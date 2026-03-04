@@ -47,6 +47,12 @@ over strict real-time behavior.
 - Derived macOS plan: `docs/plans/vapor-macos-plan.md`
 - Execution task list: `docs/plans/vapor-macos-task-list.md`
 
+## Architecture and Operations Docs
+
+- Architecture index: `docs/architecture/README.md`
+- Operations index: `docs/operations/README.md`
+- Performance index: `docs/performance/README.md`
+
 ## Development and Contribution
 
 - Contributor operating rules: `AGENTS.md`
