@@ -95,6 +95,9 @@ Do not move heavy compute into app process or FSEvents callback path.
 
 Every substantial change must include relevant test updates.
 
+- Rule: any non-trivial new feature or logic change must ship with tests.
+- Trivial changes (for example typo fixes, copy edits, or purely mechanical renames) may skip tests when behavior is unchanged.
+
 - Unit tests
   - debounce/coalescing behavior
   - scheduler superseding semantics
@@ -124,6 +127,13 @@ PRs should answer:
 3. What durability or failure paths were validated?
 4. What tests were added/updated?
 5. What docs/contracts were updated?
+
+Documentation update policy:
+
+- Non-trivial feature/logic changes must update required documentation in the same change set.
+- `README.md` should be updated when behavior, setup, operational workflow, or developer commands change.
+- `AGENTS.md` should be updated when a new durable engineering rule, safety invariant, or contributor policy should be remembered for future work.
+- If docs are intentionally not updated, PR description must explain why no documentation changes were needed.
 
 Required in PR description:
 
