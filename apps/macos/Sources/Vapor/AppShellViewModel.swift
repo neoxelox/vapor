@@ -1,5 +1,5 @@
 import Combine
-import VaporAppCore
+import VaporCore
 
 @MainActor
 final class AppShellViewModel: ObservableObject {

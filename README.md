@@ -61,7 +61,8 @@ over strict real-time behavior.
 Current code bootstrap:
 
 - Rust workspace: root `Cargo.toml` with `daemon`, `providers`, `shared`
-- Swift package: `apps/macos/Package.swift` (`VaporApp`, `VaporAppCore`)
+- Daemon binary: `vapord`
+- Swift package: `apps/macos/Package.swift` (`Vapor`, `VaporCore`)
 
 Implementation work follows the phase checklist in `docs/plans/vapor-macos-task-list.md`,
 starting with repository/documentation hardening before core sync engine code.

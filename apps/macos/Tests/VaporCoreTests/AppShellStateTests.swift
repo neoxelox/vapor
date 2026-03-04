@@ -1,6 +1,6 @@
 import Testing
 
-@testable import VaporAppCore
+@testable import VaporCore
 
 @Test
 func initialStateUsesSafeDefaults() {

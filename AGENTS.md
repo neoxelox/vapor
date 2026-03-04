@@ -29,6 +29,12 @@ This file defines the operating rules for contributors (human and AI) working on
 
 Do not move heavy compute into app process or FSEvents callback path.
 
+## 2.1) Naming conventions
+
+- The macOS app/program name must be `Vapor`.
+- The daemon binary name must be `vapord`.
+- New binaries, CLIs, apps, and libraries must use consistent vapor naming (`vapor*`/`vapor-*`) and avoid unrelated names.
+
 ## 3) Performance and throttle invariants
 
 - FSEvents callback may only normalize/filter/record event metadata.

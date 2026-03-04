@@ -1,5 +1,5 @@
 [package]
-name = "vapor-daemon"
+name = "vapord"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,5 +12,5 @@ vapor-shared = { path = "../shared" }
 path = "src/lib.rs"
 
 [[bin]]
-name = "vapor-daemon"
+name = "vapord"
 path = "src/main.rs"

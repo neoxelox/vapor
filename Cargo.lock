@@ -3,14 +3,6 @@
 version = 4
 
 [[package]]
-name = "vapor-daemon"
-version = "0.1.0"
-dependencies = [
- "vapor-providers",
- "vapor-shared",
-]
-
-[[package]]
 name = "vapor-providers"
 version = "0.1.0"
 dependencies = [
@@ -20,3 +12,11 @@ dependencies = [
 [[package]]
 name = "vapor-shared"
 version = "0.1.0"
+
+[[package]]
+name = "vapord"
+version = "0.1.0"
+dependencies = [
+ "vapor-providers",
+ "vapor-shared",
+]

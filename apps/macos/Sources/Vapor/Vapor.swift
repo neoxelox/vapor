@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct VaporApp: App {
+struct Vapor: App {
   @StateObject private var viewModel = AppShellViewModel()
 
   var body: some Scene {

@@ -3,15 +3,15 @@
 import PackageDescription
 
 let package = Package(
-  name: "VaporMacOS",
-  platforms: [.macOS(.v15)],
+  name: "Vapor",
+  platforms: [.macOS("26.0")],
   products: [
-    .executable(name: "VaporApp", targets: ["VaporApp"]),
-    .library(name: "VaporAppCore", targets: ["VaporAppCore"]),
+    .executable(name: "Vapor", targets: ["Vapor"]),
+    .library(name: "VaporCore", targets: ["VaporCore"]),
   ],
   targets: [
-    .target(name: "VaporAppCore"),
-    .executableTarget(name: "VaporApp", dependencies: ["VaporAppCore"]),
-    .testTarget(name: "VaporAppCoreTests", dependencies: ["VaporAppCore"]),
+    .target(name: "VaporCore"),
+    .executableTarget(name: "Vapor", dependencies: ["VaporCore"]),
+    .testTarget(name: "VaporCoreTests", dependencies: ["VaporCore"]),
   ]
 )
