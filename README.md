@@ -93,6 +93,13 @@ Toolchain defaults in CI:
 - Xcode/Swift: `latest-stable`
 - Rust: `stable`
 
+Pinned CI action versions:
+
+- `actions/checkout@v6`
+- `maxim-lobanov/setup-xcode@v1.6.0`
+- `actions-rust-lang/setup-rust-toolchain@v1.9.0`
+- `actions/cache@v5` for Rust and Swift dependency caches
+
 Both workflows run on pull requests and pushes to `main`, and are intended to mirror local commands.
 
 Branch protection / required checks guidance: `docs/ci/required-checks.md`.

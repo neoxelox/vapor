@@ -82,6 +82,15 @@ Do not move heavy compute into app process or FSEvents callback path.
   - Version XPC payloads and avoid breaking changes without migration.
   - Provider trait changes require capability and behavior review.
 
+## 8.1) Toolchain and platform version policy
+
+- Target latest stable versions by default for:
+  - macOS runner/image in CI
+  - Xcode and Swift toolchain
+  - Rust toolchain and required components
+- Avoid pinning old versions unless there is a documented blocker.
+- If temporary pinning/downgrade is required, document the reason, owner, and removal criteria.
+
 ## 9) Required test matrix
 
 Every substantial change must include relevant test updates.

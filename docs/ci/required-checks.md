@@ -17,6 +17,21 @@ Execution environment defaults:
 - Xcode/Swift toolchain: `latest-stable` via `setup-xcode`
 - Rust toolchain: `stable`
 
+Pinned CI actions:
+
+- `actions/checkout@v6`
+- `maxim-lobanov/setup-xcode@v1.6.0`
+- `actions-rust-lang/setup-rust-toolchain@v1.9.0`
+- `actions/cache@v5`
+
+Dependency caches used in CI:
+
+- Rust: `~/.cargo/bin`, `~/.cargo/registry/index`, `~/.cargo/registry/cache`, `~/.cargo/git/db`, `target`
+- Swift/Carthage: `Carthage`
+- Swift/CocoaPods: `Pods`
+- SwiftPM: `.build`
+- Mint: `.mint`
+
 - Lint workflow (`.github/workflows/lint.yml`)
   - `./scripts/lint.sh`
   - `./scripts/format.sh check`
