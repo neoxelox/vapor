@@ -70,6 +70,7 @@ starting with repository/documentation hardening before core sync engine code.
 
 Repository-level script entry points (used by both local development and CI):
 
+- Build both stacks (release): `./scripts/build.sh`
 - Lint both stacks: `./scripts/lint.sh`
 - Format check both stacks (included in lint): `./scripts/format.sh check`
 - Format apply both stacks: `./scripts/format.sh apply`
@@ -80,9 +81,11 @@ Stack-specific helpers:
 - Rust lint: `./scripts/rust/lint.sh`
 - Rust format: `./scripts/rust/format.sh check`
 - Rust tests: `./scripts/rust/test.sh`
+- Rust build: `./scripts/rust/build.sh`
 - Swift lint: `./scripts/swift/lint.sh`
 - Swift format: `./scripts/swift/format.sh check`
 - Swift tests: `./scripts/swift/test.sh`
+- Swift build: `./scripts/swift/build.sh`
 
 Notes:
 
@@ -90,6 +93,14 @@ Notes:
   no `Cargo.toml` yet or no `apps/macos` project yet).
 - If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild test`
   in `./scripts/swift/test.sh`.
+- If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild build`
+  in `./scripts/swift/build.sh`.
+
+Release build policy:
+
+- A single release mode is used and tuned for performance with safe optimizations.
+- Rust release profile uses `opt-level=3`, `lto=fat`, `codegen-units=1`, `panic=abort`, and `strip=symbols`.
+- Swift release build uses whole-module and cross-module optimization flags.
 
 ## Known-good local baseline (Mar 2026)
 

@@ -10,3 +10,11 @@ resolver = "2"
 edition = "2024"
 license = "MIT"
 version = "0.1.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+incremental = false
+panic = "abort"
+strip = "symbols"
