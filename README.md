@@ -87,6 +87,12 @@ GitHub Actions workflows are defined in `.github/workflows/`:
 - `lint.yml`: runs lint and format-check via repository scripts.
 - `test.yml`: runs test suites via repository scripts.
 
+Toolchain defaults in CI:
+
+- Runner: `macos-latest`
+- Xcode/Swift: `latest-stable`
+- Rust: `stable`
+
 Both workflows run on pull requests and pushes to `main`, and are intended to mirror local commands.
 
 Branch protection / required checks guidance: `docs/ci/required-checks.md`.

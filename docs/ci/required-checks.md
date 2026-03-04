@@ -11,6 +11,12 @@ Configure branch protection for `main` to require the following workflow checks:
 
 ## Workflow to script mapping
 
+Execution environment defaults:
+
+- GitHub runner: `macos-latest`
+- Xcode/Swift toolchain: `latest-stable` via `setup-xcode`
+- Rust toolchain: `stable`
+
 - Lint workflow (`.github/workflows/lint.yml`)
   - `./scripts/lint.sh`
   - `./scripts/format.sh check`
