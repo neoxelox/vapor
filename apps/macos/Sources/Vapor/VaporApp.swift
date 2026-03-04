@@ -1,8 +1,14 @@
 import SwiftUI
+import VaporCore
 
 @main
 struct VaporApp: App {
   @StateObject private var viewModel = AppShellViewModel()
+  private let logger = StructuredLogger(component: "app-lifecycle")
+
+  init() {
+    logger.info("Vapor app launched")
+  }
 
   var body: some Scene {
     WindowGroup("Vapor") {

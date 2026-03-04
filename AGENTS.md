@@ -96,7 +96,13 @@ Do not move heavy compute into app process or FSEvents callback path.
   - Version XPC payloads and avoid breaking changes without migration.
   - Provider trait changes require capability and behavior review.
 
-## 8.1) Toolchain and platform version policy
+## 8.1) Observability and diagnostics
+
+- Contributors may add structured file logging when needed to diagnose reliability or lifecycle issues.
+- Logging should favor actionable context (state, reason, identifiers) and avoid secrets or tokens.
+- Temporary debug-heavy logging should be easy to dial down via log levels and should not violate low-impact goals.
+
+## 8.2) Toolchain and platform version policy
 
 - Target latest stable versions by default for:
   - macOS runner/image in CI
@@ -105,7 +111,7 @@ Do not move heavy compute into app process or FSEvents callback path.
 - Avoid pinning old versions unless there is a documented blocker.
 - If temporary pinning/downgrade is required, document the reason, owner, and removal criteria.
 
-## 8.2) Known-good local baseline (reference)
+## 8.3) Known-good local baseline (reference)
 
 Current verified contributor baseline (Mar 2026):
 
@@ -118,6 +124,15 @@ Current verified contributor baseline (Mar 2026):
 
 This section is informational and should be updated when contributor baseline shifts materially.
 It does not override the "latest stable" policy above.
+
+## 8.4) Script-first validation command policy
+
+- Contributors must run repository wrapper scripts under `scripts/` instead of invoking raw tool commands directly for routine validation.
+- Required validation order is:
+  1. `./scripts/format.sh apply`
+  2. `./scripts/lint.sh`
+  3. `./scripts/test.sh`
+- Rationale: wrapper scripts set required project environment (for example log routing and other workflow invariants).
 
 ## 9) Required test matrix
 

@@ -7,6 +7,8 @@ paths=(
   "$ROOT_DIR/target"
   "$ROOT_DIR/debug"
   "$ROOT_DIR/dist"
+  "$ROOT_DIR/.vapor/logs"
+  "$ROOT_DIR/vapor/logs"
   "$ROOT_DIR/apps/macos/.build"
   "$ROOT_DIR/apps/macos/.swiftpm"
   "$ROOT_DIR/apps/macos/dist"

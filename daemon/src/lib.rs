@@ -3,6 +3,8 @@
 use vapor_providers::{GoogleDriveProvider, Provider};
 use vapor_shared::{RunState, StatusSnapshot, ThrottleState};
 
+pub mod logging;
+
 #[derive(Debug)]
 pub struct DaemonApp {
     snapshot: StatusSnapshot,
@@ -11,6 +13,7 @@ pub struct DaemonApp {
 
 impl Default for DaemonApp {
     fn default() -> Self {
+        logging::info("Initialized daemon app state", &[]);
         Self {
             snapshot: StatusSnapshot::default(),
             provider: GoogleDriveProvider,
@@ -28,17 +31,44 @@ impl DaemonApp {
     }
 
     pub fn set_run_state(&mut self, run_state: RunState, reason: impl Into<String>) {
+        let reason = reason.into();
+        logging::info(
+            "Updated run state",
+            &[
+                ("run_state", format!("{:?}", run_state)),
+                ("reason", reason.clone()),
+            ],
+        );
         self.snapshot.run_state = run_state;
-        self.snapshot.reason = reason.into();
+        self.snapshot.reason = reason;
     }
 
     pub fn set_throttle_state(&mut self, throttle_state: ThrottleState, reason: impl Into<String>) {
+        let reason = reason.into();
+        logging::warning(
+            "Updated throttle state",
+            &[
+                ("throttle_state", format!("{:?}", throttle_state)),
+                ("reason", reason.clone()),
+            ],
+        );
         self.snapshot.throttle_state = throttle_state;
-        self.snapshot.reason = reason.into();
+        self.snapshot.reason = reason;
     }
 
     pub fn remote_poll_allowed(&self) -> bool {
-        self.provider.poll_allowed(self.snapshot.throttle_state)
+        let allowed = self.provider.poll_allowed(self.snapshot.throttle_state);
+        logging::debug(
+            "Evaluated remote polling permission",
+            &[
+                (
+                    "throttle_state",
+                    format!("{:?}", self.snapshot.throttle_state),
+                ),
+                ("allowed", allowed.to_string()),
+            ],
+        );
+        allowed
     }
 }
 

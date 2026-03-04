@@ -157,18 +157,21 @@ public final class DaemonLifecycleManager {
   private let settingsStore: AutoLaunchSettingStore
   private let settingsKey: String
   private var crashLoopGuard: CrashLoopGuard
+  private let logger: StructuredLogger
 
   public init(
     launchAgentController: LaunchAgentControlling,
     settingsStore: AutoLaunchSettingStore,
     loginItemController: (any LoginItemControlling)? = nil,
     settingsKey: String = DaemonLifecycleManager.autoLaunchSettingKey,
-    crashLoopPolicy: CrashLoopPolicy = .default
+    crashLoopPolicy: CrashLoopPolicy = .default,
+    logger: StructuredLogger = StructuredLogger(component: "daemon-lifecycle")
   ) {
     self.launchAgentController = launchAgentController
     self.loginItemController = loginItemController
     self.settingsStore = settingsStore
     self.settingsKey = settingsKey
+    self.logger = logger
     crashLoopGuard = CrashLoopGuard(policy: crashLoopPolicy)
   }
 
@@ -182,21 +185,25 @@ public final class DaemonLifecycleManager {
 
   public var autoLaunchEnabled: Bool {
     if let persisted = settingsStore.bool(forKey: settingsKey) {
+      logger.debug("Read persisted auto-launch setting", metadata: ["value": String(persisted)])
       return persisted
     }
 
     settingsStore.set(true, forKey: settingsKey)
+    logger.info("Auto-launch setting missing; defaulting to enabled")
     return true
   }
 
   @discardableResult
   public func bootstrapIfNeeded(now: Date = .now) throws -> DaemonLifecycleActionResult {
     guard autoLaunchEnabled else {
+      logger.debug("Skipped lifecycle bootstrap because auto-launch is disabled")
       return .unchanged
     }
 
     try launchAgentController.installAndEnable()
     try loginItemController?.register()
+    logger.info("Lifecycle bootstrap completed; attempting daemon start")
     return try startDaemonIfAllowed(now: now)
   }
 
@@ -207,6 +214,10 @@ public final class DaemonLifecycleManager {
     now: Date = .now
   ) throws -> DaemonLifecycleActionResult {
     settingsStore.set(enabled, forKey: settingsKey)
+    logger.info(
+      "Updated auto-launch setting",
+      metadata: ["enabled": String(enabled), "stop_now": String(stopDaemonNow)]
+    )
 
     if enabled {
       try launchAgentController.installAndEnable()
@@ -217,9 +228,11 @@ public final class DaemonLifecycleManager {
     try launchAgentController.disableAndUninstall()
     try loginItemController?.unregister()
     crashLoopGuard.reset()
+    logger.warning("Disabled auto-launch and reset crash-loop guard")
 
     if stopDaemonNow {
       try launchAgentController.stopDaemon()
+      logger.warning("Daemon stop requested due to stop-now disable flow")
       return .stopped
     }
 
@@ -227,17 +240,27 @@ public final class DaemonLifecycleManager {
   }
 
   public func registerUnexpectedDaemonExit(now: Date = .now) -> TimeInterval? {
-    crashLoopGuard.registerCrash(at: now)
+    let delay = crashLoopGuard.registerCrash(at: now)
+    logger.warning(
+      "Registered unexpected daemon exit",
+      metadata: ["relaunch_delay_seconds": String(delay ?? 0)]
+    )
+    return delay
   }
 
   @discardableResult
   public func startDaemonIfAllowed(now: Date = .now) throws -> DaemonLifecycleActionResult {
     let remaining = crashLoopGuard.remainingDelay(at: now)
     guard remaining <= 0 else {
+      logger.warning(
+        "Deferred daemon relaunch due to crash-loop policy",
+        metadata: ["remaining_seconds": String(remaining)]
+      )
       return .relaunchDeferred(remaining)
     }
 
     try launchAgentController.startDaemon()
+    logger.info("Requested daemon start")
     return .started
   }
 }

@@ -28,6 +28,16 @@ Implementation phases map to `docs/plans/vapor-macos-task-list.md`.
 - Build: `swift build --package-path apps/macos`
 - Test: `swift test --package-path apps/macos`
 
+## Logging
+
+- Structured app logs: `~/Library/Logs/Vapor/vapor.log`
+- Test script logs: `.vapor/logs/vapor.logs`
+- Log line format: `{timestamp} [{level}] ({component}): {message}. key=value ...`
+- Runtime log level override: `VAPOR_LOG_LEVEL` (`debug`, `info`, `warning`, `error`)
+- Default log level:
+  - local/debug build flows: `debug`
+  - package flow (`apps/macos/scripts/package.sh`): `warning`
+
 ## Package app (local)
 
 - Direct packaging: `apps/macos/scripts/package.sh`

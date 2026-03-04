@@ -16,14 +16,6 @@ if [[ ! -d "$SWIFT_DIR" ]]; then
 fi
 
 if [[ -f "$SWIFT_DIR/Package.swift" ]]; then
-  echo "[swift-build] swift build --package-path $SWIFT_DIR -c release"
-  swift build \
-    --package-path "$SWIFT_DIR" \
-    -c release \
-    --disable-index-store \
-    -Xswiftc -whole-module-optimization \
-    -Xswiftc -cross-module-optimization
-
   if [[ "$MODE" == "package" ]]; then
     PACKAGE_SCRIPT="$SWIFT_DIR/scripts/package.sh"
     if [[ ! -f "$PACKAGE_SCRIPT" ]]; then
@@ -33,7 +25,16 @@ if [[ -f "$SWIFT_DIR/Package.swift" ]]; then
 
     echo "[swift-build] package mode; running $PACKAGE_SCRIPT"
     bash "$PACKAGE_SCRIPT"
+    exit 0
   fi
+
+  echo "[swift-build] swift build --package-path $SWIFT_DIR -c release"
+  swift build \
+    --package-path "$SWIFT_DIR" \
+    -c release \
+    --disable-index-store \
+    -Xswiftc -whole-module-optimization \
+    -Xswiftc -cross-module-optimization
 
   exit 0
 fi

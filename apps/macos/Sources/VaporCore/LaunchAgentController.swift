@@ -86,21 +86,25 @@ public final class LaunchAgentController: LaunchAgentControlling {
   private let runner: any LaunchctlCommandRunning
   private let fileManager: FileManager
   private let userID: UInt32
+  private let logger: StructuredLogger
 
   public init(
     configuration: LaunchAgentConfiguration,
     runner: any LaunchctlCommandRunning = ProcessLaunchctlRunner(),
     fileManager: FileManager = .default,
-    userID: UInt32 = getuid()
+    userID: UInt32 = getuid(),
+    logger: StructuredLogger = StructuredLogger(component: "launch-agent")
   ) {
     self.configuration = configuration
     self.runner = runner
     self.fileManager = fileManager
     self.userID = userID
+    self.logger = logger
   }
 
   public func installAndEnable() throws {
     try writeLaunchAgentPlist()
+    logger.info("Installing and enabling launch agent", metadata: ["label": configuration.label])
 
     _ = try? runBestEffort(arguments: ["bootout", domainTarget, configuration.plistURL.path])
     try runRequired(arguments: ["bootstrap", domainTarget, configuration.plistURL.path])
@@ -108,6 +112,8 @@ public final class LaunchAgentController: LaunchAgentControlling {
   }
 
   public func disableAndUninstall() throws {
+    logger.warning(
+      "Disabling and uninstalling launch agent", metadata: ["label": configuration.label])
     _ = try? runBestEffort(arguments: ["disable", serviceTarget])
     _ = try? runBestEffort(arguments: ["bootout", domainTarget, configuration.plistURL.path])
 
@@ -116,13 +122,16 @@ public final class LaunchAgentController: LaunchAgentControlling {
     }
 
     try fileManager.removeItem(at: configuration.plistURL)
+    logger.info("Removed launch agent plist", metadata: ["path": configuration.plistURL.path])
   }
 
   public func startDaemon() throws {
+    logger.info("Starting daemon with launchctl kickstart", metadata: ["service": serviceTarget])
     try runRequired(arguments: ["kickstart", "-k", serviceTarget])
   }
 
   public func stopDaemon() throws {
+    logger.warning("Stopping daemon with launchctl kill", metadata: ["service": serviceTarget])
     _ = try? runBestEffort(arguments: ["kill", "TERM", serviceTarget])
   }
 
@@ -143,6 +152,7 @@ public final class LaunchAgentController: LaunchAgentControlling {
     }
 
     try plistData.write(to: configuration.plistURL, options: .atomic)
+    logger.debug("Wrote launch agent plist", metadata: ["path": configuration.plistURL.path])
   }
 
   private func launchAgentPlistData() throws -> Data? {
@@ -168,8 +178,18 @@ public final class LaunchAgentController: LaunchAgentControlling {
 
   @discardableResult
   private func runRequired(arguments: [String]) throws -> LaunchctlCommandResult {
+    logger.debug(
+      "Running launchctl command", metadata: ["arguments": arguments.joined(separator: " ")])
     let result = try runner.run(arguments: arguments)
     guard result.exitCode == 0 else {
+      logger.error(
+        "launchctl command failed",
+        metadata: [
+          "arguments": arguments.joined(separator: " "),
+          "exit_code": String(result.exitCode),
+          "stderr": result.standardError,
+        ]
+      )
       throw LaunchAgentControllerError.launchctlFailed(
         arguments: arguments,
         exitCode: result.exitCode,
@@ -182,6 +202,9 @@ public final class LaunchAgentController: LaunchAgentControlling {
 
   @discardableResult
   private func runBestEffort(arguments: [String]) throws -> LaunchctlCommandResult {
-    try runner.run(arguments: arguments)
+    logger.debug(
+      "Running best-effort launchctl command",
+      metadata: ["arguments": arguments.joined(separator: " ")])
+    return try runner.run(arguments: arguments)
   }
 }

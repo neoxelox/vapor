@@ -65,6 +65,8 @@ swift build \
   --package-path "$ROOT_DIR/apps/macos" \
   -c release \
   --disable-index-store \
+  -Xswiftc -D \
+  -Xswiftc VAPOR_PACKAGED_BUILD \
   -Xswiftc -whole-module-optimization \
   -Xswiftc -cross-module-optimization
 

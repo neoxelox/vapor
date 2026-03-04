@@ -106,6 +106,21 @@ Release build policy:
 - Rust release profile uses `opt-level=3`, `lto=fat`, `codegen-units=1`, `panic=abort`, and `strip=symbols`.
 - Swift release build uses whole-module and cross-module optimization flags.
 
+## Logging
+
+- Structured logs are written to `~/Library/Logs/Vapor/`.
+- Current log files:
+  - macOS app: `~/Library/Logs/Vapor/vapor.log`
+  - daemon: `~/Library/Logs/Vapor/vapord.log`
+- Test scripts write logs to repo-local files:
+  - `.vapor/logs/vapor.logs`
+  - `.vapor/logs/vapord.logs`
+- Runtime log level override: `VAPOR_LOG_LEVEL` (`debug`, `info`, `warning`, `error`).
+- Log line format: `{timestamp} [{level}] ({component}): {message}. key=value ...`
+- Build defaults:
+  - normal builds default to `debug`
+  - package builds (`./scripts/build.sh package`) default to `warning`
+
 ## Known-good local baseline (Mar 2026)
 
 - macOS: `26.3` (Tahoe)

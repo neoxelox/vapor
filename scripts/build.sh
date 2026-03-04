@@ -9,5 +9,5 @@ if [[ "$MODE" != "build" && "$MODE" != "package" ]]; then
   exit 1
 fi
 
-"$ROOT_DIR/scripts/rust/build.sh"
+"$ROOT_DIR/scripts/rust/build.sh" "$MODE"
 "$ROOT_DIR/scripts/swift/build.sh" "$MODE"

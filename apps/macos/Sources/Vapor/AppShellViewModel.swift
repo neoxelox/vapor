@@ -6,6 +6,7 @@ import VaporCore
 final class AppShellViewModel: ObservableObject {
   @Published private(set) var state: AppShellState = .initial
   private let daemonLifecycleManager: DaemonLifecycleManager
+  private let logger = StructuredLogger(component: "app-shell")
 
   convenience init() {
     self.init(daemonLifecycleManager: AppShellViewModel.makeDefaultLifecycleManager())
@@ -14,25 +15,51 @@ final class AppShellViewModel: ObservableObject {
   init(daemonLifecycleManager: DaemonLifecycleManager) {
     self.daemonLifecycleManager = daemonLifecycleManager
     state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
+    logger.debug(
+      "Initialized app shell state",
+      metadata: ["auto_launch_enabled": String(state.autoLaunchEnabled)]
+    )
   }
 
   func toggleAutoLaunch() {
     let nextState = !state.autoLaunchEnabled
+    logger.info("Toggling auto-launch", metadata: ["next_value": String(nextState)])
 
     do {
-      _ = try daemonLifecycleManager.setAutoLaunchEnabled(nextState)
+      let result = try daemonLifecycleManager.setAutoLaunchEnabled(nextState)
       state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
+      logger.info(
+        "Auto-launch toggle completed",
+        metadata: [
+          "persisted_value": String(state.autoLaunchEnabled),
+          "result": String(describing: result),
+        ]
+      )
     } catch {
       state.syncState = .error
+      logger.error(
+        "Auto-launch toggle failed",
+        metadata: ["error": String(describing: error)]
+      )
     }
   }
 
   func disableAutoLaunchAndStopNow() {
+    logger.info("Disabling auto-launch and requesting immediate daemon stop")
+
     do {
-      _ = try daemonLifecycleManager.setAutoLaunchEnabled(false, stopDaemonNow: true)
+      let result = try daemonLifecycleManager.setAutoLaunchEnabled(false, stopDaemonNow: true)
       state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
+      logger.warning(
+        "Auto-launch disabled with stop-now",
+        metadata: ["result": String(describing: result)]
+      )
     } catch {
       state.syncState = .error
+      logger.error(
+        "Disable auto-launch and stop-now failed",
+        metadata: ["error": String(describing: error)]
+      )
     }
   }
 
@@ -46,6 +73,7 @@ final class AppShellViewModel: ObservableObject {
     let nextIndex = allStates.index(after: currentIndex)
     let wrappedIndex = nextIndex == allStates.endIndex ? allStates.startIndex : nextIndex
     state.syncState = allStates[wrappedIndex]
+    logger.debug("Cycled sync state", metadata: ["new_state": String(describing: state.syncState)])
   }
 
   private static func makeDefaultLifecycleManager() -> DaemonLifecycleManager {
