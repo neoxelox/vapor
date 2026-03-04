@@ -92,8 +92,7 @@ Notes:
 
 - Scripts intentionally skip missing stack artifacts during early bootstrap (for example,
   no `Cargo.toml` yet or no `apps/macos` project yet).
-- If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild test`
-  in `./scripts/swift/test.sh`.
+- Swift lint/format scripts intentionally use `swift format` only.
 - If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild build`
   in `./scripts/swift/build.sh`.
 
