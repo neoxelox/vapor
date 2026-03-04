@@ -73,6 +73,10 @@ struct SettingsView: View {
   var body: some View {
     Form {
       Toggle("Start vapor at login", isOn: autoLaunchBinding)
+      Button("Disable auto-launch and stop now") {
+        viewModel.disableAutoLaunchAndStopNow()
+      }
+      .disabled(!viewModel.state.autoLaunchEnabled)
     }
     .padding(24)
     .frame(width: 420)

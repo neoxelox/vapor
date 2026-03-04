@@ -36,10 +36,10 @@ Exit gate:
 ## Phase 1 - App shell, daemon lifecycle, auto-launch
 
 - [x] P1-1 Build SwiftUI app shell (onboarding/settings/menubar status placeholders).
-- [ ] P1-2 Implement LaunchAgent lifecycle manager with default ON behavior.
-- [ ] P1-3 Add optional SMAppService integration for login-item UX.
-- [ ] P1-4 Implement auto-launch toggle semantics (enable/disable + optional stop-now).
-- [ ] P1-5 Add crash-loop detection and exponential relaunch delay.
+- [x] P1-2 Implement LaunchAgent lifecycle manager with default ON behavior.
+- [x] P1-3 Add optional SMAppService integration for login-item UX.
+- [x] P1-4 Implement auto-launch toggle semantics (enable/disable + optional stop-now).
+- [x] P1-5 Add crash-loop detection and exponential relaunch delay.
 
 Exit gate:
 

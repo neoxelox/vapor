@@ -1,0 +1,166 @@
+import Foundation
+import Testing
+
+@testable import VaporCore
+
+@Test
+func bootstrapDefaultsToAutoLaunchEnabledAndStartsDaemon() throws {
+  let store = InMemoryAutoLaunchSettingStore()
+  let controller = RecordingLaunchAgentController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: controller,
+    settingsStore: store,
+    crashLoopPolicy: .init(
+      failureWindow: 60,
+      baseDelay: 2,
+      maxDelay: 32,
+      delayStartsAfterFailures: 2
+    )
+  )
+
+  #expect(manager.autoLaunchEnabled)
+
+  let result = try manager.bootstrapIfNeeded(now: Date(timeIntervalSince1970: 0))
+  #expect(result == .started)
+  #expect(store.bool(forKey: DaemonLifecycleManager.autoLaunchSettingKey) == true)
+  #expect(controller.operations == ["install", "start"])
+}
+
+@Test
+func disablingAutoLaunchWithoutStopKeepsDaemonRunning() throws {
+  let store = InMemoryAutoLaunchSettingStore(
+    seed: [DaemonLifecycleManager.autoLaunchSettingKey: true]
+  )
+  let controller = RecordingLaunchAgentController()
+  let manager = DaemonLifecycleManager(launchAgentController: controller, settingsStore: store)
+
+  let result = try manager.setAutoLaunchEnabled(false, stopDaemonNow: false)
+
+  #expect(result == .unchanged)
+  #expect(manager.autoLaunchEnabled == false)
+  #expect(controller.operations == ["disable"])
+}
+
+@Test
+func disablingAutoLaunchWithStopAlsoStopsDaemon() throws {
+  let store = InMemoryAutoLaunchSettingStore(
+    seed: [DaemonLifecycleManager.autoLaunchSettingKey: true]
+  )
+  let controller = RecordingLaunchAgentController()
+  let manager = DaemonLifecycleManager(launchAgentController: controller, settingsStore: store)
+
+  let result = try manager.setAutoLaunchEnabled(false, stopDaemonNow: true)
+
+  #expect(result == .stopped)
+  #expect(controller.operations == ["disable", "stop"])
+}
+
+@Test
+func crashLoopDefersRelaunchWithExponentialBackoff() throws {
+  let store = InMemoryAutoLaunchSettingStore(
+    seed: [DaemonLifecycleManager.autoLaunchSettingKey: true]
+  )
+  let controller = RecordingLaunchAgentController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: controller,
+    settingsStore: store,
+    crashLoopPolicy: .init(
+      failureWindow: 60,
+      baseDelay: 4,
+      maxDelay: 32,
+      delayStartsAfterFailures: 2
+    )
+  )
+
+  let t0 = Date(timeIntervalSince1970: 0)
+  #expect(manager.registerUnexpectedDaemonExit(now: t0) == nil)
+  #expect(manager.registerUnexpectedDaemonExit(now: t0.addingTimeInterval(1)) == 4)
+
+  let deferred = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(2))
+  #expect(deferred == .relaunchDeferred(3))
+  #expect(controller.operations.isEmpty)
+
+  let started = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(5))
+  #expect(started == .started)
+  #expect(controller.operations == ["start"])
+}
+
+@Test
+func crashHistoryExpiresOutsideFailureWindow() {
+  var guardrail = CrashLoopGuard(
+    policy: .init(failureWindow: 10, baseDelay: 2, maxDelay: 30, delayStartsAfterFailures: 2)
+  )
+
+  let t0 = Date(timeIntervalSince1970: 0)
+  #expect(guardrail.registerCrash(at: t0) == nil)
+  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(1)) == 2)
+  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(20)) == nil)
+}
+
+@Test
+func enablingAutoLaunchRegistersOptionalLoginItem() throws {
+  let store = InMemoryAutoLaunchSettingStore(seed: [
+    DaemonLifecycleManager.autoLaunchSettingKey: false
+  ])
+  let launchAgent = RecordingLaunchAgentController()
+  let loginItem = RecordingLoginItemController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: launchAgent,
+    settingsStore: store,
+    loginItemController: loginItem
+  )
+
+  _ = try manager.setAutoLaunchEnabled(true)
+
+  #expect(loginItem.operations == ["register"])
+}
+
+@Test
+func disablingAutoLaunchUnregistersOptionalLoginItem() throws {
+  let store = InMemoryAutoLaunchSettingStore(seed: [
+    DaemonLifecycleManager.autoLaunchSettingKey: true
+  ])
+  let launchAgent = RecordingLaunchAgentController()
+  let loginItem = RecordingLoginItemController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: launchAgent,
+    settingsStore: store,
+    loginItemController: loginItem
+  )
+
+  _ = try manager.setAutoLaunchEnabled(false)
+
+  #expect(loginItem.operations == ["unregister"])
+}
+
+private final class RecordingLaunchAgentController: LaunchAgentControlling {
+  var operations: [String] = []
+
+  func installAndEnable() {
+    operations.append("install")
+  }
+
+  func disableAndUninstall() {
+    operations.append("disable")
+  }
+
+  func startDaemon() {
+    operations.append("start")
+  }
+
+  func stopDaemon() {
+    operations.append("stop")
+  }
+}
+
+private final class RecordingLoginItemController: LoginItemControlling {
+  var operations: [String] = []
+
+  func register() {
+    operations.append("register")
+  }
+
+  func unregister() {
+    operations.append("unregister")
+  }
+}
