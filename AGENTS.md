@@ -122,6 +122,13 @@ Required in PR description:
 - Risk assessment and rollback plan.
 - Any migration/compatibility implications.
 
+Commit and push policy:
+
+- Create one git commit per feature or per tightly related change group.
+- Keep commits small, cohesive, and rollback-friendly.
+- Use commit messages that explain why the change exists.
+- Do not push commits to GitHub unless the project owner explicitly asks.
+
 ## 11) Definition of done
 
 A change is done when:
