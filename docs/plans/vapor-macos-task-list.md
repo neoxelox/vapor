@@ -13,16 +13,16 @@ Status legend:
 ## Phase 0 - Repository foundation and planning docs
 
 - [ ] P0-1 Define monorepo layout (`apps/macos`, `daemon`, `providers`, `shared`, `docs`).
-- [ ] P0-2 Expand root `README.md` to production-grade project/operator/developer guide.
-- [ ] P0-3 Upgrade `.gitignore` for Rust + Swift/Xcode + macOS + runtime/state/secrets artifacts.
-- [ ] P0-4 Create comprehensive `AGENTS.md` with boundaries, standards, tests, and safety policy.
+- [x] P0-2 Expand root `README.md` to production-grade project/operator/developer guide.
+- [x] P0-3 Upgrade `.gitignore` for Rust + Swift/Xcode + macOS + runtime/state/secrets artifacts.
+- [x] P0-4 Create comprehensive `AGENTS.md` with boundaries, standards, tests, and safety policy.
 - [ ] P0-5 Add `docs/architecture/` skeleton and baseline diagrams/contracts placeholders.
-- [ ] P0-6 Add repository scripts for Rust lint/format/test.
-- [ ] P0-7 Add repository scripts for Swift lint/format/test.
-- [ ] P0-8 Add local developer runbook section documenting script usage.
-- [ ] P0-9 Add GitHub Actions lint workflow for Swift + Rust on PR/push.
-- [ ] P0-10 Add GitHub Actions test workflow for Swift + Rust on PR/push.
-- [ ] P0-11 Configure required CI checks and branch protection guidance.
+- [x] P0-6 Add repository scripts for Rust lint/format/test.
+- [x] P0-7 Add repository scripts for Swift lint/format/test.
+- [x] P0-8 Add local developer runbook section documenting script usage.
+- [x] P0-9 Add GitHub Actions lint workflow for Swift + Rust on PR/push.
+- [x] P0-10 Add GitHub Actions test workflow for Swift + Rust on PR/push.
+- [x] P0-11 Configure required CI checks and branch protection guidance.
 - [ ] P0-12 Define distribution trust-chain plan (signing, hardened runtime, notarization, entitlements).
 - [ ] P0-13 Define OAuth/provider operations plan (PKCE flow, token refresh failure handling).
 - [ ] P0-14 Define state schema versioning, migration test strategy, and rollback posture.

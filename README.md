@@ -54,3 +54,39 @@ over strict real-time behavior.
 
 Implementation work follows the phase checklist in `docs/plans/vapor-macos-task-list.md`,
 starting with repository/documentation hardening before core sync engine code.
+
+## Developer Runbook (local)
+
+Repository-level script entry points (used by both local development and CI):
+
+- Lint both stacks: `./scripts/lint.sh`
+- Format check both stacks: `./scripts/format.sh check`
+- Format apply both stacks: `./scripts/format.sh apply`
+- Test both stacks: `./scripts/test.sh`
+
+Stack-specific helpers:
+
+- Rust lint: `./scripts/rust/lint.sh`
+- Rust format: `./scripts/rust/format.sh check`
+- Rust tests: `./scripts/rust/test.sh`
+- Swift lint: `./scripts/swift/lint.sh`
+- Swift format: `./scripts/swift/format.sh check`
+- Swift tests: `./scripts/swift/test.sh`
+
+Notes:
+
+- Scripts intentionally skip missing stack artifacts during early bootstrap (for example,
+  no `Cargo.toml` yet or no `apps/macos` project yet).
+- If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild test`
+  in `./scripts/swift/test.sh`.
+
+## CI
+
+GitHub Actions workflows are defined in `.github/workflows/`:
+
+- `lint.yml`: runs lint and format-check via repository scripts.
+- `test.yml`: runs test suites via repository scripts.
+
+Both workflows run on pull requests and pushes to `main`, and are intended to mirror local commands.
+
+Branch protection / required checks guidance: `docs/ci/required-checks.md`.

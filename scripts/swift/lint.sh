@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SWIFT_DIR="$ROOT_DIR/apps/macos"
+
+if [[ ! -d "$SWIFT_DIR" ]]; then
+  echo "[swift-lint] apps/macos not found. Skipping Swift lint."
+  exit 0
+fi
+
+if ! find "$SWIFT_DIR" -type f -name "*.swift" -print -quit | grep -q .; then
+  echo "[swift-lint] No Swift files found in apps/macos. Skipping Swift lint."
+  exit 0
+fi
+
+if command -v swiftlint >/dev/null 2>&1; then
+  echo "[swift-lint] swiftlint lint --strict --path $SWIFT_DIR"
+  swiftlint lint --strict --path "$SWIFT_DIR"
+  exit 0
+fi
+
+if command -v swift-format >/dev/null 2>&1; then
+  echo "[swift-lint] swift-format lint --recursive $SWIFT_DIR"
+  swift-format lint --recursive "$SWIFT_DIR"
+  exit 0
+fi
+
+if swift format --help >/dev/null 2>&1; then
+  echo "[swift-lint] swift format lint --recursive $SWIFT_DIR"
+  swift format lint --recursive "$SWIFT_DIR"
+  exit 0
+fi
+
+echo "[swift-lint] No Swift linter found. Install swiftlint or swift-format."
+exit 1
