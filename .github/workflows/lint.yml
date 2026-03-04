@@ -47,6 +47,3 @@ jobs:
 
       - name: Run lint checks
         run: ./scripts/lint.sh
-
-      - name: Run format checks
-        run: ./scripts/format.sh check

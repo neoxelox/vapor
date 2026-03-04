@@ -36,7 +36,6 @@ Dependency source defaults:
 
 - Lint workflow (`.github/workflows/lint.yml`)
   - `./scripts/lint.sh`
-  - `./scripts/format.sh check`
 - Test workflow (`.github/workflows/test.yml`)
   - `./scripts/test.sh`
 
@@ -45,5 +44,6 @@ Dependency source defaults:
 Run the same validations locally before opening a PR:
 
 - `./scripts/lint.sh`
-- `./scripts/format.sh check`
 - `./scripts/test.sh`
+
+`./scripts/lint.sh` includes format checks (`./scripts/format.sh check`).

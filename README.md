@@ -71,7 +71,7 @@ starting with repository/documentation hardening before core sync engine code.
 Repository-level script entry points (used by both local development and CI):
 
 - Lint both stacks: `./scripts/lint.sh`
-- Format check both stacks: `./scripts/format.sh check`
+- Format check both stacks (included in lint): `./scripts/format.sh check`
 - Format apply both stacks: `./scripts/format.sh apply`
 - Test both stacks: `./scripts/test.sh`
 
