@@ -10,9 +10,6 @@ jobs:
   test:
     runs-on: macos-latest
     timeout-minutes: 45
-    env:
-      MINT_PATH: .mint/lib
-      MINT_LINK_PATH: .mint/bin
 
     steps:
       - name: Checkout
@@ -39,22 +36,6 @@ jobs:
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Cache Carthage dependencies
-        uses: actions/cache@v5
-        with:
-          path: Carthage
-          key: ${{ runner.os }}-carthage-${{ hashFiles('**/Cartfile.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-carthage-
-
-      - name: Cache CocoaPods dependencies
-        uses: actions/cache@v5
-        with:
-          path: Pods
-          key: ${{ runner.os }}-pods-${{ hashFiles('**/Podfile.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-pods-
-
       - name: Cache SwiftPM dependencies
         uses: actions/cache@v5
         with:
@@ -62,14 +43,6 @@ jobs:
           key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
           restore-keys: |
             ${{ runner.os }}-spm-
-
-      - name: Cache Mint dependencies
-        uses: actions/cache@v5
-        with:
-          path: .mint
-          key: ${{ runner.os }}-mint-${{ hashFiles('**/Mintfile') }}
-          restore-keys: |
-            ${{ runner.os }}-mint-
 
       - name: Run tests
         run: ./scripts/test.sh

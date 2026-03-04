@@ -98,7 +98,12 @@ Pinned CI action versions:
 - `actions/checkout@v6`
 - `maxim-lobanov/setup-xcode@v1.6.0`
 - `actions-rust-lang/setup-rust-toolchain@v1.9.0`
-- `actions/cache@v5` for Rust and Swift dependency caches
+- `actions/cache@v5` for Rust (`cargo`) and SwiftPM caches
+
+Dependency source defaults:
+
+- Rust crates: `crates.io` via Cargo
+- Swift packages: SwiftPM (package dependencies)
 
 Both workflows run on pull requests and pushes to `main`, and are intended to mirror local commands.
 

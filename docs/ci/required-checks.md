@@ -27,10 +27,12 @@ Pinned CI actions:
 Dependency caches used in CI:
 
 - Rust: `~/.cargo/bin`, `~/.cargo/registry/index`, `~/.cargo/registry/cache`, `~/.cargo/git/db`, `target`
-- Swift/Carthage: `Carthage`
-- Swift/CocoaPods: `Pods`
 - SwiftPM: `.build`
-- Mint: `.mint`
+
+Dependency source defaults:
+
+- Rust crates: `crates.io` via Cargo
+- Swift packages: SwiftPM
 
 - Lint workflow (`.github/workflows/lint.yml`)
   - `./scripts/lint.sh`
