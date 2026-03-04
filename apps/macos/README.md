@@ -11,3 +11,8 @@ Responsibilities:
 - daemon lifecycle and auto-launch controls
 
 Implementation phases map to `docs/plans/vapor-macos-task-list.md`.
+
+Local commands:
+
+- Build: `swift build --package-path apps/macos`
+- Test: `swift test --package-path apps/macos`

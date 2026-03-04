@@ -1,0 +1,11 @@
+[package]
+name = "vapor-providers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vapor-shared = { path = "../shared" }
+
+[lib]
+path = "src/lib.rs"

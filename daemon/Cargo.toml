@@ -1,0 +1,16 @@
+[package]
+name = "vapor-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vapor-providers = { path = "../providers" }
+vapor-shared = { path = "../shared" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "vapor-daemon"
+path = "src/main.rs"
