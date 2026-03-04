@@ -33,6 +33,7 @@ Do not move heavy compute into app process or FSEvents callback path.
 
 - The macOS app/program name must be `Vapor`.
 - The daemon binary name must be `vapord`.
+- The daemon package/crate name should remain `vapor-daemon` for naming consistency.
 - New binaries, CLIs, apps, and libraries must use consistent vapor naming (`vapor*`/`vapor-*`) and avoid unrelated names.
 
 ## 3) Performance and throttle invariants

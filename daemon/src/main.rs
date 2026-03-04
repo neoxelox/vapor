@@ -1,4 +1,4 @@
-use vapord::DaemonApp;
+use vapor_daemon::DaemonApp;
 
 fn main() {
     let app = DaemonApp::default();
