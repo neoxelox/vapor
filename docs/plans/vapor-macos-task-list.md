@@ -2,6 +2,8 @@
 
 Plan reference: `docs/plans/vapor-macos-plan.md`
 
+Distribution foundation reference: `docs/plans/vapor-macos-distribution-foundation-plan.md`
+
 Original source: `docs/plans/vapor-original-plan-verbatim.md`
 
 Status legend:
@@ -44,6 +46,29 @@ Exit gate:
 Exit gate:
 
 - Daemon reliably starts at login and avoids restart-loop meltdown.
+
+## Phase 1.5 - Native app bundle and distribution foundation
+
+- [ ] P1D-1 Convert `Vapor` executable target to a native SwiftUI app entry (`@main App`) with no CLI-style entrypoint conflicts.
+- [ ] P1D-2 Add initial native macOS window structure (`ContentView`) with toolbar/menu command so the app does not look skeletal.
+- [ ] P1D-3 Create script-first packaging entrypoint `apps/macos/scripts/package-app.sh`.
+- [ ] P1D-4 Implement deterministic `.app` bundle assembly in `dist/Vapor.app` (binary copy, bundle structure, executable permissions).
+- [ ] P1D-5 Generate required `Info.plist` metadata, including latest-only `LSMinimumSystemVersion=26.0` and deterministic version/build derivation.
+- [ ] P1D-6 Generate `AppIcon.icns` from a 1024x1024 PNG using built-in tooling (`sips`, `iconutil`) and install it into bundle resources (source artwork in `apps/macos/Assets/AppIcon.icon`).
+- [ ] P1D-7 Add optional resource copy convention from `apps/macos/Resources/**` to `Contents/Resources`.
+- [ ] P1D-8 Implement signing modes in packaging script: ad-hoc default, Developer ID + hardened runtime when `VAPOR_SIGN_IDENTITY` is set, optional entitlements injection.
+- [ ] P1D-9 Add bundle verification steps (`plutil`, `codesign --verify`, `spctl` best-effort).
+- [ ] P1D-10 Produce zip artifact `dist/Vapor.zip` using `ditto --keepParent`.
+- [ ] P1D-11 Add optional notarization + stapling flow gated by `VAPOR_NOTARIZE=1` and `VAPOR_NOTARY_PROFILE`.
+- [ ] P1D-12 Integrate packaging into repo build scripts behind `VAPOR_PACKAGE_APP=1` while preserving build-only default behavior.
+- [ ] P1D-13 Add optional Xcode convenience workflow (open package/workspace for debugging) without changing script-first release source of truth.
+- [ ] P1D-14 Update `apps/macos/README.md` with local build/package/signed/notarized distribution commands.
+
+Exit gate:
+
+- `open dist/Vapor.app` launches a normal app window without Terminal.
+- `apps/macos/scripts/package-app.sh` produces `dist/Vapor.app` and `dist/Vapor.zip`.
+- CI can run the packaging path non-interactively.
 
 ## Phase 2 - Low-impact local engine core
 

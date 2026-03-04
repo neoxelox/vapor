@@ -18,6 +18,12 @@ Define release trust requirements for macOS app + daemon distribution.
 3. Submit for notarization and verify staple status.
 4. Publish only notarization-passing artifacts.
 
+Implementation requirements:
+
+- App packaging pipeline is script-first (`apps/macos/scripts/package-app.sh`) and CI-runnable.
+- Pipeline must produce `dist/Vapor.app` and zip artifacts without requiring Xcode Archive UI flows.
+- Xcode project/workspace support remains optional debugging convenience only.
+
 ## Validation checklist
 
 - App and daemon signatures are valid on clean host.

@@ -74,6 +74,8 @@ Do not move heavy compute into app process or FSEvents callback path.
   - hardened runtime
   - notarization
   - entitlement review
+- macOS app distribution must be script-first and CI-runnable, producing `Vapor.app` and zip artifacts without requiring Xcode UI archive workflows.
+- Xcode project/workspace support is optional convenience for debugging and must not become the release source of truth.
 - LaunchAgent and login item behavior must be stable across upgrades.
 - App/daemon version compatibility rules must be maintained and tested.
 

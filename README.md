@@ -45,6 +45,7 @@ over strict real-time behavior.
 - Index: `docs/plans/README.md`
 - Source plan (verbatim): `docs/plans/vapor-original-plan-verbatim.md`
 - Derived macOS plan: `docs/plans/vapor-macos-plan.md`
+- Distribution foundation plan: `docs/plans/vapor-macos-distribution-foundation-plan.md`
 - Execution task list: `docs/plans/vapor-macos-task-list.md`
 
 ## Architecture and Operations Docs

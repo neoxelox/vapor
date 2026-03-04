@@ -98,13 +98,14 @@ Recommended default conflict policy:
 
 1. Repository/documentation foundation and contributor operating model.
 2. App shell + daemon lifecycle + auto-launch.
-3. Low-impact local engine core.
-4. Google Drive provider with bidirectional event flow.
-5. Durability, retries, storm deferral, deferred reconcile, and conflict safety.
-6. XPC contract hardening and full diagnostics UX.
-7. Auto-tuning and performance stabilization.
-8. Provider extensibility and S3/R2 module.
-9. Optional advanced safeguards and enhancements.
+3. Native app bundle/distribution foundation (script-first packaging, signing, notarization path).
+4. Low-impact local engine core.
+5. Google Drive provider with bidirectional event flow.
+6. Durability, retries, storm deferral, deferred reconcile, and conflict safety.
+7. XPC contract hardening and full diagnostics UX.
+8. Auto-tuning and performance stabilization.
+9. Provider extensibility and S3/R2 module.
+10. Optional advanced safeguards and enhancements.
 
 ## 9) Definition of done (applies to every milestone)
 
