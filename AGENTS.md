@@ -75,6 +75,8 @@ Do not move heavy compute into app process or FSEvents callback path.
 - Swift
   - Prefer structured concurrency and explicit actor boundaries.
   - Keep UI/state surfaces deterministic and reason-first.
+  - macOS UI must follow Apple Human Interface Guidelines and platform conventions.
+  - Visual direction should be minimalist, sleek, and polished; prefer native controls, spacing, typography, and motion over heavy custom chrome.
 - Rust
   - Use explicit error enums and classify transient vs permanent failures.
   - Keep async/task lifetimes bounded and cancellation-aware.
@@ -90,6 +92,20 @@ Do not move heavy compute into app process or FSEvents callback path.
   - Rust toolchain and required components
 - Avoid pinning old versions unless there is a documented blocker.
 - If temporary pinning/downgrade is required, document the reason, owner, and removal criteria.
+
+## 8.2) Known-good local baseline (reference)
+
+Current verified contributor baseline (Mar 2026):
+
+- macOS `26.3` (Tahoe)
+- `rustc 1.93.1 (01f6ddf75 2026-02-11)`
+- `cargo 1.93.1 (083ac5135 2025-12-15)`
+- `swift-driver 1.127.15`
+- `Apple Swift 6.2.4 (swiftlang-6.2.4.1.4 clang-1700.6.4.2)`
+- target `arm64-apple-macosx26.0`
+
+This section is informational and should be updated when contributor baseline shifts materially.
+It does not override the "latest stable" policy above.
 
 ## 9) Required test matrix
 
@@ -132,6 +148,7 @@ Documentation update policy:
 
 - Non-trivial feature/logic changes must update required documentation in the same change set.
 - `README.md` should be updated when behavior, setup, operational workflow, or developer commands change.
+- Non-trivial UI/UX changes must document the intended user experience and note alignment with Apple design conventions.
 - `AGENTS.md` should be updated when a new durable engineering rule, safety invariant, or contributor policy should be remembered for future work.
 - If docs are intentionally not updated, PR description must explain why no documentation changes were needed.
 
