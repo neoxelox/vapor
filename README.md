@@ -73,6 +73,8 @@ starting with repository/documentation hardening before core sync engine code.
 Repository-level script entry points (used by both local development and CI):
 
 - Build both stacks (release): `./scripts/build.sh`
+- Build + package macOS app bundle: `./scripts/build.sh package`
+- Clean build/dist artifacts: `./scripts/clean.sh`
 - Lint both stacks: `./scripts/lint.sh`
 - Format check both stacks (included in lint): `./scripts/format.sh check`
 - Format apply both stacks: `./scripts/format.sh apply`
@@ -88,6 +90,7 @@ Stack-specific helpers:
 - Swift format: `./scripts/swift/format.sh check`
 - Swift tests: `./scripts/swift/test.sh`
 - Swift build: `./scripts/swift/build.sh`
+- macOS app packaging: `apps/macos/scripts/package.sh`
 
 Notes:
 

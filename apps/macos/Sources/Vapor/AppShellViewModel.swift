@@ -14,12 +14,6 @@ final class AppShellViewModel: ObservableObject {
   init(daemonLifecycleManager: DaemonLifecycleManager) {
     self.daemonLifecycleManager = daemonLifecycleManager
     state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
-
-    do {
-      _ = try daemonLifecycleManager.bootstrapIfNeeded()
-    } catch {
-      state.syncState = .error
-    }
   }
 
   func toggleAutoLaunch() {

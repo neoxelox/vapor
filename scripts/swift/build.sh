@@ -3,6 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SWIFT_DIR="$ROOT_DIR/apps/macos"
+MODE="${1:-build}"
+
+if [[ "$MODE" != "build" && "$MODE" != "package" ]]; then
+  echo "Usage: scripts/swift/build.sh [build|package]"
+  exit 1
+fi
 
 if [[ ! -d "$SWIFT_DIR" ]]; then
   echo "[swift-build] apps/macos not found. Skipping Swift build."
@@ -17,6 +23,18 @@ if [[ -f "$SWIFT_DIR/Package.swift" ]]; then
     --disable-index-store \
     -Xswiftc -whole-module-optimization \
     -Xswiftc -cross-module-optimization
+
+  if [[ "$MODE" == "package" ]]; then
+    PACKAGE_SCRIPT="$SWIFT_DIR/scripts/package.sh"
+    if [[ ! -f "$PACKAGE_SCRIPT" ]]; then
+      echo "[swift-build] Package mode requested but packaging script is missing at $PACKAGE_SCRIPT"
+      exit 1
+    fi
+
+    echo "[swift-build] package mode; running $PACKAGE_SCRIPT"
+    bash "$PACKAGE_SCRIPT"
+  fi
+
   exit 0
 fi
 

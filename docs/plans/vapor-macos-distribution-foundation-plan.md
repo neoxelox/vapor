@@ -24,7 +24,7 @@ Acceptance checks:
 
 ## Priority 2 - Deterministic packaging pipeline (`dist/Vapor.app`)
 
-Create `apps/macos/scripts/package-app.sh` with deterministic, ordered steps:
+Create `apps/macos/scripts/package.sh` with deterministic, ordered steps:
 
 1. Build release binary via SwiftPM.
 2. Locate expected binary output (`apps/macos/.build/release/Vapor`).
@@ -42,9 +42,9 @@ Required environment inputs:
 
 - `APP_NAME` (default `Vapor`)
 - `EXECUTABLE_NAME` (default `Vapor`)
-- `BUNDLE_ID` (default `so.latitude.vapor`)
+- `BUNDLE_ID` (default `sh.arn.vapor`)
 - `MIN_MACOS` (default `26.0`)
-- `ICON_PNG` (default `apps/macos/Assets/AppIcon.png`)
+- `ICON_PNG` (default `assets/icon.png`)
 - `DIST_DIR` (default `dist`)
 - `VAPOR_SIGN_IDENTITY` (optional)
 - `VAPOR_ENTITLEMENTS` (optional)
@@ -58,13 +58,13 @@ Versioning policy:
 
 Icon source note:
 
-- Repository icon source is stored at `apps/macos/Assets/AppIcon.icon` (Icon Composer format).
-- Packaging flow should consume `ICON_PNG` and fail with a clear message when missing, instructing export of a 1024x1024 PNG from the Icon Composer source.
+- Repository icon source of truth is `assets/icon.png` (1024x1024).
+- Packaging flow should consume `ICON_PNG` and fail with a clear message when missing.
 
 ## Priority 3 - Build-script and CI integration
 
 - Keep existing build-only mode for fast local loops.
-- Add `VAPOR_PACKAGE_APP=1` flow so release build script can invoke packaging script.
+- Add `./scripts/build.sh package` flow so release build script can invoke packaging script.
 - Ensure packaging path is non-interactive and CI-friendly.
 - Fail fast with clear errors if notarization is requested without required credentials/profile.
 
@@ -72,7 +72,7 @@ Icon source note:
 
 - Support opening `apps/macos/Package.swift` in Xcode for debugging.
 - Optional `.xcworkspace` helper is allowed, but not required.
-- Distribution source of truth remains scripts (`package-app.sh`, signing, notarization).
+- Distribution source of truth remains scripts (`package.sh`, signing, notarization).
 
 ## Priority 5 - Developer documentation
 
@@ -86,6 +86,6 @@ Document in `apps/macos/README.md`:
 ## Final acceptance criteria
 
 1. `Vapor` launches as a SwiftUI-native app via `open dist/Vapor.app` with no Terminal window.
-2. `apps/macos/scripts/package-app.sh` produces both `dist/Vapor.app` and `dist/Vapor.zip`.
+2. `apps/macos/scripts/package.sh` produces both `dist/Vapor.app` and `dist/Vapor.zip`.
 3. Scripted signing/notarization path works when corresponding env vars are provided.
 4. Xcode debugging remains optional and does not gate distribution.

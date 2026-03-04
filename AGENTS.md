@@ -34,6 +34,8 @@ Do not move heavy compute into app process or FSEvents callback path.
 - The macOS app/program name must be `Vapor`.
 - The daemon binary name must be `vapord`.
 - The daemon package/crate name should remain `vapor-daemon` for naming consistency.
+- Brand/domain identifiers are fixed: brand `ARN`, domain `arn.sh`, bundle ID `sh.arn.vapor`.
+- The macOS app bundle identifier must remain `sh.arn.vapor` unless the project owner explicitly changes it.
 - New binaries, CLIs, apps, and libraries must use consistent vapor naming (`vapor*`/`vapor-*`) and avoid unrelated names.
 
 ## 3) Performance and throttle invariants
@@ -76,6 +78,7 @@ Do not move heavy compute into app process or FSEvents callback path.
   - entitlement review
 - macOS app distribution must be script-first and CI-runnable, producing `Vapor.app` and zip artifacts without requiring Xcode UI archive workflows.
 - Xcode project/workspace support is optional convenience for debugging and must not become the release source of truth.
+- AI contributors must never auto-open packaged apps (for example `open dist/Vapor.app`); app launch verification is performed manually by the project owner.
 - LaunchAgent and login item behavior must be stable across upgrades.
 - App/daemon version compatibility rules must be maintained and tested.
 

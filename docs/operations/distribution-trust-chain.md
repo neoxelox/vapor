@@ -20,7 +20,7 @@ Define release trust requirements for macOS app + daemon distribution.
 
 Implementation requirements:
 
-- App packaging pipeline is script-first (`apps/macos/scripts/package-app.sh`) and CI-runnable.
+- App packaging pipeline is script-first (`apps/macos/scripts/package.sh`) and CI-runnable.
 - Pipeline must produce `dist/Vapor.app` and zip artifacts without requiring Xcode Archive UI flows.
 - Xcode project/workspace support remains optional debugging convenience only.
 

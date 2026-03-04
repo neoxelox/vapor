@@ -30,6 +30,7 @@ DerivedData/
 
 # --- Logs / Temp ---
 logs/
+dist/
 tmp/
 temp/
 *.log
