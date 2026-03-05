@@ -1,6 +1,6 @@
 # XPC Contracts (Placeholder)
 
-This document defines the contract surface between `apps/macos` and `daemon`.
+This document defines the contract surface between `apps/macos` and `core/daemon`.
 
 ## Contract versioning rules
 
@@ -21,4 +21,4 @@ This document defines the contract surface between `apps/macos` and `daemon`.
 
 ## Next implementation step
 
-Define concrete Swift/Rust payload types in `shared` and add contract tests for version compatibility.
+Define concrete Swift/Rust payload types in `core/shared` and add contract tests for version compatibility.

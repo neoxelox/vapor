@@ -17,9 +17,9 @@ collect_manifests() {
   else
     local candidate
     for candidate in \
-      "$ROOT_DIR/daemon/Cargo.toml" \
-      "$ROOT_DIR/providers/Cargo.toml" \
-      "$ROOT_DIR/shared/Cargo.toml"
+      "$ROOT_DIR/core/daemon/Cargo.toml" \
+      "$ROOT_DIR/core/providers/Cargo.toml" \
+      "$ROOT_DIR/core/shared/Cargo.toml"
     do
       if [[ -f "$candidate" ]]; then
         if [[ -n "$manifests" ]]; then

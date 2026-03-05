@@ -14,7 +14,7 @@ Status legend:
 
 ## Phase 0 - Repository foundation and planning docs
 
-- [x] P0-1 Define monorepo layout (`apps/macos`, `daemon`, `providers`, `shared`, `docs`).
+- [x] P0-1 Define monorepo layout (`apps/macos`, `core/daemon`, `core/providers`, `core/shared`, `docs`).
 - [x] P0-2 Expand root `README.md` to production-grade project/operator/developer guide.
 - [x] P0-3 Upgrade `.gitignore` for Rust + Swift/Xcode + macOS + runtime/state/secrets artifacts.
 - [x] P0-4 Create comprehensive `AGENTS.md` with boundaries, standards, tests, and safety policy.

@@ -24,13 +24,13 @@ over strict real-time behavior.
 - SwiftUI app
   - Onboarding, provider auth, root selection, settings, diagnostics, menubar state.
   - Auto-launch toggle and daemon control surface.
-- Rust daemon (LaunchAgent)
+- Rust daemon (`core/daemon`, LaunchAgent)
   - FSEvents ingestion, debounce/coalescing, scheduler, throttle controller.
   - Durable queue/state, retries, deferred reconcile, provider execution.
-- Provider modules
+- Provider modules (`core/providers`)
   - `provider_gdrive` first, `provider_s3`/R2 later via shared provider trait.
 - XPC boundary
-  - Typed status/control API between app and daemon.
+  - Typed status/control API between app and daemon with shared contracts in `core/shared`.
 
 ## macOS App Components and Lifecycle
 
@@ -80,7 +80,7 @@ Expected lifecycle behavior:
 
 Current code bootstrap:
 
-- Rust workspace: root `Cargo.toml` with `daemon`, `providers`, `shared`
+- Rust workspace: root `Cargo.toml` with crates in `core/daemon`, `core/providers`, `core/shared`
 - Daemon binary: `vapord`
 - Swift package: `apps/macos/Package.swift` (`Vapor`, `VaporCore`)
 

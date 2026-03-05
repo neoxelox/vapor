@@ -18,13 +18,13 @@ This file defines the operating rules for contributors (human and AI) working on
   - UX, onboarding, settings, diagnostics, menubar state.
   - Keychain access and auth orchestration UI.
   - Auto-launch and daemon lifecycle controls.
-- Rust daemon (`daemon`)
+- Rust daemon (`core/daemon`)
   - FSEvents ingest, debounce/coalescing, scheduler, throttle controller.
   - Durable queue/state, retry/backoff, reconcile, provider execution.
-- Providers (`providers`)
+- Providers (`core/providers`)
   - Cloud API integration via provider trait/capabilities.
   - No provider-specific assumptions in core engine.
-- Shared contracts (`shared`)
+- Shared contracts (`core/shared`)
   - XPC schemas, error taxonomies, settings models, version contracts.
 
 Do not move heavy compute into app process or FSEvents callback path.

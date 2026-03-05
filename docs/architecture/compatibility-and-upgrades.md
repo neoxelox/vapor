@@ -7,8 +7,8 @@ Compatibility rules for app, daemon, shared contracts, and persisted schema acro
 ## Version surfaces
 
 - App version (`apps/macos`)
-- Daemon version (`daemon`)
-- Shared contract version (`shared`)
+- Daemon version (`core/daemon`)
+- Shared contract version (`core/shared`)
 - State schema version (durable DB)
 
 ## Baseline policy

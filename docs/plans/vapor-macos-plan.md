@@ -33,14 +33,16 @@ The service must default to auto-launch at login, stay low-impact under user loa
    - Menubar status: Idle, Queued, Syncing, Throttled, Suspended, Error.
    - Controls: Pause/Resume, Flush now, diagnostics.
    - Keychain secrets and launch configuration management.
-2. Rust daemon (LaunchAgent)
+2. Rust daemon (`core/daemon`, LaunchAgent)
    - FSEvents ingest, debounce/coalescing, keyed scheduler, storm handling.
    - Bounded planner/hashing/uploader stages controlled by throttle state.
    - Durable queue/state and retry/backoff.
    - Local metrics + impact-first auto-tuning.
-3. Providers (Rust)
-   - Provider trait + capabilities.
-   - `provider_gdrive` first, `provider_s3`/R2 next.
+3. Providers (`core/providers`, Rust)
+    - Provider trait + capabilities.
+    - `provider_gdrive` first, `provider_s3`/R2 next.
+4. Shared contracts (`core/shared`)
+   - App/daemon versioned contract models and shared schema types.
 
 ## 4) Auto-launch and lifecycle
 

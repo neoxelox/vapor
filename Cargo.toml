@@ -1,8 +1,8 @@
 [workspace]
 members = [
-  "daemon",
-  "providers",
-  "shared",
+  "core/daemon",
+  "core/providers",
+  "core/shared",
 ]
 resolver = "2"
 
