@@ -13,11 +13,11 @@ Responsibilities:
 
 Current implementation notes:
 
-- `VaporCore` includes `DaemonLifecycleManager` for default auto-launch policy, toggle semantics, crash-loop relaunch backoff, and optional login-item registration.
+- `VaporCore` includes `DaemonLifecycleManager` for default auto-launch policy, toggle semantics, crash-loop relaunch backoff, and login-item registration.
 - `VaporCore` includes `AppLifecycleCoordinator` for app-window/menubar lifecycle actions (Dock presence, daemon stop on quit).
 - `VaporCore` includes `VaporConfigurationStore` + `VaporPaths` for runtime directory resolution and `vapor.json` persistence.
 - `VaporCore` includes a concrete `LaunchAgentController` that writes `~/Library/LaunchAgents/<label>.plist` and manages lifecycle with `launchctl`.
-- `AppShellViewModel` uses lifecycle defaults backed by `LaunchAgentController` and can optionally enable `SMAppService` login-item integration when `VAPOR_LOGIN_ITEM_IDENTIFIER` is set.
+- `AppShellViewModel` uses lifecycle defaults backed by `LaunchAgentController` and `SMAppService.mainApp` integration to restore Vapor at login in menubar-only mode.
 - Startup performs daemon lifecycle bootstrap asynchronously so app window launch stays responsive.
 - Menubar provides explicit lifecycle controls: `Open Vapor` restores Dock/window surface and `Quit Vapor` requests daemon stop before app termination.
 - Distribution artifacts are produced by `apps/macos/scripts/package.sh` (source of truth for app packaging, signing, and optional notarization).
@@ -34,6 +34,8 @@ Current implementation notes:
   - Remains available after main window closes.
   - Shows status/control actions, including reopen (`Open Vapor`) and full quit (`Quit Vapor`).
   - `Open Vapor` should focus the existing main window when already open (no duplicate windows).
+- Login startup:
+  - Restores Vapor as menubar-only (no automatic main window presentation).
 - Daemon (`vapord`):
   - Must remain running when the main window is closed.
   - Full daemon shutdown should happen only on explicit quit/stop flows, not on window close.

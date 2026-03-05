@@ -13,6 +13,7 @@ struct VaporApp: App {
     _viewModel = StateObject(wrappedValue: viewModel)
     logger.info("Vapor app launched")
     viewModel.configureAppRuntimeControllerIfNeeded(MacAppRuntimeController())
+    viewModel.prepareMenubarOnlyStartupSurface()
     viewModel.bootstrapDaemonLifecycleIfNeeded()
   }
 

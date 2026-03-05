@@ -38,6 +38,7 @@ Do not move heavy compute into app process or FSEvents callback path.
 ## 2.1) macOS app component model and lifecycle semantics
 
 - Treat the app window, menubar surface, and daemon as distinct runtime components.
+- Login/startup flow should initialize Vapor as menubar-first (no automatic main-window presentation) while keeping daemon lifecycle bootstrap active.
 - Closing the main window is a UI action only:
   - close the window
   - remove Dock presence for the UI app surface
@@ -54,6 +55,7 @@ Do not move heavy compute into app process or FSEvents callback path.
 - The daemon package/crate name should remain `vapor-daemon` for naming consistency.
 - Brand/domain identifiers are fixed: brand `ARN`, domain `arn.sh`, bundle ID `sh.arn.vapor`.
 - The macOS app bundle identifier must remain `sh.arn.vapor` unless the project owner explicitly changes it.
+- Reverse-DNS identifiers used by Vapor (bundle IDs, helper IDs, launch labels, and related service identifiers) must be scoped under `sh.arn.vapor.*`.
 - New binaries, CLIs, apps, and libraries must use consistent vapor naming (`vapor*`/`vapor-*`) and avoid unrelated names.
 
 ## 3) Performance and throttle invariants

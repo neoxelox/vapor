@@ -47,6 +47,7 @@ over strict real-time behavior.
 
 Expected lifecycle behavior:
 
+- Auto-launch at login starts `vapord` and keeps Vapor as a menubar surface without opening the main window.
 - Closing the main window closes the UI and removes Dock presence.
 - Closing the main window does not stop `vapord` and does not remove menubar status/control.
 - Reopening from menubar focuses the existing main window when present, or restores it when closed.
@@ -178,7 +179,6 @@ Runtime and scripts:
 | `VAPOR_DIR` | `~/.vapor` for normal runtime; repo scripts set `./.vapor` | Runtime root for `vapor.json`, logs, and durable state. |
 | `VAPOR_ENV` | Unset (treated as `prod`); repo scripts default to `dev`; package flow defaults to `prod` | Runtime mode (`dev` or `prod`) controlling path fallback and default log level. |
 | `VAPOR_LOG_LEVEL` | Unset (falls back to `VAPOR_ENV`) | Runtime minimum log level (`debug`, `info`, `warning`, `error`). |
-| `VAPOR_LOGIN_ITEM_IDENTIFIER` | Unset | Optional login-item bundle identifier; when unset, SMAppService login-item integration is disabled. |
 
 Build/packaging:
 

@@ -133,6 +133,25 @@ func disablingAutoLaunchUnregistersOptionalLoginItem() throws {
   #expect(loginItem.operations == ["unregister"])
 }
 
+@Test
+func loginItemRegistrationFailureDoesNotBlockDaemonLifecycle() throws {
+  let store = InMemoryAutoLaunchSettingStore(seed: [
+    DaemonLifecycleManager.autoLaunchSettingKey: true
+  ])
+  let launchAgent = RecordingLaunchAgentController()
+  let loginItem = ThrowingLoginItemController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: launchAgent,
+    settingsStore: store,
+    loginItemController: loginItem
+  )
+
+  let result = try manager.bootstrapIfNeeded(now: Date(timeIntervalSince1970: 0))
+
+  #expect(result == .started)
+  #expect(launchAgent.operations == ["install", "start"])
+}
+
 private final class RecordingLaunchAgentController: LaunchAgentControlling {
   var operations: [String] = []
 
@@ -162,5 +181,17 @@ private final class RecordingLoginItemController: LoginItemControlling {
 
   func unregister() {
     operations.append("unregister")
+  }
+}
+
+private final class ThrowingLoginItemController: LoginItemControlling {
+  struct LoginItemError: Error {}
+
+  func register() throws {
+    throw LoginItemError()
+  }
+
+  func unregister() throws {
+    throw LoginItemError()
   }
 }

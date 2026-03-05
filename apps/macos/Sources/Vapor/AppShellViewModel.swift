@@ -82,6 +82,11 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
+  func prepareMenubarOnlyStartupSurface() {
+    lifecycleCoordinator?.handleMainWindowClosed()
+    logger.info("Prepared menubar-only startup surface")
+  }
+
   private func runDaemonLifecycleBootstrap() {
     do {
       let result = try daemonLifecycleManager.bootstrapIfNeeded()
@@ -188,7 +193,7 @@ final class AppShellViewModel: ObservableObject {
     }
 
     let daemonExecutableURL = inferredDaemonExecutableURL()
-    let launchAgentLabel = "dev.vapor.vapord"
+    let launchAgentLabel = "sh.arn.vapor.daemon"
     var daemonEnvironment = [
       "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
       "VAPOR_DIR": vaporDirectoryURL.path,
@@ -229,13 +234,7 @@ final class AppShellViewModel: ObservableObject {
   private static func makeOptionalLoginItemController() -> (any LoginItemControlling)? {
     #if canImport(ServiceManagement)
       if #available(macOS 13.0, *) {
-        guard let identifier = ProcessInfo.processInfo.environment["VAPOR_LOGIN_ITEM_IDENTIFIER"],
-          !identifier.isEmpty
-        else {
-          return nil
-        }
-
-        return SMAppServiceLoginItemController(loginItemIdentifier: identifier)
+        return SMAppServiceLoginItemController()
       }
     #endif
 

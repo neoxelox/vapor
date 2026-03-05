@@ -10,8 +10,8 @@ func installWritesPlistAndBootstrapsLaunchAgent() throws {
 
   let runner = RecordingLaunchctlRunner()
   let config = LaunchAgentConfiguration(
-    label: "dev.vapor.vapord",
-    plistURL: sandboxURL.appendingPathComponent("dev.vapor.vapord.plist"),
+    label: "sh.arn.vapor.daemon",
+    plistURL: sandboxURL.appendingPathComponent("sh.arn.vapor.daemon.plist"),
     daemonExecutableURL: URL(fileURLWithPath: "/usr/local/bin/vapord")
   )
 
@@ -28,7 +28,7 @@ func installWritesPlistAndBootstrapsLaunchAgent() throws {
     runner.calls == [
       ["bootout", "gui/501", config.plistURL.path],
       ["bootstrap", "gui/501", config.plistURL.path],
-      ["enable", "gui/501/dev.vapor.vapord"],
+      ["enable", "gui/501/sh.arn.vapor.daemon"],
     ]
   )
 }
@@ -40,8 +40,8 @@ func disableUnloadsLaunchAgentAndRemovesPlist() throws {
 
   let runner = RecordingLaunchctlRunner()
   let config = LaunchAgentConfiguration(
-    label: "dev.vapor.vapord",
-    plistURL: sandboxURL.appendingPathComponent("dev.vapor.vapord.plist"),
+    label: "sh.arn.vapor.daemon",
+    plistURL: sandboxURL.appendingPathComponent("sh.arn.vapor.daemon.plist"),
     daemonExecutableURL: URL(fileURLWithPath: "/usr/local/bin/vapord")
   )
 
@@ -59,7 +59,7 @@ func disableUnloadsLaunchAgentAndRemovesPlist() throws {
   #expect(!FileManager.default.fileExists(atPath: config.plistURL.path))
   #expect(
     runner.calls == [
-      ["disable", "gui/501/dev.vapor.vapord"],
+      ["disable", "gui/501/sh.arn.vapor.daemon"],
       ["bootout", "gui/501", config.plistURL.path],
     ]
   )
@@ -72,8 +72,8 @@ func startAndStopIssueExpectedLaunchctlCommands() throws {
 
   let runner = RecordingLaunchctlRunner()
   let config = LaunchAgentConfiguration(
-    label: "dev.vapor.vapord",
-    plistURL: sandboxURL.appendingPathComponent("dev.vapor.vapord.plist"),
+    label: "sh.arn.vapor.daemon",
+    plistURL: sandboxURL.appendingPathComponent("sh.arn.vapor.daemon.plist"),
     daemonExecutableURL: URL(fileURLWithPath: "/usr/local/bin/vapord")
   )
 
@@ -88,8 +88,8 @@ func startAndStopIssueExpectedLaunchctlCommands() throws {
 
   #expect(
     runner.calls == [
-      ["kickstart", "-k", "gui/501/dev.vapor.vapord"],
-      ["kill", "TERM", "gui/501/dev.vapor.vapord"],
+      ["kickstart", "-k", "gui/501/sh.arn.vapor.daemon"],
+      ["kill", "TERM", "gui/501/sh.arn.vapor.daemon"],
     ]
   )
 }

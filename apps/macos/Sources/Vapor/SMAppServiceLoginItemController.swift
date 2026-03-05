@@ -7,8 +7,8 @@ import VaporCore
   final class SMAppServiceLoginItemController: LoginItemControlling {
     private let service: SMAppService
 
-    init(loginItemIdentifier: String) {
-      service = .loginItem(identifier: loginItemIdentifier)
+    init() {
+      service = .mainApp
     }
 
     func register() throws {

@@ -219,7 +219,7 @@ public final class DaemonLifecycleManager {
     }
 
     try launchAgentController.installAndEnable()
-    try loginItemController?.register()
+    registerLoginItemIfAvailable()
     logger.info("Lifecycle bootstrap completed; attempting daemon start")
     return try startDaemonIfAllowed(now: now)
   }
@@ -238,12 +238,12 @@ public final class DaemonLifecycleManager {
 
     if enabled {
       try launchAgentController.installAndEnable()
-      try loginItemController?.register()
+      registerLoginItemIfAvailable()
       return try startDaemonIfAllowed(now: now)
     }
 
     try launchAgentController.disableAndUninstall()
-    try loginItemController?.unregister()
+    unregisterLoginItemIfAvailable()
     crashLoopGuard.reset()
     logger.warning("Disabled auto-launch and reset crash-loop guard")
 
@@ -284,5 +284,27 @@ public final class DaemonLifecycleManager {
   public func stopDaemonForTermination() throws {
     try launchAgentController.stopDaemon()
     logger.warning("Requested daemon stop for app termination")
+  }
+
+  private func registerLoginItemIfAvailable() {
+    do {
+      try loginItemController?.register()
+    } catch {
+      logger.warning(
+        "Failed to register app login item",
+        metadata: ["error": String(describing: error)]
+      )
+    }
+  }
+
+  private func unregisterLoginItemIfAvailable() {
+    do {
+      try loginItemController?.unregister()
+    } catch {
+      logger.warning(
+        "Failed to unregister app login item",
+        metadata: ["error": String(describing: error)]
+      )
+    }
   }
 }
