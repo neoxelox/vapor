@@ -126,10 +126,15 @@ Exit gate:
 - [ ] P5-2 Add control endpoints (pause/resume, flush-now, toggle auto-launch, excludes).
 - [ ] P5-3 Implement full menubar state model and reasoned status messages.
 - [ ] P5-4 Implement diagnostics panel (throttle reason, queue depth, conflicts, failures).
+- [ ] P5-5 Add daemon activity event stream (search/hash/upload and related work stages) to app diagnostics via XPC.
+- [ ] P5-6 Implement a diagnostics timeline tab in Vapor app UI showing live daemon activity events (non-persistent across app relaunch).
+- [ ] P5-7 Implement bounded in-memory timeline buffer with configurable max length (default `1000` events) and safe bounds.
+- [ ] P5-8 Add tests for timeline ordering, truncation at max length, and UI/event-stream integration behavior.
 
 Exit gate:
 
 - User can understand "what is happening" and "why" without CLI access.
+- User can inspect a live timeline of current daemon work (for example directory scanning, hashing, uploading).
 
 ## Phase 6 - Auto-tuning (impact-first)
 
