@@ -48,8 +48,7 @@ Required environment inputs:
 - `DIST_DIR` (default `dist`)
 - `VAPOR_SIGN_IDENTITY` (optional)
 - `VAPOR_ENTITLEMENTS` (optional)
-- `VAPOR_NOTARIZE` (optional toggle)
-- `VAPOR_NOTARY_PROFILE` (required if notarization toggle is on)
+- `VAPOR_NOTARY_PROFILE` (optional; when provided, notarization + stapling run)
 
 Versioning policy:
 
@@ -81,7 +80,7 @@ Document in `apps/macos/README.md`:
 - Local Swift build commands.
 - App packaging command(s).
 - Signed distribution usage (`VAPOR_SIGN_IDENTITY`).
-- Notarized distribution usage (`VAPOR_NOTARIZE`, `VAPOR_NOTARY_PROFILE`).
+- Notarized distribution usage (`VAPOR_NOTARY_PROFILE`).
 
 ## Final acceptance criteria
 

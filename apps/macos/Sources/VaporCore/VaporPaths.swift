@@ -2,12 +2,18 @@ import Foundation
 
 public enum VaporPaths {
   public static let directoryEnvironmentKey = "VAPOR_DIR"
-  public static let persistedDirectoryDefaultsKey = "vapor.user-config.vapor-directory-path"
+  public static let environmentKey = "VAPOR_ENV"
+
+  public static let logsDirectoryName = "logs"
+  public static let stateDirectoryName = "state"
+  public static let configurationFileName = "vapor.json"
+  public static let sqliteDatabaseFileName = "vapor.sqlite"
+  public static let appLogFileName = "vapor.logs"
+  public static let daemonLogFileName = "vapord.logs"
 
   public static func resolveVaporDirectoryURL(
     environment: [String: String] = ProcessInfo.processInfo.environment,
-    fileManager: FileManager = .default,
-    persistedPath: String? = nil
+    fileManager: FileManager = .default
   ) -> URL {
     if let configuredByEnvironment = normalizedDirectoryURL(
       pathString: environment[directoryEnvironmentKey],
@@ -16,22 +22,9 @@ public enum VaporPaths {
       return configuredByEnvironment
     }
 
-    let resolvedPersistedPath =
-      persistedPath
-      ?? UserDefaults.standard.string(forKey: persistedDirectoryDefaultsKey)
-
-    if let resolvedPersistedPath,
-      let configuredByUserSettings = normalizedDirectoryURL(
-        pathString: resolvedPersistedPath,
-        fileManager: fileManager
-      )
-    {
-      return configuredByUserSettings
-    }
-
     if environment["XCTestConfigurationFilePath"] != nil
       || environment["CI"] != nil
-      || environment["VAPOR_LOCAL_DEV"] == "1"
+      || environment[environmentKey]?.lowercased() == "dev"
     {
       return URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
         .appendingPathComponent(".vapor", isDirectory: true)
@@ -42,20 +35,20 @@ public enum VaporPaths {
   }
 
   public static func logsDirectoryURL(vaporDirectoryURL: URL) -> URL {
-    vaporDirectoryURL.appendingPathComponent("logs", isDirectory: true)
+    vaporDirectoryURL.appendingPathComponent(logsDirectoryName, isDirectory: true)
   }
 
   public static func stateDirectoryURL(vaporDirectoryURL: URL) -> URL {
-    vaporDirectoryURL.appendingPathComponent("state", isDirectory: true)
+    vaporDirectoryURL.appendingPathComponent(stateDirectoryName, isDirectory: true)
   }
 
   public static func configurationFileURL(vaporDirectoryURL: URL) -> URL {
-    vaporDirectoryURL.appendingPathComponent("vapor.json", isDirectory: false)
+    vaporDirectoryURL.appendingPathComponent(configurationFileName, isDirectory: false)
   }
 
   public static func sqliteDatabaseURL(vaporDirectoryURL: URL) -> URL {
     stateDirectoryURL(vaporDirectoryURL: vaporDirectoryURL)
-      .appendingPathComponent("vapor.sqlite", isDirectory: false)
+      .appendingPathComponent(sqliteDatabaseFileName, isDirectory: false)
   }
 
   public static func normalizedDirectoryURL(

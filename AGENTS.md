@@ -12,6 +12,12 @@ This file defines the operating rules for contributors (human and AI) working on
   - Defer under pressure and converge eventually.
 - Bidirectional behavior is in MVP for Google Drive and must be safety-first.
 
+## 1.1) Project maturity and compatibility policy
+
+- Vapor is pre-GA and under heavy active development.
+- Backward compatibility is not guaranteed yet for local config/state/schema formats, app/daemon internal contracts, or developer-facing interfaces.
+- Prefer clear, simple implementations over temporary legacy/migration shims unless the project owner explicitly requests compatibility preservation.
+
 ## 2) System boundaries
 
 - SwiftUI app (`apps/macos`)
@@ -73,6 +79,7 @@ Do not move heavy compute into app process or FSEvents callback path.
 - Schema versions are explicit and migration-tested.
 - Forward migration and rollback behavior must be defined before schema changes ship.
 - Corruption recovery path must be documented and observable.
+- Pre-GA exception: contributors may make intentional breaking changes to config/state formats without migration when the change is documented and validated in the same change set.
 
 ## 6) Security and privacy
 
@@ -105,7 +112,7 @@ Do not move heavy compute into app process or FSEvents callback path.
   - Use explicit error enums and classify transient vs permanent failures.
   - Keep async/task lifetimes bounded and cancellation-aware.
 - API/contracts
-  - Version XPC payloads and avoid breaking changes without migration.
+  - Version XPC payloads; pre-GA breaking changes are allowed with coordinated updates.
   - Provider trait changes require capability and behavior review.
 
 ## 8.1) Observability and diagnostics
@@ -152,12 +159,13 @@ It does not override the "latest stable" policy above.
 - Configuration file path is `vapor_dir/vapor.json`.
 - Logs should be written under `vapor_dir/logs/`.
 - Durable queue/state DB paths should live under `vapor_dir/state/`.
+- Runtime directory selection is code-defined and env-overridable only; it is not a user-configurable `vapor.json` field.
 - Runtime directory resolution order is:
   1. `VAPOR_DIR` environment variable (explicit override)
-  2. app user setting persisted by Vapor UI
-  3. local dev/test/CI default `./.vapor`
-  4. normal runtime default `~/.vapor`
+  2. local dev/test/CI default `./.vapor` when `VAPOR_ENV=dev` (and in test/CI contexts)
+  3. normal runtime default `~/.vapor`
 - Repository scripts must default `VAPOR_DIR` to `./.vapor` so local and CI behavior are consistent.
+- Repository scripts should default `VAPOR_ENV` to `dev` (and `prod` for package flow).
 
 ## 9) Required test matrix
 
@@ -201,6 +209,7 @@ Documentation update policy:
 
 - Non-trivial feature/logic changes must update required documentation in the same change set.
 - `README.md` should be updated when behavior, setup, operational workflow, or developer commands change.
+- `README.md` must keep a complete user-configuration and `VAPOR_*` environment-variable reference (what each option does and its default); any config/env change must update that reference in the same change set.
 - Non-trivial UI/UX changes must document the intended user experience and note alignment with Apple design conventions.
 - `AGENTS.md` should be updated when a new durable engineering rule, safety invariant, or contributor policy should be remembered for future work.
 - If docs are intentionally not updated, PR description must explain why no documentation changes were needed.

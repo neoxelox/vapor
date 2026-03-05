@@ -15,7 +15,7 @@ Current implementation notes:
 
 - `VaporCore` includes `DaemonLifecycleManager` for default auto-launch policy, toggle semantics, crash-loop relaunch backoff, and optional login-item registration.
 - `VaporCore` includes `AppLifecycleCoordinator` for app-window/menubar lifecycle actions (Dock presence, daemon stop on quit).
-- `VaporCore` includes `VaporUserConfigurationStore` + `VaporPaths` for runtime directory resolution and `vapor.json` persistence.
+- `VaporCore` includes `VaporConfigurationStore` + `VaporPaths` for runtime directory resolution and `vapor.json` persistence.
 - `VaporCore` includes a concrete `LaunchAgentController` that writes `~/Library/LaunchAgents/<label>.plist` and manages lifecycle with `launchctl`.
 - `AppShellViewModel` uses lifecycle defaults backed by `LaunchAgentController` and can optionally enable `SMAppService` login-item integration when `VAPOR_LOGIN_ITEM_IDENTIFIER` is set.
 - Startup performs daemon lifecycle bootstrap asynchronously so app window launch stays responsive.
@@ -55,8 +55,8 @@ Implementation phases map to `docs/plans/vapor-macos-task-list.md`.
 - Log line format: `{timestamp} [{level}] ({component}): {message}. key=value ...`
 - Runtime log level override: `VAPOR_LOG_LEVEL` (`debug`, `info`, `warning`, `error`)
 - Default log level:
-  - local/debug build flows: `debug`
-  - package flow (`apps/macos/scripts/package.sh`): `warning`
+  - `VAPOR_ENV=dev`: `debug`
+  - `VAPOR_ENV=prod` (or unset): `warning`
 
 ## Package app (local)
 
@@ -76,8 +76,8 @@ Optional entitlements:
 ## Notarized distribution
 
 1. Create a keychain profile with `xcrun notarytool store-credentials`.
-2. Run packaging with notarization enabled:
-   - `VAPOR_SIGN_IDENTITY="Developer ID Application: ..." VAPOR_NOTARIZE=1 VAPOR_NOTARY_PROFILE="<profile>" apps/macos/scripts/package.sh`
+2. Run packaging with a notary profile (presence of `VAPOR_NOTARY_PROFILE` enables notarization):
+   - `VAPOR_SIGN_IDENTITY="Developer ID Application: ..." VAPOR_NOTARY_PROFILE="<profile>" apps/macos/scripts/package.sh`
 
 ## Xcode debugging convenience
 

@@ -5,6 +5,12 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const VAPOR_DIR_ENV_KEY: &str = "VAPOR_DIR";
+const VAPOR_ENV_ENV_KEY: &str = "VAPOR_ENV";
+const VAPOR_LOG_LEVEL_ENV_KEY: &str = "VAPOR_LOG_LEVEL";
+const LOGS_DIRECTORY_NAME: &str = "logs";
+const VAPOR_DIRECTORY_NAME: &str = ".vapor";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum LogLevel {
     Debug,
@@ -42,7 +48,7 @@ pub struct StructuredLogger {
 
 impl StructuredLogger {
     pub fn new(component: &'static str, file_name: &str) -> Self {
-        let min_level = env::var("VAPOR_LOG_LEVEL")
+        let min_level = env::var(VAPOR_LOG_LEVEL_ENV_KEY)
             .ok()
             .and_then(|value| LogLevel::parse(&value))
             .unwrap_or_else(build_default_level);
@@ -110,21 +116,15 @@ impl StructuredLogger {
 
 pub struct GlobalComponentLogger {
     component: &'static str,
-    file_name_env_var: &'static str,
-    default_file_name: &'static str,
+    file_name: &'static str,
     logger: OnceLock<StructuredLogger>,
 }
 
 impl GlobalComponentLogger {
-    pub const fn new(
-        component: &'static str,
-        file_name_env_var: &'static str,
-        default_file_name: &'static str,
-    ) -> Self {
+    pub const fn new(component: &'static str, file_name: &'static str) -> Self {
         Self {
             component,
-            file_name_env_var,
-            default_file_name,
+            file_name,
             logger: OnceLock::new(),
         }
     }
@@ -150,44 +150,46 @@ impl GlobalComponentLogger {
     }
 
     fn global(&self) -> &StructuredLogger {
-        let log_file = env::var(self.file_name_env_var)
-            .ok()
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| self.default_file_name.to_string());
         self.logger
-            .get_or_init(|| StructuredLogger::new(self.component, &log_file))
+            .get_or_init(|| StructuredLogger::new(self.component, self.file_name))
     }
 }
 
 fn build_default_level() -> LogLevel {
-    let configured = option_env!("VAPOR_DEFAULT_LOG_LEVEL").unwrap_or("debug");
-    LogLevel::parse(configured).unwrap_or(LogLevel::Debug)
+    match env::var(VAPOR_ENV_ENV_KEY)
+        .ok()
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("dev") => LogLevel::Debug,
+        _ => LogLevel::Warning,
+    }
 }
 
 fn logs_directory() -> PathBuf {
-    if let Some(configured) = env::var_os("VAPOR_LOG_DIR") {
-        return PathBuf::from(configured);
-    }
-
-    vapor_directory().join("logs")
+    vapor_directory().join(LOGS_DIRECTORY_NAME)
 }
 
 fn vapor_directory() -> PathBuf {
-    if let Some(configured) = env::var_os("VAPOR_DIR") {
+    if let Some(configured) = env::var_os(VAPOR_DIR_ENV_KEY) {
         return PathBuf::from(configured);
     }
 
-    if (env::var_os("CI").is_some() || env::var_os("VAPOR_LOCAL_DEV").is_some())
+    if (env::var_os("CI").is_some()
+        || env::var(VAPOR_ENV_ENV_KEY)
+            .ok()
+            .map(|value| value.eq_ignore_ascii_case("dev"))
+            .unwrap_or(false))
         && let Ok(current_directory) = env::current_dir()
     {
-        return current_directory.join(".vapor");
+        return current_directory.join(VAPOR_DIRECTORY_NAME);
     }
 
     if let Some(home) = env::var_os("HOME") {
-        return PathBuf::from(home).join(".vapor");
+        return PathBuf::from(home).join(VAPOR_DIRECTORY_NAME);
     }
 
-    PathBuf::from("/tmp/.vapor")
+    PathBuf::from("/tmp").join(VAPOR_DIRECTORY_NAME)
 }
 
 fn sanitize_text(raw: &str) -> String {

@@ -32,12 +32,6 @@ public enum VaporLogLevel: String, CaseIterable, Sendable {
 public final class StructuredLogger: @unchecked Sendable {
   private static let writeQueue = DispatchQueue(label: "sh.arn.vapor.logging.writer")
 
-  #if VAPOR_PACKAGED_BUILD
-    private static let buildDefaultLevel: VaporLogLevel = .warning
-  #else
-    private static let buildDefaultLevel: VaporLogLevel = .debug
-  #endif
-
   private let component: String
   private let minLevel: VaporLogLevel
   private let fileURL: URL
@@ -45,7 +39,6 @@ public final class StructuredLogger: @unchecked Sendable {
 
   public init(
     component: String,
-    fileName: String = "vapor.logs",
     minLevel: VaporLogLevel? = nil,
     fileManager: FileManager = .default
   ) {
@@ -55,15 +48,14 @@ public final class StructuredLogger: @unchecked Sendable {
     if let minLevel {
       self.minLevel = minLevel
     } else {
+      let environment = ProcessInfo.processInfo.environment
       self.minLevel =
-        VaporLogLevel.from(environmentValue: ProcessInfo.processInfo.environment["VAPOR_LOG_LEVEL"])
-        ?? StructuredLogger.buildDefaultLevel
+        VaporLogLevel.from(environmentValue: environment["VAPOR_LOG_LEVEL"])
+        ?? StructuredLogger.defaultMinLevel(for: environment)
     }
 
-    let resolvedFileName = ProcessInfo.processInfo.environment["VAPOR_APP_LOG_FILE"] ?? fileName
-
     self.fileURL = StructuredLogger.logDirectory(fileManager: fileManager)
-      .appendingPathComponent(resolvedFileName)
+      .appendingPathComponent(VaporPaths.appLogFileName)
 
     prepareLogFile()
   }
@@ -133,12 +125,16 @@ public final class StructuredLogger: @unchecked Sendable {
   }
 
   private static func logDirectory(fileManager: FileManager) -> URL {
-    if let configured = ProcessInfo.processInfo.environment["VAPOR_LOG_DIR"], !configured.isEmpty {
-      return URL(fileURLWithPath: configured, isDirectory: true)
-    }
-
     let vaporDirectoryURL = VaporPaths.resolveVaporDirectoryURL(fileManager: fileManager)
     return VaporPaths.logsDirectoryURL(vaporDirectoryURL: vaporDirectoryURL)
+  }
+
+  private static func defaultMinLevel(for environment: [String: String]) -> VaporLogLevel {
+    if environment[VaporPaths.environmentKey]?.lowercased() == "dev" {
+      return .debug
+    }
+
+    return .warning
   }
 
   private func sanitize(_ raw: String) -> String {

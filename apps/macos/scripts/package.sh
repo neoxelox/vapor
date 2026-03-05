@@ -10,8 +10,8 @@ ICON_PNG="${ICON_PNG:-assets/icon.png}"
 DIST_DIR="${DIST_DIR:-dist}"
 VAPOR_SIGN_IDENTITY="${VAPOR_SIGN_IDENTITY:-}"
 VAPOR_ENTITLEMENTS="${VAPOR_ENTITLEMENTS:-}"
-VAPOR_NOTARIZE="${VAPOR_NOTARIZE:-0}"
 VAPOR_NOTARY_PROFILE="${VAPOR_NOTARY_PROFILE:-}"
+export VAPOR_ENV="${VAPOR_ENV:-prod}"
 
 if [[ "$ICON_PNG" != /* ]]; then
   ICON_PNG="$ROOT_DIR/$ICON_PNG"
@@ -65,8 +65,6 @@ swift build \
   --package-path "$ROOT_DIR/apps/macos" \
   -c release \
   --disable-index-store \
-  -Xswiftc -D \
-  -Xswiftc VAPOR_PACKAGED_BUILD \
   -Xswiftc -whole-module-optimization \
   -Xswiftc -cross-module-optimization
 
@@ -174,14 +172,9 @@ zip_path="$DIST_DIR/$APP_NAME.zip"
 rm -f "$zip_path"
 ditto -c -k --keepParent "$app_bundle" "$zip_path"
 
-if [[ "$VAPOR_NOTARIZE" == "1" ]]; then
+if [[ -n "$VAPOR_NOTARY_PROFILE" ]]; then
   if [[ -z "$VAPOR_SIGN_IDENTITY" ]]; then
     echo "[package] Notarization requires VAPOR_SIGN_IDENTITY with Developer ID Application certificate"
-    exit 1
-  fi
-
-  if [[ -z "$VAPOR_NOTARY_PROFILE" ]]; then
-    echo "[package] VAPOR_NOTARIZE=1 requires VAPOR_NOTARY_PROFILE"
     exit 1
   fi
 

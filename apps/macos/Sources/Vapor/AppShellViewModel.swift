@@ -6,44 +6,46 @@ import VaporCore
 final class AppShellViewModel: ObservableObject {
   @Published private(set) var state: AppShellState = .initial
   private var daemonLifecycleManager: DaemonLifecycleManager
-  private let userConfigurationStore: VaporUserConfigurationStore
-  private var userConfiguration: VaporUserConfiguration
+  private let configurationStore: VaporConfigurationStore
+  private var configuration: VaporConfiguration
   private let logger = StructuredLogger(component: "app-shell")
   private var runtimeController: (any AppRuntimeControlling)?
   private var lifecycleCoordinator: AppLifecycleCoordinator?
   private var hasScheduledBootstrap = false
 
   convenience init() {
-    let userConfigurationStore = VaporUserConfigurationStore()
-    let userConfiguration = userConfigurationStore.load()
-    let vaporDirectoryURL = URL(
-      fileURLWithPath: userConfiguration.vaporDirectoryPath, isDirectory: true)
+    let configurationStore = VaporConfigurationStore()
+    let configuration = configurationStore.load()
+    let vaporDirectoryURL = configurationStore.resolveVaporDirectoryURL()
+    let autoLaunchSettingStore = VaporConfigurationAutoLaunchSettingStore(
+      configurationStore: configurationStore)
     self.init(
       daemonLifecycleManager: AppShellViewModel.makeDefaultLifecycleManager(
-        vaporDirectoryURL: vaporDirectoryURL
+        vaporDirectoryURL: vaporDirectoryURL,
+        autoLaunchSettingStore: autoLaunchSettingStore
       ),
-      userConfigurationStore: userConfigurationStore,
-      userConfiguration: userConfiguration
+      configurationStore: configurationStore,
+      configuration: configuration
     )
   }
 
   init(
     daemonLifecycleManager: DaemonLifecycleManager,
-    userConfigurationStore: VaporUserConfigurationStore = VaporUserConfigurationStore(),
-    userConfiguration: VaporUserConfiguration? = nil
+    configurationStore: VaporConfigurationStore = VaporConfigurationStore(),
+    configuration: VaporConfiguration? = nil
   ) {
     self.daemonLifecycleManager = daemonLifecycleManager
-    self.userConfigurationStore = userConfigurationStore
-    self.userConfiguration = userConfiguration ?? userConfigurationStore.load()
+    self.configurationStore = configurationStore
+    self.configuration = configuration ?? configurationStore.load()
 
     state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
-    state.vaporDirectoryPath = self.userConfiguration.vaporDirectoryPath
+    state.vaporDirectoryPath = self.configurationStore.resolveVaporDirectoryURL().path
 
     do {
-      try self.userConfigurationStore.save(self.userConfiguration)
+      try self.configurationStore.save(self.configuration)
     } catch {
       logger.error(
-        "Failed to persist user configuration during startup",
+        "Failed to persist configuration during startup",
         metadata: ["error": String(describing: error)]
       )
     }
@@ -115,6 +117,7 @@ final class AppShellViewModel: ObservableObject {
     do {
       let result = try daemonLifecycleManager.setAutoLaunchEnabled(nextState)
       state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
+      configuration.autoLaunchEnabled = state.autoLaunchEnabled
       logger.info(
         "Auto-launch toggle completed",
         metadata: [
@@ -137,6 +140,7 @@ final class AppShellViewModel: ObservableObject {
     do {
       let result = try daemonLifecycleManager.setAutoLaunchEnabled(false, stopDaemonNow: true)
       state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
+      configuration.autoLaunchEnabled = state.autoLaunchEnabled
       logger.warning(
         "Auto-launch disabled with stop-now",
         metadata: ["result": String(describing: result)]
@@ -163,48 +167,6 @@ final class AppShellViewModel: ObservableObject {
     logger.debug("Cycled sync state", metadata: ["new_state": String(describing: state.syncState)])
   }
 
-  func updateVaporDirectoryPath(_ rawPath: String) {
-    guard
-      let vaporDirectoryURL = VaporPaths.normalizedDirectoryURL(pathString: rawPath),
-      !vaporDirectoryURL.path.isEmpty
-    else {
-      state.syncState = .error
-      logger.error("Invalid vapor directory path", metadata: ["raw_path": rawPath])
-      return
-    }
-
-    do {
-      var updatedConfiguration = userConfiguration
-      updatedConfiguration.vaporDirectoryPath = vaporDirectoryURL.path
-      try userConfigurationStore.save(updatedConfiguration)
-      userConfiguration = updatedConfiguration
-      state.vaporDirectoryPath = updatedConfiguration.vaporDirectoryPath
-
-      daemonLifecycleManager = Self.makeDefaultLifecycleManager(
-        vaporDirectoryURL: vaporDirectoryURL)
-      state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
-      refreshLifecycleCoordinator()
-
-      if state.autoLaunchEnabled {
-        _ = try daemonLifecycleManager.setAutoLaunchEnabled(true)
-      }
-
-      logger.info(
-        "Updated vapor runtime directory",
-        metadata: ["vapor_directory": vaporDirectoryURL.path]
-      )
-    } catch {
-      state.syncState = .error
-      logger.error(
-        "Failed to update vapor runtime directory",
-        metadata: [
-          "raw_path": rawPath,
-          "error": String(describing: error),
-        ]
-      )
-    }
-  }
-
   private func refreshLifecycleCoordinator() {
     guard let runtimeController else {
       lifecycleCoordinator = nil
@@ -217,28 +179,36 @@ final class AppShellViewModel: ObservableObject {
     )
   }
 
-  private static func makeDefaultLifecycleManager(vaporDirectoryURL: URL) -> DaemonLifecycleManager
-  {
+  private static func makeDefaultLifecycleManager(
+    vaporDirectoryURL: URL,
+    autoLaunchSettingStore: any AutoLaunchSettingStore
+  ) -> DaemonLifecycleManager {
     if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
       return .placeholder()
     }
 
     let daemonExecutableURL = inferredDaemonExecutableURL()
     let launchAgentLabel = "dev.vapor.vapord"
+    var daemonEnvironment = [
+      "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+      "VAPOR_DIR": vaporDirectoryURL.path,
+    ]
+    if let runtimeEnvironment = ProcessInfo.processInfo.environment[VaporPaths.environmentKey],
+      !runtimeEnvironment.isEmpty
+    {
+      daemonEnvironment[VaporPaths.environmentKey] = runtimeEnvironment
+    }
     let configuration = LaunchAgentConfiguration(
       label: launchAgentLabel,
       plistURL: LaunchAgentConfiguration.defaultPlistURL(label: launchAgentLabel),
       daemonExecutableURL: daemonExecutableURL,
       workingDirectoryURL: vaporDirectoryURL,
-      environment: [
-        "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-        "VAPOR_DIR": vaporDirectoryURL.path,
-      ]
+      environment: daemonEnvironment
     )
 
     return DaemonLifecycleManager(
       launchAgentController: LaunchAgentController(configuration: configuration),
-      settingsStore: UserDefaultsAutoLaunchSettingStore(),
+      settingsStore: autoLaunchSettingStore,
       loginItemController: makeOptionalLoginItemController()
     )
   }

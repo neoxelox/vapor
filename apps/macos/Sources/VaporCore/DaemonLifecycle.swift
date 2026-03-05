@@ -9,23 +9,7 @@ public enum DaemonLifecycleActionResult: Equatable {
 
 public protocol AutoLaunchSettingStore {
   func bool(forKey key: String) -> Bool?
-  func set(_ value: Bool, forKey key: String)
-}
-
-public struct UserDefaultsAutoLaunchSettingStore: AutoLaunchSettingStore {
-  private let defaults: UserDefaults
-
-  public init(defaults: UserDefaults = .standard) {
-    self.defaults = defaults
-  }
-
-  public func bool(forKey key: String) -> Bool? {
-    defaults.object(forKey: key) as? Bool
-  }
-
-  public func set(_ value: Bool, forKey key: String) {
-    defaults.set(value, forKey: key)
-  }
+  func set(_ value: Bool, forKey key: String) throws
 }
 
 public final class InMemoryAutoLaunchSettingStore: AutoLaunchSettingStore {
@@ -39,8 +23,34 @@ public final class InMemoryAutoLaunchSettingStore: AutoLaunchSettingStore {
     values[key]
   }
 
-  public func set(_ value: Bool, forKey key: String) {
+  public func set(_ value: Bool, forKey key: String) throws {
     values[key] = value
+  }
+}
+
+public final class VaporConfigurationAutoLaunchSettingStore: AutoLaunchSettingStore {
+  private let configurationStore: VaporConfigurationStore
+
+  public init(configurationStore: VaporConfigurationStore = VaporConfigurationStore()) {
+    self.configurationStore = configurationStore
+  }
+
+  public func bool(forKey key: String) -> Bool? {
+    guard key == DaemonLifecycleManager.autoLaunchSettingKey else {
+      return nil
+    }
+
+    return configurationStore.load().autoLaunchEnabled
+  }
+
+  public func set(_ value: Bool, forKey key: String) throws {
+    guard key == DaemonLifecycleManager.autoLaunchSettingKey else {
+      return
+    }
+
+    var configuration = configurationStore.load()
+    configuration.autoLaunchEnabled = value
+    try configurationStore.save(configuration)
   }
 }
 
@@ -178,7 +188,7 @@ public final class DaemonLifecycleManager {
   public static func placeholder() -> DaemonLifecycleManager {
     DaemonLifecycleManager(
       launchAgentController: NoopLaunchAgentController(),
-      settingsStore: UserDefaultsAutoLaunchSettingStore(),
+      settingsStore: InMemoryAutoLaunchSettingStore(),
       loginItemController: nil
     )
   }
@@ -189,7 +199,14 @@ public final class DaemonLifecycleManager {
       return persisted
     }
 
-    settingsStore.set(true, forKey: settingsKey)
+    do {
+      try settingsStore.set(true, forKey: settingsKey)
+    } catch {
+      logger.error(
+        "Failed to persist default auto-launch setting",
+        metadata: ["error": String(describing: error)]
+      )
+    }
     logger.info("Auto-launch setting missing; defaulting to enabled")
     return true
   }
@@ -213,7 +230,7 @@ public final class DaemonLifecycleManager {
     stopDaemonNow: Bool = false,
     now: Date = .now
   ) throws -> DaemonLifecycleActionResult {
-    settingsStore.set(enabled, forKey: settingsKey)
+    try settingsStore.set(enabled, forKey: settingsKey)
     logger.info(
       "Updated auto-launch setting",
       metadata: ["enabled": String(enabled), "stop_now": String(stopDaemonNow)]

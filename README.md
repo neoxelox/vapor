@@ -11,6 +11,7 @@ over strict real-time behavior.
 - Current stage: planning and repository foundation.
 - Product direction: bidirectional eventual consistency for Google Drive in MVP.
 - Primary constraint: do no harm to user workload, battery, and thermal headroom.
+- Pre-GA compatibility policy: backward compatibility is not guaranteed yet; config/state/schema and local interfaces may change during active development.
 
 ## Product Goals
 
@@ -116,6 +117,7 @@ Notes:
 - Scripts intentionally skip missing stack artifacts during early bootstrap (for example,
   no `Cargo.toml` yet or no `apps/macos` project yet).
 - Scripts default `VAPOR_DIR` to repo-local `./.vapor` for local dev/test ergonomics.
+- Scripts default `VAPOR_ENV` to `dev` (and `prod` for `./scripts/build.sh package`).
 - Override runtime root with `VAPOR_DIR=/path/to/vapor ./scripts/test.sh` (same for build/lint/format).
 - Swift lint/format scripts intentionally use `swift format` only.
 - If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild build`
@@ -137,12 +139,56 @@ Release build policy:
   - config: `<vapor_dir>/vapor.json`
   - logs: `<vapor_dir>/logs/vapor.logs`, `<vapor_dir>/logs/vapord.logs`
   - state/db reserved path: `<vapor_dir>/state/vapor.sqlite`
-- Optional log directory override: `VAPOR_LOG_DIR`.
 - Runtime log level override: `VAPOR_LOG_LEVEL` (`debug`, `info`, `warning`, `error`).
 - Log line format: `{timestamp} [{level}] ({component}): {message}. key=value ...`
-- Build defaults:
-  - normal builds default to `debug`
-  - package builds (`./scripts/build.sh package`) default to `warning`
+- Default log level behavior:
+  - `VAPOR_ENV=dev` -> `debug`
+  - `VAPOR_ENV=prod` (or unset) -> `warning`
+
+## User Configuration Reference
+
+All user-facing configuration must be documented here with meaning and defaults.
+
+`vapor.json` (`<vapor_dir>/vapor.json`):
+
+- `autoLaunchEnabled` (`Bool`)
+  - Default: `true`
+  - Purpose: controls whether Vapor auto-launches and bootstraps `vapord` at startup/login.
+- `useGitIgnore` (`Bool`)
+  - Default: `true`
+  - Purpose: persisted user preference for `.gitignore`-aware behavior in sync/timeline filtering flows.
+- `timelineEventLimit` (`Int`)
+  - Default: `1000`
+  - Purpose: persisted cap for timeline/diagnostic event surfaces.
+
+All persisted user configuration lives in `vapor.json`.
+
+Runtime directory is not a `vapor.json` option and is resolved by precedence:
+
+1. `VAPOR_DIR` environment override
+2. `./.vapor` in tests/CI or when `VAPOR_ENV=dev`
+3. `~/.vapor` in normal runtime
+
+## `VAPOR_*` Environment Variable Reference
+
+Runtime and scripts:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VAPOR_DIR` | `~/.vapor` for normal runtime; repo scripts set `./.vapor` | Runtime root for `vapor.json`, logs, and durable state. |
+| `VAPOR_ENV` | Unset (treated as `prod`); repo scripts default to `dev`; package flow defaults to `prod` | Runtime mode (`dev` or `prod`) controlling path fallback and default log level. |
+| `VAPOR_LOG_LEVEL` | Unset (falls back to `VAPOR_ENV`) | Runtime minimum log level (`debug`, `info`, `warning`, `error`). |
+| `VAPOR_LOGIN_ITEM_IDENTIFIER` | Unset | Optional login-item bundle identifier; when unset, SMAppService login-item integration is disabled. |
+
+Build/packaging:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VAPOR_XCODE_SCHEME` | Unset | Required to run `xcodebuild` in `./scripts/swift/build.sh` when building from an Xcode project/workspace. |
+| `VAPOR_SIGN_IDENTITY` | Empty (ad-hoc signing) | Developer ID identity used by `apps/macos/scripts/package.sh`. |
+| `VAPOR_ENTITLEMENTS` | Empty | Optional entitlements plist path passed to codesign in packaging. |
+| `VAPOR_NOTARY_PROFILE` | Empty | Notarytool keychain profile; when set, packaging performs notarization and stapling. |
+| `VAPOR_BUILD_NUMBER` | `git rev-list --count HEAD` fallback to `1` | Overrides `CFBundleVersion` in packaged app artifacts. |
 
 ## Known-good local baseline (Mar 2026)
 

@@ -19,4 +19,4 @@ Logging:
 - Reserved state/db location: `<vapor_dir>/state/vapor.sqlite`.
 - Log line format: `{timestamp} [{level}] ({component}): {message}. key=value ...`
 - Runtime log level override uses `VAPOR_LOG_LEVEL` (`debug`, `info`, `warning`, `error`).
-- Default level is `debug` in normal builds and `warning` in package builds.
+- Default level is `debug` when `VAPOR_ENV=dev`, otherwise `warning`.

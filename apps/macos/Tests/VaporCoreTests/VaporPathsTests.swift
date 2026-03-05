@@ -14,12 +14,12 @@ func resolvesVaporDirectoryFromEnvironmentOverride() {
 }
 
 @Test
-func resolvesVaporDirectoryToCurrentDirectoryForLocalDev() {
+func resolvesVaporDirectoryToCurrentDirectoryForDevEnvironment() {
   let expected = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
     .appendingPathComponent(".vapor", isDirectory: true)
 
   let resolved = VaporPaths.resolveVaporDirectoryURL(
-    environment: ["VAPOR_LOCAL_DEV": "1"],
+    environment: ["VAPOR_ENV": "dev"],
     fileManager: .default
   )
 

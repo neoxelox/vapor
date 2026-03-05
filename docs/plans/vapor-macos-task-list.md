@@ -59,7 +59,7 @@ Exit gate:
 - [x] P1D-8 Implement signing modes in packaging script: ad-hoc default, Developer ID + hardened runtime when `VAPOR_SIGN_IDENTITY` is set, optional entitlements injection.
 - [x] P1D-9 Add bundle verification steps (`plutil`, `codesign --verify`, `spctl` best-effort).
 - [x] P1D-10 Produce zip artifact `dist/Vapor.zip` using `ditto --keepParent`.
-- [x] P1D-11 Add optional notarization + stapling flow gated by `VAPOR_NOTARIZE=1` and `VAPOR_NOTARY_PROFILE`.
+- [x] P1D-11 Add optional notarization + stapling flow triggered when `VAPOR_NOTARY_PROFILE` is provided.
 - [x] P1D-12 Integrate packaging into repo build scripts via `./scripts/build.sh package` while preserving build-only default behavior.
 - [x] P1D-13 Add optional Xcode convenience workflow (open package/workspace for debugging) without changing script-first release source of truth.
 - [x] P1D-14 Update `apps/macos/README.md` with local build/package/signed/notarized distribution commands.
