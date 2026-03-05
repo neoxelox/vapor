@@ -68,7 +68,7 @@ Exit gate:
 - [x] P1D-17 Ensure window-close and daemon lifecycle are decoupled: closing UI window must not stop `vapord` or remove menubar status/control.
 - [x] P1D-18 Add explicit menubar lifecycle controls for `Open Vapor` (reopen/focus main window) and `Quit Vapor` (request daemon stop then terminate app).
 - [x] P1D-19 Add lifecycle coverage tests for: window close keeps daemon alive, reopen from menubar works, and menubar quit executes daemon stop path before app termination.
-- [ ] P1D-20 Update app lifecycle docs (`README.md`, `apps/macos/README.md`, `AGENTS.md`) to define app-window vs menubar vs daemon responsibilities.
+- [x] P1D-20 Update app lifecycle docs (`README.md`, `apps/macos/README.md`, `AGENTS.md`) to define app-window vs menubar vs daemon responsibilities.
 
 Exit gate:
 
@@ -79,8 +79,12 @@ Exit gate:
 
 ## Phase 2 - Low-impact local engine core
 
-- [ ] P2-1 Implement FSEvents recursive watcher with minimal callback work only.
+- [x] P2-1 Implement FSEvents recursive watcher with minimal callback work only.
 - [ ] P2-2 Implement default excludes + `.vaporignore` parser and matcher.
+- [ ] P2-2a Add optional `.gitignore` ingestion/matching in daemon local filtering (default enabled).
+- [ ] P2-2b Add app setting to toggle `.gitignore` usage (`useGitIgnore`, default `true`).
+- [ ] P2-2c Add user-level ignore rules configured via Vapor app UI and apply them in daemon filtering.
+- [ ] P2-2d Add tests for ignore precedence/merge across defaults, `.vaporignore`, `.gitignore`, and UI rules.
 - [ ] P2-3 Implement debounce/coalescing loop (250ms tick, conservative windows).
 - [ ] P2-4 Implement keyed superseding scheduler (latest intent wins per path).
 - [ ] P2-5 Implement throttle controller inputs and 4-state model.

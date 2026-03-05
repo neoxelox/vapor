@@ -3,6 +3,7 @@
 use vapor_providers::{GoogleDriveProvider, Provider};
 use vapor_shared::{RunState, StatusSnapshot, ThrottleState};
 
+pub mod fs_events;
 pub mod logging;
 
 #[derive(Debug)]

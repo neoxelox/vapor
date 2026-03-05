@@ -37,7 +37,7 @@ Do not move heavy compute into app process or FSEvents callback path.
   - remove Dock presence for the UI app surface
   - keep menubar surface active
   - keep daemon runtime active
-- Reopen flow (`Open Vapor` from menubar) must restore the main window and Dock presence without restarting the daemon.
+- Reopen flow (`Open Vapor` from menubar) must focus the existing main window when already open, or restore it when closed, without restarting the daemon.
 - Full shutdown (`Quit Vapor` from menubar) must execute daemon stop/shutdown path and then terminate the app process.
 - Never couple window-close behavior to daemon termination.
 

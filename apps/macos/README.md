@@ -32,6 +32,7 @@ Current implementation notes:
 - Menubar (`MenuBarExtra`):
   - Remains available after main window closes.
   - Shows status/control actions, including reopen (`Open Vapor`) and full quit (`Quit Vapor`).
+  - `Open Vapor` should focus the existing main window when already open (no duplicate windows).
 - Daemon (`vapord`):
   - Must remain running when the main window is closed.
   - Full daemon shutdown should happen only on explicit quit/stop flows, not on window close.
