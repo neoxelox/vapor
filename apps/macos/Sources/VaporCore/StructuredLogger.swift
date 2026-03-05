@@ -45,7 +45,7 @@ public final class StructuredLogger: @unchecked Sendable {
 
   public init(
     component: String,
-    fileName: String = "vapor.log",
+    fileName: String = "vapor.logs",
     minLevel: VaporLogLevel? = nil,
     fileManager: FileManager = .default
   ) {
@@ -137,14 +137,8 @@ public final class StructuredLogger: @unchecked Sendable {
       return URL(fileURLWithPath: configured, isDirectory: true)
     }
 
-    if let userLibraryURL = fileManager.urls(for: .libraryDirectory, in: .userDomainMask).first {
-      return userLibraryURL.appendingPathComponent("Logs").appendingPathComponent("Vapor")
-    }
-
-    return fileManager.homeDirectoryForCurrentUser
-      .appendingPathComponent("Library")
-      .appendingPathComponent("Logs")
-      .appendingPathComponent("Vapor")
+    let vaporDirectoryURL = VaporPaths.resolveVaporDirectoryURL(fileManager: fileManager)
+    return VaporPaths.logsDirectoryURL(vaporDirectoryURL: vaporDirectoryURL)
   }
 
   private func sanitize(_ raw: String) -> String {

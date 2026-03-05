@@ -146,6 +146,19 @@ It does not override the "latest stable" policy above.
   3. `./scripts/test.sh`
 - Rationale: wrapper scripts set required project environment (for example log routing and other workflow invariants).
 
+## 8.5) Runtime data directory policy
+
+- Runtime artifacts must live under a single vapor directory root (`vapor_dir`): config, logs, and durable state.
+- Configuration file path is `vapor_dir/vapor.json`.
+- Logs should be written under `vapor_dir/logs/`.
+- Durable queue/state DB paths should live under `vapor_dir/state/`.
+- Runtime directory resolution order is:
+  1. `VAPOR_DIR` environment variable (explicit override)
+  2. app user setting persisted by Vapor UI
+  3. local dev/test/CI default `./.vapor`
+  4. normal runtime default `~/.vapor`
+- Repository scripts must default `VAPOR_DIR` to `./.vapor` so local and CI behavior are consistent.
+
 ## 9) Required test matrix
 
 Every substantial change must include relevant test updates.

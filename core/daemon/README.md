@@ -14,8 +14,9 @@ The daemon owns heavy compute and must remain pressure-aware.
 
 Logging:
 
-- Structured daemon logs are appended to `~/Library/Logs/Vapor/vapord.log`.
-- Test script logs: `.vapor/logs/vapord.logs`.
+- Runtime root is `VAPOR_DIR` (`~/.vapor` by default, `./.vapor` under repo scripts/tests).
+- Structured daemon logs are appended to `<vapor_dir>/logs/vapord.logs`.
+- Reserved state/db location: `<vapor_dir>/state/vapor.sqlite`.
 - Log line format: `{timestamp} [{level}] ({component}): {message}. key=value ...`
 - Runtime log level override uses `VAPOR_LOG_LEVEL` (`debug`, `info`, `warning`, `error`).
 - Default level is `debug` in normal builds and `warning` in package builds.

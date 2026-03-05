@@ -169,14 +169,25 @@ fn logs_directory() -> PathBuf {
         return PathBuf::from(configured);
     }
 
-    if let Some(home) = env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join("Library")
-            .join("Logs")
-            .join("Vapor");
+    vapor_directory().join("logs")
+}
+
+fn vapor_directory() -> PathBuf {
+    if let Some(configured) = env::var_os("VAPOR_DIR") {
+        return PathBuf::from(configured);
     }
 
-    PathBuf::from("/tmp/VaporLogs")
+    if (env::var_os("CI").is_some() || env::var_os("VAPOR_LOCAL_DEV").is_some())
+        && let Ok(current_directory) = env::current_dir()
+    {
+        return current_directory.join(".vapor");
+    }
+
+    if let Some(home) = env::var_os("HOME") {
+        return PathBuf::from(home).join(".vapor");
+    }
+
+    PathBuf::from("/tmp/.vapor")
 }
 
 fn sanitize_text(raw: &str) -> String {

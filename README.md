@@ -115,6 +115,8 @@ Notes:
 
 - Scripts intentionally skip missing stack artifacts during early bootstrap (for example,
   no `Cargo.toml` yet or no `apps/macos` project yet).
+- Scripts default `VAPOR_DIR` to repo-local `./.vapor` for local dev/test ergonomics.
+- Override runtime root with `VAPOR_DIR=/path/to/vapor ./scripts/test.sh` (same for build/lint/format).
 - Swift lint/format scripts intentionally use `swift format` only.
 - If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild build`
   in `./scripts/swift/build.sh`.
@@ -127,13 +129,15 @@ Release build policy:
 
 ## Logging
 
-- Structured logs are written to `~/Library/Logs/Vapor/`.
-- Current log files:
-  - macOS app: `~/Library/Logs/Vapor/vapor.log`
-  - daemon: `~/Library/Logs/Vapor/vapord.log`
-- Test scripts write logs to repo-local files:
-  - `.vapor/logs/vapor.logs`
-  - `.vapor/logs/vapord.logs`
+- Vapor runtime artifacts are rooted at a single directory controlled by `VAPOR_DIR`.
+- Default runtime directory:
+  - app/daemon runtime: `~/.vapor`
+  - local dev + tests/CI via repo scripts: `./.vapor`
+- Runtime layout:
+  - config: `<vapor_dir>/vapor.json`
+  - logs: `<vapor_dir>/logs/vapor.logs`, `<vapor_dir>/logs/vapord.logs`
+  - state/db reserved path: `<vapor_dir>/state/vapor.sqlite`
+- Optional log directory override: `VAPOR_LOG_DIR`.
 - Runtime log level override: `VAPOR_LOG_LEVEL` (`debug`, `info`, `warning`, `error`).
 - Log line format: `{timestamp} [{level}] ({component}): {message}. key=value ...`
 - Build defaults:

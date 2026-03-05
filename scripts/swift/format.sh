@@ -5,6 +5,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SWIFT_DIR="$ROOT_DIR/apps/macos"
 MODE="${1:-check}"
 
+export VAPOR_DIR="${VAPOR_DIR:-$ROOT_DIR/.vapor}"
+export VAPOR_LOCAL_DEV="${VAPOR_LOCAL_DEV:-1}"
+export VAPOR_LOG_DIR="${VAPOR_LOG_DIR:-$VAPOR_DIR/logs}"
+export VAPOR_APP_LOG_FILE="${VAPOR_APP_LOG_FILE:-vapor.logs}"
+export VAPOR_DAEMON_LOG_FILE="${VAPOR_DAEMON_LOG_FILE:-vapord.logs}"
+mkdir -p "$VAPOR_DIR/logs" "$VAPOR_DIR/state"
+
 if [[ "$MODE" != "check" && "$MODE" != "apply" ]]; then
   echo "Usage: scripts/swift/format.sh [check|apply]"
   exit 1

@@ -15,6 +15,7 @@ Current implementation notes:
 
 - `VaporCore` includes `DaemonLifecycleManager` for default auto-launch policy, toggle semantics, crash-loop relaunch backoff, and optional login-item registration.
 - `VaporCore` includes `AppLifecycleCoordinator` for app-window/menubar lifecycle actions (Dock presence, daemon stop on quit).
+- `VaporCore` includes `VaporUserConfigurationStore` + `VaporPaths` for runtime directory resolution and `vapor.json` persistence.
 - `VaporCore` includes a concrete `LaunchAgentController` that writes `~/Library/LaunchAgents/<label>.plist` and manages lifecycle with `launchctl`.
 - `AppShellViewModel` uses lifecycle defaults backed by `LaunchAgentController` and can optionally enable `SMAppService` login-item integration when `VAPOR_LOGIN_ITEM_IDENTIFIER` is set.
 - Startup performs daemon lifecycle bootstrap asynchronously so app window launch stays responsive.
@@ -43,11 +44,14 @@ Implementation phases map to `docs/plans/vapor-macos-task-list.md`.
 
 - Build: `swift build --package-path apps/macos`
 - Test: `swift test --package-path apps/macos`
+- Runtime root override: `VAPOR_DIR=/path/to/vapor swift run --package-path apps/macos Vapor`
 
 ## Logging
 
-- Structured app logs: `~/Library/Logs/Vapor/vapor.log`
-- Test script logs: `.vapor/logs/vapor.logs`
+- Runtime root is `VAPOR_DIR` (`~/.vapor` by default, `./.vapor` under repo scripts/tests).
+- App configuration file: `<vapor_dir>/vapor.json`
+- Structured app logs: `<vapor_dir>/logs/vapor.logs`
+- Reserved state/db location: `<vapor_dir>/state/vapor.sqlite`
 - Log line format: `{timestamp} [{level}] ({component}): {message}. key=value ...`
 - Runtime log level override: `VAPOR_LOG_LEVEL` (`debug`, `info`, `warning`, `error`)
 - Default log level:

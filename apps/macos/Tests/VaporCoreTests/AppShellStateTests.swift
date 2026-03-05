@@ -8,12 +8,17 @@ func initialStateUsesSafeDefaults() {
   #expect(state.syncState == .idle)
   #expect(state.autoLaunchEnabled)
   #expect(state.providerName == "Google Drive")
+  #expect(!state.vaporDirectoryPath.isEmpty)
 }
 
 @Test
 func statusLineIncludesStateAndProvider() {
   let state = AppShellState(
-    syncState: .throttled, autoLaunchEnabled: true, providerName: "Google Drive")
+    syncState: .throttled,
+    autoLaunchEnabled: true,
+    providerName: "Google Drive",
+    vaporDirectoryPath: "~/.vapor"
+  )
   #expect(state.statusLine == "Throttled · Google Drive")
 }
 

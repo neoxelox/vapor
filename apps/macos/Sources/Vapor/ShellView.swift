@@ -22,6 +22,10 @@ struct ShellView: View {
 
       Toggle("Start vapor at login", isOn: autoLaunchBinding)
 
+      Text("Runtime directory: \(viewModel.state.vaporDirectoryPath)")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+
       HStack {
         Button("Pause / Resume") {
           viewModel.cycleSyncState()
@@ -81,14 +85,29 @@ struct MenuBarContentView: View {
 
 struct SettingsView: View {
   @ObservedObject var viewModel: AppShellViewModel
+  @State private var vaporDirectoryInput = ""
 
   var body: some View {
     Form {
       Toggle("Start vapor at login", isOn: autoLaunchBinding)
+
+      TextField("Vapor directory", text: $vaporDirectoryInput)
+      Button("Apply vapor directory") {
+        viewModel.updateVaporDirectoryPath(vaporDirectoryInput)
+      }
+
       Button("Disable auto-launch and stop now") {
         viewModel.disableAutoLaunchAndStopNow()
       }
       .disabled(!viewModel.state.autoLaunchEnabled)
+    }
+    .onAppear {
+      if vaporDirectoryInput.isEmpty {
+        vaporDirectoryInput = viewModel.state.vaporDirectoryPath
+      }
+    }
+    .onChange(of: viewModel.state.vaporDirectoryPath) { _, newValue in
+      vaporDirectoryInput = newValue
     }
     .padding(24)
     .frame(width: 420)

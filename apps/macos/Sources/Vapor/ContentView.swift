@@ -77,6 +77,8 @@ private struct DiagnosticsSummaryView: View {
           Text("Auto-launch is \(viewModel.state.autoLaunchEnabled ? "enabled" : "disabled")")
           Text("Provider: \(viewModel.state.providerName)")
             .foregroundStyle(.secondary)
+          Text("Runtime directory: \(viewModel.state.vaporDirectoryPath)")
+            .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       }
