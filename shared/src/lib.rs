@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod logging;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThrottleState {
     IdleDrain,

@@ -1,7 +1,7 @@
 use vapor_shared::logging::GlobalComponentLogger;
 
 static LOGGER: GlobalComponentLogger =
-    GlobalComponentLogger::new("vapord", "VAPOR_DAEMON_LOG_FILE", "vapord.log");
+    GlobalComponentLogger::new("providers", "VAPOR_PROVIDERS_LOG_FILE", "vapord.log");
 
 pub fn debug(message: &str, metadata: &[(&str, String)]) {
     LOGGER.debug(message, metadata)

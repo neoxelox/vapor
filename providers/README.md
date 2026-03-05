@@ -8,3 +8,8 @@ Current plan:
 - `provider_s3`/R2 next (capability-aware behavior)
 
 All providers implement a shared trait and map errors into core engine taxonomy.
+
+Logging:
+
+- Provider modules can use shared structured logging from `vapor-shared`.
+- Default provider logs target `~/Library/Logs/Vapor/vapord.log` (override with `VAPOR_PROVIDERS_LOG_FILE`).

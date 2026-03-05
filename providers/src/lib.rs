@@ -2,6 +2,8 @@
 
 use vapor_shared::ThrottleState;
 
+pub mod logging;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderCapabilities {
     pub supports_remote_changes_feed: bool,
@@ -19,7 +21,14 @@ pub trait Provider {
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> ProviderCapabilities;
     fn poll_allowed(&self, throttle_state: ThrottleState) -> bool {
-        !matches!(throttle_state, ThrottleState::Suspended)
+        let allowed = !matches!(throttle_state, ThrottleState::Suspended);
+        if !allowed {
+            logging::debug(
+                "Blocked remote polling because throttle state is suspended",
+                &[("throttle_state", format!("{:?}", throttle_state))],
+            );
+        }
+        allowed
     }
 }
 
