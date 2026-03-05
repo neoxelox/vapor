@@ -64,12 +64,18 @@ Exit gate:
 - [x] P1D-13 Add optional Xcode convenience workflow (open package/workspace for debugging) without changing script-first release source of truth.
 - [x] P1D-14 Update `apps/macos/README.md` with local build/package/signed/notarized distribution commands.
 - [ ] P1D-15 Reintroduce daemon lifecycle bootstrap in a non-blocking startup path (background/async), preserving fast app launch while keeping default auto-launch semantics.
+- [ ] P1D-16 Implement close-window behavior so closing the main Vapor window removes Dock presence and leaves Vapor running as menubar-only.
+- [ ] P1D-17 Ensure window-close and daemon lifecycle are decoupled: closing UI window must not stop `vapord` or remove menubar status/control.
+- [ ] P1D-18 Add explicit menubar lifecycle controls for `Open Vapor` (reopen/focus main window) and `Quit Vapor` (request daemon stop then terminate app).
+- [ ] P1D-19 Add lifecycle coverage tests for: window close keeps daemon alive, reopen from menubar works, and menubar quit executes daemon stop path before app termination.
+- [ ] P1D-20 Update app lifecycle docs (`README.md`, `apps/macos/README.md`, `AGENTS.md`) to define app-window vs menubar vs daemon responsibilities.
 
 Exit gate:
 
 - `open dist/Vapor.app` launches a normal app window without Terminal.
 - `apps/macos/scripts/package.sh` produces `dist/Vapor.app` and `dist/Vapor.zip`.
 - CI can run the packaging path non-interactively.
+- Closing the main window leaves menubar + daemon running, and quitting from menubar performs full shutdown semantics.
 
 ## Phase 2 - Low-impact local engine core
 

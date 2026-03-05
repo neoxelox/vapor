@@ -21,6 +21,19 @@ Current implementation notes:
 - Bundle identifier baseline is `sh.arn.vapor`.
 - Icon source of truth is `assets/icon.png` (1024x1024).
 
+## App component model and lifecycle semantics
+
+- Main window and menubar are separate app surfaces with different lifecycle responsibilities.
+- Main window:
+  - Hosts full UI (`ContentView`, settings, diagnostics).
+  - Closing window should fully close UI and remove Dock presence.
+- Menubar (`MenuBarExtra`):
+  - Remains available after main window closes.
+  - Shows status/control actions, including reopen (`Open Vapor`) and full quit (`Quit Vapor`).
+- Daemon (`vapord`):
+  - Must remain running when the main window is closed.
+  - Full daemon shutdown should happen only on explicit quit/stop flows, not on window close.
+
 Implementation phases map to `docs/plans/vapor-macos-task-list.md`.
 
 ## Local dev

@@ -29,7 +29,19 @@ This file defines the operating rules for contributors (human and AI) working on
 
 Do not move heavy compute into app process or FSEvents callback path.
 
-## 2.1) Naming conventions
+## 2.1) macOS app component model and lifecycle semantics
+
+- Treat the app window, menubar surface, and daemon as distinct runtime components.
+- Closing the main window is a UI action only:
+  - close the window
+  - remove Dock presence for the UI app surface
+  - keep menubar surface active
+  - keep daemon runtime active
+- Reopen flow (`Open Vapor` from menubar) must restore the main window and Dock presence without restarting the daemon.
+- Full shutdown (`Quit Vapor` from menubar) must execute daemon stop/shutdown path and then terminate the app process.
+- Never couple window-close behavior to daemon termination.
+
+## 2.2) Naming conventions
 
 - The macOS app/program name must be `Vapor`.
 - The daemon binary name must be `vapord`.
@@ -151,6 +163,7 @@ Every substantial change must include relevant test updates.
   - restart recovery with pending queue
   - retry/backoff behavior
   - auto-launch toggle and daemon lifecycle
+  - app lifecycle semantics: window close (UI only) vs menubar quit (full shutdown)
 - Bidirectional race tests
   - simultaneous local/remote file edits
   - rename+modify races

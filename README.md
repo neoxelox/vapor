@@ -32,6 +32,25 @@ over strict real-time behavior.
 - XPC boundary
   - Typed status/control API between app and daemon.
 
+## macOS App Components and Lifecycle
+
+- Main app window (`WindowGroup`)
+  - Primary configuration and diagnostics UI.
+  - Dock-visible while the window is open.
+- Menubar component (`MenuBarExtra`)
+  - Always-on quick status and control surface while app process is running.
+  - Owns user-facing lifecycle actions (`Open Vapor`, `Quit Vapor`).
+- Background daemon (`vapord` LaunchAgent)
+  - Independent runtime for sync execution and durability.
+  - Must keep running when only the UI window is closed.
+
+Expected lifecycle behavior:
+
+- Closing the main window closes the UI and removes Dock presence.
+- Closing the main window does not stop `vapord` and does not remove menubar status/control.
+- Reopening from menubar restores the main window and Dock presence.
+- Quitting from menubar performs full shutdown semantics (stop daemon, then terminate app process).
+
 ## Runtime Model
 
 - Auto-launch at login is ON by default.
