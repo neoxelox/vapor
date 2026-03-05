@@ -45,7 +45,11 @@ struct ShellView: View {
 }
 
 struct MenuBarContentView: View {
+  @Environment(\.openWindow) private var openWindow
   @ObservedObject var viewModel: AppShellViewModel
+  let mainWindowID: String
+  let openVaporAction: () -> Void
+  let quitVaporAction: () -> Void
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
@@ -55,11 +59,19 @@ struct MenuBarContentView: View {
         .font(.subheadline)
         .foregroundStyle(.secondary)
       Divider()
+      Button("Open Vapor") {
+        openVaporAction()
+        openWindow(id: mainWindowID)
+      }
       Button("Cycle status") {
         viewModel.cycleSyncState()
       }
       Button("Toggle auto-launch") {
         viewModel.toggleAutoLaunch()
+      }
+      Divider()
+      Button("Quit Vapor") {
+        quitVaporAction()
       }
     }
     .padding(14)

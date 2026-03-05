@@ -14,9 +14,11 @@ Responsibilities:
 Current implementation notes:
 
 - `VaporCore` includes `DaemonLifecycleManager` for default auto-launch policy, toggle semantics, crash-loop relaunch backoff, and optional login-item registration.
+- `VaporCore` includes `AppLifecycleCoordinator` for app-window/menubar lifecycle actions (Dock presence, daemon stop on quit).
 - `VaporCore` includes a concrete `LaunchAgentController` that writes `~/Library/LaunchAgents/<label>.plist` and manages lifecycle with `launchctl`.
 - `AppShellViewModel` uses lifecycle defaults backed by `LaunchAgentController` and can optionally enable `SMAppService` login-item integration when `VAPOR_LOGIN_ITEM_IDENTIFIER` is set.
-- Startup path currently avoids synchronous daemon bootstrap to preserve app responsiveness; a follow-up task tracks restoring bootstrap via a non-blocking startup flow.
+- Startup performs daemon lifecycle bootstrap asynchronously so app window launch stays responsive.
+- Menubar provides explicit lifecycle controls: `Open Vapor` restores Dock/window surface and `Quit Vapor` requests daemon stop before app termination.
 - Distribution artifacts are produced by `apps/macos/scripts/package.sh` (source of truth for app packaging, signing, and optional notarization).
 - Bundle identifier baseline is `sh.arn.vapor`.
 - Icon source of truth is `assets/icon.png` (1024x1024).

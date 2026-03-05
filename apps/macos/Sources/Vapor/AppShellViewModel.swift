@@ -7,6 +7,8 @@ final class AppShellViewModel: ObservableObject {
   @Published private(set) var state: AppShellState = .initial
   private let daemonLifecycleManager: DaemonLifecycleManager
   private let logger = StructuredLogger(component: "app-shell")
+  private var lifecycleCoordinator: AppLifecycleCoordinator?
+  private var hasScheduledBootstrap = false
 
   convenience init() {
     self.init(daemonLifecycleManager: AppShellViewModel.makeDefaultLifecycleManager())
@@ -19,6 +21,59 @@ final class AppShellViewModel: ObservableObject {
       "Initialized app shell state",
       metadata: ["auto_launch_enabled": String(state.autoLaunchEnabled)]
     )
+  }
+
+  func configureAppRuntimeControllerIfNeeded(_ runtimeController: any AppRuntimeControlling) {
+    guard lifecycleCoordinator == nil else {
+      return
+    }
+
+    lifecycleCoordinator = AppLifecycleCoordinator(
+      daemonLifecycleManager: daemonLifecycleManager,
+      runtimeController: runtimeController
+    )
+    logger.debug("Configured app runtime lifecycle controller")
+  }
+
+  func bootstrapDaemonLifecycleIfNeeded() {
+    guard !hasScheduledBootstrap else {
+      return
+    }
+
+    hasScheduledBootstrap = true
+    logger.info("Scheduling non-blocking daemon lifecycle bootstrap")
+
+    DispatchQueue.main.async { [weak self] in
+      self?.runDaemonLifecycleBootstrap()
+    }
+  }
+
+  private func runDaemonLifecycleBootstrap() {
+    do {
+      let result = try daemonLifecycleManager.bootstrapIfNeeded()
+      logger.info(
+        "Daemon lifecycle bootstrap completed",
+        metadata: ["result": String(describing: result)]
+      )
+    } catch {
+      state.syncState = .error
+      logger.error(
+        "Daemon lifecycle bootstrap failed",
+        metadata: ["error": String(describing: error)]
+      )
+    }
+  }
+
+  func handleMainWindowClosed() {
+    lifecycleCoordinator?.handleMainWindowClosed()
+  }
+
+  func handleOpenFromMenuBar() {
+    lifecycleCoordinator?.handleOpenFromMenuBar()
+  }
+
+  func handleQuitFromMenuBar() {
+    lifecycleCoordinator?.handleQuitFromMenuBar()
   }
 
   func toggleAutoLaunch() {

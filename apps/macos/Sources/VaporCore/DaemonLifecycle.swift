@@ -263,4 +263,9 @@ public final class DaemonLifecycleManager {
     logger.info("Requested daemon start")
     return .started
   }
+
+  public func stopDaemonForTermination() throws {
+    try launchAgentController.stopDaemon()
+    logger.warning("Requested daemon stop for app termination")
+  }
 }
