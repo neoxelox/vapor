@@ -8,6 +8,7 @@ use notify::event::{CreateKind, ModifyKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::logging;
+use crate::path_filter::{EventPathFilter, EventPathFilterOptions};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FsEventKind {
@@ -101,9 +102,18 @@ impl FsEventsWatcher {
         let watch_root = normalize_watch_root(watch_root.into())?;
         let callback_watch_root = watch_root.clone();
         let callback_recorder = Arc::clone(&recorder);
+        let callback_path_filter = Arc::new(EventPathFilter::for_watch_root(
+            &watch_root,
+            &EventPathFilterOptions::from_process_environment(),
+        ));
 
         let mut watcher = notify::recommended_watcher(move |result| {
-            record_callback_result(&callback_watch_root, result, callback_recorder.as_ref());
+            record_callback_result(
+                &callback_watch_root,
+                callback_path_filter.as_ref(),
+                result,
+                callback_recorder.as_ref(),
+            );
         })?;
 
         watcher.watch(&watch_root, RecursiveMode::Recursive)?;
@@ -141,6 +151,7 @@ fn normalize_watch_root(watch_root: PathBuf) -> Result<PathBuf, FsEventsWatcherE
 
 fn record_callback_result(
     watch_root: &Path,
+    path_filter: &EventPathFilter,
     result: Result<Event, notify::Error>,
     recorder: &dyn FsEventRecording,
 ) {
@@ -149,6 +160,10 @@ fn record_callback_result(
             let kind = map_event_kind(&event.kind);
             for path in event.paths {
                 if let Some(path) = normalize_event_path(watch_root, &path) {
+                    if path_filter.should_ignore(&path) {
+                        continue;
+                    }
+
                     recorder.record_event(FsEventRecord {
                         path,
                         kind: kind.clone(),
@@ -200,6 +215,7 @@ mod tests {
     #[test]
     fn callback_normalizes_relative_paths_and_records_metadata() {
         let watch_root = PathBuf::from("/tmp/vapor-root");
+        let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
         let event = Event {
@@ -208,7 +224,7 @@ mod tests {
             attrs: Default::default(),
         };
 
-        record_callback_result(&watch_root, Ok(event), &recorder);
+        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
 
         let events = recorder.events.lock().expect("events mutex poisoned");
         assert_eq!(events.len(), 1);
@@ -219,6 +235,7 @@ mod tests {
     #[test]
     fn callback_filters_paths_outside_watch_root() {
         let watch_root = PathBuf::from("/tmp/vapor-root");
+        let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
         let event = Event {
@@ -227,7 +244,7 @@ mod tests {
             attrs: Default::default(),
         };
 
-        record_callback_result(&watch_root, Ok(event), &recorder);
+        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
 
         let events = recorder.events.lock().expect("events mutex poisoned");
         assert!(events.is_empty());
@@ -236,6 +253,7 @@ mod tests {
     #[test]
     fn callback_maps_rename_events() {
         let watch_root = PathBuf::from("/tmp/vapor-root");
+        let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
         let event = Event {
@@ -244,7 +262,7 @@ mod tests {
             attrs: Default::default(),
         };
 
-        record_callback_result(&watch_root, Ok(event), &recorder);
+        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
 
         let events = recorder.events.lock().expect("events mutex poisoned");
         assert_eq!(events.len(), 1);
@@ -254,10 +272,12 @@ mod tests {
     #[test]
     fn callback_records_notify_errors() {
         let watch_root = PathBuf::from("/tmp/vapor-root");
+        let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
         record_callback_result(
             &watch_root,
+            &path_filter,
             Err(notify::Error::generic("watch callback failed")),
             &recorder,
         );
@@ -265,6 +285,24 @@ mod tests {
         let errors = recorder.errors.lock().expect("errors mutex poisoned");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].description.contains("watch callback failed"));
+    }
+
+    #[test]
+    fn callback_skips_paths_matching_default_ignore_rules() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let path_filter = test_path_filter(&watch_root);
+        let recorder = TestRecorder::default();
+
+        let event = Event {
+            kind: EventKind::Modify(ModifyKind::Any),
+            paths: vec![PathBuf::from("node_modules/pkg/index.js")],
+            attrs: Default::default(),
+        };
+
+        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+
+        let events = recorder.events.lock().expect("events mutex poisoned");
+        assert!(events.is_empty());
     }
 
     #[derive(Default)]
@@ -287,5 +325,15 @@ mod tests {
                 .expect("errors mutex poisoned")
                 .push(error);
         }
+    }
+
+    fn test_path_filter(watch_root: &Path) -> EventPathFilter {
+        EventPathFilter::for_watch_root(
+            watch_root,
+            &EventPathFilterOptions {
+                use_gitignore: false,
+                user_rules: Vec::new(),
+            },
+        )
     }
 }

@@ -9,6 +9,7 @@ Responsibilities:
 - provider auth orchestration UI
 - Keychain integration
 - daemon lifecycle and auto-launch controls
+- sync filtering preferences (for example `.gitignore` ingestion)
 - native app lifecycle and script-first distribution packaging
 
 Current implementation notes:
@@ -18,6 +19,7 @@ Current implementation notes:
 - `VaporCore` includes `VaporConfigurationStore` + `VaporPaths` for runtime directory resolution and `vapor.json` persistence.
 - `VaporCore` includes a concrete `LaunchAgentController` that writes `~/Library/LaunchAgents/<label>.plist` and manages lifecycle with `launchctl`.
 - `AppShellViewModel` uses lifecycle defaults backed by `LaunchAgentController` and `SMAppService.mainApp` integration to restore Vapor at login in menubar-only mode.
+- Settings surface includes `useGitIgnore`, persisted in `vapor.json` and exported to daemon launch env as `VAPOR_USE_GITIGNORE`.
 - Startup performs daemon lifecycle bootstrap asynchronously so app window launch stays responsive.
 - Menubar provides explicit lifecycle controls: `Open Vapor` restores Dock/window surface and `Quit Vapor` requests daemon stop before app termination.
 - Distribution artifacts are produced by `apps/macos/scripts/package.sh` (source of truth for app packaging, signing, and optional notarization).

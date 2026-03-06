@@ -3,6 +3,7 @@ import Foundation
 public enum VaporPaths {
   public static let directoryEnvironmentKey = "VAPOR_DIR"
   public static let environmentKey = "VAPOR_ENV"
+  public static let useGitIgnoreEnvironmentKey = "VAPOR_USE_GITIGNORE"
 
   public static let logsDirectoryName = "logs"
   public static let stateDirectoryName = "state"

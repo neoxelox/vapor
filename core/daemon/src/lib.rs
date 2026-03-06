@@ -5,6 +5,7 @@ use vapor_shared::{RunState, StatusSnapshot, ThrottleState};
 
 pub mod fs_events;
 pub mod logging;
+pub mod path_filter;
 
 #[derive(Debug)]
 pub struct DaemonApp {

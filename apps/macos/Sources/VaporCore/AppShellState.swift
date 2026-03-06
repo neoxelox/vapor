@@ -27,17 +27,20 @@ public enum SyncSurfaceState: String, CaseIterable, Codable, Sendable {
 public struct AppShellState: Equatable, Codable, Sendable {
   public var syncState: SyncSurfaceState
   public var autoLaunchEnabled: Bool
+  public var useGitIgnore: Bool
   public var providerName: String
   public var vaporDirectoryPath: String
 
   public init(
     syncState: SyncSurfaceState,
     autoLaunchEnabled: Bool,
+    useGitIgnore: Bool,
     providerName: String,
     vaporDirectoryPath: String
   ) {
     self.syncState = syncState
     self.autoLaunchEnabled = autoLaunchEnabled
+    self.useGitIgnore = useGitIgnore
     self.providerName = providerName
     self.vaporDirectoryPath = vaporDirectoryPath
   }
@@ -45,6 +48,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
   public static let initial = AppShellState(
     syncState: .idle,
     autoLaunchEnabled: true,
+    useGitIgnore: true,
     providerName: "Google Drive",
     vaporDirectoryPath: VaporPaths.resolveVaporDirectoryURL().path
   )

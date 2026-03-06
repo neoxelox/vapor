@@ -160,12 +160,19 @@ All user-facing configuration must be documented here with meaning and defaults.
   - Purpose: controls whether Vapor auto-launches and bootstraps `vapord` at startup/login.
 - `useGitIgnore` (`Bool`)
   - Default: `true`
-  - Purpose: persisted user preference for `.gitignore`-aware behavior in sync/timeline filtering flows.
+  - Purpose: persisted preference for `.gitignore`-aware daemon local filtering.
 - `timelineEventLimit` (`Int`)
   - Default: `1000`
   - Purpose: persisted cap for timeline/diagnostic event surfaces.
 
 All persisted user configuration lives in `vapor.json`.
+
+## Local Event Filtering
+
+- Filesystem callback filtering applies before event metadata is recorded.
+- Rule precedence (lowest to highest): default excludes -> `.gitignore` (when enabled) -> `.vaporignore` -> user rules (reserved for upcoming excludes UI/API controls).
+- `.vaporignore` supports glob-like rules and `!` unignore rules.
+- Default excludes cover common low-signal paths such as `.git/`, `node_modules/`, build outputs (`dist/`, `build/`, `out/`), caches, swap/tmp files, logs, and `.env.local`.
 
 Runtime directory is not a `vapor.json` option and is resolved by precedence:
 
@@ -182,6 +189,7 @@ Runtime and scripts:
 | `VAPOR_DIR` | `~/.vapor` for normal runtime; repo scripts set `./.vapor` | Runtime root for `vapor.json`, logs, and durable state. |
 | `VAPOR_ENV` | Unset (treated as `prod`); repo scripts default to `dev`; package flow defaults to `prod` | Runtime mode (`dev` or `prod`) controlling path fallback and default log level. |
 | `VAPOR_LOG_LEVEL` | Unset (falls back to `VAPOR_ENV`) | Runtime minimum log level (`debug`, `info`, `warning`, `error`). |
+| `VAPOR_USE_GITIGNORE` | `true` | Daemon local filtering toggle for `.gitignore` ingestion. |
 
 Build/packaging:
 

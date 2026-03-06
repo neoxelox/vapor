@@ -23,7 +23,8 @@ final class AppShellViewModel: ObservableObject {
     self.init(
       daemonLifecycleManager: AppShellViewModel.makeDefaultLifecycleManager(
         vaporDirectoryURL: vaporDirectoryURL,
-        autoLaunchSettingStore: autoLaunchSettingStore
+        autoLaunchSettingStore: autoLaunchSettingStore,
+        useGitIgnore: configuration.useGitIgnore
       ),
       configurationStore: configurationStore,
       configuration: configuration
@@ -40,6 +41,7 @@ final class AppShellViewModel: ObservableObject {
     self.configuration = configuration ?? configurationStore.load()
 
     state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
+    state.useGitIgnore = self.configuration.useGitIgnore
     state.vaporDirectoryPath = self.configurationStore.resolveVaporDirectoryURL().path
 
     do {
@@ -55,6 +57,7 @@ final class AppShellViewModel: ObservableObject {
       "Initialized app shell state",
       metadata: [
         "auto_launch_enabled": String(state.autoLaunchEnabled),
+        "use_gitignore": String(state.useGitIgnore),
         "vapor_directory": state.vaporDirectoryPath,
       ]
     )
@@ -215,6 +218,32 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
+  func setUseGitIgnore(_ enabled: Bool) {
+    guard configuration.useGitIgnore != enabled else {
+      return
+    }
+
+    configuration.useGitIgnore = enabled
+    state.useGitIgnore = enabled
+
+    do {
+      try configurationStore.save(configuration)
+      logger.info(
+        "Updated useGitIgnore setting",
+        metadata: [
+          "use_gitignore": String(enabled),
+          "note": "applies on next daemon launch",
+        ]
+      )
+    } catch {
+      state.syncState = .error
+      logger.error(
+        "Failed to persist useGitIgnore setting",
+        metadata: ["error": String(describing: error)]
+      )
+    }
+  }
+
   func cycleSyncState() {
     let allStates = SyncSurfaceState.allCases
     guard let currentIndex = allStates.firstIndex(of: state.syncState) else {
@@ -242,7 +271,8 @@ final class AppShellViewModel: ObservableObject {
 
   private static func makeDefaultLifecycleManager(
     vaporDirectoryURL: URL,
-    autoLaunchSettingStore: any AutoLaunchSettingStore
+    autoLaunchSettingStore: any AutoLaunchSettingStore,
+    useGitIgnore: Bool
   ) -> DaemonLifecycleManager {
     if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
       return .placeholder()
@@ -253,6 +283,7 @@ final class AppShellViewModel: ObservableObject {
     var daemonEnvironment = [
       "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
       "VAPOR_DIR": vaporDirectoryURL.path,
+      VaporPaths.useGitIgnoreEnvironmentKey: useGitIgnore ? "true" : "false",
     ]
     if let runtimeEnvironment = ProcessInfo.processInfo.environment[VaporPaths.environmentKey],
       !runtimeEnvironment.isEmpty

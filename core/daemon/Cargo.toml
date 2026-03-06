@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+globset = "0.4"
 notify = "7"
 vapor-providers = { path = "../providers" }
 vapor-shared = { path = "../shared" }

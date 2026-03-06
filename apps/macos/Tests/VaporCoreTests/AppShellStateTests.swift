@@ -7,6 +7,7 @@ func initialStateUsesSafeDefaults() {
   let state = AppShellState.initial
   #expect(state.syncState == .idle)
   #expect(state.autoLaunchEnabled)
+  #expect(state.useGitIgnore)
   #expect(state.providerName == "Google Drive")
   #expect(!state.vaporDirectoryPath.isEmpty)
 }
@@ -16,6 +17,7 @@ func statusLineIncludesStateAndProvider() {
   let state = AppShellState(
     syncState: .throttled,
     autoLaunchEnabled: true,
+    useGitIgnore: true,
     providerName: "Google Drive",
     vaporDirectoryPath: "~/.vapor"
   )

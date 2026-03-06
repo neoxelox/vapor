@@ -80,9 +80,9 @@ Exit gate:
 ## Phase 2 - Low-impact local engine core
 
 - [x] P2-1 Implement FSEvents recursive watcher with minimal callback work only.
-- [ ] P2-2 Implement default excludes + `.vaporignore` parser and matcher.
-- [ ] P2-2a Add optional `.gitignore` ingestion/matching in daemon local filtering (default enabled).
-- [ ] P2-2b Add app setting to toggle `.gitignore` usage (`useGitIgnore`, default `true`).
+- [x] P2-2 Implement default excludes + `.vaporignore` parser and matcher.
+- [x] P2-2a Add optional `.gitignore` ingestion/matching in daemon local filtering (default enabled).
+- [x] P2-2b Add app setting to toggle `.gitignore` usage (`useGitIgnore`, default `true`).
 - [ ] P2-2c Add user-level ignore rules configured via Vapor app UI and apply them in daemon filtering.
 - [ ] P2-2d Add tests for ignore precedence/merge across defaults, `.vaporignore`, `.gitignore`, and UI rules.
 - [ ] P2-3 Implement debounce/coalescing loop (250ms tick, conservative windows).
