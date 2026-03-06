@@ -44,6 +44,7 @@ over strict real-time behavior.
 - Background daemon (`vapord` LaunchAgent)
   - Independent runtime for sync execution and durability.
   - Must keep running when only the UI window is closed.
+  - Must be shipped inside the same `Vapor.app` bundle at `Contents/MacOS/vapord`.
 
 Expected lifecycle behavior:
 
@@ -120,6 +121,8 @@ Notes:
 - Scripts default `VAPOR_DIR` to repo-local `./.vapor` for local dev/test ergonomics.
 - Scripts default `VAPOR_ENV` to `dev` (and `prod` for `./scripts/build.sh package`).
 - Override runtime root with `VAPOR_DIR=/path/to/vapor ./scripts/test.sh` (same for build/lint/format).
+- `Vapor.app` is a single package that ships both binaries: `Contents/MacOS/Vapor` and `Contents/MacOS/vapord`.
+- Runtime daemon launch path is always the bundled sibling binary (`vapord`) next to the app executable.
 - Swift lint/format scripts intentionally use `swift format` only.
 - If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild build`
   in `./scripts/swift/build.sh`.

@@ -248,7 +248,7 @@ final class AppShellViewModel: ObservableObject {
       return .placeholder()
     }
 
-    let daemonExecutableURL = inferredDaemonExecutableURL()
+    let daemonExecutableURL = bundledDaemonExecutableURL()
     let launchAgentLabel = "sh.arn.vapor.daemon"
     var daemonEnvironment = [
       "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
@@ -274,17 +274,18 @@ final class AppShellViewModel: ObservableObject {
     )
   }
 
-  private static func inferredDaemonExecutableURL() -> URL {
-    let bundledURL = Bundle.main.bundleURL
-      .appendingPathComponent("Contents")
-      .appendingPathComponent("MacOS")
-      .appendingPathComponent("vapord")
-
-    if FileManager.default.fileExists(atPath: bundledURL.path) {
-      return bundledURL
+  private static func bundledDaemonExecutableURL() -> URL {
+    guard let executableURL = Bundle.main.executableURL else {
+      return Bundle.main.bundleURL
+        .appendingPathComponent("Contents")
+        .appendingPathComponent("MacOS")
+        .appendingPathComponent("vapord")
     }
 
-    return URL(fileURLWithPath: "/usr/local/bin/vapord")
+    return
+      executableURL
+      .deletingLastPathComponent()
+      .appendingPathComponent("vapord")
   }
 
   private static func makeOptionalLoginItemController() -> (any LoginItemControlling)? {

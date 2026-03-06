@@ -58,6 +58,8 @@ public protocol LaunchctlCommandRunning {
 public enum LaunchAgentControllerError: Error, Equatable {
   case launchctlFailed(arguments: [String], exitCode: Int32, standardError: String)
   case plistEncodingFailed
+  case daemonExecutableMissing(path: String)
+  case daemonExecutableNotExecutable(path: String)
 }
 
 public struct ProcessLaunchctlRunner: LaunchctlCommandRunning {
@@ -103,12 +105,13 @@ public final class LaunchAgentController: LaunchAgentControlling {
   }
 
   public func installAndEnable() throws {
+    try validateDaemonExecutable()
     try writeLaunchAgentPlist()
     logger.info("Installing and enabling launch agent", metadata: ["label": configuration.label])
 
     _ = try? runBestEffort(arguments: ["bootout", domainTarget, configuration.plistURL.path])
+    try runRequired(arguments: ["enable", serviceTarget])
     try runRequired(arguments: ["bootstrap", domainTarget, configuration.plistURL.path])
-    _ = try? runBestEffort(arguments: ["enable", serviceTarget])
   }
 
   public func disableAndUninstall() throws {
@@ -153,6 +156,22 @@ public final class LaunchAgentController: LaunchAgentControlling {
 
     try plistData.write(to: configuration.plistURL, options: .atomic)
     logger.debug("Wrote launch agent plist", metadata: ["path": configuration.plistURL.path])
+  }
+
+  private func validateDaemonExecutable() throws {
+    var isDirectory: ObjCBool = false
+    let daemonPath = configuration.daemonExecutableURL.path
+    guard fileManager.fileExists(atPath: daemonPath, isDirectory: &isDirectory),
+      !isDirectory.boolValue
+    else {
+      logger.error("Daemon executable missing", metadata: ["path": daemonPath])
+      throw LaunchAgentControllerError.daemonExecutableMissing(path: daemonPath)
+    }
+
+    guard fileManager.isExecutableFile(atPath: daemonPath) else {
+      logger.error("Daemon executable is not executable", metadata: ["path": daemonPath])
+      throw LaunchAgentControllerError.daemonExecutableNotExecutable(path: daemonPath)
+    }
   }
 
   private func launchAgentPlistData() throws -> Data? {

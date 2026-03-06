@@ -68,9 +68,18 @@ swift build \
   -Xswiftc -whole-module-optimization \
   -Xswiftc -cross-module-optimization
 
+echo "[package] Building release daemon executable"
+cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --package vapor-daemon --bin vapord --release
+
 binary_path="$ROOT_DIR/apps/macos/.build/release/$EXECUTABLE_NAME"
 if [[ ! -f "$binary_path" ]]; then
   echo "[package] Expected release binary missing at $binary_path"
+  exit 1
+fi
+
+daemon_binary_path="$ROOT_DIR/target/release/vapord"
+if [[ ! -f "$daemon_binary_path" ]]; then
+  echo "[package] Expected daemon binary missing at $daemon_binary_path"
   exit 1
 fi
 
@@ -85,6 +94,9 @@ mkdir -p "$macos_dir" "$resources_dir"
 
 cp "$binary_path" "$macos_dir/$EXECUTABLE_NAME"
 chmod +x "$macos_dir/$EXECUTABLE_NAME"
+
+cp "$daemon_binary_path" "$macos_dir/vapord"
+chmod +x "$macos_dir/vapord"
 
 cat >"$info_plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

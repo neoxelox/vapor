@@ -22,6 +22,10 @@ Implementation requirements:
 
 - App packaging pipeline is script-first (`apps/macos/scripts/package.sh`) and CI-runnable.
 - Pipeline must produce `dist/Vapor.app` and zip artifacts without requiring Xcode Archive UI flows.
+- `dist/Vapor.app` must include both executables in `Contents/MacOS/`:
+  - `Vapor`
+  - `vapord`
+- Runtime daemon launch path must be the bundled sibling binary (`Contents/MacOS/vapord`) only.
 - Xcode project/workspace support remains optional debugging convenience only.
 
 ## Validation checklist

@@ -98,6 +98,10 @@ Do not move heavy compute into app process or FSEvents callback path.
   - notarization
   - entitlement review
 - macOS app distribution must be script-first and CI-runnable, producing `Vapor.app` and zip artifacts without requiring Xcode UI archive workflows.
+- `Vapor.app` is the single distributable package and must contain both executables:
+  - `Contents/MacOS/Vapor`
+  - `Contents/MacOS/vapord`
+- Runtime daemon launch must target only the bundled sibling binary (`Contents/MacOS/vapord`) and must not rely on global install paths.
 - Xcode project/workspace support is optional convenience for debugging and must not become the release source of truth.
 - AI contributors must never auto-open packaged apps (for example `open dist/Vapor.app`); app launch verification is performed manually by the project owner.
 - LaunchAgent and login item behavior must be stable across upgrades.
