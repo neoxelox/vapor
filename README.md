@@ -144,7 +144,7 @@ Release build policy:
 - Log line format: `{timestamp} [{level}] ({component}): {message}. key=value ...`
 - Default log level behavior:
   - `VAPOR_ENV=dev` -> `debug`
-  - `VAPOR_ENV=prod` (or unset) -> `warning`
+  - `VAPOR_ENV=prod` (or unset) -> `info`
 
 ## User Configuration Reference
 

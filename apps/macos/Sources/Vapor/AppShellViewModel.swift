@@ -9,6 +9,7 @@ final class AppShellViewModel: ObservableObject {
   private let configurationStore: VaporConfigurationStore
   private var configuration: VaporConfiguration
   private let logger = StructuredLogger(component: "app-shell")
+  private let lifecycleQueue = DispatchQueue(label: "sh.arn.vapor.lifecycle", qos: .utility)
   private var runtimeController: (any AppRuntimeControlling)?
   private var lifecycleCoordinator: AppLifecycleCoordinator?
   private var hasScheduledBootstrap = false
@@ -77,29 +78,46 @@ final class AppShellViewModel: ObservableObject {
     hasScheduledBootstrap = true
     logger.info("Scheduling non-blocking daemon lifecycle bootstrap")
 
-    DispatchQueue.main.async { [weak self] in
-      self?.runDaemonLifecycleBootstrap()
+    let daemonLifecycleManager = self.daemonLifecycleManager
+    let logger = self.logger
+
+    lifecycleQueue.async { [weak self] in
+      do {
+        let result = try daemonLifecycleManager.bootstrapIfNeeded()
+        Task { @MainActor [weak self] in
+          guard self != nil else {
+            return
+          }
+
+          logger.info(
+            "Daemon lifecycle bootstrap completed",
+            metadata: ["result": String(describing: result)]
+          )
+        }
+      } catch {
+        Task { @MainActor [weak self] in
+          guard let self else {
+            return
+          }
+
+          self.state.syncState = .error
+          logger.error(
+            "Daemon lifecycle bootstrap failed",
+            metadata: ["error": String(describing: error)]
+          )
+        }
+      }
     }
   }
 
   func prepareMenubarOnlyStartupSurface() {
-    lifecycleCoordinator?.handleMainWindowClosed()
-    logger.info("Prepared menubar-only startup surface")
-  }
+    DispatchQueue.main.async { [weak self] in
+      guard let self else {
+        return
+      }
 
-  private func runDaemonLifecycleBootstrap() {
-    do {
-      let result = try daemonLifecycleManager.bootstrapIfNeeded()
-      logger.info(
-        "Daemon lifecycle bootstrap completed",
-        metadata: ["result": String(describing: result)]
-      )
-    } catch {
-      state.syncState = .error
-      logger.error(
-        "Daemon lifecycle bootstrap failed",
-        metadata: ["error": String(describing: error)]
-      )
+      self.lifecycleCoordinator?.handleMainWindowClosed()
+      self.logger.info("Prepared menubar-only startup surface")
     }
   }
 
@@ -119,43 +137,81 @@ final class AppShellViewModel: ObservableObject {
     let nextState = !state.autoLaunchEnabled
     logger.info("Toggling auto-launch", metadata: ["next_value": String(nextState)])
 
-    do {
-      let result = try daemonLifecycleManager.setAutoLaunchEnabled(nextState)
-      state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
-      configuration.autoLaunchEnabled = state.autoLaunchEnabled
-      logger.info(
-        "Auto-launch toggle completed",
-        metadata: [
-          "persisted_value": String(state.autoLaunchEnabled),
-          "result": String(describing: result),
-        ]
-      )
-    } catch {
-      state.syncState = .error
-      logger.error(
-        "Auto-launch toggle failed",
-        metadata: ["error": String(describing: error)]
-      )
+    let daemonLifecycleManager = self.daemonLifecycleManager
+    let logger = self.logger
+
+    lifecycleQueue.async { [weak self] in
+      do {
+        let result = try daemonLifecycleManager.setAutoLaunchEnabled(nextState)
+        let persistedValue = daemonLifecycleManager.autoLaunchEnabled
+
+        Task { @MainActor [weak self] in
+          guard let self else {
+            return
+          }
+
+          self.state.autoLaunchEnabled = persistedValue
+          self.configuration.autoLaunchEnabled = persistedValue
+          logger.info(
+            "Auto-launch toggle completed",
+            metadata: [
+              "persisted_value": String(persistedValue),
+              "result": String(describing: result),
+            ]
+          )
+        }
+      } catch {
+        Task { @MainActor [weak self] in
+          guard let self else {
+            return
+          }
+
+          self.state.syncState = .error
+          logger.error(
+            "Auto-launch toggle failed",
+            metadata: ["error": String(describing: error)]
+          )
+        }
+      }
     }
   }
 
   func disableAutoLaunchAndStopNow() {
     logger.info("Disabling auto-launch and requesting immediate daemon stop")
 
-    do {
-      let result = try daemonLifecycleManager.setAutoLaunchEnabled(false, stopDaemonNow: true)
-      state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
-      configuration.autoLaunchEnabled = state.autoLaunchEnabled
-      logger.warning(
-        "Auto-launch disabled with stop-now",
-        metadata: ["result": String(describing: result)]
-      )
-    } catch {
-      state.syncState = .error
-      logger.error(
-        "Disable auto-launch and stop-now failed",
-        metadata: ["error": String(describing: error)]
-      )
+    let daemonLifecycleManager = self.daemonLifecycleManager
+    let logger = self.logger
+
+    lifecycleQueue.async { [weak self] in
+      do {
+        let result = try daemonLifecycleManager.setAutoLaunchEnabled(false, stopDaemonNow: true)
+        let persistedValue = daemonLifecycleManager.autoLaunchEnabled
+
+        Task { @MainActor [weak self] in
+          guard let self else {
+            return
+          }
+
+          self.state.autoLaunchEnabled = persistedValue
+          self.configuration.autoLaunchEnabled = persistedValue
+          logger.warning(
+            "Auto-launch disabled with stop-now",
+            metadata: ["result": String(describing: result)]
+          )
+        }
+      } catch {
+        Task { @MainActor [weak self] in
+          guard let self else {
+            return
+          }
+
+          self.state.syncState = .error
+          logger.error(
+            "Disable auto-launch and stop-now failed",
+            metadata: ["error": String(describing: error)]
+          )
+        }
+      }
     }
   }
 

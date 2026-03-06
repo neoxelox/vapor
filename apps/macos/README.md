@@ -58,7 +58,7 @@ Implementation phases map to `docs/plans/vapor-macos-task-list.md`.
 - Runtime log level override: `VAPOR_LOG_LEVEL` (`debug`, `info`, `warning`, `error`)
 - Default log level:
   - `VAPOR_ENV=dev`: `debug`
-  - `VAPOR_ENV=prod` (or unset): `warning`
+  - `VAPOR_ENV=prod` (or unset): `info`
 
 ## Package app (local)
 

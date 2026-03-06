@@ -134,7 +134,7 @@ public final class StructuredLogger: @unchecked Sendable {
       return .debug
     }
 
-    return .warning
+    return .info
   }
 
   private func sanitize(_ raw: String) -> String {

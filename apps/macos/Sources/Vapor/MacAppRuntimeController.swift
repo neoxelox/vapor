@@ -4,19 +4,20 @@ import VaporCore
 @MainActor
 struct MacAppRuntimeController: AppRuntimeControlling {
   func setDockVisible(_ isVisible: Bool) {
+    let application = NSApp ?? NSApplication.shared
     let targetPolicy: NSApplication.ActivationPolicy = isVisible ? .regular : .accessory
-    guard NSApp.activationPolicy() != targetPolicy else {
+    guard application.activationPolicy() != targetPolicy else {
       return
     }
 
-    NSApp.setActivationPolicy(targetPolicy)
+    application.setActivationPolicy(targetPolicy)
 
     if isVisible {
-      NSApp.activate(ignoringOtherApps: true)
+      application.activate(ignoringOtherApps: true)
     }
   }
 
   func terminateApplication() {
-    NSApp.terminate(nil)
+    (NSApp ?? NSApplication.shared).terminate(nil)
   }
 }

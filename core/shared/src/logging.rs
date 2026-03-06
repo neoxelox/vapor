@@ -162,7 +162,7 @@ fn build_default_level() -> LogLevel {
         .as_deref()
     {
         Some("dev") => LogLevel::Debug,
-        _ => LogLevel::Warning,
+        _ => LogLevel::Info,
     }
 }
 
