@@ -161,6 +161,12 @@ All user-facing configuration must be documented here with meaning and defaults.
 - `useGitIgnore` (`Bool`)
   - Default: `true`
   - Purpose: persisted preference for `.gitignore`-aware daemon local filtering.
+- `useVaporIgnore` (`Bool`)
+  - Default: `true`
+  - Purpose: persisted preference for `.vaporignore`-aware daemon local filtering.
+- `ignoreRules` (`String`)
+  - Default: embedded `.gitignore`-like text with a curated low-impact ignore set.
+  - Purpose: user-level daemon ignore rules in `.gitignore`/`.vaporignore` syntax (including comments and `!` unignore lines); fully editable so users can paste and adapt existing ignore files.
 - `timelineEventLimit` (`Int`)
   - Default: `1000`
   - Purpose: persisted cap for timeline/diagnostic event surfaces.
@@ -170,9 +176,9 @@ All persisted user configuration lives in `vapor.json`.
 ## Local Event Filtering
 
 - Filesystem callback filtering applies before event metadata is recorded.
-- Rule precedence (lowest to highest): default excludes -> `.gitignore` (when enabled) -> `.vaporignore` -> user rules (reserved for upcoming excludes UI/API controls).
+- Rule precedence (lowest to highest): `.gitignore` (when enabled) -> `.vaporignore` (when enabled) -> embedded user `ignoreRules`.
 - `.vaporignore` supports glob-like rules and `!` unignore rules.
-- Default excludes cover common low-signal paths such as `.git/`, `node_modules/`, build outputs (`dist/`, `build/`, `out/`), caches, swap/tmp files, logs, and `.env.local`.
+- Default `ignoreRules` content covers common low-signal paths such as `.git/`, `node_modules/`, build outputs (`dist/`, `build/`, `out/`), caches, swap/tmp files, logs, and `.env.local`.
 
 Runtime directory is not a `vapor.json` option and is resolved by precedence:
 
@@ -190,6 +196,8 @@ Runtime and scripts:
 | `VAPOR_ENV` | Unset (treated as `prod`); repo scripts default to `dev`; package flow defaults to `prod` | Runtime mode (`dev` or `prod`) controlling path fallback and default log level. |
 | `VAPOR_LOG_LEVEL` | Unset (falls back to `VAPOR_ENV`) | Runtime minimum log level (`debug`, `info`, `warning`, `error`). |
 | `VAPOR_USE_GITIGNORE` | `true` | Daemon local filtering toggle for `.gitignore` ingestion. |
+| `VAPOR_USE_VAPORIGNORE` | `true` | Daemon local filtering toggle for `.vaporignore` ingestion. |
+| `VAPOR_IGNORE_RULES` | Raw value from `vapor.json.ignoreRules` | Daemon user-level local filtering rules source (embedded `.gitignore`-like text). |
 
 Build/packaging:
 

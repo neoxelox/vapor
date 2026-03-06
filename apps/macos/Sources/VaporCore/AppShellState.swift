@@ -28,6 +28,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
   public var syncState: SyncSurfaceState
   public var autoLaunchEnabled: Bool
   public var useGitIgnore: Bool
+  public var useVaporIgnore: Bool
   public var providerName: String
   public var vaporDirectoryPath: String
 
@@ -35,12 +36,14 @@ public struct AppShellState: Equatable, Codable, Sendable {
     syncState: SyncSurfaceState,
     autoLaunchEnabled: Bool,
     useGitIgnore: Bool,
+    useVaporIgnore: Bool,
     providerName: String,
     vaporDirectoryPath: String
   ) {
     self.syncState = syncState
     self.autoLaunchEnabled = autoLaunchEnabled
     self.useGitIgnore = useGitIgnore
+    self.useVaporIgnore = useVaporIgnore
     self.providerName = providerName
     self.vaporDirectoryPath = vaporDirectoryPath
   }
@@ -49,6 +52,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
     syncState: .idle,
     autoLaunchEnabled: true,
     useGitIgnore: true,
+    useVaporIgnore: true,
     providerName: "Google Drive",
     vaporDirectoryPath: VaporPaths.resolveVaporDirectoryURL().path
   )

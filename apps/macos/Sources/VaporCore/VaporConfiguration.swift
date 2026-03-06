@@ -3,15 +3,52 @@ import Foundation
 public struct VaporConfiguration: Codable, Equatable, Sendable {
   public var autoLaunchEnabled: Bool
   public var useGitIgnore: Bool
+  public var useVaporIgnore: Bool
+  public var ignoreRules: String
   public var timelineEventLimit: Int
+
+  public static let defaultIgnoreRuleLines: [String] = [
+    ".git/",
+    ".DS_Store",
+    "*.tmp",
+    "*.temp",
+    "*.swp",
+    "*.swo",
+    "*~",
+    "node_modules/",
+    ".pnpm-store/",
+    ".yarn/cache/",
+    ".yarn/unplugged/",
+    ".npm/",
+    ".next/",
+    ".nuxt/",
+    ".svelte-kit/",
+    "dist/",
+    "build/",
+    "out/",
+    ".turbo/",
+    ".vite/",
+    ".parcel-cache/",
+    "coverage/",
+    "storybook-static/",
+    "*.tsbuildinfo",
+    ".eslintcache",
+    "*.log",
+    ".env.local",
+  ]
+  public static let defaultIgnoreRules = defaultIgnoreRuleLines.joined(separator: "\n")
 
   public init(
     autoLaunchEnabled: Bool = true,
     useGitIgnore: Bool = true,
+    useVaporIgnore: Bool = true,
+    ignoreRules: String = defaultIgnoreRules,
     timelineEventLimit: Int = 1000
   ) {
     self.autoLaunchEnabled = autoLaunchEnabled
     self.useGitIgnore = useGitIgnore
+    self.useVaporIgnore = useVaporIgnore
+    self.ignoreRules = ignoreRules
     self.timelineEventLimit = timelineEventLimit
   }
 }

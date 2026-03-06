@@ -24,7 +24,9 @@ final class AppShellViewModel: ObservableObject {
       daemonLifecycleManager: AppShellViewModel.makeDefaultLifecycleManager(
         vaporDirectoryURL: vaporDirectoryURL,
         autoLaunchSettingStore: autoLaunchSettingStore,
-        useGitIgnore: configuration.useGitIgnore
+        useGitIgnore: configuration.useGitIgnore,
+        useVaporIgnore: configuration.useVaporIgnore,
+        ignoreRules: configuration.ignoreRules
       ),
       configurationStore: configurationStore,
       configuration: configuration
@@ -42,6 +44,7 @@ final class AppShellViewModel: ObservableObject {
 
     state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
     state.useGitIgnore = self.configuration.useGitIgnore
+    state.useVaporIgnore = self.configuration.useVaporIgnore
     state.vaporDirectoryPath = self.configurationStore.resolveVaporDirectoryURL().path
 
     do {
@@ -58,6 +61,7 @@ final class AppShellViewModel: ObservableObject {
       metadata: [
         "auto_launch_enabled": String(state.autoLaunchEnabled),
         "use_gitignore": String(state.useGitIgnore),
+        "use_vaporignore": String(state.useVaporIgnore),
         "vapor_directory": state.vaporDirectoryPath,
       ]
     )
@@ -244,6 +248,32 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
+  func setUseVaporIgnore(_ enabled: Bool) {
+    guard configuration.useVaporIgnore != enabled else {
+      return
+    }
+
+    configuration.useVaporIgnore = enabled
+    state.useVaporIgnore = enabled
+
+    do {
+      try configurationStore.save(configuration)
+      logger.info(
+        "Updated useVaporIgnore setting",
+        metadata: [
+          "use_vaporignore": String(enabled),
+          "note": "applies on next daemon launch",
+        ]
+      )
+    } catch {
+      state.syncState = .error
+      logger.error(
+        "Failed to persist useVaporIgnore setting",
+        metadata: ["error": String(describing: error)]
+      )
+    }
+  }
+
   func cycleSyncState() {
     let allStates = SyncSurfaceState.allCases
     guard let currentIndex = allStates.firstIndex(of: state.syncState) else {
@@ -272,7 +302,9 @@ final class AppShellViewModel: ObservableObject {
   private static func makeDefaultLifecycleManager(
     vaporDirectoryURL: URL,
     autoLaunchSettingStore: any AutoLaunchSettingStore,
-    useGitIgnore: Bool
+    useGitIgnore: Bool,
+    useVaporIgnore: Bool,
+    ignoreRules: String
   ) -> DaemonLifecycleManager {
     if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
       return .placeholder()
@@ -284,6 +316,8 @@ final class AppShellViewModel: ObservableObject {
       "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
       "VAPOR_DIR": vaporDirectoryURL.path,
       VaporPaths.useGitIgnoreEnvironmentKey: useGitIgnore ? "true" : "false",
+      VaporPaths.useVaporIgnoreEnvironmentKey: useVaporIgnore ? "true" : "false",
+      VaporPaths.ignoreRulesEnvironmentKey: ignoreRules,
     ]
     if let runtimeEnvironment = ProcessInfo.processInfo.environment[VaporPaths.environmentKey],
       !runtimeEnvironment.isEmpty

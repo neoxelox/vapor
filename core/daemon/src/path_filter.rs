@@ -9,6 +9,8 @@ use crate::logging;
 const VAPOR_IGNORE_FILE_NAME: &str = ".vaporignore";
 const GIT_IGNORE_FILE_NAME: &str = ".gitignore";
 const VAPOR_USE_GITIGNORE_ENV_KEY: &str = "VAPOR_USE_GITIGNORE";
+const VAPOR_USE_VAPORIGNORE_ENV_KEY: &str = "VAPOR_USE_VAPORIGNORE";
+const VAPOR_IGNORE_RULES_ENV_KEY: &str = "VAPOR_IGNORE_RULES";
 
 const DEFAULT_IGNORE_RULES: &[&str] = &[
     ".git/",
@@ -43,6 +45,7 @@ const DEFAULT_IGNORE_RULES: &[&str] = &[
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EventPathFilterOptions {
     pub use_gitignore: bool,
+    pub use_vaporignore: bool,
     pub user_rules: Vec<String>,
 }
 
@@ -50,7 +53,11 @@ impl Default for EventPathFilterOptions {
     fn default() -> Self {
         Self {
             use_gitignore: true,
-            user_rules: Vec::new(),
+            use_vaporignore: true,
+            user_rules: DEFAULT_IGNORE_RULES
+                .iter()
+                .map(|rule| (*rule).to_string())
+                .collect(),
         }
     }
 }
@@ -59,16 +66,36 @@ impl EventPathFilterOptions {
     pub fn from_process_environment() -> Self {
         let use_gitignore =
             resolve_use_gitignore(env::var(VAPOR_USE_GITIGNORE_ENV_KEY).ok().as_deref());
+        let use_vaporignore =
+            resolve_use_vaporignore(env::var(VAPOR_USE_VAPORIGNORE_ENV_KEY).ok().as_deref());
+        let user_rules = resolve_user_rules(env::var(VAPOR_IGNORE_RULES_ENV_KEY).ok().as_deref());
 
         Self {
             use_gitignore,
-            ..Self::default()
+            use_vaporignore,
+            user_rules,
         }
     }
 }
 
 fn resolve_use_gitignore(value: Option<&str>) -> bool {
     value.and_then(parse_bool_flag).unwrap_or(true)
+}
+
+fn resolve_use_vaporignore(value: Option<&str>) -> bool {
+    value.and_then(parse_bool_flag).unwrap_or(true)
+}
+
+fn resolve_user_rules(value: Option<&str>) -> Vec<String> {
+    match value {
+        Some(raw) => raw
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        None => EventPathFilterOptions::default().user_rules,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,13 +128,13 @@ impl EventPathFilter {
     pub fn for_watch_root(watch_root: &Path, options: &EventPathFilterOptions) -> Self {
         let mut rules = Vec::new();
 
-        append_default_rules(&mut rules);
-
         if options.use_gitignore {
             append_rules_from_file(&mut rules, watch_root.join(GIT_IGNORE_FILE_NAME));
         }
 
-        append_rules_from_file(&mut rules, watch_root.join(VAPOR_IGNORE_FILE_NAME));
+        if options.use_vaporignore {
+            append_rules_from_file(&mut rules, watch_root.join(VAPOR_IGNORE_FILE_NAME));
+        }
         append_user_rules(&mut rules, &options.user_rules);
 
         logging::info(
@@ -116,6 +143,8 @@ impl EventPathFilter {
                 ("watch_root", watch_root.display().to_string()),
                 ("rule_count", rules.len().to_string()),
                 ("use_gitignore", options.use_gitignore.to_string()),
+                ("use_vaporignore", options.use_vaporignore.to_string()),
+                ("user_rule_count", options.user_rules.len().to_string()),
             ],
         );
 
@@ -143,12 +172,6 @@ impl EventPathFilter {
         }
 
         ignored
-    }
-}
-
-fn append_default_rules(rules: &mut Vec<CompiledRule>) {
-    for rule in DEFAULT_IGNORE_RULES {
-        append_rule_line(rules, rule, "defaults", None, None);
     }
 }
 
@@ -329,10 +352,32 @@ mod tests {
             &watch_root,
             &EventPathFilterOptions {
                 use_gitignore: false,
-                user_rules: Vec::new(),
+                ..EventPathFilterOptions::default()
             },
         );
         assert!(!filter_without_gitignore.should_ignore(&watch_root.join("generated/file.txt")));
+
+        remove_test_directory(&watch_root);
+    }
+
+    #[test]
+    fn vaporignore_rules_can_be_disabled() {
+        let watch_root = create_test_directory();
+        fs::write(watch_root.join(".vaporignore"), "scratch/\n")
+            .expect("failed to write .vaporignore");
+
+        let filter_with_vaporignore =
+            EventPathFilter::for_watch_root(&watch_root, &EventPathFilterOptions::default());
+        assert!(filter_with_vaporignore.should_ignore(&watch_root.join("scratch/file.txt")));
+
+        let filter_without_vaporignore = EventPathFilter::for_watch_root(
+            &watch_root,
+            &EventPathFilterOptions {
+                use_vaporignore: false,
+                ..EventPathFilterOptions::default()
+            },
+        );
+        assert!(!filter_without_vaporignore.should_ignore(&watch_root.join("scratch/file.txt")));
 
         remove_test_directory(&watch_root);
     }
@@ -360,6 +405,7 @@ mod tests {
                     "!coverage/from-user-rule.txt".to_string(),
                     "coverage/from-vaporignore.txt".to_string(),
                 ],
+                ..EventPathFilterOptions::default()
             },
         );
 
@@ -367,6 +413,23 @@ mod tests {
         assert!(filter.should_ignore(&watch_root.join("coverage/from-gitignore.txt")));
         assert!(filter.should_ignore(&watch_root.join("coverage/from-vaporignore.txt")));
         assert!(!filter.should_ignore(&watch_root.join("coverage/from-user-rule.txt")));
+
+        remove_test_directory(&watch_root);
+    }
+
+    #[test]
+    fn empty_user_rules_disable_default_ignore_set() {
+        let watch_root = create_test_directory();
+        let filter = EventPathFilter::for_watch_root(
+            &watch_root,
+            &EventPathFilterOptions {
+                use_gitignore: false,
+                user_rules: Vec::new(),
+                ..EventPathFilterOptions::default()
+            },
+        );
+
+        assert!(!filter.should_ignore(&watch_root.join("node_modules/pkg/index.js")));
 
         remove_test_directory(&watch_root);
     }
@@ -381,6 +444,30 @@ mod tests {
         assert!(resolve_use_gitignore(Some("true")));
         assert!(!resolve_use_gitignore(Some("false")));
         assert!(resolve_use_gitignore(Some("invalid")));
+    }
+
+    #[test]
+    fn resolves_use_vaporignore_with_safe_default() {
+        assert!(resolve_use_vaporignore(None));
+    }
+
+    #[test]
+    fn resolves_use_vaporignore_from_explicit_values() {
+        assert!(resolve_use_vaporignore(Some("true")));
+        assert!(!resolve_use_vaporignore(Some("false")));
+        assert!(resolve_use_vaporignore(Some("invalid")));
+    }
+
+    #[test]
+    fn resolves_user_rules_with_safe_default() {
+        let rules = resolve_user_rules(None);
+        assert!(rules.iter().any(|rule| rule == "node_modules/"));
+    }
+
+    #[test]
+    fn resolves_user_rules_from_environment_lines() {
+        let rules = resolve_user_rules(Some("tmp/\n*.cache\n\n"));
+        assert_eq!(rules, vec!["tmp/", "*.cache"]);
     }
 
     #[test]

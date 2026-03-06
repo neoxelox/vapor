@@ -18,6 +18,8 @@ func loadCreatesDefaultConfigurationAndRuntimeDirectories() throws {
 
   #expect(configuration.autoLaunchEnabled == true)
   #expect(configuration.useGitIgnore == true)
+  #expect(configuration.useVaporIgnore == true)
+  #expect(configuration.ignoreRules == VaporConfiguration.defaultIgnoreRules)
   #expect(configuration.timelineEventLimit == 1000)
   #expect(
     fileManager.fileExists(atPath: VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL).path)
@@ -44,6 +46,8 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
   let configuration = VaporConfiguration(
     autoLaunchEnabled: false,
     useGitIgnore: false,
+    useVaporIgnore: false,
+    ignoreRules: "",
     timelineEventLimit: 1500
   )
 
@@ -52,6 +56,8 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
 
   #expect(loaded.autoLaunchEnabled == false)
   #expect(loaded.useGitIgnore == false)
+  #expect(loaded.useVaporIgnore == false)
+  #expect(loaded.ignoreRules.isEmpty)
   #expect(loaded.timelineEventLimit == 1500)
 
   try fileManager.removeItem(at: rootURL)

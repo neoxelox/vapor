@@ -90,6 +90,7 @@ struct SettingsView: View {
     Form {
       Toggle("Start vapor at login", isOn: autoLaunchBinding)
       Toggle("Use .gitignore patterns", isOn: useGitIgnoreBinding)
+      Toggle("Use .vaporignore patterns", isOn: useVaporIgnoreBinding)
 
       Text("Runtime directory: \(viewModel.state.vaporDirectoryPath)")
         .font(.caption)
@@ -115,6 +116,13 @@ struct SettingsView: View {
     Binding(
       get: { viewModel.state.useGitIgnore },
       set: { viewModel.setUseGitIgnore($0) }
+    )
+  }
+
+  private var useVaporIgnoreBinding: Binding<Bool> {
+    Binding(
+      get: { viewModel.state.useVaporIgnore },
+      set: { viewModel.setUseVaporIgnore($0) }
     )
   }
 }

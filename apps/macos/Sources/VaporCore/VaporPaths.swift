@@ -4,6 +4,8 @@ public enum VaporPaths {
   public static let directoryEnvironmentKey = "VAPOR_DIR"
   public static let environmentKey = "VAPOR_ENV"
   public static let useGitIgnoreEnvironmentKey = "VAPOR_USE_GITIGNORE"
+  public static let useVaporIgnoreEnvironmentKey = "VAPOR_USE_VAPORIGNORE"
+  public static let ignoreRulesEnvironmentKey = "VAPOR_IGNORE_RULES"
 
   public static let logsDirectoryName = "logs"
   public static let stateDirectoryName = "state"

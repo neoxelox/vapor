@@ -328,12 +328,11 @@ mod tests {
     }
 
     fn test_path_filter(watch_root: &Path) -> EventPathFilter {
-        EventPathFilter::for_watch_root(
-            watch_root,
-            &EventPathFilterOptions {
-                use_gitignore: false,
-                user_rules: Vec::new(),
-            },
-        )
+        let options = EventPathFilterOptions {
+            use_gitignore: false,
+            use_vaporignore: false,
+            ..EventPathFilterOptions::default()
+        };
+        EventPathFilter::for_watch_root(watch_root, &options)
     }
 }
