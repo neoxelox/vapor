@@ -10,7 +10,8 @@ const VAPOR_IGNORE_FILE_NAME: &str = ".vaporignore";
 const GIT_IGNORE_FILE_NAME: &str = ".gitignore";
 const VAPOR_USE_GITIGNORE_ENV_KEY: &str = "VAPOR_USE_GITIGNORE";
 const VAPOR_USE_VAPORIGNORE_ENV_KEY: &str = "VAPOR_USE_VAPORIGNORE";
-const VAPOR_IGNORE_RULES_ENV_KEY: &str = "VAPOR_IGNORE_RULES";
+const VAPOR_PRE_IGNORE_RULES_ENV_KEY: &str = "VAPOR_PRE_IGNORE_RULES";
+const VAPOR_POST_IGNORE_RULES_ENV_KEY: &str = "VAPOR_POST_IGNORE_RULES";
 
 const DEFAULT_IGNORE_RULES: &[&str] = &[
     ".git/",
@@ -46,7 +47,8 @@ const DEFAULT_IGNORE_RULES: &[&str] = &[
 pub struct EventPathFilterOptions {
     pub use_gitignore: bool,
     pub use_vaporignore: bool,
-    pub user_rules: Vec<String>,
+    pub pre_user_rules: Vec<String>,
+    pub post_user_rules: Vec<String>,
 }
 
 impl Default for EventPathFilterOptions {
@@ -54,10 +56,11 @@ impl Default for EventPathFilterOptions {
         Self {
             use_gitignore: true,
             use_vaporignore: true,
-            user_rules: DEFAULT_IGNORE_RULES
+            pre_user_rules: DEFAULT_IGNORE_RULES
                 .iter()
                 .map(|rule| (*rule).to_string())
                 .collect(),
+            post_user_rules: Vec::new(),
         }
     }
 }
@@ -68,12 +71,16 @@ impl EventPathFilterOptions {
             resolve_use_gitignore(env::var(VAPOR_USE_GITIGNORE_ENV_KEY).ok().as_deref());
         let use_vaporignore =
             resolve_use_vaporignore(env::var(VAPOR_USE_VAPORIGNORE_ENV_KEY).ok().as_deref());
-        let user_rules = resolve_user_rules(env::var(VAPOR_IGNORE_RULES_ENV_KEY).ok().as_deref());
+        let pre_user_rules =
+            resolve_pre_user_rules(env::var(VAPOR_PRE_IGNORE_RULES_ENV_KEY).ok().as_deref());
+        let post_user_rules =
+            resolve_post_user_rules(env::var(VAPOR_POST_IGNORE_RULES_ENV_KEY).ok().as_deref());
 
         Self {
             use_gitignore,
             use_vaporignore,
-            user_rules,
+            pre_user_rules,
+            post_user_rules,
         }
     }
 }
@@ -86,16 +93,26 @@ fn resolve_use_vaporignore(value: Option<&str>) -> bool {
     value.and_then(parse_bool_flag).unwrap_or(true)
 }
 
-fn resolve_user_rules(value: Option<&str>) -> Vec<String> {
+fn resolve_pre_user_rules(value: Option<&str>) -> Vec<String> {
     match value {
-        Some(raw) => raw
-            .lines()
-            .map(|line| line.trim())
-            .filter(|line| !line.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-        None => EventPathFilterOptions::default().user_rules,
+        Some(raw) => parse_rule_lines(raw),
+        None => EventPathFilterOptions::default().pre_user_rules,
     }
+}
+
+fn resolve_post_user_rules(value: Option<&str>) -> Vec<String> {
+    match value {
+        Some(raw) => parse_rule_lines(raw),
+        None => EventPathFilterOptions::default().post_user_rules,
+    }
+}
+
+fn parse_rule_lines(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,14 +145,22 @@ impl EventPathFilter {
     pub fn for_watch_root(watch_root: &Path, options: &EventPathFilterOptions) -> Self {
         let mut rules = Vec::new();
 
+        append_user_rules(&mut rules, &options.pre_user_rules);
+
+        let mut gitignore_file_count = 0usize;
+        let mut vaporignore_file_count = 0usize;
+
         if options.use_gitignore {
-            append_rules_from_file(&mut rules, watch_root.join(GIT_IGNORE_FILE_NAME));
+            gitignore_file_count =
+                append_rules_from_file_tree(&mut rules, watch_root, GIT_IGNORE_FILE_NAME);
         }
 
         if options.use_vaporignore {
-            append_rules_from_file(&mut rules, watch_root.join(VAPOR_IGNORE_FILE_NAME));
+            vaporignore_file_count =
+                append_rules_from_file_tree(&mut rules, watch_root, VAPOR_IGNORE_FILE_NAME);
         }
-        append_user_rules(&mut rules, &options.user_rules);
+
+        append_user_rules(&mut rules, &options.post_user_rules);
 
         logging::info(
             "Initialized filesystem path filter",
@@ -144,7 +169,16 @@ impl EventPathFilter {
                 ("rule_count", rules.len().to_string()),
                 ("use_gitignore", options.use_gitignore.to_string()),
                 ("use_vaporignore", options.use_vaporignore.to_string()),
-                ("user_rule_count", options.user_rules.len().to_string()),
+                (
+                    "pre_user_rule_count",
+                    options.pre_user_rules.len().to_string(),
+                ),
+                (
+                    "post_user_rule_count",
+                    options.post_user_rules.len().to_string(),
+                ),
+                ("gitignore_file_count", gitignore_file_count.to_string()),
+                ("vaporignore_file_count", vaporignore_file_count.to_string()),
             ],
         );
 
@@ -175,12 +209,99 @@ impl EventPathFilter {
     }
 }
 
-fn append_rules_from_file(rules: &mut Vec<CompiledRule>, path: PathBuf) {
+fn append_rules_from_file_tree(
+    rules: &mut Vec<CompiledRule>,
+    watch_root: &Path,
+    file_name: &str,
+) -> usize {
+    let ignore_files = collect_ignore_files(watch_root, file_name);
+    for ignore_file in &ignore_files {
+        append_rules_from_file(rules, watch_root, ignore_file.as_path());
+    }
+
+    ignore_files.len()
+}
+
+fn collect_ignore_files(watch_root: &Path, file_name: &str) -> Vec<PathBuf> {
+    let mut discovered = Vec::new();
+    let mut pending = vec![watch_root.to_path_buf()];
+
+    while let Some(directory) = pending.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                logging::warning(
+                    "Failed to enumerate directory while discovering ignore files; skipping",
+                    &[
+                        ("directory", directory.display().to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                continue;
+            }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    logging::warning(
+                        "Failed to read directory entry while discovering ignore files; skipping",
+                        &[("error", error.to_string())],
+                    );
+                    continue;
+                }
+            };
+
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    logging::warning(
+                        "Failed to inspect directory entry type while discovering ignore files; skipping",
+                        &[
+                            ("path", path.display().to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    continue;
+                }
+            };
+
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+
+            if file_type.is_file()
+                && path.file_name().and_then(|name| name.to_str()) == Some(file_name)
+            {
+                discovered.push(path);
+            }
+        }
+    }
+
+    discovered.sort_by(|left, right| {
+        let left_depth = left.components().count();
+        let right_depth = right.components().count();
+        left_depth
+            .cmp(&right_depth)
+            .then_with(|| left.as_os_str().cmp(right.as_os_str()))
+    });
+    discovered
+}
+
+fn append_rules_from_file(rules: &mut Vec<CompiledRule>, watch_root: &Path, path: &Path) {
     if !path.exists() {
         return;
     }
 
-    let contents = match fs::read_to_string(&path) {
+    let relative_parent = path
+        .parent()
+        .and_then(|parent| parent.strip_prefix(watch_root).ok())
+        .unwrap_or_else(|| Path::new(""));
+
+    let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) => {
             logging::warning(
@@ -195,13 +316,20 @@ fn append_rules_from_file(rules: &mut Vec<CompiledRule>, path: PathBuf) {
     };
 
     for (index, line) in contents.lines().enumerate() {
-        append_rule_line(rules, line, "file", Some(path.as_path()), Some(index + 1));
+        append_rule_line(
+            rules,
+            line,
+            "file",
+            Some(path),
+            Some(index + 1),
+            Some(relative_parent),
+        );
     }
 }
 
 fn append_user_rules(rules: &mut Vec<CompiledRule>, user_rules: &[String]) {
     for rule in user_rules {
-        append_rule_line(rules, rule, "user", None, None);
+        append_rule_line(rules, rule, "user", None, None, None);
     }
 }
 
@@ -211,17 +339,18 @@ fn append_rule_line(
     source: &str,
     source_path: Option<&Path>,
     line_number: Option<usize>,
+    base_directory: Option<&Path>,
 ) {
     let Some((action, pattern)) = parse_rule_line(raw_line) else {
         return;
     };
 
-    match compile_rule(action, pattern) {
+    match compile_rule(action, pattern.as_str(), base_directory) {
         Ok(rule) => rules.push(rule),
         Err(error) => {
             let mut metadata = vec![
                 ("source", source.to_string()),
-                ("pattern", pattern.to_string()),
+                ("pattern", pattern),
                 ("error", error),
             ];
             if let Some(path) = source_path {
@@ -230,15 +359,30 @@ fn append_rule_line(
             if let Some(line_number) = line_number {
                 metadata.push(("line", line_number.to_string()));
             }
+            if let Some(base_directory) = base_directory {
+                metadata.push(("base_directory", base_directory.display().to_string()));
+            }
 
             logging::warning("Skipping invalid ignore rule", &metadata);
         }
     }
 }
 
-fn parse_rule_line(raw_line: &str) -> Option<(RuleAction, &str)> {
+fn parse_rule_line(raw_line: &str) -> Option<(RuleAction, String)> {
     let trimmed = raw_line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(pattern) = trimmed.strip_prefix("\\!") {
+        return Some((RuleAction::Ignore, format!("!{pattern}")));
+    }
+
+    if let Some(pattern) = trimmed.strip_prefix("\\#") {
+        return Some((RuleAction::Ignore, format!("#{pattern}")));
+    }
+
+    if trimmed.starts_with('#') {
         return None;
     }
 
@@ -247,14 +391,18 @@ fn parse_rule_line(raw_line: &str) -> Option<(RuleAction, &str)> {
         if unignore_pattern.is_empty() {
             return None;
         }
-        return Some((RuleAction::Allow, unignore_pattern));
+        return Some((RuleAction::Allow, unignore_pattern.to_string()));
     }
 
-    Some((RuleAction::Ignore, trimmed))
+    Some((RuleAction::Ignore, trimmed.to_string()))
 }
 
-fn compile_rule(action: RuleAction, raw_pattern: &str) -> Result<CompiledRule, String> {
-    let patterns = expand_glob_patterns(raw_pattern)?;
+fn compile_rule(
+    action: RuleAction,
+    raw_pattern: &str,
+    base_directory: Option<&Path>,
+) -> Result<CompiledRule, String> {
+    let patterns = expand_glob_patterns(raw_pattern, base_directory)?;
     let mut matchers = Vec::with_capacity(patterns.len());
 
     for pattern in patterns {
@@ -270,7 +418,10 @@ fn compile_rule(action: RuleAction, raw_pattern: &str) -> Result<CompiledRule, S
     Ok(CompiledRule { action, matchers })
 }
 
-fn expand_glob_patterns(raw_pattern: &str) -> Result<Vec<String>, String> {
+fn expand_glob_patterns(
+    raw_pattern: &str,
+    base_directory: Option<&Path>,
+) -> Result<Vec<String>, String> {
     let anchored = raw_pattern.starts_with('/');
     let directory_only = raw_pattern.ends_with('/');
 
@@ -286,7 +437,9 @@ fn expand_glob_patterns(raw_pattern: &str) -> Result<Vec<String>, String> {
         return Err("ignore pattern is empty".to_string());
     }
 
-    let mut stems = if anchored {
+    let has_separator = body.contains('/');
+
+    let mut stems = if anchored || has_separator {
         vec![body.to_string()]
     } else {
         vec![body.to_string(), format!("**/{body}")]
@@ -296,9 +449,17 @@ fn expand_glob_patterns(raw_pattern: &str) -> Result<Vec<String>, String> {
 
     let mut patterns = Vec::new();
     for stem in stems {
-        patterns.push(stem.clone());
+        let mut resolved = stem.clone();
+        if let Some(base_directory) = base_directory {
+            let base_directory = normalize_relative_path(base_directory);
+            if !base_directory.is_empty() {
+                resolved = format!("{base_directory}/{resolved}");
+            }
+        }
+
+        patterns.push(resolved.clone());
         if directory_only {
-            patterns.push(format!("{stem}/**"));
+            patterns.push(format!("{resolved}/**"));
         }
     }
 
@@ -383,7 +544,7 @@ mod tests {
     }
 
     #[test]
-    fn vaporignore_and_user_rules_override_defaults_and_gitignore() {
+    fn vaporignore_overrides_gitignore_and_pre_user_rules() {
         let watch_root = create_test_directory();
 
         fs::write(
@@ -401,30 +562,129 @@ mod tests {
             &watch_root,
             &EventPathFilterOptions {
                 use_gitignore: true,
-                user_rules: vec![
+                pre_user_rules: vec![
                     "!coverage/from-user-rule.txt".to_string(),
                     "coverage/from-vaporignore.txt".to_string(),
                 ],
+                post_user_rules: Vec::new(),
                 ..EventPathFilterOptions::default()
             },
         );
 
         assert!(filter.should_ignore(&watch_root.join("coverage/regular.txt")));
         assert!(filter.should_ignore(&watch_root.join("coverage/from-gitignore.txt")));
-        assert!(filter.should_ignore(&watch_root.join("coverage/from-vaporignore.txt")));
-        assert!(!filter.should_ignore(&watch_root.join("coverage/from-user-rule.txt")));
+        assert!(!filter.should_ignore(&watch_root.join("coverage/from-vaporignore.txt")));
+        assert!(filter.should_ignore(&watch_root.join("coverage/from-user-rule.txt")));
 
         remove_test_directory(&watch_root);
     }
 
     #[test]
-    fn empty_user_rules_disable_default_ignore_set() {
+    fn post_user_rules_override_vaporignore_rules() {
+        let watch_root = create_test_directory();
+
+        fs::write(
+            watch_root.join(".vaporignore"),
+            "coverage/\n!coverage/keep.txt\n",
+        )
+        .expect("failed to write .vaporignore");
+
+        let filter = EventPathFilter::for_watch_root(
+            &watch_root,
+            &EventPathFilterOptions {
+                use_gitignore: false,
+                pre_user_rules: vec!["!coverage/keep.txt".to_string()],
+                post_user_rules: vec!["coverage/keep.txt".to_string()],
+                ..EventPathFilterOptions::default()
+            },
+        );
+
+        assert!(filter.should_ignore(&watch_root.join("coverage/keep.txt")));
+
+        remove_test_directory(&watch_root);
+    }
+
+    #[test]
+    fn recursively_loads_nested_gitignore_files() {
+        let watch_root = create_test_directory();
+        fs::create_dir_all(watch_root.join("apps/web")).expect("failed to create nested directory");
+        fs::write(watch_root.join("apps/web/.gitignore"), "generated/\n")
+            .expect("failed to write nested .gitignore");
+
+        let filter = EventPathFilter::for_watch_root(
+            &watch_root,
+            &EventPathFilterOptions {
+                use_vaporignore: false,
+                pre_user_rules: Vec::new(),
+                post_user_rules: Vec::new(),
+                ..EventPathFilterOptions::default()
+            },
+        );
+
+        assert!(filter.should_ignore(&watch_root.join("apps/web/generated/app.js")));
+        assert!(!filter.should_ignore(&watch_root.join("generated/app.js")));
+
+        remove_test_directory(&watch_root);
+    }
+
+    #[test]
+    fn recursively_loads_nested_vaporignore_files() {
+        let watch_root = create_test_directory();
+        fs::create_dir_all(watch_root.join("apps/desktop"))
+            .expect("failed to create nested directory");
+        fs::write(watch_root.join("apps/desktop/.vaporignore"), "scratch/\n")
+            .expect("failed to write nested .vaporignore");
+
+        let filter = EventPathFilter::for_watch_root(
+            &watch_root,
+            &EventPathFilterOptions {
+                use_gitignore: false,
+                pre_user_rules: Vec::new(),
+                post_user_rules: Vec::new(),
+                ..EventPathFilterOptions::default()
+            },
+        );
+
+        assert!(filter.should_ignore(&watch_root.join("apps/desktop/scratch/file.txt")));
+        assert!(!filter.should_ignore(&watch_root.join("scratch/file.txt")));
+
+        remove_test_directory(&watch_root);
+    }
+
+    #[test]
+    fn pre_user_rules_accept_gitignore_style_comments_and_unignore() {
         let watch_root = create_test_directory();
         let filter = EventPathFilter::for_watch_root(
             &watch_root,
             &EventPathFilterOptions {
                 use_gitignore: false,
-                user_rules: Vec::new(),
+                use_vaporignore: false,
+                pre_user_rules: vec![
+                    "# comment".to_string(),
+                    "tmp/".to_string(),
+                    "!tmp/keep.txt".to_string(),
+                    "\\#literal-file".to_string(),
+                ],
+                post_user_rules: Vec::new(),
+            },
+        );
+
+        assert!(filter.should_ignore(&watch_root.join("tmp/a.txt")));
+        assert!(!filter.should_ignore(&watch_root.join("tmp/keep.txt")));
+        assert!(filter.should_ignore(&watch_root.join("#literal-file")));
+
+        remove_test_directory(&watch_root);
+    }
+
+    #[test]
+    fn empty_pre_user_rules_disable_default_ignore_set() {
+        let watch_root = create_test_directory();
+        let filter = EventPathFilter::for_watch_root(
+            &watch_root,
+            &EventPathFilterOptions {
+                use_gitignore: false,
+                pre_user_rules: Vec::new(),
+                post_user_rules: Vec::new(),
                 ..EventPathFilterOptions::default()
             },
         );
@@ -459,14 +719,26 @@ mod tests {
     }
 
     #[test]
-    fn resolves_user_rules_with_safe_default() {
-        let rules = resolve_user_rules(None);
+    fn resolves_pre_user_rules_with_safe_default() {
+        let rules = resolve_pre_user_rules(None);
         assert!(rules.iter().any(|rule| rule == "node_modules/"));
     }
 
     #[test]
-    fn resolves_user_rules_from_environment_lines() {
-        let rules = resolve_user_rules(Some("tmp/\n*.cache\n\n"));
+    fn resolves_pre_user_rules_from_environment_lines() {
+        let rules = resolve_pre_user_rules(Some("tmp/\n*.cache\n\n"));
+        assert_eq!(rules, vec!["tmp/", "*.cache"]);
+    }
+
+    #[test]
+    fn resolves_post_user_rules_with_safe_default() {
+        let rules = resolve_post_user_rules(None);
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn resolves_post_user_rules_from_environment_lines() {
+        let rules = resolve_post_user_rules(Some("tmp/\n*.cache\n\n"));
         assert_eq!(rules, vec!["tmp/", "*.cache"]);
     }
 

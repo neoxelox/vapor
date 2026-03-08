@@ -26,7 +26,8 @@ final class AppShellViewModel: ObservableObject {
         autoLaunchSettingStore: autoLaunchSettingStore,
         useGitIgnore: configuration.useGitIgnore,
         useVaporIgnore: configuration.useVaporIgnore,
-        ignoreRules: configuration.ignoreRules
+        preIgnoreRules: configuration.preIgnoreRules,
+        postIgnoreRules: configuration.postIgnoreRules
       ),
       configurationStore: configurationStore,
       configuration: configuration
@@ -304,7 +305,8 @@ final class AppShellViewModel: ObservableObject {
     autoLaunchSettingStore: any AutoLaunchSettingStore,
     useGitIgnore: Bool,
     useVaporIgnore: Bool,
-    ignoreRules: String
+    preIgnoreRules: String,
+    postIgnoreRules: String
   ) -> DaemonLifecycleManager {
     if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
       return .placeholder()
@@ -317,7 +319,8 @@ final class AppShellViewModel: ObservableObject {
       "VAPOR_DIR": vaporDirectoryURL.path,
       VaporPaths.useGitIgnoreEnvironmentKey: useGitIgnore ? "true" : "false",
       VaporPaths.useVaporIgnoreEnvironmentKey: useVaporIgnore ? "true" : "false",
-      VaporPaths.ignoreRulesEnvironmentKey: ignoreRules,
+      VaporPaths.preIgnoreRulesEnvironmentKey: preIgnoreRules,
+      VaporPaths.postIgnoreRulesEnvironmentKey: postIgnoreRules,
     ]
     if let runtimeEnvironment = ProcessInfo.processInfo.environment[VaporPaths.environmentKey],
       !runtimeEnvironment.isEmpty
