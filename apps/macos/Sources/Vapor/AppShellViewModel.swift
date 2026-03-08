@@ -315,10 +315,10 @@ final class AppShellViewModel: ObservableObject {
     }
 
     let daemonExecutableURL = bundledDaemonExecutableURL()
-    let launchAgentLabel = "sh.arn.vapor.daemon"
+    let launchAgentLabel = VaporConstants.Daemon.launchAgentLabel
     var daemonEnvironment = [
-      "PATH": "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-      "VAPOR_DIR": vaporDirectoryURL.path,
+      "PATH": VaporConstants.Daemon.processPath,
+      VaporPaths.directoryEnvironmentKey: vaporDirectoryURL.path,
       VaporPaths.useGitIgnoreEnvironmentKey: useGitIgnore ? "true" : "false",
       VaporPaths.useVaporIgnoreEnvironmentKey: useVaporIgnore ? "true" : "false",
       VaporPaths.syncDirectoriesEnvironmentKey: syncDirectories.joined(separator: "\n"),

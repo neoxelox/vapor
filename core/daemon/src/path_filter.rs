@@ -3,45 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use globset::{GlobBuilder, GlobMatcher};
+use vapor_shared::constants;
 
 use crate::logging;
-
-const VAPOR_IGNORE_FILE_NAME: &str = ".vaporignore";
-const GIT_IGNORE_FILE_NAME: &str = ".gitignore";
-const VAPOR_USE_GITIGNORE_ENV_KEY: &str = "VAPOR_USE_GITIGNORE";
-const VAPOR_USE_VAPORIGNORE_ENV_KEY: &str = "VAPOR_USE_VAPORIGNORE";
-const VAPOR_PRE_IGNORE_RULES_ENV_KEY: &str = "VAPOR_PRE_IGNORE_RULES";
-const VAPOR_POST_IGNORE_RULES_ENV_KEY: &str = "VAPOR_POST_IGNORE_RULES";
-
-const DEFAULT_IGNORE_RULES: &[&str] = &[
-    ".git/",
-    ".DS_Store",
-    "*.tmp",
-    "*.temp",
-    "*.swp",
-    "*.swo",
-    "*~",
-    "node_modules/",
-    ".pnpm-store/",
-    ".yarn/cache/",
-    ".yarn/unplugged/",
-    ".npm/",
-    ".next/",
-    ".nuxt/",
-    ".svelte-kit/",
-    "dist/",
-    "build/",
-    "out/",
-    ".turbo/",
-    ".vite/",
-    ".parcel-cache/",
-    "coverage/",
-    "storybook-static/",
-    "*.tsbuildinfo",
-    ".eslintcache",
-    "*.log",
-    ".env.local",
-];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EventPathFilterOptions {
@@ -56,7 +20,7 @@ impl Default for EventPathFilterOptions {
         Self {
             use_gitignore: true,
             use_vaporignore: true,
-            pre_user_rules: DEFAULT_IGNORE_RULES
+            pre_user_rules: constants::filtering::DEFAULT_PRE_IGNORE_RULES
                 .iter()
                 .map(|rule| (*rule).to_string())
                 .collect(),
@@ -67,14 +31,26 @@ impl Default for EventPathFilterOptions {
 
 impl EventPathFilterOptions {
     pub fn from_process_environment() -> Self {
-        let use_gitignore =
-            resolve_use_gitignore(env::var(VAPOR_USE_GITIGNORE_ENV_KEY).ok().as_deref());
-        let use_vaporignore =
-            resolve_use_vaporignore(env::var(VAPOR_USE_VAPORIGNORE_ENV_KEY).ok().as_deref());
-        let pre_user_rules =
-            resolve_pre_user_rules(env::var(VAPOR_PRE_IGNORE_RULES_ENV_KEY).ok().as_deref());
-        let post_user_rules =
-            resolve_post_user_rules(env::var(VAPOR_POST_IGNORE_RULES_ENV_KEY).ok().as_deref());
+        let use_gitignore = resolve_use_gitignore(
+            env::var(constants::env::VAPOR_USE_GITIGNORE)
+                .ok()
+                .as_deref(),
+        );
+        let use_vaporignore = resolve_use_vaporignore(
+            env::var(constants::env::VAPOR_USE_VAPORIGNORE)
+                .ok()
+                .as_deref(),
+        );
+        let pre_user_rules = resolve_pre_user_rules(
+            env::var(constants::env::VAPOR_PRE_IGNORE_RULES)
+                .ok()
+                .as_deref(),
+        );
+        let post_user_rules = resolve_post_user_rules(
+            env::var(constants::env::VAPOR_POST_IGNORE_RULES)
+                .ok()
+                .as_deref(),
+        );
 
         Self {
             use_gitignore,
@@ -151,13 +127,19 @@ impl EventPathFilter {
         let mut vaporignore_file_count = 0usize;
 
         if options.use_gitignore {
-            gitignore_file_count =
-                append_rules_from_file_tree(&mut rules, watch_root, GIT_IGNORE_FILE_NAME);
+            gitignore_file_count = append_rules_from_file_tree(
+                &mut rules,
+                watch_root,
+                constants::filtering::GIT_IGNORE_FILE_NAME,
+            );
         }
 
         if options.use_vaporignore {
-            vaporignore_file_count =
-                append_rules_from_file_tree(&mut rules, watch_root, VAPOR_IGNORE_FILE_NAME);
+            vaporignore_file_count = append_rules_from_file_tree(
+                &mut rules,
+                watch_root,
+                constants::filtering::VAPOR_IGNORE_FILE_NAME,
+            );
         }
 
         append_user_rules(&mut rules, &options.post_user_rules);

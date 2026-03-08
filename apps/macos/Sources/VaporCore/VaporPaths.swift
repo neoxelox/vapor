@@ -1,20 +1,20 @@
 import Foundation
 
 public enum VaporPaths {
-  public static let directoryEnvironmentKey = "VAPOR_DIR"
-  public static let environmentKey = "VAPOR_ENV"
-  public static let useGitIgnoreEnvironmentKey = "VAPOR_USE_GITIGNORE"
-  public static let useVaporIgnoreEnvironmentKey = "VAPOR_USE_VAPORIGNORE"
-  public static let syncDirectoriesEnvironmentKey = "VAPOR_SYNC_DIRECTORIES"
-  public static let preIgnoreRulesEnvironmentKey = "VAPOR_PRE_IGNORE_RULES"
-  public static let postIgnoreRulesEnvironmentKey = "VAPOR_POST_IGNORE_RULES"
+  public static let directoryEnvironmentKey = VaporConstants.Environment.vaporDirectory
+  public static let environmentKey = VaporConstants.Environment.vaporEnvironment
+  public static let useGitIgnoreEnvironmentKey = VaporConstants.Environment.useGitIgnore
+  public static let useVaporIgnoreEnvironmentKey = VaporConstants.Environment.useVaporIgnore
+  public static let syncDirectoriesEnvironmentKey = VaporConstants.Environment.syncDirectories
+  public static let preIgnoreRulesEnvironmentKey = VaporConstants.Environment.preIgnoreRules
+  public static let postIgnoreRulesEnvironmentKey = VaporConstants.Environment.postIgnoreRules
 
-  public static let logsDirectoryName = "logs"
-  public static let stateDirectoryName = "state"
-  public static let configurationFileName = "vapor.json"
-  public static let sqliteDatabaseFileName = "vapor.sqlite"
-  public static let appLogFileName = "vapor.logs"
-  public static let daemonLogFileName = "vapord.logs"
+  public static let logsDirectoryName = VaporConstants.Runtime.logsDirectoryName
+  public static let stateDirectoryName = VaporConstants.Runtime.stateDirectoryName
+  public static let configurationFileName = VaporConstants.Runtime.configurationFileName
+  public static let sqliteDatabaseFileName = VaporConstants.Runtime.sqliteDatabaseFileName
+  public static let appLogFileName = VaporConstants.Runtime.appLogFileName
+  public static let daemonLogFileName = VaporConstants.Runtime.daemonLogFileName
 
   public static func resolveVaporDirectoryURL(
     environment: [String: String] = ProcessInfo.processInfo.environment,
@@ -32,11 +32,11 @@ public enum VaporPaths {
       || environment[environmentKey]?.lowercased() == "dev"
     {
       return URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
-        .appendingPathComponent(".vapor", isDirectory: true)
+        .appendingPathComponent(VaporConstants.Runtime.vaporDirectoryName, isDirectory: true)
     }
 
     return fileManager.homeDirectoryForCurrentUser
-      .appendingPathComponent(".vapor", isDirectory: true)
+      .appendingPathComponent(VaporConstants.Runtime.vaporDirectoryName, isDirectory: true)
   }
 
   public static func logsDirectoryURL(vaporDirectoryURL: URL) -> URL {

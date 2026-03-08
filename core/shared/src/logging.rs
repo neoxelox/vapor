@@ -5,11 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const VAPOR_DIR_ENV_KEY: &str = "VAPOR_DIR";
-const VAPOR_ENV_ENV_KEY: &str = "VAPOR_ENV";
-const VAPOR_LOG_LEVEL_ENV_KEY: &str = "VAPOR_LOG_LEVEL";
-const LOGS_DIRECTORY_NAME: &str = "logs";
-const VAPOR_DIRECTORY_NAME: &str = ".vapor";
+use crate::constants;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum LogLevel {
@@ -48,7 +44,7 @@ pub struct StructuredLogger {
 
 impl StructuredLogger {
     pub fn new(component: &'static str, file_name: &str) -> Self {
-        let min_level = env::var(VAPOR_LOG_LEVEL_ENV_KEY)
+        let min_level = env::var(constants::env::VAPOR_LOG_LEVEL)
             .ok()
             .and_then(|value| LogLevel::parse(&value))
             .unwrap_or_else(build_default_level);
@@ -156,7 +152,7 @@ impl GlobalComponentLogger {
 }
 
 fn build_default_level() -> LogLevel {
-    match env::var(VAPOR_ENV_ENV_KEY)
+    match env::var(constants::env::VAPOR_ENV)
         .ok()
         .map(|value| value.to_ascii_lowercase())
         .as_deref()
@@ -167,29 +163,29 @@ fn build_default_level() -> LogLevel {
 }
 
 fn logs_directory() -> PathBuf {
-    vapor_directory().join(LOGS_DIRECTORY_NAME)
+    vapor_directory().join(constants::runtime::LOGS_DIRECTORY_NAME)
 }
 
 fn vapor_directory() -> PathBuf {
-    if let Some(configured) = env::var_os(VAPOR_DIR_ENV_KEY) {
+    if let Some(configured) = env::var_os(constants::env::VAPOR_DIR) {
         return PathBuf::from(configured);
     }
 
     if (env::var_os("CI").is_some()
-        || env::var(VAPOR_ENV_ENV_KEY)
+        || env::var(constants::env::VAPOR_ENV)
             .ok()
             .map(|value| value.eq_ignore_ascii_case("dev"))
             .unwrap_or(false))
         && let Ok(current_directory) = env::current_dir()
     {
-        return current_directory.join(VAPOR_DIRECTORY_NAME);
+        return current_directory.join(constants::runtime::VAPOR_DIRECTORY_NAME);
     }
 
     if let Some(home) = env::var_os("HOME") {
-        return PathBuf::from(home).join(VAPOR_DIRECTORY_NAME);
+        return PathBuf::from(home).join(constants::runtime::VAPOR_DIRECTORY_NAME);
     }
 
-    PathBuf::from("/tmp").join(VAPOR_DIRECTORY_NAME)
+    PathBuf::from("/tmp").join(constants::runtime::VAPOR_DIRECTORY_NAME)
 }
 
 fn sanitize_text(raw: &str) -> String {

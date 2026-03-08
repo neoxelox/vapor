@@ -50,7 +50,7 @@ public final class StructuredLogger: @unchecked Sendable {
     } else {
       let environment = ProcessInfo.processInfo.environment
       self.minLevel =
-        VaporLogLevel.from(environmentValue: environment["VAPOR_LOG_LEVEL"])
+        VaporLogLevel.from(environmentValue: environment[VaporConstants.Environment.vaporLogLevel])
         ?? StructuredLogger.defaultMinLevel(for: environment)
     }
 

@@ -173,6 +173,18 @@ It does not override the "latest stable" policy above.
 - Repository scripts must default `VAPOR_DIR` to `./.vapor` so local and CI behavior are consistent.
 - Repository scripts should default `VAPOR_ENV` to `dev` (and `prod` for package flow).
 
+## 8.6) Shared constants policy
+
+- Runtime/config/environment constants must be centralized in language-level constants modules and treated as source-of-truth.
+- Current source-of-truth files are:
+  - Rust shared constants: `core/shared/src/constants.rs`
+  - Swift app constants: `apps/macos/Sources/VaporCore/VaporConstants.swift`
+- When adding or changing any config keys, environment variables, default values, runtime path names, launch labels, or filtering defaults, contributors must:
+  1. update the relevant constants file first,
+  2. consume the constant from call sites (avoid re-defining string literals), and
+  3. update docs/tests in the same change set.
+- Avoid duplicated hardcoded literals for `VAPOR_*` keys and shared defaults outside the constants modules unless there is a documented, temporary exception.
+
 ## 9) Required test matrix
 
 Every substantial change must include relevant test updates.

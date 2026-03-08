@@ -9,47 +9,19 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   public var postIgnoreRules: String
   public var timelineEventLimit: Int
 
-  public static let defaultPreIgnoreRuleLines: [String] = [
-    ".git/",
-    ".DS_Store",
-    "*.tmp",
-    "*.temp",
-    "*.swp",
-    "*.swo",
-    "*~",
-    "node_modules/",
-    ".pnpm-store/",
-    ".yarn/cache/",
-    ".yarn/unplugged/",
-    ".npm/",
-    ".next/",
-    ".nuxt/",
-    ".svelte-kit/",
-    "dist/",
-    "build/",
-    "out/",
-    ".turbo/",
-    ".vite/",
-    ".parcel-cache/",
-    "coverage/",
-    "storybook-static/",
-    "*.tsbuildinfo",
-    ".eslintcache",
-    "*.log",
-    ".env.local",
-  ]
-  public static let defaultSyncDirectories = ["~/Vapor"]
-  public static let defaultPreIgnoreRules = defaultPreIgnoreRuleLines.joined(separator: "\n")
-  public static let defaultPostIgnoreRules = ""
+  public static let defaultPreIgnoreRuleLines = VaporConstants.Defaults.preIgnoreRuleLines
+  public static let defaultSyncDirectories = VaporConstants.Defaults.syncDirectories
+  public static let defaultPreIgnoreRules = VaporConstants.Defaults.preIgnoreRules
+  public static let defaultPostIgnoreRules = VaporConstants.Defaults.postIgnoreRules
 
   public init(
-    autoLaunchEnabled: Bool = true,
-    useGitIgnore: Bool = true,
-    useVaporIgnore: Bool = true,
+    autoLaunchEnabled: Bool = VaporConstants.Defaults.autoLaunchEnabled,
+    useGitIgnore: Bool = VaporConstants.Defaults.useGitIgnore,
+    useVaporIgnore: Bool = VaporConstants.Defaults.useVaporIgnore,
     syncDirectories: [String] = defaultSyncDirectories,
     preIgnoreRules: String = defaultPreIgnoreRules,
     postIgnoreRules: String = defaultPostIgnoreRules,
-    timelineEventLimit: Int = 1000
+    timelineEventLimit: Int = VaporConstants.Defaults.timelineEventLimit
   ) {
     self.autoLaunchEnabled = autoLaunchEnabled
     self.useGitIgnore = useGitIgnore

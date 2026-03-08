@@ -1,14 +1,12 @@
 use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
+use vapor_shared::constants;
 
 use crate::logging;
 
-const VAPOR_SYNC_DIRECTORIES_ENV_KEY: &str = "VAPOR_SYNC_DIRECTORIES";
-const DEFAULT_SYNC_DIRECTORIES: &[&str] = &["~/Vapor"];
-
 pub fn resolve_from_process_environment() -> Vec<PathBuf> {
-    let configured = env::var(VAPOR_SYNC_DIRECTORIES_ENV_KEY).ok();
+    let configured = env::var(constants::env::VAPOR_SYNC_DIRECTORIES).ok();
     let current_directory = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home_directory = home_directory();
     resolve_directories(
@@ -25,7 +23,7 @@ fn resolve_directories(
 ) -> Vec<PathBuf> {
     let raw_directories = match configured {
         Some(raw) => parse_directory_lines(raw),
-        None => DEFAULT_SYNC_DIRECTORIES
+        None => constants::filtering::DEFAULT_SYNC_DIRECTORIES
             .iter()
             .map(|path| (*path).to_string())
             .collect(),

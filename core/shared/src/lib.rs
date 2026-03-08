@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod constants;
 pub mod logging;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
