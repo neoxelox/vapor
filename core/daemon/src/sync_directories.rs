@@ -1,80 +1,106 @@
-use std::collections::HashSet;
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
+
 use vapor_shared::constants;
 
 use crate::logging;
 
-pub fn resolve_from_process_environment() -> Vec<PathBuf> {
-    let configured = env::var(constants::env::VAPOR_SYNC_DIRECTORIES).ok();
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SyncScope {
+    pub local_sync_directory: Option<PathBuf>,
+    pub cloud_sync_directory: String,
+}
+
+pub fn resolve_from_process_environment() -> SyncScope {
+    let configured_local = env::var(constants::env::VAPOR_LOCAL_SYNC_DIRECTORY).ok();
+    let configured_cloud = env::var(constants::env::VAPOR_CLOUD_SYNC_DIRECTORY).ok();
     let current_directory = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home_directory = home_directory();
-    resolve_directories(
-        configured.as_deref(),
+
+    resolve_scope(
+        configured_local.as_deref(),
+        configured_cloud.as_deref(),
         &current_directory,
         home_directory.as_deref(),
     )
 }
 
-fn resolve_directories(
-    configured: Option<&str>,
+fn resolve_scope(
+    configured_local: Option<&str>,
+    configured_cloud: Option<&str>,
     current_directory: &Path,
     home_directory: Option<&Path>,
-) -> Vec<PathBuf> {
-    let raw_directories = match configured {
-        Some(raw) => parse_directory_lines(raw),
-        None => constants::filtering::DEFAULT_SYNC_DIRECTORIES
-            .iter()
-            .map(|path| (*path).to_string())
-            .collect(),
-    };
+) -> SyncScope {
+    let local_raw = configured_local.unwrap_or(constants::filtering::DEFAULT_LOCAL_SYNC_DIRECTORY);
+    let local_sync_directory =
+        resolve_local_directory(local_raw, current_directory, home_directory);
+    let cloud_sync_directory = resolve_cloud_directory(
+        configured_cloud.unwrap_or(constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY),
+    );
 
-    let mut seen = HashSet::new();
-    let mut resolved = Vec::new();
-    for raw_directory in raw_directories {
-        let Some(path) = resolve_path(raw_directory.as_str(), current_directory, home_directory)
-        else {
-            continue;
-        };
-
-        if !path.exists() {
-            logging::warning(
-                "Skipping sync directory because it does not exist",
-                &[("path", path.display().to_string())],
-            );
-            continue;
-        }
-
-        if !path.is_dir() {
-            logging::warning(
-                "Skipping sync directory because path is not a directory",
-                &[("path", path.display().to_string())],
-            );
-            continue;
-        }
-
-        let key = path.to_string_lossy().to_string();
-        if seen.insert(key) {
-            resolved.push(path);
-        }
+    SyncScope {
+        local_sync_directory,
+        cloud_sync_directory,
     }
-
-    if resolved.is_empty() {
-        logging::warning(
-            "No valid sync directories resolved; daemon will remain idle",
-            &[],
-        );
-    }
-
-    resolved
 }
 
-fn parse_directory_lines(raw: &str) -> Vec<String> {
-    raw.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
+fn resolve_local_directory(
+    raw: &str,
+    current_directory: &Path,
+    home_directory: Option<&Path>,
+) -> Option<PathBuf> {
+    let Some(path) = resolve_path(raw, current_directory, home_directory) else {
+        logging::warning(
+            "No local sync directory configured; daemon will remain idle",
+            &[],
+        );
+        return None;
+    };
+
+    if !path.exists() {
+        match fs::create_dir_all(&path) {
+            Ok(_) => {
+                logging::info(
+                    "Created missing local sync directory",
+                    &[("path", path.display().to_string())],
+                );
+            }
+            Err(error) => {
+                logging::error(
+                    "Failed to create missing local sync directory",
+                    &[
+                        ("path", path.display().to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                return None;
+            }
+        }
+    }
+
+    if !path.is_dir() {
+        logging::warning(
+            "Skipping local sync directory because path is not a directory",
+            &[("path", path.display().to_string())],
+        );
+        return None;
+    }
+
+    Some(path)
+}
+
+fn resolve_cloud_directory(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY.to_string();
+    }
+
+    if trimmed.starts_with('/') {
+        return trimmed.to_string();
+    }
+
+    format!("/{trimmed}")
 }
 
 fn resolve_path(
@@ -110,54 +136,82 @@ fn home_directory() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn defaults_to_home_vapor_directory() {
+    fn defaults_to_home_vapor_and_cloud_vapor_directories() {
         let home = create_test_directory();
-        fs::create_dir_all(home.join("Vapor")).expect("failed to create default Vapor directory");
 
-        let resolved = resolve_directories(None, Path::new("/tmp"), Some(home.as_path()));
-        assert_eq!(resolved, vec![home.join("Vapor")]);
+        let scope = resolve_scope(None, None, Path::new("/tmp"), Some(home.as_path()));
+        assert_eq!(scope.local_sync_directory, Some(home.join("Vapor")));
+        assert_eq!(scope.cloud_sync_directory, "/Vapor");
+        assert!(home.join("Vapor").exists());
 
         remove_test_directory(&home);
     }
 
     #[test]
-    fn skips_missing_directories() {
+    fn creates_missing_local_directory() {
         let root = create_test_directory();
-        let existing = root.join("existing");
-        fs::create_dir_all(&existing).expect("failed to create existing directory");
+        let missing = root.join("missing");
 
-        let configured = format!("{}\n{}", existing.display(), root.join("missing").display());
-        let resolved = resolve_directories(Some(configured.as_str()), Path::new("/tmp"), None);
-        assert_eq!(resolved, vec![existing]);
+        let scope = resolve_scope(
+            Some(missing.to_string_lossy().as_ref()),
+            Some("/Cloud"),
+            Path::new("/tmp"),
+            None,
+        );
+        assert_eq!(scope.local_sync_directory, Some(missing.clone()));
+        assert!(missing.exists());
+        assert_eq!(scope.cloud_sync_directory, "/Cloud");
 
         remove_test_directory(&root);
     }
 
     #[test]
-    fn resolves_relative_paths_against_current_directory() {
+    fn returns_none_when_local_sync_path_is_a_file() {
+        let root = create_test_directory();
+        let file_path = root.join("not-a-directory");
+        fs::write(&file_path, b"x").expect("failed to create file path");
+
+        let scope = resolve_scope(
+            Some(file_path.to_string_lossy().as_ref()),
+            Some("/Cloud"),
+            Path::new("/tmp"),
+            None,
+        );
+        assert!(scope.local_sync_directory.is_none());
+        assert_eq!(scope.cloud_sync_directory, "/Cloud");
+
+        remove_test_directory(&root);
+    }
+
+    #[test]
+    fn resolves_relative_local_path_against_current_directory() {
         let root = create_test_directory();
         let projects = root.join("projects");
         fs::create_dir_all(&projects).expect("failed to create projects directory");
 
-        let resolved = resolve_directories(Some("projects"), &root, None);
-        assert_eq!(resolved, vec![projects]);
+        let scope = resolve_scope(Some("projects"), Some("cloud-folder"), &root, None);
+        assert_eq!(scope.local_sync_directory, Some(projects));
+        assert_eq!(scope.cloud_sync_directory, "/cloud-folder");
 
         remove_test_directory(&root);
     }
 
     #[test]
-    fn deduplicates_same_directory_entries() {
+    fn empty_cloud_directory_falls_back_to_default() {
         let root = create_test_directory();
         let sync = root.join("sync");
         fs::create_dir_all(&sync).expect("failed to create sync directory");
 
-        let configured = format!("{0}\n{0}", sync.display());
-        let resolved = resolve_directories(Some(configured.as_str()), Path::new("/tmp"), None);
-        assert_eq!(resolved, vec![sync]);
+        let scope = resolve_scope(
+            Some(sync.to_string_lossy().as_ref()),
+            Some("   "),
+            Path::new("/tmp"),
+            None,
+        );
+        assert_eq!(scope.cloud_sync_directory, "/Vapor");
 
         remove_test_directory(&root);
     }
@@ -168,7 +222,7 @@ mod tests {
             .expect("clock drift")
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "vapor-daemon-sync-directories-{}-{}",
+            "vapor-daemon-sync-scope-{}-{}",
             std::process::id(),
             timestamp
         ));

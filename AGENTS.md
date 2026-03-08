@@ -6,6 +6,9 @@ This file defines the operating rules for contributors (human and AI) working on
 
 - `vapor` is an invisible-first macOS background sync product.
 - Primary priority is user device impact, not strict real-time sync.
+- Vapor sync scope is a user-selected local directory replicated bidirectionally with a user-selected cloud directory.
+- Vapor is not a full-device backup product and must never broaden scope beyond configured sync roots.
+- If configured sync roots are missing, Vapor should create the local root on-device and ensure the cloud root exists provider-side before regular sync work proceeds.
 - Core guarantees:
   - Never lose intent state.
   - Recover safely after crash/restart.

@@ -30,6 +30,14 @@ pub trait Provider {
         }
         allowed
     }
+
+    fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), String> {
+        logging::info(
+            "Ensuring cloud sync directory",
+            &[("cloud_sync_directory", cloud_sync_directory.to_string())],
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]

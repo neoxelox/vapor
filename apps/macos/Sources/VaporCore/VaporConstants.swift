@@ -7,7 +7,8 @@ public enum VaporConstants {
     public static let vaporLogLevel = "VAPOR_LOG_LEVEL"
     public static let useGitIgnore = "VAPOR_USE_GITIGNORE"
     public static let useVaporIgnore = "VAPOR_USE_VAPORIGNORE"
-    public static let syncDirectories = "VAPOR_SYNC_DIRECTORIES"
+    public static let localSyncDirectory = "VAPOR_LOCAL_SYNC_DIRECTORY"
+    public static let cloudSyncDirectory = "VAPOR_CLOUD_SYNC_DIRECTORY"
     public static let preIgnoreRules = "VAPOR_PRE_IGNORE_RULES"
     public static let postIgnoreRules = "VAPOR_POST_IGNORE_RULES"
   }
@@ -26,7 +27,8 @@ public enum VaporConstants {
     public static let autoLaunchEnabled = true
     public static let useGitIgnore = true
     public static let useVaporIgnore = true
-    public static let syncDirectories = ["~/Vapor"]
+    public static let localSyncDirectory = "~/Vapor"
+    public static let cloudSyncDirectory = "/Vapor"
     public static let postIgnoreRules = ""
     public static let preferredLanguageCode: String? = nil
     public static let timelineEventLimit = 1000

@@ -4,7 +4,8 @@ pub mod env {
     pub const VAPOR_LOG_LEVEL: &str = "VAPOR_LOG_LEVEL";
     pub const VAPOR_USE_GITIGNORE: &str = "VAPOR_USE_GITIGNORE";
     pub const VAPOR_USE_VAPORIGNORE: &str = "VAPOR_USE_VAPORIGNORE";
-    pub const VAPOR_SYNC_DIRECTORIES: &str = "VAPOR_SYNC_DIRECTORIES";
+    pub const VAPOR_LOCAL_SYNC_DIRECTORY: &str = "VAPOR_LOCAL_SYNC_DIRECTORY";
+    pub const VAPOR_CLOUD_SYNC_DIRECTORY: &str = "VAPOR_CLOUD_SYNC_DIRECTORY";
     pub const VAPOR_PRE_IGNORE_RULES: &str = "VAPOR_PRE_IGNORE_RULES";
     pub const VAPOR_POST_IGNORE_RULES: &str = "VAPOR_POST_IGNORE_RULES";
 }
@@ -22,7 +23,8 @@ pub mod runtime {
 pub mod filtering {
     pub const GIT_IGNORE_FILE_NAME: &str = ".gitignore";
     pub const VAPOR_IGNORE_FILE_NAME: &str = ".vaporignore";
-    pub const DEFAULT_SYNC_DIRECTORIES: &[&str] = &["~/Vapor"];
+    pub const DEFAULT_LOCAL_SYNC_DIRECTORY: &str = "~/Vapor";
+    pub const DEFAULT_CLOUD_SYNC_DIRECTORY: &str = "/Vapor";
     pub const DEFAULT_PRE_IGNORE_RULES: &[&str] = &[
         ".git/",
         ".DS_Store",

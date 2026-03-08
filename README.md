@@ -15,7 +15,8 @@ over strict real-time behavior.
 
 ## Product Goals
 
-- Keep a selected local folder (default `~/Drive/`) synced to cloud with durable intent state.
+- Keep one selected local folder (default `~/Vapor`) bidirectionally synced with one selected cloud folder (default `/Vapor`) with durable intent state.
+- Scope sync strictly to that configured folder pair; Vapor is not intended to be full-device backup.
 - Stay low-impact during active development and heavy system load.
 - Defer expensive work under pressure while maintaining eventual consistency.
 - Provide transparent state, diagnostics, and user controls from the macOS app/menubar.
@@ -164,9 +165,12 @@ All user-facing configuration must be documented here with meaning and defaults.
 - `useVaporIgnore` (`Bool`)
   - Default: `true`
   - Purpose: persisted preference for `.vaporignore`-aware daemon local filtering.
-- `syncDirectories` (`[String]`)
-  - Default: `["~/Vapor"]`
-  - Purpose: user-level list of local directories to sync. Missing or non-directory paths are skipped at daemon startup.
+- `localSyncDirectory` (`String`)
+  - Default: `"~/Vapor"`
+  - Purpose: user-level local root directory to replicate to cloud. If missing, Vapor creates it at startup; non-directory paths are rejected.
+- `cloudSyncDirectory` (`String`)
+  - Default: `"/Vapor"`
+  - Purpose: user-level provider cloud root directory to replicate with the local sync directory. Vapor ensures this remote directory exists before sync operations.
 - `preIgnoreRules` (`String`)
   - Default: embedded `.gitignore`-like text with a curated low-impact ignore set.
   - Purpose: user-level baseline rules appended first, before discovered `.gitignore`/`.vaporignore` files.
@@ -215,7 +219,8 @@ Runtime and scripts:
 | `VAPOR_LOG_LEVEL` | Unset (falls back to `VAPOR_ENV`) | Runtime minimum log level (`debug`, `info`, `warning`, `error`). |
 | `VAPOR_USE_GITIGNORE` | `true` | Daemon local filtering toggle for `.gitignore` ingestion. |
 | `VAPOR_USE_VAPORIGNORE` | `true` | Daemon local filtering toggle for `.vaporignore` ingestion. |
-| `VAPOR_SYNC_DIRECTORIES` | Newline-joined value from `vapor.json.syncDirectories` | Daemon local sync directory list source. |
+| `VAPOR_LOCAL_SYNC_DIRECTORY` | Raw value from `vapor.json.localSyncDirectory` | Daemon local sync root directory source. |
+| `VAPOR_CLOUD_SYNC_DIRECTORY` | Raw value from `vapor.json.cloudSyncDirectory` | Daemon cloud sync root directory source. |
 | `VAPOR_PRE_IGNORE_RULES` | Raw value from `vapor.json.preIgnoreRules` | Daemon user-level baseline rules source (embedded `.gitignore`-like text). |
 | `VAPOR_POST_IGNORE_RULES` | Raw value from `vapor.json.postIgnoreRules` | Daemon user-level override rules source (embedded `.gitignore`-like text). |
 

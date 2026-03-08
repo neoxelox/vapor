@@ -73,6 +73,25 @@ impl DaemonApp {
         );
         allowed
     }
+
+    pub fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) {
+        match self
+            .provider
+            .ensure_cloud_sync_directory(cloud_sync_directory)
+        {
+            Ok(_) => logging::info(
+                "Cloud sync directory is ready",
+                &[("cloud_sync_directory", cloud_sync_directory.to_string())],
+            ),
+            Err(error) => logging::error(
+                "Failed to ensure cloud sync directory",
+                &[
+                    ("cloud_sync_directory", cloud_sync_directory.to_string()),
+                    ("error", error),
+                ],
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -98,5 +117,11 @@ mod tests {
         app.set_run_state(RunState::Running, "daemon ready");
         assert_eq!(app.snapshot().run_state, RunState::Running);
         assert_eq!(app.snapshot().reason, "daemon ready");
+    }
+
+    #[test]
+    fn ensure_cloud_sync_directory_does_not_panic() {
+        let app = DaemonApp::default();
+        app.ensure_cloud_sync_directory("/Vapor");
     }
 }

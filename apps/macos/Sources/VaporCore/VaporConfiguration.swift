@@ -4,14 +4,16 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   public var autoLaunchEnabled: Bool
   public var useGitIgnore: Bool
   public var useVaporIgnore: Bool
-  public var syncDirectories: [String]
+  public var localSyncDirectory: String
+  public var cloudSyncDirectory: String
   public var preIgnoreRules: String
   public var postIgnoreRules: String
   public var preferredLanguageCode: String?
   public var timelineEventLimit: Int
 
   public static let defaultPreIgnoreRuleLines = VaporConstants.Defaults.preIgnoreRuleLines
-  public static let defaultSyncDirectories = VaporConstants.Defaults.syncDirectories
+  public static let defaultLocalSyncDirectory = VaporConstants.Defaults.localSyncDirectory
+  public static let defaultCloudSyncDirectory = VaporConstants.Defaults.cloudSyncDirectory
   public static let defaultPreIgnoreRules = VaporConstants.Defaults.preIgnoreRules
   public static let defaultPostIgnoreRules = VaporConstants.Defaults.postIgnoreRules
   public static let defaultPreferredLanguageCode = VaporConstants.Defaults.preferredLanguageCode
@@ -20,7 +22,8 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     autoLaunchEnabled: Bool = VaporConstants.Defaults.autoLaunchEnabled,
     useGitIgnore: Bool = VaporConstants.Defaults.useGitIgnore,
     useVaporIgnore: Bool = VaporConstants.Defaults.useVaporIgnore,
-    syncDirectories: [String] = defaultSyncDirectories,
+    localSyncDirectory: String = defaultLocalSyncDirectory,
+    cloudSyncDirectory: String = defaultCloudSyncDirectory,
     preIgnoreRules: String = defaultPreIgnoreRules,
     postIgnoreRules: String = defaultPostIgnoreRules,
     preferredLanguageCode: String? = defaultPreferredLanguageCode,
@@ -29,7 +32,8 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     self.autoLaunchEnabled = autoLaunchEnabled
     self.useGitIgnore = useGitIgnore
     self.useVaporIgnore = useVaporIgnore
-    self.syncDirectories = syncDirectories
+    self.localSyncDirectory = localSyncDirectory
+    self.cloudSyncDirectory = cloudSyncDirectory
     self.preIgnoreRules = preIgnoreRules
     self.postIgnoreRules = postIgnoreRules
     self.preferredLanguageCode = preferredLanguageCode

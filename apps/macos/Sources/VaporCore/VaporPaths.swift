@@ -5,7 +5,8 @@ public enum VaporPaths {
   public static let environmentKey = VaporConstants.Environment.vaporEnvironment
   public static let useGitIgnoreEnvironmentKey = VaporConstants.Environment.useGitIgnore
   public static let useVaporIgnoreEnvironmentKey = VaporConstants.Environment.useVaporIgnore
-  public static let syncDirectoriesEnvironmentKey = VaporConstants.Environment.syncDirectories
+  public static let localSyncDirectoryEnvironmentKey = VaporConstants.Environment.localSyncDirectory
+  public static let cloudSyncDirectoryEnvironmentKey = VaporConstants.Environment.cloudSyncDirectory
   public static let preIgnoreRulesEnvironmentKey = VaporConstants.Environment.preIgnoreRules
   public static let postIgnoreRulesEnvironmentKey = VaporConstants.Environment.postIgnoreRules
 

@@ -85,8 +85,8 @@ Exit gate:
 - [x] P2-2b Add app setting to toggle `.gitignore` usage (`useGitIgnore`, default `true`).
 - [ ] P2-2c Add user-level ignore rules configured via Vapor app UI and apply them in daemon filtering.
 - [ ] P2-2d Add tests for ignore precedence/merge across defaults, `.vaporignore`, `.gitignore`, and UI rules.
-- [ ] P2-2e Enforce sync scope strictly to configured user `syncDirectories` (including missing-directory skip behavior) and never fall back to whole-device scanning.
-- [ ] P2-2f Add explicit safety tests that invalid/missing sync directories do not trigger any broad/root filesystem watch fallback.
+- [ ] P2-2e Enforce sync scope strictly to configured `localSyncDirectory`/`cloudSyncDirectory` roots (including missing-root auto-create behavior) and never fall back to whole-device scanning.
+- [ ] P2-2f Add explicit safety tests that invalid local sync path and missing-root creation flows do not trigger any broad/root filesystem watch fallback.
 - [ ] P2-3 Implement debounce/coalescing loop (250ms tick, conservative windows).
 - [ ] P2-4 Implement keyed superseding scheduler (latest intent wins per path).
 - [ ] P2-5 Implement throttle controller inputs and 4-state model.
@@ -180,5 +180,5 @@ Exit gate:
 - [ ] T-6 Security validation: Keychain-only secrets + redacted logs.
 - [ ] T-7 Upgrade compatibility validation across app/daemon/schema versions.
 - [ ] T-8 CI parity validation: pull-request lint and tests match local script entry points.
-- [ ] T-9 Scope safety validation: daemon only watches configured sync directories and never escalates to full-device sync.
+- [ ] T-9 Scope safety validation: daemon only watches configured local sync root and never escalates to full-device sync.
 - [ ] T-10 Ignore-rule safety validation: enforce precedence and behavior for `preIgnoreRules` -> `.gitignore` -> `.vaporignore` -> `postIgnoreRules` so low-signal paths stay excluded and user overrides work predictably.
