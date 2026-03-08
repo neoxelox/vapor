@@ -241,11 +241,30 @@ PRs should answer:
 Documentation update policy:
 
 - Non-trivial feature/logic changes must update required documentation in the same change set.
+- Root `README.md` is intentionally concise and acts as a product-facing index; detailed operational and engineering content belongs under `docs/` in topic-specific files.
+- Contributors must preserve and keep current the `README.md` **Features** section whenever capabilities, guarantees, or supported behavior change.
+- Contributors must preserve and keep current the `README.md` **Configuration** section (including `vapor.json` keys, defaults, and `VAPOR_*` environment variables) whenever config/env behavior changes.
+- When README content is shortened or reorganized, no critical information may be dropped: move it into the corresponding `docs/` file (or create a new one) in the same change set.
 - `README.md` should be updated when behavior, setup, operational workflow, or developer commands change.
-- `README.md` must keep a complete user-configuration and `VAPOR_*` environment-variable reference (what each option does and its default); any config/env change must update that reference in the same change set.
 - Non-trivial UI/UX changes must document the intended user experience and note alignment with Apple design conventions.
 - `AGENTS.md` should be updated when a new durable engineering rule, safety invariant, or contributor policy should be remembered for future work.
 - If docs are intentionally not updated, PR description must explain why no documentation changes were needed.
+
+### README style and Features section policy
+
+- The rules in this subsection apply only to the root `README.md` (the product-facing README).
+- Other markdown docs (including nested/module `README.md` files under `docs/`, `apps/`, or `core/`) may use a more technical style appropriate to their audience.
+- Keep root `README.md` user-facing: concise, attractive, and easy to scan.
+- Use short, direct one-liners in root `README.md` **Features** with one emoji per bullet.
+- Prioritize user outcomes and reliability promises (speed feel, low impact, safety, visibility) over implementation internals in root `README.md` **Features**.
+- Avoid specific config key names, file names, env vars, or packaging mechanics in root `README.md` **Features** unless absolutely necessary for user understanding.
+- Avoid naming specific cloud providers inside root `README.md` **Features**; keep wording provider-agnostic (for example, "cloud sync").
+- Avoid device-specific wording such as "laptop" in root `README.md` **Features`; use "device".
+- Keep root `README.md` **Features** aligned with real product status:
+  - "Available now" for shipped behavior.
+  - "In flight and coming next" for planned roadmap items.
+- Do not duplicate nearby root `README.md` section content (for example provider lists in **Cloud Providers**) inside **Features**.
+- When changing root `README.md` feature tone/style, preserve factual accuracy and do not overpromise.
 
 Required in PR description:
 

@@ -2,6 +2,8 @@
 
 This project uses repository script entry points as the source of truth for local and CI validation.
 
+See `docs/ci/overview.md` for workflow scope, triggers, and pinned action versions.
+
 ## Required GitHub status checks
 
 Configure branch protection for `main` to require the following workflow checks:

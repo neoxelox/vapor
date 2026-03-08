@@ -1,99 +1,104 @@
-# vapor
+# Vapor 💨
 
-background cloud sync that won't melt your device 🔥
+**`background cloud sync that won't melt your device 🔥`** - [**`vapor.arn.sh`**](https://vapor.arn.sh)
 
-`vapor` is an invisible-first macOS sync application with a SwiftUI app and a Rust daemon.
-It is designed to auto-launch at login, sync opportunistically, and preserve laptop performance
-over strict real-time behavior.
+## What
 
-## Project Status
+Vapor is an invisible-first cloud sync app that stays out of your way. It keeps a local and a cloud folder in full bidirectional sync with best-effort real-time updates and durable eventual consistency. It works automatically in the background, from startup to shutdown, syncs opportunistically, and is tuned for speed without draining your device.
 
-- Current stage: planning and repository foundation.
-- Product direction: bidirectional eventual consistency for Google Drive in MVP.
-- Primary constraint: do no harm to user workload, battery, and thermal headroom.
-- Pre-GA compatibility policy: backward compatibility is not guaranteed yet; config/state/schema and local interfaces may change during active development.
+## Install
 
-## Product Goals
+> TBD
 
-- Keep one selected local folder (default `~/Vapor`) bidirectionally synced with one selected cloud folder (default `/Vapor`) with durable intent state.
-- Scope sync strictly to that configured folder pair; Vapor is not intended to be full-device backup.
-- Stay low-impact during active development and heavy system load.
-- Defer expensive work under pressure while maintaining eventual consistency.
-- Provide transparent state, diagnostics, and user controls from the macOS app/menubar.
+## Features
 
-## Core Architecture
+Available now:
 
-- SwiftUI app
-  - Onboarding, provider auth, root selection, settings, diagnostics, menubar state.
-  - Auto-launch toggle and daemon control surface.
-- Rust daemon (`core/daemon`, LaunchAgent)
-  - FSEvents ingestion, debounce/coalescing, scheduler, throttle controller.
-  - Durable queue/state, retries, deferred reconcile, provider execution.
-- Provider modules (`core/providers`)
-  - `provider_gdrive` first, `provider_s3`/R2 later via shared provider trait.
-- XPC boundary
-  - Typed status/control API between app and daemon with shared contracts in `core/shared`.
+- ⚡ Fast-feeling background sync designed to stay responsive without stealing your machine.
+- 🪶 Low-impact by design: Vapor defers heavy work under pressure to protect battery and thermals.
+- 🍎 Menubar-first experience that stays out of your way while keeping status and controls one click away.
+- 🚀 Auto-launch at login with resilient crash-loop protection for dependable day-to-day use.
+- 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow.
 
-## macOS App Components and Lifecycle
+In flight and coming next:
 
-- Main app window (`Window` single-instance scene)
-  - Primary configuration and diagnostics UI.
-  - Dock-visible while the window is open.
-- Menubar component (`MenuBarExtra`)
-  - Always-on quick status and control surface while app process is running.
-  - Owns user-facing lifecycle actions (`Open Vapor`, `Quit Vapor`).
-- Background daemon (`vapord` LaunchAgent)
-  - Independent runtime for sync execution and durability.
-  - Must keep running when only the UI window is closed.
-  - Must be shipped inside the same `Vapor.app` bundle at `Contents/MacOS/vapord`.
+- 🔁 Bidirectional cloud sync with durable intent replay and eventual consistency.
+- 🛡 Conflict-safe behavior with deterministic outcomes (keep both copies, never silent overwrite).
+- ⏸️ Pressure-aware throttle modes that adapt sync intensity to real device load.
+- 📈 Clear diagnostics with status reasons, queue visibility, and live activity timeline.
+- 🌩 Storm-aware scheduling and resilient recovery keep big change bursts under control.
 
-Expected lifecycle behavior:
+## Cloud Providers
 
-- Auto-launch at login starts `vapord` and keeps Vapor as a menubar surface without opening the main window.
-- Closing the main window closes the UI and removes Dock presence.
-- Closing the main window does not stop `vapord` and does not remove menubar status/control.
-- Reopening from menubar focuses the existing main window when present, or restores it when closed.
-- Quitting from menubar performs full shutdown semantics (stop daemon, then terminate app process).
+- [Google Drive](https://workspace.google.com/intl/es/products/drive) (current MVP target)
 
-## Runtime Model
+## Benchmarks
 
-- Auto-launch at login is ON by default.
-- Throttle states govern all heavy work:
-  - `IdleDrain`, `Light`, `Throttled`, `Suspended`.
-- Eventual consistency is guaranteed by durable intent persistence and retry logic.
-- Bidirectional safety includes loop prevention and deterministic conflict handling.
+> TBD
 
-## Planning Docs
+## Configuration
 
-- Index: `docs/plans/README.md`
-- Source plan (verbatim): `docs/plans/vapor-original-plan-verbatim.md`
-- Derived macOS plan: `docs/plans/vapor-macos-plan.md`
-- Distribution foundation plan: `docs/plans/vapor-macos-distribution-foundation-plan.md`
-- Execution task list: `docs/plans/vapor-macos-task-list.md`
+All user-facing configuration is documented here with meaning and defaults.
 
-## Architecture and Operations Docs
+All persisted user configuration lives in `<vapor_dir>/vapor.json`.
 
-- Architecture index: `docs/architecture/README.md`
-- Operations index: `docs/operations/README.md`
-- Performance index: `docs/performance/README.md`
+| Key | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `autoLaunchEnabled` | `Bool` | `true` | Controls whether Vapor auto-launches and bootstraps `vapord` at startup/login. |
+| `useGitIgnore` | `Bool` | `true` | Persisted preference for `.gitignore`-aware daemon local filtering. |
+| `useVaporIgnore` | `Bool` | `true` | Persisted preference for `.vaporignore`-aware daemon local filtering. |
+| `localSyncDirectory` | `String` | `"~/Vapor"` | User-level local root directory to replicate to cloud; missing roots are created at startup and non-directory paths are rejected. |
+| `cloudSyncDirectory` | `String` | `"/Vapor"` | User-level provider cloud root directory to replicate with local sync; Vapor ensures this remote directory exists before sync operations. |
+| `preIgnoreRules` | `String` | Embedded `.gitignore`-like low-impact default rules | User-level baseline rules appended first, before discovered `.gitignore` and `.vaporignore` files. |
+| `postIgnoreRules` | `String` | Empty string | User-level override rules appended last, after discovered ignore files. |
+| `preferredLanguageCode` | `String?` | `null` | Optional UI language override code (for example `en`); unsupported values fall back to English. |
+| `timelineEventLimit` | `Int` | `1000` | Persisted cap for timeline and diagnostic event surfaces. |
 
-## Development and Contribution
+### Ignore rules
 
-- Contributor operating rules: `AGENTS.md`
-- License: `LICENSE`
+- Filesystem callback filtering applies before event metadata is recorded.
+- Rule precedence (lowest to highest): `preIgnoreRules` -> `.gitignore` (when enabled, recursive per-directory) -> `.vaporignore` (when enabled, recursive per-directory) -> `postIgnoreRules`.
+- `.vaporignore` supports glob-like rules and `!` unignore rules.
+- `preIgnoreRules` default content covers common low-signal paths such as `.git/`, `node_modules/`, build outputs (`dist/`, `build/`, `out/`), caches, swap/tmp files, logs, and `.env.local`.
 
-Current code bootstrap:
+### Environment Variables
 
-- Rust workspace: root `Cargo.toml` with crates in `core/daemon`, `core/providers`, `core/shared`
-- Daemon binary: `vapord`
-- Swift package: `apps/macos/Package.swift` (`Vapor`, `VaporCore`)
+The following environment variables can be used to override settings.
 
-Implementation work follows the phase checklist in `docs/plans/vapor-macos-task-list.md`,
-starting with repository/documentation hardening before core sync engine code.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VAPOR_DIR` | `~/.vapor` for normal runtime; repo scripts set `./.vapor` | Runtime root for `vapor.json`, logs, and durable state. |
+| `VAPOR_ENV` | Unset (treated as `prod`); repo scripts default to `dev`; package flow defaults to `prod` | Runtime mode (`dev` or `prod`) controlling path fallback and default log level. |
+| `VAPOR_LOG_LEVEL` | Unset (falls back to `VAPOR_ENV`) | Runtime minimum log level (`debug`, `info`, `warning`, `error`). |
+| `VAPOR_USE_GITIGNORE` | `true` | Daemon local filtering toggle for `.gitignore` ingestion. |
+| `VAPOR_USE_VAPORIGNORE` | `true` | Daemon local filtering toggle for `.vaporignore` ingestion. |
+| `VAPOR_LOCAL_SYNC_DIRECTORY` | Raw value from `vapor.json.localSyncDirectory` | Daemon local sync root directory source. |
+| `VAPOR_CLOUD_SYNC_DIRECTORY` | Raw value from `vapor.json.cloudSyncDirectory` | Daemon cloud sync root directory source. |
+| `VAPOR_PRE_IGNORE_RULES` | Raw value from `vapor.json.preIgnoreRules` | Daemon user-level baseline rules source (embedded `.gitignore`-like text). |
+| `VAPOR_POST_IGNORE_RULES` | Raw value from `vapor.json.postIgnoreRules` | Daemon user-level override rules source (embedded `.gitignore`-like text). |
 
-## Developer Runbook (local)
+Build and packaging:
 
-Repository-level script entry points (used by both local development and CI):
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `VAPOR_XCODE_SCHEME` | Unset | Required to run `xcodebuild` in `./scripts/swift/build.sh` when building from an Xcode project/workspace. |
+| `VAPOR_SIGN_IDENTITY` | Empty (ad-hoc signing) | Developer ID identity used by `apps/macos/scripts/package.sh`. |
+| `VAPOR_ENTITLEMENTS` | Empty | Optional entitlements plist path passed to codesign in packaging. |
+| `VAPOR_NOTARY_PROFILE` | Empty | Notarytool keychain profile; when set, packaging performs notarization and stapling. |
+| `VAPOR_BUILD_NUMBER` | `git rev-list --count HEAD` fallback to `1` | Overrides `CFBundleVersion` in packaged app artifacts. |
+
+## Development
+
+This project is intentionally vibe-coded while still following strict reliability, safety, and low-impact engineering rules.
+
+Structure:
+
+- `apps/macos`: SwiftUI app (`Vapor`) and shared app code.
+- `core/daemon`: Rust daemon runtime (`vapord`).
+- `core/providers`: Rust cloud provider integrations.
+- `core/shared`: shared contracts/constants used across app and daemon boundaries.
+
+### Scripts
 
 - Build both stacks (release): `./scripts/build.sh`
 - Build + package macOS app bundle: `./scripts/build.sh package`
@@ -115,162 +120,24 @@ Stack-specific helpers:
 - Swift build: `./scripts/swift/build.sh`
 - macOS app packaging: `apps/macos/scripts/package.sh`
 
-Notes:
+## Agents
 
-- Scripts intentionally skip missing stack artifacts during early bootstrap (for example,
-  no `Cargo.toml` yet or no `apps/macos` project yet).
-- Scripts default `VAPOR_DIR` to repo-local `./.vapor` for local dev/test ergonomics.
-- Scripts default `VAPOR_ENV` to `dev` (and `prod` for `./scripts/build.sh package`).
-- Override runtime root with `VAPOR_DIR=/path/to/vapor ./scripts/test.sh` (same for build/lint/format).
-- `Vapor.app` is a single package that ships both binaries: `Contents/MacOS/Vapor` and `Contents/MacOS/vapord`.
-- Runtime daemon launch path is always the bundled sibling binary (`vapord`) next to the app executable.
-- Swift lint/format scripts intentionally use `swift format` only.
-- If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild build`
-  in `./scripts/swift/build.sh`.
+Use `docs/README.md` as the entrypoint index for agent work. Quick intent mapping:
 
-Release build policy:
+- Product direction/status/goals: `docs/product/status-and-goals.md`
+- Architecture/system boundaries: `docs/architecture/README.md`
+- App/menubar/daemon lifecycle semantics: `docs/architecture/macos-app-lifecycle.md`
+- Runtime/logging/localization policy: `docs/operations/runtime-logging-and-localization.md`
+- CI behavior and required checks: `docs/ci/required-checks.md`
+- Plans and execution sequence: `docs/plans/README.md`
+- Performance budgets and harness: `docs/performance/README.md`
+- Local developer runbook details: `docs/development/runbook.md`
+- Contributor operating rules: `AGENTS.md`
 
-- A single release mode is used and tuned for performance with safe optimizations.
-- Rust release profile uses `opt-level=3`, `lto=fat`, `codegen-units=1`, `panic=abort`, and `strip=symbols`.
-- Swift release build uses whole-module and cross-module optimization flags.
+## Contribute
 
-## Logging
+Feel free to contribute to this project : ) .
 
-- Vapor runtime artifacts are rooted at a single directory controlled by `VAPOR_DIR`.
-- Default runtime directory:
-  - app/daemon runtime: `~/.vapor`
-  - local dev + tests/CI via repo scripts: `./.vapor`
-- Runtime layout:
-  - config: `<vapor_dir>/vapor.json`
-  - logs: `<vapor_dir>/logs/vapor.logs`, `<vapor_dir>/logs/vapord.logs`
-  - state/db reserved path: `<vapor_dir>/state/vapor.sqlite`
-- Runtime log level override: `VAPOR_LOG_LEVEL` (`debug`, `info`, `warning`, `error`).
-- Log line format: `{timestamp} [{level}] ({component}): {message}. key=value ...`
-- Default log level behavior:
-  - `VAPOR_ENV=dev` -> `debug`
-  - `VAPOR_ENV=prod` (or unset) -> `info`
+## License
 
-## User Configuration Reference
-
-All user-facing configuration must be documented here with meaning and defaults.
-
-`vapor.json` (`<vapor_dir>/vapor.json`):
-
-- `autoLaunchEnabled` (`Bool`)
-  - Default: `true`
-  - Purpose: controls whether Vapor auto-launches and bootstraps `vapord` at startup/login.
-- `useGitIgnore` (`Bool`)
-  - Default: `true`
-  - Purpose: persisted preference for `.gitignore`-aware daemon local filtering.
-- `useVaporIgnore` (`Bool`)
-  - Default: `true`
-  - Purpose: persisted preference for `.vaporignore`-aware daemon local filtering.
-- `localSyncDirectory` (`String`)
-  - Default: `"~/Vapor"`
-  - Purpose: user-level local root directory to replicate to cloud. If missing, Vapor creates it at startup; non-directory paths are rejected.
-- `cloudSyncDirectory` (`String`)
-  - Default: `"/Vapor"`
-  - Purpose: user-level provider cloud root directory to replicate with the local sync directory. Vapor ensures this remote directory exists before sync operations.
-- `preIgnoreRules` (`String`)
-  - Default: embedded `.gitignore`-like text with a curated low-impact ignore set.
-  - Purpose: user-level baseline rules appended first, before discovered `.gitignore`/`.vaporignore` files.
-- `postIgnoreRules` (`String`)
-  - Default: empty string.
-  - Purpose: user-level override rules appended last, after discovered ignore files.
-- `preferredLanguageCode` (`String?`)
-  - Default: `null` (use device preferred language).
-  - Purpose: optional UI language override code (for example `en`); when missing or unsupported, Vapor falls back to English.
-- `timelineEventLimit` (`Int`)
-  - Default: `1000`
-  - Purpose: persisted cap for timeline/diagnostic event surfaces.
-
-All persisted user configuration lives in `vapor.json`.
-
-## Local Event Filtering
-
-- Filesystem callback filtering applies before event metadata is recorded.
-- Rule precedence (lowest to highest): `preIgnoreRules` -> `.gitignore` (when enabled, recursive per-directory) -> `.vaporignore` (when enabled, recursive per-directory) -> `postIgnoreRules`.
-- `.vaporignore` supports glob-like rules and `!` unignore rules.
-- `preIgnoreRules` default content covers common low-signal paths such as `.git/`, `node_modules/`, build outputs (`dist/`, `build/`, `out/`), caches, swap/tmp files, logs, and `.env.local`.
-
-## UI Localization
-
-- Source-of-truth user-facing app copy catalogs live at `assets/locales/*.json`.
-- Swift build/test/package scripts sync those catalogs into `apps/macos/Sources/VaporCore/Resources/locales/*.json` before bundling.
-- Current catalog set includes `en.json` (English).
-- Language resolution order: `preferredLanguageCode` override (if set) -> device preferred languages -> English fallback.
-- If a requested language catalog is unavailable, Vapor always falls back to English.
-- Logs remain English-only by design.
-
-Runtime directory is not a `vapor.json` option and is resolved by precedence:
-
-1. `VAPOR_DIR` environment override
-2. `./.vapor` in tests/CI or when `VAPOR_ENV=dev`
-3. `~/.vapor` in normal runtime
-
-## `VAPOR_*` Environment Variable Reference
-
-Runtime and scripts:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `VAPOR_DIR` | `~/.vapor` for normal runtime; repo scripts set `./.vapor` | Runtime root for `vapor.json`, logs, and durable state. |
-| `VAPOR_ENV` | Unset (treated as `prod`); repo scripts default to `dev`; package flow defaults to `prod` | Runtime mode (`dev` or `prod`) controlling path fallback and default log level. |
-| `VAPOR_LOG_LEVEL` | Unset (falls back to `VAPOR_ENV`) | Runtime minimum log level (`debug`, `info`, `warning`, `error`). |
-| `VAPOR_USE_GITIGNORE` | `true` | Daemon local filtering toggle for `.gitignore` ingestion. |
-| `VAPOR_USE_VAPORIGNORE` | `true` | Daemon local filtering toggle for `.vaporignore` ingestion. |
-| `VAPOR_LOCAL_SYNC_DIRECTORY` | Raw value from `vapor.json.localSyncDirectory` | Daemon local sync root directory source. |
-| `VAPOR_CLOUD_SYNC_DIRECTORY` | Raw value from `vapor.json.cloudSyncDirectory` | Daemon cloud sync root directory source. |
-| `VAPOR_PRE_IGNORE_RULES` | Raw value from `vapor.json.preIgnoreRules` | Daemon user-level baseline rules source (embedded `.gitignore`-like text). |
-| `VAPOR_POST_IGNORE_RULES` | Raw value from `vapor.json.postIgnoreRules` | Daemon user-level override rules source (embedded `.gitignore`-like text). |
-
-Build/packaging:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `VAPOR_XCODE_SCHEME` | Unset | Required to run `xcodebuild` in `./scripts/swift/build.sh` when building from an Xcode project/workspace. |
-| `VAPOR_SIGN_IDENTITY` | Empty (ad-hoc signing) | Developer ID identity used by `apps/macos/scripts/package.sh`. |
-| `VAPOR_ENTITLEMENTS` | Empty | Optional entitlements plist path passed to codesign in packaging. |
-| `VAPOR_NOTARY_PROFILE` | Empty | Notarytool keychain profile; when set, packaging performs notarization and stapling. |
-| `VAPOR_BUILD_NUMBER` | `git rev-list --count HEAD` fallback to `1` | Overrides `CFBundleVersion` in packaged app artifacts. |
-
-## Known-good local baseline (Mar 2026)
-
-- macOS: `26.3` (Tahoe)
-- Rust: `rustc 1.93.1 (01f6ddf75 2026-02-11)`
-- Cargo: `cargo 1.93.1 (083ac5135 2025-12-15)`
-- Swift driver: `1.127.15`
-- Swift: `6.2.4 (swiftlang-6.2.4.1.4 clang-1700.6.4.2)`
-- Swift target: `arm64-apple-macosx26.0`
-
-This baseline is a known-good reference for contributors, not a hard pin. Project policy remains
-"latest stable by default" unless a documented blocker requires temporary pinning.
-
-## CI
-
-GitHub Actions workflows are defined in `.github/workflows/`:
-
-- `lint.yml`: runs lint and format-check via repository scripts.
-- `test.yml`: runs test suites via repository scripts.
-
-Toolchain defaults in CI:
-
-- Runner: `macos-latest`
-- Xcode/Swift: `latest-stable`
-- Rust: `stable`
-
-Pinned CI action versions:
-
-- `actions/checkout@v6`
-- `maxim-lobanov/setup-xcode@v1.6.0`
-- `actions-rust-lang/setup-rust-toolchain@v1.9.0`
-- `actions/cache@v5` for Rust (`cargo`) and SwiftPM caches
-
-Dependency source defaults:
-
-- Rust crates: `crates.io` via Cargo
-- Swift packages: SwiftPM (package dependencies)
-
-Both workflows run on pull requests and pushes to `main`, and are intended to mirror local commands.
-
-Branch protection / required checks guidance: `docs/ci/required-checks.md`.
+This project is licensed under the [GPL-3.0 License](https://opensource.org/license/gpl-3-0). Read the [LICENSE](LICENSE) file for details.
