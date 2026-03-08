@@ -15,7 +15,7 @@ The service must default to auto-launch at login, stay low-impact under user loa
 2. Opportunistic sync: aggressively defer under pressure.
 3. Durable correctness: never lose intent state, recover after crashes/restarts.
 4. Best-effort freshness: seconds when idle, minutes when busy.
-5. Provider-extensible engine: Google Drive first, then S3/R2.
+5. Provider-extensible engine: Google Drive first, with first release focused on provider-ready architecture and additional providers later.
 
 ## 2) Hard constraints
 
@@ -40,7 +40,7 @@ The service must default to auto-launch at login, stay low-impact under user loa
    - Local metrics + impact-first auto-tuning.
 3. Providers (`core/providers`, Rust)
     - Provider trait + capabilities.
-    - `provider_gdrive` first, `provider_s3`/R2 next.
+    - `provider_gdrive` first; harden provider abstractions for future adapters (for example iCloud, S3, R2, Proton Drive) without shipping extra providers in first release.
 4. Shared contracts (`core/shared`)
    - App/daemon versioned contract models and shared schema types.
 
@@ -106,7 +106,7 @@ Recommended default conflict policy:
 6. Durability, retries, storm deferral, deferred reconcile, and conflict safety.
 7. XPC contract hardening and full diagnostics UX.
 8. Auto-tuning and performance stabilization.
-9. Provider extensibility and S3/R2 module.
+9. Provider-system extensibility hardening (provider-ready compatibility and performance for future providers, without shipping additional providers in first release).
 10. Optional advanced safeguards and enhancements.
 
 ## 9) Definition of done (applies to every milestone)

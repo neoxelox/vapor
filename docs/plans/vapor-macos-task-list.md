@@ -149,15 +149,17 @@ Exit gate:
 
 - Tuned behavior outperforms static defaults without oscillation or instability.
 
-## Phase 7 - Provider extensibility and S3/R2
+## Phase 7 - Provider-system extensibility hardening
 
-- [ ] P7-1 Implement `provider_s3` root/prefix model and upload/delete primitives.
-- [ ] P7-2 Implement rename emulation (copy+delete) and capability-aware behavior.
-- [ ] P7-3 Validate engine behavior under providers without Drive-like semantics.
+- [ ] P7-1 Finalize provider capability model and trait boundaries so core engine behavior remains provider-neutral.
+- [ ] P7-2 Add provider contract tests with a reference/mock provider to validate compatibility across provider semantics (for example iCloud, R2, S3, Proton Drive style constraints).
+- [ ] P7-3 Add compatibility validation for bidirectional flows, conflicts, tombstones, retries, and throttle behavior through provider abstractions.
+- [ ] P7-4 Add provider-adapter performance checks so abstraction overhead stays low and full-speed sync targets are preserved.
+- [ ] P7-5 Document a provider-onboarding checklist and acceptance criteria for future provider implementations.
 
 Exit gate:
 
-- Engine remains provider-neutral and reliable across at least two providers.
+- Engine is provider-ready (compatibility + performance validated) without shipping additional providers in first release.
 
 ## Phase 8 - Optional safeguards and advanced features
 
@@ -182,3 +184,7 @@ Exit gate:
 - [ ] T-8 CI parity validation: pull-request lint and tests match local script entry points.
 - [ ] T-9 Scope safety validation: daemon only watches configured local sync root and never escalates to full-device sync.
 - [ ] T-10 Ignore-rule safety validation: enforce precedence and behavior for `preIgnoreRules` -> `.gitignore` -> `.vaporignore` -> `postIgnoreRules` so low-signal paths stay excluded and user overrides work predictably.
+
+## Deferred onboarding task
+
+- [ ] O-1 Design and implement the production onboarding flow (information architecture, step sequence, copy, and UX states). When this task starts, first run a clarification pass with the project owner to define the onboarding structure and decisions before implementation.
