@@ -4,6 +4,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   public var autoLaunchEnabled: Bool
   public var useGitIgnore: Bool
   public var useVaporIgnore: Bool
+  public var syncDirectories: [String]
   public var preIgnoreRules: String
   public var postIgnoreRules: String
   public var timelineEventLimit: Int
@@ -37,6 +38,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     "*.log",
     ".env.local",
   ]
+  public static let defaultSyncDirectories = ["~/Vapor"]
   public static let defaultPreIgnoreRules = defaultPreIgnoreRuleLines.joined(separator: "\n")
   public static let defaultPostIgnoreRules = ""
 
@@ -44,6 +46,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     autoLaunchEnabled: Bool = true,
     useGitIgnore: Bool = true,
     useVaporIgnore: Bool = true,
+    syncDirectories: [String] = defaultSyncDirectories,
     preIgnoreRules: String = defaultPreIgnoreRules,
     postIgnoreRules: String = defaultPostIgnoreRules,
     timelineEventLimit: Int = 1000
@@ -51,6 +54,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     self.autoLaunchEnabled = autoLaunchEnabled
     self.useGitIgnore = useGitIgnore
     self.useVaporIgnore = useVaporIgnore
+    self.syncDirectories = syncDirectories
     self.preIgnoreRules = preIgnoreRules
     self.postIgnoreRules = postIgnoreRules
     self.timelineEventLimit = timelineEventLimit

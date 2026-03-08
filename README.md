@@ -164,6 +164,9 @@ All user-facing configuration must be documented here with meaning and defaults.
 - `useVaporIgnore` (`Bool`)
   - Default: `true`
   - Purpose: persisted preference for `.vaporignore`-aware daemon local filtering.
+- `syncDirectories` (`[String]`)
+  - Default: `["~/Vapor"]`
+  - Purpose: user-level list of local directories to sync. Missing or non-directory paths are skipped at daemon startup.
 - `preIgnoreRules` (`String`)
   - Default: embedded `.gitignore`-like text with a curated low-impact ignore set.
   - Purpose: user-level baseline rules appended first, before discovered `.gitignore`/`.vaporignore` files.
@@ -200,6 +203,7 @@ Runtime and scripts:
 | `VAPOR_LOG_LEVEL` | Unset (falls back to `VAPOR_ENV`) | Runtime minimum log level (`debug`, `info`, `warning`, `error`). |
 | `VAPOR_USE_GITIGNORE` | `true` | Daemon local filtering toggle for `.gitignore` ingestion. |
 | `VAPOR_USE_VAPORIGNORE` | `true` | Daemon local filtering toggle for `.vaporignore` ingestion. |
+| `VAPOR_SYNC_DIRECTORIES` | Newline-joined value from `vapor.json.syncDirectories` | Daemon local sync directory list source. |
 | `VAPOR_PRE_IGNORE_RULES` | Raw value from `vapor.json.preIgnoreRules` | Daemon user-level baseline rules source (embedded `.gitignore`-like text). |
 | `VAPOR_POST_IGNORE_RULES` | Raw value from `vapor.json.postIgnoreRules` | Daemon user-level override rules source (embedded `.gitignore`-like text). |
 

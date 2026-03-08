@@ -19,6 +19,7 @@ func loadCreatesDefaultConfigurationAndRuntimeDirectories() throws {
   #expect(configuration.autoLaunchEnabled == true)
   #expect(configuration.useGitIgnore == true)
   #expect(configuration.useVaporIgnore == true)
+  #expect(configuration.syncDirectories == VaporConfiguration.defaultSyncDirectories)
   #expect(configuration.preIgnoreRules == VaporConfiguration.defaultPreIgnoreRules)
   #expect(configuration.postIgnoreRules == VaporConfiguration.defaultPostIgnoreRules)
   #expect(configuration.timelineEventLimit == 1000)
@@ -48,6 +49,7 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
     autoLaunchEnabled: false,
     useGitIgnore: false,
     useVaporIgnore: false,
+    syncDirectories: ["~/Vapor", "~/Desktop/Vapor"],
     preIgnoreRules: "",
     postIgnoreRules: "*.bak",
     timelineEventLimit: 1500
@@ -59,6 +61,7 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
   #expect(loaded.autoLaunchEnabled == false)
   #expect(loaded.useGitIgnore == false)
   #expect(loaded.useVaporIgnore == false)
+  #expect(loaded.syncDirectories == ["~/Vapor", "~/Desktop/Vapor"])
   #expect(loaded.preIgnoreRules.isEmpty)
   #expect(loaded.postIgnoreRules == "*.bak")
   #expect(loaded.timelineEventLimit == 1500)

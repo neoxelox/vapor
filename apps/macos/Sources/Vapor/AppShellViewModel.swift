@@ -26,6 +26,7 @@ final class AppShellViewModel: ObservableObject {
         autoLaunchSettingStore: autoLaunchSettingStore,
         useGitIgnore: configuration.useGitIgnore,
         useVaporIgnore: configuration.useVaporIgnore,
+        syncDirectories: configuration.syncDirectories,
         preIgnoreRules: configuration.preIgnoreRules,
         postIgnoreRules: configuration.postIgnoreRules
       ),
@@ -305,6 +306,7 @@ final class AppShellViewModel: ObservableObject {
     autoLaunchSettingStore: any AutoLaunchSettingStore,
     useGitIgnore: Bool,
     useVaporIgnore: Bool,
+    syncDirectories: [String],
     preIgnoreRules: String,
     postIgnoreRules: String
   ) -> DaemonLifecycleManager {
@@ -319,6 +321,7 @@ final class AppShellViewModel: ObservableObject {
       "VAPOR_DIR": vaporDirectoryURL.path,
       VaporPaths.useGitIgnoreEnvironmentKey: useGitIgnore ? "true" : "false",
       VaporPaths.useVaporIgnoreEnvironmentKey: useVaporIgnore ? "true" : "false",
+      VaporPaths.syncDirectoriesEnvironmentKey: syncDirectories.joined(separator: "\n"),
       VaporPaths.preIgnoreRulesEnvironmentKey: preIgnoreRules,
       VaporPaths.postIgnoreRulesEnvironmentKey: postIgnoreRules,
     ]
