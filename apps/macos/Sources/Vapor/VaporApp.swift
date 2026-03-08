@@ -18,20 +18,20 @@ struct VaporApp: App {
   }
 
   var body: some Scene {
-    Window("Vapor", id: Self.mainWindowID) {
+    Window(viewModel.localized("app_title"), id: Self.mainWindowID) {
       ContentView(viewModel: viewModel)
         .onDisappear {
           viewModel.handleMainWindowClosed()
         }
     }
     .commands {
-      CommandMenu("Sync") {
-        Button("Pause / Resume") {
+      CommandMenu(viewModel.localized("command_sync")) {
+        Button(viewModel.localized("toolbar_pause_resume")) {
           viewModel.cycleSyncState()
         }
         .keyboardShortcut("p")
 
-        Button("Flush Now") {
+        Button(viewModel.localized("command_flush_now")) {
           viewModel.cycleSyncState()
         }
         .keyboardShortcut("f")
@@ -42,7 +42,7 @@ struct VaporApp: App {
       SettingsView(viewModel: viewModel)
     }
 
-    MenuBarExtra("Vapor", systemImage: "wind") {
+    MenuBarExtra(viewModel.localized("app_title"), systemImage: "wind") {
       MenuBarContentView(
         viewModel: viewModel,
         mainWindowID: Self.mainWindowID,

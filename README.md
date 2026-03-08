@@ -173,6 +173,9 @@ All user-facing configuration must be documented here with meaning and defaults.
 - `postIgnoreRules` (`String`)
   - Default: empty string.
   - Purpose: user-level override rules appended last, after discovered ignore files.
+- `preferredLanguageCode` (`String?`)
+  - Default: `null` (use device preferred language).
+  - Purpose: optional UI language override code (for example `en`); when missing or unsupported, Vapor falls back to English.
 - `timelineEventLimit` (`Int`)
   - Default: `1000`
   - Purpose: persisted cap for timeline/diagnostic event surfaces.
@@ -185,6 +188,15 @@ All persisted user configuration lives in `vapor.json`.
 - Rule precedence (lowest to highest): `preIgnoreRules` -> `.gitignore` (when enabled, recursive per-directory) -> `.vaporignore` (when enabled, recursive per-directory) -> `postIgnoreRules`.
 - `.vaporignore` supports glob-like rules and `!` unignore rules.
 - `preIgnoreRules` default content covers common low-signal paths such as `.git/`, `node_modules/`, build outputs (`dist/`, `build/`, `out/`), caches, swap/tmp files, logs, and `.env.local`.
+
+## UI Localization
+
+- Source-of-truth user-facing app copy catalogs live at `assets/locales/*.json`.
+- Swift build/test/package scripts sync those catalogs into `apps/macos/Sources/VaporCore/Resources/locales/*.json` before bundling.
+- Current catalog set includes `en.json` (English).
+- Language resolution order: `preferredLanguageCode` override (if set) -> device preferred languages -> English fallback.
+- If a requested language catalog is unavailable, Vapor always falls back to English.
+- Logs remain English-only by design.
 
 Runtime directory is not a `vapor.json` option and is resolved by precedence:
 

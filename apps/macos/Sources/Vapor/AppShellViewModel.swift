@@ -7,7 +7,9 @@ final class AppShellViewModel: ObservableObject {
   @Published private(set) var state: AppShellState = .initial
   private var daemonLifecycleManager: DaemonLifecycleManager
   private let configurationStore: VaporConfigurationStore
+  private let localizationStore: VaporLocalizationStore
   private var configuration: VaporConfiguration
+  private var localization: VaporLocalizedCatalog
   private let logger = StructuredLogger(component: "app-shell")
   private let lifecycleQueue = DispatchQueue(label: "sh.arn.vapor.lifecycle", qos: .utility)
   private var runtimeController: (any AppRuntimeControlling)?
@@ -18,6 +20,7 @@ final class AppShellViewModel: ObservableObject {
     let configurationStore = VaporConfigurationStore()
     let configuration = configurationStore.load()
     let vaporDirectoryURL = configurationStore.resolveVaporDirectoryURL()
+    let localizationStore = VaporLocalizationStore()
     let autoLaunchSettingStore = VaporConfigurationAutoLaunchSettingStore(
       configurationStore: configurationStore)
     self.init(
@@ -31,6 +34,7 @@ final class AppShellViewModel: ObservableObject {
         postIgnoreRules: configuration.postIgnoreRules
       ),
       configurationStore: configurationStore,
+      localizationStore: localizationStore,
       configuration: configuration
     )
   }
@@ -38,15 +42,23 @@ final class AppShellViewModel: ObservableObject {
   init(
     daemonLifecycleManager: DaemonLifecycleManager,
     configurationStore: VaporConfigurationStore = VaporConfigurationStore(),
+    localizationStore: VaporLocalizationStore = VaporLocalizationStore(),
     configuration: VaporConfiguration? = nil
   ) {
+    let resolvedConfiguration = configuration ?? configurationStore.load()
+
     self.daemonLifecycleManager = daemonLifecycleManager
     self.configurationStore = configurationStore
-    self.configuration = configuration ?? configurationStore.load()
+    self.localizationStore = localizationStore
+    self.configuration = resolvedConfiguration
+    self.localization = localizationStore.resolve(
+      preferredLanguageCodeOverride: resolvedConfiguration.preferredLanguageCode)
 
     state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
     state.useGitIgnore = self.configuration.useGitIgnore
     state.useVaporIgnore = self.configuration.useVaporIgnore
+    state.preferredLanguageCode = self.configuration.preferredLanguageCode
+    state.effectiveLanguageCode = localization.effectiveLanguageCode
     state.vaporDirectoryPath = self.configurationStore.resolveVaporDirectoryURL().path
 
     do {
@@ -64,9 +76,23 @@ final class AppShellViewModel: ObservableObject {
         "auto_launch_enabled": String(state.autoLaunchEnabled),
         "use_gitignore": String(state.useGitIgnore),
         "use_vaporignore": String(state.useVaporIgnore),
+        "preferred_language": state.preferredLanguageCode ?? "system",
+        "effective_language": state.effectiveLanguageCode,
         "vapor_directory": state.vaporDirectoryPath,
       ]
     )
+  }
+
+  var availableLanguageCodes: [String] {
+    localization.availableLanguageCodes
+  }
+
+  func localized(_ key: String) -> String {
+    localization.text(key)
+  }
+
+  func localized(_ key: String, _ arguments: CVarArg...) -> String {
+    localization.formatted(key, arguments)
   }
 
   func configureAppRuntimeControllerIfNeeded(_ runtimeController: any AppRuntimeControlling) {
@@ -276,6 +302,40 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
+  func setPreferredLanguageCode(_ languageCode: String?) {
+    let normalizedLanguageCode = languageCode?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let sanitizedLanguageCode: String?
+    if let normalizedLanguageCode, !normalizedLanguageCode.isEmpty {
+      sanitizedLanguageCode = normalizedLanguageCode.lowercased()
+    } else {
+      sanitizedLanguageCode = nil
+    }
+
+    guard configuration.preferredLanguageCode != sanitizedLanguageCode else {
+      return
+    }
+
+    configuration.preferredLanguageCode = sanitizedLanguageCode
+    refreshLocalization()
+
+    do {
+      try configurationStore.save(configuration)
+      logger.info(
+        "Updated preferred language setting",
+        metadata: [
+          "preferred_language": configuration.preferredLanguageCode ?? "system",
+          "effective_language": state.effectiveLanguageCode,
+        ]
+      )
+    } catch {
+      state.syncState = .error
+      logger.error(
+        "Failed to persist preferred language setting",
+        metadata: ["error": String(describing: error)]
+      )
+    }
+  }
+
   func cycleSyncState() {
     let allStates = SyncSurfaceState.allCases
     guard let currentIndex = allStates.firstIndex(of: state.syncState) else {
@@ -299,6 +359,13 @@ final class AppShellViewModel: ObservableObject {
       daemonLifecycleManager: daemonLifecycleManager,
       runtimeController: runtimeController
     )
+  }
+
+  private func refreshLocalization() {
+    localization = localizationStore.resolve(
+      preferredLanguageCodeOverride: configuration.preferredLanguageCode)
+    state.preferredLanguageCode = configuration.preferredLanguageCode
+    state.effectiveLanguageCode = localization.effectiveLanguageCode
   }
 
   private static func makeDefaultLifecycleManager(

@@ -13,6 +13,8 @@ VAPOR_ENTITLEMENTS="${VAPOR_ENTITLEMENTS:-}"
 VAPOR_NOTARY_PROFILE="${VAPOR_NOTARY_PROFILE:-}"
 export VAPOR_ENV="${VAPOR_ENV:-prod}"
 
+"$ROOT_DIR/scripts/swift/sync-locales.sh"
+
 if [[ "$ICON_PNG" != /* ]]; then
   ICON_PNG="$ROOT_DIR/$ICON_PNG"
 fi

@@ -22,6 +22,40 @@ public enum SyncSurfaceState: String, CaseIterable, Codable, Sendable {
       return "Action required"
     }
   }
+
+  public var labelLocalizationKey: String {
+    switch self {
+    case .idle:
+      return "sync_state_idle_label"
+    case .queued:
+      return "sync_state_queued_label"
+    case .syncing:
+      return "sync_state_syncing_label"
+    case .throttled:
+      return "sync_state_throttled_label"
+    case .suspended:
+      return "sync_state_suspended_label"
+    case .error:
+      return "sync_state_error_label"
+    }
+  }
+
+  public var detailLocalizationKey: String {
+    switch self {
+    case .idle:
+      return "sync_state_idle_detail"
+    case .queued:
+      return "sync_state_queued_detail"
+    case .syncing:
+      return "sync_state_syncing_detail"
+    case .throttled:
+      return "sync_state_throttled_detail"
+    case .suspended:
+      return "sync_state_suspended_detail"
+    case .error:
+      return "sync_state_error_detail"
+    }
+  }
 }
 
 public struct AppShellState: Equatable, Codable, Sendable {
@@ -29,6 +63,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
   public var autoLaunchEnabled: Bool
   public var useGitIgnore: Bool
   public var useVaporIgnore: Bool
+  public var preferredLanguageCode: String?
+  public var effectiveLanguageCode: String
   public var providerName: String
   public var vaporDirectoryPath: String
 
@@ -37,6 +73,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     autoLaunchEnabled: Bool,
     useGitIgnore: Bool,
     useVaporIgnore: Bool,
+    preferredLanguageCode: String?,
+    effectiveLanguageCode: String,
     providerName: String,
     vaporDirectoryPath: String
   ) {
@@ -44,6 +82,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     self.autoLaunchEnabled = autoLaunchEnabled
     self.useGitIgnore = useGitIgnore
     self.useVaporIgnore = useVaporIgnore
+    self.preferredLanguageCode = preferredLanguageCode
+    self.effectiveLanguageCode = effectiveLanguageCode
     self.providerName = providerName
     self.vaporDirectoryPath = vaporDirectoryPath
   }
@@ -53,6 +93,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     autoLaunchEnabled: true,
     useGitIgnore: true,
     useVaporIgnore: true,
+    preferredLanguageCode: VaporConfiguration.defaultPreferredLanguageCode,
+    effectiveLanguageCode: VaporConstants.Localization.defaultLanguageCode,
     providerName: "Google Drive",
     vaporDirectoryPath: VaporPaths.resolveVaporDirectoryURL().path
   )

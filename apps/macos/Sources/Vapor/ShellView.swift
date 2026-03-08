@@ -5,33 +5,39 @@ struct ShellView: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
-      Text("vapor")
+      Text(viewModel.localized("app_title"))
         .font(.largeTitle)
         .fontWeight(.semibold)
 
-      GroupBox("Sync Status") {
+      GroupBox(viewModel.localized("sync_status_group")) {
         VStack(alignment: .leading, spacing: 8) {
-          Text(viewModel.state.statusLine)
-            .font(.headline)
-          Text(viewModel.state.syncState.detail)
+          Text(
+            viewModel.localized(
+              "status_line_format",
+              viewModel.localized(viewModel.state.syncState.labelLocalizationKey),
+              viewModel.state.providerName
+            )
+          )
+          .font(.headline)
+          Text(viewModel.localized(viewModel.state.syncState.detailLocalizationKey))
             .font(.subheadline)
             .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       }
 
-      Toggle("Start vapor at login", isOn: autoLaunchBinding)
+      Toggle(viewModel.localized("settings_start_at_login"), isOn: autoLaunchBinding)
 
-      Text("Runtime directory: \(viewModel.state.vaporDirectoryPath)")
+      Text(viewModel.localized("runtime_directory_format", viewModel.state.vaporDirectoryPath))
         .font(.caption)
         .foregroundStyle(.secondary)
 
       HStack {
-        Button("Pause / Resume") {
+        Button(viewModel.localized("toolbar_pause_resume")) {
           viewModel.cycleSyncState()
         }
 
-        Button("Flush now") {
+        Button(viewModel.localized("toolbar_flush_now")) {
           viewModel.cycleSyncState()
         }
       }
@@ -57,24 +63,30 @@ struct MenuBarContentView: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      Text(viewModel.state.statusLine)
-        .font(.headline)
-      Text(viewModel.state.syncState.detail)
+      Text(
+        viewModel.localized(
+          "status_line_format",
+          viewModel.localized(viewModel.state.syncState.labelLocalizationKey),
+          viewModel.state.providerName
+        )
+      )
+      .font(.headline)
+      Text(viewModel.localized(viewModel.state.syncState.detailLocalizationKey))
         .font(.subheadline)
         .foregroundStyle(.secondary)
       Divider()
-      Button("Open Vapor") {
+      Button(viewModel.localized("menubar_open_vapor")) {
         openVaporAction()
         openWindow(id: mainWindowID)
       }
-      Button("Cycle status") {
+      Button(viewModel.localized("menubar_cycle_status")) {
         viewModel.cycleSyncState()
       }
-      Button("Toggle auto-launch") {
+      Button(viewModel.localized("menubar_toggle_auto_launch")) {
         viewModel.toggleAutoLaunch()
       }
       Divider()
-      Button("Quit Vapor") {
+      Button(viewModel.localized("menubar_quit_vapor")) {
         quitVaporAction()
       }
     }
@@ -88,15 +100,22 @@ struct SettingsView: View {
 
   var body: some View {
     Form {
-      Toggle("Start vapor at login", isOn: autoLaunchBinding)
-      Toggle("Use .gitignore patterns", isOn: useGitIgnoreBinding)
-      Toggle("Use .vaporignore patterns", isOn: useVaporIgnoreBinding)
+      Toggle(viewModel.localized("settings_start_at_login"), isOn: autoLaunchBinding)
+      Toggle(viewModel.localized("settings_use_gitignore"), isOn: useGitIgnoreBinding)
+      Toggle(viewModel.localized("settings_use_vaporignore"), isOn: useVaporIgnoreBinding)
 
-      Text("Runtime directory: \(viewModel.state.vaporDirectoryPath)")
+      Picker(viewModel.localized("settings_language"), selection: languageCodeBinding) {
+        Text(viewModel.localized("settings_language_system_default")).tag(String?.none)
+        ForEach(viewModel.availableLanguageCodes, id: \.self) { code in
+          Text(code).tag(Optional(code))
+        }
+      }
+
+      Text(viewModel.localized("runtime_directory_format", viewModel.state.vaporDirectoryPath))
         .font(.caption)
         .foregroundStyle(.secondary)
 
-      Button("Disable auto-launch and stop now") {
+      Button(viewModel.localized("settings_disable_auto_launch_and_stop_now")) {
         viewModel.disableAutoLaunchAndStopNow()
       }
       .disabled(!viewModel.state.autoLaunchEnabled)
@@ -123,6 +142,13 @@ struct SettingsView: View {
     Binding(
       get: { viewModel.state.useVaporIgnore },
       set: { viewModel.setUseVaporIgnore($0) }
+    )
+  }
+
+  private var languageCodeBinding: Binding<String?> {
+    Binding(
+      get: { viewModel.state.preferredLanguageCode },
+      set: { viewModel.setPreferredLanguageCode($0) }
     )
   }
 }

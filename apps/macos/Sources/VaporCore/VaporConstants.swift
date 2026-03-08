@@ -28,6 +28,7 @@ public enum VaporConstants {
     public static let useVaporIgnore = true
     public static let syncDirectories = ["~/Vapor"]
     public static let postIgnoreRules = ""
+    public static let preferredLanguageCode: String? = nil
     public static let timelineEventLimit = 1000
 
     public static let preIgnoreRuleLines: [String] = [
@@ -61,6 +62,11 @@ public enum VaporConstants {
     ]
 
     public static let preIgnoreRules = preIgnoreRuleLines.joined(separator: "\n")
+  }
+
+  public enum Localization {
+    public static let localesSubdirectory = "locales"
+    public static let defaultLanguageCode = "en"
   }
 
   public enum Daemon {

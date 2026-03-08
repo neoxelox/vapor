@@ -7,12 +7,14 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   public var syncDirectories: [String]
   public var preIgnoreRules: String
   public var postIgnoreRules: String
+  public var preferredLanguageCode: String?
   public var timelineEventLimit: Int
 
   public static let defaultPreIgnoreRuleLines = VaporConstants.Defaults.preIgnoreRuleLines
   public static let defaultSyncDirectories = VaporConstants.Defaults.syncDirectories
   public static let defaultPreIgnoreRules = VaporConstants.Defaults.preIgnoreRules
   public static let defaultPostIgnoreRules = VaporConstants.Defaults.postIgnoreRules
+  public static let defaultPreferredLanguageCode = VaporConstants.Defaults.preferredLanguageCode
 
   public init(
     autoLaunchEnabled: Bool = VaporConstants.Defaults.autoLaunchEnabled,
@@ -21,6 +23,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     syncDirectories: [String] = defaultSyncDirectories,
     preIgnoreRules: String = defaultPreIgnoreRules,
     postIgnoreRules: String = defaultPostIgnoreRules,
+    preferredLanguageCode: String? = defaultPreferredLanguageCode,
     timelineEventLimit: Int = VaporConstants.Defaults.timelineEventLimit
   ) {
     self.autoLaunchEnabled = autoLaunchEnabled
@@ -29,6 +32,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     self.syncDirectories = syncDirectories
     self.preIgnoreRules = preIgnoreRules
     self.postIgnoreRules = postIgnoreRules
+    self.preferredLanguageCode = preferredLanguageCode
     self.timelineEventLimit = timelineEventLimit
   }
 }

@@ -10,7 +10,12 @@ let package = Package(
     .library(name: "VaporCore", targets: ["VaporCore"]),
   ],
   targets: [
-    .target(name: "VaporCore"),
+    .target(
+      name: "VaporCore",
+      resources: [
+        .process("Resources")
+      ]
+    ),
     .executableTarget(name: "Vapor", dependencies: ["VaporCore"]),
     .testTarget(name: "VaporCoreTests", dependencies: ["VaporCore"]),
   ]

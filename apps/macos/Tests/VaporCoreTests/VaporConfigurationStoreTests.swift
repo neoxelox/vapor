@@ -22,6 +22,7 @@ func loadCreatesDefaultConfigurationAndRuntimeDirectories() throws {
   #expect(configuration.syncDirectories == VaporConfiguration.defaultSyncDirectories)
   #expect(configuration.preIgnoreRules == VaporConfiguration.defaultPreIgnoreRules)
   #expect(configuration.postIgnoreRules == VaporConfiguration.defaultPostIgnoreRules)
+  #expect(configuration.preferredLanguageCode == VaporConfiguration.defaultPreferredLanguageCode)
   #expect(configuration.timelineEventLimit == 1000)
   #expect(
     fileManager.fileExists(atPath: VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL).path)
@@ -52,6 +53,7 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
     syncDirectories: ["~/Vapor", "~/Desktop/Vapor"],
     preIgnoreRules: "",
     postIgnoreRules: "*.bak",
+    preferredLanguageCode: "en",
     timelineEventLimit: 1500
   )
 
@@ -64,6 +66,7 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
   #expect(loaded.syncDirectories == ["~/Vapor", "~/Desktop/Vapor"])
   #expect(loaded.preIgnoreRules.isEmpty)
   #expect(loaded.postIgnoreRules == "*.bak")
+  #expect(loaded.preferredLanguageCode == "en")
   #expect(loaded.timelineEventLimit == 1500)
 
   try fileManager.removeItem(at: rootURL)

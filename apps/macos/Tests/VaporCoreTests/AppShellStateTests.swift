@@ -9,6 +9,8 @@ func initialStateUsesSafeDefaults() {
   #expect(state.autoLaunchEnabled)
   #expect(state.useGitIgnore)
   #expect(state.useVaporIgnore)
+  #expect(state.preferredLanguageCode == nil)
+  #expect(state.effectiveLanguageCode == "en")
   #expect(state.providerName == "Google Drive")
   #expect(!state.vaporDirectoryPath.isEmpty)
 }
@@ -20,6 +22,8 @@ func statusLineIncludesStateAndProvider() {
     autoLaunchEnabled: true,
     useGitIgnore: true,
     useVaporIgnore: true,
+    preferredLanguageCode: nil,
+    effectiveLanguageCode: "en",
     providerName: "Google Drive",
     vaporDirectoryPath: "~/.vapor"
   )

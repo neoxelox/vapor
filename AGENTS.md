@@ -185,6 +185,18 @@ It does not override the "latest stable" policy above.
   3. update docs/tests in the same change set.
 - Avoid duplicated hardcoded literals for `VAPOR_*` keys and shared defaults outside the constants modules unless there is a documented, temporary exception.
 
+## 8.7) Localization and user-facing copy policy
+
+- User-facing UI copy source-of-truth catalogs must live under `assets/locales/*.json`.
+- Swift workflow scripts must sync locale catalogs into `apps/macos/Sources/VaporCore/Resources/locales/*.json` before build/test/package.
+- Logs and internal diagnostics text may remain English-only.
+- Language selection behavior must preserve safe fallback order:
+  1. user `preferredLanguageCode` override,
+  2. device preferred language list,
+  3. English (`en`) fallback.
+- When adding or changing user-facing UI text, contributors must update `en.json` (and any other available catalogs) in the same change set.
+- If a translation key is missing in a non-English catalog, fallback behavior must remain deterministic and resolve to English.
+
 ## 9) Required test matrix
 
 Every substantial change must include relevant test updates.

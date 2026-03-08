@@ -17,9 +17,12 @@ Current implementation notes:
 - `VaporCore` includes `DaemonLifecycleManager` for default auto-launch policy, toggle semantics, crash-loop relaunch backoff, and login-item registration.
 - `VaporCore` includes `AppLifecycleCoordinator` for app-window/menubar lifecycle actions (Dock presence, daemon stop on quit).
 - `VaporCore` includes `VaporConfigurationStore` + `VaporPaths` for runtime directory resolution and `vapor.json` persistence.
+- `VaporCore` includes `VaporLocalizationStore` for JSON-catalog UI copy lookup with device-language selection and English fallback.
+- Locale source-of-truth catalogs live in `assets/locales/*.json` and are synced by scripts into `Sources/VaporCore/Resources/locales/*.json` before Swift build/test/package.
 - `VaporCore` includes a concrete `LaunchAgentController` that writes `~/Library/LaunchAgents/<label>.plist` and manages lifecycle with `launchctl`.
 - `AppShellViewModel` uses lifecycle defaults backed by `LaunchAgentController` and `SMAppService.mainApp` integration to restore Vapor at login in menubar-only mode.
 - Settings/config surface includes `useGitIgnore`, `useVaporIgnore`, `syncDirectories`, `preIgnoreRules`, and `postIgnoreRules`, persisted in `vapor.json` and exported to daemon launch env as `VAPOR_USE_GITIGNORE`, `VAPOR_USE_VAPORIGNORE`, `VAPOR_SYNC_DIRECTORIES`, `VAPOR_PRE_IGNORE_RULES`, and `VAPOR_POST_IGNORE_RULES`.
+- Settings/config surface includes `preferredLanguageCode` to override UI language selection; when unset or unavailable, app copy falls back to device language then English.
 - Startup performs daemon lifecycle bootstrap asynchronously so app window launch stays responsive.
 - Menubar provides explicit lifecycle controls: `Open Vapor` restores Dock/window surface and `Quit Vapor` requests daemon stop before app termination.
 - Distribution artifacts are produced by `apps/macos/scripts/package.sh` (source of truth for app packaging, signing, and optional notarization).

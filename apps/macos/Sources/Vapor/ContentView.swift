@@ -1,10 +1,26 @@
 import SwiftUI
 
-private enum SidebarDestination: String, CaseIterable, Identifiable {
-  case dashboard = "Dashboard"
-  case diagnostics = "Diagnostics"
+private enum SidebarDestination: CaseIterable, Identifiable {
+  case dashboard
+  case diagnostics
 
-  var id: String { rawValue }
+  var id: String {
+    switch self {
+    case .dashboard:
+      return "dashboard"
+    case .diagnostics:
+      return "diagnostics"
+    }
+  }
+
+  var localizationKey: String {
+    switch self {
+    case .dashboard:
+      return "nav_dashboard"
+    case .diagnostics:
+      return "nav_diagnostics"
+    }
+  }
 
   var symbolName: String {
     switch self {
@@ -23,22 +39,25 @@ struct ContentView: View {
   var body: some View {
     NavigationSplitView {
       List(SidebarDestination.allCases, selection: $selection) { destination in
-        Label(destination.rawValue, systemImage: destination.symbolName)
+        Label(viewModel.localized(destination.localizationKey), systemImage: destination.symbolName)
           .tag(destination)
       }
       .navigationSplitViewColumnWidth(min: 180, ideal: 210)
-      .navigationTitle("Vapor")
+      .navigationTitle(viewModel.localized("app_title"))
     } detail: {
       detailView
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .navigationTitle(selection?.rawValue ?? "Vapor")
+        .navigationTitle(
+          selection.map { viewModel.localized($0.localizationKey) }
+            ?? viewModel.localized("app_title")
+        )
     }
     .toolbar {
       ToolbarItemGroup {
-        Button("Pause / Resume", systemImage: "pause.circle") {
+        Button(viewModel.localized("toolbar_pause_resume"), systemImage: "pause.circle") {
           viewModel.cycleSyncState()
         }
-        Button("Flush now", systemImage: "arrow.clockwise.circle") {
+        Button(viewModel.localized("toolbar_flush_now"), systemImage: "arrow.clockwise.circle") {
           viewModel.cycleSyncState()
         }
       }
@@ -61,23 +80,33 @@ private struct DiagnosticsSummaryView: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
-      GroupBox("Current Status") {
+      GroupBox(viewModel.localized("diagnostics_current_status")) {
         VStack(alignment: .leading, spacing: 8) {
-          Text(viewModel.state.statusLine)
-            .font(.headline)
-          Text(viewModel.state.syncState.detail)
+          Text(
+            viewModel.localized(
+              "status_line_format",
+              viewModel.localized(viewModel.state.syncState.labelLocalizationKey),
+              viewModel.state.providerName
+            )
+          )
+          .font(.headline)
+          Text(viewModel.localized(viewModel.state.syncState.detailLocalizationKey))
             .font(.subheadline)
             .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       }
 
-      GroupBox("Lifecycle") {
+      GroupBox(viewModel.localized("diagnostics_lifecycle")) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Auto-launch is \(viewModel.state.autoLaunchEnabled ? "enabled" : "disabled")")
-          Text("Provider: \(viewModel.state.providerName)")
+          Text(
+            viewModel.localized(
+              viewModel.state.autoLaunchEnabled
+                ? "diagnostics_auto_launch_enabled" : "diagnostics_auto_launch_disabled"
+            ))
+          Text(viewModel.localized("diagnostics_provider_format", viewModel.state.providerName))
             .foregroundStyle(.secondary)
-          Text("Runtime directory: \(viewModel.state.vaporDirectoryPath)")
+          Text(viewModel.localized("runtime_directory_format", viewModel.state.vaporDirectoryPath))
             .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
