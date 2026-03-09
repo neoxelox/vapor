@@ -107,6 +107,7 @@ Structure:
 - Format check both stacks (included in lint): `./scripts/format.sh check`
 - Format apply both stacks: `./scripts/format.sh apply`
 - Test both stacks: `./scripts/test.sh`
+- Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
 
 Stack-specific helpers:
 

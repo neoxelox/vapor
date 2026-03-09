@@ -24,6 +24,8 @@ The service must default to auto-launch at login, stay low-impact under user loa
 - Pressure-aware throttling is mandatory and drives all heavy work.
 - Eventual consistency is required; strict real-time is not required.
 - Intent durability is mandatory even if uploads are deferred for long periods.
+- Bounded memory/backpressure is mandatory; storm paths must compact/coalesce instead of growing unbounded in-memory maps.
+- Performance acceptance budgets must be explicit and enforceable in script/CI gates (not narrative-only).
 
 ## 3) Product architecture
 
@@ -96,16 +98,25 @@ Recommended default conflict policy:
 - Auto-tuning cadence 60-120s, one safe adjustment per cycle.
 - Diagnostics must always expose the current throttle reason and sync blockers.
 
+## 7.1) Initial performance acceptance SLOs
+
+- Idle baseline (10m no-sync window): daemon CPU avg <= 1%, p95 <= 3%.
+- Active coding/load: daemon CPU avg <= 5%, p95 <= 12%; no sustained reconcile outside `IdleDrain`.
+- `Suspended` state: hashing/uploads remain disabled; only lightweight coalescing and minimal queue bookkeeping run.
+- FSEvents callback remains hot-path safe (p99 <= 2ms) and performs no DB/hash/network work.
+- Event/intents memory is bounded with deterministic compaction/backpressure behavior under storms.
+- After pressure clears, backlog convergence meets benchmark-defined target windows.
+
 ## 8) Milestone order
 
 1. Repository/documentation foundation and contributor operating model.
 2. App shell + daemon lifecycle + auto-launch.
 3. Native app bundle/distribution foundation (script-first packaging, signing, notarization path).
-4. Low-impact local engine core.
-5. Google Drive provider with bidirectional event flow.
-6. Durability, retries, storm deferral, deferred reconcile, and conflict safety.
+4. Low-impact local engine core plus durability substrate (durable queue, retries, storm deferral, interruptible reconcile, and bounded backpressure).
+5. Google Drive provider with bidirectional event flow on top of durable substrate.
+6. Conflict/tombstone safety and deterministic race handling hardening.
 7. XPC contract hardening and full diagnostics UX.
-8. Auto-tuning and performance stabilization.
+8. Auto-tuning and performance-budget enforcement.
 9. Provider-system extensibility hardening (provider-ready compatibility and performance for future providers, without shipping additional providers in first release).
 10. Optional advanced safeguards and enhancements.
 
@@ -120,7 +131,7 @@ Recommended default conflict policy:
 
 ## 10) Documentation deliverables tied to this plan
 
-- `README.md` must become an operator/developer guide (not just project title).
+- Root `README.md` must remain a concise product-facing index; detailed operator/developer guidance belongs under `docs/` and must stay linked/current.
 - `.gitignore` must cover Rust + Swift/Xcode + macOS + local secret/state artifacts.
 - `AGENTS.md` must define contribution rules, boundaries, test requirements, and safety playbooks.
 
@@ -152,5 +163,6 @@ Recommended default conflict policy:
 - GitHub Actions workflows must run on pull requests and main-branch pushes:
   - lint workflow: executes Swift and Rust lint/format-check paths.
   - test workflow: executes Swift and Rust test suites.
-- CI should report separate checks for lint and tests and fail fast on regressions.
+- benchmark/perf workflow should run via scripts as a release gate with threshold-based regression checks.
+- CI should report separate checks for lint, tests, and benchmark runs (when enabled) and fail fast on regressions.
 - Caching and toolchain pinning should be used to keep CI reliable and reasonably fast.

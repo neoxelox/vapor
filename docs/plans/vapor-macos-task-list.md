@@ -15,7 +15,7 @@ Status legend:
 ## Phase 0 - Repository foundation and planning docs
 
 - [x] P0-1 Define monorepo layout (`apps/macos`, `core/daemon`, `core/providers`, `core/shared`, `docs`).
-- [x] P0-2 Expand root `README.md` to production-grade project/operator/developer guide.
+- [x] P0-2 Keep root `README.md` concise/product-facing and move detailed operator/developer guidance into `docs/`.
 - [x] P0-3 Upgrade `.gitignore` for Rust + Swift/Xcode + macOS + runtime/state/secrets artifacts.
 - [x] P0-4 Create comprehensive `AGENTS.md` with boundaries, standards, tests, and safety policy.
 - [x] P0-5 Add `docs/architecture/` skeleton and baseline diagrams/contracts placeholders.
@@ -29,7 +29,9 @@ Status legend:
 - [x] P0-13 Define OAuth/provider operations plan (PKCE flow, token refresh failure handling).
 - [x] P0-14 Define state schema versioning, migration test strategy, and rollback posture.
 - [x] P0-15 Define app-daemon compatibility matrix and upgrade/rollback policy.
-- [x] P0-16 Define measurable acceptance budgets and benchmark harness approach.
+- [x] P0-16 Define measurable acceptance budget categories and benchmark harness approach.
+- [x] P0-17 Convert budget categories into explicit numeric SLO thresholds for idle/load/storm/recovery scenarios.
+- [x] P0-18 Define benchmark/perf CI gating policy (release-only invocation, thresholds, and failure behavior).
 
 Exit gate:
 
@@ -69,6 +71,7 @@ Exit gate:
 - [x] P1D-18 Add explicit menubar lifecycle controls for `Open Vapor` (reopen/focus main window) and `Quit Vapor` (request daemon stop then terminate app).
 - [x] P1D-19 Add lifecycle coverage tests for: window close keeps daemon alive, reopen from menubar works, and menubar quit executes daemon stop path before app termination.
 - [x] P1D-20 Update app lifecycle docs (`README.md`, `apps/macos/README.md`, `AGENTS.md`) to define app-window vs menubar vs daemon responsibilities.
+- [ ] P1D-21 Add packaging/lifecycle assertions that `dist/Vapor.app` always contains `Contents/MacOS/Vapor` and `Contents/MacOS/vapord`, and runtime daemon launch resolves the bundled sibling binary only.
 
 Exit gate:
 
@@ -76,8 +79,9 @@ Exit gate:
 - `apps/macos/scripts/package.sh` produces `dist/Vapor.app` and `dist/Vapor.zip`.
 - CI can run the packaging path non-interactively.
 - Closing the main window leaves menubar + daemon running, and quitting from menubar performs full shutdown semantics.
+- `dist/Vapor.app` always embeds both `Contents/MacOS/Vapor` and `Contents/MacOS/vapord`, and runtime launch targets the bundled daemon path.
 
-## Phase 2 - Low-impact local engine core
+## Phase 2 - Low-impact local engine core + durability substrate
 
 - [x] P2-1 Implement FSEvents recursive watcher with minimal callback work only.
 - [x] P2-2 Implement default excludes + `.vaporignore` parser and matcher.
@@ -87,14 +91,22 @@ Exit gate:
 - [ ] P2-2d Add tests for ignore precedence/merge across defaults, `.vaporignore`, `.gitignore`, and UI rules.
 - [ ] P2-2e Enforce sync scope strictly to configured `localSyncDirectory`/`cloudSyncDirectory` roots (including missing-root auto-create behavior) and never fall back to whole-device scanning.
 - [ ] P2-2f Add explicit safety tests that invalid local sync path and missing-root creation flows do not trigger any broad/root filesystem watch fallback.
-- [ ] P2-3 Implement debounce/coalescing loop (250ms tick, conservative windows).
-- [ ] P2-4 Implement keyed superseding scheduler (latest intent wins per path).
-- [ ] P2-5 Implement throttle controller inputs and 4-state model.
-- [ ] P2-6 Gate planner/uploader worker caps strictly by throttle state.
+- [ ] P2-3 Implement bounded in-memory event/intent maps with deterministic caps and compaction/backpressure behavior.
+- [ ] P2-4 Implement debounce/coalescing loop (250ms tick, conservative windows).
+- [ ] P2-5 Implement keyed superseding scheduler (latest intent wins per path).
+- [ ] P2-6 Implement throttle controller inputs and 4-state model.
+- [ ] P2-7 Gate planner/uploader worker caps strictly by throttle state.
+- [ ] P2-8 Implement durable queue/state DB with at-least-once semantics.
+- [ ] P2-9 Implement retries with exponential backoff + jitter + rate-limit-aware slowdown.
+- [ ] P2-10 Implement storm detection triggers and deferred `RECONCILE_SUBTREE` scheduling.
+- [ ] P2-11 Implement interruptible reconcile with idle-biased execution.
+- [ ] P2-12 Add microbench/regression tests for FSEvents callback, debounce/coalescing loop, and scheduler superseding paths.
+- [ ] P2-13 Add load/stress tests for memory/backpressure caps under large pending-intent storms.
 
 Exit gate:
 
 - Under synthetic load, CPU and I/O impact stay bounded while queue converges eventually.
+- Under storm load, in-memory event/intent structures remain bounded and backpressure behavior is deterministic.
 
 ## Phase 3 - Google Drive provider plus bidirectional flow
 
@@ -102,25 +114,26 @@ Exit gate:
 - [ ] P3-2 Implement `provider_gdrive` auth/refresh + remote root initialization.
 - [ ] P3-3 Implement upload paths (multipart small, resumable large).
 - [ ] P3-4 Implement remote changes polling (low frequency, throttle-aware).
-- [ ] P3-5 Implement remote-to-local apply pipeline with durable intents.
+- [ ] P3-5 Implement remote-to-local apply pipeline using durable queue/state intents.
 - [ ] P3-6 Implement self-write loop prevention (`self_write_cache`, op IDs, TTL rules).
+- [ ] P3-7 Add adaptive remote polling cadence/request budgeting tied to throttle state and recent change rates.
+- [ ] P3-8 Add provider metadata caching and resumable upload chunk auto-sizing to improve throughput without impact spikes.
 
 Exit gate:
 
-- Bidirectional Drive sync works end-to-end under normal conditions with durable recovery.
+- Bidirectional Drive sync works end-to-end under normal conditions with durable recovery and throttle-safe provider behavior.
 
-## Phase 4 - Durability, storms, reconcile, conflicts
+## Phase 4 - Bidirectional safety, conflicts, and deletion semantics
 
-- [ ] P4-1 Implement durable queue/state DB with at-least-once semantics.
-- [ ] P4-2 Implement retries with exponential backoff + jitter.
-- [ ] P4-3 Implement storm detection triggers and deferred `RECONCILE_SUBTREE` scheduling.
-- [ ] P4-4 Implement interruptible reconcile with idle-biased execution.
-- [ ] P4-5 Implement bidirectional conflict policy (keep both copies; no silent overwrite).
-- [ ] P4-6 Implement tombstone/delete reconciliation and restart-safe replay.
+- [ ] P4-1 Implement bidirectional conflict policy (keep both copies; no silent overwrite).
+- [ ] P4-2 Implement tombstone/delete reconciliation and restart-safe replay.
+- [ ] P4-3 Implement deterministic race-resolution rules for simultaneous edits, rename+modify, and delete/restore paths.
+- [ ] P4-4 Add bidirectional race integration tests for conflict handling, tombstones, and loop-prevention behavior.
+- [ ] P4-5 Add corruption-recovery validation for queue/tombstone state under crash + restart.
 
 Exit gate:
 
-- No lost intent across restarts and deterministic behavior under conflict/delete races.
+- No lost intent across restarts and deterministic behavior under conflict/delete/race scenarios.
 
 ## Phase 5 - XPC contract and diagnostics UX
 
@@ -144,6 +157,8 @@ Exit gate:
 - [ ] P6-2 Implement tuning loop cadence (60-120s) with one small change per cycle.
 - [ ] P6-3 Tune priority order: impact reduction, rate-limit avoidance, then latency.
 - [ ] P6-4 Tune polling/debounce/concurrency/storm thresholds within safe bounds.
+- [ ] P6-5 Add hysteresis/min-dwell guardrails and rollback-on-regression safety to avoid oscillation.
+- [ ] P6-6 Bind tuning decisions to acceptance SLOs and freeze unsafe adjustments when budgets are violated.
 
 Exit gate:
 
@@ -184,7 +199,14 @@ Exit gate:
 - [ ] T-8 CI parity validation: pull-request lint and tests match local script entry points.
 - [ ] T-9 Scope safety validation: daemon only watches configured local sync root and never escalates to full-device sync.
 - [ ] T-10 Ignore-rule safety validation: enforce precedence and behavior for `preIgnoreRules` -> `.gitignore` -> `.vaporignore` -> `postIgnoreRules` so low-signal paths stay excluded and user overrides work predictably.
+- [ ] T-11 Performance SLO validation: idle/load/storm/recovery benchmarks pass defined thresholds and configured CI gates.
+- [ ] T-12 Memory/backpressure validation: bounded `event_map`/intent structures remain within defined caps under storm-scale workloads.
+- [ ] T-13 Auto-tuning stability validation: throttle/tuning decisions avoid oscillation and rollback unsafe adjustments.
 
 ## Deferred onboarding task
 
 - [ ] O-1 Design and implement the production onboarding flow (information architecture, step sequence, copy, and UX states). When this task starts, first run a clarification pass with the project owner to define the onboarding structure and decisions before implementation.
+
+## Deferred performance tuning task
+
+- [ ] PT-1 Tune `./scripts/perf.sh` smoke thresholds using real CI/release baseline history so the `perf` gate becomes stricter at catching regressions without becoming flaky; update the documented defaults and release-gate policy in the same change set.

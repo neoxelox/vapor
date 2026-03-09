@@ -16,6 +16,7 @@
 - Format check both stacks: `./scripts/format.sh check`
 - Format apply both stacks: `./scripts/format.sh apply`
 - Test both stacks: `./scripts/test.sh`
+- Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
 
 ## Stack helpers
 
@@ -43,5 +44,6 @@
 ## Release build policy
 
 - A single release mode is used and tuned for performance with safe optimizations.
+- The GitHub release pipeline runs `perf.yml` first; the `release` job proceeds only with `needs: perf`.
 - Rust release profile uses `opt-level=3`, `lto=fat`, `codegen-units=1`, `panic=abort`, and `strip=symbols`.
 - Swift release build uses whole-module and cross-module optimization flags.

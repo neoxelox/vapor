@@ -11,6 +11,11 @@ Configure branch protection for `main` to require the following workflow checks:
 - `lint`
 - `test`
 
+Release-only performance gate:
+
+- `perf` is a reusable workflow invoked by `release.yml` for versioned releases.
+- It is not scheduled and is not a pull-request required status check.
+
 ## Workflow to script mapping
 
 Execution environment defaults:
@@ -40,6 +45,15 @@ Dependency source defaults:
   - `./scripts/lint.sh`
 - Test workflow (`.github/workflows/test.yml`)
   - `./scripts/test.sh`
+- Perf workflow (`.github/workflows/perf.yml`)
+  - trigger: `workflow_call` from `.github/workflows/release.yml`
+  - thresholds via env: `VAPOR_PERF_SMOKE_RUST_MAX_SECONDS` (default `600`), `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS` (default `900`)
+  - `./scripts/perf.sh`
+- Release workflow (`.github/workflows/release.yml`)
+  - trigger: pushed `v*` tags and manual reruns
+  - `release` job declares `needs: perf`
+  - `./scripts/build.sh package`
+  - `gh release create/edit/upload`
 
 ## Local parity command set
 
@@ -48,4 +62,10 @@ Run the same validations locally before opening a PR:
 - `./scripts/lint.sh`
 - `./scripts/test.sh`
 
+For performance-sensitive changes, run:
+
+- `./scripts/perf.sh`
+
 `./scripts/lint.sh` includes format checks (`./scripts/format.sh check`).
+
+Release workflow is tag-driven and should not be configured as a required status check for pull requests on `main`.
