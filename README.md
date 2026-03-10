@@ -80,8 +80,8 @@ Structure:
 - Build + package macOS app bundle: `./scripts/build.sh package`
 - Clean build/dist artifacts: `./scripts/clean.sh`
 - Lint both stacks: `./scripts/lint.sh`
+- Format both stacks: `./scripts/format.sh`
 - Format check both stacks (included in lint): `./scripts/format.sh check`
-- Format apply both stacks: `./scripts/format.sh apply`
 - Test both stacks: `./scripts/test.sh`
 - Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
 
@@ -100,7 +100,7 @@ Stack-specific helpers:
 ### Releases
 
 1. Update `CHANGELOG.md` with the target version section and date.
-2. Run `./scripts/format.sh apply`, `./scripts/lint.sh`, and `./scripts/test.sh`.
+2. Run `./scripts/format.sh`, `./scripts/lint.sh`, and `./scripts/test.sh`.
 3. Create an annotated tag: stable `vX.Y.Z` or prerelease `vX.Y.Z-rc.N`, `vX.Y.Z-beta.N`, or `vX.Y.Z-alpha.N`.
 4. Push the tag to GitHub.
 5. Wait for `lint`, `test`, `perf`, and `release` to pass on the tag.

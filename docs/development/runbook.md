@@ -13,8 +13,8 @@
 - Build + package macOS app bundle: `./scripts/build.sh package`
 - Clean build and dist artifacts: `./scripts/clean.sh`
 - Lint both stacks: `./scripts/lint.sh`
+- Format both stacks: `./scripts/format.sh`
 - Format check both stacks: `./scripts/format.sh check`
-- Format apply both stacks: `./scripts/format.sh apply`
 - Test both stacks: `./scripts/test.sh`
 - Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
 

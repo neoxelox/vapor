@@ -58,10 +58,10 @@ Release invariants:
    - Ensure docs and CI references are current.
 
 2. Validate before tagging
-   - Run required checks in order:
-     - `./scripts/format.sh apply`
-     - `./scripts/lint.sh`
-     - `./scripts/test.sh`
+    - Run required checks in order:
+      - `./scripts/format.sh`
+      - `./scripts/lint.sh`
+      - `./scripts/test.sh`
    - Optionally run local package rehearsal: `./scripts/build.sh package`.
 
 3. Create annotated tag

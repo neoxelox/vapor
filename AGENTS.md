@@ -158,7 +158,7 @@ It does not override the "latest stable" policy above.
 
 - Contributors must run repository wrapper scripts under `scripts/` instead of invoking raw tool commands directly for routine validation.
 - Required validation order is:
-  1. `./scripts/format.sh apply`
+  1. `./scripts/format.sh`
   2. `./scripts/lint.sh`
   3. `./scripts/test.sh`
 - Rationale: wrapper scripts set required project environment (for example log routing and other workflow invariants).
