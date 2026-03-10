@@ -9,3 +9,4 @@ mkdir -p "$VAPOR_DIR/logs" "$VAPOR_DIR/state"
 
 "$ROOT_DIR/scripts/rust/test.sh"
 "$ROOT_DIR/scripts/swift/test.sh"
+bash "$ROOT_DIR/scripts/tests/version.sh"

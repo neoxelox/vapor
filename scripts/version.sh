@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION_FILE="$ROOT_DIR/VERSION"
 CARGO_TOML="$ROOT_DIR/Cargo.toml"
+CHANGELOG_FILE="$ROOT_DIR/CHANGELOG.md"
+RELEASE_BRANCH="main"
 
 usage() {
   cat <<'EOF'
@@ -14,11 +16,11 @@ Commands:
   metadata                   Print build metadata as shell KEY=value pairs
   check-sync                 Fail if Cargo.toml does not match VERSION
   sync                       Sync Cargo.toml from VERSION
-  set <version>              Set VERSION to X.Y.Z or X.Y.Z-(alpha|beta|rc).N and sync
-  bump <major|minor|patch>   Bump the stable base version and sync
+  set <version>              Prepare a release commit/tag for X.Y.Z or X.Y.Z-(alpha|beta|rc).N
+  bump <major|minor|patch>   Prepare a stable release commit/tag after bumping the base version
   prerelease <alpha|beta|rc> [number]
-                             Set or increment a prerelease version and sync
-  release                    Strip any prerelease suffix and sync
+                             Prepare a prerelease commit/tag by setting or incrementing that track
+  release                    Prepare a stable release commit/tag by stripping the prerelease suffix
 EOF
 }
 
@@ -33,6 +35,7 @@ VERSION_PATCH=""
 VERSION_PRERELEASE_LABEL=""
 VERSION_PRERELEASE_NUMBER=""
 CURRENT_VERSION=""
+CURRENT_BRANCH=""
 
 parse_version() {
   local version="$1"
@@ -138,6 +141,71 @@ check_sync() {
   fi
 }
 
+load_current_branch() {
+  CURRENT_BRANCH="$(git -C "$ROOT_DIR" branch --show-current 2>/dev/null || true)"
+  [[ -n "$CURRENT_BRANCH" ]] || die "release preparation requires a checked-out git branch"
+}
+
+ensure_release_branch() {
+  load_current_branch
+
+  if [[ "$CURRENT_BRANCH" != "$RELEASE_BRANCH" ]]; then
+    die "release preparation must run from '$RELEASE_BRANCH' so pushed tags satisfy the release workflow"
+  fi
+}
+
+ensure_clean_worktree_except_changelog() {
+  local status_line path dirty_paths=()
+
+  while IFS= read -r status_line; do
+    [[ -z "$status_line" ]] && continue
+
+    path="${status_line:3}"
+    if [[ "$path" == *" -> "* ]]; then
+      path="${path##* -> }"
+    fi
+
+    if [[ "$path" != "CHANGELOG.md" ]]; then
+      dirty_paths+=("$path")
+    fi
+  done < <(git -C "$ROOT_DIR" status --porcelain=v1 --untracked-files=all)
+
+  if (( ${#dirty_paths[@]} > 0 )); then
+    printf '[version] release preparation requires a clean worktree except CHANGELOG.md\n' >&2
+    printf '[version] dirty paths: %s\n' "${dirty_paths[*]}" >&2
+    exit 1
+  fi
+}
+
+ensure_changelog_entry_exists() {
+  local version="$1"
+
+  if ! python3 - "$CHANGELOG_FILE" "$version" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+version = sys.argv[2]
+text = path.read_text(encoding="utf-8")
+
+if not re.search(rf"^## \[{re.escape(version)}\]", text, flags=re.MULTILINE):
+    raise SystemExit(1)
+PY
+  then
+    die "CHANGELOG.md missing section for [$version]"
+  fi
+}
+
+ensure_tag_does_not_exist() {
+  local version="$1"
+  local tag_name="v$version"
+
+  if git -C "$ROOT_DIR" rev-parse -q --verify "refs/tags/$tag_name" >/dev/null 2>&1; then
+    die "tag '$tag_name' already exists"
+  fi
+}
+
 write_version() {
   local version="$1"
   parse_version "$version" || die "invalid version '$version'"
@@ -149,6 +217,40 @@ set_version_and_sync() {
   write_version "$version"
   sync_cargo_from_version "$version"
   printf '%s\n' "$version"
+}
+
+prepare_release_version() {
+  local version="$1"
+  local release_commit_message push_command
+
+  load_current_version
+  parse_version "$version" || die "invalid version '$version'"
+
+  if [[ "$version" == "$CURRENT_VERSION" ]]; then
+    die "VERSION is already '$version'"
+  fi
+
+  ensure_release_branch
+  ensure_clean_worktree_except_changelog
+  ensure_changelog_entry_exists "$version"
+  ensure_tag_does_not_exist "$version"
+
+  set_version_and_sync "$version" >/dev/null
+
+  git -C "$ROOT_DIR" add VERSION Cargo.toml CHANGELOG.md
+
+  if git -C "$ROOT_DIR" diff --cached --quiet; then
+    die "no release changes were staged"
+  fi
+
+  release_commit_message="release: v$version"
+  git -C "$ROOT_DIR" commit -m "$release_commit_message"
+  git -C "$ROOT_DIR" tag -a "v$version" -m "$release_commit_message"
+
+  push_command="git push origin \"$CURRENT_BRANCH\" --follow-tags"
+
+  printf '[version] prepared %s and tag v%s\n' "$release_commit_message" "$version"
+  printf '[version] push when ready: %s\n' "$push_command"
 }
 
 print_metadata() {
@@ -214,7 +316,7 @@ bump_version() {
       ;;
   esac
 
-  set_version_and_sync "${next_major}.${next_minor}.${next_patch}"
+  printf '%s\n' "${next_major}.${next_minor}.${next_patch}"
 }
 
 set_prerelease_version() {
@@ -238,12 +340,12 @@ set_prerelease_version() {
     next_number=1
   fi
 
-  set_version_and_sync "$base-$label.$next_number"
+  printf '%s\n' "$base-$label.$next_number"
 }
 
 release_version() {
   load_current_version
-  set_version_and_sync "$(base_version)"
+  printf '%s\n' "$(base_version)"
 }
 
 COMMAND="${1:-current}"
@@ -266,19 +368,19 @@ case "$COMMAND" in
     ;;
   set)
     [[ $# -eq 2 ]] || die "usage: ./scripts/version.sh set <version>"
-    set_version_and_sync "$2"
+    prepare_release_version "$2"
     ;;
   bump)
     [[ $# -eq 2 ]] || die "usage: ./scripts/version.sh bump <major|minor|patch>"
-    bump_version "$2"
+    prepare_release_version "$(bump_version "$2")"
     ;;
   prerelease)
     [[ $# -ge 2 && $# -le 3 ]] || die "usage: ./scripts/version.sh prerelease <alpha|beta|rc> [number]"
-    set_prerelease_version "$2" "${3:-}"
+    prepare_release_version "$(set_prerelease_version "$2" "${3:-}")"
     ;;
   release)
     [[ $# -eq 1 ]] || die "usage: ./scripts/version.sh release"
-    release_version
+    prepare_release_version "$(release_version)"
     ;;
   help|-h|--help)
     usage

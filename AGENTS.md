@@ -111,8 +111,9 @@ Do not move heavy compute into app process or FSEvents callback path.
 - LaunchAgent and login item behavior must be stable across upgrades.
 - App/daemon version compatibility rules must be maintained and tested.
 - Product release version source-of-truth is the repository root `VERSION` file.
-- `scripts/version.sh` is the supported entrypoint for version bumps and Cargo workspace version sync.
+- `scripts/version.sh` is the supported entrypoint for version bumps, Cargo workspace version sync, and release-prep commit/tag creation.
 - Release tags must exactly match `v$(cat VERSION)`.
+- Release preparation via `scripts/version.sh` must run from a clean `main` branch with only `CHANGELOG.md` allowed to be dirty beforehand.
 - Build provenance must keep semantic version and git commit SHA separate: use valid Apple bundle version fields for app metadata, and store commit SHA in dedicated app/daemon build-info fields for logs, UI, and `--version` output.
 
 ## 8) Engineering standards

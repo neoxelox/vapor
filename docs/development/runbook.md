@@ -37,6 +37,7 @@
 - Scripts default `VAPOR_DIR` to repo-local `./.vapor` for local dev and test ergonomics.
 - Scripts default `VAPOR_ENV` to `dev` (and `prod` for `./scripts/build.sh package`).
 - `VERSION` is the release version source-of-truth; wrapper scripts fail fast when `Cargo.toml` is out of sync with it.
+- `./scripts/version.sh` is the release-prep entrypoint: it requires a clean `main` branch except for `CHANGELOG.md`, then writes `VERSION`, syncs Cargo, creates `release: v...` commit, and creates the matching tag.
 - Override runtime root with `VAPOR_DIR=/path/to/vapor ./scripts/test.sh` (same for build, lint, and format).
 - `Vapor.app` is a single package that ships both binaries: `Contents/MacOS/Vapor` and `Contents/MacOS/vapord`.
 - Runtime daemon launch path is always the bundled sibling binary (`vapord`) next to the app executable.

@@ -42,7 +42,8 @@ Release invariants:
 - `CHANGELOG.md` updated with the target version section.
 - `VERSION` updated to the exact stable or prerelease version being released.
 - `Cargo.toml` synced from `VERSION` via `./scripts/version.sh`.
-- Clean release commit on `main`.
+- Run release preparation from `main`.
+- Before invoking `./scripts/version.sh`, the worktree must be clean except for `CHANGELOG.md`.
 - For stable releases:
   - `VAPOR_SIGN_IDENTITY` configured in GitHub Actions secrets.
   - `VAPOR_NOTARY_PROFILE` configured in GitHub Actions secrets.
@@ -58,32 +59,34 @@ Release invariants:
 ## End-to-end flow
 
 1. Prepare release changes
+   - Commit all non-release changes on `main`.
    - Set the target version with `./scripts/version.sh`:
      - Stable example: `./scripts/version.sh set 0.2.0`
      - Prerelease example: `./scripts/version.sh set 0.2.0-rc.1`
      - Increment current prerelease example: `./scripts/version.sh prerelease rc`
-   - Update `CHANGELOG.md`:
+    - Update `CHANGELOG.md`:
       - Move items from `Unreleased` into a new `## [<VERSION>] - YYYY-MM-DD` section.
       - Keep sections concise and user-impact focused.
     - Ensure docs and CI references are current.
 
 2. Validate before tagging
-   - Confirm `./scripts/version.sh check-sync` passes.
    - Run required checks in order:
      - `./scripts/format.sh`
      - `./scripts/lint.sh`
      - `./scripts/test.sh`
-    - Optionally run local package rehearsal: `./scripts/build.sh package`.
+   - Commit any non-`CHANGELOG.md` fixes produced by validation.
+   - Confirm only `CHANGELOG.md` remains dirty before release preparation.
+   - Optionally run local package rehearsal: `./scripts/build.sh package`.
 
-3. Create annotated tag
-   - Stable example:
-     - `git tag -a "v$(cat VERSION)" -m "release: v$(cat VERSION)"`
-   - Prerelease example:
-     - `git tag -a "v$(cat VERSION)" -m "release: v$(cat VERSION)"`
-   - Push tag:
-     - `git push origin "v$(cat VERSION)"`
+3. Run release preparation
+   - Run the appropriate `./scripts/version.sh ...` command.
+   - The script validates the clean-worktree rule and matching `CHANGELOG.md` entry.
+   - The script updates `VERSION`, syncs `Cargo.toml`, creates commit `release: v$(cat VERSION)`, creates tag `v$(cat VERSION)`, and prints the push command.
 
-4. Workflow execution (`.github/workflows/release.yml`)
+4. Push release commit and tag
+   - `git push origin "$(git branch --show-current)" --follow-tags`
+
+5. Workflow execution (`.github/workflows/release.yml`)
      - Triggered on `push.tags: ["v*"]`.
      - Calls reusable `lint.yml`, `test.yml`, and `perf.yml` in parallel.
      - Verifies the tag ref is valid, exactly matches `VERSION`, and the tag commit is reachable from `origin/main`.
@@ -94,14 +97,14 @@ Release invariants:
       - Generates SHA-256 checksums.
       - Creates/updates GitHub Release and uploads assets with deterministic replacement (`--clobber`).
 
-5. Publish policy
+6. Publish policy
    - Stable releases are created as drafts for operator verification before publishing.
    - Prerelease tags are marked prerelease in GitHub Release metadata.
 
-6. Post-run verification
-    - Confirm release assets include:
-      - `Vapor.zip`
-      - `Checksums.txt`
+7. Post-run verification
+     - Confirm release assets include:
+       - `Vapor.zip`
+       - `Checksums.txt`
     - Confirm package contents include:
       - `Vapor.app/Contents/MacOS/Vapor`
       - `Vapor.app/Contents/MacOS/vapord`
@@ -128,11 +131,11 @@ Release invariants:
 ## Release checklist
 
 - [ ] Changelog entry exists for target version.
-- [ ] `VERSION` matches the intended release version.
-- [ ] `./scripts/version.sh check-sync` passes.
+- [ ] Worktree is clean except for `CHANGELOG.md` before running `./scripts/version.sh`.
 - [ ] Validation scripts passed (`format`, `lint`, `test`).
+- [ ] `./scripts/version.sh ...` created commit `release: v$(cat VERSION)` and tag `v$(cat VERSION)`.
+- [ ] Release push command used: `git push origin "$(git branch --show-current)" --follow-tags`.
 - [ ] Release gates passed (`lint`, `test`, `perf` reusable workflows / local script equivalents).
-- [ ] Annotated tag created with approved version grammar.
 - [ ] Release workflow succeeded.
 - [ ] Stable release zip was built from the signed, stapled app bundle.
 - [ ] Checksums present and verified.

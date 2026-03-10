@@ -102,19 +102,22 @@ Stack-specific helpers:
 
 Version bumps with `./scripts/version.sh`:
 
+1. Commit all changes and checkout to `main` with a clean worktree.
+2. Run `./scripts/format.sh`, `./scripts/lint.sh`, and `./scripts/test.sh`, then commit any fixes they produce.
+3. Update `CHANGELOG.md` with a section that matches the target version and release date.
+4. Run the appropriate `./scripts/version.sh ...` command to update `VERSION`, sync system, create the release commit, and create the matching tag.
+5. Push the release commit and tag together: `git push origin "$(git branch --show-current)" --follow-tags`.
+6. Wait for `lint`, `test`, `perf`, and `release` to pass on the tag.
+7. Review the draft GitHub Release, verify `Vapor.zip` and `Checksums.txt`, then publish it.
+
+`./scripts/version.sh` usage:
+
 - Show current version: `./scripts/version.sh current`
 - Set an exact stable version: `./scripts/version.sh set 0.2.0`
 - Bump the stable base version: `./scripts/version.sh bump patch|minor|major`
 - Set an exact prerelease: `./scripts/version.sh set 0.2.0-rc.1`
 - Bump the current prerelease: `./scripts/version.sh prerelease rc|beta|alpha`
 - Convert to stable release: `./scripts/version.sh release`
-
-1. Set the target version in `VERSION` with `./scripts/version.sh set ...`, `./scripts/version.sh bump ...`, `./scripts/version.sh prerelease ...`, or `./scripts/version.sh release`.
-2. Update `CHANGELOG.md` with a section that matches the exact `VERSION` value and release date.
-3. Run `./scripts/format.sh`, `./scripts/lint.sh`, and `./scripts/test.sh`.
-4. Create and push an annotated tag that exactly matches `v$(cat VERSION)`.
-5. Wait for `lint`, `test`, `perf`, and `release` to pass on the tag.
-6. Review the draft GitHub Release, verify `Vapor.zip` and `Checksums.txt`, then publish it.
 
 ## Agents
 
