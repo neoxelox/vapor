@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0-alpha.3] - 2026-03-10
+
+### Changed
+
+- Simplified GitHub Actions checkout credential handling so release preflight uses the default authenticated checkout session for tag ancestry fetches.
+- Added contributor policy requiring concise `CHANGELOG.md` `Unreleased` notes before non-trivial commits.
+
 ## [0.2.0-alpha.2] - 2026-03-10
 
 ### Changed
@@ -42,7 +49,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Script-first build, lint, test, and packaging workflows.
 - Baseline CI workflows for lint and test on `main` and pull requests.
 
-[Unreleased]: https://github.com/neoxelox/vapor/compare/v0.2.0-alpha.2...HEAD
+[Unreleased]: https://github.com/neoxelox/vapor/compare/v0.2.0-alpha.3...HEAD
+[0.2.0-alpha.3]: https://github.com/neoxelox/vapor/releases/tag/v0.2.0-alpha.3
 [0.2.0-alpha.2]: https://github.com/neoxelox/vapor/releases/tag/v0.2.0-alpha.2
 [0.2.0-alpha.1]: https://github.com/neoxelox/vapor/releases/tag/v0.2.0-alpha.1
 [0.1.0]: https://github.com/neoxelox/vapor/releases/tag/v0.1.0
