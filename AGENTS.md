@@ -249,6 +249,7 @@ PRs should answer:
 Documentation update policy:
 
 - Non-trivial feature/logic changes must update required documentation in the same change set.
+- Before creating a commit for a non-trivial feature, fix, refactor, build/release change, or other user/reliability-impacting work, contributors must add concise release-note lines to the root `CHANGELOG.md` `Unreleased` section so the next release can roll them up.
 - Root `README.md` is intentionally concise and acts as a product-facing index; detailed operational and engineering content belongs under `docs/` in topic-specific files.
 - Contributors must preserve and keep current the `README.md` **Features** section whenever capabilities, guarantees, or supported behavior change.
 - Contributors must preserve and keep current the `README.md` **Configuration** section (including `vapor.json` keys, defaults, and `VAPOR_*` environment variables) whenever config/env behavior changes.
