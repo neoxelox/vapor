@@ -11,6 +11,7 @@ DIST_DIR="${DIST_DIR:-dist}"
 VAPOR_SIGN_IDENTITY="${VAPOR_SIGN_IDENTITY:-}"
 VAPOR_ENTITLEMENTS="${VAPOR_ENTITLEMENTS:-}"
 VAPOR_NOTARY_PROFILE="${VAPOR_NOTARY_PROFILE:-}"
+VAPOR_NOTARY_KEYCHAIN="${VAPOR_NOTARY_KEYCHAIN:-}"
 export VAPOR_ENV="${VAPOR_ENV:-prod}"
 
 "$ROOT_DIR/scripts/version.sh" check-sync >/dev/null
@@ -191,7 +192,12 @@ if [[ -n "$VAPOR_NOTARY_PROFILE" ]]; then
     exit 1
   fi
 
-  xcrun notarytool submit "$zip_path" --keychain-profile "$VAPOR_NOTARY_PROFILE" --wait
+  notarytool_args=(submit "$zip_path" --keychain-profile "$VAPOR_NOTARY_PROFILE" --wait)
+  if [[ -n "$VAPOR_NOTARY_KEYCHAIN" ]]; then
+    notarytool_args+=(--keychain "$VAPOR_NOTARY_KEYCHAIN")
+  fi
+
+  xcrun notarytool "${notarytool_args[@]}"
   xcrun stapler staple "$app_bundle"
 
   rm -f "$zip_path"

@@ -114,6 +114,7 @@ Do not move heavy compute into app process or FSEvents callback path.
 - `scripts/version.sh` is the supported entrypoint for version bumps, Cargo workspace version sync, and release-prep commit/tag creation.
 - Release tags must exactly match `v$(cat VERSION)`.
 - Release preparation via `scripts/version.sh` must run from a clean `main` branch with only `CHANGELOG.md` allowed to be dirty beforehand.
+- GitHub release signing/notarization secrets should live in the protected GitHub Environment `release`, not only in repository-wide secrets.
 - Build provenance must keep semantic version and git commit SHA separate: use valid Apple bundle version fields for app metadata, and store commit SHA in dedicated app/daemon build-info fields for logs, UI, and `--version` output.
 
 ## 8) Engineering standards

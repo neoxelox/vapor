@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION_FILE="$ROOT_DIR/VERSION"
 CARGO_TOML="$ROOT_DIR/Cargo.toml"
+CARGO_LOCK="$ROOT_DIR/Cargo.lock"
 CHANGELOG_FILE="$ROOT_DIR/CHANGELOG.md"
 RELEASE_BRANCH="main"
 
@@ -96,6 +97,57 @@ else:
 PY
 }
 
+cargo_lock_sync_error() {
+  python3 - "$CARGO_LOCK" "$1" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+expected = sys.argv[2]
+targets = {"vapor-daemon", "vapor-providers", "vapor-shared"}
+found = {}
+current_name = None
+
+for line in path.read_text(encoding="utf-8").splitlines():
+    stripped = line.strip()
+    if stripped == "[[package]]":
+        current_name = None
+        continue
+    if stripped.startswith("name = "):
+        current_name = stripped.split("=", 1)[1].strip().strip('"')
+        continue
+    if current_name in targets and stripped.startswith("version = "):
+        found[current_name] = stripped.split("=", 1)[1].strip().strip('"')
+
+missing = sorted(targets - found.keys())
+if missing:
+    print(f"missing workspace packages in Cargo.lock: {', '.join(missing)}")
+    raise SystemExit(0)
+
+mismatched = {name: value for name, value in found.items() if value != expected}
+if mismatched:
+    details = ", ".join(f"{name}={value}" for name, value in sorted(mismatched.items()))
+    print(f"workspace package versions in Cargo.lock do not match VERSION {expected}: {details}")
+PY
+}
+
+check_cargo_lock_sync() {
+  local version="$1"
+  local error_message
+
+  [[ -f "$CARGO_LOCK" ]] || return 0
+
+  error_message="$(cargo_lock_sync_error "$version")"
+  if [[ -n "$error_message" ]]; then
+    die "$error_message"
+  fi
+}
+
+sync_cargo_lock() {
+  [[ -f "$CARGO_LOCK" ]] || return 0
+  cargo generate-lockfile --manifest-path "$CARGO_TOML" >/dev/null
+}
+
 sync_cargo_from_version() {
   local version="$1"
 
@@ -139,6 +191,8 @@ check_sync() {
   if [[ "$cargo_version" != "$version" ]]; then
     die "Cargo.toml version '$cargo_version' does not match VERSION '$version'; run ./scripts/version.sh sync"
   fi
+
+  check_cargo_lock_sync "$version"
 }
 
 load_current_branch() {
@@ -216,12 +270,14 @@ set_version_and_sync() {
   local version="$1"
   write_version "$version"
   sync_cargo_from_version "$version"
+  sync_cargo_lock
   printf '%s\n' "$version"
 }
 
 prepare_release_version() {
   local version="$1"
   local release_commit_message push_command
+  local staged_paths=(VERSION Cargo.toml CHANGELOG.md)
 
   load_current_version
   parse_version "$version" || die "invalid version '$version'"
@@ -237,7 +293,11 @@ prepare_release_version() {
 
   set_version_and_sync "$version" >/dev/null
 
-  git -C "$ROOT_DIR" add VERSION Cargo.toml CHANGELOG.md
+  if [[ -f "$CARGO_LOCK" ]]; then
+    staged_paths+=(Cargo.lock)
+  fi
+
+  git -C "$ROOT_DIR" add "${staged_paths[@]}"
 
   if git -C "$ROOT_DIR" diff --cached --quiet; then
     die "no release changes were staged"
@@ -364,6 +424,7 @@ case "$COMMAND" in
   sync)
     load_current_version
     sync_cargo_from_version "$CURRENT_VERSION"
+    sync_cargo_lock
     printf '%s\n' "$CURRENT_VERSION"
     ;;
   set)

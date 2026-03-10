@@ -16,11 +16,11 @@ Provide minimum detection, mitigation, and recovery verification steps for relea
 Detection:
 
 - Workflow fails during prerequisite gate or package notarization step.
-- Logs indicate missing `VAPOR_SIGN_IDENTITY`, `VAPOR_NOTARY_PROFILE`, or Apple certificate/notary secrets.
+- Logs indicate missing `VAPOR_SIGN_IDENTITY`, `VAPOR_NOTARY_PROFILE`, or Apple certificate/notary secrets in the `release` environment.
 
 Mitigation:
 
-- Verify secrets exist in repository settings.
+- Verify secrets exist in the GitHub `release` environment and match the expected certificate/API key inputs.
 - Re-run workflow for same tag after secret correction.
 
 Recovery verification:

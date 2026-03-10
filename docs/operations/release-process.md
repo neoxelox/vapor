@@ -42,19 +42,45 @@ Release invariants:
 - `CHANGELOG.md` updated with the target version section.
 - `VERSION` updated to the exact stable or prerelease version being released.
 - `Cargo.toml` synced from `VERSION` via `./scripts/version.sh`.
+- `Cargo.lock` refreshed after the version change so workspace package versions stay aligned.
 - Run release preparation from `main`.
 - Before invoking `./scripts/version.sh`, the worktree must be clean except for `CHANGELOG.md`.
+- GitHub Environment `release` exists and is configured for release jobs.
 - For stable releases:
-  - `VAPOR_SIGN_IDENTITY` configured in GitHub Actions secrets.
-  - `VAPOR_NOTARY_PROFILE` configured in GitHub Actions secrets.
-  - `APPLE_DEVELOPER_ID_P12_BASE64` configured in GitHub Actions secrets.
-  - `APPLE_DEVELOPER_ID_P12_PASSWORD` configured in GitHub Actions secrets.
-  - `APPLE_KEYCHAIN_PASSWORD` configured in GitHub Actions secrets.
-  - `APPLE_NOTARY_API_KEY_P8_BASE64` configured in GitHub Actions secrets.
-  - `APPLE_NOTARY_KEY_ID` configured in GitHub Actions secrets.
-  - `APPLE_NOTARY_ISSUER_ID` configured in GitHub Actions secrets.
+  - `VAPOR_SIGN_IDENTITY` configured in the `release` environment secrets.
+  - `VAPOR_NOTARY_PROFILE` configured in the `release` environment secrets.
+  - `APPLE_DEVELOPER_ID_P12_BASE64` configured in the `release` environment secrets.
+  - `APPLE_DEVELOPER_ID_P12_PASSWORD` configured in the `release` environment secrets.
+  - `APPLE_KEYCHAIN_PASSWORD` configured in the `release` environment secrets.
+  - `APPLE_NOTARY_API_KEY_P8_BASE64` configured in the `release` environment secrets.
+  - `APPLE_NOTARY_KEY_ID` configured in the `release` environment secrets.
+  - `APPLE_NOTARY_ISSUER_ID` configured in the `release` environment secrets when using an App Store Connect Team key; omit it for Individual keys.
 - Optional:
   - `VAPOR_ENTITLEMENTS` path override when needed.
+
+## GitHub release environment setup
+
+- Create a GitHub Actions environment named `release` before the first tagged release.
+- Grant the environment required reviewers if you want a human approval gate before signing/notarization starts.
+- Move Apple signing and notarization secrets into that environment instead of leaving them as repository-wide secrets.
+- Keep workflow permissions least-privilege:
+  - `contents: read` for preflight, lint, test, and perf
+  - `contents: write` only for the release publish job
+- Keep `actions/checkout` on `persist-credentials: false`; authenticated git fetches in release preflight must pass `GITHUB_TOKEN` explicitly.
+
+## Apple secret preparation
+
+- Export a `Developer ID Application` certificate plus private key from Keychain Access as a `.p12` file.
+- Convert the `.p12` file to base64 for `APPLE_DEVELOPER_ID_P12_BASE64`:
+  - `base64 -i vapor-developer-id.p12 | pbcopy`
+- Store the `.p12` export password as `APPLE_DEVELOPER_ID_P12_PASSWORD`.
+- Create a strong temporary-keychain password for CI as `APPLE_KEYCHAIN_PASSWORD`.
+- Set `VAPOR_SIGN_IDENTITY` to the exact `Developer ID Application: ...` identity string shown by Keychain Access or `security find-identity -v -p codesigning`.
+- Download the App Store Connect API key `.p8` file and convert it to base64 for `APPLE_NOTARY_API_KEY_P8_BASE64`:
+  - `base64 -i AuthKey_<KEYID>.p8 | pbcopy`
+- Store the App Store Connect key identifier as `APPLE_NOTARY_KEY_ID`.
+- Store the issuer UUID as `APPLE_NOTARY_ISSUER_ID` only when the API key belongs to a Team. Individual keys must leave it unset.
+- Choose a memorable `VAPOR_NOTARY_PROFILE` name; the workflow stores this profile inside a temporary keychain and passes that keychain path into the packaging step.
 
 ## End-to-end flow
 
@@ -81,7 +107,7 @@ Release invariants:
 3. Run release preparation
    - Run the appropriate `./scripts/version.sh ...` command.
    - The script validates the clean-worktree rule and matching `CHANGELOG.md` entry.
-   - The script updates `VERSION`, syncs `Cargo.toml`, creates commit `release: v$(cat VERSION)`, creates tag `v$(cat VERSION)`, and prints the push command.
+   - The script updates `VERSION`, syncs `Cargo.toml`, refreshes `Cargo.lock`, creates commit `release: v$(cat VERSION)`, creates tag `v$(cat VERSION)`, and prints the push command.
 
 4. Push release commit and tag
    - `git push origin "$(git branch --show-current)" --follow-tags`
@@ -92,6 +118,8 @@ Release invariants:
      - Verifies the tag ref is valid, exactly matches `VERSION`, and the tag commit is reachable from `origin/main`.
      - The `release` job declares `needs: [preflight, lint, test, perf]`, so packaging does not begin unless ref validation and all three gates pass.
      - Imports the Developer ID certificate into a temporary keychain and creates the `notarytool` profile on-runner when signing/notarization is configured.
+     - Verifies the imported keychain actually contains `VAPOR_SIGN_IDENTITY` before packaging begins.
+     - Passes the temporary keychain path into packaging so `notarytool submit` resolves the stored profile explicitly.
      - Runs `./scripts/build.sh package` on `macos-latest`.
       - Validates artifact structure and changelog/version alignment.
       - Generates SHA-256 checksums.

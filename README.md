@@ -8,7 +8,7 @@ Vapor is an invisible-first cloud sync app that stays out of your way. It keeps 
 
 ## Install
 
-> TBD
+Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/vapor/releases) page and install the `Vapor` app for your platform/distribution from the latest release assets.
 
 ## Features
 
@@ -105,7 +105,7 @@ Version bumps with `./scripts/version.sh`:
 1. Commit all changes and checkout to `main` with a clean worktree.
 2. Run `./scripts/format.sh`, `./scripts/lint.sh`, and `./scripts/test.sh`, then commit any fixes they produce.
 3. Update `CHANGELOG.md` with a section that matches the target version and release date.
-4. Run the appropriate `./scripts/version.sh ...` command to update `VERSION`, sync system, create the release commit, and create the matching tag.
+4. Run the appropriate `./scripts/version.sh ...` command to update `VERSION`, sync Cargo metadata, create the release commit, and create the matching tag.
 5. Push the release commit and tag together: `git push origin "$(git branch --show-current)" --follow-tags`.
 6. Wait for `lint`, `test`, `perf`, and `release` to pass on the tag.
 7. Review the draft GitHub Release, verify `Vapor.zip` and `Checksums.txt`, then publish it.

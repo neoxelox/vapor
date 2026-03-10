@@ -56,6 +56,7 @@ Dependency source defaults:
   - validates tag format, `VERSION` match, and tag ancestry on `main`
   - calls `lint`, `test`, and `perf` in parallel
   - `release` job declares `needs: [preflight, lint, test, perf]`
+  - `release` job targets GitHub Environment `release`
   - `./scripts/build.sh package`
   - `gh release create/edit/upload`
 

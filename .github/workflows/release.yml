@@ -68,10 +68,12 @@ jobs:
           echo "release_prerelease=$VAPOR_VERSION_IS_PRERELEASE" >> "$GITHUB_OUTPUT"
 
       - name: Verify tag commit is on main
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          git fetch origin main --depth=1
+          git -c http.extraheader="AUTHORIZATION: bearer $GITHUB_TOKEN" fetch origin main --depth=1
 
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "[release] tag commit must be reachable from origin/main"
@@ -94,6 +96,7 @@ jobs:
     needs: [preflight, lint, test, perf]
     runs-on: macos-latest
     timeout-minutes: 60
+    environment: release
     permissions:
       contents: write
     env:
@@ -160,7 +163,7 @@ jobs:
 
           if [[ "$signing_configured" == "true" ]]; then
             missing=()
-            for required_var in VAPOR_SIGN_IDENTITY VAPOR_NOTARY_PROFILE APPLE_DEVELOPER_ID_P12_BASE64 APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_KEYCHAIN_PASSWORD APPLE_NOTARY_API_KEY_P8_BASE64 APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID; do
+            for required_var in VAPOR_SIGN_IDENTITY VAPOR_NOTARY_PROFILE APPLE_DEVELOPER_ID_P12_BASE64 APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_KEYCHAIN_PASSWORD APPLE_NOTARY_API_KEY_P8_BASE64 APPLE_NOTARY_KEY_ID; do
               if [[ -z "${!required_var}" ]]; then
                 missing+=("$required_var")
               fi
@@ -182,6 +185,7 @@ jobs:
       - name: Install signing certificate and notarization profile
         if: steps.signing_config.outputs.enabled == 'true'
         env:
+          VAPOR_SIGN_IDENTITY: ${{ secrets.VAPOR_SIGN_IDENTITY }}
           VAPOR_NOTARY_PROFILE: ${{ secrets.VAPOR_NOTARY_PROFILE }}
           APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
           APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
@@ -195,9 +199,21 @@ jobs:
           KEYCHAIN_PATH="$RUNNER_TEMP/vapor-release.keychain-db"
           CERT_PATH="$RUNNER_TEMP/vapor-developer-id.p12"
           NOTARY_KEY_PATH="$RUNNER_TEMP/vapor-notary-api-key.p8"
+
+          cleanup_temp_files() {
+            rm -f "$CERT_PATH" "$NOTARY_KEY_PATH"
+          }
+
+          trap cleanup_temp_files EXIT
+
+          echo "VAPOR_RELEASE_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "VAPOR_RELEASE_CERT_PATH=$CERT_PATH" >> "$GITHUB_ENV"
+          echo "VAPOR_RELEASE_NOTARY_KEY_PATH=$NOTARY_KEY_PATH" >> "$GITHUB_ENV"
+          echo "VAPOR_NOTARY_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
           export CERT_PATH NOTARY_KEY_PATH APPLE_DEVELOPER_ID_P12_BASE64 APPLE_NOTARY_API_KEY_P8_BASE64
 
-          python - <<'PY'
+          python3 - <<'PY'
           import base64
           import os
           from pathlib import Path
@@ -212,25 +228,35 @@ jobs:
           security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$APPLE_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple: -k "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
-          CURRENT_KEYCHAINS=$(security list-keychains -d user | tr -d '"')
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $CURRENT_KEYCHAINS
+          keychains=("$KEYCHAIN_PATH")
+          while IFS= read -r keychain; do
+            keychain=${keychain//\"/}
+            [[ -n "$keychain" ]] && keychains+=("$keychain")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "${keychains[@]}"
           security default-keychain -d user -s "$KEYCHAIN_PATH"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+          if ! security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -F "$VAPOR_SIGN_IDENTITY" >/dev/null; then
+            echo "[release] imported keychain does not contain signing identity '$VAPOR_SIGN_IDENTITY'"
+            exit 1
+          fi
+
+          issuer_args=()
+          if [[ -n "$APPLE_NOTARY_ISSUER_ID" ]]; then
+            issuer_args=(--issuer "$APPLE_NOTARY_ISSUER_ID")
+          fi
 
           xcrun notarytool store-credentials "$VAPOR_NOTARY_PROFILE" \
             --key "$NOTARY_KEY_PATH" \
             --key-id "$APPLE_NOTARY_KEY_ID" \
-            --issuer "$APPLE_NOTARY_ISSUER_ID" \
+            "${issuer_args[@]}" \
             --keychain "$KEYCHAIN_PATH"
-
-          echo "VAPOR_RELEASE_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
-          echo "VAPOR_RELEASE_CERT_PATH=$CERT_PATH" >> "$GITHUB_ENV"
-          echo "VAPOR_RELEASE_NOTARY_KEY_PATH=$NOTARY_KEY_PATH" >> "$GITHUB_ENV"
 
       - name: Validate changelog section matches tag
         run: |
           set -euo pipefail
-          python - <<'PY'
+          python3 - <<'PY'
           import os
           import re
           from pathlib import Path
@@ -274,7 +300,7 @@ jobs:
       - name: Extract release notes from changelog
         run: |
           set -euo pipefail
-          python - <<'PY'
+          python3 - <<'PY'
           import os
           import re
           from pathlib import Path
