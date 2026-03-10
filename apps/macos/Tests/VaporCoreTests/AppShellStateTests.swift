@@ -9,6 +9,8 @@ func initialStateUsesSafeDefaults() {
   #expect(state.autoLaunchEnabled)
   #expect(state.useGitIgnore)
   #expect(state.useVaporIgnore)
+  #expect(state.preIgnoreRules == VaporConfiguration.defaultPreIgnoreRules)
+  #expect(state.postIgnoreRules == VaporConfiguration.defaultPostIgnoreRules)
   #expect(state.preferredLanguageCode == nil)
   #expect(state.effectiveLanguageCode == "en")
   #expect(state.providerName == "Google Drive")
@@ -22,6 +24,8 @@ func statusLineIncludesStateAndProvider() {
     autoLaunchEnabled: true,
     useGitIgnore: true,
     useVaporIgnore: true,
+    preIgnoreRules: "node_modules/",
+    postIgnoreRules: "!node_modules/keep.txt",
     preferredLanguageCode: nil,
     effectiveLanguageCode: "en",
     providerName: "Google Drive",

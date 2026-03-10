@@ -63,6 +63,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
   public var autoLaunchEnabled: Bool
   public var useGitIgnore: Bool
   public var useVaporIgnore: Bool
+  public var preIgnoreRules: String
+  public var postIgnoreRules: String
   public var preferredLanguageCode: String?
   public var effectiveLanguageCode: String
   public var providerName: String
@@ -73,6 +75,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     autoLaunchEnabled: Bool,
     useGitIgnore: Bool,
     useVaporIgnore: Bool,
+    preIgnoreRules: String,
+    postIgnoreRules: String,
     preferredLanguageCode: String?,
     effectiveLanguageCode: String,
     providerName: String,
@@ -82,6 +86,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     self.autoLaunchEnabled = autoLaunchEnabled
     self.useGitIgnore = useGitIgnore
     self.useVaporIgnore = useVaporIgnore
+    self.preIgnoreRules = preIgnoreRules
+    self.postIgnoreRules = postIgnoreRules
     self.preferredLanguageCode = preferredLanguageCode
     self.effectiveLanguageCode = effectiveLanguageCode
     self.providerName = providerName
@@ -93,6 +99,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     autoLaunchEnabled: true,
     useGitIgnore: true,
     useVaporIgnore: true,
+    preIgnoreRules: VaporConfiguration.defaultPreIgnoreRules,
+    postIgnoreRules: VaporConfiguration.defaultPostIgnoreRules,
     preferredLanguageCode: VaporConfiguration.defaultPreferredLanguageCode,
     effectiveLanguageCode: VaporConstants.Localization.defaultLanguageCode,
     providerName: "Google Drive",

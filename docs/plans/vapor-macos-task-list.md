@@ -71,7 +71,7 @@ Exit gate:
 - [x] P1D-18 Add explicit menubar lifecycle controls for `Open Vapor` (reopen/focus main window) and `Quit Vapor` (request daemon stop then terminate app).
 - [x] P1D-19 Add lifecycle coverage tests for: window close keeps daemon alive, reopen from menubar works, and menubar quit executes daemon stop path before app termination.
 - [x] P1D-20 Update app lifecycle docs (`README.md`, `apps/macos/README.md`, `AGENTS.md`) to define app-window vs menubar vs daemon responsibilities.
-- [ ] P1D-21 Add packaging/lifecycle assertions that `dist/Vapor.app` always contains `Contents/MacOS/Vapor` and `Contents/MacOS/vapord`, and runtime daemon launch resolves the bundled sibling binary only.
+- [x] P1D-21 Add packaging/lifecycle assertions that `dist/Vapor.app` always contains `Contents/MacOS/Vapor` and `Contents/MacOS/vapord`, and runtime daemon launch resolves the bundled sibling binary only.
 
 Exit gate:
 
@@ -87,10 +87,10 @@ Exit gate:
 - [x] P2-2 Implement default excludes + `.vaporignore` parser and matcher.
 - [x] P2-2a Add optional `.gitignore` ingestion/matching in daemon local filtering (default enabled).
 - [x] P2-2b Add app setting to toggle `.gitignore` usage (`useGitIgnore`, default `true`).
-- [ ] P2-2c Add user-level ignore rules configured via Vapor app UI and apply them in daemon filtering.
-- [ ] P2-2d Add tests for ignore precedence/merge across defaults, `.vaporignore`, `.gitignore`, and UI rules.
-- [ ] P2-2e Enforce sync scope strictly to configured `localSyncDirectory`/`cloudSyncDirectory` roots (including missing-root auto-create behavior) and never fall back to whole-device scanning.
-- [ ] P2-2f Add explicit safety tests that invalid local sync path and missing-root creation flows do not trigger any broad/root filesystem watch fallback.
+- [x] P2-2c Add user-level ignore rules configured via Vapor app UI and apply them in daemon filtering.
+- [x] P2-2d Add tests for ignore precedence/merge across defaults, `.vaporignore`, `.gitignore`, and UI rules.
+- [x] P2-2e Enforce sync scope strictly to configured `localSyncDirectory`/`cloudSyncDirectory` roots (including missing-root auto-create behavior) and never fall back to whole-device scanning.
+- [x] P2-2f Add explicit safety tests that invalid local sync path and missing-root creation flows do not trigger any broad/root filesystem watch fallback.
 - [ ] P2-3 Implement bounded in-memory event/intent maps with deterministic caps and compaction/backpressure behavior.
 - [ ] P2-4 Implement debounce/coalescing loop (250ms tick, conservative windows).
 - [ ] P2-5 Implement keyed superseding scheduler (latest intent wins per path).

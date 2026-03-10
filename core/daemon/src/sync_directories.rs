@@ -187,6 +187,30 @@ mod tests {
     }
 
     #[test]
+    fn invalid_local_sync_path_does_not_fall_back_to_current_or_home_directory() {
+        let root = create_test_directory();
+        let current_directory = root.join("current-directory");
+        let home_directory = root.join("home-directory");
+        let file_path = root.join("not-a-directory");
+        fs::create_dir_all(&current_directory).expect("failed to create current directory");
+        fs::create_dir_all(&home_directory).expect("failed to create home directory");
+        fs::write(&file_path, b"x").expect("failed to create file path");
+
+        let scope = resolve_scope(
+            Some(file_path.to_string_lossy().as_ref()),
+            Some("/Cloud"),
+            current_directory.as_path(),
+            Some(home_directory.as_path()),
+        );
+
+        assert!(scope.local_sync_directory.is_none());
+        assert_ne!(scope.local_sync_directory, Some(current_directory));
+        assert_ne!(scope.local_sync_directory, Some(home_directory));
+
+        remove_test_directory(&root);
+    }
+
+    #[test]
     fn resolves_relative_local_path_against_current_directory() {
         let root = create_test_directory();
         let projects = root.join("projects");
@@ -195,6 +219,30 @@ mod tests {
         let scope = resolve_scope(Some("projects"), Some("cloud-folder"), &root, None);
         assert_eq!(scope.local_sync_directory, Some(projects));
         assert_eq!(scope.cloud_sync_directory, "/cloud-folder");
+
+        remove_test_directory(&root);
+    }
+
+    #[test]
+    fn missing_local_sync_root_creation_stays_scoped_to_configured_directory() {
+        let root = create_test_directory();
+        let current_directory = root.join("current-directory");
+        let home_directory = root.join("home-directory");
+        let configured = root.join("nested").join("sync-root");
+        fs::create_dir_all(&current_directory).expect("failed to create current directory");
+        fs::create_dir_all(&home_directory).expect("failed to create home directory");
+
+        let scope = resolve_scope(
+            Some(configured.to_string_lossy().as_ref()),
+            Some("/Cloud"),
+            current_directory.as_path(),
+            Some(home_directory.as_path()),
+        );
+
+        assert_eq!(scope.local_sync_directory, Some(configured.clone()));
+        assert!(configured.exists());
+        assert_ne!(scope.local_sync_directory, Some(current_directory));
+        assert_ne!(scope.local_sync_directory, Some(home_directory));
 
         remove_test_directory(&root);
     }

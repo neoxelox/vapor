@@ -6,6 +6,7 @@ import VaporCore
 final class AppShellViewModel: ObservableObject {
   @Published private(set) var state: AppShellState = .initial
   private var daemonLifecycleManager: DaemonLifecycleManager
+  private let lifecycleManagerFactory: (VaporConfiguration) -> DaemonLifecycleManager
   private let configurationStore: VaporConfigurationStore
   private let localizationStore: VaporLocalizationStore
   private var configuration: VaporConfiguration
@@ -23,8 +24,8 @@ final class AppShellViewModel: ObservableObject {
     let localizationStore = VaporLocalizationStore()
     let autoLaunchSettingStore = VaporConfigurationAutoLaunchSettingStore(
       configurationStore: configurationStore)
-    self.init(
-      daemonLifecycleManager: AppShellViewModel.makeDefaultLifecycleManager(
+    let lifecycleManagerFactory: (VaporConfiguration) -> DaemonLifecycleManager = { configuration in
+      AppShellViewModel.makeDefaultLifecycleManager(
         vaporDirectoryURL: vaporDirectoryURL,
         autoLaunchSettingStore: autoLaunchSettingStore,
         useGitIgnore: configuration.useGitIgnore,
@@ -33,10 +34,14 @@ final class AppShellViewModel: ObservableObject {
         cloudSyncDirectory: configuration.cloudSyncDirectory,
         preIgnoreRules: configuration.preIgnoreRules,
         postIgnoreRules: configuration.postIgnoreRules
-      ),
+      )
+    }
+    self.init(
+      daemonLifecycleManager: lifecycleManagerFactory(configuration),
       configurationStore: configurationStore,
       localizationStore: localizationStore,
-      configuration: configuration
+      configuration: configuration,
+      lifecycleManagerFactory: lifecycleManagerFactory
     )
   }
 
@@ -44,11 +49,13 @@ final class AppShellViewModel: ObservableObject {
     daemonLifecycleManager: DaemonLifecycleManager,
     configurationStore: VaporConfigurationStore = VaporConfigurationStore(),
     localizationStore: VaporLocalizationStore = VaporLocalizationStore(),
-    configuration: VaporConfiguration? = nil
+    configuration: VaporConfiguration? = nil,
+    lifecycleManagerFactory: ((VaporConfiguration) -> DaemonLifecycleManager)? = nil
   ) {
     let resolvedConfiguration = configuration ?? configurationStore.load()
 
     self.daemonLifecycleManager = daemonLifecycleManager
+    self.lifecycleManagerFactory = lifecycleManagerFactory ?? { _ in daemonLifecycleManager }
     self.configurationStore = configurationStore
     self.localizationStore = localizationStore
     self.configuration = resolvedConfiguration
@@ -58,6 +65,8 @@ final class AppShellViewModel: ObservableObject {
     state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
     state.useGitIgnore = self.configuration.useGitIgnore
     state.useVaporIgnore = self.configuration.useVaporIgnore
+    state.preIgnoreRules = self.configuration.preIgnoreRules
+    state.postIgnoreRules = self.configuration.postIgnoreRules
     state.preferredLanguageCode = self.configuration.preferredLanguageCode
     state.effectiveLanguageCode = localization.effectiveLanguageCode
     state.vaporDirectoryPath = self.configurationStore.resolveVaporDirectoryURL().path
@@ -97,6 +106,13 @@ final class AppShellViewModel: ObservableObject {
 
   var buildVersionDisplay: String {
     VaporBuildInfo.buildVersion
+  }
+
+  var hasPendingIgnoreRuleChanges: Bool {
+    Self.normalizeRuleEditorText(state.preIgnoreRules)
+      != Self.normalizeRuleEditorText(configuration.preIgnoreRules)
+      || Self.normalizeRuleEditorText(state.postIgnoreRules)
+        != Self.normalizeRuleEditorText(configuration.postIgnoreRules)
   }
 
   func localized(_ key: String) -> String {
@@ -314,6 +330,52 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
+  func updatePreIgnoreRulesDraft(_ rules: String) {
+    state.preIgnoreRules = rules
+  }
+
+  func updatePostIgnoreRulesDraft(_ rules: String) {
+    state.postIgnoreRules = rules
+  }
+
+  func saveIgnoreRuleSettings() {
+    let normalizedPreIgnoreRules = Self.normalizeRuleEditorText(state.preIgnoreRules)
+    let normalizedPostIgnoreRules = Self.normalizeRuleEditorText(state.postIgnoreRules)
+
+    guard
+      normalizedPreIgnoreRules != Self.normalizeRuleEditorText(configuration.preIgnoreRules)
+        || normalizedPostIgnoreRules != Self.normalizeRuleEditorText(configuration.postIgnoreRules)
+    else {
+      state.preIgnoreRules = normalizedPreIgnoreRules
+      state.postIgnoreRules = normalizedPostIgnoreRules
+      return
+    }
+
+    configuration.preIgnoreRules = normalizedPreIgnoreRules
+    configuration.postIgnoreRules = normalizedPostIgnoreRules
+    state.preIgnoreRules = normalizedPreIgnoreRules
+    state.postIgnoreRules = normalizedPostIgnoreRules
+
+    do {
+      try configurationStore.save(configuration)
+      refreshDaemonLifecycleManagerForCurrentConfiguration()
+      logger.info(
+        "Updated user ignore rules",
+        metadata: [
+          "pre_rule_count": String(Self.countConfiguredRules(in: normalizedPreIgnoreRules)),
+          "post_rule_count": String(Self.countConfiguredRules(in: normalizedPostIgnoreRules)),
+          "note": "applies on next daemon launch",
+        ]
+      )
+    } catch {
+      state.syncState = .error
+      logger.error(
+        "Failed to persist user ignore rules",
+        metadata: ["error": String(describing: error)]
+      )
+    }
+  }
+
   func setPreferredLanguageCode(_ languageCode: String?) {
     let normalizedLanguageCode = languageCode?.trimmingCharacters(in: .whitespacesAndNewlines)
     let sanitizedLanguageCode: String?
@@ -380,6 +442,26 @@ final class AppShellViewModel: ObservableObject {
     state.effectiveLanguageCode = localization.effectiveLanguageCode
   }
 
+  private func refreshDaemonLifecycleManagerForCurrentConfiguration() {
+    daemonLifecycleManager = lifecycleManagerFactory(configuration)
+    state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
+    refreshLifecycleCoordinator()
+  }
+
+  private static func normalizeRuleEditorText(_ rules: String) -> String {
+    rules
+      .replacingOccurrences(of: "\r\n", with: "\n")
+      .replacingOccurrences(of: "\r", with: "\n")
+  }
+
+  private static func countConfiguredRules(in rules: String) -> Int {
+    normalizeRuleEditorText(rules)
+      .split(whereSeparator: \.isNewline)
+      .map { $0.trimmingCharacters(in: .whitespaces) }
+      .filter { !$0.isEmpty }
+      .count
+  }
+
   private static func makeDefaultLifecycleManager(
     vaporDirectoryURL: URL,
     autoLaunchSettingStore: any AutoLaunchSettingStore,
@@ -427,17 +509,10 @@ final class AppShellViewModel: ObservableObject {
   }
 
   private static func bundledDaemonExecutableURL() -> URL {
-    guard let executableURL = Bundle.main.executableURL else {
-      return Bundle.main.bundleURL
-        .appendingPathComponent("Contents")
-        .appendingPathComponent("MacOS")
-        .appendingPathComponent("vapord")
-    }
-
-    return
-      executableURL
-      .deletingLastPathComponent()
-      .appendingPathComponent("vapord")
+    VaporBundleLayout.bundledDaemonExecutableURL(
+      bundleURL: Bundle.main.bundleURL,
+      executableURL: Bundle.main.executableURL
+    )
   }
 
   private static func makeOptionalLoginItemController() -> (any LoginItemControlling)? {

@@ -18,5 +18,6 @@ let package = Package(
     ),
     .executableTarget(name: "Vapor", dependencies: ["VaporCore"]),
     .testTarget(name: "VaporCoreTests", dependencies: ["VaporCore"]),
+    .testTarget(name: "VaporAppTests", dependencies: ["Vapor", "VaporCore"]),
   ]
 )

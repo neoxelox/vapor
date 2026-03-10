@@ -31,6 +31,21 @@ if [[ -n "$VAPOR_ENTITLEMENTS" && "$VAPOR_ENTITLEMENTS" != /* ]]; then
   VAPOR_ENTITLEMENTS="$ROOT_DIR/$VAPOR_ENTITLEMENTS"
 fi
 
+assert_bundle_executable() {
+  local executable_path="$1"
+  local description="$2"
+
+  if [[ ! -f "$executable_path" ]]; then
+    echo "[package] Missing bundled $description at $executable_path"
+    exit 1
+  fi
+
+  if [[ ! -x "$executable_path" ]]; then
+    echo "[package] Bundled $description is not executable at $executable_path"
+    exit 1
+  fi
+}
+
 if [[ ! -f "$ICON_PNG" ]]; then
   echo "[package] Missing icon PNG at $ICON_PNG"
   echo "[package] Expected source-of-truth icon at assets/icon.png"
@@ -101,6 +116,9 @@ chmod +x "$macos_dir/$EXECUTABLE_NAME"
 
 cp "$daemon_binary_path" "$macos_dir/vapord"
 chmod +x "$macos_dir/vapord"
+
+assert_bundle_executable "$macos_dir/$EXECUTABLE_NAME" "app executable"
+assert_bundle_executable "$macos_dir/vapord" "daemon executable"
 
 ditto "$resource_bundle_path" "$resources_dir/$(basename "$resource_bundle_path")"
 

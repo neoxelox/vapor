@@ -104,6 +104,39 @@ struct SettingsView: View {
       Toggle(viewModel.localized("settings_use_gitignore"), isOn: useGitIgnoreBinding)
       Toggle(viewModel.localized("settings_use_vaporignore"), isOn: useVaporIgnoreBinding)
 
+      Section(viewModel.localized("settings_user_ignore_rules")) {
+        VStack(alignment: .leading, spacing: 6) {
+          Text(viewModel.localized("settings_pre_ignore_rules"))
+            .font(.headline)
+          Text(viewModel.localized("settings_pre_ignore_rules_help"))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          TextEditor(text: preIgnoreRulesBinding)
+            .font(.system(.body, design: .monospaced))
+            .frame(minHeight: 110)
+        }
+
+        VStack(alignment: .leading, spacing: 6) {
+          Text(viewModel.localized("settings_post_ignore_rules"))
+            .font(.headline)
+          Text(viewModel.localized("settings_post_ignore_rules_help"))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          TextEditor(text: postIgnoreRulesBinding)
+            .font(.system(.body, design: .monospaced))
+            .frame(minHeight: 110)
+        }
+
+        Button(viewModel.localized("settings_save_ignore_rules")) {
+          viewModel.saveIgnoreRuleSettings()
+        }
+        .disabled(!viewModel.hasPendingIgnoreRuleChanges)
+
+        Text(viewModel.localized("settings_ignore_rules_apply_note"))
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+
       Picker(viewModel.localized("settings_language"), selection: languageCodeBinding) {
         Text(viewModel.localized("settings_language_system_default")).tag(String?.none)
         ForEach(viewModel.availableLanguageCodes, id: \.self) { code in
@@ -142,6 +175,20 @@ struct SettingsView: View {
     Binding(
       get: { viewModel.state.useVaporIgnore },
       set: { viewModel.setUseVaporIgnore($0) }
+    )
+  }
+
+  private var preIgnoreRulesBinding: Binding<String> {
+    Binding(
+      get: { viewModel.state.preIgnoreRules },
+      set: { viewModel.updatePreIgnoreRulesDraft($0) }
+    )
+  }
+
+  private var postIgnoreRulesBinding: Binding<String> {
+    Binding(
+      get: { viewModel.state.postIgnoreRules },
+      set: { viewModel.updatePostIgnoreRulesDraft($0) }
     )
   }
 

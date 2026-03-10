@@ -6,9 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Vapor settings now expose editable baseline and override ignore-rule lists, persisting them for daemon filtering on the next launch.
+
 ### Fixed
 
 - Packaged `Vapor.app` builds now include the SwiftPM localization resource bundle and no longer crash on launch while the app shell resolves UI copy catalogs.
+- Packaging now fails fast if either bundled executable is missing, and runtime daemon resolution stays pinned to the bundled `Contents/MacOS/vapord` sibling binary.
 
 ## [0.2.0-alpha.3] - 2026-03-10
 
