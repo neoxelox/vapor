@@ -1,6 +1,17 @@
-use vapor_daemon::{DaemonApp, logging, sync_directories};
+use vapor_daemon::{DaemonApp, build_info, logging, sync_directories};
 
 fn main() {
+    if let Some(flag) = std::env::args().nth(1)
+        && (flag == "--version" || flag == "-V")
+    {
+        println!(
+            "vapord {} ({})",
+            build_info::VERSION,
+            build_info::GIT_COMMIT_SHORT
+        );
+        return;
+    }
+
     let app = DaemonApp::default();
     let sync_scope = sync_directories::resolve_from_process_environment();
     app.ensure_cloud_sync_directory(sync_scope.cloud_sync_directory.as_str());
@@ -13,6 +24,8 @@ fn main() {
     logging::info(
         "vapord started",
         &[
+            ("version", build_info::VERSION.to_string()),
+            ("git_commit", build_info::GIT_COMMIT_SHORT.to_string()),
             ("provider", app.provider_name().to_string()),
             ("run_state", format!("{:?}", app.snapshot().run_state)),
             (

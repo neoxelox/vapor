@@ -56,7 +56,7 @@ For initial safety, use draft-first publishing for stable tags until 2-3 success
 
 - **Source of truth:** `apps/macos/scripts/package.sh` remains canonical for app bundle assembly/signing/notarization.
 - **CI orchestration:** new GitHub workflow handles trigger/gating/publish only.
-- **Versioning contract:** tags are authoritative for release version (`CFBundleShortVersionString` already derives from latest tag).
+- **Versioning contract:** the root `VERSION` file is authoritative for release version, and release tags must match it.
 - **Release notes contract:** `CHANGELOG.md` is canonical human narrative; generated GitHub notes are supplemental.
 
 ### Implementation Phases
@@ -144,7 +144,7 @@ Rejected for now: adds policy complexity before baseline release reliability is 
 ### API Surface Parity
 
 - Root docs (`README.md` and operations docs) must stay aligned with release behavior.
-- Scripts and workflow must use the same env vars (`VAPOR_SIGN_IDENTITY`, `VAPOR_NOTARY_PROFILE`, `VAPOR_BUILD_NUMBER`).
+- Scripts and workflow must use the same signing/notarization inputs while deriving app/daemon version from the root `VERSION` file.
 
 ### Integration Test Scenarios
 

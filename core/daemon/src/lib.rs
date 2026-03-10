@@ -3,6 +3,10 @@
 use vapor_providers::{GoogleDriveProvider, Provider};
 use vapor_shared::{RunState, StatusSnapshot, ThrottleState};
 
+pub mod build_info {
+    include!(concat!(env!("OUT_DIR"), "/vapor_build_info.rs"));
+}
+
 pub mod fs_events;
 pub mod logging;
 pub mod path_filter;
@@ -123,5 +127,11 @@ mod tests {
     fn ensure_cloud_sync_directory_does_not_panic() {
         let app = DaemonApp::default();
         app.ensure_cloud_sync_directory("/Vapor");
+    }
+
+    #[test]
+    fn build_info_is_populated() {
+        assert!(!build_info::VERSION.is_empty());
+        assert!(!build_info::GIT_COMMIT_SHORT.is_empty());
     }
 }

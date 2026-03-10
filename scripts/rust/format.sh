@@ -8,6 +8,8 @@ export VAPOR_DIR="${VAPOR_DIR:-$ROOT_DIR/.vapor}"
 export VAPOR_ENV="${VAPOR_ENV:-dev}"
 mkdir -p "$VAPOR_DIR/logs" "$VAPOR_DIR/state"
 
+"$ROOT_DIR/scripts/version.sh" check-sync >/dev/null
+
 if [[ "$MODE" != "check" && "$MODE" != "apply" ]]; then
   echo "Usage: scripts/rust/format.sh [check|apply]"
   exit 1

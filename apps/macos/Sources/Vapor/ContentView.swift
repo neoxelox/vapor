@@ -106,6 +106,10 @@ private struct DiagnosticsSummaryView: View {
             ))
           Text(viewModel.localized("diagnostics_provider_format", viewModel.state.providerName))
             .foregroundStyle(.secondary)
+          Text(viewModel.localized("diagnostics_version_format", viewModel.versionDisplay))
+            .foregroundStyle(.secondary)
+          Text(viewModel.localized("diagnostics_build_format", viewModel.buildVersionDisplay))
+            .foregroundStyle(.secondary)
           Text(viewModel.localized("runtime_directory_format", viewModel.state.vaporDirectoryPath))
             .foregroundStyle(.secondary)
         }

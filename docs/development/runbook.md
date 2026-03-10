@@ -16,6 +16,7 @@
 - Format both stacks: `./scripts/format.sh`
 - Format check both stacks: `./scripts/format.sh check`
 - Test both stacks: `./scripts/test.sh`
+- Version helper: `./scripts/version.sh`
 - Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
 
 ## Stack helpers
@@ -35,6 +36,7 @@
 - Scripts intentionally skip missing stack artifacts during early bootstrap (for example, no `Cargo.toml` yet or no `apps/macos` project yet).
 - Scripts default `VAPOR_DIR` to repo-local `./.vapor` for local dev and test ergonomics.
 - Scripts default `VAPOR_ENV` to `dev` (and `prod` for `./scripts/build.sh package`).
+- `VERSION` is the release version source-of-truth; wrapper scripts fail fast when `Cargo.toml` is out of sync with it.
 - Override runtime root with `VAPOR_DIR=/path/to/vapor ./scripts/test.sh` (same for build, lint, and format).
 - `Vapor.app` is a single package that ships both binaries: `Contents/MacOS/Vapor` and `Contents/MacOS/vapord`.
 - Runtime daemon launch path is always the bundled sibling binary (`vapord`) next to the app executable.

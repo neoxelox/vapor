@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - GitHub release automation policy, workflow, and operational runbooks.
+- Centralized `VERSION`-driven app + daemon versioning with synced Cargo metadata and build commit provenance.
 
 ## [0.1.0] - 2026-03-08
 

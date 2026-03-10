@@ -53,7 +53,7 @@ Dependency source defaults:
   - `./scripts/perf.sh`
 - Release workflow (`.github/workflows/release.yml`)
   - trigger: pushed `v*` tags
-  - validates tag format and tag ancestry on `main`
+  - validates tag format, `VERSION` match, and tag ancestry on `main`
   - calls `lint`, `test`, and `perf` in parallel
   - `release` job declares `needs: [preflight, lint, test, perf]`
   - `./scripts/build.sh package`

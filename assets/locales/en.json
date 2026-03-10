@@ -20,6 +20,8 @@
   "diagnostics_auto_launch_enabled": "Auto-launch is enabled",
   "diagnostics_auto_launch_disabled": "Auto-launch is disabled",
   "diagnostics_provider_format": "Provider: %@",
+  "diagnostics_version_format": "Version: %@",
+  "diagnostics_build_format": "Bundle build: %@",
   "menubar_open_vapor": "Open Vapor",
   "menubar_cycle_status": "Cycle status",
   "menubar_toggle_auto_launch": "Toggle auto-launch",

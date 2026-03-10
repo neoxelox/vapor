@@ -12,6 +12,8 @@ else
 fi
 mkdir -p "$VAPOR_DIR/logs" "$VAPOR_DIR/state"
 
+"$ROOT_DIR/scripts/version.sh" check-sync >/dev/null
+
 if [[ "$MODE" != "build" && "$MODE" != "package" ]]; then
   echo "Usage: scripts/rust/build.sh [build|package]"
   exit 1

@@ -52,8 +52,8 @@ Required environment inputs:
 
 Versioning policy:
 
-- `CFBundleShortVersionString` from latest git tag (`git describe --tags --abbrev=0`) fallback `0.1.0`.
-- `CFBundleVersion` from commit count (`git rev-list --count HEAD`) or CI build number override.
+- `CFBundleShortVersionString` from the centralized root `VERSION` file release portion.
+- `CFBundleVersion` from an Apple-valid mapping of the centralized root `VERSION` file, with git SHA stored separately for provenance.
 
 Icon source note:
 

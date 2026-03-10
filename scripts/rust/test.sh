@@ -7,6 +7,8 @@ export VAPOR_DIR="${VAPOR_DIR:-$ROOT_DIR/.vapor}"
 export VAPOR_ENV="${VAPOR_ENV:-dev}"
 mkdir -p "$VAPOR_DIR/logs" "$VAPOR_DIR/state"
 
+"$ROOT_DIR/scripts/version.sh" check-sync >/dev/null
+
 collect_manifests() {
   local manifests=""
 

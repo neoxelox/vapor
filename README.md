@@ -61,8 +61,6 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`.
 - `.vaporignore` supports glob-like rules and `!` unignore rules.
 - `preIgnoreRules` default content covers common low-signal paths such as `.git/`, `node_modules/`, build outputs (`dist/`, `build/`, `out/`), caches, swap/tmp files, logs, and `.env.local`.
 
-See `.env.example` for the available `VAPOR_*` environment variables used by the app, scripts, CI, and packaging flow.
-
 ## Development
 
 This project is intentionally vibe-coded while still following strict reliability, safety, and low-impact engineering rules.
@@ -74,6 +72,8 @@ Structure:
 - `core/providers`: Rust cloud provider integrations.
 - `core/shared`: shared contracts/constants used across app and daemon boundaries.
 
+See `.env.example` for the available `VAPOR_*` environment variables used by the app, scripts, CI, and packaging flow. The release version source of truth lives in `VERSION`.
+
 ### Scripts
 
 - Build both stacks (release): `./scripts/build.sh`
@@ -83,6 +83,7 @@ Structure:
 - Format both stacks: `./scripts/format.sh`
 - Format check both stacks (included in lint): `./scripts/format.sh check`
 - Test both stacks: `./scripts/test.sh`
+- Version helper: `./scripts/version.sh`
 - Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
 
 Stack-specific helpers:
@@ -99,10 +100,19 @@ Stack-specific helpers:
 
 ### Releases
 
-1. Update `CHANGELOG.md` with the target version section and date.
-2. Run `./scripts/format.sh`, `./scripts/lint.sh`, and `./scripts/test.sh`.
-3. Create an annotated tag: stable `vX.Y.Z` or prerelease `vX.Y.Z-rc.N`, `vX.Y.Z-beta.N`, or `vX.Y.Z-alpha.N`.
-4. Push the tag to GitHub.
+Version bumps with `./scripts/version.sh`:
+
+- Show current version: `./scripts/version.sh current`
+- Set an exact stable version: `./scripts/version.sh set 0.2.0`
+- Bump the stable base version: `./scripts/version.sh bump patch|minor|major`
+- Set an exact prerelease: `./scripts/version.sh set 0.2.0-rc.1`
+- Bump the current prerelease: `./scripts/version.sh prerelease rc|beta|alpha`
+- Convert to stable release: `./scripts/version.sh release`
+
+1. Set the target version in `VERSION` with `./scripts/version.sh set ...`, `./scripts/version.sh bump ...`, `./scripts/version.sh prerelease ...`, or `./scripts/version.sh release`.
+2. Update `CHANGELOG.md` with a section that matches the exact `VERSION` value and release date.
+3. Run `./scripts/format.sh`, `./scripts/lint.sh`, and `./scripts/test.sh`.
+4. Create and push an annotated tag that exactly matches `v$(cat VERSION)`.
 5. Wait for `lint`, `test`, `perf`, and `release` to pass on the tag.
 6. Review the draft GitHub Release, verify `Vapor.zip` and `Checksums.txt`, then publish it.
 

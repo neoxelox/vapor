@@ -13,6 +13,9 @@ VAPOR_ENTITLEMENTS="${VAPOR_ENTITLEMENTS:-}"
 VAPOR_NOTARY_PROFILE="${VAPOR_NOTARY_PROFILE:-}"
 export VAPOR_ENV="${VAPOR_ENV:-prod}"
 
+"$ROOT_DIR/scripts/version.sh" check-sync >/dev/null
+eval "$("$ROOT_DIR/scripts/version.sh" metadata)"
+
 "$ROOT_DIR/scripts/swift/sync-locales.sh"
 
 if [[ "$ICON_PNG" != /* ]]; then
@@ -48,21 +51,13 @@ if [[ "$icon_width" != "1024" || "$icon_height" != "1024" ]]; then
   exit 1
 fi
 
-if short_version_candidate="$(git -C "$ROOT_DIR" describe --tags --abbrev=0 2>/dev/null)"; then
-  short_version="$short_version_candidate"
-else
-  short_version="0.1.0"
-fi
-
-if [[ -n "${VAPOR_BUILD_NUMBER:-}" ]]; then
-  build_version="$VAPOR_BUILD_NUMBER"
-elif build_version_candidate="$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null)"; then
-  build_version="$build_version_candidate"
-else
-  build_version="1"
-fi
+short_version="$VAPOR_RELEASE_VERSION"
+build_version="$VAPOR_APPLE_BUILD_VERSION"
 
 echo "[package] Building release executable"
+echo "[package] Version: $VAPOR_VERSION"
+echo "[package] Build version: $build_version"
+echo "[package] Git commit: $VAPOR_GIT_COMMIT_SHORT"
 swift build \
   --package-path "$ROOT_DIR/apps/macos" \
   -c release \
@@ -119,6 +114,10 @@ cat >"$info_plist" <<EOF
   <string>$short_version</string>
   <key>CFBundleVersion</key>
   <string>$build_version</string>
+  <key>VaporVersion</key>
+  <string>$VAPOR_VERSION</string>
+  <key>VaporGitCommit</key>
+  <string>$VAPOR_GIT_COMMIT_SHORT</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_MACOS</string>
   <key>CFBundleIconFile</key>

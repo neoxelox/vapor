@@ -79,6 +79,9 @@ final class AppShellViewModel: ObservableObject {
         "use_vaporignore": String(state.useVaporIgnore),
         "preferred_language": state.preferredLanguageCode ?? "system",
         "effective_language": state.effectiveLanguageCode,
+        "version": VaporBuildInfo.version,
+        "bundle_build": VaporBuildInfo.buildVersion,
+        "git_commit": VaporBuildInfo.gitCommitShort ?? "unknown",
         "vapor_directory": state.vaporDirectoryPath,
       ]
     )
@@ -86,6 +89,14 @@ final class AppShellViewModel: ObservableObject {
 
   var availableLanguageCodes: [String] {
     localization.availableLanguageCodes
+  }
+
+  var versionDisplay: String {
+    VaporBuildInfo.displayVersion
+  }
+
+  var buildVersionDisplay: String {
+    VaporBuildInfo.buildVersion
   }
 
   func localized(_ key: String) -> String {

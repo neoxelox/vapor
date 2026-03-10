@@ -110,6 +110,10 @@ Do not move heavy compute into app process or FSEvents callback path.
 - AI contributors must never auto-open packaged apps (for example `open dist/Vapor.app`); app launch verification is performed manually by the project owner.
 - LaunchAgent and login item behavior must be stable across upgrades.
 - App/daemon version compatibility rules must be maintained and tested.
+- Product release version source-of-truth is the repository root `VERSION` file.
+- `scripts/version.sh` is the supported entrypoint for version bumps and Cargo workspace version sync.
+- Release tags must exactly match `v$(cat VERSION)`.
+- Build provenance must keep semantic version and git commit SHA separate: use valid Apple bundle version fields for app metadata, and store commit SHA in dedicated app/daemon build-info fields for logs, UI, and `--version` output.
 
 ## 8) Engineering standards
 
@@ -183,6 +187,7 @@ It does not override the "latest stable" policy above.
 - Current source-of-truth files are:
   - Rust shared constants: `core/shared/src/constants.rs`
   - Swift app constants: `apps/macos/Sources/VaporCore/VaporConstants.swift`
+- Product version source-of-truth is the root `VERSION` file; Cargo workspace version must be synced from it via `./scripts/version.sh`.
 - When adding or changing any config keys, environment variables, default values, runtime path names, launch labels, or filtering defaults, contributors must:
   1. update the relevant constants file first,
   2. consume the constant from call sites (avoid re-defining string literals), and

@@ -54,21 +54,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          ./scripts/version.sh check-sync >/dev/null
+          eval "$(./scripts/version.sh metadata)"
 
-          if [[ "$TAG_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
-            echo "release_version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
-            echo "release_stable=true" >> "$GITHUB_OUTPUT"
-            echo "release_prerelease=false" >> "$GITHUB_OUTPUT"
-          elif [[ "$TAG_NAME" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-(rc|beta|alpha)\.([0-9]+)$ ]]; then
-            echo "release_version=${BASH_REMATCH[1]}-${BASH_REMATCH[2]}.${BASH_REMATCH[3]}" >> "$GITHUB_OUTPUT"
-            echo "release_stable=false" >> "$GITHUB_OUTPUT"
-            echo "release_prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "[release] unsupported tag format: $TAG_NAME"
-            echo "[release] allowed: vX.Y.Z, vX.Y.Z-rc.N, vX.Y.Z-beta.N, vX.Y.Z-alpha.N"
+          if [[ "$TAG_NAME" != "$VAPOR_VERSION_TAG" ]]; then
+            echo "[release] tag '$TAG_NAME' does not match VERSION '$VAPOR_VERSION'"
             exit 1
           fi
+
+          echo "tag_name=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "release_version=$VAPOR_VERSION" >> "$GITHUB_OUTPUT"
+          echo "release_stable=$VAPOR_VERSION_IS_STABLE" >> "$GITHUB_OUTPUT"
+          echo "release_prerelease=$VAPOR_VERSION_IS_PRERELEASE" >> "$GITHUB_OUTPUT"
 
       - name: Verify tag commit is on main
         run: |
@@ -258,7 +255,6 @@ jobs:
           VAPOR_SIGN_IDENTITY: ${{ secrets.VAPOR_SIGN_IDENTITY }}
           VAPOR_NOTARY_PROFILE: ${{ secrets.VAPOR_NOTARY_PROFILE }}
           VAPOR_ENTITLEMENTS: ${{ vars.VAPOR_ENTITLEMENTS }}
-          VAPOR_BUILD_NUMBER: ${{ vars.VAPOR_BUILD_NUMBER }}
         run: ./scripts/build.sh package
 
       - name: Validate packaged outputs
