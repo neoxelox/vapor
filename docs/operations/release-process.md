@@ -66,7 +66,7 @@ Release invariants:
 - Keep workflow permissions least-privilege:
   - `contents: read` for preflight, lint, test, and perf
   - `contents: write` only for the release publish job
-- Keep `actions/checkout` on `persist-credentials: false`; authenticated git fetches in release preflight must pass `GITHUB_TOKEN` explicitly.
+- Release preflight relies on the default authenticated checkout credentials for `git fetch origin main`.
 
 ## Apple secret preparation
 
