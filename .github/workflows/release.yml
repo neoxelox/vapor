@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   preflight:
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 10
     outputs:
       tag_name: ${{ steps.release_meta.outputs.tag_name }}
@@ -91,7 +91,7 @@ jobs:
 
   release:
     needs: [preflight, lint, test, perf]
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 60
     environment: release
     permissions:
