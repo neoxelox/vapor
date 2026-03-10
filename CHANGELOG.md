@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0-alpha.2] - 2026-03-10
+
+### Changed
+
+- Hardened `lint`, `test`, `perf`, and `release` GitHub Actions workflows with explicit least-privilege permissions and non-persisted checkout credentials.
+- GitHub Releases are now documented as the direct installation source for Vapor app builds.
+
+### Fixed
+
+- Release preflight now authenticates its `main` ancestry fetch correctly on GitHub-hosted runners when checkout credentials are not persisted.
+- CI signing and notarization now run behind the protected GitHub `release` environment, verify the imported `Developer ID Application` identity, and pass the temporary keychain into `notarytool` explicitly.
+- `./scripts/version.sh` now refreshes `Cargo.lock` through Cargo and keeps workspace package versions aligned with `VERSION` during release preparation.
+
 ## [0.2.0-alpha.1] - 2026-03-10
 
 ### Added
@@ -29,6 +42,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Script-first build, lint, test, and packaging workflows.
 - Baseline CI workflows for lint and test on `main` and pull requests.
 
-[Unreleased]: https://github.com/neoxelox/vapor/compare/v0.2.0-alpha.1...HEAD
+[Unreleased]: https://github.com/neoxelox/vapor/compare/v0.2.0-alpha.2...HEAD
+[0.2.0-alpha.2]: https://github.com/neoxelox/vapor/releases/tag/v0.2.0-alpha.2
 [0.2.0-alpha.1]: https://github.com/neoxelox/vapor/releases/tag/v0.2.0-alpha.1
 [0.1.0]: https://github.com/neoxelox/vapor/releases/tag/v0.1.0
