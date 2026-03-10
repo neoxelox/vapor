@@ -4,31 +4,118 @@ import Testing
 @testable import VaporCore
 
 @Test
-func resolveUsesEnglishCatalogByDefault() {
-  let store = VaporLocalizationStore(preferredLanguagesProvider: { ["en-US"] })
+func resolveUsesEnglishCatalogByDefault() throws {
+  try withTemporaryLocalizationStore(
+    preferredLanguagesProvider: { ["en-US"] },
+    body: { store in
+      let catalog = store.resolve(preferredLanguageCodeOverride: nil)
 
-  let catalog = store.resolve(preferredLanguageCodeOverride: nil)
-
-  #expect(catalog.effectiveLanguageCode == "en")
-  #expect(catalog.availableLanguageCodes.contains("en"))
-  #expect(catalog.text("app_title") == "Vapor")
+      #expect(catalog.effectiveLanguageCode == "en")
+      #expect(catalog.availableLanguageCodes.contains("en"))
+      #expect(catalog.text("app_title") == "Vapor")
+    }
+  )
 }
 
 @Test
-func resolveFallsBackToEnglishWhenOverrideLanguageMissing() {
-  let store = VaporLocalizationStore(preferredLanguagesProvider: { ["de-DE"] })
+func resolveFallsBackToEnglishWhenOverrideLanguageMissing() throws {
+  try withTemporaryLocalizationStore(
+    preferredLanguagesProvider: { ["de-DE"] },
+    body: { store in
+      let catalog = store.resolve(preferredLanguageCodeOverride: "es")
 
-  let catalog = store.resolve(preferredLanguageCodeOverride: "es")
-
-  #expect(catalog.effectiveLanguageCode == "en")
-  #expect(catalog.text("settings_language") == "Language")
+      #expect(catalog.effectiveLanguageCode == "en")
+      #expect(catalog.text("settings_language") == "Language")
+    }
+  )
 }
 
 @Test
-func missingTranslationKeyFallsBackToKeyName() {
-  let store = VaporLocalizationStore(preferredLanguagesProvider: { ["en-US"] })
+func missingTranslationKeyFallsBackToKeyName() throws {
+  try withTemporaryLocalizationStore(
+    preferredLanguagesProvider: { ["en-US"] },
+    body: { store in
+      let catalog = store.resolve(preferredLanguageCodeOverride: nil)
+
+      #expect(catalog.text("unknown_key") == "unknown_key")
+    }
+  )
+}
+
+@Test
+func discoverResourceBundleFindsSwiftPackageBundleByExactName() throws {
+  let fileManager = FileManager.default
+  let rootURL = fileManager.temporaryDirectory.appendingPathComponent(
+    UUID().uuidString, isDirectory: true)
+  defer {
+    try? fileManager.removeItem(at: rootURL)
+  }
+
+  let bundleURL = rootURL.appendingPathComponent("Vapor_VaporCore.bundle", isDirectory: true)
+  try fileManager.createDirectory(at: bundleURL, withIntermediateDirectories: true)
+  try Data("{\"app_title\":\"Temp Vapor\"}".utf8).write(
+    to: bundleURL.appendingPathComponent("en.json"))
+
+  let bundle = VaporLocalizationStore.discoverResourceBundle(
+    searchRoots: [rootURL],
+    fileManager: fileManager
+  )
+
+  #expect(bundle?.bundleURL == bundleURL)
+}
+
+@Test
+func discoverResourceBundleFindsLocalizedCatalogsInAlternateVaporCoreBundle() throws {
+  let fileManager = FileManager.default
+  let rootURL = fileManager.temporaryDirectory.appendingPathComponent(
+    UUID().uuidString, isDirectory: true)
+  defer {
+    try? fileManager.removeItem(at: rootURL)
+  }
+
+  let bundleURL = rootURL.appendingPathComponent("CustomVaporCoreAssets.bundle", isDirectory: true)
+  let localesURL = bundleURL.appendingPathComponent(
+    VaporConstants.Localization.localesSubdirectory,
+    isDirectory: true
+  )
+  try fileManager.createDirectory(at: localesURL, withIntermediateDirectories: true)
+  try Data("{\"app_title\":\"Temp Vapor\"}".utf8).write(
+    to: localesURL.appendingPathComponent("en.json"))
+
+  let bundle = try #require(
+    VaporLocalizationStore.discoverResourceBundle(
+      searchRoots: [rootURL],
+      fileManager: fileManager
+    )
+  )
+  let store = VaporLocalizationStore(bundle: bundle, preferredLanguagesProvider: { ["en-US"] })
 
   let catalog = store.resolve(preferredLanguageCodeOverride: nil)
 
-  #expect(catalog.text("unknown_key") == "unknown_key")
+  #expect(catalog.text("app_title") == "Temp Vapor")
+}
+
+private func withTemporaryLocalizationStore(
+  catalogEntries: [String: String] = [
+    "app_title": "Vapor",
+    "settings_language": "Language",
+  ],
+  preferredLanguagesProvider: @escaping () -> [String],
+  body: (VaporLocalizationStore) throws -> Void
+) throws {
+  let fileManager = FileManager.default
+  let rootURL = fileManager.temporaryDirectory.appendingPathComponent(
+    UUID().uuidString, isDirectory: true)
+  defer {
+    try? fileManager.removeItem(at: rootURL)
+  }
+
+  let bundleURL = rootURL.appendingPathComponent("Vapor_VaporCore.bundle", isDirectory: true)
+  try fileManager.createDirectory(at: bundleURL, withIntermediateDirectories: true)
+  let catalogData = try JSONEncoder().encode(catalogEntries)
+  try catalogData.write(to: bundleURL.appendingPathComponent("en.json"))
+
+  let bundle = try #require(Bundle(url: bundleURL))
+  try body(
+    VaporLocalizationStore(bundle: bundle, preferredLanguagesProvider: preferredLanguagesProvider))
 }

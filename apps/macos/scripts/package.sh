@@ -81,6 +81,12 @@ if [[ ! -f "$daemon_binary_path" ]]; then
   exit 1
 fi
 
+resource_bundle_path="$ROOT_DIR/apps/macos/.build/release/Vapor_VaporCore.bundle"
+if [[ ! -d "$resource_bundle_path" ]]; then
+  echo "[package] Expected SwiftPM resource bundle missing at $resource_bundle_path"
+  exit 1
+fi
+
 app_bundle="$DIST_DIR/$APP_NAME.app"
 contents_dir="$app_bundle/Contents"
 macos_dir="$contents_dir/MacOS"
@@ -95,6 +101,8 @@ chmod +x "$macos_dir/$EXECUTABLE_NAME"
 
 cp "$daemon_binary_path" "$macos_dir/vapord"
 chmod +x "$macos_dir/vapord"
+
+ditto "$resource_bundle_path" "$resources_dir/$(basename "$resource_bundle_path")"
 
 cat >"$info_plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

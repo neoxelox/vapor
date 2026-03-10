@@ -1,11 +1,5 @@
 import Foundation
 
-#if !SWIFT_PACKAGE
-  extension Bundle {
-    fileprivate static var module: Bundle { .main }
-  }
-#endif
-
 public struct VaporLocalizedCatalog: Equatable, Sendable {
   public let effectiveLanguageCode: String
   public let availableLanguageCodes: [String]
@@ -40,6 +34,8 @@ public struct VaporLocalizedCatalog: Equatable, Sendable {
 }
 
 public final class VaporLocalizationStore {
+  private static let swiftPackageResourceBundleName = "Vapor_VaporCore.bundle"
+
   private let bundle: Bundle
   private let fileManager: FileManager
   private let preferredLanguagesProvider: () -> [String]
@@ -55,29 +51,33 @@ public final class VaporLocalizationStore {
   }
 
   private static func resolveDefaultBundle(fileManager: FileManager) -> Bundle {
-    if hasDefaultCatalog(in: .module) {
-      return .module
-    }
-
-    let candidateBundles = [Bundle.main] + Bundle.allBundles + Bundle.allFrameworks
+    let candidateBundles = loadedBundleCandidates()
     for candidate in candidateBundles {
       if hasDefaultCatalog(in: candidate) {
         return candidate
       }
     }
 
-    if let discovered = discoverResourceBundle(fileManager: fileManager),
-      hasDefaultCatalog(in: discovered)
-    {
+    if let discovered = discoverResourceBundle(
+      searchRoots: resourceSearchRoots(for: candidateBundles),
+      fileManager: fileManager
+    ) {
       return discovered
     }
 
     return Bundle.main
   }
 
-  private static func discoverResourceBundle(fileManager: FileManager) -> Bundle? {
-    let searchRoots = [Bundle.main.bundleURL, Bundle.main.resourceURL].compactMap { $0 }
-    for root in searchRoots {
+  static func discoverResourceBundle(searchRoots: [URL], fileManager: FileManager) -> Bundle? {
+    for root in uniqueSearchRoots(searchRoots) {
+      let directCandidate = root.appendingPathComponent(
+        swiftPackageResourceBundleName,
+        isDirectory: true
+      )
+      if let bundle = Bundle(url: directCandidate), hasDefaultCatalog(in: bundle) {
+        return bundle
+      }
+
       guard
         let candidates = try? fileManager.contentsOfDirectory(
           at: root,
@@ -92,13 +92,54 @@ public final class VaporLocalizationStore {
         guard candidate.lastPathComponent.lowercased().contains("vaporcore") else {
           continue
         }
-        if let bundle = Bundle(url: candidate) {
+        if let bundle = Bundle(url: candidate), hasDefaultCatalog(in: bundle) {
           return bundle
         }
       }
     }
 
     return nil
+  }
+
+  private static func loadedBundleCandidates() -> [Bundle] {
+    [Bundle.main] + Bundle.allBundles + Bundle.allFrameworks
+  }
+
+  private static func resourceSearchRoots(for bundles: [Bundle]) -> [URL] {
+    bundles.flatMap { bundle in
+      searchRoots(around: bundle)
+    }
+  }
+
+  private static func uniqueSearchRoots(_ searchRoots: [URL]) -> [URL] {
+    var seenPaths = Set<String>()
+    return searchRoots.filter { root in
+      seenPaths.insert(root.standardizedFileURL.path).inserted
+    }
+  }
+
+  private static func searchRoots(around bundle: Bundle) -> [URL] {
+    [bundle.bundleURL, bundle.resourceURL, bundle.executableURL?.deletingLastPathComponent()]
+      .compactMap { $0 }
+      .flatMap(searchRoots(around:))
+  }
+
+  private static func searchRoots(around url: URL) -> [URL] {
+    var roots: [URL] = []
+    var current = url.standardizedFileURL
+
+    roots.append(current)
+    for _ in 0..<3 {
+      let parent = current.deletingLastPathComponent()
+      guard parent.path != current.path else {
+        break
+      }
+
+      roots.append(parent)
+      current = parent
+    }
+
+    return roots
   }
 
   private static func hasDefaultCatalog(in bundle: Bundle) -> Bool {
