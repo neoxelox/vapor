@@ -44,6 +44,7 @@
 ## Release build policy
 
 - A single release mode is used and tuned for performance with safe optimizations.
-- The GitHub release pipeline runs `perf.yml` first; the `release` job proceeds only with `needs: perf`.
+- The GitHub release pipeline validates the tag ref first, then runs `lint.yml`, `test.yml`, and `perf.yml` in parallel; the `release` job proceeds only with `needs: [preflight, lint, test, perf]`.
+- Stable tag releases provision signing and notarization material on the runner before packaging.
 - Rust release profile uses `opt-level=3`, `lto=fat`, `codegen-units=1`, `panic=abort`, and `strip=symbols`.
 - Swift release build uses whole-module and cross-module optimization flags.

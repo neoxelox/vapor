@@ -25,10 +25,10 @@ GitHub Actions workflows are defined in `.github/workflows/`:
 - Rust crates: `crates.io` via Cargo
 - Swift packages: SwiftPM package dependencies
 
-`lint.yml` and `test.yml` run on pull requests and pushes to `main`, and are intended to mirror local script commands.
+`lint.yml` and `test.yml` run on pull requests and pushes to `main`, and also expose `workflow_call` so release automation can reuse the same gates.
 
 `perf.yml` has no standalone triggers; `release.yml` calls it for versioned release runs.
 
-`release.yml` runs on pushed tags matching `v*` (plus manual dispatch for reruns), invokes `perf.yml` / `./scripts/perf.sh` as a release gate, and then runs the `release` job only after `needs: perf` succeeds. Packaging still uses `./scripts/build.sh package` as the source of truth.
+`release.yml` runs on pushed tags matching `v*`, validates that the tag commit is on `main`, invokes `lint.yml`, `test.yml`, and `perf.yml` in parallel, and then runs the `release` job only after all three succeed. Packaging still uses `./scripts/build.sh package` as the source of truth.
 
 For branch protection and required status-check guidance, see `docs/ci/required-checks.md`.

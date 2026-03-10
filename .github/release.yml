@@ -1,0 +1,32 @@
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+  categories:
+    - title: Features
+      labels:
+        - feat
+        - feature
+    - title: Fixes
+      labels:
+        - fix
+        - bug
+        - bugfix
+    - title: Performance
+      labels:
+        - perf
+    - title: Refactors
+      labels:
+        - refactor
+    - title: Docs
+      labels:
+        - docs
+    - title: Testing
+      labels:
+        - test
+    - title: Tooling
+      labels:
+        - ci
+        - build
+        - chore
+        - release

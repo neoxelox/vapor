@@ -61,31 +61,7 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`.
 - `.vaporignore` supports glob-like rules and `!` unignore rules.
 - `preIgnoreRules` default content covers common low-signal paths such as `.git/`, `node_modules/`, build outputs (`dist/`, `build/`, `out/`), caches, swap/tmp files, logs, and `.env.local`.
 
-### Environment Variables
-
-The following environment variables can be used to override settings.
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `VAPOR_DIR` | `~/.vapor` for normal runtime; repo scripts set `./.vapor` | Runtime root for `vapor.json`, logs, and durable state. |
-| `VAPOR_ENV` | Unset (treated as `prod`); repo scripts default to `dev`; package flow defaults to `prod` | Runtime mode (`dev` or `prod`) controlling path fallback and default log level. |
-| `VAPOR_LOG_LEVEL` | Unset (falls back to `VAPOR_ENV`) | Runtime minimum log level (`debug`, `info`, `warning`, `error`). |
-| `VAPOR_USE_GITIGNORE` | `true` | Daemon local filtering toggle for `.gitignore` ingestion. |
-| `VAPOR_USE_VAPORIGNORE` | `true` | Daemon local filtering toggle for `.vaporignore` ingestion. |
-| `VAPOR_LOCAL_SYNC_DIRECTORY` | Raw value from `vapor.json.localSyncDirectory` | Daemon local sync root directory source. |
-| `VAPOR_CLOUD_SYNC_DIRECTORY` | Raw value from `vapor.json.cloudSyncDirectory` | Daemon cloud sync root directory source. |
-| `VAPOR_PRE_IGNORE_RULES` | Raw value from `vapor.json.preIgnoreRules` | Daemon user-level baseline rules source (embedded `.gitignore`-like text). |
-| `VAPOR_POST_IGNORE_RULES` | Raw value from `vapor.json.postIgnoreRules` | Daemon user-level override rules source (embedded `.gitignore`-like text). |
-
-Build and packaging:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `VAPOR_XCODE_SCHEME` | Unset | Required to run `xcodebuild` in `./scripts/swift/build.sh` when building from an Xcode project/workspace. |
-| `VAPOR_SIGN_IDENTITY` | Empty (ad-hoc signing) | Developer ID identity used by `apps/macos/scripts/package.sh`. |
-| `VAPOR_ENTITLEMENTS` | Empty | Optional entitlements plist path passed to codesign in packaging. |
-| `VAPOR_NOTARY_PROFILE` | Empty | Notarytool keychain profile; when set, packaging performs notarization and stapling. |
-| `VAPOR_BUILD_NUMBER` | `git rev-list --count HEAD` fallback to `1` | Overrides `CFBundleVersion` in packaged app artifacts. |
+See `.env.example` for the available `VAPOR_*` environment variables used by the app, scripts, CI, and packaging flow.
 
 ## Development
 
@@ -120,6 +96,15 @@ Stack-specific helpers:
 - Swift tests: `./scripts/swift/test.sh`
 - Swift build: `./scripts/swift/build.sh`
 - macOS app packaging: `apps/macos/scripts/package.sh`
+
+### Releases
+
+1. Update `CHANGELOG.md` with the target version section and date.
+2. Run `./scripts/format.sh apply`, `./scripts/lint.sh`, and `./scripts/test.sh`.
+3. Create an annotated tag: stable `vX.Y.Z` or prerelease `vX.Y.Z-rc.N`, `vX.Y.Z-beta.N`, or `vX.Y.Z-alpha.N`.
+4. Push the tag to GitHub.
+5. Wait for `lint`, `test`, `perf`, and `release` to pass on the tag.
+6. Review the draft GitHub Release, verify `Vapor.zip` and `Checksums.txt`, then publish it.
 
 ## Agents
 

@@ -104,6 +104,7 @@ Do not move heavy compute into app process or FSEvents callback path.
 - `Vapor.app` is the single distributable package and must contain both executables:
   - `Contents/MacOS/Vapor`
   - `Contents/MacOS/vapord`
+- GitHub Releases must publish file assets, so release uploads should use a zip that contains `Vapor.app`; the raw `.app` bundle directory remains a local packaging/validation artifact rather than a direct release asset.
 - Runtime daemon launch must target only the bundled sibling binary (`Contents/MacOS/vapord`) and must not rely on global install paths.
 - Xcode project/workspace support is optional convenience for debugging and must not become the release source of truth.
 - AI contributors must never auto-open packaged apps (for example `open dist/Vapor.app`); app launch verification is performed manually by the project owner.
@@ -278,6 +279,22 @@ Commit and push policy:
 - Keep commits small, cohesive, and rollback-friendly.
 - Use commit messages that explain why the change exists.
 - Do not push commits to GitHub unless the project owner explicitly asks.
+
+Commit message convention:
+
+- Use Conventional Commit-style subjects: `<type>: <why-focused summary>`.
+- Prefer these types and keep PR labels aligned with the same dominant category for GitHub release notes:
+  - `feat`: user-visible capability or additive behavior -> label `feat`/`feature` -> release category `Features`
+  - `fix`: bug or reliability correction -> label `fix`/`bug`/`bugfix` -> release category `Fixes`
+  - `perf`: performance, battery, thermal, or throughput improvement -> label `perf` -> release category `Performance`
+  - `refactor`: internal restructuring without intended behavior change -> label `refactor` -> release category `Refactors`
+  - `docs`: documentation-only change -> label `docs` -> release category `Docs`
+  - `test`: behavior-preserving test-only change -> label `test` -> release category `Testing`
+  - `ci`: GitHub Actions or CI pipeline change -> label `ci` -> release category `Tooling`
+  - `build`: build, packaging, signing, or release automation change -> label `build` -> release category `Tooling`
+  - `chore`: repository maintenance that does not fit another type -> label `chore` -> release category `Tooling`
+  - `release`: changelog/version/release-prep only -> label `release` -> release category `Tooling`
+- Use one dominant type per commit; split mixed changes when practical so changelog grouping stays accurate.
 
 ## 11) Definition of done
 

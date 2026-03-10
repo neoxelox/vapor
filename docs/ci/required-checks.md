@@ -11,10 +11,10 @@ Configure branch protection for `main` to require the following workflow checks:
 - `lint`
 - `test`
 
-Release-only performance gate:
+Release-only gates:
 
-- `perf` is a reusable workflow invoked by `release.yml` for versioned releases.
-- It is not scheduled and is not a pull-request required status check.
+- `lint`, `test`, and `perf` are reusable workflows invoked by `release.yml` for versioned releases.
+- `perf` is not a pull-request required status check.
 
 ## Workflow to script mapping
 
@@ -42,16 +42,20 @@ Dependency source defaults:
 - Swift packages: SwiftPM
 
 - Lint workflow (`.github/workflows/lint.yml`)
+  - triggers: `pull_request`, `push` to `main`, `workflow_call`
   - `./scripts/lint.sh`
 - Test workflow (`.github/workflows/test.yml`)
+  - triggers: `pull_request`, `push` to `main`, `workflow_call`
   - `./scripts/test.sh`
 - Perf workflow (`.github/workflows/perf.yml`)
   - trigger: `workflow_call` from `.github/workflows/release.yml`
   - thresholds via env: `VAPOR_PERF_SMOKE_RUST_MAX_SECONDS` (default `600`), `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS` (default `900`)
   - `./scripts/perf.sh`
 - Release workflow (`.github/workflows/release.yml`)
-  - trigger: pushed `v*` tags and manual reruns
-  - `release` job declares `needs: perf`
+  - trigger: pushed `v*` tags
+  - validates tag format and tag ancestry on `main`
+  - calls `lint`, `test`, and `perf` in parallel
+  - `release` job declares `needs: [preflight, lint, test, perf]`
   - `./scripts/build.sh package`
   - `gh release create/edit/upload`
 

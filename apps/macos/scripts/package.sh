@@ -195,11 +195,10 @@ if [[ -n "$VAPOR_NOTARY_PROFILE" ]]; then
   xcrun notarytool submit "$zip_path" --keychain-profile "$VAPOR_NOTARY_PROFILE" --wait
   xcrun stapler staple "$app_bundle"
 
-  notarized_zip="$DIST_DIR/$APP_NAME-notarized.zip"
-  rm -f "$notarized_zip"
-  ditto -c -k --keepParent "$app_bundle" "$notarized_zip"
+  rm -f "$zip_path"
+  ditto -c -k --keepParent "$app_bundle" "$zip_path"
 
-  echo "[package] Notarized artifact: $notarized_zip"
+  echo "[package] Notarized zip artifact: $zip_path"
 fi
 
 echo "[package] App bundle: $app_bundle"

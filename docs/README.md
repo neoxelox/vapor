@@ -14,6 +14,8 @@ Use this page as the default entrypoint for product, engineering, and operations
 ## Operations
 
 - Operations index: `docs/operations/README.md`
+- Release process: `docs/operations/release-process.md`
+- Release incident playbook: `docs/operations/release-incident-playbook.md`
 - Runtime logging and localization: `docs/operations/runtime-logging-and-localization.md`
 
 ## Development
