@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Vapor settings now expose editable baseline and override ignore-rule lists, persisting them for daemon filtering on the next launch.
+- Daemon event/intent bookkeeping now stays bounded in memory by compacting over-cap subtrees into a single reconcile intent instead of letting callback path growth run unbounded.
 
 ### Fixed
 

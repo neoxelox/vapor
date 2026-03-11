@@ -55,3 +55,8 @@ pub mod filtering {
         ".env.local",
     ];
 }
+
+pub mod engine {
+    pub const MAX_IN_MEMORY_PENDING_PATHS: usize = 20_000;
+    pub const MAX_IN_MEMORY_PENDING_PATHS_PER_SUBTREE: usize = 5_000;
+}

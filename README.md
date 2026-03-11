@@ -16,6 +16,7 @@ Available now:
 
 - ⚡ Fast-feeling background sync designed to stay responsive without stealing your machine.
 - 🪶 Low-impact by design: Vapor defers heavy work under pressure to protect battery and thermals.
+- 🌩 Sudden bursts of file changes stay contained, so one big folder update doesn't snowball.
 - 🍎 Menubar-first experience that stays out of your way while keeping status and controls one click away.
 - 🚀 Auto-launch at login with resilient crash-loop protection for dependable day-to-day use.
 - 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow.

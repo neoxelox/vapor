@@ -3,11 +3,12 @@
 ## Local to remote
 
 1. FSEvents emits path metadata.
-2. Daemon callback normalizes/excludes and records event intent in memory.
-3. Debounce/coalesce loop emits stabilized intents.
-4. Keyed scheduler supersedes stale intents and selects latest action.
-5. Planner/hashing/uploader execute under throttle state constraints.
-6. Durable queue/state records progress and retry metadata.
+2. Daemon callback normalizes/excludes and records path metadata into bounded in-memory event and intent maps.
+3. If pending-path caps are exceeded, noisy subtrees compact into a single `RECONCILE_SUBTREE` marker so storms stay bounded until later deferred reconcile stages run.
+4. Debounce/coalesce loop emits stabilized intents.
+5. Keyed scheduler supersedes stale intents and selects latest action.
+6. Planner/hashing/uploader execute under throttle state constraints.
+7. Durable queue/state records progress and retry metadata.
 
 ## Remote to local (bidirectional MVP)
 
