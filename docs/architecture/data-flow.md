@@ -5,7 +5,7 @@
 1. FSEvents emits path metadata.
 2. Daemon callback normalizes/excludes and records path metadata into bounded in-memory event and intent maps.
 3. If pending-path caps are exceeded, noisy subtrees compact into a single `RECONCILE_SUBTREE` marker so storms stay bounded until later deferred reconcile stages run.
-4. Debounce/coalesce loop emits stabilized intents.
+4. A 250ms debounce/coalesce tick emits stabilized events after conservative per-path quiet windows (shorter for key configs, longer for lockfiles and other unmatched paths).
 5. Keyed scheduler supersedes stale intents and selects latest action.
 6. Planner/hashing/uploader execute under throttle state constraints.
 7. Durable queue/state records progress and retry metadata.

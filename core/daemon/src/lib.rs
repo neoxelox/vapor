@@ -7,6 +7,7 @@ pub mod build_info {
     include!(concat!(env!("OUT_DIR"), "/vapor_build_info.rs"));
 }
 
+pub mod debounce;
 pub mod event_intents;
 pub mod fs_events;
 pub mod logging;

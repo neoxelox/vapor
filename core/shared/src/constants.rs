@@ -59,4 +59,11 @@ pub mod filtering {
 pub mod engine {
     pub const MAX_IN_MEMORY_PENDING_PATHS: usize = 20_000;
     pub const MAX_IN_MEMORY_PENDING_PATHS_PER_SUBTREE: usize = 5_000;
+    pub const DEBOUNCE_TICK_MILLIS: u64 = 250;
+    pub const MIN_DEBOUNCE_WINDOW_MILLIS: u64 = 500;
+    pub const MAX_DEBOUNCE_WINDOW_MILLIS: u64 = 8_000;
+    pub const KEY_CONFIG_DEBOUNCE_WINDOW_MILLIS: u64 = 900;
+    pub const CODE_TEXT_DEBOUNCE_WINDOW_MILLIS: u64 = 1_200;
+    pub const LOCKFILE_DEBOUNCE_WINDOW_MILLIS: u64 = 2_500;
+    pub const DEFAULT_DEBOUNCE_WINDOW_MILLIS: u64 = 4_000;
 }

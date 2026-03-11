@@ -174,6 +174,39 @@ impl BoundedEventIntentMaps {
         self.subtree_pending_counts.get(root).copied().unwrap_or(0)
     }
 
+    pub fn drain_ready_events(
+        &mut self,
+        mut is_ready: impl FnMut(&PendingEventRecord) -> bool,
+    ) -> Vec<PendingEventRecord> {
+        self.drain_ready_events_with(|record| is_ready(record).then_some(()))
+            .into_iter()
+            .map(|(record, ())| record)
+            .collect()
+    }
+
+    pub fn drain_ready_events_with<T>(
+        &mut self,
+        mut select_ready_metadata: impl FnMut(&PendingEventRecord) -> Option<T>,
+    ) -> Vec<(PendingEventRecord, T)> {
+        let ready_paths_with_metadata: Vec<(PathBuf, T)> = self
+            .event_map
+            .iter()
+            .filter_map(|(path, record)| {
+                select_ready_metadata(record).map(|metadata| (path.clone(), metadata))
+            })
+            .collect();
+
+        let mut ready_records = Vec::with_capacity(ready_paths_with_metadata.len());
+        for (path, metadata) in ready_paths_with_metadata {
+            if let Some(record) = self.event_map.remove(&path) {
+                self.untrack_path(&path);
+                ready_records.push((record, metadata));
+            }
+        }
+
+        ready_records
+    }
+
     pub fn record_event(&mut self, event: FsEventRecord) {
         if !self.path_is_in_scope(&event.path) {
             logging::warning(
@@ -515,6 +548,11 @@ impl BoundedFsEventRecorder {
     pub fn with_state<R>(&self, reader: impl FnOnce(&BoundedEventIntentMaps) -> R) -> R {
         let guard = self.maps.lock().expect("event intent mutex poisoned");
         reader(&guard)
+    }
+
+    pub fn with_mut_state<R>(&self, writer: impl FnOnce(&mut BoundedEventIntentMaps) -> R) -> R {
+        let mut guard = self.maps.lock().expect("event intent mutex poisoned");
+        writer(&mut guard)
     }
 }
 

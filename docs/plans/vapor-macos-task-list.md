@@ -92,7 +92,7 @@ Exit gate:
 - [x] P2-2e Enforce sync scope strictly to configured `localSyncDirectory`/`cloudSyncDirectory` roots (including missing-root auto-create behavior) and never fall back to whole-device scanning.
 - [x] P2-2f Add explicit safety tests that invalid local sync path and missing-root creation flows do not trigger any broad/root filesystem watch fallback.
 - [x] P2-3 Implement bounded in-memory event/intent maps with deterministic caps and compaction/backpressure behavior.
-- [ ] P2-4 Implement debounce/coalescing loop (250ms tick, conservative windows).
+- [x] P2-4 Implement debounce/coalescing loop (250ms tick, conservative windows).
 - [ ] P2-5 Implement keyed superseding scheduler (latest intent wins per path).
 - [ ] P2-6 Implement throttle controller inputs and 4-state model.
 - [ ] P2-7 Gate planner/uploader worker caps strictly by throttle state.
