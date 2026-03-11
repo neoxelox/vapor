@@ -6,6 +6,7 @@ use vapor_shared::constants;
 use crate::event_intents::{
     BoundedEventIntentMaps, BoundedFsEventRecorder, PendingEventFlags, PendingEventRecord,
 };
+use crate::fs_events::FsEventKind;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DebounceClass {
@@ -87,6 +88,7 @@ pub struct StabilizedEvent {
     pub path: PathBuf,
     pub first_observed_at: SystemTime,
     pub last_observed_at: SystemTime,
+    pub last_event_kind: FsEventKind,
     pub flags: PendingEventFlags,
     pub burst_count: usize,
     pub debounce_class: DebounceClass,
@@ -204,6 +206,7 @@ impl DebounceLoop {
             path: record.path,
             first_observed_at: record.first_observed_at,
             last_observed_at: record.last_observed_at,
+            last_event_kind: record.last_event_kind,
             flags: record.flags,
             burst_count: record.burst_count,
             debounce_class,
@@ -392,6 +395,7 @@ mod tests {
         assert_eq!(stabilized.len(), 1);
         assert_eq!(stabilized[0].path, path);
         assert_eq!(stabilized[0].debounce_class, DebounceClass::CodeText);
+        assert_eq!(stabilized[0].last_event_kind, FsEventKind::Modified);
         assert_eq!(stabilized[0].quiet_window, Duration::from_millis(1_200));
     }
 

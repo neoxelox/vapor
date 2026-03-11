@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Vapor settings now expose editable baseline and override ignore-rule lists, persisting them for daemon filtering on the next launch.
 - Daemon event/intent bookkeeping now stays bounded in memory by compacting over-cap subtrees into a single reconcile intent instead of letting callback path growth run unbounded.
 - Daemon debounce/coalescing now runs on a 250ms tick with conservative quiet windows so config edits settle faster while lockfiles and other unmatched paths wait longer before stabilization.
+- Daemon scheduling now keeps one latest intent per path, supersedes stale actions, and requeues dirty paths when new changes arrive during in-flight work.
 
 ### Fixed
 

@@ -12,6 +12,7 @@ pub mod event_intents;
 pub mod fs_events;
 pub mod logging;
 pub mod path_filter;
+pub mod scheduler;
 pub mod sync_directories;
 
 #[derive(Debug)]

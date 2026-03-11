@@ -58,6 +58,7 @@ pub struct PendingEventRecord {
     pub path: PathBuf,
     pub first_observed_at: SystemTime,
     pub last_observed_at: SystemTime,
+    pub last_event_kind: FsEventKind,
     pub flags: PendingEventFlags,
     pub burst_count: usize,
 }
@@ -207,6 +208,19 @@ impl BoundedEventIntentMaps {
         ready_records
     }
 
+    pub fn drain_pending_intents(&mut self) -> Vec<PendingIntentRecord> {
+        let pending_paths: Vec<PathBuf> = self.intent_map.keys().cloned().collect();
+        let mut pending_intents = Vec::with_capacity(pending_paths.len());
+        for path in pending_paths {
+            if let Some(record) = self.intent_map.remove(&path) {
+                self.untrack_path(&path);
+                pending_intents.push(record);
+            }
+        }
+
+        pending_intents
+    }
+
     pub fn record_event(&mut self, event: FsEventRecord) {
         if !self.path_is_in_scope(&event.path) {
             logging::warning(
@@ -226,6 +240,7 @@ impl BoundedEventIntentMaps {
 
         if let Some(existing) = self.event_map.get_mut(&event.path) {
             existing.last_observed_at = event.observed_at;
+            existing.last_event_kind = event.kind.clone();
             existing.flags.include(&event.kind);
             existing.burst_count += 1;
         } else {
@@ -246,6 +261,7 @@ impl BoundedEventIntentMaps {
                     path: event.path.clone(),
                     first_observed_at: event.observed_at,
                     last_observed_at: event.observed_at,
+                    last_event_kind: event.kind,
                     flags,
                     burst_count: 1,
                 },
@@ -611,6 +627,7 @@ mod tests {
         let pending = maps.pending_event(&path).expect("missing pending event");
         assert_eq!(pending.first_observed_at, timestamp(1));
         assert_eq!(pending.last_observed_at, timestamp(3));
+        assert_eq!(pending.last_event_kind, FsEventKind::Renamed);
         assert_eq!(pending.burst_count, 3);
         assert!(pending.flags.created);
         assert!(pending.flags.modified);
@@ -757,6 +774,23 @@ mod tests {
             assert_eq!(maps.pending_event_count(), 1);
             assert_eq!(maps.tracked_path_count(), 1);
         });
+    }
+
+    #[test]
+    fn draining_pending_intents_clears_intent_entries_and_tracking() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let path = watch_root.join("project/file.txt");
+        let mut maps =
+            BoundedEventIntentMaps::with_limits(watch_root, EventIntentLimits::new(10, 10));
+
+        maps.upsert_intent(path.clone(), PendingIntentKind::Upload, timestamp(1));
+
+        let intents = maps.drain_pending_intents();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].path, path);
+        assert_eq!(intents[0].kind, PendingIntentKind::Upload);
+        assert_eq!(maps.pending_intent_count(), 0);
+        assert_eq!(maps.tracked_path_count(), 0);
     }
 
     fn fs_event(path: PathBuf, kind: FsEventKind, seconds: u64) -> FsEventRecord {
