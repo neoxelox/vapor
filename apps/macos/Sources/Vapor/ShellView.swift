@@ -138,9 +138,8 @@ struct SettingsView: View {
       }
 
       Picker(viewModel.localized("settings_language"), selection: languageCodeBinding) {
-        Text(viewModel.localized("settings_language_system_default")).tag(String?.none)
         ForEach(viewModel.availableLanguageCodes, id: \.self) { code in
-          Text(code).tag(Optional(code))
+          Text(code).tag(code)
         }
       }
 
@@ -192,10 +191,10 @@ struct SettingsView: View {
     )
   }
 
-  private var languageCodeBinding: Binding<String?> {
+  private var languageCodeBinding: Binding<String> {
     Binding(
-      get: { viewModel.state.preferredLanguageCode },
-      set: { viewModel.setPreferredLanguageCode($0) }
+      get: { viewModel.state.languageCode },
+      set: { viewModel.setLanguageCode($0) }
     )
   }
 }

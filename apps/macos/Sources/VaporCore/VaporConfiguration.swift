@@ -1,14 +1,14 @@
 import Foundation
 
 public struct VaporConfiguration: Codable, Equatable, Sendable {
-  public var autoLaunchEnabled: Bool
+  public var autoLaunch: Bool
   public var useGitIgnore: Bool
   public var useVaporIgnore: Bool
   public var localSyncDirectory: String
   public var cloudSyncDirectory: String
   public var preIgnoreRules: String
   public var postIgnoreRules: String
-  public var preferredLanguageCode: String?
+  public var languageCode: String
   public var timelineEventLimit: Int
 
   public static let defaultPreIgnoreRuleLines = VaporConstants.Defaults.preIgnoreRuleLines
@@ -16,28 +16,69 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   public static let defaultCloudSyncDirectory = VaporConstants.Defaults.cloudSyncDirectory
   public static let defaultPreIgnoreRules = VaporConstants.Defaults.preIgnoreRules
   public static let defaultPostIgnoreRules = VaporConstants.Defaults.postIgnoreRules
-  public static let defaultPreferredLanguageCode = VaporConstants.Defaults.preferredLanguageCode
+  public static let defaultLanguageCode = VaporConstants.Defaults.languageCode
 
   public init(
-    autoLaunchEnabled: Bool = VaporConstants.Defaults.autoLaunchEnabled,
+    autoLaunch: Bool = VaporConstants.Defaults.autoLaunch,
     useGitIgnore: Bool = VaporConstants.Defaults.useGitIgnore,
     useVaporIgnore: Bool = VaporConstants.Defaults.useVaporIgnore,
     localSyncDirectory: String = defaultLocalSyncDirectory,
     cloudSyncDirectory: String = defaultCloudSyncDirectory,
     preIgnoreRules: String = defaultPreIgnoreRules,
     postIgnoreRules: String = defaultPostIgnoreRules,
-    preferredLanguageCode: String? = defaultPreferredLanguageCode,
+    languageCode: String = defaultLanguageCode,
     timelineEventLimit: Int = VaporConstants.Defaults.timelineEventLimit
   ) {
-    self.autoLaunchEnabled = autoLaunchEnabled
+    self.autoLaunch = autoLaunch
     self.useGitIgnore = useGitIgnore
     self.useVaporIgnore = useVaporIgnore
     self.localSyncDirectory = localSyncDirectory
     self.cloudSyncDirectory = cloudSyncDirectory
     self.preIgnoreRules = preIgnoreRules
     self.postIgnoreRules = postIgnoreRules
-    self.preferredLanguageCode = preferredLanguageCode
+    self.languageCode = Self.normalizedLanguageCode(languageCode)
     self.timelineEventLimit = timelineEventLimit
+  }
+
+  enum CodingKeys: String, CodingKey {
+    case autoLaunch
+    case useGitIgnore
+    case useVaporIgnore
+    case localSyncDirectory
+    case cloudSyncDirectory
+    case preIgnoreRules
+    case postIgnoreRules
+    case languageCode
+    case timelineEventLimit
+  }
+
+  public init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      autoLaunch: try container.decodeIfPresent(Bool.self, forKey: .autoLaunch)
+        ?? VaporConstants.Defaults.autoLaunch,
+      useGitIgnore: try container.decodeIfPresent(Bool.self, forKey: .useGitIgnore)
+        ?? VaporConstants.Defaults.useGitIgnore,
+      useVaporIgnore: try container.decodeIfPresent(Bool.self, forKey: .useVaporIgnore)
+        ?? VaporConstants.Defaults.useVaporIgnore,
+      localSyncDirectory: try container.decodeIfPresent(String.self, forKey: .localSyncDirectory)
+        ?? Self.defaultLocalSyncDirectory,
+      cloudSyncDirectory: try container.decodeIfPresent(String.self, forKey: .cloudSyncDirectory)
+        ?? Self.defaultCloudSyncDirectory,
+      preIgnoreRules: try container.decodeIfPresent(String.self, forKey: .preIgnoreRules)
+        ?? Self.defaultPreIgnoreRules,
+      postIgnoreRules: try container.decodeIfPresent(String.self, forKey: .postIgnoreRules)
+        ?? Self.defaultPostIgnoreRules,
+      languageCode: try container.decodeIfPresent(String.self, forKey: .languageCode)
+        ?? Self.defaultLanguageCode,
+      timelineEventLimit: try container.decodeIfPresent(Int.self, forKey: .timelineEventLimit)
+        ?? VaporConstants.Defaults.timelineEventLimit
+    )
+  }
+
+  private static func normalizedLanguageCode(_ languageCode: String) -> String {
+    let normalized = languageCode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized.isEmpty ? defaultLanguageCode : normalized
   }
 }
 

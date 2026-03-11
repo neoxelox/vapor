@@ -112,6 +112,8 @@ Exit gate:
 
 - [ ] P3-1 Implement provider trait/capabilities and provider-neutral error taxonomy.
 - [ ] P3-2 Implement `provider_gdrive` auth/refresh + remote root initialization.
+- [ ] P3-2a Add authenticated Google Drive folder lookup/create for the configured `cloudSyncDirectory` before regular sync starts.
+- [ ] P3-2b Block normal sync startup until the configured cloud root exists or the provider returns an actionable initialization error.
 - [ ] P3-3 Implement upload paths (multipart small, resumable large).
 - [ ] P3-4 Implement remote changes polling (low frequency, throttle-aware).
 - [ ] P3-5 Implement remote-to-local apply pipeline using durable queue/state intents.

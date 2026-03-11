@@ -6,9 +6,8 @@ import Testing
 @Test
 func resolveUsesEnglishCatalogByDefault() throws {
   try withTemporaryLocalizationStore(
-    preferredLanguagesProvider: { ["en-US"] },
     body: { store in
-      let catalog = store.resolve(preferredLanguageCodeOverride: nil)
+      let catalog = store.resolve(languageCode: "en")
 
       #expect(catalog.effectiveLanguageCode == "en")
       #expect(catalog.availableLanguageCodes.contains("en"))
@@ -20,9 +19,8 @@ func resolveUsesEnglishCatalogByDefault() throws {
 @Test
 func resolveFallsBackToEnglishWhenOverrideLanguageMissing() throws {
   try withTemporaryLocalizationStore(
-    preferredLanguagesProvider: { ["de-DE"] },
     body: { store in
-      let catalog = store.resolve(preferredLanguageCodeOverride: "es")
+      let catalog = store.resolve(languageCode: "es")
 
       #expect(catalog.effectiveLanguageCode == "en")
       #expect(catalog.text("settings_language") == "Language")
@@ -33,9 +31,8 @@ func resolveFallsBackToEnglishWhenOverrideLanguageMissing() throws {
 @Test
 func missingTranslationKeyFallsBackToKeyName() throws {
   try withTemporaryLocalizationStore(
-    preferredLanguagesProvider: { ["en-US"] },
     body: { store in
-      let catalog = store.resolve(preferredLanguageCodeOverride: nil)
+      let catalog = store.resolve(languageCode: "en")
 
       #expect(catalog.text("unknown_key") == "unknown_key")
     }
@@ -88,9 +85,9 @@ func discoverResourceBundleFindsLocalizedCatalogsInAlternateVaporCoreBundle() th
       fileManager: fileManager
     )
   )
-  let store = VaporLocalizationStore(bundle: bundle, preferredLanguagesProvider: { ["en-US"] })
+  let store = VaporLocalizationStore(bundle: bundle)
 
-  let catalog = store.resolve(preferredLanguageCodeOverride: nil)
+  let catalog = store.resolve(languageCode: "en")
 
   #expect(catalog.text("app_title") == "Temp Vapor")
 }
@@ -100,7 +97,6 @@ private func withTemporaryLocalizationStore(
     "app_title": "Vapor",
     "settings_language": "Language",
   ],
-  preferredLanguagesProvider: @escaping () -> [String],
   body: (VaporLocalizationStore) throws -> Void
 ) throws {
   let fileManager = FileManager.default
@@ -116,6 +112,5 @@ private func withTemporaryLocalizationStore(
   try catalogData.write(to: bundleURL.appendingPathComponent("en.json"))
 
   let bundle = try #require(Bundle(url: bundleURL))
-  try body(
-    VaporLocalizationStore(bundle: bundle, preferredLanguagesProvider: preferredLanguagesProvider))
+  try body(VaporLocalizationStore(bundle: bundle))
 }

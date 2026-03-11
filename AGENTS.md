@@ -202,9 +202,8 @@ It does not override the "latest stable" policy above.
 - Swift workflow scripts must sync locale catalogs into `apps/macos/Sources/VaporCore/Resources/locales/*.json` before build/test/package.
 - Logs and internal diagnostics text may remain English-only.
 - Language selection behavior must preserve safe fallback order:
-  1. user `preferredLanguageCode` override,
-  2. device preferred language list,
-  3. English (`en`) fallback.
+  1. user `languageCode` selection (default `en`),
+  2. English (`en`) fallback if that catalog is unavailable.
 - When adding or changing user-facing UI text, contributors must update `en.json` (and any other available catalogs) in the same change set.
 - If a translation key is missing in a non-English catalog, fallback behavior must remain deterministic and resolve to English.
 

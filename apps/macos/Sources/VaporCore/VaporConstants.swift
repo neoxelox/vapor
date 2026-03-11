@@ -24,13 +24,13 @@ public enum VaporConstants {
   }
 
   public enum Defaults {
-    public static let autoLaunchEnabled = true
+    public static let autoLaunch = true
     public static let useGitIgnore = true
     public static let useVaporIgnore = true
     public static let localSyncDirectory = "~/Vapor"
     public static let cloudSyncDirectory = "/Vapor"
     public static let postIgnoreRules = ""
-    public static let preferredLanguageCode: String? = nil
+    public static let languageCode = VaporConstants.Localization.defaultLanguageCode
     public static let timelineEventLimit = 1000
 
     public static let preIgnoreRuleLines: [String] = [

@@ -22,8 +22,8 @@ Current implementation notes:
 - `VaporCore` includes a concrete `LaunchAgentController` that writes `~/Library/LaunchAgents/<label>.plist` and manages lifecycle with `launchctl`.
 - `AppShellViewModel` uses lifecycle defaults backed by `LaunchAgentController` and `SMAppService.mainApp` integration to restore Vapor at login in menubar-only mode.
 - Settings/config surface includes `useGitIgnore`, `useVaporIgnore`, `localSyncDirectory`, `cloudSyncDirectory`, `preIgnoreRules`, and `postIgnoreRules`, persisted in `vapor.json` and exported to daemon launch env as `VAPOR_USE_GITIGNORE`, `VAPOR_USE_VAPORIGNORE`, `VAPOR_LOCAL_SYNC_DIRECTORY`, `VAPOR_CLOUD_SYNC_DIRECTORY`, `VAPOR_PRE_IGNORE_RULES`, and `VAPOR_POST_IGNORE_RULES`.
-- Daemon startup ensures configured local/cloud sync roots exist before normal sync flow (local directory created on-device when missing, cloud root ensured provider-side).
-- Settings/config surface includes `preferredLanguageCode` to override UI language selection; when unset or unavailable, app copy falls back to device language then English.
+- Daemon startup ensures the configured local sync root exists before normal sync flow; provider-side cloud root creation is planned with Google Drive auth/root initialization work.
+- Settings/config surface includes `languageCode`, which defaults UI copy to English and falls back to English again if a requested catalog is unavailable.
 - Startup performs daemon lifecycle bootstrap asynchronously so app window launch stays responsive.
 - Menubar provides explicit lifecycle controls: `Open Vapor` restores Dock/window surface and `Quit Vapor` requests daemon stop before app termination.
 - Distribution artifacts are produced by `apps/macos/scripts/package.sh` (source of truth for app packaging, signing, and optional notarization).

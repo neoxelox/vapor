@@ -40,7 +40,7 @@ public final class VaporConfigurationAutoLaunchSettingStore: AutoLaunchSettingSt
       return nil
     }
 
-    return configurationStore.load().autoLaunchEnabled
+    return configurationStore.load().autoLaunch
   }
 
   public func set(_ value: Bool, forKey key: String) throws {
@@ -49,7 +49,7 @@ public final class VaporConfigurationAutoLaunchSettingStore: AutoLaunchSettingSt
     }
 
     var configuration = configurationStore.load()
-    configuration.autoLaunchEnabled = value
+    configuration.autoLaunch = value
     try configurationStore.save(configuration)
   }
 }

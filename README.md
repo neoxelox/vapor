@@ -43,17 +43,17 @@ All user-facing configuration is documented here with meaning and defaults.
 
 All persisted user configuration lives in `<vapor_dir>/vapor.json`.
 
-| Key | Type | Default | Purpose |
-| --- | --- | --- | --- |
-| `autoLaunchEnabled` | `Bool` | `true` | Controls whether Vapor auto-launches and bootstraps `vapord` at startup/login. |
-| `useGitIgnore` | `Bool` | `true` | Persisted preference for `.gitignore`-aware daemon local filtering. |
-| `useVaporIgnore` | `Bool` | `true` | Persisted preference for `.vaporignore`-aware daemon local filtering. |
-| `localSyncDirectory` | `String` | `"~/Vapor"` | User-level local root directory to replicate to cloud; missing roots are created at startup and non-directory paths are rejected. |
-| `cloudSyncDirectory` | `String` | `"/Vapor"` | User-level provider cloud root directory to replicate with local sync; Vapor ensures this remote directory exists before sync operations. |
-| `preIgnoreRules` | `String` | Embedded `.gitignore`-like low-impact default rules | User-level baseline rules appended first, before discovered `.gitignore` and `.vaporignore` files. |
-| `postIgnoreRules` | `String` | Empty string | User-level override rules appended last, after discovered ignore files. |
-| `preferredLanguageCode` | `String?` | `null` | Optional UI language override code (for example `en`); unsupported values fall back to English. |
-| `timelineEventLimit` | `Int` | `1000` | Persisted cap for timeline and diagnostic event surfaces. |
+| Key                  | Type     | Default                                             | Description                                                                              |
+| -------------------- | -------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `autoLaunch`         | `Bool`   | `true`                                              | Starts Vapor automatically at login and keeps the daemon bootstrapped in the background. |
+| `useGitIgnore`       | `Bool`   | `true`                                              | Applies recursive `.gitignore` rules during local filtering.                             |
+| `useVaporIgnore`     | `Bool`   | `true`                                              | Applies recursive `.vaporignore` rules during local filtering.                           |
+| `localSyncDirectory` | `String` | `"~/Vapor"`                                         | Sets the local sync root; Vapor creates it if it does not exist yet.                     |
+| `cloudSyncDirectory` | `String` | `"/Vapor"`                                          | Sets the cloud sync root; Vapor creates it if it does not exist yet.                     |
+| `preIgnoreRules`     | `String` | Embedded `.gitignore`-like low-impact default rules | Provides the baseline ignore rules that run before discovered ignore files.              |
+| `postIgnoreRules`    | `String` | Empty string                                        | Provides the final override rules that run after discovered ignore files.                |
+| `languageCode`       | `String` | `"en"`                                              | Selects the UI language catalog to load.                                                 |
+| `timelineEventLimit` | `Int`    | `1000`                                              | Caps the in-memory timeline length shown in diagnostics.                                 |
 
 ### Ignore rules
 

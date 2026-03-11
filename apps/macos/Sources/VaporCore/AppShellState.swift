@@ -65,7 +65,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
   public var useVaporIgnore: Bool
   public var preIgnoreRules: String
   public var postIgnoreRules: String
-  public var preferredLanguageCode: String?
+  public var languageCode: String
   public var effectiveLanguageCode: String
   public var providerName: String
   public var vaporDirectoryPath: String
@@ -77,7 +77,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
     useVaporIgnore: Bool,
     preIgnoreRules: String,
     postIgnoreRules: String,
-    preferredLanguageCode: String?,
+    languageCode: String,
     effectiveLanguageCode: String,
     providerName: String,
     vaporDirectoryPath: String
@@ -88,7 +88,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
     self.useVaporIgnore = useVaporIgnore
     self.preIgnoreRules = preIgnoreRules
     self.postIgnoreRules = postIgnoreRules
-    self.preferredLanguageCode = preferredLanguageCode
+    self.languageCode = languageCode
     self.effectiveLanguageCode = effectiveLanguageCode
     self.providerName = providerName
     self.vaporDirectoryPath = vaporDirectoryPath
@@ -101,7 +101,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
     useVaporIgnore: true,
     preIgnoreRules: VaporConfiguration.defaultPreIgnoreRules,
     postIgnoreRules: VaporConfiguration.defaultPostIgnoreRules,
-    preferredLanguageCode: VaporConfiguration.defaultPreferredLanguageCode,
+    languageCode: VaporConfiguration.defaultLanguageCode,
     effectiveLanguageCode: VaporConstants.Localization.defaultLanguageCode,
     providerName: "Google Drive",
     vaporDirectoryPath: VaporPaths.resolveVaporDirectoryURL().path

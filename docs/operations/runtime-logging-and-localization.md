@@ -30,6 +30,6 @@ Runtime directory is not a `vapor.json` option and is resolved by precedence:
 - Source-of-truth user-facing app copy catalogs live at `assets/locales/*.json`.
 - Swift build/test/package scripts sync those catalogs into `apps/macos/Sources/VaporCore/Resources/locales/*.json` before bundling.
 - Current catalog set includes `en.json` (English).
-- Language resolution order: `preferredLanguageCode` override (if set), then device preferred languages, then English fallback.
+- Language selection comes from persisted `languageCode` (default `en`), and Vapor falls back to English if that catalog is unavailable.
 - If a requested language catalog is unavailable, Vapor falls back to English.
 - Logs remain English-only by design.

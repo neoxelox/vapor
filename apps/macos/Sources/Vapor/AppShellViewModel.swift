@@ -59,15 +59,15 @@ final class AppShellViewModel: ObservableObject {
     self.configurationStore = configurationStore
     self.localizationStore = localizationStore
     self.configuration = resolvedConfiguration
-    self.localization = localizationStore.resolve(
-      preferredLanguageCodeOverride: resolvedConfiguration.preferredLanguageCode)
+    self.localization = localizationStore.resolve(languageCode: resolvedConfiguration.languageCode)
+    self.configuration.languageCode = localization.effectiveLanguageCode
 
     state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
     state.useGitIgnore = self.configuration.useGitIgnore
     state.useVaporIgnore = self.configuration.useVaporIgnore
     state.preIgnoreRules = self.configuration.preIgnoreRules
     state.postIgnoreRules = self.configuration.postIgnoreRules
-    state.preferredLanguageCode = self.configuration.preferredLanguageCode
+    state.languageCode = self.configuration.languageCode
     state.effectiveLanguageCode = localization.effectiveLanguageCode
     state.vaporDirectoryPath = self.configurationStore.resolveVaporDirectoryURL().path
 
@@ -86,7 +86,7 @@ final class AppShellViewModel: ObservableObject {
         "auto_launch_enabled": String(state.autoLaunchEnabled),
         "use_gitignore": String(state.useGitIgnore),
         "use_vaporignore": String(state.useVaporIgnore),
-        "preferred_language": state.preferredLanguageCode ?? "system",
+        "language_code": state.languageCode,
         "effective_language": state.effectiveLanguageCode,
         "version": VaporBuildInfo.version,
         "bundle_build": VaporBuildInfo.buildVersion,
@@ -214,7 +214,7 @@ final class AppShellViewModel: ObservableObject {
           }
 
           self.state.autoLaunchEnabled = persistedValue
-          self.configuration.autoLaunchEnabled = persistedValue
+          self.configuration.autoLaunch = persistedValue
           logger.info(
             "Auto-launch toggle completed",
             metadata: [
@@ -256,7 +256,7 @@ final class AppShellViewModel: ObservableObject {
           }
 
           self.state.autoLaunchEnabled = persistedValue
-          self.configuration.autoLaunchEnabled = persistedValue
+          self.configuration.autoLaunch = persistedValue
           logger.warning(
             "Auto-launch disabled with stop-now",
             metadata: ["result": String(describing: result)]
@@ -376,35 +376,29 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
-  func setPreferredLanguageCode(_ languageCode: String?) {
-    let normalizedLanguageCode = languageCode?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let sanitizedLanguageCode: String?
-    if let normalizedLanguageCode, !normalizedLanguageCode.isEmpty {
-      sanitizedLanguageCode = normalizedLanguageCode.lowercased()
-    } else {
-      sanitizedLanguageCode = nil
-    }
+  func setLanguageCode(_ languageCode: String) {
+    let sanitizedLanguageCode = Self.normalizedLanguageCode(languageCode)
 
-    guard configuration.preferredLanguageCode != sanitizedLanguageCode else {
+    guard configuration.languageCode != sanitizedLanguageCode else {
       return
     }
 
-    configuration.preferredLanguageCode = sanitizedLanguageCode
+    configuration.languageCode = sanitizedLanguageCode
     refreshLocalization()
 
     do {
       try configurationStore.save(configuration)
       logger.info(
-        "Updated preferred language setting",
+        "Updated language setting",
         metadata: [
-          "preferred_language": configuration.preferredLanguageCode ?? "system",
+          "language_code": configuration.languageCode,
           "effective_language": state.effectiveLanguageCode,
         ]
       )
     } catch {
       state.syncState = .error
       logger.error(
-        "Failed to persist preferred language setting",
+        "Failed to persist language setting",
         metadata: ["error": String(describing: error)]
       )
     }
@@ -436,9 +430,9 @@ final class AppShellViewModel: ObservableObject {
   }
 
   private func refreshLocalization() {
-    localization = localizationStore.resolve(
-      preferredLanguageCodeOverride: configuration.preferredLanguageCode)
-    state.preferredLanguageCode = configuration.preferredLanguageCode
+    localization = localizationStore.resolve(languageCode: configuration.languageCode)
+    configuration.languageCode = localization.effectiveLanguageCode
+    state.languageCode = configuration.languageCode
     state.effectiveLanguageCode = localization.effectiveLanguageCode
   }
 
@@ -452,6 +446,11 @@ final class AppShellViewModel: ObservableObject {
     rules
       .replacingOccurrences(of: "\r\n", with: "\n")
       .replacingOccurrences(of: "\r", with: "\n")
+  }
+
+  private static func normalizedLanguageCode(_ languageCode: String) -> String {
+    let normalized = languageCode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized.isEmpty ? VaporConfiguration.defaultLanguageCode : normalized
   }
 
   private static func countConfiguredRules(in rules: String) -> Int {

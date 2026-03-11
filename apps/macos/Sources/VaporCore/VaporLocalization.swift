@@ -38,16 +38,13 @@ public final class VaporLocalizationStore {
 
   private let bundle: Bundle
   private let fileManager: FileManager
-  private let preferredLanguagesProvider: () -> [String]
 
   public init(
     bundle: Bundle? = nil,
-    fileManager: FileManager = .default,
-    preferredLanguagesProvider: @escaping () -> [String] = { Locale.preferredLanguages }
+    fileManager: FileManager = .default
   ) {
     self.bundle = bundle ?? Self.resolveDefaultBundle(fileManager: fileManager)
     self.fileManager = fileManager
-    self.preferredLanguagesProvider = preferredLanguagesProvider
   }
 
   private static func resolveDefaultBundle(fileManager: FileManager) -> Bundle {
@@ -156,10 +153,10 @@ public final class VaporLocalizationStore {
     return scopedURL != nil || rootURL != nil
   }
 
-  public func resolve(preferredLanguageCodeOverride: String?) -> VaporLocalizedCatalog {
+  public func resolve(languageCode: String) -> VaporLocalizedCatalog {
     let availableLanguageCodes = discoverAvailableLanguageCodes()
     let selectedLanguageCode = resolveLanguageCode(
-      overrideLanguageCode: preferredLanguageCodeOverride,
+      requestedLanguageCode: languageCode,
       availableLanguageCodes: availableLanguageCodes
     )
 
@@ -206,17 +203,11 @@ public final class VaporLocalizationStore {
   }
 
   private func resolveLanguageCode(
-    overrideLanguageCode: String?,
+    requestedLanguageCode: String,
     availableLanguageCodes: [String]
   ) -> String {
-    let preferredLanguageCodes = preferredLanguagesProvider()
-      .flatMap(languageCandidates)
-
     var candidates: [String] = []
-    if let overrideLanguageCode {
-      candidates.append(contentsOf: languageCandidates(overrideLanguageCode))
-    }
-    candidates.append(contentsOf: preferredLanguageCodes)
+    candidates.append(contentsOf: languageCandidates(requestedLanguageCode))
     candidates.append(VaporConstants.Localization.defaultLanguageCode)
 
     for candidate in candidates {
