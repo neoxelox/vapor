@@ -172,29 +172,59 @@ impl DurableStateDb {
         kind: PendingIntentKind,
         now: SystemTime,
     ) -> Result<DurableIntentRecord, StateDbError> {
-        let now_ms = system_time_to_millis(now)?;
-        self.connection.execute(
-            "INSERT INTO queue_intents (
-                path_bytes,
-                kind,
-                state,
-                enqueued_at_ms,
-                available_at_ms,
-                leased_at_ms,
-                attempt_count,
-                last_error
-            ) VALUES (?, ?, ?, ?, ?, NULL, 0, NULL)",
-            params![
-                path_to_bytes(path),
-                intent_kind_label(kind),
-                STATE_PENDING,
-                now_ms,
-                now_ms
-            ],
-        )?;
-        let id = self.connection.last_insert_rowid();
-        self.intent_record(id)?
-            .ok_or(StateDbError::MissingIntentRecord(id))
+        self.enqueue_intent_with_available_at(path, kind, now, now)
+    }
+
+    pub fn enqueue_startup_reconcile_intent(
+        &mut self,
+        path: &Path,
+        now: SystemTime,
+    ) -> Result<DurableIntentRecord, StateDbError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let path_bytes = path_to_bytes(path);
+        let existing = transaction
+            .query_row(
+                "SELECT id, state
+                 FROM queue_intents
+                 WHERE path_bytes = ? AND kind = ? AND state IN (?, ?)
+                 ORDER BY available_at_ms ASC, id ASC
+                 LIMIT 1",
+                params![
+                    path_bytes,
+                    intent_kind_label(PendingIntentKind::ReconcileSubtree),
+                    STATE_PENDING,
+                    STATE_LEASED
+                ],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+
+        let intent = if let Some((existing_id, state)) = existing {
+            if state == STATE_PENDING {
+                transaction.execute(
+                    "UPDATE queue_intents
+                     SET available_at_ms = ?, last_error = NULL
+                     WHERE id = ? AND state = ?",
+                    params![0_i64, existing_id, STATE_PENDING],
+                )?;
+            }
+            fetch_intent(&transaction, existing_id)?
+                .ok_or(StateDbError::MissingIntentRecord(existing_id))?
+        } else {
+            let id = insert_intent(
+                &transaction,
+                path,
+                PendingIntentKind::ReconcileSubtree,
+                now,
+                UNIX_EPOCH,
+            )?;
+            fetch_intent(&transaction, id)?.ok_or(StateDbError::MissingIntentRecord(id))?
+        };
+
+        transaction.commit()?;
+        Ok(intent)
     }
 
     pub fn intent_record(&self, id: i64) -> Result<Option<DurableIntentRecord>, StateDbError> {
@@ -470,6 +500,49 @@ impl DurableStateDb {
             .execute("DELETE FROM state_entries WHERE key = ?", params![key])?;
         Ok(changed > 0)
     }
+
+    fn enqueue_intent_with_available_at(
+        &mut self,
+        path: &Path,
+        kind: PendingIntentKind,
+        enqueued_at: SystemTime,
+        available_at: SystemTime,
+    ) -> Result<DurableIntentRecord, StateDbError> {
+        let id = insert_intent(&self.connection, path, kind, enqueued_at, available_at)?;
+        self.intent_record(id)?
+            .ok_or(StateDbError::MissingIntentRecord(id))
+    }
+}
+
+fn insert_intent(
+    connection: &Connection,
+    path: &Path,
+    kind: PendingIntentKind,
+    enqueued_at: SystemTime,
+    available_at: SystemTime,
+) -> Result<i64, StateDbError> {
+    let enqueued_at_ms = system_time_to_millis(enqueued_at)?;
+    let available_at_ms = system_time_to_millis(available_at)?;
+    connection.execute(
+        "INSERT INTO queue_intents (
+            path_bytes,
+            kind,
+            state,
+            enqueued_at_ms,
+            available_at_ms,
+            leased_at_ms,
+            attempt_count,
+            last_error
+        ) VALUES (?, ?, ?, ?, ?, NULL, 0, NULL)",
+        params![
+            path_to_bytes(path),
+            intent_kind_label(kind),
+            STATE_PENDING,
+            enqueued_at_ms,
+            available_at_ms
+        ],
+    )?;
+    Ok(connection.last_insert_rowid())
 }
 
 fn configure_connection(connection: &Connection) -> Result<(), StateDbError> {
@@ -793,6 +866,85 @@ mod tests {
                 .expect("complete leased")
         );
         assert_eq!(database.queue_depth().expect("queue depth"), 0);
+    }
+
+    #[test]
+    fn startup_reconcile_is_prioritized_ahead_of_existing_pending_work() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+
+        database
+            .enqueue_intent(
+                &watch_root.join("src/main.rs"),
+                PendingIntentKind::Upload,
+                timestamp_ms(100),
+            )
+            .expect("enqueue upload intent");
+        let startup_reconcile = database
+            .enqueue_startup_reconcile_intent(&watch_root, timestamp_ms(200))
+            .expect("enqueue startup reconcile intent");
+
+        assert_eq!(startup_reconcile.kind, PendingIntentKind::ReconcileSubtree);
+        assert_eq!(startup_reconcile.available_at, UNIX_EPOCH);
+
+        let leased = database
+            .lease_next_ready(timestamp_ms(200))
+            .expect("lease next ready")
+            .expect("leased record");
+        assert_eq!(leased.path, watch_root);
+        assert_eq!(leased.kind, PendingIntentKind::ReconcileSubtree);
+    }
+
+    #[test]
+    fn startup_reconcile_is_deduplicated_when_one_already_exists() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+
+        let first = database
+            .enqueue_startup_reconcile_intent(&watch_root, timestamp_ms(100))
+            .expect("enqueue first startup reconcile intent");
+        let second = database
+            .enqueue_startup_reconcile_intent(&watch_root, timestamp_ms(200))
+            .expect("reuse startup reconcile intent");
+
+        assert_eq!(database.queue_depth().expect("queue depth"), 1);
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.available_at, UNIX_EPOCH);
+    }
+
+    #[test]
+    fn startup_reconcile_reprioritizes_existing_delayed_root_reconcile() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+
+        let first = database
+            .enqueue_startup_reconcile_intent(&watch_root, timestamp_ms(100))
+            .expect("enqueue startup reconcile intent");
+        assert!(
+            database
+                .lease_next_ready(timestamp_ms(100))
+                .expect("lease next ready")
+                .is_some()
+        );
+        assert!(
+            database
+                .requeue_leased(first.id, timestamp_ms(500), Some("yielded"))
+                .expect("requeue yielded reconcile")
+        );
+
+        let reprioritized = database
+            .enqueue_startup_reconcile_intent(&watch_root, timestamp_ms(600))
+            .expect("reprioritize startup reconcile intent");
+
+        assert_eq!(reprioritized.id, first.id);
+        assert_eq!(reprioritized.available_at, UNIX_EPOCH);
+        assert!(reprioritized.last_error.is_none());
     }
 
     #[test]

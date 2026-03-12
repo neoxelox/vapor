@@ -111,7 +111,7 @@ Exit gate:
 ## Phase 2.5 - Runtime integration and hardening pass
 
 - [x] P2.5-1 Compose the real daemon runtime loop end-to-end: watcher -> bounded ingest -> debounce -> scheduler -> durable queue -> workgate -> reconcile.
-- [ ] P2.5-2 Make compacted/deferred/scheduled intent state durable before execution, or add a documented whole-scope restart reconstruction path that preserves intent safely after crash/restart.
+- [x] P2.5-2 Make compacted/deferred/scheduled intent state durable before execution, or add a documented whole-scope restart reconstruction path that preserves intent safely after crash/restart.
 - [ ] P2.5-3 Harden callback path scope enforcement by normalizing event paths and rejecting traversal/symlink escape cases outside the configured local sync root.
 - [ ] P2.5-4 Replace destructive config-load fallback with preserved-invalid-config recovery and actionable app diagnostics instead of silently rewriting defaults.
 - [ ] P2.5-5 Refresh daemon lifecycle/launch configuration immediately when ignore toggles change so in-memory runtime settings never diverge from persisted config in-session.

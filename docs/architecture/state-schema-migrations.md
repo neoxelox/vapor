@@ -24,6 +24,7 @@ Durable queue/state schema rules for daemon persistence.
 - `state_entries` stores small daemon state values (for example resume markers or recovery metadata).
 - Startup recovery must move any leased rows back to pending so interrupted work replays with at-least-once semantics.
 - Retry scheduling updates `available_at_ms`, `last_error`, and the durable retry slowdown marker so backoff survives restarts.
+- Runtime restart recovery currently adds a conservative whole-scope `ReconcileSubtree` intent at startup so any volatile pre-DB loss is reconstructed before ordinary replay continues.
 
 ## Compatibility and safety
 

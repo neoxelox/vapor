@@ -9,7 +9,7 @@ Responsibilities:
 - throttle controller with a 1s sample policy, strict planner/hash/upload/reconcile work permits, and a keyed latest-wins scheduler
 - a composed runtime loop that advances watcher ingest, debounce, durable queueing, work permits, and reconcile progression on each daemon tick
 - idle-biased reconcile control that runs in interruptible slices and clears compaction boundaries after success
-- SQLite durable queue/state with startup lease recovery, retry backoff, durable failed intents, and state metadata
+- SQLite durable queue/state with startup lease recovery, conservative whole-scope restart reconstruction, retry backoff, durable failed intents, and state metadata
 - reconcile and provider execution
 - XPC status/control endpoints
 

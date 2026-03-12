@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Daemon reconcile control now starts only in `IdleDrain`, yields on slice expiry or throttle changes, and clears compacted subtree boundaries after successful quiet completion.
 - Daemon tests now stress large per-subtree, global-cap, and multi-subtree storm scenarios so bounded memory/backpressure behavior stays covered under heavy pending-intent bursts.
 - Daemon startup now composes a real runtime loop that advances watcher ingest, debounce, scheduler draining, durable queueing, throttle-gated work, and idle-biased reconcile progression on each tick.
+- Daemon restart recovery now inserts a prioritized whole-scope reconcile and re-prioritizes any existing root reconcile so volatile pre-DB intent loss is reconstructed conservatively before older durable work resumes.
 
 ### Changed
 

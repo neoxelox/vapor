@@ -65,7 +65,9 @@ impl DaemonRuntime {
         sync_scope: SyncScope,
         state_db: DurableStateDb,
     ) -> Result<Self, DaemonRuntimeError> {
-        Self::build(sync_scope, state_db, true)
+        let mut runtime = Self::build(sync_scope, state_db, true)?;
+        runtime.enqueue_startup_reconstruction_reconcile(SystemTime::now())?;
+        Ok(runtime)
     }
 
     pub fn run_forever(&mut self) -> Result<(), DaemonRuntimeError> {
@@ -220,6 +222,23 @@ impl DaemonRuntime {
             self.app.apply_throttle_inputs(inputs);
             self.last_throttle_sample_at = Some(now);
         }
+    }
+
+    fn enqueue_startup_reconstruction_reconcile(
+        &mut self,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        let Some(local_sync_directory) = self.sync_scope.local_sync_directory.as_ref() else {
+            return Ok(());
+        };
+
+        self.state_db
+            .enqueue_startup_reconcile_intent(local_sync_directory, now)?;
+        logging::info(
+            "Queued startup whole-scope reconcile for volatile-state reconstruction",
+            &[("root", local_sync_directory.display().to_string())],
+        );
+        Ok(())
     }
 
     fn release_ready_deferred_reconciles(&mut self, now: SystemTime) -> usize {
@@ -377,6 +396,102 @@ mod tests {
     use crate::fs_events::{FsEventKind, FsEventRecord, FsEventRecording};
     use crate::sync_directories::SyncScope;
     use tempfile::TempDir;
+
+    #[test]
+    fn start_queues_whole_scope_reconcile_for_restart_reconstruction() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        std::fs::create_dir_all(&watch_root).expect("create watch root");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+
+        let runtime =
+            DaemonRuntime::start(test_sync_scope(&watch_root), state_db).expect("runtime");
+
+        assert!(runtime.has_live_watcher());
+        assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 1);
+        assert_eq!(
+            runtime.state_db().pending_depth().expect("pending depth"),
+            1
+        );
+    }
+
+    #[test]
+    fn start_skips_whole_scope_reconcile_when_no_local_sync_directory_exists() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+
+        let runtime = DaemonRuntime::start(
+            SyncScope {
+                local_sync_directory: None,
+                cloud_sync_directory: "/Vapor".to_string(),
+            },
+            state_db,
+        )
+        .expect("runtime");
+
+        assert!(!runtime.has_live_watcher());
+        assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 0);
+    }
+
+    #[test]
+    fn start_adds_startup_reconcile_even_when_other_durable_work_exists() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        std::fs::create_dir_all(&watch_root).expect("create watch root");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+
+        state_db
+            .enqueue_intent(
+                &watch_root.join("src/main.rs"),
+                PendingIntentKind::Upload,
+                timestamp_ms(100),
+            )
+            .expect("enqueue existing upload intent");
+
+        let runtime =
+            DaemonRuntime::start(test_sync_scope(&watch_root), state_db).expect("runtime");
+
+        assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 2);
+        assert_eq!(
+            runtime.state_db().pending_depth().expect("pending depth"),
+            2
+        );
+    }
+
+    #[test]
+    fn startup_reconstruction_reconcile_runs_before_older_durable_uploads() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        std::fs::create_dir_all(&watch_root).expect("create watch root");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+
+        state_db
+            .enqueue_intent(
+                &watch_root.join("src/main.rs"),
+                PendingIntentKind::Upload,
+                timestamp_ms(100),
+            )
+            .expect("enqueue existing upload intent");
+
+        let mut runtime =
+            DaemonRuntime::start(test_sync_scope(&watch_root), state_db).expect("runtime");
+
+        let first_tick = runtime
+            .tick_with_inputs(timestamp_ms(1_000), ThrottleInputs::default())
+            .expect("runtime tick");
+
+        assert_eq!(first_tick.started_reconcile_root, Some(watch_root.clone()));
+        assert_eq!(first_tick.completed_intents, 0);
+        assert_eq!(runtime.state_db().leased_depth().expect("leased depth"), 1);
+        assert_eq!(
+            runtime.state_db().pending_depth().expect("pending depth"),
+            1
+        );
+    }
 
     #[test]
     fn runtime_tick_moves_stabilized_event_through_scheduler_and_durable_queue() {
