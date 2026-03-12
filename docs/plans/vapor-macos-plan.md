@@ -115,13 +115,14 @@ Recommended default conflict policy:
 2. App shell + daemon lifecycle + auto-launch.
 3. Native app bundle/distribution foundation (script-first packaging, signing, notarization path).
 4. Low-impact local engine core plus durability substrate (durable queue, retries, storm deferral, interruptible reconcile, and bounded backpressure).
-5. Google Drive provider with bidirectional event flow on top of durable substrate.
-6. Conflict/tombstone safety and deterministic race handling hardening.
-7. Multi-profile provider/account model with layered settings, profile isolation, and same-folder multi-provider fan-out.
-8. XPC contract hardening and full diagnostics UX.
-9. Auto-tuning and performance-budget enforcement.
-10. Provider-system extensibility hardening (provider-ready compatibility and performance for future providers, without shipping additional providers in first release).
-11. Optional advanced safeguards and enhancements.
+5. Runtime integration and hardening pass: compose the real daemon loop, close local safety/privacy gaps, remove pre-GA transitional code, and turn bounded concurrency policy into actual staged execution.
+6. Google Drive provider with bidirectional event flow on top of durable substrate.
+7. Conflict/tombstone safety and deterministic race handling hardening.
+8. Multi-profile provider/account model with layered settings, profile isolation, and same-folder multi-provider fan-out.
+9. XPC contract hardening and full diagnostics UX.
+10. Auto-tuning and performance-budget enforcement.
+11. Provider-system extensibility hardening (provider-ready compatibility and performance for future providers, without shipping additional providers in first release).
+12. Optional advanced safeguards and enhancements.
 
 ## 9) Definition of done (applies to every milestone)
 

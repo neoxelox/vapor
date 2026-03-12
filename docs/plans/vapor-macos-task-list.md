@@ -108,6 +108,31 @@ Exit gate:
 - Under synthetic load, CPU and I/O impact stay bounded while queue converges eventually.
 - Under storm load, in-memory event/intent structures remain bounded and backpressure behavior is deterministic.
 
+## Phase 2.5 - Runtime integration and hardening pass
+
+- [ ] P2.5-1 Compose the real daemon runtime loop end-to-end: watcher -> bounded ingest -> debounce -> scheduler -> durable queue -> workgate -> reconcile.
+- [ ] P2.5-2 Make compacted/deferred/scheduled intent state durable before execution, or add a documented whole-scope restart reconstruction path that preserves intent safely after crash/restart.
+- [ ] P2.5-3 Harden callback path scope enforcement by normalizing event paths and rejecting traversal/symlink escape cases outside the configured local sync root.
+- [ ] P2.5-4 Replace destructive config-load fallback with preserved-invalid-config recovery and actionable app diagnostics instead of silently rewriting defaults.
+- [ ] P2.5-5 Refresh daemon lifecycle/launch configuration immediately when ignore toggles change so in-memory runtime settings never diverge from persisted config in-session.
+- [ ] P2.5-6 Replace placeholder app controls (`Pause/Resume`, `Flush now`, demo status cycling) with real daemon-backed behavior, or hide them until the control plane exists.
+- [ ] P2.5-7 Make runtime path/logging behavior fail-safe and privacy-safe: validated `VAPOR_DIR`, restrictive permissions for config/log/state artifacts, centralized redaction, and no panic on log-file open failure.
+- [ ] P2.5-8 Bound and sanitize durable diagnostic/state fields (`last_error`, counters, persisted timestamps) and add corruption/tamper guards for malformed local state.
+- [ ] P2.5-9 Remove pre-GA compatibility shims and transitional APIs that are no longer justified (for example legacy schema migration paths, duplicate deferred-intent helpers, and placeholder app state surfaces).
+- [ ] P2.5-10 Decouple core daemon orchestration from the concrete `GoogleDriveProvider` type so provider choice is injected at startup and core engine code stays provider-neutral before provider-phase expansion.
+- [ ] P2.5-11 Introduce a real staged executor that uses workgate/throttle caps to run bounded planner/hash/upload work across available cores instead of keeping execution mostly serialized.
+- [ ] P2.5-12 Reduce known serialized hot spots with batched durable leasing and ready-queue/indexed dispatch for debounce/scheduler paths, then add runtime-level regression coverage for the composed engine.
+
+Exit gate:
+
+- The local engine runs as one real daemon pipeline instead of only unit-tested primitives.
+- No path outside the configured local sync root can enter callback state, including relative traversal and symlink-escape cases.
+- Malformed/unreadable config is preserved in place and surfaced for recovery; Vapor does not silently reset user intent to defaults.
+- Compacted/deferred/scheduled work survives crash/restart without silent loss, either through earlier durability or deterministic whole-scope recovery.
+- Logging/runtime-path handling degrades safely, uses restrictive local permissions, and avoids leaking sensitive values in durable logs/state.
+- App controls shown to users are real daemon-backed controls, not placeholder/demo state transitions.
+- Core daemon orchestration is provider-neutral, pre-GA backcompat shims are removed, and the runtime uses bounded parallel worker execution under explicit caps.
+
 ## Phase 3 - Google Drive provider plus bidirectional flow
 
 - [ ] P3-1 Implement provider trait/capabilities and provider-neutral error taxonomy.
