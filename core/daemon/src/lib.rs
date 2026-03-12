@@ -2,7 +2,7 @@
 
 use std::time::SystemTime;
 
-use vapor_providers::{GoogleDriveProvider, Provider};
+use vapor_providers::{Provider, default_provider};
 use vapor_shared::{RunState, StatusSnapshot, ThrottleState};
 
 use crate::event_intents::BoundedEventIntentMaps;
@@ -36,10 +36,9 @@ pub mod sync_directories;
 pub mod throttle;
 pub mod workgate;
 
-#[derive(Debug)]
 pub struct DaemonApp {
     snapshot: StatusSnapshot,
-    provider: GoogleDriveProvider,
+    provider: Box<dyn Provider>,
     throttle_controller: ThrottleController,
     last_throttle_decision: Option<ThrottleDecision>,
     retry_slowdown_until: Option<SystemTime>,
@@ -49,6 +48,25 @@ pub struct DaemonApp {
 
 impl Default for DaemonApp {
     fn default() -> Self {
+        Self::new(default_provider())
+    }
+}
+
+impl std::fmt::Debug for DaemonApp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DaemonApp")
+            .field("snapshot", &self.snapshot)
+            .field("provider_name", &self.provider.name())
+            .field("last_throttle_decision", &self.last_throttle_decision)
+            .field("retry_slowdown_until", &self.retry_slowdown_until)
+            .field("reconcile_controller", &self.reconcile_controller)
+            .field("workgate", &self.workgate)
+            .finish()
+    }
+}
+
+impl DaemonApp {
+    pub fn new(provider: Box<dyn Provider>) -> Self {
         logging::info("Initialized daemon app state", &[]);
         let snapshot = StatusSnapshot::default();
         let initial_throttle_state = snapshot.throttle_state;
@@ -56,7 +74,7 @@ impl Default for DaemonApp {
         let throttle_caps = throttle_controller.caps_for(initial_throttle_state);
         Self {
             snapshot,
-            provider: GoogleDriveProvider,
+            provider,
             throttle_controller,
             last_throttle_decision: None,
             retry_slowdown_until: None,
@@ -64,9 +82,7 @@ impl Default for DaemonApp {
             workgate: ThrottleWorkgate::new(initial_throttle_state, throttle_caps),
         }
     }
-}
 
-impl DaemonApp {
     pub fn snapshot(&self) -> &StatusSnapshot {
         &self.snapshot
     }

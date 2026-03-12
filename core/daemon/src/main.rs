@@ -1,6 +1,7 @@
 use vapor_daemon::{
     build_info, logging, runtime::DaemonRuntime, state_db::DurableStateDb, sync_directories,
 };
+use vapor_providers::default_provider;
 
 fn main() {
     if let Some(flag) = std::env::args().nth(1)
@@ -25,7 +26,7 @@ fn main() {
         }
     };
     let sync_scope = sync_directories::resolve_from_process_environment();
-    let mut runtime = match DaemonRuntime::start(sync_scope, state_db) {
+    let mut runtime = match DaemonRuntime::start(sync_scope, state_db, default_provider()) {
         Ok(runtime) => runtime,
         Err(error) => {
             logging::error(

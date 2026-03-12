@@ -25,10 +25,12 @@ Durable queue/state schema rules for daemon persistence.
 - Startup recovery must move any leased rows back to pending so interrupted work replays with at-least-once semantics.
 - Retry scheduling updates `available_at_ms`, `last_error`, and the durable retry slowdown marker so backoff survives restarts.
 - Runtime restart recovery currently adds a conservative whole-scope `ReconcileSubtree` intent at startup so any volatile pre-DB loss is reconstructed before ordinary replay continues.
+- Durable diagnostic/state reads now reject oversized attempt counters, out-of-range timestamps, and oversized state values, while persisted error text is redacted and length-bounded before storage.
 
 ## Compatibility and safety
 
-- New code must handle prior supported schema versions or block with clear error.
+- Pre-GA durable state treats the current schema version as the only supported version.
+- Older local schemas are rejected clearly instead of carrying forward compatibility shims.
 - Partial migration failures must not corrupt existing persisted data.
 - Backup or snapshot strategy required for high-risk migrations.
 

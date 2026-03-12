@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use vapor_providers::Provider;
 use vapor_shared::{RunState, constants};
 
 use crate::debounce::DebounceLoop;
@@ -64,8 +65,9 @@ impl DaemonRuntime {
     pub fn start(
         sync_scope: SyncScope,
         state_db: DurableStateDb,
+        provider: Box<dyn Provider>,
     ) -> Result<Self, DaemonRuntimeError> {
-        let mut runtime = Self::build(sync_scope, state_db, true)?;
+        let mut runtime = Self::build(sync_scope, state_db, provider, true)?;
         runtime.enqueue_startup_reconstruction_reconcile(SystemTime::now())?;
         Ok(runtime)
     }
@@ -143,10 +145,11 @@ impl DaemonRuntime {
     fn build(
         mut sync_scope: SyncScope,
         mut state_db: DurableStateDb,
+        provider: Box<dyn Provider>,
         start_watcher: bool,
     ) -> Result<Self, DaemonRuntimeError> {
         let now = SystemTime::now();
-        let mut app = DaemonApp::default();
+        let mut app = DaemonApp::new(provider);
         let recovered_count = state_db.recover_leased(now)?;
         logging::info(
             "Durable queue/state DB is ready",
@@ -403,6 +406,7 @@ mod tests {
     use crate::sync_directories::SyncScope;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
+    use vapor_providers::default_provider;
 
     #[test]
     fn start_queues_whole_scope_reconcile_for_restart_reconstruction() {
@@ -413,7 +417,8 @@ mod tests {
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
 
         let runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db).expect("runtime");
+            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
+                .expect("runtime");
 
         assert!(runtime.has_live_watcher());
         assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 1);
@@ -435,6 +440,7 @@ mod tests {
                 cloud_sync_directory: "/Vapor".to_string(),
             },
             state_db,
+            default_provider(),
         )
         .expect("runtime");
 
@@ -452,8 +458,12 @@ mod tests {
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
 
-        let runtime =
-            DaemonRuntime::start(test_sync_scope(&symlink_watch_root), state_db).expect("runtime");
+        let runtime = DaemonRuntime::start(
+            test_sync_scope(&symlink_watch_root),
+            state_db,
+            default_provider(),
+        )
+        .expect("runtime");
 
         assert_eq!(
             runtime.sync_scope().local_sync_directory,
@@ -487,7 +497,8 @@ mod tests {
             .expect("enqueue existing upload intent");
 
         let runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db).expect("runtime");
+            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
+                .expect("runtime");
 
         assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 2);
         assert_eq!(
@@ -513,7 +524,8 @@ mod tests {
             .expect("enqueue existing upload intent");
 
         let mut runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db).expect("runtime");
+            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
+                .expect("runtime");
 
         let first_tick = runtime
             .tick_with_inputs(timestamp_ms(1_000), ThrottleInputs::default())
@@ -538,8 +550,13 @@ mod tests {
         std::fs::create_dir_all(&watch_root).expect("create watch root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
-        let mut runtime =
-            DaemonRuntime::build(test_sync_scope(&watch_root), state_db, false).expect("runtime");
+        let mut runtime = DaemonRuntime::build(
+            test_sync_scope(&watch_root),
+            state_db,
+            default_provider(),
+            false,
+        )
+        .expect("runtime");
         let runtime_watch_root = runtime
             .sync_scope()
             .local_sync_directory
@@ -572,8 +589,13 @@ mod tests {
         std::fs::create_dir_all(&watch_root).expect("create watch root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
-        let mut runtime =
-            DaemonRuntime::build(test_sync_scope(&watch_root), state_db, false).expect("runtime");
+        let mut runtime = DaemonRuntime::build(
+            test_sync_scope(&watch_root),
+            state_db,
+            default_provider(),
+            false,
+        )
+        .expect("runtime");
         let runtime_watch_root = runtime
             .sync_scope()
             .local_sync_directory

@@ -18,10 +18,17 @@ pub mod runtime {
     pub const SQLITE_DATABASE_FILE_NAME: &str = "vapor.sqlite";
     pub const APP_LOG_FILE_NAME: &str = "vapor.logs";
     pub const DAEMON_LOG_FILE_NAME: &str = "vapord.logs";
+    pub const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
+    pub const PRIVATE_FILE_MODE: u32 = 0o600;
 }
 
 pub mod state {
     pub const RETRY_SLOWDOWN_UNTIL_KEY: &str = "queue.retry_slowdown_until_ms";
+    pub const MAX_ATTEMPT_COUNT: u32 = 10_000;
+    pub const MAX_DIAGNOSTIC_TEXT_LENGTH: usize = 1_024;
+    pub const MAX_STATE_KEY_LENGTH: usize = 128;
+    pub const MAX_STATE_VALUE_LENGTH: usize = 4_096;
+    pub const MAX_TIMESTAMP_MILLIS: i64 = 32_503_680_000_000;
 }
 
 pub mod filtering {

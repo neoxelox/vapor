@@ -17,7 +17,7 @@ impl ProviderCapabilities {
     };
 }
 
-pub trait Provider {
+pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> ProviderCapabilities;
     fn poll_allowed(&self, throttle_state: ThrottleState) -> bool {
@@ -42,6 +42,10 @@ pub trait Provider {
 
 #[derive(Debug, Default)]
 pub struct GoogleDriveProvider;
+
+pub fn default_provider() -> Box<dyn Provider> {
+    Box::new(GoogleDriveProvider)
+}
 
 impl Provider for GoogleDriveProvider {
     fn name(&self) -> &'static str {

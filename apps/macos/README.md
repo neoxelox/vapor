@@ -26,6 +26,7 @@ Current implementation notes:
 - Daemon startup ensures the configured local sync root exists before normal sync flow; provider-side cloud root creation is planned with Google Drive auth/root initialization work.
 - Settings/config surface includes `languageCode`, which defaults UI copy to English and falls back to English again if a requested catalog is unavailable.
 - Malformed `vapor.json` is preserved in place and surfaced as an actionable app diagnostic; Vapor uses in-memory defaults until the file is fixed or replaced.
+- Runtime/config/log/state paths now use restrictive local permissions, and app logging shares the same centralized redaction rules used for sensitive metadata.
 - Startup performs daemon lifecycle bootstrap asynchronously so app window launch stays responsive.
 - Menubar provides only real lifecycle controls: `Open Vapor` restores Dock/window surface, auto-launch toggle updates persisted state, and `Quit Vapor` requests daemon stop before app termination.
 - Distribution artifacts are produced by `apps/macos/scripts/package.sh` (source of truth for app packaging, signing, and optional notarization).

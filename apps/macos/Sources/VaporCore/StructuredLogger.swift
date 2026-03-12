@@ -30,16 +30,30 @@ public enum VaporLogLevel: String, CaseIterable, Sendable {
 }
 
 public final class StructuredLogger: @unchecked Sendable {
-  private static let writeQueue = DispatchQueue(label: "sh.arn.vapor.logging.writer")
+  static let writeQueue = DispatchQueue(label: "sh.arn.vapor.logging.writer")
 
   private let component: String
   private let minLevel: VaporLogLevel
   private let fileURL: URL
   private let fileManager: FileManager
 
+  public convenience init(
+    component: String,
+    minLevel: VaporLogLevel? = nil,
+    fileManager: FileManager = .default
+  ) {
+    self.init(
+      component: component,
+      minLevel: minLevel,
+      environment: ProcessInfo.processInfo.environment,
+      fileManager: fileManager
+    )
+  }
+
   public init(
     component: String,
     minLevel: VaporLogLevel? = nil,
+    environment: [String: String],
     fileManager: FileManager = .default
   ) {
     self.component = component
@@ -48,13 +62,12 @@ public final class StructuredLogger: @unchecked Sendable {
     if let minLevel {
       self.minLevel = minLevel
     } else {
-      let environment = ProcessInfo.processInfo.environment
       self.minLevel =
         VaporLogLevel.from(environmentValue: environment[VaporConstants.Environment.vaporLogLevel])
         ?? StructuredLogger.defaultMinLevel(for: environment)
     }
 
-    self.fileURL = StructuredLogger.logDirectory(fileManager: fileManager)
+    self.fileURL = StructuredLogger.logDirectory(environment: environment, fileManager: fileManager)
       .appendingPathComponent(VaporPaths.appLogFileName)
 
     prepareLogFile()
@@ -83,7 +96,7 @@ public final class StructuredLogger: @unchecked Sendable {
 
     let timestamp = Int64(Date().timeIntervalSince1970 * 1000)
     let levelLabel = level.rawValue.uppercased()
-    let safeMessage = sanitize(message)
+    let safeMessage = redactInlineSecrets(in: sanitize(message))
 
     let metadataSuffix: String
     if metadata.isEmpty {
@@ -91,7 +104,7 @@ public final class StructuredLogger: @unchecked Sendable {
     } else {
       let metadataParts = metadata.keys.sorted().map { key in
         let value = metadata[key, default: ""]
-        return "\(sanitize(key))=\(sanitize(value))"
+        return "\(sanitize(key))=\(sanitizeMetadataValue(key: key, value: value))"
       }
       metadataSuffix = metadataParts.isEmpty ? "" : " \(metadataParts.joined(separator: " "))"
     }
@@ -117,15 +130,19 @@ public final class StructuredLogger: @unchecked Sendable {
   private func prepareLogFile() {
     StructuredLogger.writeQueue.sync {
       let directory = fileURL.deletingLastPathComponent()
-      try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-      if !fileManager.fileExists(atPath: fileURL.path) {
-        fileManager.createFile(atPath: fileURL.path, contents: nil)
-      }
+      try? VaporPaths.prepareRuntimeDirectories(
+        vaporDirectoryURL: directory.deletingLastPathComponent(),
+        fileManager: fileManager
+      )
+      try? VaporPaths.ensurePrivateFile(at: fileURL, fileManager: fileManager)
     }
   }
 
-  private static func logDirectory(fileManager: FileManager) -> URL {
-    let vaporDirectoryURL = VaporPaths.resolveVaporDirectoryURL(fileManager: fileManager)
+  private static func logDirectory(environment: [String: String], fileManager: FileManager) -> URL {
+    let vaporDirectoryURL = VaporPaths.resolveVaporDirectoryURL(
+      environment: environment,
+      fileManager: fileManager
+    )
     return VaporPaths.logsDirectoryURL(vaporDirectoryURL: vaporDirectoryURL)
   }
 
@@ -142,5 +159,38 @@ public final class StructuredLogger: @unchecked Sendable {
       .replacingOccurrences(of: "\n", with: "\\n")
       .replacingOccurrences(of: "\r", with: "\\r")
       .replacingOccurrences(of: "\t", with: "\\t")
+  }
+
+  private func sanitizeMetadataValue(key: String, value: String) -> String {
+    if isSensitiveKey(key) {
+      return "[REDACTED]"
+    }
+
+    return redactInlineSecrets(in: sanitize(value))
+  }
+
+  private func isSensitiveKey(_ key: String) -> Bool {
+    let normalized = key.lowercased()
+    return [
+      "authorization",
+      "token",
+      "secret",
+      "password",
+      "cookie",
+      "keychain",
+      "credential",
+      "auth_header",
+    ].contains(where: { normalized.contains($0) })
+  }
+
+  private func redactInlineSecrets(in raw: String) -> String {
+    let normalized = raw.lowercased()
+    if normalized.contains("bearer ") || normalized.contains("token=")
+      || normalized.contains("authorization:")
+    {
+      return "[REDACTED]"
+    }
+
+    return raw
   }
 }

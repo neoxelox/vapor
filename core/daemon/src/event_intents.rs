@@ -274,18 +274,6 @@ impl BoundedEventIntentMaps {
         pending_intents
     }
 
-    pub fn materialize_ready_deferred_reconciles(
-        &mut self,
-        now: SystemTime,
-    ) -> Vec<PendingIntentRecord> {
-        let ready_intents = self.take_ready_deferred_reconcile_intents(now);
-        for intent in &ready_intents {
-            self.upsert_reconcile_intent(&intent.path, intent.observed_at);
-        }
-
-        ready_intents
-    }
-
     pub fn take_ready_deferred_reconcile_intents(
         &mut self,
         now: SystemTime,
@@ -1034,15 +1022,15 @@ mod tests {
         assert_eq!(compacted.suppressed_event_count, 2);
 
         assert!(
-            maps.materialize_ready_deferred_reconciles(timestamp(31))
+            maps.take_ready_deferred_reconcile_intents(timestamp(31))
                 .is_empty()
         );
-        let ready = maps.materialize_ready_deferred_reconciles(timestamp(32));
+        let ready = maps.take_ready_deferred_reconcile_intents(timestamp(32));
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].path, subtree_root);
         assert_eq!(ready[0].kind, PendingIntentKind::ReconcileSubtree);
         assert_eq!(maps.deferred_reconcile_count(), 0);
-        assert_eq!(maps.pending_intent_count(), 1);
+        assert_eq!(maps.pending_intent_count(), 0);
     }
 
     #[test]

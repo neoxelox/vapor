@@ -17,10 +17,15 @@ Runtime directory is not a `vapor.json` option and is resolved by precedence:
 2. `./.vapor` in tests/CI or when `VAPOR_ENV=dev`
 3. `~/.vapor` in normal runtime
 
+- Relative `VAPOR_DIR` overrides are normalized against the current working directory.
+- Runtime directories and files should use restrictive local permissions (`0700` for directories, `0600` for config/log/state files).
+
 ## Logging behavior
 
 - Runtime log level override: `VAPOR_LOG_LEVEL` (`debug`, `info`, `warning`, `error`).
 - Log line format: `{timestamp} [{level}] ({component}): {message}. key=value ...`
+- Logging must redact sensitive metadata keys and common inline auth/token patterns.
+- Rust daemon logging falls back safely instead of panicking if the log file cannot be opened.
 - Default log level behavior:
   - `VAPOR_ENV=dev` -> `debug`
   - `VAPOR_ENV=prod` (or unset) -> `info`

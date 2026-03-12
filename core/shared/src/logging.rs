@@ -1,6 +1,6 @@
 use std::env;
-use std::fs::{File, OpenOptions, create_dir_all};
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{Write, stderr};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -39,7 +39,7 @@ impl LogLevel {
 pub struct StructuredLogger {
     component: &'static str,
     min_level: LogLevel,
-    file: Mutex<File>,
+    file: Mutex<Option<File>>,
 }
 
 impl StructuredLogger {
@@ -50,21 +50,17 @@ impl StructuredLogger {
             .unwrap_or_else(build_default_level);
 
         let file_path = logs_directory().join(file_name);
-        if let Some(parent) = file_path.parent() {
-            let _ = create_dir_all(parent);
-        }
-
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&file_path)
-            .unwrap_or_else(|error| {
-                panic!(
-                    "failed to open log file at {}: {}",
+        let file = open_log_file(&file_path)
+            .map_err(|error| {
+                let _ = writeln!(
+                    stderr(),
+                    "vapor logging fallback: failed to open {}: {}",
                     file_path.display(),
                     error
-                )
-            });
+                );
+                error
+            })
+            .ok();
 
         Self {
             component,
@@ -88,7 +84,7 @@ impl StructuredLogger {
             now_ms,
             level.as_label(),
             sanitize_text(self.component),
-            sanitize_text(message)
+            sanitize_message(message)
         );
 
         if !metadata.is_empty() {
@@ -97,15 +93,23 @@ impl StructuredLogger {
                 if index > 0 {
                     line.push(' ');
                 }
-                line.push_str(&format!("{}={}", sanitize_text(key), sanitize_text(value)));
+                line.push_str(&format!(
+                    "{}={}",
+                    sanitize_text(key),
+                    sanitize_metadata_value(key, value)
+                ));
             }
         }
 
         line.push('\n');
 
         if let Ok(mut file) = self.file.lock() {
-            let _ = file.write_all(line.as_bytes());
-            let _ = file.flush();
+            if let Some(file) = file.as_mut() {
+                let _ = file.write_all(line.as_bytes());
+                let _ = file.flush();
+            } else {
+                let _ = stderr().write_all(line.as_bytes());
+            }
         }
     }
 }
@@ -166,10 +170,56 @@ fn logs_directory() -> PathBuf {
     runtime_paths::logs_directory()
 }
 
+fn open_log_file(path: &std::path::Path) -> std::io::Result<File> {
+    runtime_paths::ensure_private_file(path)?;
+    OpenOptions::new().create(true).append(true).open(path)
+}
+
 fn sanitize_text(raw: &str) -> String {
     raw.replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+pub fn sanitize_diagnostic_text(raw: &str) -> String {
+    redact_inline_secrets(sanitize_text(raw))
+}
+
+fn sanitize_message(raw: &str) -> String {
+    sanitize_diagnostic_text(raw)
+}
+
+fn sanitize_metadata_value(key: &str, value: &str) -> String {
+    if is_sensitive_key(key) {
+        return "[REDACTED]".to_string();
+    }
+
+    sanitize_diagnostic_text(value)
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "authorization",
+        "token",
+        "secret",
+        "password",
+        "cookie",
+        "keychain",
+        "credential",
+        "auth_header",
+    ]
+    .iter()
+    .any(|marker| key.contains(marker))
+}
+
+fn redact_inline_secrets(raw: String) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("bearer ") || lower.contains("token=") || lower.contains("authorization:") {
+        "[REDACTED]".to_string()
+    } else {
+        raw
+    }
 }
 
 #[cfg(test)]
@@ -189,5 +239,28 @@ mod tests {
     fn sanitizes_control_characters() {
         let sanitized = sanitize_text("a\tb\nc\r");
         assert_eq!(sanitized, "a\\tb\\nc\\r");
+    }
+
+    #[test]
+    fn redacts_sensitive_metadata_values() {
+        assert_eq!(
+            sanitize_metadata_value("auth_token", "secret-value"),
+            "[REDACTED]"
+        );
+        assert_eq!(
+            sanitize_metadata_value("note", "Bearer abc123"),
+            "[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn opening_log_file_gracefully_fails_for_directory_path() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let directory_path = temp_dir.path().join("logs-as-directory");
+        std::fs::create_dir_all(&directory_path).expect("create directory path");
+
+        let result = open_log_file(&directory_path);
+
+        assert!(result.is_err());
     }
 }

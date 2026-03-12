@@ -600,6 +600,9 @@ dependencies = [
 [[package]]
 name = "vapor-shared"
 version = "0.2.0-alpha.3"
+dependencies = [
+ "tempfile",
+]
 
 [[package]]
 name = "vcpkg"

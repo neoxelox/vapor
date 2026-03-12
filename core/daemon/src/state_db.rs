@@ -1,12 +1,11 @@
 use std::error::Error;
 use std::fmt;
-use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
-use vapor_shared::{constants, runtime_paths};
+use vapor_shared::{constants, logging::sanitize_diagnostic_text, runtime_paths};
 
 use crate::event_intents::PendingIntentKind;
 use crate::retry::{RetryDecision, RetryFailureKind, RetryPolicy};
@@ -23,6 +22,7 @@ pub enum StateDbError {
     MissingSchemaVersion,
     InvalidSchemaVersion(i64),
     InvalidTimestampMillis(i64),
+    InvalidAttemptCount(i64),
     InvalidStateValue(String),
     InvalidIntentKind(String),
     InvalidIntentState(String),
@@ -45,6 +45,7 @@ impl fmt::Display for StateDbError {
             Self::InvalidTimestampMillis(millis) => {
                 write!(f, "invalid timestamp millis value {millis}")
             }
+            Self::InvalidAttemptCount(value) => write!(f, "invalid attempt count value {value}"),
             Self::InvalidStateValue(message) => write!(f, "invalid state value: {message}"),
             Self::InvalidIntentKind(kind) => write!(f, "invalid intent kind '{kind}'"),
             Self::InvalidIntentState(state) => write!(f, "invalid intent state '{state}'"),
@@ -126,11 +127,10 @@ impl DurableStateDb {
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StateDbError> {
         let path = path.as_ref().to_path_buf();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        runtime_paths::ensure_private_file(&path)?;
 
         let mut connection = Connection::open(&path)?;
+        runtime_paths::ensure_private_file(&path)?;
         configure_connection(&connection)?;
         migrate_schema(&mut connection)?;
 
@@ -295,7 +295,13 @@ impl DurableStateDb {
             "UPDATE queue_intents
              SET state = ?, available_at_ms = ?, leased_at_ms = NULL, last_error = ?
              WHERE id = ? AND state = ?",
-            params![STATE_PENDING, available_at_ms, last_error, id, STATE_LEASED],
+            params![
+                STATE_PENDING,
+                available_at_ms,
+                last_error.map(sanitize_persisted_error),
+                id,
+                STATE_LEASED
+            ],
         )?;
         Ok(changed > 0)
     }
@@ -390,7 +396,13 @@ impl DurableStateDb {
                  ?
              FROM queue_intents
              WHERE id = ? AND state = ?",
-            params![failure_label, failed_at_ms, last_error, id, STATE_LEASED],
+            params![
+                failure_label,
+                failed_at_ms,
+                sanitize_persisted_error(last_error),
+                id,
+                STATE_LEASED
+            ],
         )?;
         if inserted == 0 {
             return Err(StateDbError::InvalidIntentState(format!(
@@ -440,6 +452,8 @@ impl DurableStateDb {
         updated_at: SystemTime,
     ) -> Result<StateEntry, StateDbError> {
         let updated_at_ms = system_time_to_millis(updated_at)?;
+        validate_state_key(key)?;
+        validate_state_value(value)?;
         self.connection.execute(
             "INSERT INTO state_entries (key, value, updated_at_ms)
              VALUES (?, ?, ?)
@@ -471,6 +485,8 @@ impl DurableStateDb {
 
         raw_entry
             .map(|(entry_key, value, updated_at_ms)| {
+                validate_state_key(&entry_key)?;
+                validate_state_value(&value)?;
                 Ok(StateEntry {
                     key: entry_key,
                     value,
@@ -594,12 +610,6 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
 
     match read_schema_version(&transaction)? {
         Some(CURRENT_SCHEMA_VERSION) => {}
-        Some(1) => {
-            transaction.execute(
-                "UPDATE schema_meta SET schema_version = ? WHERE singleton = 1",
-                params![CURRENT_SCHEMA_VERSION],
-            )?;
-        }
         Some(found) => {
             return Err(StateDbError::SchemaVersionMismatch {
                 found,
@@ -694,8 +704,8 @@ fn fetch_intent(
                     enqueued_at: millis_to_system_time(enqueued_at_ms)?,
                     available_at: millis_to_system_time(available_at_ms)?,
                     leased_at: leased_at_ms.map(millis_to_system_time).transpose()?,
-                    attempt_count: attempt_count as u32,
-                    last_error,
+                    attempt_count: validate_attempt_count(attempt_count)?,
+                    last_error: last_error.map(|value| sanitize_persisted_error(&value)),
                 })
             },
         )
@@ -746,8 +756,8 @@ fn fetch_failed_intent(
                     failure_kind: terminal_failure_from_label(&failure_kind)?,
                     enqueued_at: millis_to_system_time(enqueued_at_ms)?,
                     failed_at: millis_to_system_time(failed_at_ms)?,
-                    attempt_count: attempt_count as u32,
-                    last_error,
+                    attempt_count: validate_attempt_count(attempt_count)?,
+                    last_error: sanitize_persisted_error(&last_error),
                 })
             },
         )
@@ -770,10 +780,50 @@ fn system_time_to_millis(time: SystemTime) -> Result<i64, StateDbError> {
 }
 
 fn millis_to_system_time(millis: i64) -> Result<SystemTime, StateDbError> {
-    if millis < 0 {
+    if !(0..=constants::state::MAX_TIMESTAMP_MILLIS).contains(&millis) {
         return Err(StateDbError::InvalidTimestampMillis(millis));
     }
     Ok(UNIX_EPOCH + Duration::from_millis(millis as u64))
+}
+
+fn sanitize_persisted_error(raw: &str) -> String {
+    let sanitized = sanitize_diagnostic_text(raw);
+    sanitized
+        .chars()
+        .take(constants::state::MAX_DIAGNOSTIC_TEXT_LENGTH)
+        .collect()
+}
+
+fn validate_attempt_count(value: i64) -> Result<u32, StateDbError> {
+    if !(0..=i64::from(constants::state::MAX_ATTEMPT_COUNT)).contains(&value) {
+        return Err(StateDbError::InvalidAttemptCount(value));
+    }
+
+    Ok(value as u32)
+}
+
+fn validate_state_key(key: &str) -> Result<(), StateDbError> {
+    if key.is_empty() || key.len() > constants::state::MAX_STATE_KEY_LENGTH {
+        return Err(StateDbError::InvalidStateValue(format!(
+            "state key length {} is outside 1..={}",
+            key.len(),
+            constants::state::MAX_STATE_KEY_LENGTH
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_state_value(value: &str) -> Result<(), StateDbError> {
+    if value.len() > constants::state::MAX_STATE_VALUE_LENGTH {
+        return Err(StateDbError::InvalidStateValue(format!(
+            "state value length {} exceeds {}",
+            value.len(),
+            constants::state::MAX_STATE_VALUE_LENGTH
+        )));
+    }
+
+    Ok(())
 }
 
 fn intent_kind_label(kind: PendingIntentKind) -> &'static str {
@@ -817,6 +867,7 @@ fn terminal_failure_from_label(label: &str) -> Result<RetryFailureKind, StateDbE
 mod tests {
     use super::*;
     use crate::retry::RetryFailureKind;
+    use std::fs;
     use tempfile::TempDir;
 
     #[test]
@@ -1107,6 +1158,37 @@ mod tests {
     }
 
     #[test]
+    fn persisted_retry_error_text_is_sanitized_and_bounded() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let path = PathBuf::from("/tmp/vapor-root/project/file.txt");
+        let long_error = format!("Bearer {}", "x".repeat(5_000));
+
+        database
+            .enqueue_intent(&path, PendingIntentKind::Upload, timestamp_ms(100))
+            .expect("enqueue upload intent");
+        let leased = database
+            .lease_next_ready(timestamp_ms(100))
+            .expect("lease next ready")
+            .expect("leased record");
+
+        let scheduled = database
+            .schedule_retry(
+                leased.id,
+                RetryFailureKind::Transient,
+                &long_error,
+                timestamp_ms(100),
+            )
+            .expect("schedule retry")
+            .expect("scheduled retry");
+
+        let last_error = scheduled.intent.last_error.expect("persisted last_error");
+        assert_eq!(last_error, "[REDACTED]");
+        assert!(last_error.len() <= constants::state::MAX_DIAGNOSTIC_TEXT_LENGTH);
+    }
+
+    #[test]
     fn rate_limit_slowdown_marker_survives_reopen_until_it_expires() {
         let temp_dir = TempDir::new().expect("temp dir");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
@@ -1232,6 +1314,20 @@ mod tests {
                 .expect("failed record")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn oversized_state_values_are_rejected() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let oversized = "x".repeat(constants::state::MAX_STATE_VALUE_LENGTH + 1);
+
+        let error = database
+            .set_state("queue.resume_marker", &oversized, timestamp_ms(100))
+            .expect_err("oversized state value should fail");
+
+        assert!(matches!(error, StateDbError::InvalidStateValue(_)));
     }
 
     #[test]
@@ -1390,7 +1486,7 @@ mod tests {
     }
 
     #[test]
-    fn version_one_database_migrates_forward_to_version_two() {
+    fn version_one_database_is_rejected_in_pre_ga_state() {
         let temp_dir = TempDir::new().expect("temp dir");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         if let Some(parent) = database_path.parent() {
@@ -1427,12 +1523,46 @@ mod tests {
             .expect("seed version one schema");
         drop(connection);
 
-        let database = DurableStateDb::open(&database_path).expect("migrate version one database");
-        assert_eq!(
-            database.schema_version().expect("schema version"),
-            CURRENT_SCHEMA_VERSION
-        );
-        assert_eq!(database.failed_depth().expect("failed depth"), 0);
+        let error = DurableStateDb::open(&database_path)
+            .expect_err("version one schema should be rejected");
+        assert!(matches!(
+            error,
+            StateDbError::SchemaVersionMismatch {
+                found: 1,
+                expected: CURRENT_SCHEMA_VERSION
+            }
+        ));
+    }
+
+    #[test]
+    fn oversized_attempt_count_in_local_state_is_rejected() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let path = PathBuf::from("/tmp/vapor-root/project/file.txt");
+        let queued = database
+            .enqueue_intent(&path, PendingIntentKind::Upload, timestamp_ms(100))
+            .expect("enqueue upload intent");
+        drop(database);
+
+        let connection = Connection::open(&database_path).expect("open sqlite connection");
+        configure_connection(&connection).expect("configure connection");
+        connection
+            .execute(
+                "UPDATE queue_intents SET attempt_count = ? WHERE id = ?",
+                params![
+                    i64::from(constants::state::MAX_ATTEMPT_COUNT) + 1,
+                    queued.id
+                ],
+            )
+            .expect("tamper attempt count");
+        drop(connection);
+
+        let reopened = DurableStateDb::open(&database_path).expect("reopen durable state db");
+        let error = reopened
+            .intent_record(queued.id)
+            .expect_err("oversized attempt count should fail");
+        assert!(matches!(error, StateDbError::InvalidAttemptCount(_)));
     }
 
     fn timestamp_ms(milliseconds: u64) -> SystemTime {

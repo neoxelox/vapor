@@ -36,3 +36,37 @@ func normalizesRelativeDirectoryPathsAgainstCurrentDirectory() {
 
   #expect(normalized?.path == expected.path)
 }
+
+@Test
+func prepareRuntimeDirectoriesAppliesRestrictivePermissions() throws {
+  let fileManager = FileManager.default
+  let tempRoot = fileManager.temporaryDirectory
+    .appendingPathComponent("vapor-paths-tests")
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  defer { try? fileManager.removeItem(at: tempRoot) }
+
+  try VaporPaths.prepareRuntimeDirectories(vaporDirectoryURL: tempRoot, fileManager: fileManager)
+  try VaporPaths.ensurePrivateFile(
+    at: VaporPaths.configurationFileURL(vaporDirectoryURL: tempRoot),
+    fileManager: fileManager
+  )
+
+  #expect(posixPermissions(for: tempRoot, fileManager: fileManager) == 0o700)
+  #expect(
+    posixPermissions(
+      for: VaporPaths.logsDirectoryURL(vaporDirectoryURL: tempRoot), fileManager: fileManager)
+      == 0o700)
+  #expect(
+    posixPermissions(
+      for: VaporPaths.stateDirectoryURL(vaporDirectoryURL: tempRoot), fileManager: fileManager)
+      == 0o700)
+  #expect(
+    posixPermissions(
+      for: VaporPaths.configurationFileURL(vaporDirectoryURL: tempRoot),
+      fileManager: fileManager
+    ) == 0o600)
+}
+
+private func posixPermissions(for url: URL, fileManager: FileManager) -> NSNumber? {
+  (try? fileManager.attributesOfItem(atPath: url.path)[.posixPermissions]) as? NSNumber
+}

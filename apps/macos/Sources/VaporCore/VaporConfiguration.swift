@@ -152,19 +152,15 @@ public final class VaporConfigurationStore {
   public func save(_ configuration: VaporConfiguration) throws {
     let vaporDirectoryURL = resolveVaporDirectoryURL()
 
-    try fileManager.createDirectory(at: vaporDirectoryURL, withIntermediateDirectories: true)
-    try fileManager.createDirectory(
-      at: VaporPaths.logsDirectoryURL(vaporDirectoryURL: vaporDirectoryURL),
-      withIntermediateDirectories: true
-    )
-    try fileManager.createDirectory(
-      at: VaporPaths.stateDirectoryURL(vaporDirectoryURL: vaporDirectoryURL),
-      withIntermediateDirectories: true
+    try VaporPaths.prepareRuntimeDirectories(
+      vaporDirectoryURL: vaporDirectoryURL,
+      fileManager: fileManager
     )
 
     let data = try encoder.encode(configuration)
     let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: vaporDirectoryURL)
     try data.write(to: configurationURL, options: .atomic)
+    try VaporPaths.ensurePrivateFile(at: configurationURL, fileManager: fileManager)
 
     logger.info(
       "Persisted vapor configuration",

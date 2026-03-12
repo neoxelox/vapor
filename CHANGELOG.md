@@ -30,6 +30,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - App startup now preserves malformed `vapor.json` files in place, surfaces the load failure in the UI, and avoids silently overwriting broken config with defaults.
 - Ignore toggles and saved ignore rules now refresh the in-memory daemon launch configuration immediately so future lifecycle actions stay aligned with persisted settings.
 - Placeholder sync-state cycling controls have been removed from the app and menubar until real daemon-backed pause/flush actions exist.
+- Runtime path handling now normalizes `VAPOR_DIR`, applies restrictive local permissions to config/log/state artifacts, and redacts sensitive log metadata without panicking on log-file open failure.
+- Durable daemon state now redacts and bounds persisted error text, rejects oversized counters or state values, and guards against out-of-range persisted timestamps.
+- Pre-GA daemon state now rejects older on-disk schemas instead of carrying forward compatibility shims, and removes an obsolete deferred-reconcile helper API.
+- Daemon startup now injects the selected provider through the provider trait boundary instead of hardcoding the Google Drive type inside core daemon orchestration.
 
 ### Fixed
 

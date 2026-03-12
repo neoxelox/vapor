@@ -10,6 +10,10 @@ Responsibilities:
 - a composed runtime loop that advances watcher ingest, debounce, durable queueing, work permits, and reconcile progression on each daemon tick
 - idle-biased reconcile control that runs in interruptible slices and clears compaction boundaries after success
 - SQLite durable queue/state with startup lease recovery, conservative whole-scope restart reconstruction, retry backoff, durable failed intents, and state metadata
+- validated runtime paths plus restrictive local permissions for logs/state artifacts and non-panicking log fallback
+- bounded durable diagnostics/state fields with corruption guards for attempt counters, timestamps, and oversized stored values
+- pre-GA durable state keeps only the current schema path and rejects older on-disk schemas instead of carrying migration shims
+- provider choice is injected through the provider trait boundary at runtime startup instead of being hardcoded in daemon core state
 - reconcile and provider execution
 - XPC status/control endpoints
 

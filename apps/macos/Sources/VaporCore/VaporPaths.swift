@@ -1,6 +1,9 @@
 import Foundation
 
 public enum VaporPaths {
+  private static let privateDirectoryPermissions = 0o700
+  private static let privateFilePermissions = 0o600
+
   public static let directoryEnvironmentKey = VaporConstants.Environment.vaporDirectory
   public static let environmentKey = VaporConstants.Environment.vaporEnvironment
   public static let useGitIgnoreEnvironmentKey = VaporConstants.Environment.useGitIgnore
@@ -77,5 +80,45 @@ public enum VaporPaths {
     return URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
       .appendingPathComponent(expandedPath, isDirectory: true)
       .standardizedFileURL
+  }
+
+  public static func prepareRuntimeDirectories(
+    vaporDirectoryURL: URL,
+    fileManager: FileManager = .default
+  ) throws {
+    try ensurePrivateDirectory(at: vaporDirectoryURL, fileManager: fileManager)
+    try ensurePrivateDirectory(
+      at: logsDirectoryURL(vaporDirectoryURL: vaporDirectoryURL),
+      fileManager: fileManager
+    )
+    try ensurePrivateDirectory(
+      at: stateDirectoryURL(vaporDirectoryURL: vaporDirectoryURL),
+      fileManager: fileManager
+    )
+  }
+
+  public static func ensurePrivateFile(
+    at fileURL: URL,
+    fileManager: FileManager = .default
+  ) throws {
+    let parentDirectoryURL = fileURL.deletingLastPathComponent()
+    try ensurePrivateDirectory(at: parentDirectoryURL, fileManager: fileManager)
+
+    if !fileManager.fileExists(atPath: fileURL.path) {
+      fileManager.createFile(atPath: fileURL.path, contents: nil)
+    }
+    try fileManager.setAttributes(
+      [.posixPermissions: privateFilePermissions], ofItemAtPath: fileURL.path)
+  }
+
+  public static func ensurePrivateDirectory(
+    at directoryURL: URL,
+    fileManager: FileManager = .default
+  ) throws {
+    try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+    try fileManager.setAttributes(
+      [.posixPermissions: privateDirectoryPermissions],
+      ofItemAtPath: directoryURL.path
+    )
   }
 }
