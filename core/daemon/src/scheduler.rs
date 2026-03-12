@@ -114,10 +114,23 @@ impl KeyedSupersedingScheduler {
     }
 
     pub fn claim_next(&mut self) -> Option<ClaimedIntent> {
+        self.claim_next_matching(|_| true)
+    }
+
+    pub fn claim_next_reconcile(&mut self) -> Option<ClaimedIntent> {
+        self.claim_next_matching(|record| record.kind == PendingIntentKind::ReconcileSubtree)
+    }
+
+    fn claim_next_matching(
+        &mut self,
+        mut predicate: impl FnMut(&ScheduledIntentRecord) -> bool,
+    ) -> Option<ClaimedIntent> {
         let path = self
             .intents
             .iter()
-            .filter(|(_, record)| record.state == ScheduledIntentState::Pending)
+            .filter(|(_, record)| {
+                record.state == ScheduledIntentState::Pending && predicate(record)
+            })
             .min_by(|(left_path, left_record), (right_path, right_record)| {
                 left_record
                     .queue_sequence
@@ -248,7 +261,7 @@ mod tests {
     use crate::debounce::{DebounceClass, DebounceLoop};
     use crate::event_intents::{BoundedEventIntentMaps, EventIntentLimits, PendingEventFlags};
     use crate::fs_events::FsEventRecord;
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     #[test]
     fn stabilized_create_or_modify_becomes_upload_intent() {
@@ -351,6 +364,25 @@ mod tests {
         assert_eq!(claimed.kind, PendingIntentKind::Upload);
         assert_eq!(scheduler.pending_count(), 1);
         assert_eq!(scheduler.running_count(), 1);
+    }
+
+    #[test]
+    fn claim_next_reconcile_ignores_non_reconcile_work() {
+        let upload_path = PathBuf::from("/tmp/vapor-root/a.txt");
+        let reconcile_path = PathBuf::from("/tmp/vapor-root/project");
+        let mut scheduler = KeyedSupersedingScheduler::default();
+
+        scheduler.upsert_intent(upload_path, PendingIntentKind::Upload, timestamp(1));
+        scheduler.upsert_intent(
+            reconcile_path.clone(),
+            PendingIntentKind::ReconcileSubtree,
+            timestamp(2),
+        );
+
+        let claimed = scheduler.claim_next_reconcile().unwrap();
+        assert_eq!(claimed.path, reconcile_path);
+        assert_eq!(claimed.kind, PendingIntentKind::ReconcileSubtree);
+        assert_eq!(scheduler.pending_count(), 1);
     }
 
     #[test]
@@ -479,6 +511,40 @@ mod tests {
         let record = scheduler.scheduled_intent(&project_root).unwrap();
         assert_eq!(record.kind, PendingIntentKind::ReconcileSubtree);
         assert_eq!(scheduler.pending_count(), 1);
+    }
+
+    #[test]
+    fn scheduler_superseding_regression_stays_under_guardrail() {
+        let path = PathBuf::from("/tmp/vapor-root/src/main.rs");
+        let mut scheduler = KeyedSupersedingScheduler::default();
+
+        let start = Instant::now();
+        for index in 0..50_000 {
+            scheduler.upsert_stabilized_event(stabilized_event(
+                path.clone(),
+                if index % 7 == 0 {
+                    FsEventKind::Removed
+                } else {
+                    FsEventKind::Modified
+                },
+                PendingEventFlags {
+                    modified: true,
+                    removed: index % 7 == 0,
+                    ..PendingEventFlags::default()
+                },
+                index as u64,
+                index as u64 + 1,
+                1,
+            ));
+        }
+        let elapsed = start.elapsed();
+
+        assert_eq!(scheduler.len(), 1);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "scheduler superseding took {:?}, expected < 2s",
+            elapsed
+        );
     }
 
     fn stabilized_event(

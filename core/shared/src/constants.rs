@@ -102,4 +102,5 @@ pub mod engine {
     pub const STORM_DIRECTORY_EVENT_COUNT_THRESHOLD: usize = 600;
     pub const STORM_GLOBAL_PENDING_EVENT_COUNT_THRESHOLD: usize = 5_000;
     pub const DEFERRED_RECONCILE_DELAY_MILLIS: u64 = 30_000;
+    pub const RECONCILE_SLICE_MILLIS: u64 = 500;
 }

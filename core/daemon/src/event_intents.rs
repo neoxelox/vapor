@@ -219,6 +219,11 @@ impl BoundedEventIntentMaps {
         self.deferred_reconciles.get(root)
     }
 
+    pub fn compacted_subtree_requires_follow_up_reconcile(&self, root: &Path) -> bool {
+        self.deferred_reconciles.contains_key(root)
+            || matches!(self.intent_map.get(root), Some(record) if record.kind == PendingIntentKind::ReconcileSubtree)
+    }
+
     pub fn subtree_pending_count(&self, root: &Path) -> usize {
         self.subtree_pending_counts.get(root).copied().unwrap_or(0)
     }
@@ -273,6 +278,18 @@ impl BoundedEventIntentMaps {
         &mut self,
         now: SystemTime,
     ) -> Vec<PendingIntentRecord> {
+        let ready_intents = self.take_ready_deferred_reconcile_intents(now);
+        for intent in &ready_intents {
+            self.upsert_reconcile_intent(&intent.path, intent.observed_at);
+        }
+
+        ready_intents
+    }
+
+    pub fn take_ready_deferred_reconcile_intents(
+        &mut self,
+        now: SystemTime,
+    ) -> Vec<PendingIntentRecord> {
         let ready_roots: Vec<PathBuf> = self
             .deferred_reconciles
             .iter()
@@ -282,14 +299,23 @@ impl BoundedEventIntentMaps {
         for root in ready_roots {
             if let Some(record) = self.deferred_reconciles.remove(&root) {
                 self.untrack_path(&root);
-                self.upsert_reconcile_intent(&root, record.available_at);
-                if let Some(intent) = self.pending_intent(&root).cloned() {
-                    ready_intents.push(intent);
-                }
+                ready_intents.push(PendingIntentRecord {
+                    path: root,
+                    kind: PendingIntentKind::ReconcileSubtree,
+                    observed_at: record.available_at,
+                });
             }
         }
 
         ready_intents
+    }
+
+    pub fn clear_compacted_subtree_boundary(&mut self, root: &Path) -> bool {
+        if self.compacted_subtree_requires_follow_up_reconcile(root) {
+            return false;
+        }
+
+        self.compacted_subtrees.remove(root).is_some()
     }
 
     pub fn record_event(&mut self, event: FsEventRecord) {

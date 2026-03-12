@@ -327,7 +327,7 @@ mod tests {
     use super::*;
     use crate::event_intents::{EventIntentLimits, PendingIntentKind};
     use crate::fs_events::{FsEventErrorRecord, FsEventKind, FsEventRecord, FsEventRecording};
-    use std::time::UNIX_EPOCH;
+    use std::time::{Instant, UNIX_EPOCH};
 
     #[test]
     fn default_loop_uses_250ms_tick_interval() {
@@ -473,6 +473,41 @@ mod tests {
         recorder.with_state(|maps| {
             assert_eq!(maps.pending_event_count(), 0);
         });
+    }
+
+    #[test]
+    fn debounce_tick_regression_stays_under_guardrail() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root.clone(),
+            EventIntentLimits::new(10_000, 10_000),
+            crate::storm::StormThresholds {
+                directory_unique_paths_threshold: usize::MAX,
+                directory_event_count_threshold: usize::MAX,
+                global_pending_event_count_threshold: usize::MAX,
+                ..crate::storm::StormThresholds::default()
+            },
+        );
+        let mut loop_state = DebounceLoop::default();
+
+        for index in 0..5_000 {
+            maps.record_event(fs_event(
+                watch_root.join(format!("src/file-{index}.rs")),
+                FsEventKind::Modified,
+                0,
+            ));
+        }
+
+        let start = Instant::now();
+        let stabilized = loop_state.run_tick(&mut maps, timestamp(1_250));
+        let elapsed = start.elapsed();
+
+        assert_eq!(stabilized.len(), 5_000);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "debounce tick took {:?}, expected < 2s",
+            elapsed
+        );
     }
 
     fn bounded_maps(watch_root: &Path) -> BoundedEventIntentMaps {

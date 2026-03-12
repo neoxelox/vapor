@@ -211,6 +211,7 @@ fn map_event_kind(kind: &EventKind) -> FsEventKind {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn callback_normalizes_relative_paths_and_records_metadata() {
@@ -303,6 +304,32 @@ mod tests {
 
         let events = recorder.events.lock().expect("events mutex poisoned");
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn callback_burst_regression_stays_under_guardrail() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let path_filter = test_path_filter(&watch_root);
+        let recorder = TestRecorder::default();
+
+        let start = Instant::now();
+        for index in 0..5_000 {
+            let event = Event {
+                kind: EventKind::Modify(ModifyKind::Any),
+                paths: vec![PathBuf::from(format!("src/file-{index}.rs"))],
+                attrs: Default::default(),
+            };
+            record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+        }
+        let elapsed = start.elapsed();
+
+        let events = recorder.events.lock().expect("events mutex poisoned");
+        assert_eq!(events.len(), 5_000);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "callback burst took {:?}, expected < 2s",
+            elapsed
+        );
     }
 
     #[derive(Default)]

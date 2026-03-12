@@ -5,7 +5,10 @@ use std::time::SystemTime;
 use vapor_providers::{GoogleDriveProvider, Provider};
 use vapor_shared::{RunState, StatusSnapshot, ThrottleState};
 
+use crate::event_intents::BoundedEventIntentMaps;
+use crate::reconcile::{ReconcileCompletion, ReconcileController, ReconcilePause};
 use crate::retry::{RetryDecision, RetryFailureKind};
+use crate::scheduler::KeyedSupersedingScheduler;
 use crate::state_db::{
     DurableFailedIntentRecord, DurableStateDb, ScheduledRetryRecord, StateDbError,
 };
@@ -23,6 +26,7 @@ pub mod event_intents;
 pub mod fs_events;
 pub mod logging;
 pub mod path_filter;
+pub mod reconcile;
 pub mod retry;
 pub mod scheduler;
 pub mod state_db;
@@ -38,6 +42,7 @@ pub struct DaemonApp {
     throttle_controller: ThrottleController,
     last_throttle_decision: Option<ThrottleDecision>,
     retry_slowdown_until: Option<SystemTime>,
+    reconcile_controller: ReconcileController,
     workgate: ThrottleWorkgate,
 }
 
@@ -54,6 +59,7 @@ impl Default for DaemonApp {
             throttle_controller,
             last_throttle_decision: None,
             retry_slowdown_until: None,
+            reconcile_controller: ReconcileController::default(),
             workgate: ThrottleWorkgate::new(initial_throttle_state, throttle_caps),
         }
     }
@@ -129,6 +135,55 @@ impl DaemonApp {
 
     pub fn release_work(&mut self, permit: WorkPermit) -> bool {
         self.workgate.release(permit)
+    }
+
+    pub fn release_ready_deferred_reconciles(
+        &mut self,
+        maps: &mut BoundedEventIntentMaps,
+        scheduler: &mut KeyedSupersedingScheduler,
+        now: SystemTime,
+    ) -> usize {
+        self.reconcile_controller.release_ready_deferred_reconciles(
+            maps,
+            scheduler,
+            self.snapshot.throttle_state,
+            now,
+        )
+    }
+
+    pub fn try_start_reconcile(
+        &mut self,
+        scheduler: &mut KeyedSupersedingScheduler,
+        now: SystemTime,
+    ) -> Result<Option<std::path::PathBuf>, WorkPermitDenied> {
+        self.reconcile_controller.try_start_next(
+            scheduler,
+            &mut self.workgate,
+            self.snapshot.throttle_state,
+            now,
+        )
+    }
+
+    pub fn checkpoint_reconcile(
+        &mut self,
+        scheduler: &mut KeyedSupersedingScheduler,
+        now: SystemTime,
+    ) -> Option<ReconcilePause> {
+        self.reconcile_controller.checkpoint(
+            scheduler,
+            &mut self.workgate,
+            self.snapshot.throttle_state,
+            now,
+        )
+    }
+
+    pub fn complete_reconcile(
+        &mut self,
+        maps: &mut BoundedEventIntentMaps,
+        scheduler: &mut KeyedSupersedingScheduler,
+    ) -> Option<ReconcileCompletion> {
+        self.reconcile_controller
+            .complete_success(maps, scheduler, &mut self.workgate)
     }
 
     pub fn schedule_retry(
@@ -249,6 +304,8 @@ impl DaemonApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event_intents::{BoundedEventIntentMaps, EventIntentLimits};
+    use crate::scheduler::KeyedSupersedingScheduler;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -440,5 +497,95 @@ mod tests {
 
         assert!(restored > now);
         assert_eq!(reopened_app.throttle_caps().upload_concurrency, 1);
+    }
+
+    #[test]
+    fn app_reconcile_flow_stays_idle_biased_and_clears_boundary_on_success() {
+        let subtree_root = PathBuf::from("/tmp/vapor-root/project/sub");
+        let mut maps = stormed_maps(&subtree_root);
+        let mut scheduler = KeyedSupersedingScheduler::default();
+        let mut app = DaemonApp::default();
+
+        app.set_throttle_state(ThrottleState::Light, "foreground work");
+        assert_eq!(
+            app.release_ready_deferred_reconciles(&mut maps, &mut scheduler, timestamp(32)),
+            0
+        );
+        assert!(
+            app.try_start_reconcile(&mut scheduler, timestamp(32))
+                .expect("reconcile start should not fail")
+                .is_none()
+        );
+
+        app.set_throttle_state(ThrottleState::IdleDrain, "idle drain");
+        assert_eq!(
+            app.release_ready_deferred_reconciles(&mut maps, &mut scheduler, timestamp(32)),
+            1
+        );
+        assert_eq!(
+            app.try_start_reconcile(&mut scheduler, timestamp(32))
+                .expect("reconcile start should succeed"),
+            Some(subtree_root.clone())
+        );
+
+        let completion = app
+            .complete_reconcile(&mut maps, &mut scheduler)
+            .expect("complete reconcile");
+        assert!(completion.boundary_cleared);
+        assert!(maps.compacted_subtree(&subtree_root).is_none());
+    }
+
+    #[test]
+    fn app_reconcile_checkpoint_interrupts_when_throttle_changes() {
+        let subtree_root = PathBuf::from("/tmp/vapor-root/project/sub");
+        let mut maps = stormed_maps(&subtree_root);
+        let mut scheduler = KeyedSupersedingScheduler::default();
+        let mut app = DaemonApp::default();
+
+        app.set_throttle_state(ThrottleState::IdleDrain, "idle drain");
+        app.release_ready_deferred_reconciles(&mut maps, &mut scheduler, timestamp(32));
+        app.try_start_reconcile(&mut scheduler, timestamp(32))
+            .expect("start reconcile");
+        app.set_throttle_state(ThrottleState::Light, "load spike");
+
+        let pause = app
+            .checkpoint_reconcile(&mut scheduler, timestamp(33))
+            .expect("reconcile should pause");
+        assert_eq!(
+            pause.reason,
+            crate::reconcile::ReconcilePauseReason::ThrottleNoLongerIdle
+        );
+        assert_eq!(scheduler.pending_count(), 1);
+    }
+
+    fn stormed_maps(subtree_root: &std::path::Path) -> BoundedEventIntentMaps {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root,
+            EventIntentLimits::new(100, 100),
+            crate::storm::StormThresholds {
+                window: Duration::from_secs(2),
+                directory_unique_paths_threshold: 2,
+                directory_event_count_threshold: 99,
+                global_pending_event_count_threshold: 99,
+                deferred_reconcile_delay: Duration::from_secs(30),
+            },
+        );
+
+        maps.record_event(crate::fs_events::FsEventRecord {
+            path: subtree_root.join("a.txt"),
+            kind: crate::fs_events::FsEventKind::Modified,
+            observed_at: timestamp(1),
+        });
+        maps.record_event(crate::fs_events::FsEventRecord {
+            path: subtree_root.join("b.txt"),
+            kind: crate::fs_events::FsEventKind::Modified,
+            observed_at: timestamp(2),
+        });
+        maps
+    }
+
+    fn timestamp(seconds: u64) -> SystemTime {
+        std::time::UNIX_EPOCH + Duration::from_secs(seconds)
     }
 }

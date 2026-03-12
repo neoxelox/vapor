@@ -17,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Daemon startup now initializes a SQLite durable queue/state DB, recovers leased intents after restart, and persists queue/state metadata with explicit schema versioning.
 - Daemon retry scheduling now applies exponential backoff with deterministic jitter, persists the longest rate-limit slowdown window across restarts, and durably finalizes terminal failures.
 - Daemon storm detection now converts noisy subtrees into deferred reconcile markers once per-directory or global burst thresholds trip, keeping callback-side path growth bounded earlier.
+- Daemon tests now include micro-regression guards for filesystem callback bursts, debounce/coalescing ticks, and scheduler superseding hot paths.
+- Daemon reconcile control now starts only in `IdleDrain`, yields on slice expiry or throttle changes, and clears compacted subtree boundaries after successful quiet completion.
 
 ### Changed
 
