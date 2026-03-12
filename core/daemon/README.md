@@ -5,7 +5,7 @@ Rust daemon for low-impact background sync execution.
 Responsibilities:
 
 - FSEvents ingest plus a 250ms debounce/coalescing loop with conservative per-path quiet windows
-- throttle controller and keyed latest-wins scheduler
+- throttle controller with a 1s sample policy, a four-state pressure model, and a keyed latest-wins scheduler
 - durable queue/state and retries
 - reconcile and provider execution
 - XPC status/control endpoints

@@ -66,4 +66,27 @@ pub mod engine {
     pub const CODE_TEXT_DEBOUNCE_WINDOW_MILLIS: u64 = 1_200;
     pub const LOCKFILE_DEBOUNCE_WINDOW_MILLIS: u64 = 2_500;
     pub const DEFAULT_DEBOUNCE_WINDOW_MILLIS: u64 = 4_000;
+    pub const THROTTLE_SAMPLE_INTERVAL_MILLIS: u64 = 1_000;
+    pub const LIGHT_SYSTEM_CPU_PERCENT: u8 = 35;
+    pub const THROTTLED_SYSTEM_CPU_PERCENT: u8 = 60;
+    pub const SUSPENDED_SYSTEM_CPU_PERCENT: u8 = 85;
+    pub const LIGHT_VAPOR_CPU_PERCENT: u8 = 8;
+    pub const THROTTLED_VAPOR_CPU_PERCENT: u8 = 15;
+    pub const SUSPENDED_VAPOR_CPU_PERCENT: u8 = 25;
+    pub const LIGHT_NETWORK_ERROR_RATE_PERCENT: u8 = 10;
+    pub const THROTTLED_NETWORK_ERROR_RATE_PERCENT: u8 = 25;
+    pub const LIGHT_NETWORK_THROUGHPUT_KBPS: u32 = 512;
+    pub const THROTTLED_NETWORK_THROUGHPUT_KBPS: u32 = 128;
+    pub const IDLE_DRAIN_PLANNER_WORKERS: usize = 4;
+    pub const IDLE_DRAIN_HASH_WORKERS: usize = 4;
+    pub const IDLE_DRAIN_READ_TOKENS: usize = 2;
+    pub const IDLE_DRAIN_UPLOAD_CONCURRENCY: usize = 4;
+    pub const LIGHT_PLANNER_WORKERS: usize = 2;
+    pub const LIGHT_HASH_WORKERS: usize = 2;
+    pub const LIGHT_READ_TOKENS: usize = 1;
+    pub const LIGHT_UPLOAD_CONCURRENCY: usize = 2;
+    pub const THROTTLED_PLANNER_WORKERS: usize = 1;
+    pub const THROTTLED_HASH_WORKERS: usize = 1;
+    pub const THROTTLED_READ_TOKENS: usize = 1;
+    pub const THROTTLED_UPLOAD_CONCURRENCY: usize = 1;
 }
