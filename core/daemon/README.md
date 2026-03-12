@@ -5,6 +5,7 @@ Rust daemon for low-impact background sync execution.
 Responsibilities:
 
 - FSEvents ingest plus a 250ms debounce/coalescing loop with conservative per-path quiet windows
+- storm detection with deferred reconcile markers for noisy subtrees
 - throttle controller with a 1s sample policy, strict planner/hash/upload/reconcile work permits, and a keyed latest-wins scheduler
 - SQLite durable queue/state with startup lease recovery, retry backoff, durable failed intents, and state metadata
 - reconcile and provider execution

@@ -98,7 +98,7 @@ Exit gate:
 - [x] P2-7 Gate planner/uploader worker caps strictly by throttle state.
 - [x] P2-8 Implement durable queue/state DB with at-least-once semantics.
 - [x] P2-9 Implement retries with exponential backoff + jitter + rate-limit-aware slowdown.
-- [ ] P2-10 Implement storm detection triggers and deferred `RECONCILE_SUBTREE` scheduling.
+- [x] P2-10 Implement storm detection triggers and deferred `RECONCILE_SUBTREE` scheduling.
 - [ ] P2-11 Implement interruptible reconcile with idle-biased execution.
 - [ ] P2-12 Add microbench/regression tests for FSEvents callback, debounce/coalescing loop, and scheduler superseding paths.
 - [ ] P2-13 Add load/stress tests for memory/backpressure caps under large pending-intent storms.

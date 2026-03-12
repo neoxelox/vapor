@@ -26,6 +26,7 @@ pub mod path_filter;
 pub mod retry;
 pub mod scheduler;
 pub mod state_db;
+pub mod storm;
 pub mod sync_directories;
 pub mod throttle;
 pub mod workgate;

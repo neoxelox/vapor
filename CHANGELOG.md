@@ -16,6 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Daemon planner, hash, upload, and reconcile stages now acquire strict throttle-gated work permits so new work cannot exceed the active state's caps.
 - Daemon startup now initializes a SQLite durable queue/state DB, recovers leased intents after restart, and persists queue/state metadata with explicit schema versioning.
 - Daemon retry scheduling now applies exponential backoff with deterministic jitter, persists the longest rate-limit slowdown window across restarts, and durably finalizes terminal failures.
+- Daemon storm detection now converts noisy subtrees into deferred reconcile markers once per-directory or global burst thresholds trip, keeping callback-side path growth bounded earlier.
 
 ### Changed
 

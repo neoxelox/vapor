@@ -7,6 +7,7 @@ use vapor_shared::constants;
 
 use crate::fs_events::{FsEventErrorRecord, FsEventKind, FsEventRecord, FsEventRecording};
 use crate::logging;
+use crate::storm::{DeferredReconcileRecord, StormDetector, StormReason, StormThresholds};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EventIntentLimits {
@@ -82,6 +83,32 @@ pub struct PendingIntentRecord {
 pub enum BackpressureReason {
     SubtreeCapExceeded,
     GlobalCapExceeded,
+    DirectoryUniquePathsStorm,
+    DirectoryEventCountStorm,
+    GlobalPendingEventCountStorm,
+}
+
+impl BackpressureReason {
+    fn storm_reason(self) -> Option<StormReason> {
+        match self {
+            Self::DirectoryUniquePathsStorm => Some(StormReason::DirectoryUniquePathsThreshold),
+            Self::DirectoryEventCountStorm => Some(StormReason::DirectoryEventCountThreshold),
+            Self::GlobalPendingEventCountStorm => {
+                Some(StormReason::GlobalPendingEventCountThreshold)
+            }
+            Self::SubtreeCapExceeded | Self::GlobalCapExceeded => None,
+        }
+    }
+}
+
+impl From<StormReason> for BackpressureReason {
+    fn from(value: StormReason) -> Self {
+        match value {
+            StormReason::DirectoryUniquePathsThreshold => Self::DirectoryUniquePathsStorm,
+            StormReason::DirectoryEventCountThreshold => Self::DirectoryEventCountStorm,
+            StormReason::GlobalPendingEventCountThreshold => Self::GlobalPendingEventCountStorm,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -114,8 +141,10 @@ pub struct BoundedEventIntentMaps {
     event_map: BTreeMap<PathBuf, PendingEventRecord>,
     intent_map: BTreeMap<PathBuf, PendingIntentRecord>,
     compacted_subtrees: BTreeMap<PathBuf, CompactedSubtreeRecord>,
+    deferred_reconciles: BTreeMap<PathBuf, DeferredReconcileRecord>,
     tracked_path_refcounts: BTreeMap<PathBuf, usize>,
     subtree_pending_counts: BTreeMap<PathBuf, usize>,
+    storm_detector: StormDetector,
 }
 
 impl BoundedEventIntentMaps {
@@ -124,14 +153,25 @@ impl BoundedEventIntentMaps {
     }
 
     pub fn with_limits(watch_root: impl Into<PathBuf>, limits: EventIntentLimits) -> Self {
+        Self::with_limits_and_storm_thresholds(watch_root, limits, StormThresholds::default())
+    }
+
+    pub fn with_limits_and_storm_thresholds(
+        watch_root: impl Into<PathBuf>,
+        limits: EventIntentLimits,
+        storm_thresholds: StormThresholds,
+    ) -> Self {
+        let watch_root = watch_root.into();
         Self {
-            watch_root: watch_root.into(),
+            watch_root: watch_root.clone(),
             limits,
             event_map: BTreeMap::new(),
             intent_map: BTreeMap::new(),
             compacted_subtrees: BTreeMap::new(),
+            deferred_reconciles: BTreeMap::new(),
             tracked_path_refcounts: BTreeMap::new(),
             subtree_pending_counts: BTreeMap::new(),
+            storm_detector: StormDetector::with_thresholds(watch_root, storm_thresholds),
         }
     }
 
@@ -159,6 +199,10 @@ impl BoundedEventIntentMaps {
         self.compacted_subtrees.len()
     }
 
+    pub fn deferred_reconcile_count(&self) -> usize {
+        self.deferred_reconciles.len()
+    }
+
     pub fn pending_event(&self, path: &Path) -> Option<&PendingEventRecord> {
         self.event_map.get(path)
     }
@@ -169,6 +213,10 @@ impl BoundedEventIntentMaps {
 
     pub fn compacted_subtree(&self, root: &Path) -> Option<&CompactedSubtreeRecord> {
         self.compacted_subtrees.get(root)
+    }
+
+    pub fn deferred_reconcile(&self, root: &Path) -> Option<&DeferredReconcileRecord> {
+        self.deferred_reconciles.get(root)
     }
 
     pub fn subtree_pending_count(&self, root: &Path) -> usize {
@@ -221,6 +269,29 @@ impl BoundedEventIntentMaps {
         pending_intents
     }
 
+    pub fn materialize_ready_deferred_reconciles(
+        &mut self,
+        now: SystemTime,
+    ) -> Vec<PendingIntentRecord> {
+        let ready_roots: Vec<PathBuf> = self
+            .deferred_reconciles
+            .iter()
+            .filter_map(|(root, record)| (record.available_at <= now).then_some(root.clone()))
+            .collect();
+        let mut ready_intents = Vec::with_capacity(ready_roots.len());
+        for root in ready_roots {
+            if let Some(record) = self.deferred_reconciles.remove(&root) {
+                self.untrack_path(&root);
+                self.upsert_reconcile_intent(&root, record.available_at);
+                if let Some(intent) = self.pending_intent(&root).cloned() {
+                    ready_intents.push(intent);
+                }
+            }
+        }
+
+        ready_intents
+    }
+
     pub fn record_event(&mut self, event: FsEventRecord) {
         if !self.path_is_in_scope(&event.path) {
             logging::warning(
@@ -265,6 +336,19 @@ impl BoundedEventIntentMaps {
                     flags,
                     burst_count: 1,
                 },
+            );
+        }
+
+        if let Some(trigger) = self.storm_detector.observe_event(
+            &event.path,
+            event.observed_at,
+            self.pending_event_count(),
+        ) {
+            self.compact_subtree(
+                trigger.root.as_path(),
+                trigger.reason.into(),
+                event.observed_at,
+                Some(trigger.available_at),
             );
         }
     }
@@ -329,6 +413,7 @@ impl BoundedEventIntentMaps {
                 subtree_root.as_path(),
                 BackpressureReason::SubtreeCapExceeded,
                 observed_at,
+                None,
             );
         } else if self.tracked_path_count() >= self.limits.max_pending_paths {
             let watch_root = self.watch_root.clone();
@@ -336,6 +421,7 @@ impl BoundedEventIntentMaps {
                 watch_root.as_path(),
                 BackpressureReason::GlobalCapExceeded,
                 observed_at,
+                None,
             );
         }
 
@@ -347,6 +433,7 @@ impl BoundedEventIntentMaps {
         subtree_root: &Path,
         reason: BackpressureReason,
         observed_at: SystemTime,
+        deferred_available_at: Option<SystemTime>,
     ) {
         let event_paths: Vec<PathBuf> = self
             .event_map
@@ -366,6 +453,12 @@ impl BoundedEventIntentMaps {
             .filter(|path| path_is_within_subtree(path.as_path(), subtree_root))
             .cloned()
             .collect();
+        let deferred_roots: Vec<PathBuf> = self
+            .deferred_reconciles
+            .keys()
+            .filter(|path| path_is_within_subtree(path.as_path(), subtree_root))
+            .cloned()
+            .collect();
 
         let suppressed_event_count = event_paths.len();
         let suppressed_intent_count = intent_paths.len();
@@ -378,6 +471,11 @@ impl BoundedEventIntentMaps {
         for path in intent_paths {
             self.intent_map.remove(&path);
             self.untrack_path(&path);
+        }
+
+        for root in deferred_roots {
+            self.deferred_reconciles.remove(&root);
+            self.untrack_path(&root);
         }
 
         let mut total_suppressed_event_count = suppressed_event_count;
@@ -408,7 +506,18 @@ impl BoundedEventIntentMaps {
                 compaction_count,
             },
         );
-        self.upsert_reconcile_intent(subtree_root, observed_at);
+        if let Some(deferred_available_at) = deferred_available_at {
+            self.schedule_deferred_reconcile(
+                subtree_root,
+                reason
+                    .storm_reason()
+                    .expect("deferred reconcile requires a storm reason"),
+                observed_at,
+                deferred_available_at,
+            );
+        } else {
+            self.upsert_reconcile_intent(subtree_root, observed_at);
+        }
 
         logging::warning(
             "Compacted pending paths into a subtree reconcile intent",
@@ -423,6 +532,10 @@ impl BoundedEventIntentMaps {
                 (
                     "suppressed_intent_count",
                     total_suppressed_intent_count.to_string(),
+                ),
+                (
+                    "deferred_reconcile",
+                    deferred_available_at.is_some().to_string(),
                 ),
             ],
         );
@@ -442,13 +555,31 @@ impl BoundedEventIntentMaps {
         if let Some(record) = self.compacted_subtrees.get_mut(subtree_root) {
             record.note_event(observed_at);
         }
-        self.upsert_reconcile_intent(subtree_root, observed_at);
+        self.refresh_compacted_subtree_reconcile(subtree_root, observed_at);
     }
 
     fn note_absorbed_intent(&mut self, subtree_root: &Path, observed_at: SystemTime) {
         if let Some(record) = self.compacted_subtrees.get_mut(subtree_root) {
             record.note_intent(observed_at);
         }
+        self.refresh_compacted_subtree_reconcile(subtree_root, observed_at);
+    }
+
+    fn refresh_compacted_subtree_reconcile(
+        &mut self,
+        subtree_root: &Path,
+        observed_at: SystemTime,
+    ) {
+        if let Some(storm_reason) = self.compacted_storm_reason(subtree_root) {
+            self.schedule_deferred_reconcile(
+                subtree_root,
+                storm_reason,
+                observed_at,
+                self.storm_detector.deferred_available_at(observed_at),
+            );
+            return;
+        }
+
         self.upsert_reconcile_intent(subtree_root, observed_at);
     }
 
@@ -468,6 +599,41 @@ impl BoundedEventIntentMaps {
                 observed_at,
             },
         );
+    }
+
+    fn schedule_deferred_reconcile(
+        &mut self,
+        subtree_root: &Path,
+        reason: StormReason,
+        observed_at: SystemTime,
+        available_at: SystemTime,
+    ) {
+        if let Some(existing) = self.deferred_reconciles.get_mut(subtree_root) {
+            existing.reason = reason;
+            existing.last_observed_at = observed_at;
+            existing.available_at = existing.available_at.max(available_at);
+            existing.reschedule_count += 1;
+            return;
+        }
+
+        self.track_path(subtree_root);
+        self.deferred_reconciles.insert(
+            subtree_root.to_path_buf(),
+            DeferredReconcileRecord {
+                root: subtree_root.to_path_buf(),
+                reason,
+                first_detected_at: observed_at,
+                last_observed_at: observed_at,
+                available_at,
+                reschedule_count: 0,
+            },
+        );
+    }
+
+    fn compacted_storm_reason(&self, subtree_root: &Path) -> Option<StormReason> {
+        self.compacted_subtrees
+            .get(subtree_root)
+            .and_then(|record| record.reason.storm_reason())
     }
 
     fn compacted_subtree_root_for(&self, path: &Path) -> Option<PathBuf> {
@@ -596,6 +762,7 @@ fn path_is_within_subtree(path: &Path, subtree_root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storm::{StormReason, StormThresholds};
     use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
@@ -791,6 +958,182 @@ mod tests {
         assert_eq!(intents[0].kind, PendingIntentKind::Upload);
         assert_eq!(maps.pending_intent_count(), 0);
         assert_eq!(maps.tracked_path_count(), 0);
+    }
+
+    #[test]
+    fn unique_path_storm_compacts_subtree_into_deferred_reconcile() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let subtree_root = watch_root.join("project/sub");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root,
+            EventIntentLimits::new(100, 100),
+            StormThresholds {
+                window: Duration::from_secs(2),
+                directory_unique_paths_threshold: 2,
+                directory_event_count_threshold: 99,
+                global_pending_event_count_threshold: 99,
+                deferred_reconcile_delay: Duration::from_secs(30),
+            },
+        );
+
+        maps.record_event(fs_event(
+            subtree_root.join("a.txt"),
+            FsEventKind::Modified,
+            1,
+        ));
+        maps.record_event(fs_event(
+            subtree_root.join("b.txt"),
+            FsEventKind::Modified,
+            2,
+        ));
+
+        assert_eq!(maps.pending_event_count(), 0);
+        assert_eq!(maps.pending_intent_count(), 0);
+        assert_eq!(maps.deferred_reconcile_count(), 1);
+        assert_eq!(maps.tracked_path_count(), 1);
+
+        let deferred = maps
+            .deferred_reconcile(&subtree_root)
+            .expect("missing deferred reconcile");
+        assert_eq!(deferred.reason, StormReason::DirectoryUniquePathsThreshold);
+        assert_eq!(deferred.available_at, timestamp(32));
+
+        let compacted = maps
+            .compacted_subtree(&subtree_root)
+            .expect("missing compacted subtree record");
+        assert_eq!(
+            compacted.reason,
+            BackpressureReason::DirectoryUniquePathsStorm
+        );
+        assert_eq!(compacted.suppressed_event_count, 2);
+
+        assert!(
+            maps.materialize_ready_deferred_reconciles(timestamp(31))
+                .is_empty()
+        );
+        let ready = maps.materialize_ready_deferred_reconciles(timestamp(32));
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].path, subtree_root);
+        assert_eq!(ready[0].kind, PendingIntentKind::ReconcileSubtree);
+        assert_eq!(maps.deferred_reconcile_count(), 0);
+        assert_eq!(maps.pending_intent_count(), 1);
+    }
+
+    #[test]
+    fn absorbed_events_extend_deferred_reconcile_delay_inside_stormed_subtree() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let subtree_root = watch_root.join("project/sub");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root,
+            EventIntentLimits::new(100, 100),
+            StormThresholds {
+                window: Duration::from_secs(2),
+                directory_unique_paths_threshold: 2,
+                directory_event_count_threshold: 99,
+                global_pending_event_count_threshold: 99,
+                deferred_reconcile_delay: Duration::from_secs(30),
+            },
+        );
+
+        maps.record_event(fs_event(
+            subtree_root.join("a.txt"),
+            FsEventKind::Modified,
+            1,
+        ));
+        maps.record_event(fs_event(
+            subtree_root.join("b.txt"),
+            FsEventKind::Modified,
+            2,
+        ));
+        maps.record_event(fs_event(
+            subtree_root.join("c.txt"),
+            FsEventKind::Removed,
+            3,
+        ));
+
+        let deferred = maps
+            .deferred_reconcile(&subtree_root)
+            .expect("missing deferred reconcile");
+        assert_eq!(deferred.available_at, timestamp(33));
+        assert_eq!(deferred.reschedule_count, 1);
+        assert_eq!(maps.pending_event_count(), 0);
+
+        let compacted = maps
+            .compacted_subtree(&subtree_root)
+            .expect("missing compacted subtree record");
+        assert_eq!(compacted.suppressed_event_count, 3);
+    }
+
+    #[test]
+    fn repeated_events_can_trigger_directory_event_count_storm() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let subtree_root = watch_root.join("project");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root,
+            EventIntentLimits::new(100, 100),
+            StormThresholds {
+                window: Duration::from_secs(2),
+                directory_unique_paths_threshold: 99,
+                directory_event_count_threshold: 3,
+                global_pending_event_count_threshold: 99,
+                deferred_reconcile_delay: Duration::from_secs(10),
+            },
+        );
+
+        let path = subtree_root.join("file.txt");
+        maps.record_event(fs_event(path.clone(), FsEventKind::Modified, 1));
+        maps.record_event(fs_event(path.clone(), FsEventKind::Modified, 2));
+        maps.record_event(fs_event(path, FsEventKind::Modified, 3));
+
+        let deferred = maps
+            .deferred_reconcile(&subtree_root)
+            .expect("missing deferred reconcile");
+        assert_eq!(deferred.reason, StormReason::DirectoryEventCountThreshold);
+
+        let compacted = maps
+            .compacted_subtree(&subtree_root)
+            .expect("missing compacted subtree record");
+        assert_eq!(
+            compacted.reason,
+            BackpressureReason::DirectoryEventCountStorm
+        );
+    }
+
+    #[test]
+    fn global_pending_event_threshold_defers_watch_root_reconcile() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root.clone(),
+            EventIntentLimits::new(100, 100),
+            StormThresholds {
+                window: Duration::from_secs(2),
+                directory_unique_paths_threshold: 99,
+                directory_event_count_threshold: 99,
+                global_pending_event_count_threshold: 2,
+                deferred_reconcile_delay: Duration::from_secs(15),
+            },
+        );
+
+        maps.record_event(fs_event(watch_root.join("a.txt"), FsEventKind::Modified, 1));
+        maps.record_event(fs_event(watch_root.join("b.txt"), FsEventKind::Modified, 2));
+
+        assert_eq!(maps.pending_event_count(), 0);
+        let deferred = maps
+            .deferred_reconcile(&watch_root)
+            .expect("missing global deferred reconcile");
+        assert_eq!(
+            deferred.reason,
+            StormReason::GlobalPendingEventCountThreshold
+        );
+
+        let compacted = maps
+            .compacted_subtree(&watch_root)
+            .expect("missing compacted watch root record");
+        assert_eq!(
+            compacted.reason,
+            BackpressureReason::GlobalPendingEventCountStorm
+        );
+        assert_eq!(compacted.suppressed_event_count, 2);
     }
 
     fn fs_event(path: PathBuf, kind: FsEventKind, seconds: u64) -> FsEventRecord {
