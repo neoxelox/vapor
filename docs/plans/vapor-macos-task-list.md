@@ -101,7 +101,7 @@ Exit gate:
 - [x] P2-10 Implement storm detection triggers and deferred `RECONCILE_SUBTREE` scheduling.
 - [x] P2-11 Implement interruptible reconcile with idle-biased execution.
 - [x] P2-12 Add microbench/regression tests for FSEvents callback, debounce/coalescing loop, and scheduler superseding paths.
-- [ ] P2-13 Add load/stress tests for memory/backpressure caps under large pending-intent storms.
+- [x] P2-13 Add load/stress tests for memory/backpressure caps under large pending-intent storms.
 
 Exit gate:
 

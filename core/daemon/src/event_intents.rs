@@ -789,7 +789,7 @@ fn path_is_within_subtree(path: &Path, subtree_root: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::storm::{StormReason, StormThresholds};
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     #[test]
     fn event_and_intent_for_same_path_share_one_tracked_path_count() {
@@ -1160,6 +1160,135 @@ mod tests {
             BackpressureReason::GlobalPendingEventCountStorm
         );
         assert_eq!(compacted.suppressed_event_count, 2);
+    }
+
+    #[test]
+    fn subtree_cap_stress_keeps_large_single_directory_bounded() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let subtree_root = watch_root.join("project/stress");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root,
+            EventIntentLimits::new(20_000, 5_000),
+            disabled_storm_thresholds(),
+        );
+
+        let start = Instant::now();
+        for index in 0..6_000 {
+            maps.record_event(fs_event(
+                subtree_root.join(format!("file-{index}.txt")),
+                FsEventKind::Modified,
+                index as u64,
+            ));
+        }
+        let elapsed = start.elapsed();
+
+        assert_eq!(maps.pending_event_count(), 0);
+        assert_eq!(maps.pending_intent_count(), 1);
+        assert_eq!(maps.tracked_path_count(), 1);
+        let compacted = maps
+            .compacted_subtree(&subtree_root)
+            .expect("missing compacted subtree record");
+        assert_eq!(compacted.reason, BackpressureReason::SubtreeCapExceeded);
+        assert_eq!(compacted.suppressed_event_count, 6_000);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "subtree cap stress test took {:?}, expected < 5s",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn global_cap_stress_keeps_large_root_bounded() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root.clone(),
+            EventIntentLimits::new(20_000, 50_000),
+            disabled_storm_thresholds(),
+        );
+
+        let start = Instant::now();
+        for index in 0..25_000 {
+            maps.record_event(fs_event(
+                watch_root.join(format!("file-{index}.txt")),
+                FsEventKind::Modified,
+                index as u64,
+            ));
+        }
+        let elapsed = start.elapsed();
+
+        assert_eq!(maps.pending_event_count(), 0);
+        assert_eq!(maps.pending_intent_count(), 1);
+        assert_eq!(maps.tracked_path_count(), 1);
+        let compacted = maps
+            .compacted_subtree(&watch_root)
+            .expect("missing compacted watch root record");
+        assert_eq!(compacted.reason, BackpressureReason::GlobalCapExceeded);
+        assert_eq!(compacted.suppressed_event_count, 25_000);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "global cap stress test took {:?}, expected < 5s",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn multi_subtree_storm_stress_keeps_only_deferred_markers_in_memory() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root.clone(),
+            EventIntentLimits::new(20_000, 5_000),
+            StormThresholds {
+                global_pending_event_count_threshold: usize::MAX,
+                ..StormThresholds::default()
+            },
+        );
+
+        let start = Instant::now();
+        for subtree_index in 0..40 {
+            let subtree_root = watch_root.join(format!("storm-{subtree_index}"));
+            for file_index in 0..250 {
+                maps.record_event(fs_event(
+                    subtree_root.join(format!("file-{file_index}.txt")),
+                    FsEventKind::Modified,
+                    (subtree_index * 10 + file_index / 200) as u64,
+                ));
+            }
+        }
+        let elapsed = start.elapsed();
+
+        assert_eq!(maps.pending_event_count(), 0);
+        assert_eq!(maps.pending_intent_count(), 0);
+        assert_eq!(maps.deferred_reconcile_count(), 40);
+        assert_eq!(maps.compacted_subtree_count(), 40);
+        assert_eq!(maps.tracked_path_count(), 40);
+
+        for subtree_index in 0..40 {
+            let subtree_root = watch_root.join(format!("storm-{subtree_index}"));
+            let deferred = maps
+                .deferred_reconcile(&subtree_root)
+                .expect("missing deferred reconcile marker");
+            assert_eq!(deferred.reason, StormReason::DirectoryUniquePathsThreshold);
+
+            let compacted = maps
+                .compacted_subtree(&subtree_root)
+                .expect("missing compacted subtree record");
+            assert_eq!(compacted.suppressed_event_count, 250);
+        }
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "multi-subtree storm stress test took {:?}, expected < 5s",
+            elapsed
+        );
+    }
+
+    fn disabled_storm_thresholds() -> StormThresholds {
+        StormThresholds {
+            window: Duration::from_secs(2),
+            directory_unique_paths_threshold: usize::MAX,
+            directory_event_count_threshold: usize::MAX,
+            global_pending_event_count_threshold: usize::MAX,
+            deferred_reconcile_delay: Duration::from_secs(30),
+        }
     }
 
     fn fs_event(path: PathBuf, kind: FsEventKind, seconds: u64) -> FsEventRecord {

@@ -55,6 +55,7 @@ All thresholds below are initial SLOs and are intended to tighten as benchmark c
 - Metrics artifact output per run with scenario-level summaries.
 - Threshold-based pass/fail evaluation against this document.
 - Current Rust micro-regression coverage includes callback burst, debounce tick, and scheduler superseding hot-path guards inside the daemon test suite.
+- Current Rust stress coverage also exercises large per-subtree caps, large global caps, and multi-subtree deferred-storm markers so bounded in-memory behavior stays regression-tested.
 
 ## CI smoke gate thresholds (initial proxy gate)
 
