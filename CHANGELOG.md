@@ -34,6 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Durable daemon state now redacts and bounds persisted error text, rejects oversized counters or state values, and guards against out-of-range persisted timestamps.
 - Pre-GA daemon state now rejects older on-disk schemas instead of carrying forward compatibility shims, and removes an obsolete deferred-reconcile helper API.
 - Daemon startup now injects the selected provider through the provider trait boundary instead of hardcoding the Google Drive type inside core daemon orchestration.
+- Daemon runtime now advances durable non-reconcile work through bounded planner, hash, and upload stages under throttle/workgate caps instead of processing one leased intent at a time.
 
 ### Fixed
 

@@ -12,6 +12,7 @@
 8. A live daemon runtime loop now wires watcher ingest -> debounce -> scheduler -> durable queue -> workgate -> reconcile, so the local engine runs as one composed pipeline instead of isolated primitives.
 9. A SQLite durable queue/state DB persists pending and leased intents, recovers interrupted leases on startup, requeues retryable failures with exponential backoff/jitter/slower rate-limit delays, durably finalizes terminal failures, and injects a whole-scope startup reconcile so volatile pre-DB intent loss is reconstructed conservatively after restart.
 10. Provider selection is now injected at runtime startup, so daemon orchestration uses the provider trait boundary instead of hardcoding the Google Drive type in core engine state.
+11. Non-reconcile work now flows through a staged executor that leases durable intents into bounded planner, hash, and upload stages under workgate/throttle caps instead of finishing one leased intent at a time.
 
 Current caveat: the reconcile controller is now idle-biased and interruptible, and the runtime loop is composed, but real system-driven throttle sampling and real subtree walking/apply work still need to replace the current placeholders in later hardening milestones.
 

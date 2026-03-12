@@ -23,6 +23,7 @@ pub mod build_info {
 
 pub mod debounce;
 pub mod event_intents;
+pub mod executor;
 pub mod fs_events;
 pub mod logging;
 pub mod path_filter;

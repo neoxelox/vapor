@@ -242,38 +242,79 @@ impl DurableStateDb {
         &mut self,
         now: SystemTime,
     ) -> Result<Option<DurableIntentRecord>, StateDbError> {
+        Ok(self.lease_ready_batch(now, 1)?.into_iter().next())
+    }
+
+    pub fn peek_next_ready_kind(
+        &self,
+        now: SystemTime,
+    ) -> Result<Option<PendingIntentKind>, StateDbError> {
+        let now_ms = system_time_to_millis(now)?;
+        let raw_kind = self
+            .connection
+            .query_row(
+                "SELECT kind
+             FROM queue_intents
+             WHERE state = ? AND available_at_ms <= ?
+             ORDER BY available_at_ms ASC, id ASC
+             LIMIT 1",
+                params![STATE_PENDING, now_ms],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        raw_kind
+            .map(|kind| intent_kind_from_label(&kind))
+            .transpose()
+    }
+
+    pub fn lease_ready_batch(
+        &mut self,
+        now: SystemTime,
+        limit: usize,
+    ) -> Result<Vec<DurableIntentRecord>, StateDbError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
         let now_ms = system_time_to_millis(now)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let intent_id = transaction
-            .query_row(
-                "SELECT id
-                 FROM queue_intents
-                 WHERE state = ? AND available_at_ms <= ?
-                 ORDER BY available_at_ms ASC, id ASC
-                 LIMIT 1",
-                params![STATE_PENDING, now_ms],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-
-        let Some(intent_id) = intent_id else {
-            transaction.commit()?;
-            return Ok(None);
-        };
-
-        transaction.execute(
-            "UPDATE queue_intents
-             SET state = ?, leased_at_ms = ?, attempt_count = attempt_count + 1
-             WHERE id = ? AND state = ?",
-            params![STATE_LEASED, now_ms, intent_id, STATE_PENDING],
+        let mut statement = transaction.prepare(
+            "SELECT id
+             FROM queue_intents
+             WHERE state = ? AND available_at_ms <= ?
+             ORDER BY available_at_ms ASC, id ASC
+             LIMIT ?",
         )?;
+        let intent_ids: Vec<i64> = statement
+            .query_map(params![STATE_PENDING, now_ms, limit as i64], |row| {
+                row.get::<_, i64>(0)
+            })?
+            .collect::<Result<_, _>>()?;
+        drop(statement);
 
-        let leased_intent = fetch_intent(&transaction, intent_id)?
-            .ok_or(StateDbError::MissingIntentRecord(intent_id))?;
+        if intent_ids.is_empty() {
+            transaction.commit()?;
+            return Ok(Vec::new());
+        }
+
+        let mut leased_intents = Vec::with_capacity(intent_ids.len());
+        for intent_id in intent_ids {
+            transaction.execute(
+                "UPDATE queue_intents
+                 SET state = ?, leased_at_ms = ?, attempt_count = attempt_count + 1
+                 WHERE id = ? AND state = ?",
+                params![STATE_LEASED, now_ms, intent_id, STATE_PENDING],
+            )?;
+            leased_intents.push(
+                fetch_intent(&transaction, intent_id)?
+                    .ok_or(StateDbError::MissingIntentRecord(intent_id))?,
+            );
+        }
         transaction.commit()?;
-        Ok(Some(leased_intent))
+        Ok(leased_intents)
     }
 
     pub fn complete_leased(&mut self, id: i64) -> Result<bool, StateDbError> {
@@ -917,6 +958,67 @@ mod tests {
                 .expect("complete leased")
         );
         assert_eq!(database.queue_depth().expect("queue depth"), 0);
+    }
+
+    #[test]
+    fn batched_leasing_preserves_ready_order() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+
+        database
+            .enqueue_intent(
+                &watch_root.join("older.txt"),
+                PendingIntentKind::Upload,
+                timestamp_ms(100),
+            )
+            .expect("enqueue older intent");
+        database
+            .enqueue_intent(
+                &watch_root.join("newer.txt"),
+                PendingIntentKind::Upload,
+                timestamp_ms(200),
+            )
+            .expect("enqueue newer intent");
+
+        let leased = database
+            .lease_ready_batch(timestamp_ms(200), 2)
+            .expect("lease ready batch");
+
+        assert_eq!(leased.len(), 2);
+        assert_eq!(leased[0].path, watch_root.join("older.txt"));
+        assert_eq!(leased[1].path, watch_root.join("newer.txt"));
+    }
+
+    #[test]
+    fn peek_next_ready_kind_reports_oldest_ready_intent_kind() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+
+        database
+            .enqueue_intent(
+                &watch_root.join("delete.txt"),
+                PendingIntentKind::Delete,
+                timestamp_ms(100),
+            )
+            .expect("enqueue delete intent");
+        database
+            .enqueue_intent(
+                &watch_root.join("upload.txt"),
+                PendingIntentKind::Upload,
+                timestamp_ms(200),
+            )
+            .expect("enqueue upload intent");
+
+        assert_eq!(
+            database
+                .peek_next_ready_kind(timestamp_ms(200))
+                .expect("peek next ready kind"),
+            Some(PendingIntentKind::Delete)
+        );
     }
 
     #[test]

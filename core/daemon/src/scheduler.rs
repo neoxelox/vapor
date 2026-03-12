@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -53,6 +53,8 @@ pub struct SchedulerUpdate {
 #[derive(Debug, Default)]
 pub struct KeyedSupersedingScheduler {
     intents: BTreeMap<PathBuf, ScheduledIntentRecord>,
+    pending_index: BTreeSet<(u64, PathBuf)>,
+    pending_reconcile_index: BTreeSet<(u64, PathBuf)>,
     next_sequence: u64,
 }
 
@@ -66,10 +68,7 @@ impl KeyedSupersedingScheduler {
     }
 
     pub fn pending_count(&self) -> usize {
-        self.intents
-            .values()
-            .filter(|record| record.state == ScheduledIntentState::Pending)
-            .count()
+        self.pending_index.len()
     }
 
     pub fn running_count(&self) -> usize {
@@ -114,35 +113,23 @@ impl KeyedSupersedingScheduler {
     }
 
     pub fn claim_next(&mut self) -> Option<ClaimedIntent> {
-        self.claim_next_matching(|_| true)
+        let (_, path) = self.pending_index.iter().next()?.clone();
+        self.claim_path(path.as_path())
     }
 
     pub fn claim_next_reconcile(&mut self) -> Option<ClaimedIntent> {
-        self.claim_next_matching(|record| record.kind == PendingIntentKind::ReconcileSubtree)
+        let (_, path) = self.pending_reconcile_index.iter().next()?.clone();
+        self.claim_path(path.as_path())
     }
 
-    fn claim_next_matching(
-        &mut self,
-        mut predicate: impl FnMut(&ScheduledIntentRecord) -> bool,
-    ) -> Option<ClaimedIntent> {
-        let path = self
-            .intents
-            .iter()
-            .filter(|(_, record)| {
-                record.state == ScheduledIntentState::Pending && predicate(record)
-            })
-            .min_by(|(left_path, left_record), (right_path, right_record)| {
-                left_record
-                    .queue_sequence
-                    .cmp(&right_record.queue_sequence)
-                    .then_with(|| left_path.cmp(right_path))
-            })
-            .map(|(path, _)| path.clone())?;
-
-        let record = self
-            .intents
-            .get_mut(&path)
-            .expect("scheduled intent disappeared before claim");
+    fn claim_path(&mut self, path: &Path) -> Option<ClaimedIntent> {
+        let queue_key = {
+            let record = self.intents.get(path)?;
+            (record.queue_sequence, record.path.clone())
+        };
+        self.pending_index.remove(&queue_key);
+        self.pending_reconcile_index.remove(&queue_key);
+        let record = self.intents.get_mut(path)?;
         record.state = ScheduledIntentState::Running;
         record.dirty = false;
 
@@ -167,14 +154,24 @@ impl KeyedSupersedingScheduler {
 
         if dirty {
             let sequence = self.take_next_sequence();
-            let record = self
-                .intents
-                .get_mut(path)
-                .expect("scheduled intent disappeared before completion");
-            record.state = ScheduledIntentState::Pending;
-            record.dirty = false;
-            record.replay_count = replay_count + 1;
-            record.queue_sequence = sequence;
+            let (queue_key, should_index_reconcile) = {
+                let record = self
+                    .intents
+                    .get_mut(path)
+                    .expect("scheduled intent disappeared before completion");
+                record.state = ScheduledIntentState::Pending;
+                record.dirty = false;
+                record.replay_count = replay_count + 1;
+                record.queue_sequence = sequence;
+                (
+                    (record.queue_sequence, record.path.clone()),
+                    record.kind == PendingIntentKind::ReconcileSubtree,
+                )
+            };
+            self.pending_index.insert(queue_key.clone());
+            if should_index_reconcile {
+                self.pending_reconcile_index.insert(queue_key);
+            }
             return Some(CompletionDisposition::RequeuedDirty);
         }
 
@@ -190,13 +187,38 @@ impl KeyedSupersedingScheduler {
         last_observed_at: SystemTime,
         burst_count: usize,
     ) -> SchedulerUpdate {
-        if let Some(record) = self.intents.get_mut(&path) {
+        if self.intents.contains_key(&path) {
+            let (was_pending, old_queue_key) = {
+                let record = self
+                    .intents
+                    .get(&path)
+                    .expect("scheduled intent disappeared");
+                (
+                    record.state == ScheduledIntentState::Pending,
+                    (record.queue_sequence, record.path.clone()),
+                )
+            };
+            if was_pending {
+                self.pending_index.remove(&old_queue_key);
+                self.pending_reconcile_index.remove(&old_queue_key);
+            }
+
+            let record = self
+                .intents
+                .get_mut(&path)
+                .expect("scheduled intent disappeared");
             record.kind = kind;
             record.first_observed_at = earliest_time(record.first_observed_at, first_observed_at);
             record.last_observed_at = latest_time(record.last_observed_at, last_observed_at);
             record.burst_count = record.burst_count.saturating_add(burst_count);
             if record.state == ScheduledIntentState::Running {
                 record.dirty = true;
+            } else {
+                let queue_key = (record.queue_sequence, record.path.clone());
+                self.pending_index.insert(queue_key.clone());
+                if record.kind == PendingIntentKind::ReconcileSubtree {
+                    self.pending_reconcile_index.insert(queue_key);
+                }
             }
 
             return SchedulerUpdate {
@@ -219,7 +241,12 @@ impl KeyedSupersedingScheduler {
             replay_count: 0,
             queue_sequence: self.take_next_sequence(),
         };
+        let queue_key = (record.queue_sequence, path.clone());
         self.intents.insert(path.clone(), record);
+        self.pending_index.insert(queue_key.clone());
+        if kind == PendingIntentKind::ReconcileSubtree {
+            self.pending_reconcile_index.insert(queue_key);
+        }
 
         SchedulerUpdate {
             path,

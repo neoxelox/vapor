@@ -14,6 +14,7 @@ Responsibilities:
 - bounded durable diagnostics/state fields with corruption guards for attempt counters, timestamps, and oversized stored values
 - pre-GA durable state keeps only the current schema path and rejects older on-disk schemas instead of carrying migration shims
 - provider choice is injected through the provider trait boundary at runtime startup instead of being hardcoded in daemon core state
+- staged planner/hash/upload execution now uses work permits to keep multiple durable intents moving concurrently within throttle limits
 - reconcile and provider execution
 - XPC status/control endpoints
 

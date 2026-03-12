@@ -120,10 +120,11 @@ Exit gate:
 - [x] P2.5-8 Bound and sanitize durable diagnostic/state fields (`last_error`, counters, persisted timestamps) and add corruption/tamper guards for malformed local state.
 - [x] P2.5-9 Remove pre-GA compatibility shims and transitional APIs that are no longer justified (for example legacy schema migration paths, duplicate deferred-intent helpers, and placeholder app state surfaces).
 - [x] P2.5-10 Decouple core daemon orchestration from the concrete `GoogleDriveProvider` type so provider choice is injected at startup and core engine code stays provider-neutral before provider-phase expansion.
-- [ ] P2.5-11 Introduce a real staged executor that uses workgate/throttle caps to run bounded planner/hash/upload work across available cores instead of keeping execution mostly serialized.
-- [ ] P2.5-12 Reduce known serialized hot spots with batched durable leasing and ready-queue/indexed dispatch for debounce/scheduler paths, then add runtime-level regression coverage for the composed engine.
+- [x] P2.5-11 Introduce bounded staged-admission/executor scaffolding under workgate/throttle caps so later real planner/hash/upload workers have a safe runtime shell.
+- [x] P2.5-12 Reduce known serialized hot spots with batched durable leasing and ready-queue/indexed dispatch for debounce/scheduler paths, then add runtime-level regression coverage for the composed engine.
 
 Current note: the composed runtime loop is now real, but its production tick path still feeds default `ThrottleInputs` until later hardening work replaces that placeholder with real system-driven pressure sampling.
+Current note: bounded staged admission and batched/indexed dispatch now exist, but the current timed stage simulator intentionally remains until provider-backed upload execution is available in Phase 3.
 
 Exit gate:
 
@@ -133,7 +134,7 @@ Exit gate:
 - Compacted/deferred/scheduled work survives crash/restart without silent loss, either through earlier durability or deterministic whole-scope recovery.
 - Logging/runtime-path handling degrades safely, uses restrictive local permissions, and avoids leaking sensitive values in durable logs/state.
 - App controls shown to users are real daemon-backed controls, not placeholder/demo state transitions.
-- Core daemon orchestration is provider-neutral, pre-GA backcompat shims are removed, and the runtime uses bounded parallel worker execution under explicit caps.
+- Core daemon orchestration is provider-neutral, pre-GA backcompat shims are removed, and the runtime keeps staged admission/dispatch bounded under explicit caps.
 
 ## Phase 3 - Google Drive provider plus bidirectional flow
 
@@ -142,6 +143,7 @@ Exit gate:
 - [ ] P3-2a Add authenticated Google Drive folder lookup/create for the configured `cloudSyncDirectory` before regular sync starts.
 - [ ] P3-2b Block normal sync startup until the configured cloud root exists or the provider returns an actionable initialization error.
 - [ ] P3-3 Implement upload paths (multipart small, resumable large).
+- [ ] P3-3b Replace the current timed staged executor with real planner/hash/upload workers backed by provider upload execution and bounded by workgate/throttle caps across available cores.
 - [ ] P3-4 Implement remote changes polling (low frequency, throttle-aware).
 - [ ] P3-5 Implement remote-to-local apply pipeline using durable queue/state intents.
 - [ ] P3-6 Implement self-write loop prevention (`self_write_cache`, op IDs, TTL rules).

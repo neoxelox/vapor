@@ -8,13 +8,14 @@ use vapor_shared::{RunState, constants};
 
 use crate::debounce::DebounceLoop;
 use crate::event_intents::BoundedFsEventRecorder;
+use crate::executor::{StagedExecutor, StagedExecutorSnapshot};
 use crate::fs_events::{FsEventsWatcher, FsEventsWatcherError, normalize_watch_root};
 use crate::logging;
 use crate::scheduler::KeyedSupersedingScheduler;
-use crate::state_db::{DurableStateDb, StateDbError};
+use crate::state_db::{DurableIntentRecord, DurableStateDb, StateDbError};
 use crate::sync_directories::SyncScope;
 use crate::throttle::ThrottleInputs;
-use crate::{DaemonApp, event_intents::PendingIntentKind, workgate::WorkClass};
+use crate::{DaemonApp, event_intents::PendingIntentKind};
 
 #[derive(Debug)]
 pub enum DaemonRuntimeError {
@@ -41,10 +42,12 @@ pub struct RuntimeTickReport {
     pub stabilized_events: usize,
     pub durable_enqueues: usize,
     pub leased_intents: usize,
+    pub started_staged_intents: usize,
     pub completed_intents: usize,
     pub requeued_intents: usize,
     pub started_reconcile_root: Option<PathBuf>,
     pub completed_reconcile_root: Option<PathBuf>,
+    pub staged_executor: StagedExecutorSnapshot,
 }
 
 pub struct DaemonRuntime {
@@ -53,10 +56,12 @@ pub struct DaemonRuntime {
     state_db: DurableStateDb,
     recorder: Option<Arc<BoundedFsEventRecorder>>,
     debounce: DebounceLoop,
+    staged_executor: StagedExecutor,
     scheduler: KeyedSupersedingScheduler,
     watcher: Option<FsEventsWatcher>,
     last_throttle_sample_at: Option<SystemTime>,
     running_reconcile_intent_id: Option<i64>,
+    startup_reconstruction_barrier: bool,
     tick_interval: Duration,
     throttle_sample_interval: Duration,
 }
@@ -98,6 +103,11 @@ impl DaemonRuntime {
             ..RuntimeTickReport::default()
         };
 
+        let staged_report = self
+            .staged_executor
+            .advance(&mut self.app, &mut self.state_db, now)?;
+        report.completed_intents += staged_report.completed;
+
         if let Some(reconcile_intent_id) = self.running_reconcile_intent_id {
             if self
                 .app
@@ -114,14 +124,19 @@ impl DaemonRuntime {
             } else if let Some(completed_root) = self.complete_running_reconcile()? {
                 self.state_db.complete_leased(reconcile_intent_id)?;
                 self.running_reconcile_intent_id = None;
+                if self.startup_reconstruction_barrier
+                    && self.sync_scope.local_sync_directory.as_ref() == Some(&completed_root)
+                {
+                    self.startup_reconstruction_barrier = false;
+                }
                 report.completed_intents += 1;
                 report.completed_reconcile_root = Some(completed_root);
             }
         }
 
-        if self.running_reconcile_intent_id.is_none() {
-            self.process_ready_queue(now, &mut report)?;
-        }
+        self.process_ready_queue(now, &mut report)?;
+
+        report.staged_executor = self.staged_executor.snapshot();
 
         Ok(report)
     }
@@ -207,10 +222,12 @@ impl DaemonRuntime {
             state_db,
             recorder,
             debounce,
+            staged_executor: StagedExecutor::new(tick_interval),
             scheduler: KeyedSupersedingScheduler::default(),
             watcher,
             last_throttle_sample_at: None,
             running_reconcile_intent_id: None,
+            startup_reconstruction_barrier: false,
             tick_interval,
             throttle_sample_interval: Duration::from_millis(
                 constants::engine::THROTTLE_SAMPLE_INTERVAL_MILLIS,
@@ -243,6 +260,7 @@ impl DaemonRuntime {
 
         self.state_db
             .enqueue_startup_reconcile_intent(local_sync_directory, now)?;
+        self.startup_reconstruction_barrier = true;
         logging::info(
             "Queued startup whole-scope reconcile for volatile-state reconstruction",
             &[("root", local_sync_directory.display().to_string())],
@@ -311,11 +329,32 @@ impl DaemonRuntime {
         now: SystemTime,
         report: &mut RuntimeTickReport,
     ) -> Result<(), DaemonRuntimeError> {
-        while let Some(intent) = self.state_db.lease_next_ready(now)? {
+        if self.startup_reconstruction_barrier && self.running_reconcile_intent_id.is_some() {
+            return Ok(());
+        }
+
+        let batch_limit = if self.startup_reconstruction_barrier {
+            1
+        } else {
+            let workgate = self.app.workgate_snapshot();
+            let next_is_reconcile = self
+                .state_db
+                .peek_next_ready_kind(now)?
+                .map(|kind| kind == PendingIntentKind::ReconcileSubtree)
+                .unwrap_or(false);
+            self.staged_executor
+                .admission_capacity(workgate)
+                .min(workgate.available_planner_workers())
+                + usize::from(self.running_reconcile_intent_id.is_none() && next_is_reconcile)
+        };
+
+        for intent in self.state_db.lease_ready_batch(now, batch_limit)? {
             report.leased_intents += 1;
 
             match intent.kind {
                 PendingIntentKind::ReconcileSubtree => {
+                    let is_startup_root_reconcile = self.startup_reconstruction_barrier
+                        && self.sync_scope.local_sync_directory.as_ref() == Some(&intent.path);
                     self.scheduler.upsert_intent(
                         intent.path.clone(),
                         intent.kind,
@@ -325,7 +364,10 @@ impl DaemonRuntime {
                         Ok(Some(root)) => {
                             self.running_reconcile_intent_id = Some(intent.id);
                             report.started_reconcile_root = Some(root);
-                            break;
+                            if is_startup_root_reconcile {
+                                break;
+                            }
+                            continue;
                         }
                         Ok(None) => {
                             self.requeue_runtime_intent(
@@ -334,7 +376,10 @@ impl DaemonRuntime {
                                 "waiting for idle reconcile slot",
                             )?;
                             report.requeued_intents += 1;
-                            break;
+                            if self.startup_reconstruction_barrier {
+                                break;
+                            }
+                            continue;
                         }
                         Err(_) => {
                             self.requeue_runtime_intent(
@@ -343,30 +388,45 @@ impl DaemonRuntime {
                                 "waiting for reconcile permit",
                             )?;
                             report.requeued_intents += 1;
-                            break;
+                            if self.startup_reconstruction_barrier {
+                                break;
+                            }
+                            continue;
                         }
                     }
                 }
-                _ => match self.app.try_acquire_work(WorkClass::Upload) {
-                    Ok(permit) => {
-                        self.state_db.complete_leased(intent.id)?;
-                        self.app.release_work(permit);
-                        report.completed_intents += 1;
-                    }
-                    Err(_) => {
+                _ => {
+                    if self.startup_reconstruction_barrier {
                         self.requeue_runtime_intent(
                             intent.id,
                             now + self.tick_interval,
-                            "waiting for throttle permit",
+                            "waiting for startup reconstruction reconcile",
                         )?;
                         report.requeued_intents += 1;
                         break;
                     }
-                },
+
+                    let intent_id = intent.id;
+                    if self.try_start_staged_intent(intent, now) {
+                        report.started_staged_intents += 1;
+                    } else {
+                        self.requeue_runtime_intent(
+                            intent_id,
+                            now + self.tick_interval,
+                            "waiting for planner permit",
+                        )?;
+                        report.requeued_intents += 1;
+                        break;
+                    }
+                }
             }
         }
 
         Ok(())
+    }
+
+    fn try_start_staged_intent(&mut self, intent: DurableIntentRecord, now: SystemTime) -> bool {
+        self.staged_executor.try_start(&mut self.app, intent, now)
     }
 
     fn complete_running_reconcile(&mut self) -> Result<Option<PathBuf>, DaemonRuntimeError> {
@@ -405,6 +465,7 @@ mod tests {
     use crate::fs_events::{FsEventKind, FsEventRecord, FsEventRecording};
     use crate::sync_directories::SyncScope;
     use std::os::unix::fs::symlink;
+    use std::time::Instant;
     use tempfile::TempDir;
     use vapor_providers::default_provider;
 
@@ -572,14 +633,112 @@ mod tests {
             },
         );
 
+        let first_tick = runtime
+            .tick_with_inputs(timestamp_ms(1_500), ThrottleInputs::default())
+            .expect("runtime tick");
+        let second_tick = runtime
+            .tick_with_inputs(timestamp_ms(1_750), ThrottleInputs::default())
+            .expect("runtime tick");
+        let third_tick = runtime
+            .tick_with_inputs(timestamp_ms(2_000), ThrottleInputs::default())
+            .expect("runtime tick");
+        let fourth_tick = runtime
+            .tick_with_inputs(timestamp_ms(2_250), ThrottleInputs::default())
+            .expect("runtime tick");
+
+        assert_eq!(first_tick.stabilized_events, 1);
+        assert_eq!(first_tick.durable_enqueues, 1);
+        assert_eq!(first_tick.started_staged_intents, 1);
+        assert_eq!(first_tick.completed_intents, 0);
+        assert_eq!(second_tick.staged_executor.hash_running, 1);
+        assert_eq!(third_tick.staged_executor.upload_running, 1);
+        assert_eq!(fourth_tick.completed_intents, 1);
+        assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 0);
+    }
+
+    #[test]
+    fn runtime_starts_multiple_upload_intents_up_to_planner_cap() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        std::fs::create_dir_all(&watch_root).expect("create watch root");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+        for index in 0..6 {
+            state_db
+                .enqueue_intent(
+                    &watch_root.join(format!("src/file-{index}.rs")),
+                    PendingIntentKind::Upload,
+                    timestamp_ms(0),
+                )
+                .expect("enqueue upload intent");
+        }
+        let mut runtime = DaemonRuntime::build(
+            test_sync_scope(&watch_root),
+            state_db,
+            default_provider(),
+            false,
+        )
+        .expect("runtime");
+
+        let first_tick = runtime
+            .tick_with_inputs(timestamp_ms(250), ThrottleInputs::default())
+            .expect("runtime tick");
+
+        assert_eq!(first_tick.started_staged_intents, 4);
+        assert_eq!(first_tick.staged_executor.planner_running, 4);
+        assert_eq!(runtime.state_db().leased_depth().expect("leased depth"), 4);
+        assert_eq!(
+            runtime.state_db().pending_depth().expect("pending depth"),
+            2
+        );
+    }
+
+    #[test]
+    fn composed_runtime_tick_regression_stays_under_guardrail() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        std::fs::create_dir_all(&watch_root).expect("create watch root");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+        let mut runtime = DaemonRuntime::build(
+            test_sync_scope(&watch_root),
+            state_db,
+            default_provider(),
+            false,
+        )
+        .expect("runtime");
+        let runtime_watch_root = runtime
+            .sync_scope()
+            .local_sync_directory
+            .clone()
+            .expect("runtime watch root");
+        let recorder = runtime.recorder.as_ref().expect("runtime recorder");
+
+        for index in 0..150 {
+            FsEventRecording::record_event(
+                recorder.as_ref(),
+                FsEventRecord {
+                    path: runtime_watch_root.join(format!("src/file-{index}.rs")),
+                    kind: FsEventKind::Modified,
+                    observed_at: timestamp_ms(0),
+                },
+            );
+        }
+
+        let start = Instant::now();
         let report = runtime
             .tick_with_inputs(timestamp_ms(1_500), ThrottleInputs::default())
             .expect("runtime tick");
+        let elapsed = start.elapsed();
 
-        assert_eq!(report.stabilized_events, 1);
-        assert_eq!(report.durable_enqueues, 1);
-        assert_eq!(report.completed_intents, 1);
-        assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 0);
+        assert_eq!(report.stabilized_events, 150);
+        assert_eq!(report.durable_enqueues, 150);
+        assert!(report.started_staged_intents >= 4);
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "composed runtime tick took {:?}, expected < 3s",
+            elapsed
+        );
     }
 
     #[test]
