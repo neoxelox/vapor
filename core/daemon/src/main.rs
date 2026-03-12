@@ -1,6 +1,6 @@
-use std::time::SystemTime;
-
-use vapor_daemon::{DaemonApp, build_info, logging, state_db::DurableStateDb, sync_directories};
+use vapor_daemon::{
+    build_info, logging, runtime::DaemonRuntime, state_db::DurableStateDb, sync_directories,
+};
 
 fn main() {
     if let Some(flag) = std::env::args().nth(1)
@@ -14,8 +14,7 @@ fn main() {
         return;
     }
 
-    let mut app = DaemonApp::default();
-    let mut state_db = match DurableStateDb::open_default() {
+    let state_db = match DurableStateDb::open_default() {
         Ok(state_db) => state_db,
         Err(error) => {
             logging::error(
@@ -25,64 +24,47 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let recovered_count = match state_db.recover_leased(SystemTime::now()) {
-        Ok(recovered_count) => recovered_count,
+    let sync_scope = sync_directories::resolve_from_process_environment();
+    let mut runtime = match DaemonRuntime::start(sync_scope, state_db) {
+        Ok(runtime) => runtime,
         Err(error) => {
             logging::error(
-                "Failed to recover leased durable intents",
-                &[
-                    ("database_path", state_db.path().display().to_string()),
-                    ("error", error.to_string()),
-                ],
+                "Failed to compose daemon runtime",
+                &[("error", format!("{:?}", error))],
             );
             std::process::exit(1);
         }
     };
-    logging::info(
-        "Durable queue/state DB is ready",
-        &[
-            ("database_path", state_db.path().display().to_string()),
-            ("recovered_leased_intents", recovered_count.to_string()),
-        ],
-    );
-    match app.restore_retry_slowdown(&mut state_db, SystemTime::now()) {
-        Ok(Some(slowdown_until)) => logging::warning(
-            "Restored retry slowdown window from durable state",
-            &[("retry_slowdown_until", format!("{:?}", slowdown_until))],
-        ),
-        Ok(None) => {}
-        Err(error) => {
-            logging::error(
-                "Failed to restore retry slowdown state",
-                &[
-                    ("database_path", state_db.path().display().to_string()),
-                    ("error", error.to_string()),
-                ],
-            );
-            std::process::exit(1);
-        }
-    }
-    let sync_scope = sync_directories::resolve_from_process_environment();
-    app.ensure_cloud_sync_directory(sync_scope.cloud_sync_directory.as_str());
-    let local_sync_directory = sync_scope
+    let local_sync_directory = runtime
+        .sync_scope()
         .local_sync_directory
         .as_ref()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "none".to_string());
+    let cloud_sync_directory = runtime.sync_scope().cloud_sync_directory.clone();
+    let provider_name = runtime.app().provider_name().to_string();
+    let run_state = format!("{:?}", runtime.app().snapshot().run_state);
+    let throttle_state = format!("{:?}", runtime.app().snapshot().throttle_state);
+    let watcher_active = runtime.has_live_watcher().to_string();
 
     logging::info(
         "vapord started",
         &[
             ("version", build_info::VERSION.to_string()),
             ("git_commit", build_info::GIT_COMMIT_SHORT.to_string()),
-            ("provider", app.provider_name().to_string()),
-            ("run_state", format!("{:?}", app.snapshot().run_state)),
-            (
-                "throttle_state",
-                format!("{:?}", app.snapshot().throttle_state),
-            ),
+            ("provider", provider_name),
+            ("run_state", run_state),
+            ("throttle_state", throttle_state),
             ("local_sync_directory", local_sync_directory),
-            ("cloud_sync_directory", sync_scope.cloud_sync_directory),
+            ("cloud_sync_directory", cloud_sync_directory),
+            ("watcher_active", watcher_active),
         ],
     );
+    if let Err(error) = runtime.run_forever() {
+        logging::error(
+            "Daemon runtime loop exited unexpectedly",
+            &[("error", format!("{:?}", error))],
+        );
+        std::process::exit(1);
+    }
 }

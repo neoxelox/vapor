@@ -465,7 +465,10 @@ fn parse_bool_flag(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(1);
 
     #[test]
     fn defaults_ignore_common_cache_and_build_paths() {
@@ -738,10 +741,12 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock drift")
             .as_nanos();
+        let unique_id = NEXT_TEST_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "vapor-daemon-path-filter-{}-{}",
+            "vapor-daemon-path-filter-{}-{}-{}",
             std::process::id(),
-            timestamp
+            timestamp,
+            unique_id,
         ));
         fs::create_dir_all(&root).expect("failed to create test directory");
         root

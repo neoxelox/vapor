@@ -28,6 +28,7 @@ pub mod logging;
 pub mod path_filter;
 pub mod reconcile;
 pub mod retry;
+pub mod runtime;
 pub mod scheduler;
 pub mod state_db;
 pub mod storm;
