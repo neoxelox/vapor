@@ -30,7 +30,7 @@ All thresholds below are initial SLOs and are intended to tighten as benchmark c
 
 ### SLO-4 Network degradation and rate-limit resilience
 
-- Retry policy applies exponential backoff + jitter with max delay <= 15 minutes.
+- Locally computed retry policy applies exponential backoff + jitter with max delay <= 15 minutes, while explicit provider `Retry-After` floors are honored even when longer.
 - On 429/5xx burst, request aggressiveness downshifts within 10 seconds.
 - After network recovery, failed-attempt rate falls below 5% within 10 minutes.
 

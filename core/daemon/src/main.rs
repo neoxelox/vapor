@@ -14,7 +14,7 @@ fn main() {
         return;
     }
 
-    let app = DaemonApp::default();
+    let mut app = DaemonApp::default();
     let mut state_db = match DurableStateDb::open_default() {
         Ok(state_db) => state_db,
         Err(error) => {
@@ -45,6 +45,23 @@ fn main() {
             ("recovered_leased_intents", recovered_count.to_string()),
         ],
     );
+    match app.restore_retry_slowdown(&mut state_db, SystemTime::now()) {
+        Ok(Some(slowdown_until)) => logging::warning(
+            "Restored retry slowdown window from durable state",
+            &[("retry_slowdown_until", format!("{:?}", slowdown_until))],
+        ),
+        Ok(None) => {}
+        Err(error) => {
+            logging::error(
+                "Failed to restore retry slowdown state",
+                &[
+                    ("database_path", state_db.path().display().to_string()),
+                    ("error", error.to_string()),
+                ],
+            );
+            std::process::exit(1);
+        }
+    }
     let sync_scope = sync_directories::resolve_from_process_environment();
     app.ensure_cloud_sync_directory(sync_scope.cloud_sync_directory.as_str());
     let local_sync_directory = sync_scope

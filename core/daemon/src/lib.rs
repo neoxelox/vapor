@@ -1,8 +1,14 @@
 #![forbid(unsafe_code)]
 
+use std::time::SystemTime;
+
 use vapor_providers::{GoogleDriveProvider, Provider};
 use vapor_shared::{RunState, StatusSnapshot, ThrottleState};
 
+use crate::retry::{RetryDecision, RetryFailureKind};
+use crate::state_db::{
+    DurableFailedIntentRecord, DurableStateDb, ScheduledRetryRecord, StateDbError,
+};
 use crate::throttle::{ThrottleCaps, ThrottleController, ThrottleDecision, ThrottleInputs};
 use crate::workgate::{
     ThrottleWorkgate, WorkClass, WorkPermit, WorkPermitDenied, WorkgateSnapshot,
@@ -17,6 +23,7 @@ pub mod event_intents;
 pub mod fs_events;
 pub mod logging;
 pub mod path_filter;
+pub mod retry;
 pub mod scheduler;
 pub mod state_db;
 pub mod sync_directories;
@@ -29,6 +36,7 @@ pub struct DaemonApp {
     provider: GoogleDriveProvider,
     throttle_controller: ThrottleController,
     last_throttle_decision: Option<ThrottleDecision>,
+    retry_slowdown_until: Option<SystemTime>,
     workgate: ThrottleWorkgate,
 }
 
@@ -44,6 +52,7 @@ impl Default for DaemonApp {
             provider: GoogleDriveProvider,
             throttle_controller,
             last_throttle_decision: None,
+            retry_slowdown_until: None,
             workgate: ThrottleWorkgate::new(initial_throttle_state, throttle_caps),
         }
     }
@@ -60,6 +69,10 @@ impl DaemonApp {
 
     pub fn throttle_decision(&self) -> Option<&ThrottleDecision> {
         self.last_throttle_decision.as_ref()
+    }
+
+    pub fn retry_slowdown_until(&self) -> Option<SystemTime> {
+        self.retry_slowdown_until
     }
 
     pub fn set_run_state(&mut self, run_state: RunState, reason: impl Into<String>) {
@@ -81,8 +94,6 @@ impl DaemonApp {
             return;
         }
 
-        let throttle_caps = self.throttle_controller.caps_for(throttle_state);
-
         logging::warning(
             "Updated throttle state",
             &[
@@ -92,7 +103,7 @@ impl DaemonApp {
         );
         self.snapshot.throttle_state = throttle_state;
         self.snapshot.reason = reason;
-        self.workgate.reconfigure(throttle_state, throttle_caps);
+        self.refresh_workgate_caps(SystemTime::now());
     }
 
     pub fn apply_throttle_inputs(&mut self, inputs: ThrottleInputs) -> ThrottleDecision {
@@ -103,13 +114,7 @@ impl DaemonApp {
     }
 
     pub fn throttle_caps(&self) -> ThrottleCaps {
-        self.last_throttle_decision
-            .as_ref()
-            .map(|decision| decision.caps)
-            .unwrap_or_else(|| {
-                self.throttle_controller
-                    .caps_for(self.snapshot.throttle_state)
-            })
+        self.effective_throttle_caps(SystemTime::now())
     }
 
     pub fn workgate_snapshot(&self) -> WorkgateSnapshot {
@@ -117,11 +122,52 @@ impl DaemonApp {
     }
 
     pub fn try_acquire_work(&mut self, class: WorkClass) -> Result<WorkPermit, WorkPermitDenied> {
+        self.refresh_workgate_caps(SystemTime::now());
         self.workgate.try_acquire(class)
     }
 
     pub fn release_work(&mut self, permit: WorkPermit) -> bool {
         self.workgate.release(permit)
+    }
+
+    pub fn schedule_retry(
+        &mut self,
+        state_db: &mut DurableStateDb,
+        id: i64,
+        failure_kind: RetryFailureKind,
+        last_error: &str,
+        now: SystemTime,
+    ) -> Result<ScheduledRetryRecord, StateDbError> {
+        let scheduled = state_db
+            .schedule_retry(id, failure_kind, last_error, now)?
+            .ok_or_else(|| {
+                StateDbError::InvalidIntentState(format!(
+                    "retry scheduling for intent {id} produced no retry record"
+                ))
+            })?;
+        self.apply_retry_decision(&scheduled.decision, now);
+        Ok(scheduled)
+    }
+
+    pub fn restore_retry_slowdown(
+        &mut self,
+        state_db: &mut DurableStateDb,
+        now: SystemTime,
+    ) -> Result<Option<SystemTime>, StateDbError> {
+        self.retry_slowdown_until = state_db.take_active_retry_slowdown_until(now)?;
+        self.refresh_workgate_caps(now);
+        Ok(self.retry_slowdown_until)
+    }
+
+    pub fn finalize_failure(
+        &mut self,
+        state_db: &mut DurableStateDb,
+        id: i64,
+        failure_kind: RetryFailureKind,
+        last_error: &str,
+        now: SystemTime,
+    ) -> Result<DurableFailedIntentRecord, StateDbError> {
+        state_db.finalize_leased_failure(id, failure_kind, last_error, now)
     }
 
     pub fn remote_poll_allowed(&self) -> bool {
@@ -157,11 +203,53 @@ impl DaemonApp {
             ),
         }
     }
+
+    fn base_throttle_caps(&self) -> ThrottleCaps {
+        self.throttle_controller
+            .caps_for(self.snapshot.throttle_state)
+    }
+
+    fn effective_throttle_caps(&self, now: SystemTime) -> ThrottleCaps {
+        let mut caps = self.base_throttle_caps();
+        if self.retry_slowdown_active(now) {
+            caps.upload_concurrency = caps.upload_concurrency.min(1);
+        }
+        caps
+    }
+
+    fn retry_slowdown_active(&self, now: SystemTime) -> bool {
+        self.retry_slowdown_until
+            .map(|until| until > now)
+            .unwrap_or(false)
+    }
+
+    fn apply_retry_decision(&mut self, decision: &RetryDecision, now: SystemTime) {
+        if let Some(slowdown_until) = decision.slowdown_until {
+            self.retry_slowdown_until = Some(
+                self.retry_slowdown_until
+                    .map(|existing| existing.max(slowdown_until))
+                    .unwrap_or(slowdown_until),
+            );
+        }
+        self.refresh_workgate_caps(now);
+    }
+
+    fn refresh_workgate_caps(&mut self, now: SystemTime) {
+        if !self.retry_slowdown_active(now) {
+            self.retry_slowdown_until = None;
+        }
+
+        let throttle_caps = self.effective_throttle_caps(now);
+        self.workgate
+            .reconfigure(self.snapshot.throttle_state, throttle_caps);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     #[test]
     fn daemon_defaults_to_google_drive_provider() {
@@ -263,5 +351,93 @@ mod tests {
     fn build_info_is_populated() {
         assert!(!build_info::VERSION.is_empty());
         assert!(!build_info::GIT_COMMIT_SHORT.is_empty());
+    }
+
+    #[test]
+    fn rate_limited_retry_clamps_upload_concurrency_until_slowdown_expires() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+        let mut app = DaemonApp::default();
+        let path = PathBuf::from("/tmp/vapor-root/project/file.txt");
+        let now = SystemTime::now();
+        let baseline_upload_concurrency = app.throttle_caps().upload_concurrency;
+
+        let queued = state_db
+            .enqueue_intent(&path, crate::event_intents::PendingIntentKind::Upload, now)
+            .expect("enqueue upload intent");
+        let leased = state_db
+            .lease_next_ready(now)
+            .expect("lease next ready")
+            .expect("leased record");
+        assert_eq!(leased.id, queued.id);
+
+        let scheduled = app
+            .schedule_retry(
+                &mut state_db,
+                leased.id,
+                RetryFailureKind::RateLimited {
+                    retry_after: Some(Duration::from_secs(30)),
+                },
+                "429 rate limited",
+                now,
+            )
+            .expect("schedule rate-limited retry");
+
+        assert_eq!(
+            app.retry_slowdown_until(),
+            scheduled.decision.slowdown_until
+        );
+        assert_eq!(app.throttle_caps().upload_concurrency, 1);
+
+        app.refresh_workgate_caps(
+            scheduled.decision.available_at.unwrap() + Duration::from_secs(1),
+        );
+        assert!(app.retry_slowdown_until().is_none());
+        assert_eq!(
+            app.throttle_caps().upload_concurrency,
+            baseline_upload_concurrency
+        );
+    }
+
+    #[test]
+    fn restored_retry_slowdown_reapplies_upload_clamp_after_reopen() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let path = PathBuf::from("/tmp/vapor-root/project/file.txt");
+        let now = SystemTime::now();
+
+        {
+            let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+            state_db
+                .enqueue_intent(&path, crate::event_intents::PendingIntentKind::Upload, now)
+                .expect("enqueue upload intent");
+            let leased = state_db
+                .lease_next_ready(now)
+                .expect("lease next ready")
+                .expect("leased record");
+            let mut app = DaemonApp::default();
+            app.schedule_retry(
+                &mut state_db,
+                leased.id,
+                RetryFailureKind::RateLimited {
+                    retry_after: Some(Duration::from_secs(30)),
+                },
+                "429 rate limited",
+                now,
+            )
+            .expect("schedule rate-limited retry");
+        }
+
+        let mut reopened_state_db =
+            DurableStateDb::open(&database_path).expect("reopen durable state db");
+        let mut reopened_app = DaemonApp::default();
+        let restored = reopened_app
+            .restore_retry_slowdown(&mut reopened_state_db, now + Duration::from_secs(5))
+            .expect("restore retry slowdown")
+            .expect("active slowdown marker");
+
+        assert!(restored > now);
+        assert_eq!(reopened_app.throttle_caps().upload_concurrency, 1);
     }
 }

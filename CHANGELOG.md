@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Daemon throttle control now evaluates 1s power, thermal, load, disk, network, and activity samples to choose `IdleDrain`, `Light`, `Throttled`, or `Suspended` with deterministic worker caps.
 - Daemon planner, hash, upload, and reconcile stages now acquire strict throttle-gated work permits so new work cannot exceed the active state's caps.
 - Daemon startup now initializes a SQLite durable queue/state DB, recovers leased intents after restart, and persists queue/state metadata with explicit schema versioning.
+- Daemon retry scheduling now applies exponential backoff with deterministic jitter, persists the longest rate-limit slowdown window across restarts, and durably finalizes terminal failures.
 
 ### Changed
 

@@ -20,6 +20,10 @@ pub mod runtime {
     pub const DAEMON_LOG_FILE_NAME: &str = "vapord.logs";
 }
 
+pub mod state {
+    pub const RETRY_SLOWDOWN_UNTIL_KEY: &str = "queue.retry_slowdown_until_ms";
+}
+
 pub mod filtering {
     pub const GIT_IGNORE_FILE_NAME: &str = ".gitignore";
     pub const VAPOR_IGNORE_FILE_NAME: &str = ".vaporignore";
@@ -89,4 +93,8 @@ pub mod engine {
     pub const THROTTLED_HASH_WORKERS: usize = 1;
     pub const THROTTLED_READ_TOKENS: usize = 1;
     pub const THROTTLED_UPLOAD_CONCURRENCY: usize = 1;
+    pub const RETRY_BASE_DELAY_MILLIS: u64 = 2_000;
+    pub const RETRY_RATE_LIMIT_BASE_DELAY_MILLIS: u64 = 15_000;
+    pub const RETRY_MAX_DELAY_MILLIS: u64 = 900_000;
+    pub const RETRY_JITTER_PERCENT: u8 = 20;
 }

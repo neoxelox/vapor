@@ -18,10 +18,12 @@ Durable queue/state schema rules for daemon persistence.
 
 ## Current schema
 
-- Current durable DB schema version is `1`.
+- Current durable DB schema version is `2`.
 - `queue_intents` stores pending vs leased work, attempt counts, next-available time, and last error text.
+- `failed_intents` stores durable terminal failures so auth/permanent outcomes leave the active queue without losing diagnostics.
 - `state_entries` stores small daemon state values (for example resume markers or recovery metadata).
 - Startup recovery must move any leased rows back to pending so interrupted work replays with at-least-once semantics.
+- Retry scheduling updates `available_at_ms`, `last_error`, and the durable retry slowdown marker so backoff survives restarts.
 
 ## Compatibility and safety
 
