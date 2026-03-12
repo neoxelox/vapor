@@ -82,6 +82,16 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   }
 }
 
+public struct VaporConfigurationLoadIssue: Equatable, Sendable {
+  public let configPath: String
+  public let reason: String
+}
+
+public struct VaporConfigurationLoadResult: Equatable, Sendable {
+  public let configuration: VaporConfiguration
+  public let issue: VaporConfigurationLoadIssue?
+}
+
 public final class VaporConfigurationStore {
   private let fileManager: FileManager
   private let environment: [String: String]
@@ -102,29 +112,40 @@ public final class VaporConfigurationStore {
   }
 
   public func load() -> VaporConfiguration {
+    loadResult().configuration
+  }
+
+  public func loadResult() -> VaporConfigurationLoadResult {
     let vaporDirectoryURL = resolveVaporDirectoryURL()
     let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: vaporDirectoryURL)
 
     guard fileManager.fileExists(atPath: configurationURL.path) else {
       let defaultConfiguration = VaporConfiguration()
       try? save(defaultConfiguration)
-      return defaultConfiguration
+      return VaporConfigurationLoadResult(configuration: defaultConfiguration, issue: nil)
     }
 
     do {
       let data = try Data(contentsOf: configurationURL)
-      return try decoder.decode(VaporConfiguration.self, from: data)
+      return VaporConfigurationLoadResult(
+        configuration: try decoder.decode(VaporConfiguration.self, from: data),
+        issue: nil
+      )
     } catch {
       logger.error(
-        "Failed to load vapor configuration; falling back to defaults",
+        "Failed to load vapor configuration; preserving existing file and using in-memory defaults",
         metadata: [
           "config_path": configurationURL.path,
           "error": String(describing: error),
         ]
       )
-      let fallbackConfiguration = VaporConfiguration()
-      try? save(fallbackConfiguration)
-      return fallbackConfiguration
+      return VaporConfigurationLoadResult(
+        configuration: VaporConfiguration(),
+        issue: VaporConfigurationLoadIssue(
+          configPath: configurationURL.path,
+          reason: String(describing: error)
+        )
+      )
     }
   }
 

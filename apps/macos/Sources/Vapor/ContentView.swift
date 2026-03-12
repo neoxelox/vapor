@@ -52,16 +52,6 @@ struct ContentView: View {
             ?? viewModel.localized("app_title")
         )
     }
-    .toolbar {
-      ToolbarItemGroup {
-        Button(viewModel.localized("toolbar_pause_resume"), systemImage: "pause.circle") {
-          viewModel.cycleSyncState()
-        }
-        Button(viewModel.localized("toolbar_flush_now"), systemImage: "arrow.clockwise.circle") {
-          viewModel.cycleSyncState()
-        }
-      }
-    }
   }
 
   @ViewBuilder

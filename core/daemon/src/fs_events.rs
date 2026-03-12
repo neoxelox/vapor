@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -63,6 +64,7 @@ pub enum FsEventsWatcherError {
     EmptyWatchRoot,
     WatchRootMissing(PathBuf),
     WatchRootNotDirectory(PathBuf),
+    WatchRootCanonicalizeFailed(PathBuf, std::io::Error),
     Notify(notify::Error),
 }
 
@@ -76,12 +78,27 @@ impl Display for FsEventsWatcherError {
             Self::WatchRootNotDirectory(path) => {
                 write!(f, "watch root is not a directory: {}", path.display())
             }
+            Self::WatchRootCanonicalizeFailed(path, error) => {
+                write!(
+                    f,
+                    "failed to canonicalize watch root {}: {error}",
+                    path.display()
+                )
+            }
             Self::Notify(error) => write!(f, "notify watcher error: {error}"),
         }
     }
 }
 
-impl Error for FsEventsWatcherError {}
+impl Error for FsEventsWatcherError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::WatchRootCanonicalizeFailed(_, error) => Some(error),
+            Self::Notify(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl From<notify::Error> for FsEventsWatcherError {
     fn from(value: notify::Error) -> Self {
@@ -133,7 +150,7 @@ impl FsEventsWatcher {
     }
 }
 
-fn normalize_watch_root(watch_root: PathBuf) -> Result<PathBuf, FsEventsWatcherError> {
+pub(crate) fn normalize_watch_root(watch_root: PathBuf) -> Result<PathBuf, FsEventsWatcherError> {
     if watch_root.as_os_str().is_empty() {
         return Err(FsEventsWatcherError::EmptyWatchRoot);
     }
@@ -146,7 +163,8 @@ fn normalize_watch_root(watch_root: PathBuf) -> Result<PathBuf, FsEventsWatcherE
         return Err(FsEventsWatcherError::WatchRootNotDirectory(watch_root));
     }
 
-    Ok(watch_root)
+    fs::canonicalize(&watch_root)
+        .map_err(|error| FsEventsWatcherError::WatchRootCanonicalizeFailed(watch_root, error))
 }
 
 fn record_callback_result(
@@ -187,11 +205,86 @@ fn normalize_event_path(watch_root: &Path, event_path: &Path) -> Option<PathBuf>
         watch_root.join(event_path)
     };
 
-    if candidate.starts_with(watch_root) {
+    let candidate = normalize_absolute_path(candidate)?;
+
+    if candidate.starts_with(watch_root) && path_resolves_within_watch_root(watch_root, &candidate)
+    {
         Some(candidate)
     } else {
         None
     }
+}
+
+fn normalize_absolute_path(path: PathBuf) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+
+    let mut normalized = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+            Component::Prefix(_) => return None,
+        }
+    }
+
+    Some(normalized)
+}
+
+fn path_resolves_within_watch_root(watch_root: &Path, candidate: &Path) -> bool {
+    let Ok(relative_path) = candidate.strip_prefix(watch_root) else {
+        return false;
+    };
+
+    let mut resolved_path = watch_root.to_path_buf();
+    for component in relative_path.components() {
+        let Component::Normal(part) = component else {
+            return false;
+        };
+
+        let Some(next_path) = resolve_path_step(&resolved_path.join(part), watch_root) else {
+            return false;
+        };
+        resolved_path = next_path;
+
+        if !resolved_path.starts_with(watch_root) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn resolve_path_step(path: &Path, watch_root: &Path) -> Option<PathBuf> {
+    let mut resolved = path.to_path_buf();
+    for _ in 0..32 {
+        match fs::symlink_metadata(&resolved) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let target = fs::read_link(&resolved).ok()?;
+                let target = if target.is_absolute() {
+                    target
+                } else {
+                    resolved.parent().unwrap_or(watch_root).join(target)
+                };
+                resolved = normalize_absolute_path(target)?;
+                if !resolved.starts_with(watch_root) {
+                    return None;
+                }
+            }
+            Ok(_) => return Some(resolved),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(resolved),
+            Err(_) => return None,
+        }
+    }
+
+    None
 }
 
 fn map_event_kind(kind: &EventKind) -> FsEventKind {
@@ -210,8 +303,10 @@ fn map_event_kind(kind: &EventKind) -> FsEventKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
+    use tempfile::TempDir;
 
     #[test]
     fn callback_normalizes_relative_paths_and_records_metadata() {
@@ -249,6 +344,112 @@ mod tests {
 
         let events = recorder.events.lock().expect("events mutex poisoned");
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn callback_rejects_relative_traversal_outside_watch_root() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let path_filter = test_path_filter(&watch_root);
+        let recorder = TestRecorder::default();
+
+        let event = Event {
+            kind: EventKind::Modify(ModifyKind::Any),
+            paths: vec![PathBuf::from("../escape.txt")],
+            attrs: Default::default(),
+        };
+
+        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+
+        let events = recorder.events.lock().expect("events mutex poisoned");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn callback_rejects_symlink_escape_outside_watch_root() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        let outside_root = temp_dir.path().join("outside");
+        fs::create_dir_all(&watch_root).expect("create watch root");
+        fs::create_dir_all(&outside_root).expect("create outside root");
+        symlink(&outside_root, watch_root.join("escape")).expect("create escape symlink");
+
+        let path_filter = test_path_filter(&watch_root);
+        let recorder = TestRecorder::default();
+        let event = Event {
+            kind: EventKind::Modify(ModifyKind::Any),
+            paths: vec![PathBuf::from("escape/file.txt")],
+            attrs: Default::default(),
+        };
+
+        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+
+        let events = recorder.events.lock().expect("events mutex poisoned");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn callback_rejects_nested_symlink_escape_outside_watch_root() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        let outside_root = temp_dir.path().join("outside");
+        fs::create_dir_all(&watch_root).expect("create watch root");
+        fs::create_dir_all(&outside_root).expect("create outside root");
+        symlink(watch_root.join("second-hop"), watch_root.join("first-hop"))
+            .expect("create first hop symlink");
+        symlink(&outside_root, watch_root.join("second-hop")).expect("create second hop symlink");
+
+        let path_filter = test_path_filter(&watch_root);
+        let recorder = TestRecorder::default();
+        let event = Event {
+            kind: EventKind::Modify(ModifyKind::Any),
+            paths: vec![PathBuf::from("first-hop/file.txt")],
+            attrs: Default::default(),
+        };
+
+        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+
+        let events = recorder.events.lock().expect("events mutex poisoned");
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn callback_allows_symlinked_paths_that_resolve_inside_watch_root() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        let target_root = watch_root.join("nested/target");
+        fs::create_dir_all(&target_root).expect("create nested target root");
+        symlink(watch_root.join("nested"), watch_root.join("alias"))
+            .expect("create inside symlink");
+
+        let path_filter = test_path_filter(&watch_root);
+        let recorder = TestRecorder::default();
+        let event = Event {
+            kind: EventKind::Modify(ModifyKind::Any),
+            paths: vec![PathBuf::from("alias/target/file.txt")],
+            attrs: Default::default(),
+        };
+
+        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+
+        let events = recorder.events.lock().expect("events mutex poisoned");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path, watch_root.join("alias/target/file.txt"));
+    }
+
+    #[test]
+    fn watch_root_is_canonicalized_before_use() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let real_root = temp_dir.path().join("real-root");
+        let symlink_root = temp_dir.path().join("watch-root-link");
+        fs::create_dir_all(&real_root).expect("create real root");
+        symlink(&real_root, &symlink_root).expect("create root symlink");
+
+        let normalized = normalize_watch_root(symlink_root).expect("normalize watch root");
+
+        assert_eq!(
+            normalized,
+            fs::canonicalize(&real_root).expect("canonical real root")
+        );
     }
 
     #[test]
@@ -328,6 +529,42 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(2),
             "callback burst took {:?}, expected < 2s",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn callback_deep_path_regression_stays_under_guardrail() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        let mut deepest_directory = watch_root.clone();
+        for index in 0..12 {
+            deepest_directory = deepest_directory.join(format!("level-{index}"));
+        }
+        fs::create_dir_all(&deepest_directory).expect("create deep watch tree");
+
+        let path_filter = test_path_filter(&watch_root);
+        let recorder = TestRecorder::default();
+        let relative_path = PathBuf::from(
+            "level-0/level-1/level-2/level-3/level-4/level-5/level-6/level-7/level-8/level-9/level-10/level-11/file.txt",
+        );
+
+        let start = Instant::now();
+        for _ in 0..2_000 {
+            let event = Event {
+                kind: EventKind::Modify(ModifyKind::Any),
+                paths: vec![relative_path.clone()],
+                attrs: Default::default(),
+            };
+            record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+        }
+        let elapsed = start.elapsed();
+
+        let events = recorder.events.lock().expect("events mutex poisoned");
+        assert_eq!(events.len(), 2_000);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "deep callback burst took {:?}, expected < 2s",
             elapsed
         );
     }

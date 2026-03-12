@@ -4,7 +4,7 @@ Rust daemon for low-impact background sync execution.
 
 Responsibilities:
 
-- FSEvents ingest plus a 250ms debounce/coalescing loop with conservative per-path quiet windows
+- FSEvents ingest with canonical watch-root enforcement, traversal/symlink escape rejection, and a 250ms debounce/coalescing loop
 - storm detection with deferred reconcile markers for noisy subtrees
 - throttle controller with a 1s sample policy, strict planner/hash/upload/reconcile work permits, and a keyed latest-wins scheduler
 - a composed runtime loop that advances watcher ingest, debounce, durable queueing, work permits, and reconcile progression on each daemon tick

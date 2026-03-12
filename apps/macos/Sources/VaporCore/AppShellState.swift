@@ -60,6 +60,8 @@ public enum SyncSurfaceState: String, CaseIterable, Codable, Sendable {
 
 public struct AppShellState: Equatable, Codable, Sendable {
   public var syncState: SyncSurfaceState
+  public var configurationIssuePath: String?
+  public var configurationIssueReason: String?
   public var autoLaunchEnabled: Bool
   public var useGitIgnore: Bool
   public var useVaporIgnore: Bool
@@ -72,6 +74,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
 
   public init(
     syncState: SyncSurfaceState,
+    configurationIssuePath: String?,
+    configurationIssueReason: String?,
     autoLaunchEnabled: Bool,
     useGitIgnore: Bool,
     useVaporIgnore: Bool,
@@ -83,6 +87,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     vaporDirectoryPath: String
   ) {
     self.syncState = syncState
+    self.configurationIssuePath = configurationIssuePath
+    self.configurationIssueReason = configurationIssueReason
     self.autoLaunchEnabled = autoLaunchEnabled
     self.useGitIgnore = useGitIgnore
     self.useVaporIgnore = useVaporIgnore
@@ -96,6 +102,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
 
   public static let initial = AppShellState(
     syncState: .idle,
+    configurationIssuePath: nil,
+    configurationIssueReason: nil,
     autoLaunchEnabled: true,
     useGitIgnore: true,
     useVaporIgnore: true,
@@ -109,5 +117,9 @@ public struct AppShellState: Equatable, Codable, Sendable {
 
   public var statusLine: String {
     "\(syncState.rawValue) · \(providerName)"
+  }
+
+  public var hasConfigurationIssue: Bool {
+    configurationIssuePath != nil
   }
 }

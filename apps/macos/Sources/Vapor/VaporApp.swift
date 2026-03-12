@@ -24,19 +24,6 @@ struct VaporApp: App {
           viewModel.handleMainWindowClosed()
         }
     }
-    .commands {
-      CommandMenu(viewModel.localized("command_sync")) {
-        Button(viewModel.localized("toolbar_pause_resume")) {
-          viewModel.cycleSyncState()
-        }
-        .keyboardShortcut("p")
-
-        Button(viewModel.localized("command_flush_now")) {
-          viewModel.cycleSyncState()
-        }
-        .keyboardShortcut("f")
-      }
-    }
 
     Settings {
       SettingsView(viewModel: viewModel)

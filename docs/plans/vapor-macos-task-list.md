@@ -112,10 +112,10 @@ Exit gate:
 
 - [x] P2.5-1 Compose the real daemon runtime loop end-to-end: watcher -> bounded ingest -> debounce -> scheduler -> durable queue -> workgate -> reconcile.
 - [x] P2.5-2 Make compacted/deferred/scheduled intent state durable before execution, or add a documented whole-scope restart reconstruction path that preserves intent safely after crash/restart.
-- [ ] P2.5-3 Harden callback path scope enforcement by normalizing event paths and rejecting traversal/symlink escape cases outside the configured local sync root.
-- [ ] P2.5-4 Replace destructive config-load fallback with preserved-invalid-config recovery and actionable app diagnostics instead of silently rewriting defaults.
-- [ ] P2.5-5 Refresh daemon lifecycle/launch configuration immediately when ignore toggles change so in-memory runtime settings never diverge from persisted config in-session.
-- [ ] P2.5-6 Replace placeholder app controls (`Pause/Resume`, `Flush now`, demo status cycling) with real daemon-backed behavior, or hide them until the control plane exists.
+- [x] P2.5-3 Harden callback path scope enforcement by normalizing event paths and rejecting traversal/symlink escape cases outside the configured local sync root.
+- [x] P2.5-4 Replace destructive config-load fallback with preserved-invalid-config recovery and actionable app diagnostics instead of silently rewriting defaults.
+- [x] P2.5-5 Refresh daemon lifecycle/launch configuration immediately when ignore toggles change so in-memory runtime settings never diverge from persisted config in-session.
+- [x] P2.5-6 Replace placeholder app controls (`Pause/Resume`, `Flush now`, demo status cycling) with real daemon-backed behavior, or hide them until the control plane exists.
 - [ ] P2.5-7 Make runtime path/logging behavior fail-safe and privacy-safe: validated `VAPOR_DIR`, restrictive permissions for config/log/state artifacts, centralized redaction, and no panic on log-file open failure.
 - [ ] P2.5-8 Bound and sanitize durable diagnostic/state fields (`last_error`, counters, persisted timestamps) and add corruption/tamper guards for malformed local state.
 - [ ] P2.5-9 Remove pre-GA compatibility shims and transitional APIs that are no longer justified (for example legacy schema migration paths, duplicate deferred-intent helpers, and placeholder app state surfaces).

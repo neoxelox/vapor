@@ -3,7 +3,7 @@
 ## Local to remote
 
 1. FSEvents emits path metadata.
-2. Daemon callback normalizes/excludes and records path metadata into bounded in-memory event and intent maps.
+2. Daemon callback canonicalizes the watch root, lexically normalizes event paths, rejects traversal/symlink escape cases outside the sync root, and then records filtered path metadata into bounded in-memory event and intent maps.
 3. Per-directory 2s storm thresholds (200 unique paths or 600 events) plus a 5000-pending global trigger compact noisy subtrees into deferred `RECONCILE_SUBTREE` markers so storms stop per-path fan-out early.
 4. A 250ms debounce/coalesce tick emits stabilized events after conservative per-path quiet windows (shorter for key configs, longer for lockfiles and other unmatched paths).
 5. A keyed latest-wins scheduler keeps one intent per path, supersedes stale actions, and requeues dirty paths after in-flight work finishes.

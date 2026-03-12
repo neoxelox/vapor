@@ -26,21 +26,20 @@ struct ShellView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
       }
 
+      if let configurationIssuePath = viewModel.state.configurationIssuePath,
+        let configurationIssueReason = viewModel.state.configurationIssueReason
+      {
+        configurationIssueView(
+          configurationIssuePath: configurationIssuePath,
+          configurationIssueReason: configurationIssueReason
+        )
+      }
+
       Toggle(viewModel.localized("settings_start_at_login"), isOn: autoLaunchBinding)
 
       Text(viewModel.localized("runtime_directory_format", viewModel.state.vaporDirectoryPath))
         .font(.caption)
         .foregroundStyle(.secondary)
-
-      HStack {
-        Button(viewModel.localized("toolbar_pause_resume")) {
-          viewModel.cycleSyncState()
-        }
-
-        Button(viewModel.localized("toolbar_flush_now")) {
-          viewModel.cycleSyncState()
-        }
-      }
     }
     .padding(24)
     .frame(minWidth: 460, minHeight: 320)
@@ -51,6 +50,26 @@ struct ShellView: View {
       get: { viewModel.state.autoLaunchEnabled },
       set: { _ in viewModel.toggleAutoLaunch() }
     )
+  }
+
+  @ViewBuilder
+  private func configurationIssueView(
+    configurationIssuePath: String,
+    configurationIssueReason: String
+  ) -> some View {
+    GroupBox(viewModel.localized("config_issue_group")) {
+      VStack(alignment: .leading, spacing: 6) {
+        Text(viewModel.localized("config_issue_preserved_file_format", configurationIssuePath))
+          .font(.subheadline)
+        Text(configurationIssueReason)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+        Text(viewModel.localized("config_issue_using_defaults"))
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+    }
   }
 }
 
@@ -79,9 +98,6 @@ struct MenuBarContentView: View {
         openVaporAction()
         openWindow(id: mainWindowID)
       }
-      Button(viewModel.localized("menubar_cycle_status")) {
-        viewModel.cycleSyncState()
-      }
       Button(viewModel.localized("menubar_toggle_auto_launch")) {
         viewModel.toggleAutoLaunch()
       }
@@ -100,6 +116,20 @@ struct SettingsView: View {
 
   var body: some View {
     Form {
+      if let configurationIssuePath = viewModel.state.configurationIssuePath,
+        let configurationIssueReason = viewModel.state.configurationIssueReason
+      {
+        Section(viewModel.localized("config_issue_group")) {
+          Text(viewModel.localized("config_issue_preserved_file_format", configurationIssuePath))
+          Text(configurationIssueReason)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+          Text(viewModel.localized("config_issue_using_defaults"))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+
       Toggle(viewModel.localized("settings_start_at_login"), isOn: autoLaunchBinding)
       Toggle(viewModel.localized("settings_use_gitignore"), isOn: useGitIgnoreBinding)
       Toggle(viewModel.localized("settings_use_vaporignore"), isOn: useVaporIgnoreBinding)

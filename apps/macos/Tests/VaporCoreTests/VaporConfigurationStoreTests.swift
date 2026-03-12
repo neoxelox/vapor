@@ -134,3 +134,29 @@ func loadDefaultsMissingKeysWithoutDroppingOtherSavedValues() throws {
 
   try fileManager.removeItem(at: rootURL)
 }
+
+@Test
+func loadResultPreservesMalformedConfigurationFileAndReportsIssue() throws {
+  let fileManager = FileManager.default
+  let rootURL = fileManager.temporaryDirectory
+    .appendingPathComponent("vapor-config-tests")
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  let store = VaporConfigurationStore(
+    fileManager: fileManager,
+    environment: ["VAPOR_DIR": rootURL.path]
+  )
+
+  try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+  let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL)
+  let malformedContents = "{\n  \"autoLaunch\": true,\n  \"useGitIgnore\":\n".data(using: .utf8)!
+  try malformedContents.write(to: configurationURL, options: .atomic)
+
+  let result = store.loadResult()
+
+  #expect(result.configuration == VaporConfiguration())
+  #expect(result.issue?.configPath == configurationURL.path)
+  #expect(result.issue?.reason.isEmpty == false)
+  #expect((try Data(contentsOf: configurationURL)) == malformedContents)
+
+  try fileManager.removeItem(at: rootURL)
+}

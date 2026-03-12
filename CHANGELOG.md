@@ -22,10 +22,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Daemon tests now stress large per-subtree, global-cap, and multi-subtree storm scenarios so bounded memory/backpressure behavior stays covered under heavy pending-intent bursts.
 - Daemon startup now composes a real runtime loop that advances watcher ingest, debounce, scheduler draining, durable queueing, throttle-gated work, and idle-biased reconcile progression on each tick.
 - Daemon restart recovery now inserts a prioritized whole-scope reconcile and re-prioritizes any existing root reconcile so volatile pre-DB intent loss is reconstructed conservatively before older durable work resumes.
+- Daemon callback scope checks now canonicalize the watch root and reject traversal or symlink-escape paths before they can enter bounded ingest state.
 
 ### Changed
 
 - Persisted app config now uses `autoLaunch` and `languageCode`, with English as the default UI language when no other catalog is selected.
+- App startup now preserves malformed `vapor.json` files in place, surfaces the load failure in the UI, and avoids silently overwriting broken config with defaults.
+- Ignore toggles and saved ignore rules now refresh the in-memory daemon launch configuration immediately so future lifecycle actions stay aligned with persisted settings.
+- Placeholder sync-state cycling controls have been removed from the app and menubar until real daemon-backed pause/flush actions exist.
 
 ### Fixed
 

@@ -7,7 +7,7 @@ use vapor_shared::{RunState, constants};
 
 use crate::debounce::DebounceLoop;
 use crate::event_intents::BoundedFsEventRecorder;
-use crate::fs_events::{FsEventsWatcher, FsEventsWatcherError};
+use crate::fs_events::{FsEventsWatcher, FsEventsWatcherError, normalize_watch_root};
 use crate::logging;
 use crate::scheduler::KeyedSupersedingScheduler;
 use crate::state_db::{DurableStateDb, StateDbError};
@@ -141,7 +141,7 @@ impl DaemonRuntime {
     }
 
     fn build(
-        sync_scope: SyncScope,
+        mut sync_scope: SyncScope,
         mut state_db: DurableStateDb,
         start_watcher: bool,
     ) -> Result<Self, DaemonRuntimeError> {
@@ -162,6 +162,12 @@ impl DaemonRuntime {
                 &[("retry_slowdown_until", format!("{:?}", slowdown_until))],
             );
         }
+
+        sync_scope.local_sync_directory = sync_scope
+            .local_sync_directory
+            .take()
+            .map(normalize_watch_root)
+            .transpose()?;
 
         app.ensure_cloud_sync_directory(sync_scope.cloud_sync_directory.as_str());
 
@@ -395,6 +401,7 @@ mod tests {
     use super::*;
     use crate::fs_events::{FsEventKind, FsEventRecord, FsEventRecording};
     use crate::sync_directories::SyncScope;
+    use std::os::unix::fs::symlink;
     use tempfile::TempDir;
 
     #[test]
@@ -433,6 +440,34 @@ mod tests {
 
         assert!(!runtime.has_live_watcher());
         assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 0);
+    }
+
+    #[test]
+    fn start_canonicalizes_symlinked_local_sync_root() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let real_watch_root = temp_dir.path().join("real-watch");
+        let symlink_watch_root = temp_dir.path().join("watch-link");
+        std::fs::create_dir_all(&real_watch_root).expect("create real watch root");
+        symlink(&real_watch_root, &symlink_watch_root).expect("create watch root symlink");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+
+        let runtime =
+            DaemonRuntime::start(test_sync_scope(&symlink_watch_root), state_db).expect("runtime");
+
+        assert_eq!(
+            runtime.sync_scope().local_sync_directory,
+            Some(std::fs::canonicalize(&real_watch_root).expect("canonical watch root"),)
+        );
+        let leased = runtime
+            .state_db()
+            .intent_record(1)
+            .expect("load startup reconcile")
+            .expect("startup reconcile record");
+        assert_eq!(
+            leased.path,
+            runtime.sync_scope().local_sync_directory.clone().unwrap()
+        );
     }
 
     #[test]
@@ -484,7 +519,10 @@ mod tests {
             .tick_with_inputs(timestamp_ms(1_000), ThrottleInputs::default())
             .expect("runtime tick");
 
-        assert_eq!(first_tick.started_reconcile_root, Some(watch_root.clone()));
+        assert_eq!(
+            first_tick.started_reconcile_root,
+            runtime.sync_scope().local_sync_directory.clone()
+        );
         assert_eq!(first_tick.completed_intents, 0);
         assert_eq!(runtime.state_db().leased_depth().expect("leased depth"), 1);
         assert_eq!(
@@ -502,11 +540,16 @@ mod tests {
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let mut runtime =
             DaemonRuntime::build(test_sync_scope(&watch_root), state_db, false).expect("runtime");
+        let runtime_watch_root = runtime
+            .sync_scope()
+            .local_sync_directory
+            .clone()
+            .expect("runtime watch root");
         let recorder = runtime.recorder.as_ref().expect("runtime recorder");
         FsEventRecording::record_event(
             recorder.as_ref(),
             FsEventRecord {
-                path: watch_root.join("src/main.rs"),
+                path: runtime_watch_root.join("src/main.rs"),
                 kind: FsEventKind::Modified,
                 observed_at: timestamp_ms(0),
             },
@@ -531,13 +574,18 @@ mod tests {
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let mut runtime =
             DaemonRuntime::build(test_sync_scope(&watch_root), state_db, false).expect("runtime");
+        let runtime_watch_root = runtime
+            .sync_scope()
+            .local_sync_directory
+            .clone()
+            .expect("runtime watch root");
         let recorder = runtime.recorder.as_ref().expect("runtime recorder");
 
         for index in 0..200 {
             FsEventRecording::record_event(
                 recorder.as_ref(),
                 FsEventRecord {
-                    path: watch_root
+                    path: runtime_watch_root
                         .join("project/sub")
                         .join(format!("file-{index}.txt")),
                     kind: FsEventKind::Modified,

@@ -19,7 +19,8 @@ final class AppShellViewModel: ObservableObject {
 
   convenience init() {
     let configurationStore = VaporConfigurationStore()
-    let configuration = configurationStore.load()
+    let configurationLoadResult = configurationStore.loadResult()
+    let configuration = configurationLoadResult.configuration
     let vaporDirectoryURL = configurationStore.resolveVaporDirectoryURL()
     let localizationStore = VaporLocalizationStore()
     let autoLaunchSettingStore = VaporConfigurationAutoLaunchSettingStore(
@@ -41,6 +42,7 @@ final class AppShellViewModel: ObservableObject {
       configurationStore: configurationStore,
       localizationStore: localizationStore,
       configuration: configuration,
+      configurationLoadIssue: configurationLoadResult.issue,
       lifecycleManagerFactory: lifecycleManagerFactory
     )
   }
@@ -50,9 +52,12 @@ final class AppShellViewModel: ObservableObject {
     configurationStore: VaporConfigurationStore = VaporConfigurationStore(),
     localizationStore: VaporLocalizationStore = VaporLocalizationStore(),
     configuration: VaporConfiguration? = nil,
+    configurationLoadIssue: VaporConfigurationLoadIssue? = nil,
     lifecycleManagerFactory: ((VaporConfiguration) -> DaemonLifecycleManager)? = nil
   ) {
-    let resolvedConfiguration = configuration ?? configurationStore.load()
+    let configurationLoadResult = configuration == nil ? configurationStore.loadResult() : nil
+    let resolvedConfiguration = configuration ?? configurationLoadResult!.configuration
+    let resolvedConfigurationLoadIssue = configurationLoadIssue ?? configurationLoadResult?.issue
 
     self.daemonLifecycleManager = daemonLifecycleManager
     self.lifecycleManagerFactory = lifecycleManagerFactory ?? { _ in daemonLifecycleManager }
@@ -70,13 +75,28 @@ final class AppShellViewModel: ObservableObject {
     state.languageCode = self.configuration.languageCode
     state.effectiveLanguageCode = localization.effectiveLanguageCode
     state.vaporDirectoryPath = self.configurationStore.resolveVaporDirectoryURL().path
+    state.configurationIssuePath = resolvedConfigurationLoadIssue?.configPath
+    state.configurationIssueReason = resolvedConfigurationLoadIssue?.reason
+    if resolvedConfigurationLoadIssue != nil {
+      state.syncState = .error
+    }
 
-    do {
-      try self.configurationStore.save(self.configuration)
-    } catch {
+    if resolvedConfigurationLoadIssue == nil {
+      do {
+        try self.configurationStore.save(self.configuration)
+      } catch {
+        logger.error(
+          "Failed to persist configuration during startup",
+          metadata: ["error": String(describing: error)]
+        )
+      }
+    } else if let resolvedConfigurationLoadIssue {
       logger.error(
-        "Failed to persist configuration during startup",
-        metadata: ["error": String(describing: error)]
+        "Preserved unreadable vapor configuration on startup",
+        metadata: [
+          "config_path": resolvedConfigurationLoadIssue.configPath,
+          "error": resolvedConfigurationLoadIssue.reason,
+        ]
       )
     }
 
@@ -215,6 +235,7 @@ final class AppShellViewModel: ObservableObject {
 
           self.state.autoLaunchEnabled = persistedValue
           self.configuration.autoLaunch = persistedValue
+          self.clearConfigurationIssueIfResolved()
           logger.info(
             "Auto-launch toggle completed",
             metadata: [
@@ -257,6 +278,7 @@ final class AppShellViewModel: ObservableObject {
 
           self.state.autoLaunchEnabled = persistedValue
           self.configuration.autoLaunch = persistedValue
+          self.clearConfigurationIssueIfResolved()
           logger.warning(
             "Auto-launch disabled with stop-now",
             metadata: ["result": String(describing: result)]
@@ -288,11 +310,13 @@ final class AppShellViewModel: ObservableObject {
 
     do {
       try configurationStore.save(configuration)
+      refreshDaemonLifecycleManagerForCurrentConfiguration()
+      clearConfigurationIssueIfResolved()
       logger.info(
         "Updated useGitIgnore setting",
         metadata: [
           "use_gitignore": String(enabled),
-          "note": "applies on next daemon launch",
+          "note": "launch configuration refreshed; running daemon picks it up on next restart",
         ]
       )
     } catch {
@@ -314,11 +338,13 @@ final class AppShellViewModel: ObservableObject {
 
     do {
       try configurationStore.save(configuration)
+      refreshDaemonLifecycleManagerForCurrentConfiguration()
+      clearConfigurationIssueIfResolved()
       logger.info(
         "Updated useVaporIgnore setting",
         metadata: [
           "use_vaporignore": String(enabled),
-          "note": "applies on next daemon launch",
+          "note": "launch configuration refreshed; running daemon picks it up on next restart",
         ]
       )
     } catch {
@@ -359,12 +385,13 @@ final class AppShellViewModel: ObservableObject {
     do {
       try configurationStore.save(configuration)
       refreshDaemonLifecycleManagerForCurrentConfiguration()
+      clearConfigurationIssueIfResolved()
       logger.info(
         "Updated user ignore rules",
         metadata: [
           "pre_rule_count": String(Self.countConfiguredRules(in: normalizedPreIgnoreRules)),
           "post_rule_count": String(Self.countConfiguredRules(in: normalizedPostIgnoreRules)),
-          "note": "applies on next daemon launch",
+          "note": "launch configuration refreshed; running daemon picks it up on next restart",
         ]
       )
     } catch {
@@ -388,6 +415,7 @@ final class AppShellViewModel: ObservableObject {
 
     do {
       try configurationStore.save(configuration)
+      clearConfigurationIssueIfResolved()
       logger.info(
         "Updated language setting",
         metadata: [
@@ -402,19 +430,6 @@ final class AppShellViewModel: ObservableObject {
         metadata: ["error": String(describing: error)]
       )
     }
-  }
-
-  func cycleSyncState() {
-    let allStates = SyncSurfaceState.allCases
-    guard let currentIndex = allStates.firstIndex(of: state.syncState) else {
-      state.syncState = .idle
-      return
-    }
-
-    let nextIndex = allStates.index(after: currentIndex)
-    let wrappedIndex = nextIndex == allStates.endIndex ? allStates.startIndex : nextIndex
-    state.syncState = allStates[wrappedIndex]
-    logger.debug("Cycled sync state", metadata: ["new_state": String(describing: state.syncState)])
   }
 
   private func refreshLifecycleCoordinator() {
@@ -440,6 +455,18 @@ final class AppShellViewModel: ObservableObject {
     daemonLifecycleManager = lifecycleManagerFactory(configuration)
     state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
     refreshLifecycleCoordinator()
+  }
+
+  private func clearConfigurationIssueIfResolved() {
+    guard state.configurationIssuePath != nil || state.configurationIssueReason != nil else {
+      return
+    }
+
+    state.configurationIssuePath = nil
+    state.configurationIssueReason = nil
+    if state.syncState == .error {
+      state.syncState = .idle
+    }
   }
 
   private static func normalizeRuleEditorText(_ rules: String) -> String {
