@@ -4,6 +4,9 @@ use vapor_providers::{GoogleDriveProvider, Provider};
 use vapor_shared::{RunState, StatusSnapshot, ThrottleState};
 
 use crate::throttle::{ThrottleCaps, ThrottleController, ThrottleDecision, ThrottleInputs};
+use crate::workgate::{
+    ThrottleWorkgate, WorkClass, WorkPermit, WorkPermitDenied, WorkgateSnapshot,
+};
 
 pub mod build_info {
     include!(concat!(env!("OUT_DIR"), "/vapor_build_info.rs"));
@@ -17,6 +20,7 @@ pub mod path_filter;
 pub mod scheduler;
 pub mod sync_directories;
 pub mod throttle;
+pub mod workgate;
 
 #[derive(Debug)]
 pub struct DaemonApp {
@@ -24,16 +28,22 @@ pub struct DaemonApp {
     provider: GoogleDriveProvider,
     throttle_controller: ThrottleController,
     last_throttle_decision: Option<ThrottleDecision>,
+    workgate: ThrottleWorkgate,
 }
 
 impl Default for DaemonApp {
     fn default() -> Self {
         logging::info("Initialized daemon app state", &[]);
+        let snapshot = StatusSnapshot::default();
+        let initial_throttle_state = snapshot.throttle_state;
+        let throttle_controller = ThrottleController::default();
+        let throttle_caps = throttle_controller.caps_for(initial_throttle_state);
         Self {
-            snapshot: StatusSnapshot::default(),
+            snapshot,
             provider: GoogleDriveProvider,
-            throttle_controller: ThrottleController::default(),
+            throttle_controller,
             last_throttle_decision: None,
+            workgate: ThrottleWorkgate::new(initial_throttle_state, throttle_caps),
         }
     }
 }
@@ -70,6 +80,8 @@ impl DaemonApp {
             return;
         }
 
+        let throttle_caps = self.throttle_controller.caps_for(throttle_state);
+
         logging::warning(
             "Updated throttle state",
             &[
@@ -79,6 +91,7 @@ impl DaemonApp {
         );
         self.snapshot.throttle_state = throttle_state;
         self.snapshot.reason = reason;
+        self.workgate.reconfigure(throttle_state, throttle_caps);
     }
 
     pub fn apply_throttle_inputs(&mut self, inputs: ThrottleInputs) -> ThrottleDecision {
@@ -96,6 +109,18 @@ impl DaemonApp {
                 self.throttle_controller
                     .caps_for(self.snapshot.throttle_state)
             })
+    }
+
+    pub fn workgate_snapshot(&self) -> WorkgateSnapshot {
+        self.workgate.snapshot()
+    }
+
+    pub fn try_acquire_work(&mut self, class: WorkClass) -> Result<WorkPermit, WorkPermitDenied> {
+        self.workgate.try_acquire(class)
+    }
+
+    pub fn release_work(&mut self, permit: WorkPermit) -> bool {
+        self.workgate.release(permit)
     }
 
     pub fn remote_poll_allowed(&self) -> bool {
@@ -176,6 +201,55 @@ mod tests {
         assert_eq!(caps.planner_workers, 1);
         assert_eq!(caps.upload_concurrency, 1);
         assert!(!caps.allow_reconcile);
+        assert_eq!(app.workgate_snapshot().caps, caps);
+    }
+
+    #[test]
+    fn throttled_workgate_limits_new_uploads_to_single_concurrency() {
+        let mut app = DaemonApp::default();
+        app.apply_throttle_inputs(ThrottleInputs {
+            user_active: true,
+            ..ThrottleInputs::default()
+        });
+
+        let first = app
+            .try_acquire_work(WorkClass::Upload)
+            .expect("first throttled upload should be allowed");
+        let denied = app
+            .try_acquire_work(WorkClass::Upload)
+            .expect_err("second throttled upload should be blocked");
+
+        assert_eq!(
+            denied.reason,
+            crate::workgate::WorkPermitDeniedReason::UploadConcurrencyExhausted
+        );
+        assert_eq!(app.workgate_snapshot().active_uploads, 1);
+        assert!(app.release_work(first));
+    }
+
+    #[test]
+    fn suspended_workgate_blocks_uploads_and_hashing() {
+        let mut app = DaemonApp::default();
+        app.apply_throttle_inputs(ThrottleInputs {
+            low_power_mode: true,
+            ..ThrottleInputs::default()
+        });
+
+        let upload_denied = app
+            .try_acquire_work(WorkClass::Upload)
+            .expect_err("uploads should be blocked when suspended");
+        let hash_denied = app
+            .try_acquire_work(WorkClass::Hash)
+            .expect_err("hashing should be blocked when suspended");
+
+        assert_eq!(
+            upload_denied.reason,
+            crate::workgate::WorkPermitDeniedReason::UploadsDisabled
+        );
+        assert_eq!(
+            hash_denied.reason,
+            crate::workgate::WorkPermitDeniedReason::HashingDisabled
+        );
     }
 
     #[test]

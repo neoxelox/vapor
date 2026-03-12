@@ -95,7 +95,7 @@ Exit gate:
 - [x] P2-4 Implement debounce/coalescing loop (250ms tick, conservative windows).
 - [x] P2-5 Implement keyed superseding scheduler (latest intent wins per path).
 - [x] P2-6 Implement throttle controller inputs and 4-state model.
-- [ ] P2-7 Gate planner/uploader worker caps strictly by throttle state.
+- [x] P2-7 Gate planner/uploader worker caps strictly by throttle state.
 - [ ] P2-8 Implement durable queue/state DB with at-least-once semantics.
 - [ ] P2-9 Implement retries with exponential backoff + jitter + rate-limit-aware slowdown.
 - [ ] P2-10 Implement storm detection triggers and deferred `RECONCILE_SUBTREE` scheduling.

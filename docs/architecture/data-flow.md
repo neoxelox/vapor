@@ -8,7 +8,7 @@
 4. A 250ms debounce/coalesce tick emits stabilized events after conservative per-path quiet windows (shorter for key configs, longer for lockfiles and other unmatched paths).
 5. A keyed latest-wins scheduler keeps one intent per path, supersedes stale actions, and requeues dirty paths after in-flight work finishes.
 6. A throttle controller evaluates 1s power, thermal, load, disk, network, and activity samples to select `IdleDrain`, `Light`, `Throttled`, or `Suspended`.
-7. Planner/hashing/uploader execute under throttle state constraints.
+7. Planner, hash, upload, and reconcile stages acquire strict throttle-gated work permits before starting.
 8. Durable queue/state records progress and retry metadata.
 
 Current caveat: `RECONCILE_SUBTREE` markers now bridge into the scheduler, but the later storm/deferred-reconcile stages still need to own clearing compacted subtree boundaries and reconciling any already-scheduled descendant work.
