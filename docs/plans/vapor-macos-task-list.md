@@ -137,53 +137,75 @@ Exit gate:
 
 - No lost intent across restarts and deterministic behavior under conflict/delete/race scenarios.
 
-## Phase 5 - XPC contract and diagnostics UX
+## Phase 5 - Profile model, multi-provider accounts, and settings overrides
 
-- [ ] P5-1 Finalize XPC schema for state, queue, auth, auto-launch, and reasons.
-- [ ] P5-2 Add control endpoints (pause/resume, flush-now, toggle auto-launch, excludes).
-- [ ] P5-3 Implement full menubar state model and reasoned status messages.
-- [ ] P5-4 Implement diagnostics panel (throttle reason, queue depth, conflicts, failures).
-- [ ] P5-5 Add daemon activity event stream (search/hash/upload and related work stages) to app diagnostics via XPC.
-- [ ] P5-6 Implement a diagnostics timeline tab in Vapor app UI showing live daemon activity events (non-persistent across app relaunch).
-- [ ] P5-7 Implement bounded in-memory timeline buffer with configurable max length (default `1000` events) and safe bounds.
-- [ ] P5-8 Add tests for timeline ordering, truncation at max length, and UI/event-stream integration behavior.
+- [ ] P5-1 Define the durable profile model (`profile_id`, display name, provider kind, authenticated account identity, enabled state) and classify settings into app-global vs profile-override-capable.
+- [ ] P5-2 Refactor persisted config/shared models to store app-global settings plus a profile list with explicit per-profile overrides, without pre-GA compatibility shims.
+- [ ] P5-3 Namespace Keychain secrets, auth refresh state, and provider connection metadata by profile/account so multiple provider accounts can coexist safely.
+- [ ] P5-4 Add app UI flows to create, rename, select, enable/disable, and delete profiles, and bind each profile to a provider plus authenticated account.
+- [ ] P5-5 Implement profile-scoped override resolution for sync roots, ignore rules, and other sync-affecting settings while keeping global-only settings (for example `languageCode`) singular.
+- [ ] P5-6 Support multiple enabled profiles concurrently, including same local root fan-out to multiple providers/accounts and different local roots to different profiles.
+- [ ] P5-7 Make watcher routing, scheduler intents, durable queue/state, tombstones, and conflict handling profile-aware with no cross-profile leakage.
+- [ ] P5-8 Deduplicate shared local-root watches and preserve low-impact budgets when multiple profiles point at the same directory.
+- [ ] P5-9 Extend startup/runtime config loading and provisional app-daemon/shared contracts so enabled profiles bootstrap together and disabled profiles stay inactive.
+- [ ] P5-10 Add safe profile disconnect/delete flows that remove only the targeted profile's auth/state and leave other profiles untouched.
+- [ ] P5-11 Add integration/perf tests for override resolution, same-folder multi-provider sync, different-folder parallel sync, restart recovery, and multi-profile budget adherence.
+
+Exit gate:
+
+- User can create multiple named profiles, each bound to one provider plus authenticated account, and enable/disable them independently.
+- Same local folder can fan out to multiple providers/accounts, and different folders can sync in parallel through different profiles.
+- Global settings and profile-scoped overrides resolve predictably; settings that do not make sense per profile remain app-global.
+- Credentials, queues, tombstones, conflicts, and failures stay isolated per profile, and deleting/disconnecting one profile does not affect others.
+- Multi-profile runtime preserves exact sync-root safety and low-impact budgets, including shared-root watch deduplication and bounded state.
+
+## Phase 6 - XPC contract and diagnostics UX
+
+- [ ] P6-1 Finalize XPC schema for state, queue, auth, auto-launch, and reasons.
+- [ ] P6-2 Add control endpoints (pause/resume, flush-now, toggle auto-launch, excludes).
+- [ ] P6-3 Implement full menubar state model and reasoned status messages.
+- [ ] P6-4 Implement diagnostics panel (throttle reason, queue depth, conflicts, failures).
+- [ ] P6-5 Add daemon activity event stream (search/hash/upload and related work stages) to app diagnostics via XPC.
+- [ ] P6-6 Implement a diagnostics timeline tab in Vapor app UI showing live daemon activity events (non-persistent across app relaunch).
+- [ ] P6-7 Implement bounded in-memory timeline buffer with configurable max length (default `1000` events) and safe bounds.
+- [ ] P6-8 Add tests for timeline ordering, truncation at max length, and UI/event-stream integration behavior.
 
 Exit gate:
 
 - User can understand "what is happening" and "why" without CLI access.
 - User can inspect a live timeline of current daemon work (for example directory scanning, hashing, uploading).
 
-## Phase 6 - Auto-tuning (impact-first)
+## Phase 7 - Auto-tuning (impact-first)
 
-- [ ] P6-1 Add bounded 60s metrics aggregation and persistence limits.
-- [ ] P6-2 Implement tuning loop cadence (60-120s) with one small change per cycle.
-- [ ] P6-3 Tune priority order: impact reduction, rate-limit avoidance, then latency.
-- [ ] P6-4 Tune polling/debounce/concurrency/storm thresholds within safe bounds.
-- [ ] P6-5 Add hysteresis/min-dwell guardrails and rollback-on-regression safety to avoid oscillation.
-- [ ] P6-6 Bind tuning decisions to acceptance SLOs and freeze unsafe adjustments when budgets are violated.
+- [ ] P7-1 Add bounded 60s metrics aggregation and persistence limits.
+- [ ] P7-2 Implement tuning loop cadence (60-120s) with one small change per cycle.
+- [ ] P7-3 Tune priority order: impact reduction, rate-limit avoidance, then latency.
+- [ ] P7-4 Tune polling/debounce/concurrency/storm thresholds within safe bounds.
+- [ ] P7-5 Add hysteresis/min-dwell guardrails and rollback-on-regression safety to avoid oscillation.
+- [ ] P7-6 Bind tuning decisions to acceptance SLOs and freeze unsafe adjustments when budgets are violated.
 
 Exit gate:
 
 - Tuned behavior outperforms static defaults without oscillation or instability.
 
-## Phase 7 - Provider-system extensibility hardening
+## Phase 8 - Provider-system extensibility hardening
 
-- [ ] P7-1 Finalize provider capability model and trait boundaries so core engine behavior remains provider-neutral.
-- [ ] P7-2 Add provider contract tests with a reference/mock provider to validate compatibility across provider semantics (for example iCloud, R2, S3, Proton Drive style constraints).
-- [ ] P7-3 Add compatibility validation for bidirectional flows, conflicts, tombstones, retries, and throttle behavior through provider abstractions.
-- [ ] P7-4 Add provider-adapter performance checks so abstraction overhead stays low and full-speed sync targets are preserved.
-- [ ] P7-5 Document a provider-onboarding checklist and acceptance criteria for future provider implementations.
+- [ ] P8-1 Finalize provider capability model and trait boundaries so core engine behavior remains provider-neutral.
+- [ ] P8-2 Add provider contract tests with a reference/mock provider to validate compatibility across provider semantics (for example iCloud, R2, S3, Proton Drive style constraints).
+- [ ] P8-3 Add compatibility validation for bidirectional flows, conflicts, tombstones, retries, and throttle behavior through provider abstractions.
+- [ ] P8-4 Add provider-adapter performance checks so abstraction overhead stays low and full-speed sync targets are preserved.
+- [ ] P8-5 Document a provider-onboarding checklist and acceptance criteria for future provider implementations.
 
 Exit gate:
 
 - Engine is provider-ready (compatibility + performance validated) without shipping additional providers in first release.
 
-## Phase 8 - Optional safeguards and advanced features
+## Phase 9 - Optional safeguards and advanced features
 
-- [ ] P8-1 Add active-coding detection (permissioned) with heuristic fallback.
-- [ ] P8-2 Add folder priority classes and temporary flush boost controls.
-- [ ] P8-3 Add mass-change/ransomware guard with pause + alert workflow.
-- [ ] P8-4 Add richer diagnostics history and support export bundle.
+- [ ] P9-1 Add active-coding detection (permissioned) with heuristic fallback.
+- [ ] P9-2 Add folder priority classes and temporary flush boost controls.
+- [ ] P9-3 Add mass-change/ransomware guard with pause + alert workflow.
+- [ ] P9-4 Add richer diagnostics history and support export bundle.
 
 Exit gate:
 
@@ -204,6 +226,7 @@ Exit gate:
 - [ ] T-11 Performance SLO validation: idle/load/storm/recovery benchmarks pass defined thresholds and configured CI gates.
 - [ ] T-12 Memory/backpressure validation: bounded `event_map`/intent structures remain within defined caps under storm-scale workloads.
 - [ ] T-13 Auto-tuning stability validation: throttle/tuning decisions avoid oscillation and rollback unsafe adjustments.
+- [ ] T-14 Multi-profile isolation validation: per-profile overrides, credentials, durable state, sync intents, and failure surfaces do not cross-apply between profiles.
 
 ## Deferred onboarding task
 

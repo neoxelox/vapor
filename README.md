@@ -24,6 +24,7 @@ Available now:
 In flight and coming next:
 
 - 🔁 Bidirectional cloud sync with durable intent replay and eventual consistency.
+- 🧩 Multiple sync profiles let one folder flow to several clouds or keep separate setups neatly isolated.
 - 🛡 Conflict-safe behavior with deterministic outcomes (keep both copies, never silent overwrite).
 - ⏸️ Pressure-aware throttle modes that adapt sync intensity to real device load.
 - 📈 Clear diagnostics with status reasons, queue visibility, and live activity timeline.

@@ -26,12 +26,13 @@ The service must default to auto-launch at login, stay low-impact under user loa
 - Intent durability is mandatory even if uploads are deferred for long periods.
 - Bounded memory/backpressure is mandatory; storm paths must compact/coalesce instead of growing unbounded in-memory maps.
 - Performance acceptance budgets must be explicit and enforceable in script/CI gates (not narrative-only).
+- Multiple profiles must preserve exact sync-root safety and state isolation; same-folder fan-out must not widen scope or cross-contaminate provider/account state.
 
 ## 3) Product architecture
 
 1. SwiftUI app
-   - Onboarding, provider auth, root folder selection.
-   - Settings: excludes, policy, auto-launch toggle, provider selection.
+   - Onboarding, profile management, provider auth, and root folder selection.
+   - Settings: app-global controls plus per-profile overrides for sync-affecting options.
    - Menubar status: Idle, Queued, Syncing, Throttled, Suspended, Error.
    - Controls: Pause/Resume, Flush now, diagnostics.
    - Keychain secrets and launch configuration management.
@@ -41,8 +42,9 @@ The service must default to auto-launch at login, stay low-impact under user loa
    - Durable queue/state and retry/backoff.
    - Local metrics + impact-first auto-tuning.
 3. Providers (`core/providers`, Rust)
-    - Provider trait + capabilities.
-    - `provider_gdrive` first; harden provider abstractions for future adapters (for example iCloud, S3, R2, Proton Drive) without shipping extra providers in first release.
+     - Provider trait + capabilities.
+     - `provider_gdrive` first; harden provider abstractions for future adapters (for example iCloud, S3, R2, Proton Drive) without shipping extra providers in first release.
+     - Provider auth/account bindings must be profile-scoped so one device can target multiple providers or multiple accounts safely.
 4. Shared contracts (`core/shared`)
    - App/daemon versioned contract models and shared schema types.
 
@@ -115,10 +117,11 @@ Recommended default conflict policy:
 4. Low-impact local engine core plus durability substrate (durable queue, retries, storm deferral, interruptible reconcile, and bounded backpressure).
 5. Google Drive provider with bidirectional event flow on top of durable substrate.
 6. Conflict/tombstone safety and deterministic race handling hardening.
-7. XPC contract hardening and full diagnostics UX.
-8. Auto-tuning and performance-budget enforcement.
-9. Provider-system extensibility hardening (provider-ready compatibility and performance for future providers, without shipping additional providers in first release).
-10. Optional advanced safeguards and enhancements.
+7. Multi-profile provider/account model with layered settings, profile isolation, and same-folder multi-provider fan-out.
+8. XPC contract hardening and full diagnostics UX.
+9. Auto-tuning and performance-budget enforcement.
+10. Provider-system extensibility hardening (provider-ready compatibility and performance for future providers, without shipping additional providers in first release).
+11. Optional advanced safeguards and enhancements.
 
 ## 9) Definition of done (applies to every milestone)
 
