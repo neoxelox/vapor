@@ -16,6 +16,13 @@ Durable queue/state schema rules for daemon persistence.
 - Support forward migration on startup.
 - Define rollback behavior for each schema transition.
 
+## Current schema
+
+- Current durable DB schema version is `1`.
+- `queue_intents` stores pending vs leased work, attempt counts, next-available time, and last error text.
+- `state_entries` stores small daemon state values (for example resume markers or recovery metadata).
+- Startup recovery must move any leased rows back to pending so interrupted work replays with at-least-once semantics.
+
 ## Compatibility and safety
 
 - New code must handle prior supported schema versions or block with clear error.

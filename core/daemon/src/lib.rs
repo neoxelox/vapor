@@ -18,6 +18,7 @@ pub mod fs_events;
 pub mod logging;
 pub mod path_filter;
 pub mod scheduler;
+pub mod state_db;
 pub mod sync_directories;
 pub mod throttle;
 pub mod workgate;

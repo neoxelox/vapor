@@ -6,7 +6,7 @@ Responsibilities:
 
 - FSEvents ingest plus a 250ms debounce/coalescing loop with conservative per-path quiet windows
 - throttle controller with a 1s sample policy, strict planner/hash/upload/reconcile work permits, and a keyed latest-wins scheduler
-- durable queue/state and retries
+- SQLite durable queue/state with startup lease recovery and retry metadata
 - reconcile and provider execution
 - XPC status/control endpoints
 

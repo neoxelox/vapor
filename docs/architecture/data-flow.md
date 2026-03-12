@@ -9,7 +9,7 @@
 5. A keyed latest-wins scheduler keeps one intent per path, supersedes stale actions, and requeues dirty paths after in-flight work finishes.
 6. A throttle controller evaluates 1s power, thermal, load, disk, network, and activity samples to select `IdleDrain`, `Light`, `Throttled`, or `Suspended`.
 7. Planner, hash, upload, and reconcile stages acquire strict throttle-gated work permits before starting.
-8. Durable queue/state records progress and retry metadata.
+8. A SQLite durable queue/state DB persists pending and leased intents, recovers interrupted leases on startup, and records retry/state metadata.
 
 Current caveat: `RECONCILE_SUBTREE` markers now bridge into the scheduler, but the later storm/deferred-reconcile stages still need to own clearing compacted subtree boundaries and reconciling any already-scheduled descendant work.
 

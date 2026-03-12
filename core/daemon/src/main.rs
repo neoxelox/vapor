@@ -1,4 +1,6 @@
-use vapor_daemon::{DaemonApp, build_info, logging, sync_directories};
+use std::time::SystemTime;
+
+use vapor_daemon::{DaemonApp, build_info, logging, state_db::DurableStateDb, sync_directories};
 
 fn main() {
     if let Some(flag) = std::env::args().nth(1)
@@ -13,6 +15,36 @@ fn main() {
     }
 
     let app = DaemonApp::default();
+    let mut state_db = match DurableStateDb::open_default() {
+        Ok(state_db) => state_db,
+        Err(error) => {
+            logging::error(
+                "Failed to initialize durable queue/state DB",
+                &[("error", error.to_string())],
+            );
+            std::process::exit(1);
+        }
+    };
+    let recovered_count = match state_db.recover_leased(SystemTime::now()) {
+        Ok(recovered_count) => recovered_count,
+        Err(error) => {
+            logging::error(
+                "Failed to recover leased durable intents",
+                &[
+                    ("database_path", state_db.path().display().to_string()),
+                    ("error", error.to_string()),
+                ],
+            );
+            std::process::exit(1);
+        }
+    };
+    logging::info(
+        "Durable queue/state DB is ready",
+        &[
+            ("database_path", state_db.path().display().to_string()),
+            ("recovered_leased_intents", recovered_count.to_string()),
+        ],
+    );
     let sync_scope = sync_directories::resolve_from_process_environment();
     app.ensure_cloud_sync_directory(sync_scope.cloud_sync_directory.as_str());
     let local_sync_directory = sync_scope

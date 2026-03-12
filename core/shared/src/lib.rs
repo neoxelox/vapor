@@ -2,6 +2,7 @@
 
 pub mod constants;
 pub mod logging;
+pub mod runtime_paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThrottleState {
