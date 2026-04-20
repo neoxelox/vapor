@@ -304,7 +304,7 @@ impl DurableStateDb {
         for intent_id in intent_ids {
             transaction.execute(
                 "UPDATE queue_intents
-                 SET state = ?, leased_at_ms = ?, attempt_count = attempt_count + 1
+                 SET state = ?, leased_at_ms = ?
                  WHERE id = ? AND state = ?",
                 params![STATE_LEASED, now_ms, intent_id, STATE_PENDING],
             )?;
@@ -347,6 +347,32 @@ impl DurableStateDb {
         Ok(changed > 0)
     }
 
+    fn requeue_leased_with_attempt_bump(
+        &mut self,
+        id: i64,
+        available_at: SystemTime,
+        last_error: Option<&str>,
+    ) -> Result<bool, StateDbError> {
+        let available_at_ms = system_time_to_millis(available_at)?;
+        let changed = self.connection.execute(
+            "UPDATE queue_intents
+             SET state = ?,
+                 available_at_ms = ?,
+                 leased_at_ms = NULL,
+                 last_error = ?,
+                 attempt_count = attempt_count + 1
+             WHERE id = ? AND state = ?",
+            params![
+                STATE_PENDING,
+                available_at_ms,
+                last_error.map(sanitize_persisted_error),
+                id,
+                STATE_LEASED
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn schedule_retry(
         &mut self,
         id: i64,
@@ -357,12 +383,15 @@ impl DurableStateDb {
         let leased_intent = self
             .intent_record(id)?
             .ok_or(StateDbError::MissingIntentRecord(id))?;
-        let decision = RetryPolicy::default().decide(
-            leased_intent.id,
-            leased_intent.attempt_count,
-            failure_kind,
-            now,
-        );
+        if leased_intent.attempt_count >= constants::state::MAX_ATTEMPT_COUNT {
+            return Err(StateDbError::InvalidIntentState(format!(
+                "intent {id} reached MAX_ATTEMPT_COUNT {}; caller must finalize as terminal failure",
+                constants::state::MAX_ATTEMPT_COUNT
+            )));
+        }
+        let next_attempt_count = leased_intent.attempt_count.saturating_add(1);
+        let decision =
+            RetryPolicy::default().decide(leased_intent.id, next_attempt_count, failure_kind, now);
         if !decision.retryable {
             return Err(StateDbError::InvalidIntentState(format!(
                 "non-retryable '{}' failure must be finalized separately",
@@ -375,7 +404,7 @@ impl DurableStateDb {
             .ok_or(StateDbError::InvalidIntentState(
                 "retryable decision missing available_at".to_string(),
             ))?;
-        if !self.requeue_leased(id, available_at, Some(last_error))? {
+        if !self.requeue_leased_with_attempt_bump(id, available_at, Some(last_error))? {
             return Err(StateDbError::InvalidIntentState(format!(
                 "intent {id} is not currently leased"
             )));
@@ -462,13 +491,33 @@ impl DurableStateDb {
 
     pub fn recover_leased(&mut self, now: SystemTime) -> Result<usize, StateDbError> {
         let now_ms = system_time_to_millis(now)?;
-        let changed = self.connection.execute(
+        let stale_lease_cutoff_ms = now_ms
+            .saturating_sub(i64::try_from(constants::engine::LEASE_TIMEOUT_MILLIS).unwrap_or(0));
+        let stale_leases_count = self.connection.execute(
+            "UPDATE queue_intents
+             SET state = ?,
+                 available_at_ms = ?,
+                 leased_at_ms = NULL,
+                 last_error = ?,
+                 attempt_count = 0
+             WHERE state = ?
+               AND leased_at_ms IS NOT NULL
+               AND leased_at_ms <= ?",
+            params![
+                STATE_PENDING,
+                now_ms,
+                sanitize_persisted_error("lease recovered after exceeding LEASE_TIMEOUT_MILLIS"),
+                STATE_LEASED,
+                stale_lease_cutoff_ms
+            ],
+        )?;
+        let fresh_leases_count = self.connection.execute(
             "UPDATE queue_intents
              SET state = ?, available_at_ms = ?, leased_at_ms = NULL
              WHERE state = ?",
             params![STATE_PENDING, now_ms, STATE_LEASED],
         )?;
-        Ok(changed)
+        Ok(stale_leases_count + fresh_leases_count)
     }
 
     pub fn take_active_retry_slowdown_until(
@@ -817,7 +866,12 @@ fn system_time_to_millis(time: SystemTime) -> Result<i64, StateDbError> {
     let duration = time
         .duration_since(UNIX_EPOCH)
         .map_err(|_| StateDbError::TimeBeforeUnixEpoch)?;
-    Ok(duration.as_millis() as i64)
+    let millis = i64::try_from(duration.as_millis())
+        .map_err(|_| StateDbError::InvalidTimestampMillis(i64::MAX))?;
+    if !(0..=constants::state::MAX_TIMESTAMP_MILLIS).contains(&millis) {
+        return Err(StateDbError::InvalidTimestampMillis(millis));
+    }
+    Ok(millis)
 }
 
 fn millis_to_system_time(millis: i64) -> Result<SystemTime, StateDbError> {
@@ -947,7 +1001,7 @@ mod tests {
             .expect("lease next ready")
             .expect("leased record");
         assert_eq!(leased.id, queued.id);
-        assert_eq!(leased.attempt_count, 1);
+        assert_eq!(leased.attempt_count, 0);
         assert!(leased.leased_at.is_some());
         assert_eq!(database.pending_depth().expect("pending depth"), 0);
         assert_eq!(database.leased_depth().expect("leased depth"), 1);
@@ -1115,7 +1169,7 @@ mod tests {
                 .lease_next_ready(timestamp_ms(100))
                 .expect("lease next ready")
                 .expect("leased record");
-            assert_eq!(leased.attempt_count, 1);
+            assert_eq!(leased.attempt_count, 0);
         }
 
         let mut reopened = DurableStateDb::open(&database_path).expect("reopen durable state db");
@@ -1134,7 +1188,7 @@ mod tests {
             .expect("replayed intent");
         assert_eq!(replayed.path, path);
         assert_eq!(replayed.kind, PendingIntentKind::Delete);
-        assert_eq!(replayed.attempt_count, 2);
+        assert_eq!(replayed.attempt_count, 0);
     }
 
     #[test]
@@ -1169,7 +1223,7 @@ mod tests {
             .expect("lease retried intent")
             .expect("retried record");
         assert_eq!(retried.last_error.as_deref(), Some("rate limited"));
-        assert_eq!(retried.attempt_count, 2);
+        assert_eq!(retried.attempt_count, 0);
     }
 
     #[test]
@@ -1216,7 +1270,7 @@ mod tests {
             .lease_next_ready(scheduled.decision.available_at.unwrap())
             .expect("lease retried intent")
             .expect("retried record");
-        assert_eq!(retried.attempt_count, 2);
+        assert_eq!(retried.attempt_count, 1);
     }
 
     #[test]
@@ -1478,7 +1532,7 @@ mod tests {
             retried.last_error.as_deref(),
             Some("temporary backend failure")
         );
-        assert_eq!(retried.attempt_count, 2);
+        assert_eq!(retried.attempt_count, 1);
     }
 
     #[test]

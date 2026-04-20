@@ -44,6 +44,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Packaged `Vapor.app` builds now include the SwiftPM localization resource bundle and no longer crash on launch while the app shell resolves UI copy catalogs.
 - Packaging now fails fast if either bundled executable is missing, and runtime daemon resolution stays pinned to the bundled `Contents/MacOS/vapord` sibling binary.
 - GitHub Actions macOS workflows now run on `macos-26`, matching Vapor's macOS 26-only app target so SwiftUI app tests load against a supported runtime.
+- Daemon runtime no longer creates duplicate durable rows each tick when a reconcile fails to start under non-`IdleDrain` throttle; the upserted scheduler intent is now discarded on failed start so the next flush skips it.
+- Startup reconstruction barrier now auto-clears after a bounded deadline so non-reconcile work cannot starve indefinitely if the startup reconcile keeps deferring under persistent non-`IdleDrain` pressure.
+- Durable intent `attempt_count` now tracks real retry count instead of lease count: `lease_ready_batch` no longer bumps it, `schedule_retry` is the only increment site, and retry caps are enforced at write time so intents cannot reach `MAX_ATTEMPT_COUNT` from throttle-delayed re-leases.
+- Durable state `system_time_to_millis` now validates `u128 → i64` conversion symmetrically with the read-path range check, eliminating silent truncation for far-future wall-clock timestamps.
+- Durable lease recovery now resets `attempt_count` for leases older than `LEASE_TIMEOUT_MILLIS` (15 minutes) so stale crash-recovered leases don't carry forward inflated retry counts.
 
 ## [0.2.0-alpha.3] - 2026-03-10
 

@@ -62,8 +62,10 @@ pub struct DaemonRuntime {
     last_throttle_sample_at: Option<SystemTime>,
     running_reconcile_intent_id: Option<i64>,
     startup_reconstruction_barrier: bool,
+    startup_barrier_expires_at: Option<SystemTime>,
     tick_interval: Duration,
     throttle_sample_interval: Duration,
+    startup_barrier_deadline: Duration,
 }
 
 impl DaemonRuntime {
@@ -128,6 +130,7 @@ impl DaemonRuntime {
                     && self.sync_scope.local_sync_directory.as_ref() == Some(&completed_root)
                 {
                     self.startup_reconstruction_barrier = false;
+                    self.startup_barrier_expires_at = None;
                 }
                 report.completed_intents += 1;
                 report.completed_reconcile_root = Some(completed_root);
@@ -228,9 +231,13 @@ impl DaemonRuntime {
             last_throttle_sample_at: None,
             running_reconcile_intent_id: None,
             startup_reconstruction_barrier: false,
+            startup_barrier_expires_at: None,
             tick_interval,
             throttle_sample_interval: Duration::from_millis(
                 constants::engine::THROTTLE_SAMPLE_INTERVAL_MILLIS,
+            ),
+            startup_barrier_deadline: Duration::from_millis(
+                constants::engine::STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS,
             ),
         })
     }
@@ -261,11 +268,42 @@ impl DaemonRuntime {
         self.state_db
             .enqueue_startup_reconcile_intent(local_sync_directory, now)?;
         self.startup_reconstruction_barrier = true;
+        self.startup_barrier_expires_at = Some(now + self.startup_barrier_deadline);
         logging::info(
             "Queued startup whole-scope reconcile for volatile-state reconstruction",
-            &[("root", local_sync_directory.display().to_string())],
+            &[
+                ("root", local_sync_directory.display().to_string()),
+                (
+                    "barrier_deadline_ms",
+                    self.startup_barrier_deadline.as_millis().to_string(),
+                ),
+            ],
         );
         Ok(())
+    }
+
+    fn evaluate_startup_barrier(&mut self, now: SystemTime) {
+        if !self.startup_reconstruction_barrier {
+            return;
+        }
+
+        let Some(expires_at) = self.startup_barrier_expires_at else {
+            return;
+        };
+
+        if now < expires_at {
+            return;
+        }
+
+        self.startup_reconstruction_barrier = false;
+        self.startup_barrier_expires_at = None;
+        logging::warning(
+            "Cleared startup reconstruction barrier after deadline; allowing non-reconcile work to proceed",
+            &[(
+                "barrier_deadline_ms",
+                self.startup_barrier_deadline.as_millis().to_string(),
+            )],
+        );
     }
 
     fn release_ready_deferred_reconciles(&mut self, now: SystemTime) -> usize {
@@ -329,6 +367,8 @@ impl DaemonRuntime {
         now: SystemTime,
         report: &mut RuntimeTickReport,
     ) -> Result<(), DaemonRuntimeError> {
+        self.evaluate_startup_barrier(now);
+
         if self.startup_reconstruction_barrier && self.running_reconcile_intent_id.is_some() {
             return Ok(());
         }
@@ -370,6 +410,7 @@ impl DaemonRuntime {
                             continue;
                         }
                         Ok(None) => {
+                            self.scheduler.discard_pending(&intent.path);
                             self.requeue_runtime_intent(
                                 intent.id,
                                 now + self.tick_interval,
@@ -382,6 +423,7 @@ impl DaemonRuntime {
                             continue;
                         }
                         Err(_) => {
+                            self.scheduler.discard_pending(&intent.path);
                             self.requeue_runtime_intent(
                                 intent.id,
                                 now + self.tick_interval,

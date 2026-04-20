@@ -122,6 +122,20 @@ impl KeyedSupersedingScheduler {
         self.claim_path(path.as_path())
     }
 
+    pub fn discard_pending(&mut self, path: &Path) -> bool {
+        let Some(record) = self.intents.get(path) else {
+            return false;
+        };
+        if record.state != ScheduledIntentState::Pending {
+            return false;
+        }
+        let queue_key = (record.queue_sequence, record.path.clone());
+        self.pending_index.remove(&queue_key);
+        self.pending_reconcile_index.remove(&queue_key);
+        self.intents.remove(path);
+        true
+    }
+
     fn claim_path(&mut self, path: &Path) -> Option<ClaimedIntent> {
         let queue_key = {
             let record = self.intents.get(path)?;

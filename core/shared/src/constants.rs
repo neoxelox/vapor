@@ -31,6 +31,13 @@ pub mod state {
     pub const MAX_TIMESTAMP_MILLIS: i64 = 32_503_680_000_000;
 }
 
+pub mod self_write_cache {
+    pub const DEFAULT_TTL_MILLIS: u64 = 30_000;
+    pub const MIN_TTL_MILLIS: u64 = 5_000;
+    pub const MAX_ENTRIES: usize = 10_000;
+    pub const MIN_ENTRIES: usize = 1_000;
+}
+
 pub mod filtering {
     pub const GIT_IGNORE_FILE_NAME: &str = ".gitignore";
     pub const VAPOR_IGNORE_FILE_NAME: &str = ".vaporignore";
@@ -78,6 +85,8 @@ pub mod engine {
     pub const LOCKFILE_DEBOUNCE_WINDOW_MILLIS: u64 = 2_500;
     pub const DEFAULT_DEBOUNCE_WINDOW_MILLIS: u64 = 4_000;
     pub const THROTTLE_SAMPLE_INTERVAL_MILLIS: u64 = 1_000;
+    pub const STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS: u64 = 60_000;
+    pub const LEASE_TIMEOUT_MILLIS: u64 = 15 * 60 * 1_000;
     pub const LIGHT_SYSTEM_CPU_PERCENT: u8 = 35;
     pub const THROTTLED_SYSTEM_CPU_PERCENT: u8 = 60;
     pub const SUSPENDED_SYSTEM_CPU_PERCENT: u8 = 85;
