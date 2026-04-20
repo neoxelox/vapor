@@ -190,6 +190,7 @@ Exit gate:
 - [ ] P5-3 Namespace Keychain secrets, auth refresh state, and provider connection metadata by profile/account so multiple provider accounts can coexist safely.
 - [ ] P5-4 Add app UI flows to create, rename, select, enable/disable, and delete profiles, and bind each profile to a provider plus authenticated account.
 - [ ] P5-5 Implement profile-scoped override resolution for sync roots, ignore rules, and other sync-affecting settings while keeping global-only settings (for example `languageCode`) singular.
+- [ ] P5-5a Extend layered-override resolution to cover the `resourceLimits` and `idleBoost` groups introduced in Phase 7. Because the daemon is a single process, effective daemon-level caps resolve by taking the MIN across global value and every enabled profile's override (only *lowering* is allowed; higher per-profile values have no effect). For `idleBoost.enabled`, any enabled profile setting `false` disables boost daemon-wide. Document this reduction semantics in `docs/architecture/data-flow.md` and cover it with a profile-resolution unit test matrix.
 - [ ] P5-6 Support multiple enabled profiles concurrently, including same local root fan-out to multiple providers/accounts and different local roots to different profiles.
 - [ ] P5-7 Make watcher routing, scheduler intents, durable queue/state, tombstones, and conflict handling profile-aware with no cross-profile leakage.
 - [ ] P5-8 Deduplicate shared local-root watches and preserve low-impact budgets when multiple profiles point at the same directory.
@@ -221,7 +222,14 @@ Exit gate:
 - User can understand "what is happening" and "why" without CLI access.
 - User can inspect a live timeline of current daemon work (for example directory scanning, hashing, uploading).
 
-## Phase 7 - Auto-tuning (impact-first)
+## Phase 7 - Auto-tuning and user resource-budget enforcement
+
+Adds two layers on top of the throttle controller already stabilized in earlier phases:
+
+1. Auto-tuning: bounded internal optimization of debounce/concurrency/polling thresholds within safe ranges, driven by local metrics, always bounded by the user-configured ceilings introduced below.
+2. User resource budgets: explicit user-facing ceilings on daemon-process CPU, memory, and network bandwidth usage, plus an opt-in idle-boost mechanism that dynamically raises those ceilings when the device is demonstrably idle and has genuinely unused resources. Ceilings are hard caps: the throttle controller and auto-tuner must never push the daemon above them. User ceilings never relax the internal throttle controller — if the controller says `Suspended`, the daemon still suspends regardless of configured ceilings.
+
+### Auto-tuning
 
 - [ ] P7-1 Add bounded 60s metrics aggregation and persistence limits.
 - [ ] P7-2 Implement tuning loop cadence (60-120s) with one small change per cycle.
@@ -229,10 +237,29 @@ Exit gate:
 - [ ] P7-4 Tune polling/debounce/concurrency/storm thresholds within safe bounds.
 - [ ] P7-5 Add hysteresis/min-dwell guardrails and rollback-on-regression safety to avoid oscillation.
 - [ ] P7-6 Bind tuning decisions to acceptance SLOs and freeze unsafe adjustments when budgets are violated.
+- [ ] P7-7 Bind auto-tuning decisions to the effective user resource ceilings resolved below. The tuner must never select concurrency, polling cadence, or bandwidth usage that would exceed the current effective ceiling; ceiling changes (from config edits or idle-boost transitions) must take effect within one tuning cycle without oscillation.
+
+### User resource-budget config surface
+
+- [ ] P7-8 Add the `resourceLimits` config group to `vapor.json`, `core/shared/src/constants.rs`, and `apps/macos/Sources/VaporCore/VaporConstants.swift`. Fields: `cpuPercent` (default `15`, range `1..100`), `memoryPercent` (default `10`, range `1..100`), `bandwidthPercent` (default `25`, range `1..100`). Semantics: each field is the maximum share of the corresponding device resource the daemon process may consume under non-boost conditions. `cpuPercent` is expressed against a single logical core (so `100` means "up to one full core"); `memoryPercent` is against total device physical RAM; `bandwidthPercent` is an absolute cap against a rolling estimate of measured link capacity (NOT a relative share of free bandwidth): Vapor's combined upload+download throughput may not exceed this fraction of link capacity, so non-Vapor traffic always retains at least `100 - bandwidthPercent` of the link by construction and everyday activities like browsing and streaming stay unaffected. Invalid values must clamp to the documented range and surface a classified configuration warning to the app.
+- [ ] P7-9 Add the `idleBoost` config group with fields: `enabled` (default `true`), `minIdleSeconds` (default `600`), `headroomCpuPercent`/`headroomMemoryPercent`/`headroomBandwidthPercent` (defaults `40`/`40`/`40`), `boostCpuPercent`/`boostMemoryPercent`/`boostBandwidthPercent` (defaults `50`/`30`/`90`), `rampUpSeconds` (default `60`), `rampDownSeconds` (default `20`). Semantics: when `enabled` is true, the device has been user-idle (no HID input and no app foreground change) for at least `minIdleSeconds`, non-Vapor CPU/memory/network utilization are each at or below the respective `headroom*Percent` value, and throttle state is `IdleDrain`, the effective ceiling is linearly ramped from `resourceLimits.*Percent` toward `boost*Percent` over `rampUpSeconds`. When any condition breaks, the ceiling ramps back to `resourceLimits.*Percent` over `rampDownSeconds` (the down-ramp must always be shorter than or equal to the up-ramp so activity resumption is non-invasive). Each `boost*Percent` must be greater than or equal to the corresponding `resourceLimits.*Percent`; lower values are treated as equal to the base ceiling (no boost).
+- [ ] P7-10 Document both groups in the root `README.md` **Configuration** table (keys, defaults, ranges, one-line semantics) and in `docs/architecture/data-flow.md` under a new "User resource budgets" section that captures the layering relationship between throttle state, auto-tuner, user ceilings, and idle boost.
+
+### Enforcement plumbing
+
+- [ ] P7-11 Add a `ResourceBudget` runtime component in `core/daemon` that (a) resolves effective ceilings every tick from global config plus any enabled profile overrides using MIN-lowering semantics from P5-5a, (b) samples device-level CPU/memory/network utilization and user-idle state once per second (same cadence as the throttle controller), (c) runs the idle-boost state machine, and (d) publishes the current effective ceilings and reason codes to the workgate, provider I/O shaper, memory compaction paths, and diagnostics.
+- [ ] P7-12 Extend the workgate to consume `ResourceBudget` effective ceilings: planner/hash/upload/download concurrency caps are the MIN of the throttle-state worker caps and the CPU-ceiling-derived cap (cpu_percent / 100 scaled against idle-drain baseline concurrency). When the effective CPU ceiling drops below the current in-flight concurrency, no new work is admitted but running work is allowed to reach its next slice checkpoint. Add unit tests for the admission-and-yield matrix across all throttle states and boost on/off conditions.
+- [ ] P7-13 Add a provider-neutral bandwidth shaper in `core/providers` (bytes-per-second token bucket with burst-aware refill) applied uniformly to upload and download paths. The shaper's rate is driven by the effective `bandwidthPercent` ceiling against a rolling link-capacity estimate maintained in `core/daemon`. The shaper is a read-only dependency for the provider trait; provider implementations must call a single acquire-permit-for-bytes API rather than implementing their own pacing. Add tests that verify effective bytes/sec stays within tolerance under sustained and bursty traffic.
+- [ ] P7-14 Add memory-ceiling enforcement by making existing bounded caches and pending-intent maps react to `ResourceBudget` pressure: when the daemon process RSS crosses the effective memory ceiling, storm compaction thresholds are lowered, `self_write_cache` TTL is reduced, and timeline/diagnostics buffers trim oldest-first. All knob movements are bounded and hysteresis-guarded to avoid flapping; document the knobs and their floors in `docs/architecture/data-flow.md`.
+- [ ] P7-15 Expose effective ceilings, current utilization, idle-boost state, and the human-readable reason for the active boost/no-boost decision through the XPC diagnostics channel (Phase 6 surface) and the app diagnostics panel. The UI must render: the three current caps, the three current utilizations, whether boost is active (and if not, why), and the user's configured values with a clear distinction between global and effective (post-profile-MIN) values.
+- [ ] P7-16 Add integration tests that drive full runtime loops against the filesystem reference provider (Phase 3) under representative scenarios: (a) steady active load with caps at defaults, (b) user-idle transition into boost and back out on HID input, (c) profile-override lowering of caps, (d) `idleBoost.enabled = false` disabling boost daemon-wide even with other profiles enabling it, (e) config reload mid-work without losing in-flight intents, (f) throttle-controller `Suspended` override of a boosted ceiling. Each scenario asserts measurable ceilings and absence of overshoot beyond documented tolerance.
 
 Exit gate:
 
-- Tuned behavior outperforms static defaults without oscillation or instability.
+- User-configurable `resourceLimits` and `idleBoost` exist end-to-end: persisted in `vapor.json`, layered via profile overrides with MIN-lowering semantics, enforced at workgate/bandwidth-shaper/memory-compaction layers, and surfaced in diagnostics.
+- Auto-tuning decisions respect effective ceilings in all throttle states and recover from ceiling changes within one tuning cycle without oscillation.
+- Idle-boost engages only when the device is genuinely idle with headroom, ramps up slowly and down quickly, and never preempts `Suspended`.
+- Integration tests cover the cross-product of throttle state, boost on/off, profile overrides, and config reload without intent loss.
 
 ## Phase 8 - Provider-system extensibility hardening
 

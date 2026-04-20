@@ -36,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Daemon startup now injects the selected provider through the provider trait boundary instead of hardcoding the Google Drive type inside core daemon orchestration.
 - Daemon runtime now advances durable non-reconcile work through bounded planner, hash, and upload stages under throttle/workgate caps instead of processing one leased intent at a time.
 - Roadmap now introduces a Phase 3 local filesystem reference provider that exercises every provider-neutral bidirectional mechanic against a loopback backing store, and defers Google Drive integration to Phase 9 so later runtime, safety, profile, XPC, auto-tuning, and provider-extensibility work stabilizes against the reference provider first.
+- Roadmap now specifies user-configurable `resourceLimits` (CPU/memory/bandwidth hard ceilings) and `idleBoost` (dynamic headroom expansion when the device is genuinely idle) as a layer over the internal throttle controller, with profile overrides resolving by MIN-lowering, enforcement at the workgate/bandwidth-shaper/memory-compaction layers, and diagnostics surfacing effective ceilings and boost reason codes.
 
 ### Fixed
 

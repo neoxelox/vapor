@@ -12,6 +12,7 @@
 - App process should not run heavy sync compute.
 - FSEvents callback path must stay lightweight.
 - Provider-specific behavior must stay out of core engine scheduling logic.
+- User-configured resource ceilings (`resourceLimits`) are hard caps on daemon CPU/memory/bandwidth; `idleBoost` may dynamically raise them only when the device is genuinely idle with measured headroom and never preempts a `Suspended` throttle decision. See `docs/architecture/data-flow.md` for the resolution/enforcement sequence.
 
 ## Initial module sketch
 

@@ -55,6 +55,10 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`.
 | `postIgnoreRules`    | `String` | Empty string                                        | Provides the final override rules that run after discovered ignore files.                |
 | `languageCode`       | `String` | `"en"`                                              | Selects the UI language catalog to load.                                                 |
 | `timelineEventLimit` | `Int`    | `1000`                                              | Caps the in-memory timeline length shown in diagnostics.                                 |
+| `resourceLimits`     | `Object` | `{ cpuPercent: 15, memoryPercent: 10, bandwidthPercent: 25 }` | Sets hard ceilings on daemon CPU (share of one core), device memory, and measured bandwidth. Honored by the throttle controller and auto-tuner. Profile overrides may only lower these values. |
+| `idleBoost`          | `Object` | See below                                           | Dynamically raises effective ceilings when the device is user-idle with measured resource headroom, ramping up slowly and down quickly. Setting `enabled: false` in any enabled profile disables boost daemon-wide. |
+
+`idleBoost` defaults: `enabled: true`, `minIdleSeconds: 600`, `headroomCpuPercent: 40`, `headroomMemoryPercent: 40`, `headroomBandwidthPercent: 40`, `boostCpuPercent: 50`, `boostMemoryPercent: 30`, `boostBandwidthPercent: 90`, `rampUpSeconds: 60`, `rampDownSeconds: 20`. Each `boost*Percent` must be `>=` the matching `resourceLimits.*Percent` (lower values are treated as equal to the base ceiling). Boost requires all of: throttle state `IdleDrain`, user-idle for at least `minIdleSeconds`, and non-Vapor utilization at or below each `headroom*Percent`.
 
 ### Ignore rules
 

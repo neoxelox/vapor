@@ -27,6 +27,7 @@ The service must default to auto-launch at login, stay low-impact under user loa
 - Bounded memory/backpressure is mandatory; storm paths must compact/coalesce instead of growing unbounded in-memory maps.
 - Performance acceptance budgets must be explicit and enforceable in script/CI gates (not narrative-only).
 - Multiple profiles must preserve exact sync-root safety and state isolation; same-folder fan-out must not widen scope or cross-contaminate provider/account state.
+- User-configured resource ceilings (`resourceLimits`) are hard caps on daemon CPU/memory/bandwidth and must never be overshot by the throttle controller or auto-tuner; `idleBoost` may only dynamically raise ceilings when the device is genuinely idle with measured headroom, and must never preempt a `Suspended` decision.
 
 ## 3) Product architecture
 
@@ -99,8 +100,8 @@ Recommended default conflict policy:
 - Durable at-least-once queue semantics.
 - Exponential backoff with jitter and rate-limit-aware slowdowns.
 - Local-only bounded metrics (60s windows) for load and sync outcomes.
-- Auto-tuning cadence 60-120s, one safe adjustment per cycle.
-- Diagnostics must always expose the current throttle reason and sync blockers.
+- Auto-tuning cadence 60-120s, one safe adjustment per cycle, always bounded by the user resource ceilings defined in §7.2.
+- Diagnostics must always expose the current throttle reason, sync blockers, effective user resource ceilings, current utilization, and idle-boost state with a human reason.
 
 ## 7.1) Initial performance acceptance SLOs
 
@@ -110,6 +111,23 @@ Recommended default conflict policy:
 - FSEvents callback remains hot-path safe (p99 <= 2ms) and performs no DB/hash/network work.
 - Event/intents memory is bounded with deterministic compaction/backpressure behavior under storms.
 - After pressure clears, backlog convergence meets benchmark-defined target windows.
+- Effective user resource ceilings (§7.2) are honored under every scenario above; no measured overshoot beyond documented tolerance.
+
+## 7.2) User resource budgets and idle boost
+
+Users configure two layered groups in `vapor.json` (globally, with per-profile overrides):
+
+- `resourceLimits` — hard ceilings on daemon-process CPU, memory, and network bandwidth (`cpuPercent`, `memoryPercent`, `bandwidthPercent`). These are hard caps, not targets. The throttle controller and auto-tuner must never drive the daemon above them.
+- `idleBoost` — opt-in dynamic headroom that raises effective ceilings when all of the following hold: user-idle for at least `minIdleSeconds`, non-Vapor utilization at or below each `headroom*Percent`, and throttle state is `IdleDrain`. While active, effective ceilings linearly ramp toward `boost*Percent` over `rampUpSeconds`; any condition break ramps back to base ceilings over `rampDownSeconds` (always <= `rampUpSeconds` so activity resumption is non-invasive).
+
+Layering rules:
+
+- User ceilings are a ceiling on top of the existing throttle controller. User ceilings never relax the controller; a `Suspended` decision always wins.
+- Auto-tuning (§7) operates strictly inside the current effective ceilings and must react to ceiling changes within one tuning cycle without oscillation.
+- Profile overrides resolve by taking the MIN with global values (overrides may only *lower* effective ceilings); `idleBoost.enabled = false` in any enabled profile disables boost daemon-wide.
+- Enforcement surfaces: workgate concurrency caps (CPU), provider-neutral bandwidth shaper (network), bounded caches and compaction thresholds that react to RSS (memory). Diagnostics expose current effective ceilings, utilization, and the boost reason code.
+
+Defaults are deliberately conservative (invisible-first principle); advanced users may relax them per profile or per machine.
 
 ## 8) Milestone order
 
@@ -122,7 +140,7 @@ Recommended default conflict policy:
 7. Conflict/tombstone safety and deterministic race handling hardening, validated against the filesystem reference provider.
 8. Multi-profile provider/account model with layered settings, profile isolation, and same-folder multi-provider fan-out.
 9. XPC contract hardening and full diagnostics UX.
-10. Auto-tuning and performance-budget enforcement.
+10. Auto-tuning and user resource-budget enforcement (hard CPU/memory/bandwidth ceilings plus idle-boost dynamic headroom, layered over the existing throttle controller).
 11. Provider-system extensibility hardening (provider-ready compatibility and performance for future providers, with the filesystem reference provider serving as the contract-test harness).
 12. Google Drive provider integration on top of the already-validated provider-neutral runtime (deferred until the engine, abstractions, and acceptance criteria are stable).
 13. Optional advanced safeguards and enhancements.
