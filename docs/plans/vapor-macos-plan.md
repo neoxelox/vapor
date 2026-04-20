@@ -54,9 +54,9 @@ The service must default to auto-launch at login, stay low-impact under user loa
 ## 4) Auto-launch and lifecycle
 
 - Default ON at install/first run.
-- LaunchAgent as per-user runtime anchor (`RunAtLoad=true`, controlled `KeepAlive`).
+- LaunchAgent as per-user runtime anchor (`RunAtLoad=true`, `KeepAlive=false`); see `docs/operations/launchagent-policy.md` for the full plist template and the crash-loop interaction contract.
 - Optional SMAppService integration for modern login-item UX.
-- Crash-loop safety: exponential restart delay and clear paused-state diagnostics.
+- Crash-loop safety is owned by the daemon and app lifecycle coordinator, not `launchd`: exponential restart delay, durable `consecutive_crashes` counter, and `CrashLoopPaused` state after 5 crashes in 10 minutes with a reasoned menubar surface.
 - Toggle semantics:
   - ON: enable launch mechanism and ensure daemon running.
   - OFF: disable launch mechanism and optionally stop daemon now.
