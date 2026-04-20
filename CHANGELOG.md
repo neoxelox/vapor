@@ -35,6 +35,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Pre-GA daemon state now rejects older on-disk schemas instead of carrying forward compatibility shims, and removes an obsolete deferred-reconcile helper API.
 - Daemon startup now injects the selected provider through the provider trait boundary instead of hardcoding the Google Drive type inside core daemon orchestration.
 - Daemon runtime now advances durable non-reconcile work through bounded planner, hash, and upload stages under throttle/workgate caps instead of processing one leased intent at a time.
+- Roadmap now introduces a Phase 3 local filesystem reference provider that exercises every provider-neutral bidirectional mechanic against a loopback backing store, and defers Google Drive integration to Phase 9 so later runtime, safety, profile, XPC, auto-tuning, and provider-extensibility work stabilizes against the reference provider first.
 
 ### Fixed
 

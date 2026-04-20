@@ -15,7 +15,7 @@ The service must default to auto-launch at login, stay low-impact under user loa
 2. Opportunistic sync: aggressively defer under pressure.
 3. Durable correctness: never lose intent state, recover after crashes/restarts.
 4. Best-effort freshness: seconds when idle, minutes when busy.
-5. Provider-extensible engine: Google Drive first, with first release focused on provider-ready architecture and additional providers later.
+5. Provider-extensible engine: Google Drive is the MVP external cloud target, but every provider-neutral mechanic (error taxonomy, op-id correlation, self-write cache, remote-to-local apply, durable provider cursor) is implemented and validated against a local filesystem reference provider first; first release focuses on provider-ready architecture with Google Drive integration deferred until the engine and abstractions are stable.
 
 ## 2) Hard constraints
 
@@ -43,7 +43,9 @@ The service must default to auto-launch at login, stay low-impact under user loa
    - Local metrics + impact-first auto-tuning.
 3. Providers (`core/providers`, Rust)
      - Provider trait + capabilities.
-     - `provider_gdrive` first; harden provider abstractions for future adapters (for example iCloud, S3, R2, Proton Drive) without shipping extra providers in first release.
+     - `provider_filesystem` is the pre-GA default and reference provider: it uses a second local directory as the remote side so bidirectional flow, self-write cache, op-id correlation, and the provider-neutral error taxonomy are exercised against a deterministic backing store before any external provider is introduced (see milestone 6).
+     - `provider_gdrive` is the first external cloud target but is deliberately deferred (see milestone 12) so it integrates into an already-validated runtime.
+     - Later adapters (for example iCloud, S3, R2, Proton Drive) are enabled by the extensibility hardening pass (see milestone 11) without shipping extra providers in first release.
      - Provider auth/account bindings must be profile-scoped so one device can target multiple providers or multiple accounts safely.
 4. Shared contracts (`core/shared`)
    - App/daemon versioned contract models and shared schema types.
@@ -116,13 +118,14 @@ Recommended default conflict policy:
 3. Native app bundle/distribution foundation (script-first packaging, signing, notarization path).
 4. Low-impact local engine core plus durability substrate (durable queue, retries, storm deferral, interruptible reconcile, and bounded backpressure).
 5. Runtime integration and hardening pass: compose the real daemon loop, close local safety/privacy gaps, remove pre-GA transitional code, and prepare bounded concurrency plumbing for later provider-backed worker execution.
-6. Google Drive provider with bidirectional event flow on top of durable substrate, including real provider-backed planner/hash/upload execution.
-7. Conflict/tombstone safety and deterministic race handling hardening.
+6. Local filesystem reference provider and bidirectional runtime shell: replace the Phase 2.5 staged executor simulator with real provider-backed planner/hash/upload/download execution against a loopback filesystem provider, exercising every provider-neutral bidirectional mechanic (self-write cache, remote-to-local apply, op-id correlation, provider-neutral error taxonomy, durable provider cursor) before any external cloud provider is introduced.
+7. Conflict/tombstone safety and deterministic race handling hardening, validated against the filesystem reference provider.
 8. Multi-profile provider/account model with layered settings, profile isolation, and same-folder multi-provider fan-out.
 9. XPC contract hardening and full diagnostics UX.
 10. Auto-tuning and performance-budget enforcement.
-11. Provider-system extensibility hardening (provider-ready compatibility and performance for future providers, without shipping additional providers in first release).
-12. Optional advanced safeguards and enhancements.
+11. Provider-system extensibility hardening (provider-ready compatibility and performance for future providers, with the filesystem reference provider serving as the contract-test harness).
+12. Google Drive provider integration on top of the already-validated provider-neutral runtime (deferred until the engine, abstractions, and acceptance criteria are stable).
+13. Optional advanced safeguards and enhancements.
 
 ## 9) Definition of done (applies to every milestone)
 

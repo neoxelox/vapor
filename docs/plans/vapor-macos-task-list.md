@@ -136,23 +136,40 @@ Exit gate:
 - App controls shown to users are real daemon-backed controls, not placeholder/demo state transitions.
 - Core daemon orchestration is provider-neutral, pre-GA backcompat shims are removed, and the runtime keeps staged admission/dispatch bounded under explicit caps.
 
-## Phase 3 - Google Drive provider plus bidirectional flow
+## Phase 3 - Local filesystem provider and bidirectional runtime shell
 
-- [ ] P3-1 Implement provider trait/capabilities and provider-neutral error taxonomy.
-- [ ] P3-2 Implement `provider_gdrive` auth/refresh + remote root initialization.
-- [ ] P3-2a Add authenticated Google Drive folder lookup/create for the configured `cloudSyncDirectory` before regular sync starts.
-- [ ] P3-2b Block normal sync startup until the configured cloud root exists or the provider returns an actionable initialization error.
-- [ ] P3-3 Implement upload paths (multipart small, resumable large).
-- [ ] P3-3b Replace the current timed staged executor with real planner/hash/upload workers backed by provider upload execution and bounded by workgate/throttle caps across available cores.
-- [ ] P3-4 Implement remote changes polling (low frequency, throttle-aware).
-- [ ] P3-5 Implement remote-to-local apply pipeline using durable queue/state intents.
-- [ ] P3-6 Implement self-write loop prevention (`self_write_cache`, op IDs, TTL rules).
-- [ ] P3-7 Add adaptive remote polling cadence/request budgeting tied to throttle state and recent change rates.
-- [ ] P3-8 Add provider metadata caching and resumable upload chunk auto-sizing to improve throughput without impact spikes.
+Introduces a loopback filesystem provider whose "remote" side is a second local directory. The phase has three purposes:
+
+1. Replace the Phase 2.5 timed staged executor simulator with real provider-backed planner/hash/upload/download execution so the runtime is exercised end-to-end without any external dependency.
+2. Implement every provider-neutral bidirectional mechanic the core engine needs (provider-neutral error taxonomy, op-id correlation, self-write cache, remote-to-local apply pipeline, durable provider cursor) against a deterministic reproducible backing store before any external cloud provider is introduced.
+3. Serve as the reference provider for Phase 8 (provider-system extensibility hardening) and the default integration-test harness for Phases 4 through 8.
+
+Scope boundary with Phase 4: this phase must make bidirectional flow work on the happy path and must not infinite-loop or lose data. Full race and conflict hardening (simultaneous edits, rename+modify, delete/restore, tombstone corruption recovery) belongs to Phase 4 and is validated against this provider.
+
+- [ ] P3-1 Define the provider trait surface in `core/providers` and the provider-neutral error taxonomy in `core/shared`. The trait must expose `enumerate(prefix)`, `stat(remote_path)`, `upload(local_path, remote_path, op_id)`, `download(remote_path, local_path, op_id)`, `delete(remote_path, op_id)`, `rename(remote_old, remote_new, op_id)`, and a changes-feed producer gated by `ProviderCapabilities::supports_remote_changes_feed`. The error taxonomy must classify failures as `Transient`, `RateLimited`, `Authentication`, `PreconditionFailed`, `NotFound`, and `Permanent`; provider-specific types must not leak into `core/daemon` or `core/shared`.
+- [ ] P3-2 Add a filesystem-provider configuration surface. Persist the selected provider kind in `vapor.json` as a new `provider` field (default `filesystem` pre-GA; `google_drive` accepted but inert until Phase 9). When `provider = "filesystem"`, interpret `cloudSyncDirectory` as a local absolute path (the filesystem provider's remote root). Document this reinterpretation in `docs/architecture/system-overview.md` and the root `README.md` **Configuration** section, and mirror the new field in `apps/macos/Sources/VaporCore/VaporConstants.swift` and `core/shared/src/constants.rs`.
+- [ ] P3-3 Implement `core/providers/src/filesystem/` as a full `Provider` implementation backed by the local filesystem:
+  - Atomic writes via temp-file-plus-rename within the remote root; op-id tagging via extended attributes when supported, with a side-file fallback.
+  - `enumerate` streams entries with size, mtime, and lazy content-hash.
+  - `stat` returns canonical metadata; content-hash is optional and computed on demand.
+  - Errors map deterministically onto the P3-1 error taxonomy.
+  - Strict scope enforcement: the provider refuses operations outside its configured remote root, including symlink escape, relative traversal, and device crossing.
+- [ ] P3-4 Implement a filesystem-backed remote changes feed for the provider. Use FSEvents on the configured remote root with the same low-impact callback discipline as the local watcher and emit `ProviderChangeEvent` items with a monotonic cursor/sequence. The feed must persist the last-applied cursor in the durable state DB and resume from it on restart without re-delivering already-applied events.
+- [ ] P3-5 Replace the Phase 2.5 timed staged executor with real planner/hash/upload/download workers driven by the provider and bounded by workgate/throttle caps. Keep the existing `WorkClass` topology (Planner, Hash, Upload, Reconcile) and add `WorkClass::Download`; preserve slice-budget interruptibility so `ThrottleState::Suspended` halts new stage admission while running work either completes cleanly or yields at the next checkpoint.
+- [ ] P3-6 Implement the remote-to-local apply pipeline. Provider changes flow into `PendingIntentRecord` entries tagged `IntentSource::Remote`, the provider cursor is carried through durable state, and the pipeline is planner-stage (stat + compare) → download-stage (atomic write, mtime preservation, op-id tagging) → completion. Persist the cursor advance only on durable intent completion so a crash never causes remote events to be skipped.
+- [ ] P3-7 Implement self-write loop prevention (`self_write_cache`). On every provider write (upload, download, delete, rename) the daemon records `(remote_path, op_id, content_hash, expiry)` in a time-bounded and size-bounded in-memory cache. Incoming provider change events are matched against the cache and hits are suppressed before they become intents. Primary correlator is the provider's op-id tag (xattr or side-file); content-hash is the fallback. Default TTL and bound are defined in `core/shared/src/constants.rs`; the eviction policy is documented in `docs/architecture/data-flow.md`.
+- [ ] P3-8 Apply ensure-remote-root semantics to the filesystem provider. If the configured remote root is missing, create it before regular sync work proceeds (mirroring P2-2e local-root behavior). If the remote root is invalid (not a directory, no permission, escapes a safe area) the daemon must refuse to start normal sync and must surface an actionable configuration error the app can render.
+- [ ] P3-9 Wire provider selection into the daemon entrypoint (`core/daemon/src/main.rs`). Accept the provider kind from resolved configuration/environment, default to `filesystem` pre-GA, validate at startup, and fail fast with a classified configuration error on invalid input. Keep `GoogleDriveProvider` compiled in as an inert option so the trait surface and capability model remain visible and compilable, but do not allow the daemon to run against it until Phase 9.
+- [ ] P3-10 Add integration tests that drive the composed daemon through the filesystem provider. Minimum coverage: local→remote propagation with real hashing and real provider writes; remote→local propagation through the provider changes feed; self-write loop prevention verified by asserting no echo-upload occurs after a local write is applied remotely; restart recovery with in-flight uploads and downloads with no intent loss and no duplicated writes; throttle transitions during real work (Suspended halts new stage admission; running work completes or yields cleanly); scope safety (the filesystem provider refuses to touch paths outside its remote root under symlink-escape and traversal inputs).
+- [ ] P3-11 Add microbench/regression coverage for provider-backed execution. A 10,000-file fixture synced end-to-end through the filesystem provider must stay within defined engine budgets; stage admission under burst must not serialize into a hot spot; remote-to-local apply cost must scale linearly with changed-file count.
+- [ ] P3-12 Update `docs/architecture/system-overview.md`, `docs/architecture/data-flow.md`, `docs/plans/vapor-macos-plan.md`, the root `README.md` **Configuration** section, and the `CHANGELOG.md` `Unreleased` section to describe the filesystem provider as the pre-GA default, document the `provider` config field and the `cloudSyncDirectory` reinterpretation, and state that Phases 4 through 8 are validated against this provider before Phase 9 introduces Google Drive.
 
 Exit gate:
 
-- Bidirectional Drive sync works end-to-end under normal conditions with durable recovery and throttle-safe provider behavior.
+- The daemon runs a complete bidirectional sync loop end-to-end against the filesystem provider, with no simulator in the hot path.
+- Every provider-neutral bidirectional mechanic required for correctness (self-write cache, remote-to-local apply, provider-neutral error taxonomy, op-id correlation, durable provider cursor) is implemented and exercised by integration tests.
+- The provider trait surface is provider-neutral and ready to accept Google Drive in Phase 9 without any core-engine changes.
+- The Phase 2.5 timed staged executor simulator is removed from the production runtime.
 
 ## Phase 4 - Bidirectional safety, conflicts, and deletion semantics
 
@@ -229,12 +246,29 @@ Exit gate:
 
 - Engine is provider-ready (compatibility + performance validated) without shipping additional providers in first release.
 
-## Phase 9 - Optional safeguards and advanced features
+## Phase 9 - Google Drive provider
 
-- [ ] P9-1 Add active-coding detection (permissioned) with heuristic fallback.
-- [ ] P9-2 Add folder priority classes and temporary flush boost controls.
-- [ ] P9-3 Add mass-change/ransomware guard with pause + alert workflow.
-- [ ] P9-4 Add richer diagnostics history and support export bundle.
+Integrates Google Drive as the first external cloud provider on top of the provider-neutral runtime already validated against the Phase 3 filesystem provider. This phase introduces no new bidirectional mechanics; those were finalized in Phases 3 and 4. It is deliberately deferred until Phases 4 through 8 stabilize the engine so Google Drive integration does not overlap with runtime or provider-abstraction evolution.
+
+- [ ] P9-1 Implement `provider_gdrive` OAuth (PKCE) auth, Keychain-backed token storage, and refresh handling per `docs/operations/provider-auth-operations.md`; degraded-auth behavior must follow the runbook.
+- [ ] P9-2 Add authenticated Google Drive folder lookup/create for the configured `cloudSyncDirectory` before regular sync starts.
+- [ ] P9-3 Block normal sync startup until the Google Drive cloud root exists or the provider returns an actionable initialization error.
+- [ ] P9-4 Implement upload paths (multipart small, resumable large) behind the provider trait, with chunked retry and rate-limit awareness mapped onto the Phase 3 error taxonomy.
+- [ ] P9-5 Implement remote changes polling using the Google Drive changes endpoint (low frequency, throttle-aware), emitting `ProviderChangeEvent` items through the changes-feed producer already consumed by the daemon since Phase 3.
+- [ ] P9-6 Add adaptive remote polling cadence and request budgeting tied to throttle state and recent change rates.
+- [ ] P9-7 Add provider metadata caching and resumable upload chunk auto-sizing to improve throughput without impact spikes.
+- [ ] P9-8 Flip `GoogleDriveProvider` from inert to selectable (via the `provider` config field introduced in P3-2), gated on successful provider contract test runs from Phase 8.
+
+Exit gate:
+
+- Bidirectional Google Drive sync works end-to-end on the runtime validated in Phases 3 through 8, with no Google-Drive-specific regressions to scope safety, durability, throttle behavior, or low-impact guarantees.
+
+## Phase 10 - Optional safeguards and advanced features
+
+- [ ] P10-1 Add active-coding detection (permissioned) with heuristic fallback.
+- [ ] P10-2 Add folder priority classes and temporary flush boost controls.
+- [ ] P10-3 Add mass-change/ransomware guard with pause + alert workflow.
+- [ ] P10-4 Add richer diagnostics history and support export bundle.
 
 Exit gate:
 

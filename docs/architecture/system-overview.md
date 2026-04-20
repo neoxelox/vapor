@@ -19,7 +19,7 @@
 vapor/
   apps/macos      # SwiftUI shell + settings + menubar + auth UI
   core/daemon     # Rust engine + queue/state + throttle + reconcile
-  core/providers  # provider_gdrive, provider_s3 (planned)
+  core/providers  # provider_filesystem (pre-GA reference and integration-test provider), provider_gdrive (deferred to a later milestone), additional providers (future)
   core/shared     # XPC models, error taxonomy, policy models
   docs            # planning, architecture, operations, performance
 ```
@@ -28,5 +28,6 @@ vapor/
 
 1. app + daemon lifecycle and status wiring
 2. low-impact local ingest and scheduling
-3. provider integration and bidirectional safety
-4. durability and upgrade hardening
+3. filesystem reference provider and bidirectional runtime shell (provider-neutral mechanics validated against a loopback local provider)
+4. conflict/tombstone safety, profile model, and XPC/diagnostics
+5. external cloud provider integration (Google Drive, deferred) and durability/upgrade hardening
