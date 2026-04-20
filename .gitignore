@@ -57,3 +57,10 @@ apps/macos/Sources/VaporCore/Resources/locales/
 # SQLite sidecar files (allow explicit DB files if needed)
 *.sqlite-wal
 *.sqlite-shm
+
+# AI tooling
+.claude
+.codex
+.opencode
+.cursor
+!.cursor/environment.json
