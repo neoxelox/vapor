@@ -218,7 +218,7 @@ fn requires_hash(kind: PendingIntentKind) -> bool {
 fn stage_elapsed(started_at: SystemTime, now: SystemTime, stage_duration: Duration) -> bool {
     now.duration_since(started_at)
         .map(|elapsed| elapsed >= stage_duration)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 fn max_in_flight_items(workgate: WorkgateSnapshot) -> usize {

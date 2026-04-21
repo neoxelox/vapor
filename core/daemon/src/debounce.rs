@@ -180,7 +180,7 @@ impl DebounceLoop {
 
         match now.duration_since(last_tick_at) {
             Ok(elapsed) => elapsed >= self.tick_interval,
-            Err(_) => false,
+            Err(_) => true,
         }
     }
 
@@ -473,6 +473,25 @@ mod tests {
         recorder.with_state(|maps| {
             assert_eq!(maps.pending_event_count(), 0);
         });
+    }
+
+    #[test]
+    fn tick_is_due_fires_after_system_clock_rewind_instead_of_stalling() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let path = watch_root.join("src/main.rs");
+        let mut maps = bounded_maps(&watch_root);
+        let mut loop_state = DebounceLoop::default();
+
+        maps.record_event(fs_event(path.clone(), FsEventKind::Modified, 0));
+        loop_state.run_tick(&mut maps, timestamp(10_000));
+
+        let rewound = loop_state.run_tick(&mut maps, timestamp(1_000));
+        let _ = rewound;
+        assert_eq!(
+            loop_state.last_tick_at(),
+            Some(timestamp(1_000)),
+            "clock rewind must update the last tick timestamp so later ticks still progress",
+        );
     }
 
     #[test]

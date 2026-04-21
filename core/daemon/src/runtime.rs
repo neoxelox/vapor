@@ -248,7 +248,7 @@ impl DaemonRuntime {
             .map(|last| {
                 now.duration_since(last)
                     .map(|elapsed| elapsed >= self.throttle_sample_interval)
-                    .unwrap_or(false)
+                    .unwrap_or(true)
             })
             .unwrap_or(true);
         if should_sample {

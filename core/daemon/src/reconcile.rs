@@ -132,7 +132,11 @@ impl ReconcileController {
 
         let reason = if throttle_state != ThrottleState::IdleDrain {
             Some(ReconcilePauseReason::ThrottleNoLongerIdle)
-        } else if now.duration_since(running.slice_started_at).ok()? >= self.slice_budget {
+        } else if now
+            .duration_since(running.slice_started_at)
+            .unwrap_or(self.slice_budget)
+            >= self.slice_budget
+        {
             Some(ReconcilePauseReason::SliceBudgetExpired)
         } else {
             return None;
@@ -295,6 +299,39 @@ mod tests {
 
         assert_eq!(pause.reason, ReconcilePauseReason::ThrottleNoLongerIdle);
         assert_eq!(scheduler.pending_count(), 1);
+    }
+
+    #[test]
+    fn checkpoint_pauses_on_system_clock_rewind_instead_of_running_without_bound() {
+        let root = PathBuf::from("/tmp/vapor-root/project");
+        let mut scheduler = KeyedSupersedingScheduler::default();
+        scheduler.upsert_intent(
+            root.clone(),
+            PendingIntentKind::ReconcileSubtree,
+            timestamp(1_000),
+        );
+        let mut workgate = idle_reconcile_gate();
+        let mut controller = ReconcileController::with_slice_budget(Duration::from_secs(1));
+
+        controller
+            .try_start_next(
+                &mut scheduler,
+                &mut workgate,
+                ThrottleState::IdleDrain,
+                timestamp(1_000),
+            )
+            .expect("start reconcile");
+
+        let pause = controller
+            .checkpoint(
+                &mut scheduler,
+                &mut workgate,
+                ThrottleState::IdleDrain,
+                timestamp(500),
+            )
+            .expect("reconcile should pause after clock rewind");
+
+        assert_eq!(pause.reason, ReconcilePauseReason::SliceBudgetExpired);
     }
 
     #[test]
