@@ -65,7 +65,6 @@ final class AppShellViewModel: ObservableObject {
     self.localizationStore = localizationStore
     self.configuration = resolvedConfiguration
     self.localization = localizationStore.resolve(languageCode: resolvedConfiguration.languageCode)
-    self.configuration.languageCode = localization.effectiveLanguageCode
 
     state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
     state.useGitIgnore = self.configuration.useGitIgnore
@@ -81,16 +80,7 @@ final class AppShellViewModel: ObservableObject {
       state.syncState = .error
     }
 
-    if resolvedConfigurationLoadIssue == nil {
-      do {
-        try self.configurationStore.save(self.configuration)
-      } catch {
-        logger.error(
-          "Failed to persist configuration during startup",
-          metadata: ["error": String(describing: error)]
-        )
-      }
-    } else if let resolvedConfigurationLoadIssue {
+    if let resolvedConfigurationLoadIssue {
       logger.error(
         "Preserved unreadable vapor configuration on startup",
         metadata: [
@@ -446,7 +436,6 @@ final class AppShellViewModel: ObservableObject {
 
   private func refreshLocalization() {
     localization = localizationStore.resolve(languageCode: configuration.languageCode)
-    configuration.languageCode = localization.effectiveLanguageCode
     state.languageCode = configuration.languageCode
     state.effectiveLanguageCode = localization.effectiveLanguageCode
   }

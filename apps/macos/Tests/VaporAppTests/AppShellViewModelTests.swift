@@ -38,6 +38,33 @@ func ignoreRuleDraftsStartFromConfigurationAndTrackPendingChanges() throws {
 
 @MainActor
 @Test
+func startupPreservesUserSelectedLanguageCodeEvenWhenCatalogFallsBackToEnglish() throws {
+  let fileManager = FileManager.default
+  let rootURL = makeTemporaryRoot(fileManager: fileManager)
+  defer { try? fileManager.removeItem(at: rootURL) }
+
+  let configurationStore = VaporConfigurationStore(
+    fileManager: fileManager,
+    environment: ["VAPOR_DIR": rootURL.path]
+  )
+  let configuration = VaporConfiguration(languageCode: "zz-unavailable-locale")
+  try configurationStore.save(configuration)
+
+  let viewModel = AppShellViewModel(
+    daemonLifecycleManager: .placeholder(),
+    configurationStore: configurationStore,
+    configuration: configuration
+  )
+
+  #expect(viewModel.state.languageCode == "zz-unavailable-locale")
+  #expect(viewModel.state.effectiveLanguageCode == "en")
+
+  let persisted = configurationStore.load()
+  #expect(persisted.languageCode == "zz-unavailable-locale")
+}
+
+@MainActor
+@Test
 func saveIgnoreRuleSettingsPersistsConfigurationAndRefreshesLifecycleFactory() throws {
   let fileManager = FileManager.default
   let rootURL = makeTemporaryRoot(fileManager: fileManager)
