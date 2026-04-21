@@ -143,7 +143,7 @@ impl ReconcileController {
         }?;
 
         let running = self.running.take().expect("running reconcile disappeared");
-        workgate.release(running.permit);
+        release_permit_or_log(workgate, running.permit, "reconcile pause");
         let disposition = requeue_claimed_reconcile(scheduler, &running.root, now);
         Some(ReconcilePause {
             root: running.root,
@@ -160,7 +160,7 @@ impl ReconcileController {
         workgate: &mut ThrottleWorkgate,
     ) -> Option<ReconcileCompletion> {
         let running = self.running.take()?;
-        workgate.release(running.permit);
+        release_permit_or_log(workgate, running.permit, "reconcile success");
         let disposition = scheduler.complete_running(&running.root)?;
         let boundary_cleared = matches!(disposition, CompletionDisposition::Removed)
             && maps.clear_compacted_subtree_boundary(&running.root);
@@ -183,6 +183,19 @@ fn requeue_claimed_reconcile(
     scheduler
         .complete_running(root)
         .expect("running reconcile intent should exist while requeueing")
+}
+
+fn release_permit_or_log(workgate: &mut ThrottleWorkgate, permit: WorkPermit, context: &str) {
+    if !workgate.release(permit) {
+        crate::logging::warning(
+            "Workgate permit release was rejected",
+            &[
+                ("context", context.to_string()),
+                ("permit_class", format!("{:?}", permit.class)),
+                ("permit_id", permit.id.to_string()),
+            ],
+        );
+    }
 }
 
 #[cfg(test)]

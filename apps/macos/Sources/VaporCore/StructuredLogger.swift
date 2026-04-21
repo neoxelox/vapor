@@ -36,6 +36,7 @@ public final class StructuredLogger: @unchecked Sendable {
   private let minLevel: VaporLogLevel
   private let fileURL: URL
   private let fileManager: FileManager
+  private var cachedFileHandle: FileHandle?
 
   public convenience init(
     component: String,
@@ -113,17 +114,38 @@ public final class StructuredLogger: @unchecked Sendable {
       "\(timestamp) [\(levelLabel)] (\(sanitize(component))): \(safeMessage).\(metadataSuffix)\n"
     let data = Data(line.utf8)
 
-    StructuredLogger.writeQueue.async { [fileURL, data] in
-      guard let fileHandle = try? FileHandle(forWritingTo: fileURL) else {
+    StructuredLogger.writeQueue.async { [weak self, fileURL, data] in
+      guard let self else {
         return
       }
 
-      defer {
-        try? fileHandle.close()
+      if self.writeReusingCachedHandle(data: data) {
+        return
       }
 
-      fileHandle.seekToEndOfFile()
-      fileHandle.write(data)
+      guard let fresh = try? FileHandle(forWritingTo: fileURL) else {
+        self.cachedFileHandle = nil
+        return
+      }
+
+      self.cachedFileHandle = fresh
+      _ = self.writeReusingCachedHandle(data: data)
+    }
+  }
+
+  private func writeReusingCachedHandle(data: Data) -> Bool {
+    guard let handle = cachedFileHandle else {
+      return false
+    }
+
+    do {
+      try handle.seekToEnd()
+      try handle.write(contentsOf: data)
+      try? handle.synchronize()
+      return true
+    } catch {
+      cachedFileHandle = nil
+      return false
     }
   }
 

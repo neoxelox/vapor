@@ -261,7 +261,7 @@ fn is_key_config_path(path: &Path) -> bool {
             ".gitignore",
             ".swiftformat",
             ".swiftlint.yml",
-            ".vaporignore",
+            constants::filtering::VAPOR_IGNORE_FILE_NAME,
             "cargo.toml",
             "dockerfile",
             "info.plist",
@@ -269,7 +269,7 @@ fn is_key_config_path(path: &Path) -> bool {
             "makefile",
             "package.json",
             "tsconfig.json",
-            "vapor.json",
+            constants::runtime::CONFIGURATION_FILE_NAME,
         ],
     ) || extension_matches(
         path,
