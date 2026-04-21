@@ -27,12 +27,21 @@ In flight and coming next:
 - 🧩 Multiple sync profiles let one folder flow to several clouds or keep separate setups neatly isolated.
 - 🛡 Conflict-safe behavior with deterministic outcomes (keep both copies, never silent overwrite).
 - ⏸️ Pressure-aware throttle modes that adapt sync intensity to real device load.
+- 🎚 Configurable hard caps on its share of CPU, memory, and network so streaming, browsing, and other apps always have room.
+- 🌙 Smart idle boost: Vapor catches up faster when your device is genuinely idle, and yields the moment you come back.
 - 📈 Clear diagnostics with status reasons, queue visibility, and live activity timeline.
 - 🌩 Storm-aware scheduling and resilient recovery keep big change bursts under control.
 
-## Cloud Providers
+## Providers
 
-- [Google Drive](https://workspace.google.com/intl/es/products/drive) (current MVP target)
+Available now:
+
+- Soon 🏗️
+
+In flight and coming next:
+
+- [File System](https://github.com/neoxelox/vapor/blob/main/core/providers/provider_filesystem.rs)
+- [Google Drive](https://workspace.google.com/intl/es/products/drive)
 
 ## Benchmarks
 
