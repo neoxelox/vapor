@@ -171,26 +171,50 @@ public final class StructuredLogger: @unchecked Sendable {
 
   private func isSensitiveKey(_ key: String) -> Bool {
     let normalized = key.lowercased()
-    return [
-      "authorization",
-      "token",
-      "secret",
-      "password",
-      "cookie",
-      "keychain",
-      "credential",
-      "auth_header",
-    ].contains(where: { normalized.contains($0) })
+    return StructuredLogger.sensitiveKeyMarkers.contains(where: { normalized.contains($0) })
   }
 
   private func redactInlineSecrets(in raw: String) -> String {
     let normalized = raw.lowercased()
-    if normalized.contains("bearer ") || normalized.contains("token=")
-      || normalized.contains("authorization:")
-    {
+    if StructuredLogger.inlineSecretMarkers.contains(where: { normalized.contains($0) }) {
       return "[REDACTED]"
     }
 
     return raw
   }
+
+  static let sensitiveKeyMarkers: [String] = [
+    "api_key",
+    "apikey",
+    "auth_header",
+    "authorization",
+    "client_secret",
+    "cookie",
+    "credential",
+    "keychain",
+    "oauth",
+    "password",
+    "refresh",
+    "secret",
+    "session",
+    "token",
+  ]
+
+  static let inlineSecretMarkers: [String] = [
+    "access_token=",
+    "api_key=",
+    "api-key:",
+    "apikey=",
+    "authorization:",
+    "bearer ",
+    "client_secret=",
+    "id_token=",
+    "password=",
+    "refresh_token=",
+    "secret=",
+    "session=",
+    "set-cookie:",
+    "token=",
+    "x-api-key:",
+  ]
 }

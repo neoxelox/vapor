@@ -50,6 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Durable state `system_time_to_millis` now validates `u128 → i64` conversion symmetrically with the read-path range check, eliminating silent truncation for far-future wall-clock timestamps.
 - Durable lease recovery now resets `attempt_count` for leases older than `LEASE_TIMEOUT_MILLIS` (15 minutes) so stale crash-recovered leases don't carry forward inflated retry counts.
 - Runtime paths now create private directories and files with restrictive modes at creation time via `DirBuilder::mode` (Rust) and `createDirectory/createFile attributes:` (Swift), including every intermediate directory under the vapor root; the previous two-step create-then-chmod pattern left intermediates at umask defaults and opened a TOCTOU window where the SQLite DB and `vapor.json` were briefly world-readable.
+- Log redaction now covers the expanded auth/secret shape set across both daemon and app loggers, matching inline markers for `access_token=`, `refresh_token=`, `api_key=`, `X-Api-Key:`, `client_secret=`, `set-cookie:`, `id_token=`, `session=`, `password=`, and structured metadata keys containing `api_key`, `client_secret`, `refresh`, `oauth`, or `session`.
 
 ## [0.2.0-alpha.3] - 2026-03-10
 

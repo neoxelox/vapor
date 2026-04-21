@@ -50,6 +50,62 @@ func loggerRedactsSensitiveMetadataAndAppliesPrivateLogPermissions() throws {
 }
 
 @Test
+func loggerRedactsExpandedInlineSecretShapesAcrossAuthProviders() throws {
+  let fileManager = FileManager.default
+  let vaporDirectoryURL = fileManager.temporaryDirectory
+    .appendingPathComponent("vapor-logger-tests")
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  defer { try? fileManager.removeItem(at: vaporDirectoryURL) }
+
+  let logger = StructuredLogger(
+    component: "tests",
+    minLevel: .debug,
+    environment: ["VAPOR_DIR": vaporDirectoryURL.path],
+    fileManager: fileManager
+  )
+
+  let redactedInlineSecrets = [
+    "response body contains access_token=abc123",
+    "replied Set-Cookie: session=xyz",
+    "captured api_key=secret-123",
+    "request header X-Api-Key: keep-private",
+    "config sent client_secret=shhh",
+    "upstream returned refresh_token=rotate-me",
+    "header authorization: basic abc",
+    "cached id_token=value",
+  ]
+  for message in redactedInlineSecrets {
+    logger.info(message)
+  }
+  logger.info(
+    "routine metadata redaction",
+    metadata: [
+      "api_key": "should-be-redacted",
+      "ClientSecret": "also-redacted",
+      "Refresh-Token": "also-redacted",
+      "safe_counter": "42",
+    ]
+  )
+
+  let logURL = VaporPaths.logsDirectoryURL(vaporDirectoryURL: vaporDirectoryURL)
+    .appendingPathComponent(VaporPaths.appLogFileName)
+  waitForLogWrites()
+  let logContents = try String(contentsOf: logURL, encoding: .utf8)
+
+  #expect(!logContents.contains("abc123"))
+  #expect(!logContents.contains("xyz"))
+  #expect(!logContents.contains("secret-123"))
+  #expect(!logContents.contains("keep-private"))
+  #expect(!logContents.contains("shhh"))
+  #expect(!logContents.contains("rotate-me"))
+  #expect(!logContents.contains("basic abc"))
+  #expect(!logContents.contains("id_token=value"))
+  #expect(!logContents.contains("should-be-redacted"))
+  #expect(!logContents.contains("also-redacted"))
+  #expect(logContents.contains("safe_counter=42"))
+}
+
+@Test
 func loggerGracefullyFallsBackWhenConfiguredRuntimeRootIsUnusable() throws {
   let fileManager = FileManager.default
   let tempRoot = fileManager.temporaryDirectory

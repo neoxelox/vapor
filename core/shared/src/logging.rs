@@ -199,28 +199,57 @@ fn sanitize_metadata_value(key: &str, value: &str) -> String {
 
 fn is_sensitive_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
-    [
-        "authorization",
-        "token",
-        "secret",
-        "password",
-        "cookie",
-        "keychain",
-        "credential",
-        "auth_header",
-    ]
-    .iter()
-    .any(|marker| key.contains(marker))
+    SENSITIVE_KEY_MARKERS
+        .iter()
+        .any(|marker| key.contains(marker))
 }
 
 fn redact_inline_secrets(raw: String) -> String {
     let lower = raw.to_ascii_lowercase();
-    if lower.contains("bearer ") || lower.contains("token=") || lower.contains("authorization:") {
+    if INLINE_SECRET_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
         "[REDACTED]".to_string()
     } else {
         raw
     }
 }
+
+const SENSITIVE_KEY_MARKERS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "auth_header",
+    "authorization",
+    "client_secret",
+    "cookie",
+    "credential",
+    "keychain",
+    "oauth",
+    "password",
+    "refresh",
+    "secret",
+    "session",
+    "token",
+];
+
+const INLINE_SECRET_MARKERS: &[&str] = &[
+    "access_token=",
+    "api_key=",
+    "api-key:",
+    "apikey=",
+    "authorization:",
+    "bearer ",
+    "client_secret=",
+    "id_token=",
+    "password=",
+    "refresh_token=",
+    "secret=",
+    "session=",
+    "set-cookie:",
+    "token=",
+    "x-api-key:",
+];
 
 #[cfg(test)]
 mod tests {
@@ -251,6 +280,51 @@ mod tests {
             sanitize_metadata_value("note", "Bearer abc123"),
             "[REDACTED]"
         );
+    }
+
+    #[test]
+    fn redacts_inline_secret_shapes_for_common_auth_patterns() {
+        let redacted_markers = [
+            "request body: access_token=abc123",
+            "replied with Set-Cookie: session=xyz",
+            "api_key=secret-123",
+            "X-Api-Key: keep-private",
+            "client_secret=shhh",
+            "response: refresh_token=rotate-me",
+            "request header Authorization: Bearer xyz",
+            "header authorization: basic abc",
+            "cached id_token=value",
+        ];
+        for input in redacted_markers {
+            assert_eq!(
+                sanitize_diagnostic_text(input),
+                "[REDACTED]",
+                "input should be redacted: {input}"
+            );
+        }
+
+        assert_eq!(
+            sanitize_diagnostic_text("routine event without secrets"),
+            "routine event without secrets"
+        );
+    }
+
+    #[test]
+    fn metadata_keys_with_auth_related_markers_are_sensitive() {
+        for key in [
+            "api_key",
+            "apiKey",
+            "client_secret",
+            "refresh_token",
+            "session_id",
+            "OAuth-State",
+        ] {
+            assert_eq!(
+                sanitize_metadata_value(key, "value-should-not-leak"),
+                "[REDACTED]",
+                "key {key} should force metadata redaction"
+            );
+        }
     }
 
     #[test]
