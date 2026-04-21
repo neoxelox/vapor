@@ -34,7 +34,7 @@ Pre-GA supported skew is `|app_schema_version - daemon_schema_version| <= 1`. Co
 
 ### Payload size bounds
 
-- Every XPC payload carries a declared `payload_bytes` hint and is bounded at the transport layer at `XPC_MAX_PAYLOAD_BYTES` (defined in `core/shared/src/constants.rs`, default `4 * 1024 * 1024`). Oversized payloads fail with `PayloadTooLarge` before any deserialization attempt and are logged with the declared size.
+- Every XPC payload carries a declared `payload_bytes` hint and is bounded at the transport layer at `XPC_MAX_PAYLOAD_BYTES` (a constant added to `core/shared/src/constants.rs` as part of the Phase 6 XPC implementation, default `4 * 1024 * 1024`). Oversized payloads fail with `PayloadTooLarge` before any deserialization attempt and are logged with the declared size.
 - Streamed endpoints (diagnostics timeline, activity events) use chunked frames; each frame is bounded independently.
 
 ## Contract groups
@@ -57,7 +57,19 @@ Pre-GA supported skew is `|app_schema_version - daemon_schema_version| <= 1`. Co
 
 ### Diagnostics (per-intent)
 
-- For each pending durable intent the daemon exposes: `intent_id`, `profile_id`, `path`, `action`, current `stage` (e.g., `Queued`, `WaitingForHash`, `Hashing`, `WaitingForUpload`, `Uploading`, `Retrying`, `DeferredReconcile`), elapsed-in-stage, attempt count, last-error classification, and a human-readable `blocker_reason` (e.g., "Throttle Suspended: no uploads allowed", "Hash worker cap 2/2 in use", "Rate-limit slowdown until {iso8601}"). This is the data source for the diagnostics "why is this intent stuck" surface.
+- For each pending durable intent the daemon exposes: `intent_id`, `profile_id`, `path`, `action`, current `stage`, elapsed-in-stage, attempt count, last-error classification, and a human-readable `blocker_reason` (e.g., "Throttle Suspended: no uploads allowed", "Hash worker cap 2/2 in use", "Rate-limit slowdown until {iso8601}"). This is the data source for the diagnostics "why is this intent stuck" surface.
+- The `stage` enum mirrors the staged-executor's own `ExecutionStage` plus four queue-state values that exist outside any executor stage. The complete set:
+  - `Queued` — intent is in the durable pending queue, waiting to be leased.
+  - `Planner` — leased and currently in the planner stage of the staged executor.
+  - `WaitingForHash` — finished planner, blocked acquiring a hash permit (e.g., workgate cap exhausted or throttle disallows hashing).
+  - `Hash` — currently hashing.
+  - `WaitingForUpload` — finished hashing (or skipped hashing for non-content-bearing actions), blocked acquiring an upload permit.
+  - `Upload` — currently uploading.
+  - `WaitingForDownload` — Phase 3 onward; remote-apply intent waiting for a download permit.
+  - `Download` — Phase 3 onward; currently downloading remote content.
+  - `Retrying` — leased intent that hit a transient/rate-limited failure and was requeued with backoff; resurfaces as `Queued` once `available_at` elapses.
+  - `DeferredReconcile` — storm-compacted subtree marker waiting on its `available_at`.
+- Diagnostics also expose the `BoundedFsEventRecorder` `dropped_incoming_event_count` so users can detect prolonged callback-vs-runtime backpressure (a non-zero value means raw FSEvents callbacks pushed faster than the runtime drained, and some events were dropped at the queue boundary rather than allowed to grow the queue without bound).
 
 ## Test matrix
 

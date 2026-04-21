@@ -44,7 +44,8 @@ The service must default to auto-launch at login, stay low-impact under user loa
    - Local metrics + impact-first auto-tuning.
 3. Providers (`core/providers`, Rust)
      - Provider trait + capabilities.
-     - `provider_filesystem` is the pre-GA default and reference provider: it uses a second local directory as the remote side so bidirectional flow, self-write cache, op-id correlation, and the provider-neutral error taxonomy are exercised against a deterministic backing store before any external provider is introduced (see milestone 6).
+     - `FilesystemStubProvider` is the current pre-GA default — an inert stub that satisfies the trait surface, reports no remote-changes-feed and no server-side-rename, and exists so the daemon does not run against `GoogleDriveProvider` until the credentials pipeline is ready.
+     - `provider_filesystem` is the Phase 3 reference provider that replaces the stub and uses a second local directory as the remote side so bidirectional flow, self-write cache, op-id correlation, and the provider-neutral error taxonomy are exercised against a deterministic backing store before any external provider is introduced (see milestone 6).
      - `provider_gdrive` is the first external cloud target but is deliberately deferred (see milestone 12) so it integrates into an already-validated runtime.
      - Later adapters (for example iCloud, S3, R2, Proton Drive) are enabled by the extensibility hardening pass (see milestone 11) without shipping extra providers in first release.
      - Provider auth/account bindings must be profile-scoped so one device can target multiple providers or multiple accounts safely.
@@ -65,7 +66,7 @@ The service must default to auto-launch at login, stay low-impact under user loa
 
 1. Watching
    - Recursive FSEvents on root.
-   - Callback only: normalize path, exclude check, record event.
+   - Callback does only lexical path normalization, watch-root prefix check, and ignore-rule filtering before pushing to a bounded incoming-events queue. Per-component symlink resolution runs on the runtime thread before events enter the scheduler. See `docs/architecture/data-flow.md` §"Local to remote" for the full callback discipline.
 2. Debounce/coalesce
    - 250ms stabilization tick.
    - Conservative debounce defaults and adaptive bounds.
@@ -94,6 +95,7 @@ Recommended default conflict policy:
 
 - Keep both copies (never silent overwrite).
 - Primary winner remains at canonical path; alternate copy gets conflict suffix with device/timestamp.
+- The concrete suffix template, deviceId derivation, collision-avoidance fallback, and "data preservation wins over deletion" rule live in `docs/architecture/data-flow.md` §"Conflict handling".
 
 ## 7) Reliability, safety, observability
 
