@@ -105,7 +105,11 @@ public enum VaporPaths {
     try ensurePrivateDirectory(at: parentDirectoryURL, fileManager: fileManager)
 
     if !fileManager.fileExists(atPath: fileURL.path) {
-      fileManager.createFile(atPath: fileURL.path, contents: nil)
+      fileManager.createFile(
+        atPath: fileURL.path,
+        contents: nil,
+        attributes: [.posixPermissions: privateFilePermissions]
+      )
     }
     try fileManager.setAttributes(
       [.posixPermissions: privateFilePermissions], ofItemAtPath: fileURL.path)
@@ -115,7 +119,11 @@ public enum VaporPaths {
     at directoryURL: URL,
     fileManager: FileManager = .default
   ) throws {
-    try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+    try fileManager.createDirectory(
+      at: directoryURL,
+      withIntermediateDirectories: true,
+      attributes: [.posixPermissions: privateDirectoryPermissions]
+    )
     try fileManager.setAttributes(
       [.posixPermissions: privateDirectoryPermissions],
       ofItemAtPath: directoryURL.path

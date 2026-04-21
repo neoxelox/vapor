@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 use crate::constants;
@@ -44,7 +44,10 @@ pub fn sqlite_database_path() -> PathBuf {
 }
 
 pub fn ensure_private_directory(path: &std::path::Path) -> std::io::Result<()> {
-    fs::create_dir_all(path)?;
+    fs::DirBuilder::new()
+        .mode(constants::runtime::PRIVATE_DIRECTORY_MODE)
+        .recursive(true)
+        .create(path)?;
     fs::set_permissions(
         path,
         fs::Permissions::from_mode(constants::runtime::PRIVATE_DIRECTORY_MODE),
@@ -55,9 +58,10 @@ pub fn ensure_private_file(path: &std::path::Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         ensure_private_directory(parent)?;
     }
-    let _ = fs::OpenOptions::new()
+    fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(constants::runtime::PRIVATE_FILE_MODE)
         .open(path)?;
     fs::set_permissions(
         path,
@@ -137,6 +141,47 @@ mod tests {
             & 0o777;
 
         assert_eq!(directory_mode, constants::runtime::PRIVATE_DIRECTORY_MODE);
+        assert_eq!(file_mode, constants::runtime::PRIVATE_FILE_MODE);
+    }
+
+    #[test]
+    fn ensure_private_directory_tightens_intermediate_components_on_create() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let intermediate = temp_dir.path().join("vapor-root");
+        let target = intermediate.join("state");
+
+        ensure_private_directory(&target).expect("ensure private directory with intermediates");
+
+        let intermediate_mode = fs::metadata(&intermediate)
+            .expect("intermediate directory metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let target_mode = fs::metadata(&target)
+            .expect("target directory metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        assert_eq!(
+            intermediate_mode,
+            constants::runtime::PRIVATE_DIRECTORY_MODE
+        );
+        assert_eq!(target_mode, constants::runtime::PRIVATE_DIRECTORY_MODE);
+    }
+
+    #[test]
+    fn ensure_private_file_creates_with_restrictive_mode_atomically() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let file = temp_dir.path().join("vapor-state/new-file.log");
+
+        ensure_private_file(&file).expect("ensure private file from fresh creation");
+
+        let file_mode = fs::metadata(&file)
+            .expect("file metadata")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(file_mode, constants::runtime::PRIVATE_FILE_MODE);
     }
 }

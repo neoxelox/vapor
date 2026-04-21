@@ -49,6 +49,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Durable intent `attempt_count` now tracks real retry count instead of lease count: `lease_ready_batch` no longer bumps it, `schedule_retry` is the only increment site, and retry caps are enforced at write time so intents cannot reach `MAX_ATTEMPT_COUNT` from throttle-delayed re-leases.
 - Durable state `system_time_to_millis` now validates `u128 → i64` conversion symmetrically with the read-path range check, eliminating silent truncation for far-future wall-clock timestamps.
 - Durable lease recovery now resets `attempt_count` for leases older than `LEASE_TIMEOUT_MILLIS` (15 minutes) so stale crash-recovered leases don't carry forward inflated retry counts.
+- Runtime paths now create private directories and files with restrictive modes at creation time via `DirBuilder::mode` (Rust) and `createDirectory/createFile attributes:` (Swift), including every intermediate directory under the vapor root; the previous two-step create-then-chmod pattern left intermediates at umask defaults and opened a TOCTOU window where the SQLite DB and `vapor.json` were briefly world-readable.
 
 ## [0.2.0-alpha.3] - 2026-03-10
 
