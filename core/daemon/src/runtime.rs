@@ -334,12 +334,27 @@ impl DaemonRuntime {
             return 0;
         };
 
+        let Some(watch_root) = self.sync_scope.local_sync_directory.as_ref() else {
+            return 0;
+        };
+
         let stabilized = self.debounce.run_tick_for_recorder(recorder, now);
-        let count = stabilized.len();
+        let mut accepted = 0;
         for event in stabilized {
+            if !crate::fs_events::resolve_event_path_within_watch_root(watch_root, &event.path) {
+                logging::warning(
+                    "Dropped stabilized event that resolves outside watch root",
+                    &[
+                        ("watch_root", watch_root.display().to_string()),
+                        ("path", event.path.display().to_string()),
+                    ],
+                );
+                continue;
+            }
             self.scheduler.upsert_stabilized_event(event);
+            accepted += 1;
         }
-        count
+        accepted
     }
 
     fn flush_scheduler_to_durable_queue(&mut self) -> Result<usize, DaemonRuntimeError> {

@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Durable lease recovery now resets `attempt_count` for leases older than `LEASE_TIMEOUT_MILLIS` (15 minutes) so stale crash-recovered leases don't carry forward inflated retry counts.
 - Runtime paths now create private directories and files with restrictive modes at creation time via `DirBuilder::mode` (Rust) and `createDirectory/createFile attributes:` (Swift), including every intermediate directory under the vapor root; the previous two-step create-then-chmod pattern left intermediates at umask defaults and opened a TOCTOU window where the SQLite DB and `vapor.json` were briefly world-readable.
 - Log redaction now covers the expanded auth/secret shape set across both daemon and app loggers, matching inline markers for `access_token=`, `refresh_token=`, `api_key=`, `X-Api-Key:`, `client_secret=`, `set-cookie:`, `id_token=`, `session=`, `password=`, and structured metadata keys containing `api_key`, `client_secret`, `refresh`, `oauth`, or `session`.
+- FSEvents callback now performs only lexical path normalization and watch-root prefix check; per-component symlink resolution (previously up to 32 `stat`+`readlink` syscalls per event) has moved to the runtime thread, where stabilized events are validated against the real filesystem before entering the scheduler. Events that resolve outside the watch root are dropped with a diagnostic. This restores callback hot-path discipline per AGENTS §3.
 
 ## [0.2.0-alpha.3] - 2026-03-10
 

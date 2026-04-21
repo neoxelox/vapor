@@ -207,12 +207,15 @@ fn normalize_event_path(watch_root: &Path, event_path: &Path) -> Option<PathBuf>
 
     let candidate = normalize_absolute_path(candidate)?;
 
-    if candidate.starts_with(watch_root) && path_resolves_within_watch_root(watch_root, &candidate)
-    {
+    if candidate.starts_with(watch_root) {
         Some(candidate)
     } else {
         None
     }
+}
+
+pub fn resolve_event_path_within_watch_root(watch_root: &Path, candidate: &Path) -> bool {
+    path_resolves_within_watch_root(watch_root, candidate)
 }
 
 fn normalize_absolute_path(path: PathBuf) -> Option<PathBuf> {
@@ -365,7 +368,57 @@ mod tests {
     }
 
     #[test]
-    fn callback_rejects_symlink_escape_outside_watch_root() {
+    fn symlink_escape_is_rejected_by_resolve_helper() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        let outside_root = temp_dir.path().join("outside");
+        fs::create_dir_all(&watch_root).expect("create watch root");
+        fs::create_dir_all(&outside_root).expect("create outside root");
+        symlink(&outside_root, watch_root.join("escape")).expect("create escape symlink");
+
+        let candidate = watch_root.join("escape/file.txt");
+        assert!(!resolve_event_path_within_watch_root(
+            &watch_root,
+            &candidate
+        ));
+    }
+
+    #[test]
+    fn nested_symlink_escape_is_rejected_by_resolve_helper() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        let outside_root = temp_dir.path().join("outside");
+        fs::create_dir_all(&watch_root).expect("create watch root");
+        fs::create_dir_all(&outside_root).expect("create outside root");
+        symlink(watch_root.join("second-hop"), watch_root.join("first-hop"))
+            .expect("create first hop symlink");
+        symlink(&outside_root, watch_root.join("second-hop")).expect("create second hop symlink");
+
+        let candidate = watch_root.join("first-hop/file.txt");
+        assert!(!resolve_event_path_within_watch_root(
+            &watch_root,
+            &candidate
+        ));
+    }
+
+    #[test]
+    fn symlink_resolving_inside_watch_root_is_accepted_by_resolve_helper() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        let target_root = watch_root.join("nested/target");
+        fs::create_dir_all(&target_root).expect("create nested target root");
+        symlink(watch_root.join("nested"), watch_root.join("alias"))
+            .expect("create inside symlink");
+
+        let candidate = watch_root.join("alias/target");
+        assert!(resolve_event_path_within_watch_root(
+            &watch_root,
+            &candidate
+        ));
+    }
+
+    #[test]
+    fn callback_records_lexically_inside_paths_without_blocking_on_filesystem_resolution() {
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         let outside_root = temp_dir.path().join("outside");
@@ -384,56 +437,11 @@ mod tests {
         record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
 
         let events = recorder.events.lock().expect("events mutex poisoned");
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn callback_rejects_nested_symlink_escape_outside_watch_root() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let watch_root = temp_dir.path().join("watch");
-        let outside_root = temp_dir.path().join("outside");
-        fs::create_dir_all(&watch_root).expect("create watch root");
-        fs::create_dir_all(&outside_root).expect("create outside root");
-        symlink(watch_root.join("second-hop"), watch_root.join("first-hop"))
-            .expect("create first hop symlink");
-        symlink(&outside_root, watch_root.join("second-hop")).expect("create second hop symlink");
-
-        let path_filter = test_path_filter(&watch_root);
-        let recorder = TestRecorder::default();
-        let event = Event {
-            kind: EventKind::Modify(ModifyKind::Any),
-            paths: vec![PathBuf::from("first-hop/file.txt")],
-            attrs: Default::default(),
-        };
-
-        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
-
-        let events = recorder.events.lock().expect("events mutex poisoned");
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn callback_allows_symlinked_paths_that_resolve_inside_watch_root() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let watch_root = temp_dir.path().join("watch");
-        let target_root = watch_root.join("nested/target");
-        fs::create_dir_all(&target_root).expect("create nested target root");
-        symlink(watch_root.join("nested"), watch_root.join("alias"))
-            .expect("create inside symlink");
-
-        let path_filter = test_path_filter(&watch_root);
-        let recorder = TestRecorder::default();
-        let event = Event {
-            kind: EventKind::Modify(ModifyKind::Any),
-            paths: vec![PathBuf::from("alias/target/file.txt")],
-            attrs: Default::default(),
-        };
-
-        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
-
-        let events = recorder.events.lock().expect("events mutex poisoned");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].path, watch_root.join("alias/target/file.txt"));
+        assert_eq!(
+            events.len(),
+            1,
+            "callback should record the lexical path; runtime-thread resolver is responsible for dropping symlink-escape events",
+        );
     }
 
     #[test]
