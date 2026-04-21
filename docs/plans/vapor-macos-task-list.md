@@ -331,3 +331,8 @@ Exit gate:
 ## Deferred performance tuning task
 
 - [ ] PT-1 Tune `./scripts/perf.sh` smoke thresholds using real CI/release baseline history so the `perf` gate becomes stricter at catching regressions without becoming flaky; update the documented defaults and release-gate policy in the same change set.
+
+## Deferred correctness tasks
+
+- [ ] D-1 Harden `ThrottleWorkgate` permit-ID allocation against `u64::MAX` saturation. Today `next_permit_id = saturating_add(1)` stalls at `u64::MAX`; after that every new permit gets the same id and `release` silently leaks active counts on the second holder. The failure is astronomical (~1.8e19 permits, centuries at any realistic acquire rate) but the failure mode is silent, so switch to wrapping allocation with reuse of freed ids (e.g., a free-list of released ids, or wrap when the active-permits map shows the slot is free) and add a stress test that walks past the boundary in-process.
+- [ ] D-2 Migrate local elapsed-time measurements in the daemon runtime from `SystemTime` to `Instant` so clock rewind cannot impact tick cadence, slice budgets, throttle sampling, or staged-executor timing at all (today the conservative `Err` arm papers over the symptom but still lets a rewound wall-clock prematurely trigger `SliceBudgetExpired`, extra throttle samples, and one debounce wake). This refactor requires a test-injectable clock abstraction on `DebounceLoop`, `ReconcileController`, `DaemonRuntime`, and `StagedExecutor`; keep `SystemTime` for persisted/durable fields (`DurableIntentRecord::available_at`, `DeferredReconcileRecord::available_at`, event observed-at) because those cross process boundaries.

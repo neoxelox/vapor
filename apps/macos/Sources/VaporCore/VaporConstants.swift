@@ -74,5 +74,6 @@ public enum VaporConstants {
   public enum Daemon {
     public static let launchAgentLabel = "sh.arn.vapor.daemon"
     public static let processPath = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    public static let preGADefaultProviderDisplayName = "Filesystem (stub)"
   }
 }

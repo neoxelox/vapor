@@ -508,12 +508,16 @@ final class AppShellViewModel: ObservableObject {
     {
       daemonEnvironment[VaporPaths.environmentKey] = runtimeEnvironment
     }
+    let logsDirectoryURL = VaporPaths.logsDirectoryURL(vaporDirectoryURL: vaporDirectoryURL)
     let configuration = LaunchAgentConfiguration(
       label: launchAgentLabel,
       plistURL: LaunchAgentConfiguration.defaultPlistURL(label: launchAgentLabel),
       daemonExecutableURL: daemonExecutableURL,
       workingDirectoryURL: vaporDirectoryURL,
-      environment: daemonEnvironment
+      environment: daemonEnvironment,
+      standardOutPath: logsDirectoryURL.appendingPathComponent("vapord.stdout.log").path,
+      standardErrorPath: logsDirectoryURL.appendingPathComponent("vapord.stderr.log").path,
+      processType: "Background"
     )
 
     return DaemonLifecycleManager(

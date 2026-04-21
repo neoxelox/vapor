@@ -91,51 +91,77 @@ public struct CrashLoopPolicy: Equatable, Sendable {
   public var baseDelay: TimeInterval
   public var maxDelay: TimeInterval
   public var delayStartsAfterFailures: Int
+  public var maxConsecutiveFailuresBeforePause: Int
 
   public init(
     failureWindow: TimeInterval,
     baseDelay: TimeInterval,
     maxDelay: TimeInterval,
-    delayStartsAfterFailures: Int
+    delayStartsAfterFailures: Int,
+    maxConsecutiveFailuresBeforePause: Int
   ) {
     self.failureWindow = failureWindow
     self.baseDelay = baseDelay
     self.maxDelay = maxDelay
     self.delayStartsAfterFailures = max(1, delayStartsAfterFailures)
+    self.maxConsecutiveFailuresBeforePause = max(1, maxConsecutiveFailuresBeforePause)
   }
 
   public static let `default` = CrashLoopPolicy(
-    failureWindow: 300,
-    baseDelay: 5,
-    maxDelay: 300,
-    delayStartsAfterFailures: 2
+    failureWindow: 600,
+    baseDelay: 2,
+    maxDelay: 120,
+    delayStartsAfterFailures: 1,
+    maxConsecutiveFailuresBeforePause: 5
   )
+}
+
+public enum CrashLoopDecision: Equatable, Sendable {
+  case noDelay
+  case backoff(TimeInterval)
+  case paused
 }
 
 public struct CrashLoopGuard: Sendable {
   private let policy: CrashLoopPolicy
   private var failureMoments: [Date] = []
   private var pausedUntil: Date?
+  private var pausedIndefinitely: Bool = false
 
   public init(policy: CrashLoopPolicy = .default) {
     self.policy = policy
   }
 
-  public mutating func registerCrash(at now: Date) -> TimeInterval? {
+  public var isPausedIndefinitely: Bool {
+    pausedIndefinitely
+  }
+
+  @discardableResult
+  public mutating func registerCrash(at now: Date) -> CrashLoopDecision {
     pruneFailures(relativeTo: now)
     failureMoments.append(now)
 
+    if failureMoments.count >= policy.maxConsecutiveFailuresBeforePause {
+      pausedIndefinitely = true
+      pausedUntil = nil
+      return .paused
+    }
+
     let exponent = failureMoments.count - policy.delayStartsAfterFailures
     guard exponent >= 0 else {
-      return nil
+      return .noDelay
     }
 
     let delay = min(policy.maxDelay, policy.baseDelay * pow(2, Double(exponent)))
     pausedUntil = now.addingTimeInterval(delay)
-    return delay
+    return .backoff(delay)
   }
 
   public mutating func remainingDelay(at now: Date) -> TimeInterval {
+    if pausedIndefinitely {
+      return .infinity
+    }
+
     guard let pausedUntil else {
       return 0
     }
@@ -148,9 +174,16 @@ public struct CrashLoopGuard: Sendable {
     return pausedUntil.timeIntervalSince(now)
   }
 
+  public mutating func acknowledgeAndResume() {
+    pausedIndefinitely = false
+    failureMoments.removeAll(keepingCapacity: true)
+    pausedUntil = nil
+  }
+
   public mutating func reset() {
     failureMoments.removeAll(keepingCapacity: true)
     pausedUntil = nil
+    pausedIndefinitely = false
   }
 
   private mutating func pruneFailures(relativeTo now: Date) {
@@ -249,16 +282,49 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
     }
   }
 
-  public func registerUnexpectedDaemonExit(now: Date = .now) -> TimeInterval? {
+  @discardableResult
+  public func registerUnexpectedDaemonExit(now: Date = .now) -> CrashLoopDecision {
     stateQueue.sync {
-      let delay = crashLoopGuard.registerCrash(at: now)
-      logger.warning(
-        "Registered unexpected daemon exit",
-        metadata: ["relaunch_delay_seconds": String(delay ?? 0)]
-      )
-      return delay
+      let decision = crashLoopGuard.registerCrash(at: now)
+      switch decision {
+      case .noDelay:
+        logger.warning(
+          "Registered unexpected daemon exit",
+          metadata: ["relaunch_delay_seconds": "0"]
+        )
+      case .backoff(let seconds):
+        logger.warning(
+          "Registered unexpected daemon exit",
+          metadata: ["relaunch_delay_seconds": String(seconds)]
+        )
+      case .paused:
+        logger.error(
+          "Daemon entered crash-loop paused state; auto-restart is suspended until user acknowledges",
+          metadata: [
+            "failure_window_seconds": String(
+              crashLoopGuard.isPausedIndefinitely
+                ? DaemonLifecycleManager.crashLoopPauseSurfaceValue : 0)
+          ]
+        )
+      }
+      return decision
     }
   }
+
+  public var isInCrashLoopPause: Bool {
+    stateQueue.sync {
+      crashLoopGuard.isPausedIndefinitely
+    }
+  }
+
+  public func acknowledgeCrashLoopPause() {
+    stateQueue.sync {
+      crashLoopGuard.acknowledgeAndResume()
+      logger.warning("Acknowledged crash-loop pause; auto-restart may proceed again")
+    }
+  }
+
+  fileprivate static let crashLoopPauseSurfaceValue: TimeInterval = -1
 
   @discardableResult
   public func startDaemonIfAllowed(now: Date = .now) throws -> DaemonLifecycleActionResult {
@@ -294,6 +360,13 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
 
   @discardableResult
   private func startDaemonIfAllowedLocked(now: Date) throws -> DaemonLifecycleActionResult {
+    if crashLoopGuard.isPausedIndefinitely {
+      logger.error(
+        "Refusing to start daemon while crash-loop pause is active; awaiting user acknowledgement"
+      )
+      return .relaunchDeferred(.infinity)
+    }
+
     let remaining = crashLoopGuard.remainingDelay(at: now)
     guard remaining <= 0 else {
       logger.warning(

@@ -16,7 +16,7 @@ func initialStateUsesSafeDefaults() {
   #expect(state.postIgnoreRules == VaporConfiguration.defaultPostIgnoreRules)
   #expect(state.languageCode == "en")
   #expect(state.effectiveLanguageCode == "en")
-  #expect(state.providerName == "Google Drive")
+  #expect(state.providerName == VaporConstants.Daemon.preGADefaultProviderDisplayName)
   #expect(!state.vaporDirectoryPath.isEmpty)
 }
 

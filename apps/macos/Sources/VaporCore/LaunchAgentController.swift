@@ -10,6 +10,9 @@ public struct LaunchAgentConfiguration: Equatable, Sendable {
   public var keepAlive: Bool
   public var workingDirectoryURL: URL?
   public var environment: [String: String]
+  public var standardOutPath: String?
+  public var standardErrorPath: String?
+  public var processType: String?
 
   public init(
     label: String,
@@ -19,7 +22,10 @@ public struct LaunchAgentConfiguration: Equatable, Sendable {
     runAtLoad: Bool = true,
     keepAlive: Bool = false,
     workingDirectoryURL: URL? = nil,
-    environment: [String: String] = [:]
+    environment: [String: String] = [:],
+    standardOutPath: String? = nil,
+    standardErrorPath: String? = nil,
+    processType: String? = "Background"
   ) {
     self.label = label
     self.plistURL = plistURL
@@ -29,6 +35,9 @@ public struct LaunchAgentConfiguration: Equatable, Sendable {
     self.keepAlive = keepAlive
     self.workingDirectoryURL = workingDirectoryURL
     self.environment = environment
+    self.standardOutPath = standardOutPath
+    self.standardErrorPath = standardErrorPath
+    self.processType = processType
   }
 
   public static func defaultPlistURL(
@@ -190,6 +199,18 @@ public final class LaunchAgentController: LaunchAgentControlling {
 
     if !configuration.environment.isEmpty {
       plist["EnvironmentVariables"] = configuration.environment
+    }
+
+    if let standardOutPath = configuration.standardOutPath {
+      plist["StandardOutPath"] = standardOutPath
+    }
+
+    if let standardErrorPath = configuration.standardErrorPath {
+      plist["StandardErrorPath"] = standardErrorPath
+    }
+
+    if let processType = configuration.processType {
+      plist["ProcessType"] = processType
     }
 
     return try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)

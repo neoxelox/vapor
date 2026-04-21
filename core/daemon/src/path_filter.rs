@@ -251,6 +251,9 @@ fn collect_ignore_files(watch_root: &Path, file_name: &str) -> Vec<PathBuf> {
             };
 
             if file_type.is_dir() {
+                if is_heavy_ignore_discovery_skip_dir(path.file_name().and_then(|n| n.to_str())) {
+                    continue;
+                }
                 pending.push(path);
                 continue;
             }
@@ -271,6 +274,34 @@ fn collect_ignore_files(watch_root: &Path, file_name: &str) -> Vec<PathBuf> {
             .then_with(|| left.as_os_str().cmp(right.as_os_str()))
     });
     discovered
+}
+
+/// Directory-name matcher used to skip heavy subtrees during startup ignore-file
+/// discovery. This is intentionally narrow and mirrors the most impactful
+/// entries from `DEFAULT_PRE_IGNORE_RULES`; matched subtrees are still covered
+/// by the default ignore rules, so skipping them here only avoids a multi-minute
+/// directory walk on massive dependency folders, not correctness.
+fn is_heavy_ignore_discovery_skip_dir(name: Option<&str>) -> bool {
+    const SKIP_DIRS: &[&str] = &[
+        ".git",
+        ".npm",
+        ".parcel-cache",
+        ".pnpm-store",
+        ".turbo",
+        ".vite",
+        ".yarn",
+        "build",
+        "coverage",
+        "dist",
+        "node_modules",
+        "out",
+        "storybook-static",
+        "target",
+    ];
+    let Some(name) = name else {
+        return false;
+    };
+    SKIP_DIRS.contains(&name)
 }
 
 fn append_rules_from_file(rules: &mut Vec<CompiledRule>, watch_root: &Path, path: &Path) {
@@ -585,6 +616,36 @@ mod tests {
         );
 
         assert!(filter.should_ignore(&watch_root.join("coverage/keep.txt")));
+
+        remove_test_directory(&watch_root);
+    }
+
+    #[test]
+    fn ignore_file_discovery_skips_heavy_dependency_directories() {
+        let watch_root = create_test_directory();
+        fs::create_dir_all(watch_root.join("node_modules/pkg/deep"))
+            .expect("failed to create node_modules tree");
+        fs::write(
+            watch_root.join("node_modules/pkg/deep/.gitignore"),
+            "leaked-rule/\n",
+        )
+        .expect("failed to write .gitignore inside node_modules");
+        fs::create_dir_all(watch_root.join("src")).expect("failed to create src dir");
+        fs::write(watch_root.join("src/.gitignore"), "real-rule/\n")
+            .expect("failed to write src .gitignore");
+
+        let filter = EventPathFilter::for_watch_root(
+            &watch_root,
+            &EventPathFilterOptions {
+                use_vaporignore: false,
+                pre_user_rules: Vec::new(),
+                post_user_rules: Vec::new(),
+                ..EventPathFilterOptions::default()
+            },
+        );
+
+        assert!(filter.should_ignore(&watch_root.join("src/real-rule/something.txt")));
+        assert!(!filter.should_ignore(&watch_root.join("other/leaked-rule/something.txt")));
 
         remove_test_directory(&watch_root);
     }

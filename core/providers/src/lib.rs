@@ -43,8 +43,15 @@ pub trait Provider: Send + Sync {
 #[derive(Debug, Default)]
 pub struct GoogleDriveProvider;
 
+/// Pre-GA default provider stub backed by the local filesystem. All real
+/// filesystem operations land in Phase 3 (P3-3); this stub exists so the
+/// daemon does not run against `GoogleDriveProvider` by default and so any
+/// caller of `default_provider()` sees a predictable, inert implementation.
+#[derive(Debug, Default)]
+pub struct FilesystemStubProvider;
+
 pub fn default_provider() -> Box<dyn Provider> {
-    Box::new(GoogleDriveProvider)
+    Box::new(FilesystemStubProvider)
 }
 
 impl Provider for GoogleDriveProvider {
@@ -54,6 +61,19 @@ impl Provider for GoogleDriveProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::GDRIVE_MVP
+    }
+}
+
+impl Provider for FilesystemStubProvider {
+    fn name(&self) -> &'static str {
+        "filesystem_stub"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            supports_remote_changes_feed: false,
+            supports_server_side_rename: false,
+        }
     }
 }
 
@@ -73,5 +93,18 @@ mod tests {
         let provider = GoogleDriveProvider;
         assert!(provider.poll_allowed(ThrottleState::Light));
         assert!(!provider.poll_allowed(ThrottleState::Suspended));
+    }
+
+    #[test]
+    fn default_provider_returns_filesystem_stub_pre_ga() {
+        let provider = default_provider();
+        assert_eq!(provider.name(), "filesystem_stub");
+    }
+
+    #[test]
+    fn filesystem_stub_reports_no_remote_changes_feed() {
+        let provider = FilesystemStubProvider;
+        assert!(!provider.capabilities().supports_remote_changes_feed);
+        assert!(!provider.capabilities().supports_server_side_rename);
     }
 }

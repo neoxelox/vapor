@@ -328,9 +328,9 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn daemon_defaults_to_google_drive_provider() {
+    fn daemon_defaults_to_pre_ga_filesystem_stub_provider() {
         let app = DaemonApp::default();
-        assert_eq!(app.provider_name(), "google_drive");
+        assert_eq!(app.provider_name(), "filesystem_stub");
     }
 
     #[test]

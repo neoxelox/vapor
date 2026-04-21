@@ -111,7 +111,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
     postIgnoreRules: VaporConfiguration.defaultPostIgnoreRules,
     languageCode: VaporConfiguration.defaultLanguageCode,
     effectiveLanguageCode: VaporConstants.Localization.defaultLanguageCode,
-    providerName: "Google Drive",
+    providerName: VaporConstants.Daemon.preGADefaultProviderDisplayName,
     vaporDirectoryPath: VaporPaths.resolveVaporDirectoryURL().path
   )
 

@@ -722,6 +722,9 @@ impl BoundedEventIntentMaps {
 #[derive(Debug)]
 pub struct BoundedFsEventRecorder {
     maps: Mutex<BoundedEventIntentMaps>,
+    incoming_events: Mutex<Vec<FsEventRecord>>,
+    dropped_incoming_events: Mutex<usize>,
+    incoming_events_cap: usize,
     error_count: Mutex<usize>,
 }
 
@@ -731,8 +734,12 @@ impl BoundedFsEventRecorder {
     }
 
     pub fn with_limits(watch_root: impl Into<PathBuf>, limits: EventIntentLimits) -> Self {
+        let cap = limits.max_pending_paths;
         Self {
             maps: Mutex::new(BoundedEventIntentMaps::with_limits(watch_root, limits)),
+            incoming_events: Mutex::new(Vec::with_capacity(512)),
+            dropped_incoming_events: Mutex::new(0),
+            incoming_events_cap: cap,
             error_count: Mutex::new(0),
         }
     }
@@ -741,23 +748,59 @@ impl BoundedFsEventRecorder {
         *self.error_count.lock().expect("error count mutex poisoned")
     }
 
+    pub fn dropped_incoming_event_count(&self) -> usize {
+        *self
+            .dropped_incoming_events
+            .lock()
+            .expect("dropped incoming events mutex poisoned")
+    }
+
     pub fn with_state<R>(&self, reader: impl FnOnce(&BoundedEventIntentMaps) -> R) -> R {
+        self.drain_incoming_into_maps();
         let guard = self.maps.lock().expect("event intent mutex poisoned");
         reader(&guard)
     }
 
     pub fn with_mut_state<R>(&self, writer: impl FnOnce(&mut BoundedEventIntentMaps) -> R) -> R {
+        self.drain_incoming_into_maps();
         let mut guard = self.maps.lock().expect("event intent mutex poisoned");
         writer(&mut guard)
+    }
+
+    fn drain_incoming_into_maps(&self) {
+        let batch: Vec<FsEventRecord> = {
+            let mut guard = self
+                .incoming_events
+                .lock()
+                .expect("incoming events mutex poisoned");
+            std::mem::take(&mut *guard)
+        };
+        if batch.is_empty() {
+            return;
+        }
+        let mut maps = self.maps.lock().expect("event intent mutex poisoned");
+        for event in batch {
+            maps.record_event(event);
+        }
     }
 }
 
 impl FsEventRecording for BoundedFsEventRecorder {
     fn record_event(&self, event: FsEventRecord) {
-        self.maps
+        let mut guard = self
+            .incoming_events
             .lock()
-            .expect("event intent mutex poisoned")
-            .record_event(event);
+            .expect("incoming events mutex poisoned");
+        if guard.len() >= self.incoming_events_cap {
+            drop(guard);
+            let mut dropped = self
+                .dropped_incoming_events
+                .lock()
+                .expect("dropped incoming events mutex poisoned");
+            *dropped = dropped.saturating_add(1);
+            return;
+        }
+        guard.push(event);
     }
 
     fn record_error(&self, error: FsEventErrorRecord) {

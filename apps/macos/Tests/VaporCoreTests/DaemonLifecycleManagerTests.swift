@@ -14,7 +14,8 @@ func bootstrapDefaultsToAutoLaunchEnabledAndStartsDaemon() throws {
       failureWindow: 60,
       baseDelay: 2,
       maxDelay: 32,
-      delayStartsAfterFailures: 2
+      delayStartsAfterFailures: 2,
+      maxConsecutiveFailuresBeforePause: 10
     )
   )
 
@@ -68,13 +69,14 @@ func crashLoopDefersRelaunchWithExponentialBackoff() throws {
       failureWindow: 60,
       baseDelay: 4,
       maxDelay: 32,
-      delayStartsAfterFailures: 2
+      delayStartsAfterFailures: 2,
+      maxConsecutiveFailuresBeforePause: 10
     )
   )
 
   let t0 = Date(timeIntervalSince1970: 0)
-  #expect(manager.registerUnexpectedDaemonExit(now: t0) == nil)
-  #expect(manager.registerUnexpectedDaemonExit(now: t0.addingTimeInterval(1)) == 4)
+  #expect(manager.registerUnexpectedDaemonExit(now: t0) == .noDelay)
+  #expect(manager.registerUnexpectedDaemonExit(now: t0.addingTimeInterval(1)) == .backoff(4))
 
   let deferred = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(2))
   #expect(deferred == .relaunchDeferred(3))
@@ -88,13 +90,60 @@ func crashLoopDefersRelaunchWithExponentialBackoff() throws {
 @Test
 func crashHistoryExpiresOutsideFailureWindow() {
   var guardrail = CrashLoopGuard(
-    policy: .init(failureWindow: 10, baseDelay: 2, maxDelay: 30, delayStartsAfterFailures: 2)
+    policy: .init(
+      failureWindow: 10,
+      baseDelay: 2,
+      maxDelay: 30,
+      delayStartsAfterFailures: 2,
+      maxConsecutiveFailuresBeforePause: 10
+    )
   )
 
   let t0 = Date(timeIntervalSince1970: 0)
-  #expect(guardrail.registerCrash(at: t0) == nil)
-  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(1)) == 2)
-  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(20)) == nil)
+  #expect(guardrail.registerCrash(at: t0) == .noDelay)
+  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(1)) == .backoff(2))
+  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(20)) == .noDelay)
+}
+
+@Test
+func crashLoopPausesAfterMaxConsecutiveFailuresAndRefusesAutoRestartUntilAcknowledged() throws {
+  let store = InMemoryAutoLaunchSettingStore(
+    seed: [DaemonLifecycleManager.autoLaunchSettingKey: true]
+  )
+  let controller = RecordingLaunchAgentController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: controller,
+    settingsStore: store,
+    crashLoopPolicy: .init(
+      failureWindow: 600,
+      baseDelay: 2,
+      maxDelay: 120,
+      delayStartsAfterFailures: 1,
+      maxConsecutiveFailuresBeforePause: 3
+    )
+  )
+
+  let t0 = Date(timeIntervalSince1970: 0)
+  _ = manager.registerUnexpectedDaemonExit(now: t0)
+  _ = manager.registerUnexpectedDaemonExit(now: t0.addingTimeInterval(1))
+  let decision = manager.registerUnexpectedDaemonExit(now: t0.addingTimeInterval(2))
+  #expect(decision == .paused)
+  #expect(manager.isInCrashLoopPause)
+
+  let result = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(3_600))
+  if case .relaunchDeferred(let remaining) = result {
+    #expect(remaining == .infinity)
+  } else {
+    Issue.record("Expected relaunchDeferred(.infinity) while paused, got \(result)")
+  }
+  #expect(controller.operations.isEmpty)
+
+  manager.acknowledgeCrashLoopPause()
+  #expect(!manager.isInCrashLoopPause)
+
+  let resumed = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(3_700))
+  #expect(resumed == .started)
+  #expect(controller.operations == ["start"])
 }
 
 @Test
