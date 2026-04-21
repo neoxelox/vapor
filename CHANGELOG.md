@@ -57,6 +57,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Swift logger now caches a per-instance `FileHandle`, calls `synchronize()` after every write, and reopens on error instead of opening a fresh handle per log line; heavy-log paths no longer churn thousands of `open()`/`close()` syscalls and crash-time log loss is bounded by the fsync cadence.
 - Daemon workgate permit releases no longer silently leak active counts when a stale or mismatched permit is returned: reconcile pause and completion paths now log a diagnostic if `ThrottleWorkgate::release` rejects the permit, surfacing the accounting discrepancy instead of swallowing it.
 - Daemon debounce classifier no longer hardcodes `".vaporignore"` and `"vapor.json"`; both file names come from `core/shared::constants` so the classifier can never diverge from the runtime-level names for Vapor's own config and ignore files.
+- Daemon now installs a SIGTERM/SIGINT handler that flips a shutdown flag checked by `run_forever`, so `launchctl unload`, `launchctl kill TERM`, or Ctrl-C exit the runtime loop at the next tick boundary instead of terminating mid-lease. Lease recovery on next start still reclaims any in-flight work; the graceful exit just avoids abruptly killing the daemon during an in-progress tick.
 
 ## [0.2.0-alpha.3] - 2026-03-10
 

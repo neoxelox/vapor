@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 globset = "=0.4.18"
+libc = "=0.2.183"
 notify = "=8.2.0"
 rusqlite = "=0.38.0"
 vapor-providers = { path = "../providers" }

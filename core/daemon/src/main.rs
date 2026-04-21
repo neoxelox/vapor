@@ -1,7 +1,22 @@
 use vapor_daemon::{
-    build_info, logging, runtime::DaemonRuntime, state_db::DurableStateDb, sync_directories,
+    build_info, logging, runtime, runtime::DaemonRuntime, state_db::DurableStateDb,
+    sync_directories,
 };
 use vapor_providers::default_provider;
+
+extern "C" fn handle_shutdown_signal(_signal: libc::c_int) {
+    runtime::request_shutdown();
+}
+
+fn install_shutdown_signal_handlers() {
+    let handler: libc::sighandler_t = handle_shutdown_signal as *const () as libc::sighandler_t;
+    // SAFETY: signal(3) is async-signal-safe; handle_shutdown_signal only performs
+    // an atomic store. Installed exactly once at process start.
+    unsafe {
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGINT, handler);
+    }
+}
 
 fn main() {
     if let Some(flag) = std::env::args().nth(1)
@@ -14,6 +29,8 @@ fn main() {
         );
         return;
     }
+
+    install_shutdown_signal_handlers();
 
     let state_db = match DurableStateDb::open_default() {
         Ok(state_db) => state_db,

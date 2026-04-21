@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -27,6 +28,16 @@ impl From<FsEventsWatcherError> for DaemonRuntimeError {
     fn from(value: FsEventsWatcherError) -> Self {
         Self::Watcher(value)
     }
+}
+
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub fn request_shutdown() {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+pub fn is_shutdown_requested() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }
 
 impl From<StateDbError> for DaemonRuntimeError {
@@ -80,10 +91,15 @@ impl DaemonRuntime {
     }
 
     pub fn run_forever(&mut self) -> Result<(), DaemonRuntimeError> {
-        loop {
+        while !is_shutdown_requested() {
             self.tick(SystemTime::now())?;
             thread::sleep(self.tick_interval);
         }
+        logging::warning(
+            "Received shutdown signal; exiting daemon runtime loop cleanly",
+            &[],
+        );
+        Ok(())
     }
 
     pub fn tick(&mut self, now: SystemTime) -> Result<RuntimeTickReport, DaemonRuntimeError> {
