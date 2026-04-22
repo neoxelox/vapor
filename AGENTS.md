@@ -16,7 +16,7 @@ This file defines the operating rules for contributors (human and AI) working on
   - Recover safely after crash/restart.
   - Defer under pressure and converge eventually.
 - Bidirectional behavior is in MVP for Google Drive and must be safety-first.
-- Feature parity across platforms is mandatory for the invariants above. Autolaunch, crash-loop protection, durable queue, throttle discipline, secret storage, and resource budgets must be delivered on every supported OS via the matching `core/platform` trait implementation; "skip it on that OS" is never acceptable.
+- Feature parity is mandatory for the invariants above on every OS that currently ships a surface. Autolaunch, crash-loop protection, durable queue, throttle discipline, secret storage, and resource budgets must be delivered via the matching `core/platform` trait implementation; "skip it on the shipping OS" is never acceptable. An OS that is not yet a shipping surface (currently Windows and Linux) may have `unimplemented!()` stubs behind the trait, provided the engine continues to compile on that OS so the door stays open.
 
 ## 1.1) Project maturity and compatibility policy
 
@@ -323,11 +323,19 @@ Every substantial change must include relevant test updates.
   - CPU and I/O budget checks
 - Platform matrix
   - Every trait in `core/platform` must have (a) an in-memory fake used by
-    cross-OS unit tests, and (b) a native implementation tested in the
-    matching OS-specific CI job (`macos-latest`, `ubuntu-latest`,
-    `windows-latest`).
+    cross-OS unit tests, and (b) a native implementation on every OS that
+    currently ships a surface, tested in the matching OS-specific CI job
+    (`macos-latest` today; `ubuntu-latest` / `windows-latest` once their
+    optional waves land).
+  - For OSes that do not currently ship a surface, a trait may be
+    `unimplemented!()` on that OS. The stub must compile (so
+    `cargo build --workspace` keeps succeeding on every OS in the CI
+    matrix) and must be tracked in `docs/tasks/core.md`.
   - `vapor service install` + `vapor run` + `vapor status` round-trip must
-    pass on every supported OS before that OS is considered shipped.
+    pass on every OS that currently ships a surface before that OS is
+    considered shipped. Adding a non-macOS shipping surface requires the
+    project owner to opt in via the optional waves in
+    `docs/tasks/README.md`.
 
 ## 10) Pull request checklist
 
@@ -419,14 +427,22 @@ Commit message convention:
 
 ## 11) Definition of done
 
+"Every shipping OS" below means the OSes currently shipping a surface.
+macOS is the primary shipping OS today; Windows/Linux only count as
+shipping OSes once their optional waves in `docs/tasks/README.md` have
+landed.
+
 A change is done when:
 
-- Behavior works in happy and failure paths on every OS it ships on.
-- No regression of throttle/impact invariants on any OS.
-- Crash/restart recovery is preserved on every OS.
-- Observability is sufficient to explain current state/reason on every OS.
-- For changes that touch a `core/platform` trait, the native impl on every
-  supported OS either passes its CI job or has a tracked follow-up task.
+- Behavior works in happy and failure paths on every shipping OS.
+- No regression of throttle/impact invariants on any shipping OS.
+- Crash/restart recovery is preserved on every shipping OS.
+- Observability is sufficient to explain current state/reason on every
+  shipping OS.
+- For changes that touch a `core/platform` trait: the native impl on
+  every shipping OS passes its CI job; on non-shipping OSes the trait
+  may be `unimplemented!()` but must compile and must be tracked in
+  `docs/tasks/core.md`.
 - Docs and contracts are updated (common docs at the top level,
   platform-specific docs under the matching `docs/<group>/<platform>/`).
 

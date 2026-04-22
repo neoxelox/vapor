@@ -6,9 +6,8 @@ serves two purposes:
 1. **Per-surface task lists** — one file per deliverable surface, each
    tracking concrete items with `[ ] / [~] / [x]` status.
 2. **Cross-surface roadmap** — this README is the orchestrator. It tells
-   you **what should be done next** when multiple task lists have pending
-   items, which tasks block which, and how the MVP lines up across
-   `core`, `macos`, and `cli`.
+   you **what should be done next**, which tasks block which, and how
+   the waves line up.
 
 If you only have time to read one doc before picking up work, read this
 one.
@@ -21,8 +20,8 @@ Tasks are flat and platform-named: one file per deliverable surface.
   that powers every app surface lives here.
 - `macos.md` — macOS app surface tasks.
 - `cli.md` — `vapor` CLI tasks.
-- `windows.md` — placeholder. Added when `apps/windows` starts.
-- `linux.md` — placeholder. Added when `apps/linux` starts.
+- `windows.md` — placeholder (only created if `apps/windows` is started).
+- `linux.md` — placeholder (only created if `apps/linux` is started).
 
 Every file mirrors its plan in `docs/plans/<surface>.md`. Plans are
 *intent*; these files track *execution*.
@@ -33,64 +32,85 @@ Status legend (used in every task file):
 - `[~]` in progress
 - `[x]` complete
 
-## Cross-surface roadmap (what should be done next)
+## Scope and prioritization
 
-Vapor is executed in **waves**. A wave is a coherent set of tasks across
-surfaces that must land together before the next wave starts. Within a
-wave, tasks can be worked in parallel unless a dependency is called out.
+**The focus is a very good, performant, and polished core runtime, CLI,
+and macOS app.** Everything else is deferred or optional.
 
-### Wave 0 — Finish the macOS MVP invariants (in flight)
+Concretely:
 
-Status: active. Do these before starting portability work.
+- **Primary path** (waves 0–11): the core runtime (`core/*`), the
+  `vapor` CLI running on macOS, and the macOS app — shipped, polished,
+  and maintained.
+- **Foundation kept open** inside the primary path: engine portability
+  fixes so `core/*` compiles on every OS, and the `core/platform` trait
+  layer with macOS-native implementations (Windows/Linux impls stubbed
+  to `unimplemented!()`). These stay in the primary path because they
+  are good engineering regardless — they remove OS-only assumptions
+  from the engine and keep the door open — not because Windows/Linux is
+  a committed deliverable.
+- **Deferred / optional** (waves 12+): Windows and Linux platform-trait
+  implementations, `apps/windows`, `apps/linux`, and full cross-OS CLI
+  distribution. None of this is required for the primary deliverable.
+  Work in this bucket only starts if and when the project owner
+  explicitly decides to ship a non-macOS surface.
 
-- `macos.md` M1-6 — LaunchAgent plist + crash-loop validation scenarios.
-  Automates the last outstanding bullet from the macOS lifecycle
-  milestone (plist audit / SIGKILL / crash-loop pause / clean shutdown).
+## Primary path — cross-surface roadmap (waves 0–11)
 
-No wave-0 work in `core.md` or `cli.md`. The macOS app closes out its
-pre-portability milestones first so the engine fixes that follow do not
-disturb a partially-completed lifecycle story.
+A wave is a coherent set of tasks across surfaces that must land
+together before the next wave starts. Within a wave, tasks can be
+worked in parallel unless a dependency is called out.
 
-### Wave 1 — Documentation and naming hygiene (portability foundation)
+### Wave 0 — Finish the macOS MVP invariants
 
-Status: active. Mostly complete via the docs reorganisation.
+Status: active. Do this before starting portability work.
+
+- `macos.md` M1-6 — LaunchAgent plist + crash-loop validation scenarios
+  (plist audit / SIGKILL / crash-loop pause / clean shutdown).
+
+### Wave 1 — Documentation and naming hygiene
+
+Status: mostly complete via the docs reorganisation.
 
 - `core.md` C0-1 … C0-10 — plans/tasks reorg, docs group READMEs,
   `xpc-contracts` → `ipc-contracts` rename, platform-abstractions
   reference, `AGENTS.md` reframing, constants / FSEvents vocabulary
   cleanup.
 
-Prerequisite for every later wave because it removes macOS-only
-vocabulary and lays out the target directory structure.
+Prerequisite for every later wave because it lays out the target
+directory structure and removes macOS-only vocabulary from the shared
+docs.
 
-### Wave 2 — Engine portability fixes (`core/*` compiles on every OS)
+### Wave 2 — Engine portability fixes
 
-Status: pending.
+Status: pending. **Foundation** — kept in the primary path even though
+macOS-only shipping would technically not need it, because it removes
+Unix-only assumptions and keeps the engine clean.
 
-- `core.md` C1-1 … C1-7 — runtime_paths permission gates,
+- `core.md` C1-1 … C1-7 — `runtime_paths` permission gates,
   `HOME`/`USERPROFILE` resolution, UTF-8 path encoding in `state_db`,
-  Windows-prefix handling in `fs_events`, `libc` dep cfg-gate, Windows
-  + Linux CI matrix for Rust jobs.
+  Windows-prefix handling in `fs_events`, `libc` dep cfg-gate, Linux +
+  Windows Rust CI matrix for `core/*` (lint + test only; Swift stays
+  macOS-only).
 
-Blocks Wave 3 (the `core/platform` crate needs a cross-OS compilable
-workspace). Swift jobs stay macOS-only.
+Exit gate: `cargo build --workspace` + `cargo test` succeed on macOS,
+Linux, Windows CI jobs for `core/*`. Blocks Wave 4 (the trait layer
+needs a cross-OS compilable workspace).
 
-### Wave 3 — Remaining runtime gaps (from prior Phase 2.5)
+### Wave 3 — Remaining runtime gaps
 
-Status: pending. Can run in parallel with Wave 2 because these are
-platform-agnostic fixes.
+Status: pending. Platform-agnostic runtime fixes; can run in parallel
+with Wave 2.
 
 - `core.md` C2-1 … C2-4 — replace default-`ThrottleInputs` placeholder
-  with real input source, throttle permit-id wrap-around hardening,
+  with a real input source, throttle permit-id wrap-around hardening,
   `SystemTime` → `Instant` migration for tick-cadence clocks, throttle
   controller hysteresis / min-dwell.
 
-No blockers; these close runtime invariants the product depends on
-regardless of platform.
-
 ### Wave 4 — Platform abstraction layer
 
-Status: pending. Requires Wave 2.
+Status: pending. **Foundation** — kept in the primary path. Requires
+Wave 2.
 
 - `core.md` C3-1 … C3-10 — new `core/platform` crate with trait
   skeletons + macOS-native implementations ported from existing
@@ -101,7 +121,8 @@ Status: pending. Requires Wave 2.
   as the living reference.
 
 macOS daemon behavior must stay byte-for-byte identical before and
-after this wave.
+after this wave. If Windows/Linux native impls are never written, the
+stubs stay as-is — the primary deliverable is unaffected.
 
 ### Wave 5 — Daemon lifecycle moves into Rust
 
@@ -117,59 +138,44 @@ Status: pending. Requires Wave 4 (specifically `ServiceInstaller`).
 These two task groups land **together** — do not merge one without the
 other.
 
-### Wave 6 — IPC channel + `vapor` CLI lifecycle commands
+### Wave 6 — IPC channel + `vapor` CLI lifecycle commands (macOS)
 
 Status: pending. Requires Waves 4 and 5.
 
 - `core.md` C5-1 … C5-5 — transport decision (UDS on Unix, named pipe
-  on Windows), JSON-RPC 2.0 framing, server-side implementation,
-  client library, status/control endpoints, skew-matrix tests.
+  on Windows — the Windows transport choice is made now even though
+  its implementation waits for Wave 12), JSON-RPC 2.0 framing,
+  server-side implementation, client library, status/control
+  endpoints, skew-matrix tests.
 - `cli.md` L0-1 … L0-5 — `vapor` crate skeleton and `--version`.
 - `cli.md` L1-1 … L1-4 — `vapor run`, `vapor config`, `vapor version`,
-  `vapor doctor`.
+  `vapor doctor` (macOS flavor).
 - `cli.md` L2-1 … L2-5 — `vapor service {install,uninstall,start,stop,status}`
   driving the macOS `ServiceInstaller`; round-trip automated on macOS
-  CI.
+  CI only.
 
 This is the "ship the CLI on macOS" milestone. The CLI proves
-`core/platform` + `core/lifecycle` actually work against real macOS
-users before we generalize to other OSes.
+`core/platform` + `core/lifecycle` work against real macOS users.
 
-### Wave 7 — Windows + Linux platform implementations
+### Wave 7 — IPC-driven CLI surface + auth flows
 
-Status: pending. Requires Waves 4, 5, 6.
-
-- `core.md` C6-1 … C6-8 — Windows native impls for every trait
-  (ReadDirectoryChangesW, Task Scheduler / SCM, Credential Manager,
-  power/thermal signals, `GetLastInputInfo`, NTFS ADS,
-  SCM / console-ctrl). Windows distribution trust chain doc.
-- `core.md` C7-1 … C7-7 — Linux native impls (inotify/fanotify,
-  systemd user/system units, Secret Service / age fallback,
-  `/proc/pressure` PSI, X11/Wayland idle, xattr, systemd unit policy
-  doc).
-- `cli.md` L2-6, L2-7 — `vapor service install` round-trip automated
-  on Linux and Windows CI.
-- `cli.md` L5-1 … L5-3 — headless / server ergonomics
-  (`--user-activity`, Docker recipe, deployment recipes).
-
-After this wave, the `vapor` CLI runs with full native-optimal
-behavior on every supported OS.
-
-### Wave 8 — IPC-driven CLI surface + auth flows
-
-Status: pending. Requires Wave 6 (IPC) and whichever provider wave ships
-first.
+Status: pending. Requires Wave 6 (IPC) and at least one provider from
+Wave 8 or the filesystem-provider no-op auth path.
 
 - `cli.md` L3-1 … L3-7 — `vapor status / pause / resume / flush-now /
   reconcile / timeline / logs`. All IPC-backed. `--json` stable; never
   hang when no daemon is running.
 - `cli.md` L4-1 … L4-3 — `vapor auth login / logout / status` via PKCE.
-  Depends on `SecretStore` from Wave 4 and the provider from Wave 9
-  first touchpoint (Google Drive) or Wave 9-filesystem's no-op auth.
+  Depends on `SecretStore` from Wave 4 and a provider with an OAuth
+  flow.
 
-### Wave 9 — Runtime capability completion (was macOS Phases 3–10)
+### Wave 8 — Runtime capability completion
 
-Status: pending. Parallelizable with Waves 6–8 except where noted.
+Status: pending. This is the big wave — it covers everything the
+original macOS Phases 3–10 used to cover, now platform-agnostic so
+every surface inherits it.
+
+Parallelizable with Waves 6–7 except where noted internally.
 
 Covers the full C8-1 … C8-58 span in `core.md`:
 
@@ -180,8 +186,8 @@ Covers the full C8-1 … C8-58 span in `core.md`:
    resolution, corruption recovery.
 3. **C8-19 … C8-26** — multi-profile model, profile-scoped overrides,
    shared-root watch dedup, blast-radius containment.
-4. **C8-27 … C8-31** — IPC finalisation + diagnostics UX (consumed by
-   `macos.md` M3 on the app side).
+4. **C8-27 … C8-31** — IPC finalisation + diagnostics UX surface
+   (consumed by Wave 9 macOS UX + Wave 7 CLI).
 5. **C8-32 … C8-42** — `resourceLimits` + `idleBoost` + auto-tuning +
    bandwidth shaper + memory-ceiling enforcement.
 6. **C8-43 … C8-47** — provider-system extensibility hardening.
@@ -190,58 +196,141 @@ Covers the full C8-1 … C8-58 span in `core.md`:
 8. **C8-55 … C8-58** — optional advanced safeguards (active-coding
    detection, mass-change guard, support export).
 
-Each of these opens matching macOS UX work in `macos.md`:
+### Wave 9 — macOS app UX polish
 
-- C8-27 … C8-31 ⇒ `macos.md` M3-1 … M3-6 (diagnostics UI).
-- C8-19 … C8-26 ⇒ `macos.md` M4-1 … M4-4 (profiles UX).
+Status: pending. Requires Wave 8 sub-blocks as noted below.
+
+- `macos.md` M3-1 … M3-6 — diagnostics UX in the macOS app: real
+  IPC-backed controls (`Pause`/`Resume`/`Flush now`), full menubar
+  state model, diagnostics panel with throttle reason + queue depth +
+  conflicts + failures + effective ceilings + utilization + idle-boost
+  reason, per-intent "why stuck" UI, live timeline tab, tests.
+  Depends on C8-27 … C8-31.
+- `macos.md` M4-1 … M4-4 — profiles UX: create/rename/select/enable/
+  disable/delete flows, profile-scoped override settings UI, safe
+  disconnect, multi-provider fan-out UI. Depends on C8-19 … C8-26.
 
 ### Wave 10 — macOS distribution hardening
 
-Status: pending. Depends on at least one release cycle in the
-multi-platform world so the entitlement drift and upgrade-from-N-1
-checks have real data.
+Status: pending.
 
-- `macos.md` M5-1 … M5-4 — signed + notarized end-to-end verification,
-  entitlements drift check, upgrade stability, rollback artifact
-  preservation.
+- `macos.md` M5-1 … M5-4 — signed + notarized end-to-end verification
+  on a clean macOS host every release cycle, entitlements drift check,
+  LaunchAgent/login-item stability across upgrades (N-1 → N), rollback
+  artifact preservation.
 
-### Wave 11 — CLI distribution
+### Wave 11 — CLI distribution (macOS)
 
-Status: pending. Depends on Wave 7 (Windows/Linux trust chains) so the
-per-target-triple release jobs have signing identities to consume.
+Status: pending. Depends on Wave 10 (the macOS signing identity and
+`release-macos` GitHub Environment are shared).
 
-- `cli.md` L6-1 … L6-6 — cross-target-triple binary release jobs,
-  strip + zstd + SHA256 per asset, publish alongside app releases,
-  per-OS signing.
+- `cli.md` L5-1 … L5-3 — headless / server ergonomics
+  (`--user-activity`, Docker recipe, deployment recipes). Docker +
+  Linux systemd recipes are written but validated only on macOS in
+  this wave (they run in CI via Docker-on-macOS); first-class Linux
+  validation waits for Wave 13.
+- `cli.md` L6-1, L6-4 — release-pipeline jobs that build `vapor` for
+  `aarch64-apple-darwin` and `x86_64-apple-darwin`, strip + zstd +
+  SHA256, sign with Developer ID (shares the macOS trust chain),
+  publish alongside the macOS app bundle under the same GitHub Release
+  tag.
+
+After this wave, the primary deliverable is complete: polished core +
+CLI + macOS app, all under one release tag.
+
+## Deferred / optional — Windows and Linux (waves 12+)
+
+**Start condition:** the project owner explicitly decides to ship a
+non-macOS surface. Until then, these waves do not progress. Nothing in
+the primary path is blocked by any of them.
+
+The foundation laid in Waves 2 and 4 means picking any of these up
+later is a matter of filling in native implementations behind an
+already-stable trait surface, not a rewrite.
+
+### Wave 12 — Windows platform implementations (optional)
+
+- `core.md` C6-1 … C6-8 — Windows native impls for every trait
+  (ReadDirectoryChangesW, Task Scheduler / SCM, Credential Manager,
+  power/thermal signals, `GetLastInputInfo`, NTFS ADS, SCM /
+  console-ctrl). Windows distribution trust chain doc. Add the named
+  pipe IPC transport implementation on the Windows side.
+- `cli.md` L2-7 — `vapor service install` round-trip automated on
+  Windows CI.
+- Add `windows-latest` as a real (not lint-only) CI job for `core/*`.
+
+### Wave 13 — Linux platform implementations (optional)
+
+- `core.md` C7-1 … C7-7 — Linux native impls (inotify / fanotify,
+  systemd user/system units, Secret Service / age fallback,
+  `/proc/pressure` PSI, X11/Wayland idle, xattr, systemd unit policy
+  doc).
+- `cli.md` L2-6 — `vapor service install` round-trip automated on
+  Linux CI.
+- Add `ubuntu-latest` as a real (not lint-only) CI job for `core/*`.
+
+### Wave 14 — Cross-OS CLI distribution (optional)
+
+Depends on whichever of Waves 12, 13 has shipped.
+
+- `cli.md` L6-1 remaining targets (`x86_64-unknown-linux-gnu`,
+  `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`,
+  `aarch64-pc-windows-msvc`).
+- `cli.md` L6-5 — Windows EV-cert signing.
+- `cli.md` L6-6 — GPG-signed Linux binaries + `Checksums.txt.asc`.
+- Full end-to-end validation on Docker + Linux + Windows (closes
+  items left open in Wave 11).
+
+### Wave 15 — `apps/windows` app shell (optional)
+
+Only if the project owner decides to ship a Windows GUI. Creates
+`docs/plans/windows.md` and `docs/tasks/windows.md` as new surfaces
+with their own plan + task list; picks the UI tech (WinUI 3, WPF, or
+Tauri — see `docs/plans/core.md §8`); `release-windows` GitHub
+Environment configured with EV cert secrets.
+
+### Wave 16 — `apps/linux` app shell (optional)
+
+Only if the project owner decides to ship a Linux GUI. Creates
+`docs/plans/linux.md` and `docs/tasks/linux.md` as new surfaces; picks
+the UI tech (GTK4-rs, Qt, or Tauri); `release-linux` GitHub
+Environment configured with GPG key secrets; AppImage first, then
+`.deb` / `.rpm` / Flatpak / Snap as demand surfaces.
 
 ## Cross-phase validation (runs continuously)
 
-`core.md` T-1 … T-15 are standing invariants validated on every CI run,
-not a wave:
+`core.md` T-1 … T-15 are standing invariants validated on every CI
+run, not a wave:
 
 - Crash/restart, throttle correctness, fs-watch callback discipline,
   self-write echo suppression, conflict policy, security posture,
   upgrade compatibility, CI parity, scope safety, ignore-rule
   precedence, performance SLOs, memory bounds, auto-tuning stability,
-  multi-profile isolation, autolaunch round-trip on every OS.
+  multi-profile isolation, autolaunch round-trip.
 
-These must pass before any wave's exit gate is declared met.
+T-15 (autolaunch round-trip on every OS) is interpreted against the
+shipping OSes — macOS only during Waves 0–11; macOS + whichever
+Windows/Linux surfaces have shipped if the optional waves land. This
+must pass before any wave's exit gate is declared met.
 
 ## How to pick up a task
 
 1. Read `docs/plans/README.md` and the matching `docs/plans/<surface>.md`
    to understand intent.
-2. Consult this README's wave table to see which waves are currently
-   open and which tasks are unblocked.
-3. Move the task to `[~]` in its task file when you start; `[x]` when
+2. Consult the wave list above to see which primary-path waves are
+   currently open and which tasks are unblocked.
+3. Only touch Wave 12+ work if the project owner has explicitly
+   opted into a non-macOS surface.
+4. Move the task to `[~]` in its task file when you start; `[x]` when
    merged.
-4. Update this README's wave statuses if your work closes a wave or
+5. Update this README's wave statuses if your work closes a wave or
    unblocks a new one.
 
 ## Deferred / parking-lot items
 
-Each task file maintains its own deferred section for work that is
-intentionally out of the current wave:
+Separate from the Windows/Linux optional bucket above, each task file
+maintains its own deferred section for work that is intentionally out
+of the current wave:
 
 - `core.md` "Deferred tasks" — perf threshold tuning, production
   onboarding clarification pass.

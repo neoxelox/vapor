@@ -306,60 +306,126 @@ native if Tauri doesn't pull its weight.
 
 ## 9) Feature parity matrix
 
-This is the acceptance definition for "Vapor ships on platform X".
+This is the acceptance definition *if and when* Vapor ships on a given
+platform. Windows and Linux columns describe what the optional waves
+must deliver; until those waves land, the Windows/Linux cells stay as
+`unimplemented!()` stubs behind the shared trait layer and the engine
+continues to compile on those OSes.
 
-| Capability | macOS | Windows | Linux | CLI | Lives in |
+| Capability | macOS | Windows (optional) | Linux (optional) | CLI | Lives in |
 |---|---|---|---|---|---|
-| Invisible background daemon | ✅ | must | must | must (`vapor run`) | `core/daemon` |
+| Invisible background daemon | ✅ | must if shipping | must if shipping | must on macOS; must on Win/Linux if shipping (`vapor run`) | `core/daemon` |
 | Autolaunch on login/boot | ✅ LaunchAgent | Task Scheduler / SCM | systemd --user / system | `vapor service install` | `core/platform/service` |
-| Crash-loop protection | ✅ Swift | must | must | must | `core/lifecycle` |
+| Crash-loop protection | ✅ Swift → moving to Rust | must if shipping | must if shipping | must | `core/lifecycle` |
 | Menubar/tray status | ✅ SwiftUI | tray (WinUI/Tauri/WPF) | tray (GTK/Qt/Tauri) | — | `apps/<os>` |
 | FS watch (native-optimal) | FSEvents | ReadDirectoryChangesW + IOCP | inotify / fanotify | via host impl | `core/platform/fs_watch` |
 | Durable queue/state | ✅ SQLite | same | same | same | `core/daemon/state_db` |
 | Throttle controller | ✅ | same | same | same | `core/daemon/throttle` |
-| Metrics sampler | needs impl | needs impl | needs impl | via host impl or static | `core/platform/metrics` |
-| User-idle detector | needs impl | needs impl | needs impl | headless ⇒ always-idle | `core/platform/idle` |
+| Metrics sampler | needs impl | needs impl if shipping | needs impl if shipping | via host impl or static | `core/platform/metrics` |
+| User-idle detector | needs impl | needs impl if shipping | needs impl if shipping | headless ⇒ always-idle | `core/platform/idle` |
 | Secret store | Keychain | Credential Manager | Secret Service + file fallback | via host impl | `core/platform/secrets` |
 | xattr / metadata tags | xattr | NTFS ADS | xattr | via host impl | `core/platform/fs_caps` |
 | Signed + verified distribution | Developer ID + notary | EV cert + signtool | GPG AppImage | binary + checksum | `apps/<os>/scripts`, `core/cli/scripts` |
-| Diagnostics / logs / timeline | ✅ | must | must | must | `core/daemon` |
+| Diagnostics / logs / timeline | ✅ | must if shipping | must if shipping | must | `core/daemon` |
 
-Everything marked "must" is a platform-port deliverable; nothing is allowed
-to ship with a hole on one OS because it was "too macOS-y".
+"Must" is scoped to shipping surfaces: nothing is allowed to ship on a
+given OS with a hole, but a non-shipping OS can have stubbed platform
+impls. Promoting a non-shipping OS to a shipping OS requires its
+optional wave in `docs/tasks/README.md` to land first.
 
 ## 10) Execution sequence
+
+### Priorities
+
+**Focus:** a very good, performant, polished core runtime, `vapor` CLI,
+and macOS app. Windows and Linux are kept *possible* via the platform
+trait layer but are not committed deliverables.
+
+### Primary path (macOS + CLI + core)
 
 1. **Docs and naming hygiene.** Rename "XPC contracts" →
    "IPC contracts"; "FSEvents callback" → "fs-watch callback"; reframe
    `AGENTS.md` product intent; split macOS-specific doc files into
    `docs/{architecture,operations}/macos/*`. Zero code risk.
 2. **Engine portability fixes (§4).** Make `core/daemon` + `core/shared`
-   compile on macOS/Linux/Windows. Add Linux + Windows Rust jobs to the CI
-   matrix (lint + test; no perf yet).
-3. **Create `core/platform` crate** with trait skeletons (§3) and macOS
-   implementations ported from existing Swift/docs. No new app surfaces yet.
+   compile on macOS/Linux/Windows. Add Linux + Windows Rust jobs to the
+   CI matrix (lint + test; no perf yet). **Foundation** — kept in the
+   primary path even though macOS-only shipping would technically not
+   need it, because it removes Unix-only assumptions from the engine
+   and keeps the door open.
+3. **Create `core/platform` crate** with trait skeletons (§3) and
+   macOS-native implementations ported from existing Swift/docs.
+   Windows/Linux implementations stubbed to `unimplemented!()`. No new
+   app surfaces yet. **Foundation** — the trait layer is the single
+   place OS-specific behavior lives; if Windows/Linux native impls are
+   never written, the stubs stay. macOS daemon behavior stays
+   byte-for-byte identical before and after.
 4. **Move lifecycle into `core/lifecycle`** (§2.3). Swift app starts
-   consuming the Rust-backed lifecycle via FFI or via the prototype `vapor`
-   CLI. macOS behavior unchanged end-to-end.
-5. **Ship the `vapor` CLI.** First non-macOS surface. Validates that
-   `core/platform` + `core/lifecycle` actually work by running the real
-   daemon on Linux + Windows with full autolaunch semantics.
-6. **Land Linux and Windows platform implementations** for every remaining
-   trait in `core/platform`. Real per-OS CI jobs run real tests.
-7. **Decide app tech per OS** (see §8). Start `apps/windows` and
-   `apps/linux`. Each is a thin shell over `core` + the IPC channel.
-8. **Ship v0.3 as the multi-platform MVP.** macOS app + `vapor` CLI + Linux
-   app + Windows app, all sharing one `core` runtime.
+   consuming the Rust-backed lifecycle via FFI or via the prototype
+   `vapor` CLI. macOS behavior unchanged end-to-end.
+5. **Ship the `vapor` CLI on macOS.** Validates that `core/platform` +
+   `core/lifecycle` work against real users by running the daemon with
+   full autolaunch semantics on macOS. The same crate also builds on
+   Linux + Windows thanks to step 2, but will not run there until the
+   deferred Wave 12/13 work lands.
+6. **Finish runtime capability completion** (the full C8 span in
+   `docs/tasks/core.md`): filesystem reference provider, bidirectional
+   runtime shell, `self_write_cache`, conflict policy, tombstones,
+   multi-profile model, IPC diagnostics surface, user resource budgets
+   + idle boost, auto-tuning, provider-system extensibility, Google
+   Drive provider, optional safeguards.
+7. **Polish the macOS app UX** against the completed runtime:
+   diagnostics panel, per-intent "why stuck" view, live timeline,
+   profiles UX, real IPC-backed controls.
+8. **Harden macOS distribution** (signing, notarization, upgrade
+   stability, rollback artifacts) and publish the macOS CLI binary
+   alongside the app bundle under the same GitHub Release tag.
+
+At the end of step 8, the primary deliverable is complete: core +
+`vapor` CLI + macOS app, polished and shipping.
+
+### Deferred / optional (Windows + Linux)
+
+Start condition: the project owner explicitly decides to ship a
+non-macOS surface. Nothing in the primary path is blocked by any of
+these.
+
+9. **Land Windows platform implementations** for every trait in
+   `core/platform`. Real Windows CI jobs (not lint-only) run the full
+   `core/*` test suite. Add the named-pipe IPC transport.
+10. **Land Linux platform implementations** for every trait in
+    `core/platform`. Real Linux CI jobs run the full `core/*` test
+    suite.
+11. **Ship the `vapor` CLI on Windows and Linux.** Cross-OS binary
+    distribution (EV-cert signing on Windows, GPG signing on Linux),
+    headless / Docker / systemd / Task Scheduler recipes validated
+    end-to-end.
+12. **Decide app tech per OS** (see §8) if and only if a GUI is
+    actually desired. Create `docs/plans/windows.md` /
+    `docs/tasks/windows.md` (and the Linux equivalents) and start
+    `apps/windows` / `apps/linux`.
+
+Steps 9–12 are entirely optional. The primary deliverable stands on its
+own with none of them.
 
 ## 11) Definition of done (applies to every milestone)
 
-- Behavior validated on every supported OS — happy path and failure path.
-- Crash/restart recovery preserved on every OS.
-- Throttle/backpressure invariants upheld on every OS.
-- Autolaunch + lifecycle behavior verified on every OS (including the CLI).
-- Diagnostics expose `current state + reason` identically on every OS.
-- Platform trait gets an in-memory fake for cross-OS unit tests and a real
-  native impl tested in each OS-specific CI job.
+"Every supported OS" below means the OSes currently shipping a surface
+(macOS is the primary shipping OS; Windows/Linux only count once their
+optional waves land).
+
+- Behavior validated on every shipping OS — happy path and failure path.
+- Crash/restart recovery preserved on every shipping OS.
+- Throttle/backpressure invariants upheld on every shipping OS.
+- Autolaunch + lifecycle behavior verified on every shipping OS
+  (including the CLI where it ships).
+- Diagnostics expose `current state + reason` identically on every
+  shipping OS.
+- Platform trait gets an in-memory fake for cross-OS unit tests. Every
+  trait has a real native implementation on macOS; Windows/Linux impls
+  may be `unimplemented!()` stubs unless their optional wave has
+  landed, but the stub state must compile and be tracked in
+  `docs/tasks/core.md`.
 - Docs/contracts updated in the same change set.
 
 ## 12) What must not change

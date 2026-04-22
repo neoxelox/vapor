@@ -240,6 +240,11 @@ Exit gate:
 
 ## Phase C6 - Windows platform implementations
 
+**Status: deferred / optional.** Gated on the project owner explicitly
+opting into a Windows surface. Nothing in the primary path (core +
+macOS app + CLI-on-macOS) is blocked by this phase. See
+`docs/tasks/README.md` wave 12.
+
 - [ ] C6-1 `core/platform/fs_watch/windows.rs`: `ReadDirectoryChangesW` with
       IOCP. Prefer `notify` as MVP; switch to direct `windows` crate when
       buffer sizing or rename-pair semantics need tuning. Rename pair
@@ -273,6 +278,11 @@ Exit gate:
   impls.
 
 ## Phase C7 - Linux platform implementations
+
+**Status: deferred / optional.** Gated on the project owner explicitly
+opting into a Linux surface. Nothing in the primary path (core +
+macOS app + CLI-on-macOS) is blocked by this phase. See
+`docs/tasks/README.md` wave 13.
 
 - [ ] C7-1 `core/platform/fs_watch/linux.rs`: `inotify` (user) MVP; optional
       `fanotify` variant behind `CAP_SYS_ADMIN` for system-wide scenarios.

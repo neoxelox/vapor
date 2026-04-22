@@ -16,8 +16,11 @@ Binary names are fixed:
 ## 1) Mission
 
 `vapor` is the reference consumer of the portable runtime and the universal
-control plane every other app can shell out to. It ships on every OS Vapor
-supports and exposes the full runtime capability surface without a GUI.
+control plane every other app can shell out to. The primary shipping target
+is macOS, alongside the macOS app. Linux and Windows CLI binaries are
+deferred behind the optional platform-impl waves in
+`docs/tasks/README.md`; the crate is designed so they cost only a
+recompile + CI job once those waves land, not a rewrite.
 
 ## 2) Non-negotiables
 
@@ -80,16 +83,34 @@ vapor version
 
 ## 4) Distribution
 
+Aligned with the prioritization in `docs/tasks/README.md`: the CLI ships
+on macOS first as part of the primary deliverable. Linux and Windows
+binaries are deferred and gated on the optional waves 12–14.
+
+### 4.1 Primary (macOS)
+
 - Pure Rust binary. Target triples:
-  - `aarch64-apple-darwin`, `x86_64-apple-darwin`
-  - `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
-    - Musl targets as a stretch goal for Alpine/Docker users.
-  - `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`
-- Packaged as zstd-compressed tarballs/zips with SHA256 checksums.
-- Published to GitHub Releases alongside the macOS app bundle and future
-  Windows/Linux installers under the same tag.
-- Signing: Developer ID signing on macOS (shares the macOS trust chain); EV
-  cert signing on Windows; GPG signature + checksum on Linux.
+  - `aarch64-apple-darwin`
+  - `x86_64-apple-darwin`
+- Packaged as zstd-compressed tarballs with SHA256 checksums.
+- Signed with the shared macOS Developer ID identity (shares
+  `release-macos` GitHub Environment secrets with the app bundle).
+- Published to GitHub Releases under the same tag as the macOS app
+  bundle.
+
+### 4.2 Deferred (Linux and Windows)
+
+Only shipped when the project owner opts into a non-macOS surface. Each
+platform's CLI distribution rides the matching platform-impl wave in
+`core.md §10` (Windows ⇒ wave 9; Linux ⇒ wave 10).
+
+- Linux targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
+  (musl variants a stretch goal for Alpine/Docker users). GPG signature
+  + checksum; `release-linux` GitHub Environment.
+- Windows targets: `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`.
+  EV-cert signing via `signtool`; `release-windows` GitHub Environment.
+- Published under the same GitHub Release tag as whichever other
+  artifacts ship that cycle.
 
 ## 5) Developer ergonomics
 
@@ -100,10 +121,13 @@ vapor version
 
 ## 6) Definition of done
 
-- Every command works on macOS, Linux, Windows CI jobs.
+- Every command works on macOS CI for the primary deliverable;
+  Linux/Windows CI validation lands with the matching optional wave.
 - `vapor service install` + `vapor run` + `vapor status` pass a full
-  round-trip on each OS.
-- `vapor doctor` detects the known misconfigurations per OS.
+  round-trip on macOS for the primary deliverable (and on each
+  additional OS once its optional wave lands).
+- `vapor doctor` detects the known misconfigurations on every shipping
+  OS.
 - `--json` mode is stable (documented schema; covered by snapshot tests).
 - Binary size stays reasonable (single-digit MB once stripped + zstd'd).
 
