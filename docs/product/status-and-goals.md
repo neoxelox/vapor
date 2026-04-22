@@ -2,10 +2,11 @@
 
 ## Project status
 
-- Current stage: pre-GA (`v0.2.0-alpha.3`); Phases 0, 1, 1.5, 2, and 2.5 are complete and Phase 3 is the next active phase. See `docs/plans/vapor-macos-task-list.md` for the per-phase checklist.
-- Default provider is currently the inert `FilesystemStubProvider`; the real `provider_filesystem` ships in Phase 3 and `GoogleDriveProvider` is selectable starting in Phase 9.
-- Product direction: bidirectional eventual consistency between a user-selected local folder and a user-selected provider folder; Google Drive remains the first external cloud target but is intentionally deferred until the runtime, abstractions, and acceptance criteria are stable.
-- Primary constraint: do no harm to user workload, battery, and thermal headroom.
+- Current stage: pre-GA (`v0.2.0-alpha.3`). Runtime Phases M0, M1, M1.5, M2, M2.5 (macOS-centric numbering in legacy task tracking) are complete. Going forward, runtime-level work is tracked in `docs/tasks/core.md`, macOS app work in `docs/tasks/macos.md`, and CLI work in `docs/tasks/cli.md`.
+- Default provider is currently the inert `FilesystemStubProvider`; the real `provider_filesystem` ships in the Phase C8 bidirectional runtime shell and `GoogleDriveProvider` becomes selectable later in C8.
+- Product direction: bidirectional eventual consistency between a user-selected local folder and a user-selected provider folder. macOS is the first shipping surface; the `vapor` CLI follows on every OS; Windows and Linux apps land on the same portable Rust runtime.
+- Google Drive remains the first external cloud target but is intentionally deferred until the runtime, abstractions, and acceptance criteria are stable.
+- Primary constraint: do no harm to user workload, battery, and thermal headroom — on every supported OS.
 - Pre-GA compatibility policy: backward compatibility is not guaranteed yet; config/state/schema and local interfaces may change during active development.
 
 ## Product goals
@@ -26,4 +27,4 @@
 - User resource ceilings (`resourceLimits.cpuPercent`, `memoryPercent`, `bandwidthPercent`) and `idleBoost` (default-on dynamic headroom) layer over the throttle controller without ever relaxing it.
 - Eventual consistency is guaranteed by durable intent persistence and retry logic.
 - Bidirectional safety includes self-write loop prevention (`self_write_cache`, planned in Phase 3) and deterministic conflict handling (planned in Phase 4).
-- Graceful shutdown on SIGTERM/SIGINT and a `CrashLoopPaused` state after 5 unclean exits in 10 minutes; see `docs/operations/launchagent-policy.md`.
+- Graceful shutdown on SIGTERM/SIGINT (or the platform-native equivalent on Windows/Linux) and a `CrashLoopPaused` state after 5 unclean exits in 10 minutes. macOS specifics: `docs/operations/macos/launchagent-policy.md`.

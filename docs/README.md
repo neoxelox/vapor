@@ -1,37 +1,58 @@
 # Vapor Documentation Index
 
-Use this page as the default entrypoint for product, engineering, and operations context.
+Use this page as the default entrypoint for product, engineering, and
+operations context.
 
-## Product
+## How the docs are organised
 
-- Product status and goals: `docs/product/status-and-goals.md`
+- Every group under `docs/` has a `README.md` that is the entrypoint for
+  that group: it explains what the group covers, what each file is, and
+  how to use them. **Always start at the group README**, not at
+  individual files.
+- Common (cross-platform) content lives at the top of each group
+  (`docs/architecture/`, `docs/operations/`, …).
+- Platform-specific content lives in per-platform subdirectories
+  (`docs/architecture/macos/`, `docs/operations/macos/`, later
+  `windows/`, `linux/`). Each platform subdirectory also has its own
+  `README.md`.
+- Plans and tasks are flat and platform-named: one file per deliverable
+  surface (`docs/plans/{core,macos,cli}.md`,
+  `docs/tasks/{core,macos,cli}.md`).
+- `docs/tasks/README.md` is the **cross-surface roadmap orchestrator** —
+  the "what should be done next" guide when multiple task lists have
+  pending items.
 
-## Architecture
+## Groups
 
-- Architecture index: `docs/architecture/README.md`
-- macOS app lifecycle semantics: `docs/architecture/macos-app-lifecycle.md`
+Jump to a group's `README.md` for an explanation of its contents and how
+to use them.
 
-## Operations
+- **Product** — direction, scope, status, non-goals:
+  `docs/product/README.md`.
+- **Architecture** — system design, contracts, platform abstractions:
+  `docs/architecture/README.md`.
+- **Operations** — release, signing, provider auth, logging, incident
+  playbooks: `docs/operations/README.md`.
+- **Development** — local runbook, scripts, toolchain baseline:
+  `docs/development/README.md`.
+- **CI** — GitHub Actions workflows and required-check policy:
+  `docs/ci/README.md`.
+- **Performance** — SLOs and benchmark harness:
+  `docs/performance/README.md`.
+- **Plans** — per-surface implementation plans (intent):
+  `docs/plans/README.md`.
+- **Tasks** — per-surface task lists and the cross-surface roadmap:
+  `docs/tasks/README.md`.
 
-- Operations index: `docs/operations/README.md`
-- Release process: `docs/operations/release-process.md`
-- Release incident playbook: `docs/operations/release-incident-playbook.md`
-- Runtime logging and localization: `docs/operations/runtime-logging-and-localization.md`
+## Quick intent mapping
 
-## Development
+- "What is Vapor and where is it going?" → `docs/product/README.md`
+- "What should I work on next?" → `docs/tasks/README.md`
+- "How does the runtime fit together?" → `docs/architecture/README.md`
+- "How do I build / test / lint locally?" → `docs/development/README.md`
+- "How is the release cut?" → `docs/operations/README.md`
+- "Which CI checks must pass?" → `docs/ci/README.md`
+- "Where are the performance SLOs?" → `docs/performance/README.md`
+- "What is the plan for surface X?" → `docs/plans/README.md`
 
-- Local developer runbook and build notes: `docs/development/runbook.md`
-- Contributor baseline toolchain reference: `docs/development/toolchain-baseline.md`
-
-## CI
-
-- Required checks and workflow parity: `docs/ci/required-checks.md`
-- Workflow overview and trigger policy: `docs/ci/overview.md`
-
-## Planning
-
-- Planning index: `docs/plans/README.md`
-
-## Performance
-
-- Performance docs index: `docs/performance/README.md`
+The contributor operating rules live at the root: `AGENTS.md`.

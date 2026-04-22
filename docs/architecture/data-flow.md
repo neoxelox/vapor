@@ -89,6 +89,6 @@ When multiple enabled profiles target overlapping local roots, the watcher must 
 
 ## Control and observability
 
-- App queries daemon over XPC for status, queue depths, reasons.
+- App queries daemon over IPC for status, queue depths, reasons (see `docs/architecture/ipc-contracts.md`).
 - App issues controls: pause/resume, flush-now, auto-launch toggle, excludes updates.
 - Diagnostics expose throttle cause, retry state, conflict outcomes, current effective resource ceilings, measured utilization, and the active idle-boost state with a human-readable reason.

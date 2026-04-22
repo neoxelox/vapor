@@ -4,7 +4,9 @@ This file defines the operating rules for contributors (human and AI) working on
 
 ## 1) Product intent and non-negotiables
 
-- `vapor` is an invisible-first macOS background sync product.
+- `vapor` is an invisible-first background sync product. The first shipping surface is the macOS app; Windows, Linux, and a CLI (`vapor`) follow and consume the same portable Rust runtime.
+- The Rust core (`core/*`) is the single portable runtime that powers every surface. Apps under `apps/*` and the `vapor` CLI are UI + OS-integration shims over that runtime; no business logic lives in them.
+- Platform-specific code is allowed and encouraged inside `core/platform` when it unlocks native performance; the engine consumes traits, not OS APIs directly.
 - Primary priority is user device impact, not strict real-time sync.
 - Vapor sync scope is a user-selected local directory replicated bidirectionally with a user-selected cloud directory.
 - Vapor is not a full-device backup product and must never broaden scope beyond configured sync roots.
@@ -14,6 +16,7 @@ This file defines the operating rules for contributors (human and AI) working on
   - Recover safely after crash/restart.
   - Defer under pressure and converge eventually.
 - Bidirectional behavior is in MVP for Google Drive and must be safety-first.
+- Feature parity across platforms is mandatory for the invariants above. Autolaunch, crash-loop protection, durable queue, throttle discipline, secret storage, and resource budgets must be delivered on every supported OS via the matching `core/platform` trait implementation; "skip it on that OS" is never acceptable.
 
 ## 1.1) Project maturity and compatibility policy
 
@@ -23,20 +26,33 @@ This file defines the operating rules for contributors (human and AI) working on
 
 ## 2) System boundaries
 
-- SwiftUI app (`apps/macos`)
-  - UX, onboarding, settings, diagnostics, menubar state.
-  - Keychain access and auth orchestration UI.
-  - Auto-launch and daemon lifecycle controls.
 - Rust daemon (`core/daemon`)
-  - FSEvents ingest, debounce/coalescing, scheduler, throttle controller.
+  - Fs-watch ingest, debounce/coalescing, scheduler, throttle controller.
   - Durable queue/state, retry/backoff, reconcile, provider execution.
 - Providers (`core/providers`)
   - Cloud API integration via provider trait/capabilities.
   - No provider-specific assumptions in core engine.
 - Shared contracts (`core/shared`)
-  - XPC schemas, error taxonomies, settings models, version contracts.
+  - IPC schemas, error taxonomies, settings models, version contracts.
+- Platform layer (`core/platform`)
+  - Traits + per-OS native implementations for fs-watch, service install,
+    secret store, metrics sampling, idle detection, filesystem capabilities,
+    and process supervision. Engine code consumes traits, not OS APIs.
+- Daemon lifecycle (`core/lifecycle`)
+  - `CrashLoopGuard`, `DaemonLifecycleManager`, `AutoLaunchSettingStore`.
+    Every surface (macOS app, Windows app, Linux app, `vapor` CLI) consumes
+    this layer; nothing reimplements it.
+- `vapor` CLI (`core/cli`)
+  - Headless-first binary that exposes the full runtime on every OS.
+- SwiftUI app (`apps/macos`)
+  - UX, onboarding, settings, diagnostics, menubar state.
+  - Delegates autolaunch, crash-loop, and daemon control to
+    `core/lifecycle` (via FFI or the `vapor` CLI).
+  - Calls the macOS-native `SecretStore` implementation for Keychain access.
+- Future apps (`apps/windows`, `apps/linux`) consume the same `core/*`
+  stack; no business logic in UI code.
 
-Do not move heavy compute into app process or FSEvents callback path.
+Do not move heavy compute into an app process or the fs-watch callback path.
 
 ## 2.1) macOS app component model and lifecycle semantics
 
@@ -54,6 +70,7 @@ Do not move heavy compute into app process or FSEvents callback path.
 ## 2.2) Naming conventions
 
 - The macOS app/program name must be `Vapor`.
+- The CLI binary name must be `vapor` (crate `core/cli`).
 - The daemon binary name must be `vapord`.
 - The daemon package/crate name should remain `vapor-daemon` for naming consistency.
 - Brand/domain identifiers are fixed: brand `ARN`, domain `arn.sh`, bundle ID `sh.arn.vapor`.
@@ -63,7 +80,7 @@ Do not move heavy compute into app process or FSEvents callback path.
 
 ## 3) Performance and throttle invariants
 
-- FSEvents callback may only normalize/filter/record event metadata.
+- The fs-watch callback (FSEvents on macOS, ReadDirectoryChangesW on Windows, inotify on Linux) may only normalize/filter/record event metadata.
 - No DB/hash/network work in callback.
 - All expensive work must be throttle-state gated.
 - Throttle states: `IdleDrain`, `Light`, `Throttled`, `Suspended`.
@@ -88,48 +105,109 @@ Do not move heavy compute into app process or FSEvents callback path.
 
 ## 6) Security and privacy
 
-- Secrets/tokens only in Keychain (or platform-secure equivalent for tests).
+- Secrets/tokens only via `core/platform/secrets::SecretStore` — Keychain on macOS, Credential Manager on Windows, Secret Service on desktop Linux, age-encrypted file or external command shim on headless Linux. Tests use the in-memory fake.
 - Logs must redact secrets, tokens, auth headers, and sensitive identifiers.
 - Telemetry is local-only unless explicitly designed otherwise.
 - Any permissioned feature must degrade safely when denied.
 
-## 7) macOS distribution and trust chain
+## 7) Distribution and trust chain
 
-- Distribution model must include:
-  - code signing
-  - hardened runtime
-  - notarization
-  - entitlement review
-- macOS app distribution must be script-first and CI-runnable, producing `Vapor.app` and zip artifacts without requiring Xcode UI archive workflows.
-- `Vapor.app` is the single distributable package and must contain both executables:
+Each platform owns its own trust chain. Cross-platform principles live here;
+concrete per-platform policy lives under `docs/operations/<platform>/`.
+
+### 7.1) Shared principles
+
+- Release artifacts are produced from a script-first pipeline, not an IDE
+  archive flow. Every platform packaging script is CI-runnable.
+- Each platform gets an isolated GitHub Environment holding its secrets
+  (`release-macos`, `release-windows`, `release-linux`). Secrets never
+  cross-leak between platform release jobs.
+- App/daemon version compatibility rules must be maintained and tested
+  per OS.
+- Product release version source-of-truth is the repository root `VERSION`
+  file.
+- `scripts/version.sh` is the supported entrypoint for version bumps,
+  Cargo workspace version sync, and release-prep commit/tag creation.
+- Release tags must exactly match `v$(cat VERSION)`.
+- Release preparation via `scripts/version.sh` must run from a clean `main`
+  branch with only `CHANGELOG.md` allowed to be dirty beforehand.
+- Build provenance must keep semantic version and git commit SHA separate.
+- AI contributors must never auto-open packaged apps (for example `open
+  dist/Vapor.app`); app launch verification is performed manually by the
+  project owner.
+
+### 7.2) macOS distribution
+
+Full policy: `docs/operations/macos/distribution-trust-chain.md`.
+
+- Distribution model must include: code signing, hardened runtime,
+  notarization, entitlement review.
+- `Vapor.app` is the single distributable package and must contain both
+  executables:
   - `Contents/MacOS/Vapor`
   - `Contents/MacOS/vapord`
-- GitHub Releases must publish file assets, so release uploads should use a zip that contains `Vapor.app`; the raw `.app` bundle directory remains a local packaging/validation artifact rather than a direct release asset.
-- Runtime daemon launch must target only the bundled sibling binary (`Contents/MacOS/vapord`) and must not rely on global install paths.
-- Xcode project/workspace support is optional convenience for debugging and must not become the release source of truth.
-- AI contributors must never auto-open packaged apps (for example `open dist/Vapor.app`); app launch verification is performed manually by the project owner.
+- GitHub Releases must publish file assets, so release uploads should use a
+  zip that contains `Vapor.app`; the raw `.app` bundle directory remains a
+  local packaging/validation artifact rather than a direct release asset.
+- Runtime daemon launch must target only the bundled sibling binary
+  (`Contents/MacOS/vapord`) and must not rely on global install paths.
+- Xcode project/workspace support is optional convenience for debugging and
+  must not become the release source of truth.
 - LaunchAgent and login item behavior must be stable across upgrades.
-- App/daemon version compatibility rules must be maintained and tested.
-- Product release version source-of-truth is the repository root `VERSION` file.
-- `scripts/version.sh` is the supported entrypoint for version bumps, Cargo workspace version sync, and release-prep commit/tag creation.
-- Release tags must exactly match `v$(cat VERSION)`.
-- Release preparation via `scripts/version.sh` must run from a clean `main` branch with only `CHANGELOG.md` allowed to be dirty beforehand.
-- GitHub release signing/notarization secrets should live in the protected GitHub Environment `release`, not only in repository-wide secrets.
-- Build provenance must keep semantic version and git commit SHA separate: use valid Apple bundle version fields for app metadata, and store commit SHA in dedicated app/daemon build-info fields for logs, UI, and `--version` output.
+- Apple bundle metadata (`CFBundleShortVersionString`, `CFBundleVersion`)
+  uses Apple-valid version fields; commit SHA is stored in dedicated
+  `VaporVersion` / `VaporGitCommit` app/daemon build-info fields for logs,
+  UI, and `--version` output.
+
+### 7.3) Windows distribution (future)
+
+Lands with `apps/windows`. Expected controls: EV code-signing certificate
+(Azure Key Vault or USB HSM), WiX or MSIX packaging, `signtool`. Isolated
+`release-windows` GitHub Environment.
+
+### 7.4) Linux distribution (future)
+
+Lands with `apps/linux`. Expected controls: GPG-signed AppImage first;
+`.deb`/`.rpm` as demand surfaces; Flathub/Snap later. Isolated
+`release-linux` GitHub Environment.
+
+### 7.5) CLI (`vapor`) distribution
+
+Pure Rust binaries per supported target triple, zstd-compressed, checksummed.
+Signing follows the host-OS policy (Developer ID on macOS, EV cert on
+Windows, GPG signature on Linux). Published alongside platform installers
+under the same GitHub Release tag.
 
 ## 8) Engineering standards
 
-- Swift
+- Swift (macOS app only)
   - Prefer structured concurrency and explicit actor boundaries.
   - Keep UI/state surfaces deterministic and reason-first.
-  - macOS UI must follow Apple Human Interface Guidelines and platform conventions.
-  - Visual direction should be minimalist, sleek, and polished; prefer native controls, spacing, typography, and motion over heavy custom chrome.
-- Rust
+  - macOS UI must follow Apple Human Interface Guidelines and platform
+    conventions.
+  - Visual direction should be minimalist, sleek, and polished; prefer
+    native controls, spacing, typography, and motion over heavy custom
+    chrome.
+  - Swift code is macOS-only by policy. Do not attempt to make Swift code
+    cross-platform; reach for Rust in `core/*` when logic needs to be
+    shared across surfaces.
+- Rust (runtime + CLI + platform layer)
   - Use explicit error enums and classify transient vs permanent failures.
   - Keep async/task lifetimes bounded and cancellation-aware.
+  - Platform-sensitive code lives under `core/platform/<trait>/<os>.rs`
+    behind a trait the engine consumes. Do not sprinkle `#[cfg(target_os)]`
+    through engine code.
+  - Native-optimal per OS is encouraged; portable-but-slow is not an
+    acceptable final state.
+- Future app shells (Windows, Linux)
+  - UI frameworks are per-app discretion (see `docs/plans/core.md §8` for
+    recommendations). Each app shell is a thin client over `core/*`.
 - API/contracts
-  - Version XPC payloads; pre-GA breaking changes are allowed with coordinated updates.
+  - Version IPC payloads; pre-GA breaking changes are allowed with
+    coordinated updates.
   - Provider trait changes require capability and behavior review.
+  - Platform-trait changes require a parity review so every supported OS
+    either adopts the change or has a tracked task to do so.
 
 ## 8.1) Observability and diagnostics
 
@@ -139,12 +217,15 @@ Do not move heavy compute into app process or FSEvents callback path.
 
 ## 8.2) Toolchain and platform version policy
 
-- Target latest stable versions by default for:
-  - macOS runner/image in CI
-  - Xcode and Swift toolchain
-  - Rust toolchain and required components
+- Target latest stable versions by default for every supported host:
+  - macOS runner/image in CI + Xcode and Swift toolchain (macOS app).
+  - Ubuntu (`ubuntu-latest`) and Windows (`windows-latest`) runners in CI
+    for every `core/*` Rust crate as soon as the engine portability fixes
+    land.
+  - Rust toolchain and required components on every runner.
 - Avoid pinning old versions unless there is a documented blocker.
-- If temporary pinning/downgrade is required, document the reason, owner, and removal criteria.
+- If temporary pinning/downgrade is required, document the reason, owner,
+  and removal criteria.
 
 ## 8.3) Known-good local baseline (reference)
 
@@ -187,13 +268,19 @@ It does not override the "latest stable" policy above.
 
 - Runtime/config/environment constants must be centralized in language-level constants modules and treated as source-of-truth.
 - Current source-of-truth files are:
-  - Rust shared constants: `core/shared/src/constants.rs`
+  - Rust shared constants: `core/shared/src/constants.rs` (authoritative for
+    the portable runtime and every Rust-side consumer, including the
+    `vapor` CLI and future Windows/Linux apps).
   - Swift app constants: `apps/macos/Sources/VaporCore/VaporConstants.swift`
+    (macOS app mirror; must stay in sync with the Rust source of truth).
 - Product version source-of-truth is the root `VERSION` file; Cargo workspace version must be synced from it via `./scripts/version.sh`.
 - When adding or changing any config keys, environment variables, default values, runtime path names, launch labels, or filtering defaults, contributors must:
-  1. update the relevant constants file first,
-  2. consume the constant from call sites (avoid re-defining string literals), and
-  3. update docs/tests in the same change set.
+  1. update the Rust source-of-truth (`core/shared/src/constants.rs`),
+  2. mirror into any platform-specific constants mirror (e.g., the Swift
+     mirror for the macOS app),
+  3. consume the constant from call sites (avoid re-defining string
+     literals), and
+  4. update docs/tests in the same change set.
 - Avoid duplicated hardcoded literals for `VAPOR_*` keys and shared defaults outside the constants modules unless there is a documented, temporary exception.
 
 ## 8.7) Localization and user-facing copy policy
@@ -234,6 +321,13 @@ Every substantial change must include relevant test updates.
   - synthetic event storms
   - load/thermal/battery transition behavior
   - CPU and I/O budget checks
+- Platform matrix
+  - Every trait in `core/platform` must have (a) an in-memory fake used by
+    cross-OS unit tests, and (b) a native implementation tested in the
+    matching OS-specific CI job (`macos-latest`, `ubuntu-latest`,
+    `windows-latest`).
+  - `vapor service install` + `vapor run` + `vapor status` round-trip must
+    pass on every supported OS before that OS is considered shipped.
 
 ## 10) Pull request checklist
 
@@ -254,8 +348,28 @@ Documentation update policy:
 - Contributors must preserve and keep current the `README.md` **Configuration** section (including `vapor.json` keys, defaults, and `VAPOR_*` environment variables) whenever config/env behavior changes.
 - When README content is shortened or reorganized, no critical information may be dropped: move it into the corresponding `docs/` file (or create a new one) in the same change set.
 - `README.md` should be updated when behavior, setup, operational workflow, or developer commands change.
-- Non-trivial UI/UX changes must document the intended user experience and note alignment with Apple design conventions.
+- Non-trivial macOS UI/UX changes must document the intended user experience and note alignment with Apple design conventions. Equivalent rule applies per OS: Windows changes follow Fluent / WinUI conventions, Linux changes follow GNOME HIG or KDE HIG per the chosen toolkit.
 - `AGENTS.md` should be updated when a new durable engineering rule, safety invariant, or contributor policy should be remembered for future work.
+- Plans and tasks live under `docs/plans/{core,macos,cli,...}.md` and
+  `docs/tasks/{core,macos,cli,...}.md`. Keep the file for the surface you
+  touched up to date in the same change set.
+- Platform-specific documentation belongs under
+  `docs/<group>/<platform>/…`. Common, cross-platform documentation stays
+  at the top of each group directory.
+- Every documentation group directory (`docs/<group>/` and every
+  per-platform subdirectory `docs/<group>/<platform>/`) must contain a
+  `README.md` that serves as the entrypoint for that group. The group
+  README must: (a) describe what the group covers, (b) describe each
+  file inside the group (what it is, what to expect, how to use it),
+  (c) link to any adjacent group READMEs that are directly related, and
+  (d) be kept current in the same change set as any addition, removal,
+  or rename of files in the group. New docs do not land without the
+  matching group README update.
+- `docs/tasks/README.md` additionally serves as the cross-surface
+  roadmap orchestrator — the "what should be done next" guide across
+  every surface (`core`, `macos`, `cli`, future `windows`, `linux`).
+  When a wave opens, closes, or changes dependencies, update this README
+  in the same change set.
 - If docs are intentionally not updated, PR description must explain why no documentation changes were needed.
 
 ### README style and Features section policy
@@ -307,11 +421,14 @@ Commit message convention:
 
 A change is done when:
 
-- Behavior works in happy and failure paths.
-- No regression of throttle/impact invariants.
-- Crash/restart recovery is preserved.
-- Observability is sufficient to explain current state/reason.
-- Docs and contracts are updated.
+- Behavior works in happy and failure paths on every OS it ships on.
+- No regression of throttle/impact invariants on any OS.
+- Crash/restart recovery is preserved on every OS.
+- Observability is sufficient to explain current state/reason on every OS.
+- For changes that touch a `core/platform` trait, the native impl on every
+  supported OS either passes its CI job or has a tracked follow-up task.
+- Docs and contracts are updated (common docs at the top level,
+  platform-specific docs under the matching `docs/<group>/<platform>/`).
 
 ## 12) Incident playbooks (minimum)
 

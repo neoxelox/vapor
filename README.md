@@ -8,7 +8,11 @@ Vapor is an invisible-first cloud sync app that stays out of your way. It keeps 
 
 ## Install
 
-Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/vapor/releases) page and install the `Vapor` app for your platform/distribution from the latest release assets.
+Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/vapor/releases) page.
+
+- **macOS**: install the `Vapor` app bundle (`Vapor.zip`) from the latest release assets.
+- **Windows / Linux**: in flight. The CLI (`vapor`) will ship for Windows and Linux before the GUI apps do.
+- **CLI (`vapor`)**: the command-line tool ships alongside every platform's installer under the same release tag.
 
 ## Features
 
@@ -17,7 +21,7 @@ Available now:
 - ⚡ Fast-feeling background sync designed to stay responsive without stealing your machine.
 - 🪶 Low-impact by design: Vapor defers heavy work under pressure to protect battery and thermals.
 - 🌩 Sudden bursts of file changes stay contained, so one big folder update doesn't snowball.
-- 🍎 Menubar-first experience that stays out of your way while keeping status and controls one click away.
+- 🔕 Stays out of your way while keeping status and controls one click away.
 - 🚀 Auto-launch at login with resilient crash-loop protection for dependable day-to-day use.
 - 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow.
 
@@ -31,6 +35,7 @@ In flight and coming next:
 - 🌙 Smart idle boost: Vapor catches up faster when your device is genuinely idle, and yields the moment you come back.
 - 📈 Clear diagnostics with status reasons, queue visibility, and live activity timeline.
 - 🌩 Storm-aware scheduling and resilient recovery keep big change bursts under control.
+- 🌍 Cross-platform parity: one portable runtime powers the macOS app, with Windows, Linux, and a CLI following.
 
 ## Providers
 
@@ -82,12 +87,19 @@ This project is intentionally vibe-coded while still following strict reliabilit
 
 Structure:
 
-- `apps/macos`: SwiftUI app (`Vapor`) and shared app code.
-- `core/daemon`: Rust daemon runtime (`vapord`).
+- `core/daemon`: Rust daemon runtime (`vapord`) — the portable sync engine.
 - `core/providers`: Rust cloud provider integrations.
-- `core/shared`: shared contracts/constants used across app and daemon boundaries.
+- `core/shared`: shared contracts/constants used across the workspace.
+- `core/platform` (planned): traits + per-OS native implementations for fs-watch, service install, secrets, metrics sampling, idle detection, filesystem capabilities, and process supervision.
+- `core/lifecycle` (planned): daemon lifecycle manager and crash-loop guard consumed by every app surface.
+- `core/cli` (planned): the `vapor` CLI — headless-first control plane usable on every supported OS.
+- `apps/macos`: SwiftUI macOS app (`Vapor`).
+- `apps/windows` (planned): Windows app surface consuming `core/*`.
+- `apps/linux` (planned): Linux app surface consuming `core/*`.
 
-See `.env.example` for the available `VAPOR_*` environment variables used by the app, scripts, CI, and packaging flow. The release version source of truth lives in `VERSION`.
+The Rust core (`core/*`) is the single portable runtime. Every app surface is a thin UI + OS-integration shim over it.
+
+See `.env.example` for the available `VAPOR_*` environment variables used by apps, scripts, CI, and packaging flow. The release version source of truth lives in `VERSION`.
 
 ### Scripts
 
@@ -136,16 +148,19 @@ Version bumps with `./scripts/version.sh`:
 
 ## Agents
 
-Use `docs/README.md` as the entrypoint index for agent work. Quick intent mapping:
+Use `docs/README.md` as the entrypoint index for agent work. Every
+documentation group has a `README.md` that is the starting point for
+that group — always enter at the group README, not at an individual
+file.
 
-- Product direction/status/goals: `docs/product/status-and-goals.md`
-- Architecture/system boundaries: `docs/architecture/README.md`
-- App/menubar/daemon lifecycle semantics: `docs/architecture/macos-app-lifecycle.md`
-- Runtime/logging/localization policy: `docs/operations/runtime-logging-and-localization.md`
-- CI behavior and required checks: `docs/ci/required-checks.md`
-- Plans and execution sequence: `docs/plans/README.md`
-- Performance budgets and harness: `docs/performance/README.md`
-- Local developer runbook details: `docs/development/runbook.md`
+- Product direction, status, goals: `docs/product/README.md`
+- Architecture, system boundaries, platform abstractions, IPC contracts: `docs/architecture/README.md`
+- Operations, release process, runtime logging, provider auth, incident playbooks: `docs/operations/README.md`
+- Local developer runbook and toolchain baseline: `docs/development/README.md`
+- CI workflows and required-check policy: `docs/ci/README.md`
+- Performance SLOs and benchmark harness: `docs/performance/README.md`
+- Per-surface implementation plans (core, macos, cli): `docs/plans/README.md`
+- Per-surface task lists and the cross-surface roadmap ("what should be done next"): `docs/tasks/README.md`
 - Contributor operating rules: `AGENTS.md`
 
 ## Contribute

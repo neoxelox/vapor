@@ -1,41 +1,27 @@
-# Distribution Trust Chain Plan
+# Distribution Trust Chain
 
-## Scope
+Vapor ships across multiple platforms. Each platform has its own signing,
+packaging, and trust chain. This document is the cross-platform index; the
+concrete policy for each platform lives in the per-platform doc below.
 
-Define release trust requirements for macOS app + daemon distribution.
+## Per-platform policy
 
-## Required controls
+- macOS: `docs/operations/macos/distribution-trust-chain.md`
+- Windows: (placeholder, lands when `apps/windows` starts)
+- Linux: (placeholder, lands when `apps/linux` starts)
+- CLI (`vapor` binary): signing follows the host OS policy (Developer ID
+  on macOS, EV cert on Windows, GPG signature on Linux). The CLI ships
+  alongside the platform installers under the same GitHub Release tag.
 
-- Code signing for app bundle and daemon executable.
-- Hardened runtime enabled for distributable binaries.
-- Notarization for release artifacts.
-- Entitlement review for least-privilege access.
+## Shared principles (apply to every platform)
 
-## Release pipeline policy
-
-1. Build signed artifacts for app and daemon.
-2. Validate signatures and entitlements.
-3. Submit for notarization and verify staple status.
-4. Publish only notarization-passing artifacts.
-
-Implementation requirements:
-
-- App packaging pipeline is script-first (`apps/macos/scripts/package.sh`) and CI-runnable.
-- Pipeline must produce `dist/Vapor.app` and zip artifacts without requiring Xcode Archive UI flows.
-- `dist/Vapor.app` must include both executables in `Contents/MacOS/`:
-  - `Vapor`
-  - `vapord`
-- Runtime daemon launch path must be the bundled sibling binary (`Contents/MacOS/vapord`) only.
-- Xcode project/workspace support remains optional debugging convenience only.
-
-## Validation checklist
-
-- App and daemon signatures are valid on clean host.
-- LaunchAgent/login item behavior is stable across install/upgrade.
-- Entitlements are reviewed for drift each release.
-- Rollback artifacts are preserved and verifiable.
-
-## Ownership and updates
-
-- Owner: release engineering (project owner until dedicated owner exists).
-- Update cadence: each release cycle and any signing/notarization incident.
+- Release artifacts are produced from a script-first pipeline, not an IDE
+  archive flow.
+- Each platform owns its own isolated GitHub Environment for secrets
+  (`release-macos`, `release-windows`, `release-linux`).
+- Each platform's signing secrets and notarization/signing tools never
+  cross-leak into another platform's release job.
+- Rollback artifacts are preserved per platform for every release.
+- Trust chain incidents follow the platform-specific incident playbook
+  (starting point: `docs/operations/release-incident-playbook.md`, which
+  links into per-platform sections as they land).

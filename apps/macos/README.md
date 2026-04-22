@@ -49,7 +49,9 @@ Current implementation notes:
   - Must remain running when the main window is closed.
   - Full daemon shutdown should happen only on explicit quit/stop flows, not on window close.
 
-Implementation phases map to `docs/plans/vapor-macos-task-list.md`.
+macOS-specific implementation phases map to `docs/tasks/macos.md`. The
+underlying runtime phases (core engine, platform abstractions, lifecycle
+migration, CLI) live in `docs/tasks/core.md` and `docs/tasks/cli.md`.
 
 ## Local dev
 

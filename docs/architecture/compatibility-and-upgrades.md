@@ -25,7 +25,7 @@ Compatibility rules for app, daemon, shared contracts, and persisted schema acro
 | N | N-1 | N-1 compatible | migrated or compatible |
 | N-1 | N | N-1 compatible | compatible |
 
-`N` denotes latest stable release line. The `|N - M| <= 1` rule for the app-vs-daemon skew is enforced at the XPC handshake layer; concrete handshake mechanics (fail-closed `IncompatibleVersion`, default-on-unknown-field, payload bounds) live in `docs/architecture/xpc-contracts.md`. The state schema versioning rules and the pre-GA "reject older schemas" stance live in `docs/architecture/state-schema-migrations.md`.
+`N` denotes latest stable release line. The `|N - M| <= 1` rule for the app-vs-daemon skew is enforced at the IPC handshake layer; concrete handshake mechanics (fail-closed `IncompatibleVersion`, default-on-unknown-field, payload bounds) live in `docs/architecture/ipc-contracts.md`. The state schema versioning rules and the pre-GA "reject older schemas" stance live in `docs/architecture/state-schema-migrations.md`.
 
 ## Upgrade flow expectations
 

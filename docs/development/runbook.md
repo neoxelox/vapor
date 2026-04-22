@@ -2,10 +2,14 @@
 
 ## Repository bootstrap
 
-- Rust workspace: root `Cargo.toml` with crates in `core/daemon`, `core/providers`, `core/shared`.
+- Rust workspace: root `Cargo.toml` with crates in `core/daemon`, `core/providers`, `core/shared` (with `core/platform`, `core/lifecycle`, and `core/cli` arriving per `docs/plans/core.md`).
 - Daemon binary: `vapord`.
-- Swift package: `apps/macos/Package.swift` (`Vapor`, `VaporCore`).
-- Implementation sequencing reference: `docs/plans/vapor-macos-task-list.md`.
+- CLI binary (arriving soon): `vapor` (`core/cli`).
+- Swift package: `apps/macos/Package.swift` (`Vapor`, `VaporCore`) — macOS-only.
+- Implementation sequencing references:
+  - Runtime + platform + CLI: `docs/tasks/core.md`.
+  - macOS app: `docs/tasks/macos.md`.
+  - `vapor` CLI: `docs/tasks/cli.md`.
 
 ## Local script entry points
 

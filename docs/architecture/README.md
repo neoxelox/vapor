@@ -1,12 +1,62 @@
-# Architecture Docs
+# Architecture
 
-Core architecture references for `vapor`.
+Reference documentation for Vapor's system design. Use this directory when
+you need to understand how the pieces fit together, why a boundary is where
+it is, or what the contract between two layers looks like.
 
-- System overview: `docs/architecture/system-overview.md`
-- macOS app lifecycle semantics: `docs/architecture/macos-app-lifecycle.md`
-- Data flow: `docs/architecture/data-flow.md`
-- XPC contracts placeholder: `docs/architecture/xpc-contracts.md`
-- State schema and migrations: `docs/architecture/state-schema-migrations.md`
-- Compatibility and upgrades: `docs/architecture/compatibility-and-upgrades.md`
+Common (cross-platform) architecture lives at the top of this directory.
+Platform-specific architecture (macOS today; Windows/Linux later) lives in
+per-platform subdirectories. For trait implementations shared by the engine
+across platforms, start with `platform-abstractions.md`.
 
-These docs are living references and are expected to evolve as implementation lands.
+## How to use this group
+
+- **New contributor?** Read `system-overview.md`, then `data-flow.md`,
+  then `platform-abstractions.md`. That gives you the mental model in
+  roughly 20 minutes.
+- **Working on the engine?** The engine touches no OS APIs directly; the
+  contracts you care about are in `platform-abstractions.md` and
+  `ipc-contracts.md`.
+- **Working on an app surface?** Start from the matching per-platform
+  subdirectory (`macos/`, later `windows/`, `linux/`). The app is a thin
+  consumer of the runtime described in the common docs.
+- **Debating a schema change?** `compatibility-and-upgrades.md` +
+  `state-schema-migrations.md` define the policy; `ipc-contracts.md`
+  governs the app ↔ daemon wire.
+
+## Common documents
+
+- `system-overview.md` — component map (`core/daemon`, `core/providers`,
+  `core/shared`, planned `core/platform` / `core/lifecycle` / `core/cli`,
+  and the app surfaces under `apps/*`), boundary rules, and the planned
+  implementation sequence.
+- `data-flow.md` — local→remote and remote→local pipelines, throttle
+  discipline, fs-watch callback rules, self-write-cache / loop-prevention
+  design, multi-profile watch coordination, conflict handling,
+  control/observability surface.
+- `ipc-contracts.md` — transport-agnostic contract surface between apps
+  (macOS, future Windows/Linux, `vapor` CLI) and the `vapord` daemon.
+  Versioning, handshake, skew-matrix, field-omission tolerance, payload
+  bounds, diagnostics surface. Transport specifics live per-platform.
+- `platform-abstractions.md` — authoritative trait catalog for
+  `core/platform`. `FsWatcher`, `ServiceInstaller`, `SecretStore`,
+  `PlatformMetricsSampler`, `IdleNotifier`, `FilesystemCapabilities`,
+  `ProcessSupervisor`; per-OS native-API mapping; parity matrix; how to
+  add a new platform.
+- `state-schema-migrations.md` — durable queue/state schema versioning,
+  at-least-once intent semantics, startup recovery, corruption detection
+  rules.
+- `compatibility-and-upgrades.md` — version compatibility across app,
+  daemon, shared contracts, and durable schema; supported skew; upgrade
+  and rollback flow.
+
+## Per-platform subdirectories
+
+- `macos/` — macOS-specific architecture: app lifecycle semantics
+  (`Window` scene, menubar, Dock, `SMAppService`), and the macOS IPC
+  transport (Unix domain socket, optional NSXPC wrapping).
+- (`windows/`, `linux/` subdirectories will be added when those app
+  surfaces start — see `docs/plans/core.md`.)
+
+Architecture docs are living references and are expected to evolve as
+implementation lands.
