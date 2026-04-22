@@ -16,6 +16,15 @@ in them.
 - `core/shared` — shared models/contracts, constants, and reusable Rust
   utilities (including logging).
 
+## Testing
+
+Every crate under `core/` is heavily tested. The test suite is the
+autonomous coding agent's feedback loop, so it must stay fast
+(Tier 1 under 5 minutes per OS on CI), deterministic (no sleeps, no
+network, no real `~/.vapor`), and honest (cover real behavior, not
+trivial restatements). Full policy in `AGENTS.md §9` and
+`docs/architecture/testing-strategy.md`.
+
 ## Planned additions
 
 Delivered incrementally per `docs/plans/core.md`:

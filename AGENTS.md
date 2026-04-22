@@ -296,46 +296,128 @@ It does not override the "latest stable" policy above.
 
 ## 9) Required test matrix
 
-Every substantial change must include relevant test updates.
+Testing is a non-negotiable part of every change. Vapor is coded
+autonomously, so the coding agent's feedback loop is whatever
+`./scripts/test.sh` tells it. The full taxonomy, per-module
+expectations, and adding-a-test checklist live in
+`docs/architecture/testing-strategy.md`. This section is the contract.
 
-- Rule: any non-trivial new feature or logic change must ship with tests.
-- Trivial changes (for example typo fixes, copy edits, or purely mechanical renames) may skip tests when behavior is unchanged.
+### 9.1) Testing philosophy
 
-- Unit tests
-  - debounce/coalescing behavior
-  - scheduler superseding semantics
-  - throttle state transitions
-  - provider error mapping
-- Integration tests
-  - local->remote and remote->local paths
-  - restart recovery with pending queue
-  - retry/backoff behavior
-  - auto-launch toggle and daemon lifecycle
-  - app lifecycle semantics: window close (UI only) vs menubar quit (full shutdown)
-- Bidirectional race tests
-  - simultaneous local/remote file edits
-  - rename+modify races
-  - delete/restore races
-  - loop-prevention verification
-- Performance tests
-  - synthetic event storms
-  - load/thermal/battery transition behavior
-  - CPU and I/O budget checks
-- Platform matrix
-  - Every trait in `core/platform` must have (a) an in-memory fake used by
-    cross-OS unit tests, and (b) a native implementation on every OS that
-    currently ships a surface, tested in the matching OS-specific CI job
-    (`macos-latest` today; `ubuntu-latest` / `windows-latest` once their
-    optional waves land).
-  - For OSes that do not currently ship a surface, a trait may be
-    `unimplemented!()` on that OS. The stub must compile (so
-    `cargo build --workspace` keeps succeeding on every OS in the CI
-    matrix) and must be tracked in `docs/tasks/core.md`.
-  - `vapor service install` + `vapor run` + `vapor status` round-trip must
-    pass on every OS that currently ships a surface before that OS is
-    considered shipped. Adding a non-macOS shipping surface requires the
-    project owner to opt in via the optional waves in
-    `docs/tasks/README.md`.
+- **Cover real behavior, not trivial restatements of code.** A
+  thousand trivial tests are worse than a hundred well-chosen ones. A
+  failing test must catch a real bug.
+- **Fast.** `./scripts/test.sh` (Tier 1) must finish in under 2 minutes
+  on a contemporary dev machine and under 5 minutes on CI. If a change
+  pushes the suite past the budget, split slow tests out to Tier 2.
+- **Deterministic.** No `thread::sleep` for timing-dependent
+  assertions; use test-injectable clocks. No retry decorators.
+- **Independent.** Tests run in any order and in parallel. Each
+  integration test uses its own `tempfile::TempDir`. No shared mutable
+  state.
+- **No network, no `~/.vapor`.** Never contact the real Internet;
+  never touch the user's runtime dir.
+
+### 9.2) What must be tested
+
+Every non-trivial logic change in `core/*` must ship with one or more
+of the following:
+
+- **Unit tests** for pure logic (debounce, scheduler, throttle,
+  workgate, retry, storm, state_db, reconcile, executor, path_filter,
+  event_intents, fs_events, runtime_paths, logging).
+- **Integration tests** composed through the `DaemonRuntime` tick
+  harness for multi-module behavior (local→remote / remote→local
+  propagation, restart recovery, throttle transitions during real
+  work, storm bursts, self-write-cache suppression, multi-profile
+  isolation, config reload mid-work).
+- **Property tests** via `proptest` for well-defined invariants where
+  random inputs add value (path normalization, scheduler superseding,
+  throttle monotonicity, retry backoff monotonicity, conflict-suffix
+  determinism, durable-queue FIFO, ignore-rule precedence, IPC
+  handshake skew matrix). Each property runs 64–256 cases on CI.
+- **Platform-trait contract tests** once `core/platform` lands. Every
+  trait runs a parameterized contract suite against both the in-memory
+  fake and the real native impl on each shipping OS. Catches
+  fake-vs-native drift.
+- **Bidirectional race tests** — simultaneous local/remote edits,
+  rename+modify, delete/restore, loop-prevention verification.
+- **Crash / restart / recovery tests** — pre/post-restart durable
+  intent count delta = 0 (excluding completed), retry slowdown
+  restored, leases recovered.
+- **Performance guard-rails** (Tier 1) — cheap "someone accidentally
+  made the callback 100× slower" checks. Distinct from the SLO perf
+  suite (Tier 2).
+- **Snapshot tests** (`insta`) for every `vapor … --json` command
+  once the CLI lands.
+
+### 9.3) What must NOT be tested
+
+As important as §9.2. Refuse tests for:
+
+- Trivial getters / setters that return an inner field.
+- `Default` impls whose values are constants mirrored 1:1 from the
+  struct definition.
+- `Debug` / `Display` impls unless the output is a wire format.
+- `serde` derive round-trips of trivial structs.
+- Generated code from `build.rs`.
+- **UI rendering on any app surface** — SwiftUI views, menubar layout,
+  Dock transitions, and the equivalent on future Windows/Linux apps.
+  UI correctness is verified by the project owner manually.
+- **Interactive TTY behavior** on the `vapor` CLI — color codes, cursor
+  positioning, terminal resize, ncurses interactions.
+- Third-party crate internals.
+- Code that just restates a policy from `constants.rs`.
+
+If a test's failure mode is "I typo'd a default value", skip it.
+
+### 9.4) Per-surface scope
+
+- `core/*` (Rust runtime, CLI, platform layer) — heavy testing. No UI,
+  so nothing is carved out.
+- `apps/macos` (Swift) — logic tests only (configuration, lifecycle
+  coordinator state transitions, view-model state mapping, localization
+  fallback, logger redaction). **No UI tests.**
+- `core/cli` (`vapor` binary) — logic + snapshot + integration tests.
+  `vapor service install` / `run` / `status` round-trip in CI. **No
+  interactive TTY tests.**
+- Future GUI apps (Windows, Linux) — same rule: logic yes, UI no.
+
+### 9.5) Test tiers
+
+- **Tier 1** — `./scripts/test.sh` via `lint.yml` / `test.yml` /
+  `workflow_call`. Unit + integration + platform-trait contract +
+  property + snapshot + guard-rail timing tests. Runs on every PR.
+  Required check on `main`. Budget: under 5 minutes per OS on CI.
+- **Tier 2** — `scripts/perf.sh` (release gate) and scheduled nightly
+  workflows. Performance SLO tests, long-running property cases
+  (higher case counts), fuzz corpora, `loom`-backed concurrency tests.
+  Not a PR gate.
+
+### 9.6) Flaky-test policy
+
+- A test that fails intermittently on the same input is flaky.
+- Flaky tests block merges until fixed or removed. Retry decorators
+  are banned.
+- A test flagged flaky twice in two weeks is either fixed or removed.
+- Removing a flaky test requires an issue describing the invariant
+  that is no longer covered.
+
+### 9.7) Platform matrix specifics
+
+- Every trait in `core/platform` must have (a) an in-memory fake used
+  by cross-OS unit tests, and (b) a native implementation on every OS
+  that currently ships a surface, exercised by the trait contract
+  suite in the matching OS-specific CI job (`macos-latest` today;
+  `ubuntu-latest` / `windows-latest` once their optional waves in
+  `docs/tasks/README.md` land).
+- For OSes that do not currently ship a surface, a trait may be
+  `unimplemented!()` on that OS. The stub must compile (so
+  `cargo build --workspace` keeps succeeding on every OS in the CI
+  matrix) and must be tracked in `docs/tasks/core.md`.
+- `vapor service install` + `vapor run` + `vapor status` round-trip
+  must pass on every OS that currently ships a surface before that OS
+  is considered shipped.
 
 ## 10) Pull request checklist
 

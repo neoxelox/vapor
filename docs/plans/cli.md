@@ -137,3 +137,23 @@ platform's CLI distribution rides the matching platform-impl wave in
 - It does not persist its own config — it reads/writes `vapor.json`.
 - It does not replace GUI diagnostics; it exposes the same information in
   text/JSON form.
+
+## 8) Testing scope (CLI)
+
+Logic + snapshot + integration tests. The full policy lives in
+`AGENTS.md §9` and `docs/architecture/testing-strategy.md`; the CLI-
+specific scope is:
+
+- **Tested** — argument parsing (`clap`), exit code discipline,
+  `--json` output schema via `insta` snapshots (one snapshot per
+  `--json` command), IPC client correctness against a fake daemon,
+  `vapor doctor` detection logic, `vapor service {install,start,stop,
+  status,uninstall}` round-trip on macOS CI (and on each additional
+  OS once its optional wave lands), "no daemon running" error paths
+  (every IPC-backed command exits non-zero within 1 s; never hangs).
+- **Not tested** — color codes, cursor positioning, terminal resize
+  handling, ncurses or TTY-capability interactions, progress-bar
+  rendering timing.
+
+Snapshot review flow: `cargo insta review` after any intentional
+`--json` schema change; CI fails the PR otherwise.

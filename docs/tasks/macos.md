@@ -190,6 +190,29 @@ Exit gate:
 
 - Every macOS release cycle validates the macOS trust chain automatically.
 
+## Phase MT - Testing discipline (macOS surface)
+
+Policy: `AGENTS.md §9`. Full taxonomy:
+`docs/architecture/testing-strategy.md`. macOS-specific scope lives in
+`docs/plans/macos.md §7.1`.
+
+- [ ] MT-1 Audit the existing Swift test suite (`apps/macos/Tests/`)
+      for trivial-test smell — `Default` impls mirroring constants,
+      `Debug`/`Display` string equality tests, `serde` round-trips of
+      trivial structs. Remove or replace with behavior-level
+      assertions. Keep the coverage of configuration, lifecycle,
+      localization, paths, logger redaction, bundle layout, and
+      ViewModel state transitions intact.
+- [ ] MT-2 When `core/lifecycle` lands (Phase M2 / `core.md` C4),
+      retire the Swift-side `DaemonLifecycleManagerTests` and rely on
+      the Rust-side parity tests from C4-6. Do not maintain duplicate
+      policy tests.
+- [ ] MT-3 **Do not add UI rendering tests.** No SwiftUI view
+      snapshots, no menubar layout assertions, no Dock-transition
+      tests, no keyboard-focus tests. UI correctness is verified by
+      the project owner manually. Any PR adding such tests is
+      rejected; the reviewer cites `AGENTS.md §9.3`.
+
 ## macOS-specific deferred onboarding task
 
 - [ ] O-1 Design and implement the production onboarding flow (information

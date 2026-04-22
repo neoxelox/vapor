@@ -48,6 +48,38 @@
 - Swift lint and format scripts intentionally use `swift format` only.
 - If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild build` in `./scripts/swift/build.sh`.
 
+## Testing discipline
+
+Vapor is coded autonomously. The suite is the feedback loop — it has to
+be fast, deterministic, and honest. Full policy in `AGENTS.md §9`; full
+taxonomy in `docs/architecture/testing-strategy.md`.
+
+Fast facts for local dev:
+
+- **One command:** `./scripts/test.sh` runs the full Tier 1 suite
+  (Rust + Swift unit/integration/property/snapshot tests plus version
+  consistency checks). Target wall time: under 2 minutes on a
+  contemporary M-series dev machine; under 5 minutes on CI.
+- **Stack-specific:** `./scripts/rust/test.sh` or
+  `./scripts/swift/test.sh` if you want to run just one side.
+- **No network, no `~/.vapor`.** Tests use `tempfile::TempDir` for
+  filesystem work and never contact the real Internet.
+- **No sleeps for timing.** Use test-injectable clock abstractions;
+  retry decorators are banned.
+- **Snapshot updates:** when an intentional `--json` schema change
+  lands on the CLI (once it ships), run `cargo insta review` to
+  approve the new snapshot. CI fails the PR if there is an
+  unapproved drift.
+- **Flaky test?** Fix it or remove it in the same PR. We do not carry
+  flaky tests forward — the agent's feedback loop depends on
+  determinism.
+- **What not to test:** trivial getters, `Default` impls mirroring
+  constants, UI rendering (SwiftUI, menubar, Dock, future GUI
+  surfaces), interactive TTY behavior on the `vapor` CLI. See
+  `AGENTS.md §9.3` and `docs/architecture/testing-strategy.md`.
+- **Performance SLO tests** run via `./scripts/perf.sh` (Tier 2;
+  release gate only, not a PR gate).
+
 ## Release build policy
 
 - A single release mode is used and tuned for performance with safe optimizations.

@@ -26,6 +26,26 @@ triggers them, and which ones gate a release.
   required on `main`; `perf` release-only), workflow-to-script mapping,
   local-parity command set.
 
+## Test tier model
+
+Testing runs in two tiers. Authoritative definition:
+`docs/architecture/testing-strategy.md §CI tier execution`.
+
+- **Tier 1** — `lint.yml` + `test.yml` (runs on every PR; required
+  checks on `main`). Unit + integration + platform-trait contract +
+  property + snapshot + guard-rail timing tests. **Budget: under
+  5 minutes per OS on CI.** If a change pushes this past the budget,
+  split slow tests out to Tier 2 or make them faster.
+- **Tier 2** — `perf.yml` (release gate) and scheduled nightly
+  workflows. Performance SLO tests, long-running property cases
+  (higher case counts), fuzz corpora, `loom`-backed concurrency
+  tests. **Not a PR gate.**
+
+A CI timing guard (tracked as `core.md` CT-2) fails the job if Tier 1
+exceeds the 5-minute budget on a matrix runner. The failure message
+points contributors at the testing-strategy doc's discipline rules
+rather than silently accepting a regression.
+
 ## Target state (portability work)
 
 As the `core/*` portability fixes land (see `docs/plans/core.md` §4 and

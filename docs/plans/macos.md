@@ -168,15 +168,36 @@ Full policy in `docs/operations/macos/distribution-trust-chain.md`.
 
 ## 7) Definition of done (macOS milestones)
 
-- UI behavior validated on clean macOS host for happy + failure paths.
+- UI behavior validated on clean macOS host for happy + failure paths
+  (manually by the project owner; UI rendering is deliberately not
+  automated — see §7.1).
 - Window-close vs menubar-quit vs daemon-stop semantics pass automated
-  coverage (see §4).
+  logic coverage (see §4) via `AppLifecycleCoordinator` state transitions.
 - `dist/Vapor.app` always embeds both `Contents/MacOS/Vapor` and
   `Contents/MacOS/vapord`; runtime launch resolves the bundled sibling only.
 - Signed + notarized path works end-to-end when credentials are supplied.
 - `AGENTS.md` invariants for throttle discipline, durability, and low-impact
   goals are preserved — validated via the core runtime's platform-native
   sampler/installer implementations.
+
+## 7.1) Testing scope (macOS app)
+
+Logic tests only. The full policy lives in `AGENTS.md §9` and
+`docs/architecture/testing-strategy.md`; the macOS-specific scope is:
+
+- **Tested** — configuration parsing + normalization (`VaporConfiguration`),
+  `AppLifecycleCoordinator` state transitions, `AppShellViewModel` state
+  mapping, localization fallback, `StructuredLogger` redaction,
+  `VaporPaths` resolution, `VaporBundleLayout` validation, the Swift shim
+  over `core/lifecycle` once wave 5 lands.
+- **Not tested** — SwiftUI view rendering, menubar layout, Dock
+  transitions, window focus, keyboard handling, animation timing,
+  accessibility audit. UI correctness is verified by the project owner
+  manually.
+
+When `core/lifecycle` lands (wave 5), the Swift-side
+`DaemonLifecycleManagerTests` becomes redundant with the Rust-side
+tests and is retired per M2-2 rather than maintained as a duplicate.
 
 ## 8) Doc deliverables tied to this plan
 

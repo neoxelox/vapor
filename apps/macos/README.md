@@ -53,6 +53,17 @@ macOS-specific implementation phases map to `docs/tasks/macos.md`. The
 underlying runtime phases (core engine, platform abstractions, lifecycle
 migration, CLI) live in `docs/tasks/core.md` and `docs/tasks/cli.md`.
 
+## Testing
+
+Logic tests only. Configuration parsing, lifecycle coordinator state
+transitions, view-model state mapping, localization fallback, logger
+redaction, paths, bundle layout are all covered in
+`apps/macos/Tests/VaporCoreTests/` and `Tests/VaporAppTests/`. **No
+SwiftUI view rendering tests, no menubar layout tests, no Dock
+transition tests, no keyboard-focus tests** — UI correctness is
+verified by the project owner manually. Policy: `AGENTS.md §9`; full
+rationale: `docs/architecture/testing-strategy.md`.
+
 ## Local dev
 
 - Build: `swift build --package-path apps/macos`

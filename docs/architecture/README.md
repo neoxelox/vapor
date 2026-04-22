@@ -43,6 +43,12 @@ across platforms, start with `platform-abstractions.md`.
   `PlatformMetricsSampler`, `IdleNotifier`, `FilesystemCapabilities`,
   `ProcessSupervisor`; per-OS native-API mapping; parity matrix; how to
   add a new platform.
+- `testing-strategy.md` — authoritative test taxonomy and discipline.
+  Unit / integration / property / platform-trait contract / concurrency
+  / snapshot / fuzz / guard-rail timing tests; what we deliberately do
+  NOT test (UI rendering, TTY interaction, trivial restatements of
+  code); per-surface scope (core heavy, apps logic-only, CLI no TTY);
+  CI tier model and budget. Read before writing or reviewing a test.
 - `state-schema-migrations.md` — durable queue/state schema versioning,
   at-least-once intent semantics, startup recovery, corruption detection
   rules.

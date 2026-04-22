@@ -38,6 +38,11 @@ The daemon owns heavy compute and must remain pressure-aware. OS-specific
 code lives behind `core/platform` traits, never sprinkled through the
 engine.
 
+Testing expectations (heavy coverage required): every non-trivial module
+ships with unit + integration tests and — where invariants are
+well-defined — property tests via `proptest`. Policy:
+`docs/architecture/testing-strategy.md`.
+
 Logging:
 
 - Runtime root is `VAPOR_DIR` (`~/.vapor` by default, `./.vapor` under repo

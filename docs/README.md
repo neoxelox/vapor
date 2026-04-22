@@ -53,6 +53,7 @@ to use them.
 - "How is the release cut?" → `docs/operations/README.md`
 - "Which CI checks must pass?" → `docs/ci/README.md`
 - "Where are the performance SLOs?" → `docs/performance/README.md`
+- "Should I write this test?" → `docs/architecture/testing-strategy.md` + `AGENTS.md §9`
 - "What is the plan for surface X?" → `docs/plans/README.md`
 
 The contributor operating rules live at the root: `AGENTS.md`.

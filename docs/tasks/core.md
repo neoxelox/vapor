@@ -499,6 +499,86 @@ inherits it.
 Tracked separately in `docs/tasks/cli.md`; this phase is informational here
 and the acceptance gate for cross-platform parity.
 
+## Phase CT - Testing discipline and coverage (cross-cutting)
+
+Standing tasks that apply across every wave. The policy lives in
+`AGENTS.md §9`; the full taxonomy and discipline rules in
+`docs/architecture/testing-strategy.md`.
+
+Testing is a non-negotiable part of every change. The suite is the
+coding agent's feedback loop — it must stay fast (under 5 minutes per
+OS on CI, under 2 minutes locally), deterministic (no sleeps, no
+network, no real `VAPOR_DIR`), and honest (cover real behavior, not
+trivial restatements of code).
+
+### One-time setup (do early)
+
+- [ ] CT-1 Adopt `proptest` as a dev-dependency in `core/daemon` and
+      `core/shared`. Add initial property tests for the high-value
+      invariants listed in `docs/architecture/testing-strategy.md`:
+      path normalization safety, scheduler superseding collapse,
+      throttle monotonicity, retry backoff monotonicity, ignore-rule
+      precedence determinism, durable-queue FIFO. Each property runs
+      64–256 cases on CI (fast tier).
+- [ ] CT-2 Add a Tier-1 timing guard to CI that fails if
+      `./scripts/test.sh` exceeds 5 minutes on a matrix runner. Emit a
+      clear message pointing at `docs/architecture/testing-strategy.md
+      §Discipline rules`.
+- [ ] CT-3 Audit the current `core/*` test corpus for trivial-test
+      smell per `AGENTS.md §9.3` (defaults that mirror constants,
+      Debug/Display string equality, serde round-trips of trivial
+      structs). Remove or replace with behavior-level assertions.
+      Document any kept legacy trivial test with a one-line rationale.
+- [ ] CT-4 Adopt `insta` as a dev-dependency in `core/cli` when it
+      lands (wave 6). Snapshot every `--json` command's output with a
+      fixed input fixture. Document the `cargo insta review` flow in
+      `docs/development/runbook.md`.
+
+### Per-wave standing requirements
+
+These do not have dedicated tickets — they ship with the wave that
+introduces the code they apply to.
+
+- [ ] CT-5 Every new `core/platform` trait ships with (a) an
+      in-memory fake, (b) a parameterized contract-test suite, and (c)
+      native implementations wired into that suite on every shipping
+      OS. Catches fake-vs-native drift. Applies to wave 4 and any new
+      trait added after.
+- [ ] CT-6 IPC skew matrix tests: when wave 6 lands, the test
+      matrix covers `app-N ↔ daemon-N`, `app-N ↔ daemon-(N-1)`,
+      `app-(N-1) ↔ daemon-N`, and `|N - M| = 2` (negative case).
+      Field-omission tolerance and payload-bound rejection each have a
+      test.
+- [ ] CT-7 Every bidirectional race scenario listed in `AGENTS.md
+      §9.2` ships with integration coverage during the C8 waves
+      (simultaneous edits, rename+modify, delete/restore, loop-
+      prevention verification). `docs/tasks/core.md` C8-10 and C8-18
+      already expect this; CT-7 is the reminder to not skip it.
+- [ ] CT-8 Every CLI command with `--json` output ships a snapshot
+      test in the same PR that adds the command. Applies to every
+      `cli.md` task from L1 onward.
+
+### Nightly / Tier-2 (deferred setup)
+
+- [ ] CT-9 Add a `cargo-fuzz` harness for parsers: ignore-rule parser,
+      IPC frame parser (once wave 6 lands), JSON config loader, path
+      normalization. Short corpus committed in-tree. Scheduled
+      nightly GitHub Actions workflow that opens an issue on failure.
+      Not a PR gate.
+- [ ] CT-10 Add `loom`-backed tests for `ThrottleWorkgate` permit
+      allocation under contention and `BoundedFsEventRecorder`
+      drop-count semantics. Run under Tier 2 (nightly); not a PR gate.
+      Keep the test set small — `loom` is slow.
+- [ ] CT-11 Nightly workflow that reruns Tier-1 property tests with a
+      higher case count (1 000–4 000 per property) to catch rare
+      counterexamples the PR budget does not reach.
+
+Exit gate (ongoing): Tier 1 stays under 5 minutes per OS on CI; no
+flaky tests carried across two consecutive weeks; every trait in
+`core/platform` has contract-test coverage against both fake and
+native on every shipping OS; every `--json` CLI command has a
+snapshot.
+
 ## Cross-phase mandatory validation
 
 - [ ] T-1 Crash/restart during active sync resumes without lost intent on

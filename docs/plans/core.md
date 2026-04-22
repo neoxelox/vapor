@@ -34,6 +34,13 @@ adopt the same runtime without forking behavior.
    native implementation of its platform trait. We do not accept portable
    implementations that cost measurable CPU, latency, or battery compared to
    the native one.
+6. **Testing is the feedback loop.** Vapor is coded autonomously. The suite is
+   what the agent trusts. Core runtime work ships with heavy, scoped testing;
+   app surfaces ship with logic tests only (no UI rendering or TTY interaction
+   tests — those are verified manually). Discipline rules and the full
+   taxonomy live in `docs/architecture/testing-strategy.md`; the policy
+   contract lives in `AGENTS.md §9`. Tier 1 (`./scripts/test.sh`) must stay
+   under 5 minutes per OS on CI.
 
 ## 2) Product architecture (target state)
 

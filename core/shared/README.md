@@ -21,3 +21,7 @@ Scope:
 Contract changes must preserve backward compatibility or ship with a
 migration plan (pre-GA, the project owner may fast-track breaking changes
 per `AGENTS.md §1.1`).
+
+Testing: logging redaction, runtime-path resolution, and log-level
+parsing are unit-tested. Constants are not tested individually — they
+are data. Policy: `docs/architecture/testing-strategy.md`.

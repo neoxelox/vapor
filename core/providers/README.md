@@ -33,6 +33,10 @@ provider-neutral error taxonomy (`Transient`, `RateLimited`,
 `Authentication`, `PreconditionFailed`, `NotFound`, `Permanent`) defined in
 `core/shared`.
 
+Testing: every provider ships with error-mapping unit tests and passes
+the provider contract-test suite (once `core.md` C8-44 lands). Policy:
+`docs/architecture/testing-strategy.md`.
+
 Logging:
 
 - Provider modules use shared structured logging from `vapor-shared`.

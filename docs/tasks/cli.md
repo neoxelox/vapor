@@ -128,10 +128,31 @@ Depends on: `docs/tasks/core.md` C6-8 and C7-7 (per-OS trust chains).
 - [ ] L6-6 GPG-sign Linux binaries + publish `Checksums.txt.asc` when
       C7-7 lands.
 
-## Cross-phase validation
+## Phase LT - Testing discipline (CLI)
 
-- [ ] LT-1 `vapor --json` schema is stable and covered by snapshot tests.
-- [ ] LT-2 Exit codes are documented and stable.
-- [ ] LT-3 Binary size stays reasonable (single-digit MB stripped + zstd'd).
-- [ ] LT-4 End-to-end flows (`install → start → status → stop → uninstall`)
-      pass on macOS/Linux/Windows CI.
+Policy: `AGENTS.md §9`. Full taxonomy:
+`docs/architecture/testing-strategy.md`. CLI-specific scope lives in
+`docs/plans/cli.md §8`.
+
+- [ ] LT-1 `vapor --json` schema is stable and covered by `insta`
+      snapshot tests. One snapshot per `--json` command, with a fixed
+      input fixture. Schema drift fails the PR; intentional changes
+      reviewed with `cargo insta review`. Applies to every command
+      from L1 onward; tracked as a standing requirement per `core.md`
+      CT-8.
+- [ ] LT-2 Exit codes are documented and stable. A `--help`-style
+      snapshot or a direct exit-code assertion test per command.
+- [ ] LT-3 Binary size stays reasonable (single-digit MB stripped +
+      zstd'd). CI guard-rail, not a soft target.
+- [ ] LT-4 End-to-end flows (`install → start → status → stop →
+      uninstall`) pass on macOS CI for the primary deliverable
+      (`core.md` L2-5). Linux and Windows CI validation lands with
+      the matching optional wave (L2-6, L2-7).
+- [ ] LT-5 IPC client correctness tested against a fake daemon that
+      speaks the IPC protocol from `docs/architecture/ipc-contracts.md`.
+      Covers every IPC-backed command; tests the "no daemon running"
+      error path (non-zero exit within 1 s; never hang).
+- [ ] LT-6 **Do not add interactive TTY tests.** No color-code
+      assertions, no cursor-positioning assertions, no terminal-resize
+      simulations, no progress-bar rendering timing. The reviewer
+      cites `AGENTS.md §9.3`.
