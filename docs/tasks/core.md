@@ -1,7 +1,6 @@
 # Vapor core task list
 
 Plan reference: `docs/plans/core.md`
-Original source: `docs/plans/original.md`
 Related task lists: `docs/tasks/macos.md`, `docs/tasks/cli.md`
 
 Status legend:

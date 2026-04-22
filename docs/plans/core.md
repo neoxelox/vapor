@@ -1,6 +1,5 @@
 # Vapor core plan (portable Rust runtime)
 
-Source intent: `docs/plans/original.md`
 Execution checklist: `docs/tasks/core.md`
 
 ## 0) Mission

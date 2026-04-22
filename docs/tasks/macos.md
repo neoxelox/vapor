@@ -3,7 +3,6 @@
 Plan reference: `docs/plans/macos.md`
 Core tasks (runtime, engine, platform layer): `docs/tasks/core.md`
 CLI tasks: `docs/tasks/cli.md`
-Original source: `docs/plans/original.md`
 
 Status legend:
 

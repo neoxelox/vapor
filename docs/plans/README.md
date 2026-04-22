@@ -22,9 +22,6 @@ surface. Concrete step-by-step execution lives next door in
 
 Plans are flat and platform-named: one file per deliverable surface.
 
-- `original.md` — canonical source plan provided by the project owner
-  (verbatim, unchanged). This is the intent document everything else
-  derives from.
 - `core.md` — portable Rust runtime plan. Covers `core/daemon`,
   `core/providers`, `core/shared`, the planned `core/platform`
   abstraction layer, `core/lifecycle`, and the `vapor` CLI. This is the
@@ -53,11 +50,10 @@ done next" guide when multiple task lists contain pending items.
 
 ## Usage flow
 
-1. Read `original.md` for product intent and non-negotiables.
-2. Read `core.md` for the portable runtime framing, platform traits, and
-   execution sequence.
-3. Read the platform-specific plan matching your surface (`macos.md`,
+1. Read `core.md` for product intent, non-negotiables, the portable
+   runtime framing, platform traits, and execution sequence.
+2. Read the platform-specific plan matching your surface (`macos.md`,
    `cli.md`, …).
-4. Execute against the matching `docs/tasks/<surface>.md` and check the
+3. Execute against the matching `docs/tasks/<surface>.md` and check the
    cross-surface roadmap in `docs/tasks/README.md` before picking up a
    new task.
