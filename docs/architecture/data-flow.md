@@ -2,7 +2,7 @@
 
 ## Local to remote
 
-1. FSEvents emits path metadata.
+1. The platform fs-watch source emits path metadata (FSEvents on macOS, ReadDirectoryChangesW on Windows, inotify on Linux).
 2. Daemon callback canonicalizes the watch root once at startup, then for each event performs only lexical path normalization, watch-root prefix check, and ignore-rule filtering before pushing the record onto a bounded incoming-events queue. Per-component symlink resolution is deliberately NOT done in the callback.
 3. The runtime thread drains the incoming queue into the bounded in-memory event/intent maps on its next tick, where it ALSO performs full per-component symlink resolution against the real filesystem; events whose paths resolve outside the watch root (symlink escape, traversal through symlink chains) are dropped with a diagnostic and never enter the scheduler.
 4. Per-directory 2s storm thresholds (200 unique paths or 600 events) plus a 5000-pending global trigger compact noisy subtrees into deferred `RECONCILE_SUBTREE` markers so storms stop per-path fan-out early.
@@ -79,8 +79,8 @@ Bidirectional sync must prevent the daemon from re-uploading changes it just app
 
 When multiple enabled profiles target overlapping local roots, the watcher must dedupe while keeping per-profile state isolated:
 
-- **One watcher per distinct canonical local root.** Profile startup computes the canonical realpath of each profile's local root. Profiles sharing a canonical root share one FSEvents watcher; non-overlapping roots each get their own watcher.
-- **Per-profile event fan-out.** On each raw FSEvents callback, the normalized event is matched against every enabled profile's sync-root prefix + ignore rules. Profiles that match each receive an independent copy of the event in their own bounded ingest queue, tagged with `profile_id`. Profiles that do not match do not see the event.
+- **One watcher per distinct canonical local root.** Profile startup computes the canonical realpath of each profile's local root. Profiles sharing a canonical root share one fs-watch watcher; non-overlapping roots each get their own watcher.
+- **Per-profile event fan-out.** On each raw fs-watch callback, the normalized event is matched against every enabled profile's sync-root prefix + ignore rules. Profiles that match each receive an independent copy of the event in their own bounded ingest queue, tagged with `profile_id`. Profiles that do not match do not see the event.
 - **Per-profile debounce, scheduler, durable queue.** Each profile has its own debounce/coalesce tick, keyed scheduler, and durable queue tables (profile-id-keyed in SQLite). No in-memory structure is shared across profiles below the raw watcher level.
 - **Shared workgate, throttle, resource ceilings.** The workgate, throttle controller, bandwidth shaper, and effective resource ceilings are daemon-level (single process serving all profiles). Profile-override MIN-lowering resolves to a single effective ceiling set that gates all profiles; per-profile work still queues behind the shared workgate under the shared caps.
 - **Blast-radius containment.** A panic or error inside one profile's scheduler, reconcile, or provider execution must not kill the watcher or other profiles. Profile runtimes are spawned in tasks wrapped with a panic catcher; a caught panic marks the profile `Failed` with a durable diagnostic, suspends its queue, and leaves the watcher and other profiles running.

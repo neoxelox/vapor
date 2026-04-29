@@ -70,12 +70,12 @@ Status: complete. Wave 2 + Wave 3 may begin in parallel.
 
 ### Wave 1 — Documentation and naming hygiene
 
-Status: mostly complete via the docs reorganisation.
+Status: complete.
 
 - `core.md` C0-1 … C0-10 — plans/tasks reorg, docs group READMEs,
   `xpc-contracts` → `ipc-contracts` rename, platform-abstractions
   reference, `AGENTS.md` reframing, constants / FSEvents vocabulary
-  cleanup.
+  cleanup. Done.
 
 Prerequisite for every later wave because it lays out the target
 directory structure and removes macOS-only vocabulary from the shared
