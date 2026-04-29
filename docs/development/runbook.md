@@ -20,6 +20,7 @@
 - Format both stacks: `./scripts/format.sh`
 - Format check both stacks: `./scripts/format.sh check`
 - Test both stacks: `./scripts/test.sh`
+- Install git pre-commit hook: `./scripts/hooks.sh` (uninstall: `./scripts/hooks.sh uninstall`)
 - Version helper: `./scripts/version.sh`
 - Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
 
@@ -34,6 +35,40 @@
 - Swift tests: `./scripts/swift/test.sh`
 - Swift build: `./scripts/swift/build.sh`
 - macOS app packaging: `apps/macos/scripts/package.sh`
+
+## Pre-commit hook (optional but recommended for agentic workflows)
+
+`./scripts/hooks.sh` installs a git `pre-commit` hook into the local
+clone. The hook runs the full local validation pipeline before any
+commit is allowed to land:
+
+1. `./scripts/clean.sh` — remove stale build/dist artifacts.
+2. `./scripts/lint.sh` — Rust + Swift lint plus `format.sh check`.
+3. `./scripts/test.sh` — Tier 1 test suite for both stacks.
+4. `./scripts/build.sh` — release-mode build of every shipping binary.
+
+Any failure aborts the commit. This is the same gate the agent's
+feedback loop uses, which is what makes it suitable for autonomous
+contributors: when a commit lands, `clean → lint → test → build` is
+known-green on the working tree.
+
+Operational notes:
+
+- The hook lives at `.git/hooks/pre-commit` and is per-clone (git does
+  not track hooks). Re-run `./scripts/hooks.sh` after a fresh clone or
+  after switching machines.
+- If a non-vapor `pre-commit` hook already exists, the installer
+  preserves it as `.git/hooks/pre-commit.bak` and refuses to overwrite
+  if a backup is already there — resolve the conflict manually.
+- Remove the hook with `./scripts/hooks.sh uninstall`; it only deletes
+  hooks that carry the `vapor-managed-hook` marker, so unrelated hooks
+  are left alone.
+- Because the hook runs `clean.sh`, every commit re-builds the
+  workspace from scratch. That trade-off is intentional: it guarantees
+  no stale artifacts mask a regression. If you need a faster local
+  iteration loop, run `./scripts/lint.sh` and `./scripts/test.sh`
+  manually and skip the hook by passing `--no-verify` only with the
+  project owner's explicit approval (see `AGENTS.md` Bash safety).
 
 ## Notes
 

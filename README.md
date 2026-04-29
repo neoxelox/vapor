@@ -110,6 +110,8 @@ See `.env.example` for the available `VAPOR_*` environment variables used by app
 - Format both stacks: `./scripts/format.sh`
 - Format check both stacks (included in lint): `./scripts/format.sh check`
 - Test both stacks: `./scripts/test.sh`
+- Install git pre-commit hook (clean → lint → test → build): `./scripts/hooks.sh`
+- Remove the installed pre-commit hook: `./scripts/hooks.sh uninstall`
 - Version helper: `./scripts/version.sh`
 - Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
 
