@@ -321,6 +321,7 @@ fn map_event_kind(kind: &EventKind) -> FsEventKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
@@ -409,6 +410,7 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlink_escape_is_rejected_by_resolve_helper() {
         let temp_dir = TempDir::new().expect("temp dir");
@@ -425,6 +427,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn nested_symlink_escape_is_rejected_by_resolve_helper() {
         let temp_dir = TempDir::new().expect("temp dir");
@@ -443,6 +446,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn symlink_resolving_inside_watch_root_is_accepted_by_resolve_helper() {
         let temp_dir = TempDir::new().expect("temp dir");
@@ -459,6 +463,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn callback_records_lexically_inside_paths_without_blocking_on_filesystem_resolution() {
         let temp_dir = TempDir::new().expect("temp dir");
@@ -486,6 +491,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn watch_root_is_canonicalized_before_use() {
         let temp_dir = TempDir::new().expect("temp dir");

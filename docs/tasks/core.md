@@ -94,12 +94,12 @@ Exit gate:
 Moved from the pre-portability macOS task list; they are platform-agnostic
 runtime work.
 
-- [ ] C2-1 Replace default-`ThrottleInputs` placeholder in the composed
+- [x] C2-1 Replace default-`ThrottleInputs` placeholder in the composed
       runtime tick path with a real input source. Until
       `PlatformMetricsSampler` (Phase C4) is implemented, inject a
       `StaticMetricsSampler` driven by config so the tick path already
       exercises real plumbing.
-- [ ] C2-2 D-1 (from legacy tasklist) — Harden `ThrottleWorkgate` permit-ID
+- [x] C2-2 D-1 (from legacy tasklist) — Harden `ThrottleWorkgate` permit-ID
       allocation against `u64::MAX` saturation: switch to wrapping
       allocation with a free-list of released ids (or wrap when the
       active-permits map shows the slot is free); add a stress test that

@@ -26,6 +26,7 @@ pub mod event_intents;
 pub mod executor;
 pub mod fs_events;
 pub mod logging;
+pub mod metrics;
 pub mod path_filter;
 pub mod reconcile;
 pub mod retry;

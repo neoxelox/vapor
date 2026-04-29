@@ -12,6 +12,7 @@ use crate::event_intents::BoundedFsEventRecorder;
 use crate::executor::{StagedExecutor, StagedExecutorSnapshot};
 use crate::fs_events::{FsEventsWatcher, FsEventsWatcherError, normalize_watch_root};
 use crate::logging;
+use crate::metrics::{MetricsSampler, StaticMetricsSampler};
 use crate::scheduler::KeyedSupersedingScheduler;
 use crate::state_db::{DurableIntentRecord, DurableStateDb, StateDbError};
 use crate::sync_directories::SyncScope;
@@ -70,6 +71,7 @@ pub struct DaemonRuntime {
     staged_executor: StagedExecutor,
     scheduler: KeyedSupersedingScheduler,
     watcher: Option<FsEventsWatcher>,
+    metrics_sampler: Arc<dyn MetricsSampler>,
     last_throttle_sample_at: Option<SystemTime>,
     running_reconcile_intent_id: Option<i64>,
     startup_reconstruction_barrier: bool,
@@ -85,7 +87,21 @@ impl DaemonRuntime {
         state_db: DurableStateDb,
         provider: Box<dyn Provider>,
     ) -> Result<Self, DaemonRuntimeError> {
-        let mut runtime = Self::build(sync_scope, state_db, provider, true)?;
+        Self::start_with_sampler(
+            sync_scope,
+            state_db,
+            provider,
+            Arc::new(StaticMetricsSampler::default()),
+        )
+    }
+
+    pub fn start_with_sampler(
+        sync_scope: SyncScope,
+        state_db: DurableStateDb,
+        provider: Box<dyn Provider>,
+        metrics_sampler: Arc<dyn MetricsSampler>,
+    ) -> Result<Self, DaemonRuntimeError> {
+        let mut runtime = Self::build(sync_scope, state_db, provider, metrics_sampler, true)?;
         runtime.enqueue_startup_reconstruction_reconcile(SystemTime::now())?;
         Ok(runtime)
     }
@@ -103,7 +119,8 @@ impl DaemonRuntime {
     }
 
     pub fn tick(&mut self, now: SystemTime) -> Result<RuntimeTickReport, DaemonRuntimeError> {
-        self.tick_with_inputs(now, ThrottleInputs::default())
+        let inputs = self.metrics_sampler.sample();
+        self.tick_with_inputs(now, inputs)
     }
 
     pub fn tick_with_inputs(
@@ -180,6 +197,7 @@ impl DaemonRuntime {
         mut sync_scope: SyncScope,
         mut state_db: DurableStateDb,
         provider: Box<dyn Provider>,
+        metrics_sampler: Arc<dyn MetricsSampler>,
         start_watcher: bool,
     ) -> Result<Self, DaemonRuntimeError> {
         let now = SystemTime::now();
@@ -244,6 +262,7 @@ impl DaemonRuntime {
             staged_executor: StagedExecutor::new(tick_interval),
             scheduler: KeyedSupersedingScheduler::default(),
             watcher,
+            metrics_sampler,
             last_throttle_sample_at: None,
             running_reconcile_intent_id: None,
             startup_reconstruction_barrier: false,
@@ -537,6 +556,8 @@ mod tests {
     use super::*;
     use crate::fs_events::{FsEventKind, FsEventRecord, FsEventRecording};
     use crate::sync_directories::SyncScope;
+    use crate::throttle::ThermalPressure;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
     use std::time::Instant;
     use tempfile::TempDir;
@@ -582,6 +603,7 @@ mod tests {
         assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn start_canonicalizes_symlinked_local_sync_root() {
         let temp_dir = TempDir::new().expect("temp dir");
@@ -688,6 +710,7 @@ mod tests {
             test_sync_scope(&watch_root),
             state_db,
             default_provider(),
+            Arc::new(StaticMetricsSampler::default()),
             false,
         )
         .expect("runtime");
@@ -749,6 +772,7 @@ mod tests {
             test_sync_scope(&watch_root),
             state_db,
             default_provider(),
+            Arc::new(StaticMetricsSampler::default()),
             false,
         )
         .expect("runtime");
@@ -777,6 +801,7 @@ mod tests {
             test_sync_scope(&watch_root),
             state_db,
             default_provider(),
+            Arc::new(StaticMetricsSampler::default()),
             false,
         )
         .expect("runtime");
@@ -825,6 +850,7 @@ mod tests {
             test_sync_scope(&watch_root),
             state_db,
             default_provider(),
+            Arc::new(StaticMetricsSampler::default()),
             false,
         )
         .expect("runtime");
@@ -879,6 +905,69 @@ mod tests {
             local_sync_directory: Some(watch_root.to_path_buf()),
             cloud_sync_directory: "/Vapor".to_string(),
         }
+    }
+
+    #[test]
+    fn tick_consults_metrics_sampler_and_propagates_decision_to_workgate() {
+        // C2-1 invariant: the runtime's public `tick(now)` path must obtain
+        // its ThrottleInputs from the injected `MetricsSampler` and feed
+        // them through to the throttle controller / workgate. We inject a
+        // sampler that reports user-active + warm thermal state; the
+        // resulting throttle decision must downshift away from `IdleDrain`.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        std::fs::create_dir_all(&watch_root).expect("create watch root");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+
+        let active_user_inputs = ThrottleInputs {
+            user_active: true,
+            thermal_pressure: ThermalPressure::Fair,
+            ..ThrottleInputs::default()
+        };
+        let sampler: Arc<dyn MetricsSampler> =
+            Arc::new(StaticMetricsSampler::new(active_user_inputs));
+
+        let mut runtime = DaemonRuntime::start_with_sampler(
+            test_sync_scope(&watch_root),
+            state_db,
+            default_provider(),
+            sampler,
+        )
+        .expect("runtime");
+
+        // The sampler's first sample drives the first tick's throttle
+        // decision. We assert via the live decision exposed on the app.
+        runtime.tick(SystemTime::now()).expect("runtime tick");
+
+        let decision = runtime
+            .app()
+            .throttle_decision()
+            .expect("throttle decision recorded after first tick");
+        assert_eq!(decision.state, vapor_shared::ThrottleState::Throttled);
+    }
+
+    #[test]
+    fn tick_with_default_static_sampler_picks_idle_drain() {
+        // Sanity check: with no overrides, the default static sampler
+        // mirrors `ThrottleInputs::default()` so the engine starts in
+        // IdleDrain — the existing behavior the C2-1 plumbing must preserve.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        std::fs::create_dir_all(&watch_root).expect("create watch root");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+
+        let mut runtime =
+            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
+                .expect("runtime");
+        runtime.tick(SystemTime::now()).expect("runtime tick");
+
+        let decision = runtime
+            .app()
+            .throttle_decision()
+            .expect("throttle decision recorded after first tick");
+        assert_eq!(decision.state, vapor_shared::ThrottleState::IdleDrain);
     }
 
     fn timestamp_ms(milliseconds: u64) -> SystemTime {

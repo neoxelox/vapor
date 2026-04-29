@@ -161,14 +161,32 @@ impl ThrottleWorkgate {
             }
         };
 
-        let permit = WorkPermit {
-            id: self.next_permit_id,
-            class,
-        };
-        self.next_permit_id = self.next_permit_id.saturating_add(1);
+        let id = self.allocate_permit_id();
+        let permit = WorkPermit { id, class };
         self.active_permits.insert(permit.id, active_permit);
         self.increment_counts(active_permit);
         Ok(permit)
+    }
+
+    /// Returns a permit id that does not collide with any currently-active
+    /// permit. Uses wrapping arithmetic so the engine survives
+    /// `u64::MAX` saturation without locking up on a single id (the previous
+    /// `saturating_add` impl would have re-issued `u64::MAX` for every
+    /// subsequent allocation, breaking the active-permits map invariants).
+    /// Per `docs/tasks/core.md` C2-2.
+    fn allocate_permit_id(&mut self) -> u64 {
+        // Active permits are bounded by the workgate caps (single digits),
+        // so the worst-case loop length is bounded by `caps.planner_workers
+        // + caps.hash_workers + caps.upload_concurrency + caps.read_tokens`,
+        // which is far below `u64::MAX`. The loop is guaranteed to find a
+        // free slot before exhausting the address space.
+        loop {
+            let id = self.next_permit_id;
+            self.next_permit_id = self.next_permit_id.wrapping_add(1);
+            if !self.active_permits.contains_key(&id) {
+                return id;
+            }
+        }
     }
 
     pub fn release(&mut self, permit: WorkPermit) -> bool {
@@ -292,6 +310,16 @@ impl ThrottleWorkgate {
             reason,
             throttle_state: self.throttle_state,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_next_permit_id_for_testing(&mut self, id: u64) {
+        self.next_permit_id = id;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_permit_id_for_testing(&self) -> u64 {
+        self.next_permit_id
     }
 }
 
@@ -492,5 +520,85 @@ mod tests {
             ThrottleState::IdleDrain,
             controller.caps_for(ThrottleState::IdleDrain),
         )
+    }
+
+    #[test]
+    fn permit_id_wraps_past_u64_max_and_skips_already_active_ids() {
+        // Per docs/tasks/core.md C2-2, the workgate must keep allocating
+        // unique permit ids even after the counter saturates. We seed the
+        // allocator one shy of u64::MAX, then walk it past the boundary
+        // while holding a permit at id 0 to force the wrap-around branch
+        // to skip a colliding slot.
+        let mut gate = idle_drain_gate();
+
+        // Drive the allocator near saturation.
+        gate.set_next_permit_id_for_testing(u64::MAX);
+        let max_permit = gate
+            .try_acquire(WorkClass::Planner)
+            .expect("permit at u64::MAX");
+        assert_eq!(max_permit.id, u64::MAX);
+        // After the wrap, the next allocation lands at id 0.
+        assert_eq!(gate.next_permit_id_for_testing(), 0);
+
+        // Hold a synthetic active permit at id 0 to force the allocator to
+        // skip it. We do this by acquiring + remembering id 0 first.
+        let zero_permit = gate
+            .try_acquire(WorkClass::Planner)
+            .expect("permit at id 0");
+        assert_eq!(zero_permit.id, 0);
+
+        // The allocator must keep walking past 0 / 1 if those collide.
+        // Re-set the counter to 0 to *force* a collision; the allocator
+        // should walk past the active permits and land at the next free id.
+        gate.set_next_permit_id_for_testing(0);
+        let next_permit = gate
+            .try_acquire(WorkClass::Upload)
+            .expect("permit after forced collision");
+        assert!(
+            next_permit.id != u64::MAX && next_permit.id != 0,
+            "wrap-around allocator must skip already-active permit ids; got {}",
+            next_permit.id
+        );
+
+        assert!(gate.release(max_permit));
+        assert!(gate.release(zero_permit));
+        assert!(gate.release(next_permit));
+    }
+
+    #[test]
+    fn permit_ids_remain_unique_under_alternating_acquire_release_through_wrap() {
+        // Stress check: walk the counter through the boundary while
+        // alternating acquire/release. Every issued permit must hold a
+        // unique id, and the workgate's bookkeeping must agree on each
+        // release (returns `false` for an id that is not currently active
+        // or has the wrong class). We release each permit before acquiring
+        // the next so we don't bump into the upload-concurrency cap.
+        let mut gate = idle_drain_gate();
+        gate.set_next_permit_id_for_testing(u64::MAX - 2);
+
+        let mut observed_ids = Vec::new();
+        for _ in 0..6 {
+            let permit = gate
+                .try_acquire(WorkClass::Upload)
+                .expect("upload permit during wrap walk");
+            observed_ids.push(permit.id);
+            assert!(gate.release(permit));
+        }
+
+        // After alternating acquire/release through the wrap, every id we
+        // saw must be distinct — i.e., the wrap-around branch never re-
+        // issued an id while it was still active. Adjacent ids may match
+        // post-release because the active-permits map is now empty, but the
+        // *issued sequence* must still be monotonic-with-wrap (no repeats
+        // within the in-flight window of one). Verifying distinct ids
+        // across all six acquisitions is the strict version of that check.
+        let mut sorted = observed_ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            observed_ids.len(),
+            "permit ids must stay unique across the wrap boundary; observed {observed_ids:?}"
+        );
     }
 }
