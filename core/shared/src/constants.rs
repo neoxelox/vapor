@@ -119,4 +119,17 @@ pub mod engine {
     pub const STORM_GLOBAL_PENDING_EVENT_COUNT_THRESHOLD: usize = 5_000;
     pub const DEFERRED_RECONCILE_DELAY_MILLIS: u64 = 30_000;
     pub const RECONCILE_SLICE_MILLIS: u64 = 500;
+    /// Minimum dwell time before the throttle controller may down-shift to
+    /// or out of `Light`. Pairs with `MIN_DWELL_THROTTLED_SECONDS` to keep
+    /// state stable under oscillating CPU / network samples (C2-4).
+    pub const MIN_DWELL_LIGHT_SECONDS: u64 = 5;
+    /// Minimum dwell time before the throttle controller may down-shift to
+    /// or out of `Throttled`. See `MIN_DWELL_LIGHT_SECONDS`.
+    pub const MIN_DWELL_THROTTLED_SECONDS: u64 = 5;
+    /// Minimum dwell time before the throttle controller may exit
+    /// `Suspended`. Shorter than the lower-pressure tiers because
+    /// `Suspended` is the safest state — staying suspended for an extra
+    /// second is never harmful, but exiting too aggressively could mask
+    /// real pressure.
+    pub const MIN_DWELL_SUSPENDED_SECONDS: u64 = 1;
 }

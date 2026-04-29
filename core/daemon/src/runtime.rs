@@ -2,12 +2,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use vapor_providers::Provider;
 use vapor_shared::{RunState, constants};
 
-use crate::debounce::DebounceLoop;
+use crate::clock::{SharedClock, system_clock};
+use crate::debounce::{DebounceLoop, DebounceWindows};
 use crate::event_intents::BoundedFsEventRecorder;
 use crate::executor::{StagedExecutor, StagedExecutorSnapshot};
 use crate::fs_events::{FsEventsWatcher, FsEventsWatcherError, normalize_watch_root};
@@ -72,7 +73,8 @@ pub struct DaemonRuntime {
     scheduler: KeyedSupersedingScheduler,
     watcher: Option<FsEventsWatcher>,
     metrics_sampler: Arc<dyn MetricsSampler>,
-    last_throttle_sample_at: Option<SystemTime>,
+    clock: SharedClock,
+    last_throttle_sample_inst: Option<Instant>,
     running_reconcile_intent_id: Option<i64>,
     startup_reconstruction_barrier: bool,
     startup_barrier_expires_at: Option<SystemTime>,
@@ -101,14 +103,37 @@ impl DaemonRuntime {
         provider: Box<dyn Provider>,
         metrics_sampler: Arc<dyn MetricsSampler>,
     ) -> Result<Self, DaemonRuntimeError> {
-        let mut runtime = Self::build(sync_scope, state_db, provider, metrics_sampler, true)?;
-        runtime.enqueue_startup_reconstruction_reconcile(SystemTime::now())?;
+        Self::start_with_sampler_and_clock(
+            sync_scope,
+            state_db,
+            provider,
+            metrics_sampler,
+            system_clock(),
+        )
+    }
+
+    pub fn start_with_sampler_and_clock(
+        sync_scope: SyncScope,
+        state_db: DurableStateDb,
+        provider: Box<dyn Provider>,
+        metrics_sampler: Arc<dyn MetricsSampler>,
+        clock: SharedClock,
+    ) -> Result<Self, DaemonRuntimeError> {
+        let mut runtime = Self::build(
+            sync_scope,
+            state_db,
+            provider,
+            metrics_sampler,
+            clock.clone(),
+            true,
+        )?;
+        runtime.enqueue_startup_reconstruction_reconcile(clock.now_system())?;
         Ok(runtime)
     }
 
     pub fn run_forever(&mut self) -> Result<(), DaemonRuntimeError> {
         while !is_shutdown_requested() {
-            self.tick(SystemTime::now())?;
+            self.tick(self.clock.now_system())?;
             thread::sleep(self.tick_interval);
         }
         logging::warning(
@@ -198,10 +223,11 @@ impl DaemonRuntime {
         mut state_db: DurableStateDb,
         provider: Box<dyn Provider>,
         metrics_sampler: Arc<dyn MetricsSampler>,
+        clock: SharedClock,
         start_watcher: bool,
     ) -> Result<Self, DaemonRuntimeError> {
-        let now = SystemTime::now();
-        let mut app = DaemonApp::new(provider);
+        let now = clock.now_system();
+        let mut app = DaemonApp::new_with_clock(provider, clock.clone());
         let recovered_count = state_db.recover_leased(now)?;
         logging::info(
             "Durable queue/state DB is ready",
@@ -251,7 +277,8 @@ impl DaemonRuntime {
             app.set_run_state(RunState::Paused, "no local sync directory configured");
         }
 
-        let debounce = DebounceLoop::default();
+        let debounce =
+            DebounceLoop::with_windows_and_clock(DebounceWindows::default(), clock.clone());
         let tick_interval = debounce.tick_interval();
         Ok(Self {
             app,
@@ -259,11 +286,12 @@ impl DaemonRuntime {
             state_db,
             recorder,
             debounce,
-            staged_executor: StagedExecutor::new(tick_interval),
+            staged_executor: StagedExecutor::with_clock(tick_interval, clock.clone()),
             scheduler: KeyedSupersedingScheduler::default(),
             watcher,
             metrics_sampler,
-            last_throttle_sample_at: None,
+            clock,
+            last_throttle_sample_inst: None,
             running_reconcile_intent_id: None,
             startup_reconstruction_barrier: false,
             startup_barrier_expires_at: None,
@@ -277,18 +305,18 @@ impl DaemonRuntime {
         })
     }
 
-    fn sample_throttle_inputs(&mut self, now: SystemTime, inputs: ThrottleInputs) {
+    fn sample_throttle_inputs(&mut self, _now: SystemTime, inputs: ThrottleInputs) {
+        // Sampling cadence uses the monotonic clock so wall-clock rewinds
+        // cannot force an extra sample (or skip one). The injected clock
+        // makes that property test-checkable. C2-3.
+        let now_inst = self.clock.now();
         let should_sample = self
-            .last_throttle_sample_at
-            .map(|last| {
-                now.duration_since(last)
-                    .map(|elapsed| elapsed >= self.throttle_sample_interval)
-                    .unwrap_or(true)
-            })
+            .last_throttle_sample_inst
+            .map(|last| now_inst.saturating_duration_since(last) >= self.throttle_sample_interval)
             .unwrap_or(true);
         if should_sample {
             self.app.apply_throttle_inputs(inputs);
-            self.last_throttle_sample_at = Some(now);
+            self.last_throttle_sample_inst = Some(now_inst);
         }
     }
 
@@ -706,11 +734,13 @@ mod tests {
         std::fs::create_dir_all(&watch_root).expect("create watch root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+        let clock = Arc::new(crate::clock::ManualClock::at_now());
         let mut runtime = DaemonRuntime::build(
             test_sync_scope(&watch_root),
             state_db,
             default_provider(),
             Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
             false,
         )
         .expect("runtime");
@@ -729,15 +759,23 @@ mod tests {
             },
         );
 
+        // Each scripted tick advances the monotonic clock by 250 ms so the
+        // debounce / staged-executor elapsed-time gates fire deterministically.
+        // The SystemTime arg keeps documenting the durable wall-clock value
+        // recorded in the state DB.
+        clock.advance(Duration::from_millis(1_500));
         let first_tick = runtime
             .tick_with_inputs(timestamp_ms(1_500), ThrottleInputs::default())
             .expect("runtime tick");
+        clock.advance(Duration::from_millis(250));
         let second_tick = runtime
             .tick_with_inputs(timestamp_ms(1_750), ThrottleInputs::default())
             .expect("runtime tick");
+        clock.advance(Duration::from_millis(250));
         let third_tick = runtime
             .tick_with_inputs(timestamp_ms(2_000), ThrottleInputs::default())
             .expect("runtime tick");
+        clock.advance(Duration::from_millis(250));
         let fourth_tick = runtime
             .tick_with_inputs(timestamp_ms(2_250), ThrottleInputs::default())
             .expect("runtime tick");
@@ -773,6 +811,7 @@ mod tests {
             state_db,
             default_provider(),
             Arc::new(StaticMetricsSampler::default()),
+            system_clock(),
             false,
         )
         .expect("runtime");
@@ -802,6 +841,7 @@ mod tests {
             state_db,
             default_provider(),
             Arc::new(StaticMetricsSampler::default()),
+            system_clock(),
             false,
         )
         .expect("runtime");
@@ -846,11 +886,13 @@ mod tests {
         std::fs::create_dir_all(&watch_root).expect("create watch root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+        let clock = Arc::new(crate::clock::ManualClock::at_now());
         let mut runtime = DaemonRuntime::build(
             test_sync_scope(&watch_root),
             state_db,
             default_provider(),
             Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
             false,
         )
         .expect("runtime");
@@ -874,6 +916,7 @@ mod tests {
             );
         }
 
+        clock.advance(Duration::from_secs(31));
         let blocked = runtime
             .tick_with_inputs(
                 timestamp_ms(31_000),
@@ -886,6 +929,11 @@ mod tests {
         assert_eq!(blocked.released_deferred_reconciles, 0);
         assert!(blocked.started_reconcile_root.is_none());
 
+        // Advance past the throttle dwell window for `Throttled`
+        // (MIN_DWELL_THROTTLED_SECONDS = 5 s) before the second
+        // evaluation so the controller is allowed to transition back to
+        // IdleDrain. C2-4.
+        clock.advance(Duration::from_secs(6));
         let started = runtime
             .tick_with_inputs(timestamp_ms(32_000), ThrottleInputs::default())
             .expect("runtime tick");
@@ -893,6 +941,7 @@ mod tests {
         assert!(started.started_reconcile_root.is_some());
         assert_eq!(runtime.state_db().leased_depth().expect("leased depth"), 1);
 
+        clock.advance(Duration::from_millis(250));
         let completed = runtime
             .tick_with_inputs(timestamp_ms(32_250), ThrottleInputs::default())
             .expect("runtime tick");

@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use vapor_shared::constants;
 
+use crate::clock::{Clock, SystemClock};
 use crate::event_intents::{
     BoundedEventIntentMaps, BoundedFsEventRecorder, PendingEventFlags, PendingEventRecord,
 };
@@ -95,11 +97,13 @@ pub struct StabilizedEvent {
     pub quiet_window: Duration,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DebounceLoop {
     tick_interval: Duration,
     windows: DebounceWindows,
     last_tick_at: Option<SystemTime>,
+    last_tick_inst: Option<Instant>,
+    clock: Arc<dyn Clock>,
 }
 
 impl Default for DebounceLoop {
@@ -114,10 +118,16 @@ impl DebounceLoop {
     }
 
     pub fn with_windows(windows: DebounceWindows) -> Self {
+        Self::with_windows_and_clock(windows, Arc::new(SystemClock))
+    }
+
+    pub fn with_windows_and_clock(windows: DebounceWindows, clock: Arc<dyn Clock>) -> Self {
         Self {
             tick_interval: Duration::from_millis(constants::engine::DEBOUNCE_TICK_MILLIS),
             windows,
             last_tick_at: None,
+            last_tick_inst: None,
+            clock,
         }
     }
 
@@ -129,6 +139,11 @@ impl DebounceLoop {
         self.last_tick_at
     }
 
+    #[cfg(test)]
+    pub(crate) fn last_tick_inst_for_testing(&self) -> Option<Instant> {
+        self.last_tick_inst
+    }
+
     pub fn windows(&self) -> &DebounceWindows {
         &self.windows
     }
@@ -138,11 +153,13 @@ impl DebounceLoop {
         maps: &mut BoundedEventIntentMaps,
         now: SystemTime,
     ) -> Vec<StabilizedEvent> {
-        if !self.tick_is_due(now) {
+        let now_inst = self.clock.now();
+        if !self.tick_is_due(now_inst) {
             return Vec::new();
         }
 
         self.last_tick_at = Some(now);
+        self.last_tick_inst = Some(now_inst);
         maps.drain_ready_events_with(|record| self.classify_stable_record(record, now))
             .into_iter()
             .map(|(record, (debounce_class, quiet_window))| {
@@ -156,11 +173,13 @@ impl DebounceLoop {
         recorder: &BoundedFsEventRecorder,
         now: SystemTime,
     ) -> Vec<StabilizedEvent> {
-        if !self.tick_is_due(now) {
+        let now_inst = self.clock.now();
+        if !self.tick_is_due(now_inst) {
             return Vec::new();
         }
 
         self.last_tick_at = Some(now);
+        self.last_tick_inst = Some(now_inst);
         let ready_records = recorder.with_mut_state(|maps| {
             maps.drain_ready_events_with(|record| self.classify_stable_record(record, now))
         });
@@ -173,15 +192,15 @@ impl DebounceLoop {
             .collect()
     }
 
-    fn tick_is_due(&self, now: SystemTime) -> bool {
-        let Some(last_tick_at) = self.last_tick_at else {
+    fn tick_is_due(&self, now_inst: Instant) -> bool {
+        // Monotonic Instant elapsed: wall-clock rewinds (DST / NTP / `date`)
+        // cannot make the daemon spin extra ticks. The injected clock seam
+        // means tests can assert this property deterministically. C2-3.
+        let Some(last_tick_inst) = self.last_tick_inst else {
             return true;
         };
 
-        match now.duration_since(last_tick_at) {
-            Ok(elapsed) => elapsed >= self.tick_interval,
-            Err(_) => true,
-        }
+        now_inst.saturating_duration_since(last_tick_inst) >= self.tick_interval
     }
 
     fn classify_stable_record(
@@ -190,6 +209,12 @@ impl DebounceLoop {
         now: SystemTime,
     ) -> Option<(DebounceClass, Duration)> {
         let classification @ (_, quiet_window) = self.windows.classify_path(record.path.as_path());
+        // The `Err(_)` branch here is the conservative fallback: a wall-
+        // clock rewind keeps an event pending instead of stabilizing it
+        // prematurely. This complements the Instant-based tick_is_due: even
+        // if `last_observed_at` (a SystemTime carried over from the
+        // fs-watch callback) gets affected by a rewind, the worst-case
+        // outcome is delayed stabilization, never a false-positive flush.
         match now.duration_since(record.last_observed_at) {
             Ok(elapsed) if elapsed >= quiet_window => Some(classification),
             Ok(_) | Err(_) => None,
@@ -325,6 +350,7 @@ fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::ManualClock;
     use crate::event_intents::{EventIntentLimits, PendingIntentKind};
     use crate::fs_events::{FsEventErrorRecord, FsEventKind, FsEventRecord, FsEventRecording};
     use std::time::{Instant, UNIX_EPOCH};
@@ -384,13 +410,24 @@ mod tests {
         let watch_root = PathBuf::from("/tmp/vapor-root");
         let path = watch_root.join("src/lib.rs");
         let mut maps = bounded_maps(&watch_root);
-        let mut loop_state = DebounceLoop::default();
+        let clock = Arc::new(ManualClock::at_now());
+        let mut loop_state =
+            DebounceLoop::with_windows_and_clock(DebounceWindows::default(), clock.clone());
 
         maps.record_event(fs_event(path.clone(), FsEventKind::Modified, 0));
 
+        // First tick is always due (no last_tick_inst yet); the recorded
+        // event still hasn't aged past its quiet window so nothing emits.
         assert!(loop_state.run_tick(&mut maps, timestamp(1_000)).is_empty());
+
+        // Advance the monotonic clock under the configured tick interval
+        // (250ms). The next tick must skip — `tick_is_due` returns false.
+        clock.advance(Duration::from_millis(200));
         assert!(loop_state.run_tick(&mut maps, timestamp(1_200)).is_empty());
 
+        // Cross the interval boundary; the next tick fires and the event
+        // has aged enough to stabilize.
+        clock.advance(Duration::from_millis(50));
         let stabilized = loop_state.run_tick(&mut maps, timestamp(1_250));
         assert_eq!(stabilized.len(), 1);
         assert_eq!(stabilized[0].path, path);
@@ -422,11 +459,16 @@ mod tests {
         let watch_root = PathBuf::from("/tmp/vapor-root");
         let path = watch_root.join("capture.mov");
         let mut maps = bounded_maps(&watch_root);
-        let mut loop_state = DebounceLoop::default();
+        let clock = Arc::new(ManualClock::at_now());
+        let mut loop_state =
+            DebounceLoop::with_windows_and_clock(DebounceWindows::default(), clock.clone());
 
         maps.record_event(fs_event(path.clone(), FsEventKind::Created, 0));
 
         assert!(loop_state.run_tick(&mut maps, timestamp(3_750)).is_empty());
+        // Cross the tick interval so the next call is due, then assert
+        // the event hasn't aged past the larger 4s "Other" quiet window.
+        clock.advance(Duration::from_millis(250));
         let stabilized = loop_state.run_tick(&mut maps, timestamp(4_000));
         assert_eq!(stabilized.len(), 1);
         assert_eq!(stabilized[0].path, path);
@@ -476,21 +518,56 @@ mod tests {
     }
 
     #[test]
-    fn tick_is_due_fires_after_system_clock_rewind_instead_of_stalling() {
+    fn tick_cadence_is_unaffected_by_wall_clock_rewind_under_injected_clock() {
+        // C2-3 invariant: tick cadence reads from a monotonic Instant, so
+        // wall-clock rewinds (DST / NTP / `date -s`) cannot make the loop
+        // spin extra ticks. We drive the wall clock backwards by a full
+        // hour while the monotonic axis stays still and assert that the
+        // next `run_tick` call is *not* prematurely due — i.e., the
+        // pre-Wave-3 SystemTime code path that woke immediately on a
+        // negative `duration_since` is gone.
         let watch_root = PathBuf::from("/tmp/vapor-root");
         let path = watch_root.join("src/main.rs");
         let mut maps = bounded_maps(&watch_root);
-        let mut loop_state = DebounceLoop::default();
+        let clock = Arc::new(ManualClock::at_now());
+        let mut loop_state =
+            DebounceLoop::with_windows_and_clock(DebounceWindows::default(), clock.clone());
 
         maps.record_event(fs_event(path.clone(), FsEventKind::Modified, 0));
+        // Prime the loop with a first tick so `last_tick_inst` is set.
         loop_state.run_tick(&mut maps, timestamp(10_000));
+        let last_tick_inst_after_first = loop_state
+            .last_tick_inst_for_testing()
+            .expect("primed last tick");
 
-        let rewound = loop_state.run_tick(&mut maps, timestamp(1_000));
-        let _ = rewound;
+        // Walk the wall clock backwards by one hour without touching the
+        // monotonic axis. Pre-C2-3 this triggered the
+        // `duration_since` `Err(_)` branch and forced an immediate tick;
+        // post-C2-3 the monotonic Instant is unchanged so `tick_is_due`
+        // remains false.
+        clock.advance_system(Duration::ZERO);
+        clock.set_system(timestamp(1_000));
+        let after_rewind = loop_state.run_tick(&mut maps, timestamp(1_000));
+        assert!(
+            after_rewind.is_empty(),
+            "wall-clock rewind alone must not force a debounce tick"
+        );
         assert_eq!(
-            loop_state.last_tick_at(),
-            Some(timestamp(1_000)),
-            "clock rewind must update the last tick timestamp so later ticks still progress",
+            loop_state.last_tick_inst_for_testing(),
+            Some(last_tick_inst_after_first),
+            "monotonic clock is untouched, so `last_tick_inst` should not advance"
+        );
+
+        // Crossing the tick interval on the monotonic axis re-enables ticks.
+        clock.advance(loop_state.tick_interval());
+        let after_advance = loop_state.run_tick(&mut maps, timestamp(2_000));
+        let _ = after_advance;
+        assert!(
+            loop_state
+                .last_tick_inst_for_testing()
+                .expect("post-advance tick recorded")
+                > last_tick_inst_after_first,
+            "monotonic-axis advance should permit the next tick"
         );
     }
 

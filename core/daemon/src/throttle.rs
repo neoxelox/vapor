@@ -1,6 +1,9 @@
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use vapor_shared::{ThrottleState, constants};
+
+use crate::clock::{Clock, SystemClock};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ThermalPressure {
@@ -111,9 +114,12 @@ struct ThrottleCandidate {
     priority: u8,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ThrottleController {
     sample_interval: Duration,
+    clock: Arc<dyn Clock>,
+    last_state: Option<ThrottleState>,
+    last_state_change_inst: Option<Instant>,
 }
 
 impl Default for ThrottleController {
@@ -124,10 +130,17 @@ impl Default for ThrottleController {
 
 impl ThrottleController {
     pub fn new() -> Self {
+        Self::with_clock(Arc::new(SystemClock))
+    }
+
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
         Self {
             sample_interval: Duration::from_millis(
                 constants::engine::THROTTLE_SAMPLE_INTERVAL_MILLIS,
             ),
+            clock,
+            last_state: None,
+            last_state_change_inst: None,
         }
     }
 
@@ -135,7 +148,22 @@ impl ThrottleController {
         self.sample_interval
     }
 
-    pub fn evaluate(&self, inputs: ThrottleInputs) -> ThrottleDecision {
+    /// Returns the minimum dwell time the controller will hold the given
+    /// state before allowing a transition. C2-4.
+    pub fn min_dwell_for(state: ThrottleState) -> Duration {
+        match state {
+            ThrottleState::IdleDrain => Duration::ZERO,
+            ThrottleState::Light => Duration::from_secs(constants::engine::MIN_DWELL_LIGHT_SECONDS),
+            ThrottleState::Throttled => {
+                Duration::from_secs(constants::engine::MIN_DWELL_THROTTLED_SECONDS)
+            }
+            ThrottleState::Suspended => {
+                Duration::from_secs(constants::engine::MIN_DWELL_SUSPENDED_SECONDS)
+            }
+        }
+    }
+
+    pub fn evaluate(&mut self, inputs: ThrottleInputs) -> ThrottleDecision {
         let mut selected = ThrottleCandidate {
             state: ThrottleState::IdleDrain,
             cause: ThrottleCause::IdleReady,
@@ -152,12 +180,59 @@ impl ThrottleController {
         self.consider(&mut selected, self.network_throughput_candidate(inputs));
         self.consider(&mut selected, self.battery_candidate(inputs));
 
-        ThrottleDecision {
-            state: selected.state,
-            cause: selected.cause,
-            reason: self.describe_reason(selected.cause, inputs),
-            caps: self.caps_for(selected.state),
+        // Hysteresis / min-dwell: if the previous decision is still inside
+        // its dwell window, hold the existing state and reuse the cause we
+        // recorded on entry. This stops oscillating CPU / network samples
+        // from flipping the throttle state more than once per dwell window.
+        // C2-4. The first transition (no prior state) is always honored so
+        // boot still settles to the right tier immediately.
+        let now_inst = self.clock.now();
+        let next_state = if let (Some(prev_state), Some(changed_at)) =
+            (self.last_state, self.last_state_change_inst)
+        {
+            let dwell = Self::min_dwell_for(prev_state);
+            if now_inst.saturating_duration_since(changed_at) < dwell {
+                prev_state
+            } else {
+                selected.state
+            }
+        } else {
+            selected.state
+        };
+
+        let cause = if next_state == selected.state {
+            selected.cause
+        } else {
+            // We held the prior state under hysteresis. Re-derive a cause
+            // that reflects the held state rather than the (would-be)
+            // selected one — using IdleReady as the neutral "no transition"
+            // signal would drop information, so we pick a representative
+            // cause from the inputs that pinned the prior state. The
+            // simplest stable choice is to mirror the held state's
+            // pressure tier from inputs; in practice the cause field is
+            // diagnostic, not behavioral, so any reasonable mapping is
+            // acceptable. We retain the originally selected cause here so
+            // callers see *why* a transition would have happened.
+            selected.cause
+        };
+
+        let decision = ThrottleDecision {
+            state: next_state,
+            cause,
+            reason: self.describe_reason(cause, inputs),
+            caps: self.caps_for(next_state),
+        };
+
+        // Record the transition only when we actually changed state.
+        match self.last_state {
+            Some(prev) if prev == decision.state => {}
+            _ => {
+                self.last_state_change_inst = Some(now_inst);
+            }
         }
+        self.last_state = Some(decision.state);
+
+        decision
     }
 
     pub fn caps_for(&self, state: ThrottleState) -> ThrottleCaps {
@@ -398,7 +473,7 @@ mod tests {
 
     #[test]
     fn idle_plugged_cool_inputs_enter_idle_drain_with_full_caps() {
-        let controller = ThrottleController::default();
+        let mut controller = ThrottleController::default();
 
         let decision = controller.evaluate(ThrottleInputs::default());
 
@@ -416,7 +491,7 @@ mod tests {
 
     #[test]
     fn battery_power_prevents_idle_drain() {
-        let controller = ThrottleController::default();
+        let mut controller = ThrottleController::default();
         let decision = controller.evaluate(ThrottleInputs {
             on_battery: true,
             ..ThrottleInputs::default()
@@ -431,7 +506,7 @@ mod tests {
 
     #[test]
     fn active_user_inputs_downshift_to_throttled() {
-        let controller = ThrottleController::default();
+        let mut controller = ThrottleController::default();
         let decision = controller.evaluate(ThrottleInputs {
             user_active: true,
             ..ThrottleInputs::default()
@@ -446,7 +521,7 @@ mod tests {
 
     #[test]
     fn fair_thermal_pressure_enters_light_state() {
-        let controller = ThrottleController::default();
+        let mut controller = ThrottleController::default();
         let decision = controller.evaluate(ThrottleInputs {
             thermal_pressure: ThermalPressure::Fair,
             ..ThrottleInputs::default()
@@ -459,7 +534,7 @@ mod tests {
 
     #[test]
     fn serious_thermal_pressure_beats_battery_light_signal() {
-        let controller = ThrottleController::default();
+        let mut controller = ThrottleController::default();
         let decision = controller.evaluate(ThrottleInputs {
             on_battery: true,
             thermal_pressure: ThermalPressure::Serious,
@@ -473,7 +548,7 @@ mod tests {
 
     #[test]
     fn low_power_mode_suspends_heavy_work() {
-        let controller = ThrottleController::default();
+        let mut controller = ThrottleController::default();
         let decision = controller.evaluate(ThrottleInputs {
             low_power_mode: true,
             ..ThrottleInputs::default()
@@ -489,7 +564,7 @@ mod tests {
 
     #[test]
     fn severe_system_cpu_can_suspend_even_when_other_inputs_are_lower() {
-        let controller = ThrottleController::default();
+        let mut controller = ThrottleController::default();
         let decision = controller.evaluate(ThrottleInputs {
             user_active: true,
             system_cpu_load_percent: 90,
@@ -503,7 +578,7 @@ mod tests {
 
     #[test]
     fn network_errors_downshift_without_forcing_suspension() {
-        let controller = ThrottleController::default();
+        let mut controller = ThrottleController::default();
         let decision = controller.evaluate(ThrottleInputs {
             network_error_rate_percent: 30,
             ..ThrottleInputs::default()
@@ -516,7 +591,7 @@ mod tests {
 
     #[test]
     fn network_throughput_only_affects_state_when_value_is_known() {
-        let controller = ThrottleController::default();
+        let mut controller = ThrottleController::default();
         let unknown = controller.evaluate(ThrottleInputs {
             network_throughput_kbps: None,
             ..ThrottleInputs::default()
@@ -530,5 +605,91 @@ mod tests {
         assert_eq!(constrained.state, ThrottleState::Throttled);
         assert_eq!(constrained.cause, ThrottleCause::NetworkThroughput);
         assert_eq!(constrained.reason, "network throughput is 100 kbps");
+    }
+
+    #[test]
+    fn min_dwell_durations_match_constants() {
+        // Sanity guard so the dwell-window helper stays in sync with the
+        // shared constants. Future tweaks must update both sides.
+        assert_eq!(
+            ThrottleController::min_dwell_for(ThrottleState::IdleDrain),
+            Duration::ZERO
+        );
+        assert_eq!(
+            ThrottleController::min_dwell_for(ThrottleState::Light),
+            Duration::from_secs(constants::engine::MIN_DWELL_LIGHT_SECONDS)
+        );
+        assert_eq!(
+            ThrottleController::min_dwell_for(ThrottleState::Throttled),
+            Duration::from_secs(constants::engine::MIN_DWELL_THROTTLED_SECONDS)
+        );
+        assert_eq!(
+            ThrottleController::min_dwell_for(ThrottleState::Suspended),
+            Duration::from_secs(constants::engine::MIN_DWELL_SUSPENDED_SECONDS)
+        );
+    }
+
+    #[test]
+    fn oscillating_cpu_samples_do_not_flip_state_more_than_once_per_min_dwell() {
+        // C2-4 invariant: CPU samples that oscillate just above and below
+        // the Light/Throttled thresholds must not flip the throttle
+        // state on every sample. We drive the controller through 6 quick
+        // samples (well under the 5 s dwell window for `Throttled`) that
+        // alternate around the boundary; the recorded transitions must be
+        // capped at one within the window.
+        use crate::clock::ManualClock;
+
+        let clock = Arc::new(ManualClock::at_now());
+        let mut controller = ThrottleController::with_clock(clock.clone());
+
+        // First evaluate puts us in Throttled (CPU ≥ 60).
+        let throttled = controller.evaluate(ThrottleInputs {
+            system_cpu_load_percent: 65,
+            ..ThrottleInputs::default()
+        });
+        assert_eq!(throttled.state, ThrottleState::Throttled);
+
+        // Oscillate: each subsequent sample alternates "back to idle" /
+        // "still throttled" at sub-second cadence. The dwell window
+        // (`MIN_DWELL_THROTTLED_SECONDS = 5 s`) means the controller must
+        // hold `Throttled` for the entire burst.
+        for step in 1..=6 {
+            clock.advance(Duration::from_millis(500));
+            let cpu_load = if step % 2 == 0 { 5 } else { 65 };
+            let decision = controller.evaluate(ThrottleInputs {
+                system_cpu_load_percent: cpu_load,
+                ..ThrottleInputs::default()
+            });
+            assert_eq!(
+                decision.state,
+                ThrottleState::Throttled,
+                "step {step}: throttle state must stay pinned during dwell window"
+            );
+        }
+
+        // After the dwell elapses, the next "all clear" sample is allowed
+        // to transition back to IdleDrain.
+        clock.advance(Duration::from_secs(3));
+        let recovered = controller.evaluate(ThrottleInputs {
+            system_cpu_load_percent: 5,
+            ..ThrottleInputs::default()
+        });
+        assert_eq!(recovered.state, ThrottleState::IdleDrain);
+    }
+
+    #[test]
+    fn first_evaluation_after_construction_skips_dwell_so_boot_settles_quickly() {
+        // The dwell only kicks in after we have a recorded prior state.
+        // On boot, the very first decision must reflect the inputs
+        // immediately so the engine starts in the right tier.
+        use crate::clock::ManualClock;
+
+        let clock = Arc::new(ManualClock::at_now());
+        let mut controller = ThrottleController::with_clock(clock);
+        let decision = controller.evaluate(ThrottleInputs {
+            system_cpu_load_percent: 90,
+            ..ThrottleInputs::default()
+        });
+        assert_eq!(decision.state, ThrottleState::Suspended);
     }
 }

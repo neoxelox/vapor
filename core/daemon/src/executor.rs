@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
+use crate::clock::{Clock, SystemClock};
 use crate::event_intents::PendingIntentKind;
 use crate::state_db::{DurableIntentRecord, DurableStateDb, StateDbError};
 use crate::workgate::WorkgateSnapshot;
@@ -34,6 +36,16 @@ pub struct StagedExecutorReport {
 pub struct StagedExecutor {
     stage_duration: Duration,
     active: BTreeMap<i64, ActiveExecution>,
+    clock: Arc<dyn Clock>,
+}
+
+impl std::fmt::Debug for StagedExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StagedExecutor")
+            .field("stage_duration", &self.stage_duration)
+            .field("active", &self.active)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -47,25 +59,30 @@ struct ActiveExecution {
 enum ActiveStage {
     Planner {
         permit: crate::workgate::WorkPermit,
-        started_at: SystemTime,
+        started_inst: Instant,
     },
     WaitingForHash,
     Hash {
         permit: crate::workgate::WorkPermit,
-        started_at: SystemTime,
+        started_inst: Instant,
     },
     WaitingForUpload,
     Upload {
         permit: crate::workgate::WorkPermit,
-        started_at: SystemTime,
+        started_inst: Instant,
     },
 }
 
 impl StagedExecutor {
     pub fn new(stage_duration: Duration) -> Self {
+        Self::with_clock(stage_duration, Arc::new(SystemClock))
+    }
+
+    pub fn with_clock(stage_duration: Duration, clock: Arc<dyn Clock>) -> Self {
         Self {
             stage_duration,
             active: BTreeMap::new(),
+            clock,
         }
     }
 
@@ -88,7 +105,7 @@ impl StagedExecutor {
         &mut self,
         app: &mut DaemonApp,
         intent: DurableIntentRecord,
-        now: SystemTime,
+        _now: SystemTime,
     ) -> bool {
         if self.active.len() >= max_in_flight_items(app.workgate_snapshot()) {
             return false;
@@ -98,6 +115,7 @@ impl StagedExecutor {
             return false;
         };
 
+        let started_inst = self.clock.now();
         self.active.insert(
             intent.id,
             ActiveExecution {
@@ -105,7 +123,7 @@ impl StagedExecutor {
                 kind: intent.kind,
                 stage: ActiveStage::Planner {
                     permit,
-                    started_at: now,
+                    started_inst,
                 },
             },
         );
@@ -116,8 +134,13 @@ impl StagedExecutor {
         &mut self,
         app: &mut DaemonApp,
         state_db: &mut DurableStateDb,
-        now: SystemTime,
+        _now: SystemTime,
     ) -> Result<StagedExecutorReport, StateDbError> {
+        // Stage timing uses monotonic Instant pairs so wall-clock rewinds
+        // never make a stage falsely "complete" or "expire". The
+        // `_now: SystemTime` parameter stays in the signature for the
+        // public contract — durable fields downstream still need it. C2-3.
+        let now_inst = self.clock.now();
         let mut report = StagedExecutorReport::default();
         let intent_ids: Vec<i64> = self.active.keys().copied().collect();
 
@@ -127,8 +150,11 @@ impl StagedExecutor {
             };
 
             match &mut execution.stage {
-                ActiveStage::Planner { permit, started_at } => {
-                    if !stage_elapsed(*started_at, now, self.stage_duration) {
+                ActiveStage::Planner {
+                    permit,
+                    started_inst,
+                } => {
+                    if !stage_elapsed_inst(*started_inst, now_inst, self.stage_duration) {
                         self.active.insert(intent_id, execution);
                         continue;
                     }
@@ -140,8 +166,11 @@ impl StagedExecutor {
                         ActiveStage::WaitingForUpload
                     };
                 }
-                ActiveStage::Hash { permit, started_at } => {
-                    if !stage_elapsed(*started_at, now, self.stage_duration) {
+                ActiveStage::Hash {
+                    permit,
+                    started_inst,
+                } => {
+                    if !stage_elapsed_inst(*started_inst, now_inst, self.stage_duration) {
                         self.active.insert(intent_id, execution);
                         continue;
                     }
@@ -149,8 +178,11 @@ impl StagedExecutor {
                     app.release_work(*permit);
                     execution.stage = ActiveStage::WaitingForUpload;
                 }
-                ActiveStage::Upload { permit, started_at } => {
-                    if !stage_elapsed(*started_at, now, self.stage_duration) {
+                ActiveStage::Upload {
+                    permit,
+                    started_inst,
+                } => {
+                    if !stage_elapsed_inst(*started_inst, now_inst, self.stage_duration) {
                         self.active.insert(intent_id, execution);
                         continue;
                     }
@@ -172,14 +204,14 @@ impl StagedExecutor {
                 ActiveStage::WaitingForHash => match app.try_acquire_work(WorkClass::Hash) {
                     Ok(permit) => ActiveStage::Hash {
                         permit,
-                        started_at: now,
+                        started_inst: now_inst,
                     },
                     Err(_) => ActiveStage::WaitingForHash,
                 },
                 ActiveStage::WaitingForUpload => match app.try_acquire_work(WorkClass::Upload) {
                     Ok(permit) => ActiveStage::Upload {
                         permit,
-                        started_at: now,
+                        started_inst: now_inst,
                     },
                     Err(_) => ActiveStage::WaitingForUpload,
                 },
@@ -215,10 +247,8 @@ fn requires_hash(kind: PendingIntentKind) -> bool {
     matches!(kind, PendingIntentKind::Upload | PendingIntentKind::Rename)
 }
 
-fn stage_elapsed(started_at: SystemTime, now: SystemTime, stage_duration: Duration) -> bool {
-    now.duration_since(started_at)
-        .map(|elapsed| elapsed >= stage_duration)
-        .unwrap_or(true)
+fn stage_elapsed_inst(started_inst: Instant, now_inst: Instant, stage_duration: Duration) -> bool {
+    now_inst.saturating_duration_since(started_inst) >= stage_duration
 }
 
 fn max_in_flight_items(workgate: WorkgateSnapshot) -> usize {
@@ -228,13 +258,15 @@ fn max_in_flight_items(workgate: WorkgateSnapshot) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::ManualClock;
     use crate::event_intents::PendingIntentKind;
     use crate::throttle::ThrottleInputs;
     use std::path::PathBuf;
 
     #[test]
     fn upload_intent_moves_through_planner_hash_and_upload_stages() {
-        let mut app = DaemonApp::default();
+        let clock = Arc::new(ManualClock::at_now());
+        let mut app = DaemonApp::new_with_clock(default_provider_for_test(), clock.clone());
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let mut state_db = DurableStateDb::open(&database_path).expect("open state db");
@@ -249,22 +281,25 @@ mod tests {
             .lease_next_ready(timestamp_ms(0))
             .expect("lease next ready")
             .expect("leased intent");
-        let mut executor = StagedExecutor::new(Duration::from_millis(100));
+        let mut executor = StagedExecutor::with_clock(Duration::from_millis(100), clock.clone());
         let intent_id = intent.id;
 
         assert!(executor.try_start(&mut app, intent, timestamp_ms(0)));
         assert_eq!(executor.snapshot().planner_running, 1);
 
+        clock.advance(Duration::from_millis(100));
         executor
             .advance(&mut app, &mut state_db, timestamp_ms(100))
             .expect("advance to hash");
         assert_eq!(executor.snapshot().hash_running, 1);
 
+        clock.advance(Duration::from_millis(100));
         executor
             .advance(&mut app, &mut state_db, timestamp_ms(200))
             .expect("advance to upload");
         assert_eq!(executor.snapshot().upload_running, 1);
 
+        clock.advance(Duration::from_millis(100));
         let report = executor
             .advance(&mut app, &mut state_db, timestamp_ms(300))
             .expect("complete upload");
@@ -276,7 +311,8 @@ mod tests {
 
     #[test]
     fn delete_intent_skips_hash_stage() {
-        let mut app = DaemonApp::default();
+        let clock = Arc::new(ManualClock::at_now());
+        let mut app = DaemonApp::new_with_clock(default_provider_for_test(), clock.clone());
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let mut state_db = DurableStateDb::open(&database_path).expect("open state db");
@@ -291,13 +327,18 @@ mod tests {
             .lease_next_ready(timestamp_ms(0))
             .expect("lease next ready")
             .expect("leased intent");
-        let mut executor = StagedExecutor::new(Duration::from_millis(100));
+        let mut executor = StagedExecutor::with_clock(Duration::from_millis(100), clock.clone());
 
         assert!(executor.try_start(&mut app, leased, timestamp_ms(0)));
+        clock.advance(Duration::from_millis(100));
         executor
             .advance(&mut app, &mut state_db, timestamp_ms(100))
             .expect("advance to upload");
         assert_eq!(executor.snapshot().upload_running, 1);
+    }
+
+    fn default_provider_for_test() -> Box<dyn vapor_providers::Provider> {
+        vapor_providers::default_provider()
     }
 
     #[test]

@@ -104,14 +104,14 @@ runtime work.
       allocation with a free-list of released ids (or wrap when the
       active-permits map shows the slot is free); add a stress test that
       walks past the boundary in-process.
-- [ ] C2-3 D-2 (from legacy tasklist) — Migrate local elapsed-time
+- [x] C2-3 D-2 (from legacy tasklist) — Migrate local elapsed-time
       measurements in the daemon runtime from `SystemTime` to `Instant` so
       wall-clock rewinds cannot affect tick cadence, slice budgets, throttle
       sampling, or staged-executor timing. Introduce a test-injectable clock
       abstraction on `DebounceLoop`, `ReconcileController`, `DaemonRuntime`,
       and `StagedExecutor`; keep `SystemTime` for durable/crossing-process
       fields.
-- [ ] C2-4 D-3 (from legacy tasklist) — Add hysteresis and min-dwell to
+- [x] C2-4 D-3 (from legacy tasklist) — Add hysteresis and min-dwell to
       `ThrottleController::evaluate` itself so state does not flap when
       input metrics oscillate. Suggest 5s for `Light`/`Throttled`, 1s for
       `Suspended`. Regression test: oscillating CPU samples must not flip

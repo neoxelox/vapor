@@ -1,25 +1,26 @@
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use vapor_shared::{ThrottleState, constants};
 
+use crate::clock::{Clock, SystemClock};
 use crate::event_intents::BoundedEventIntentMaps;
 use crate::event_intents::PendingIntentKind;
 use crate::scheduler::{CompletionDisposition, KeyedSupersedingScheduler};
 use crate::workgate::{ThrottleWorkgate, WorkClass, WorkPermit, WorkPermitDenied};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ReconcileController {
     slice_budget: Duration,
     running: Option<RunningReconcile>,
+    clock: Arc<dyn Clock>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 struct RunningReconcile {
     root: PathBuf,
-    started_at: SystemTime,
-    slice_started_at: SystemTime,
-    last_checkpoint_at: SystemTime,
+    slice_started_inst: Instant,
     checkpoint_count: usize,
     permit: WorkPermit,
 }
@@ -48,18 +49,27 @@ pub struct ReconcileCompletion {
 
 impl Default for ReconcileController {
     fn default() -> Self {
-        Self {
-            slice_budget: Duration::from_millis(constants::engine::RECONCILE_SLICE_MILLIS),
-            running: None,
-        }
+        Self::with_clock(Arc::new(SystemClock))
     }
 }
 
 impl ReconcileController {
     pub fn with_slice_budget(slice_budget: Duration) -> Self {
+        Self::with_slice_budget_and_clock(slice_budget, Arc::new(SystemClock))
+    }
+
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
+        Self::with_slice_budget_and_clock(
+            Duration::from_millis(constants::engine::RECONCILE_SLICE_MILLIS),
+            clock,
+        )
+    }
+
+    pub fn with_slice_budget_and_clock(slice_budget: Duration, clock: Arc<dyn Clock>) -> Self {
         Self {
             slice_budget,
             running: None,
+            clock,
         }
     }
 
@@ -108,11 +118,11 @@ impl ReconcileController {
             }
         };
 
+        let now_inst = self.clock.now();
+        let _ = now;
         self.running = Some(RunningReconcile {
             root: claimed.path.clone(),
-            started_at: now,
-            slice_started_at: now,
-            last_checkpoint_at: now,
+            slice_started_inst: now_inst,
             checkpoint_count: 0,
             permit,
         });
@@ -126,17 +136,18 @@ impl ReconcileController {
         throttle_state: ThrottleState,
         now: SystemTime,
     ) -> Option<ReconcilePause> {
+        let now_inst = self.clock.now();
+        let _ = now;
         let running = self.running.as_mut()?;
         running.checkpoint_count += 1;
-        running.last_checkpoint_at = now;
 
+        // Slice elapsed uses the monotonic Instant pair so wall-clock
+        // rewinds cannot trick the controller into pausing for budget
+        // expiry that didn't actually happen on the monotonic axis. C2-3.
+        let slice_elapsed = now_inst.saturating_duration_since(running.slice_started_inst);
         let reason = if throttle_state != ThrottleState::IdleDrain {
             Some(ReconcilePauseReason::ThrottleNoLongerIdle)
-        } else if now
-            .duration_since(running.slice_started_at)
-            .unwrap_or(self.slice_budget)
-            >= self.slice_budget
-        {
+        } else if slice_elapsed >= self.slice_budget {
             Some(ReconcilePauseReason::SliceBudgetExpired)
         } else {
             return None;
@@ -201,6 +212,7 @@ fn release_permit_or_log(workgate: &mut ThrottleWorkgate, permit: WorkPermit, co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::ManualClock;
     use crate::event_intents::{BoundedEventIntentMaps, EventIntentLimits};
     use crate::fs_events::{FsEventKind, FsEventRecord};
     use crate::scheduler::KeyedSupersedingScheduler;
@@ -249,7 +261,9 @@ mod tests {
             timestamp(1),
         );
         let mut workgate = idle_reconcile_gate();
-        let mut controller = ReconcileController::with_slice_budget(Duration::from_secs(1));
+        let clock = Arc::new(ManualClock::at_now());
+        let mut controller =
+            ReconcileController::with_slice_budget_and_clock(Duration::from_secs(1), clock.clone());
 
         assert_eq!(
             controller
@@ -263,6 +277,9 @@ mod tests {
             Some(root.clone())
         );
 
+        // Advance the monotonic clock past the slice budget — this is
+        // what should make `checkpoint` decide the slice expired.
+        clock.advance(Duration::from_secs(2));
         let pause = controller
             .checkpoint(
                 &mut scheduler,
@@ -315,7 +332,12 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_pauses_on_system_clock_rewind_instead_of_running_without_bound() {
+    fn checkpoint_slice_budget_uses_monotonic_clock_under_wall_clock_rewind() {
+        // C2-3 invariant: slice budget elapses on the monotonic axis. A
+        // wall-clock rewind alone must not make `checkpoint` pause —
+        // that would have been a false positive under the pre-Wave-3
+        // SystemTime path. Advancing the monotonic clock past the slice
+        // budget is the only thing that should trigger pause.
         let root = PathBuf::from("/tmp/vapor-root/project");
         let mut scheduler = KeyedSupersedingScheduler::default();
         scheduler.upsert_intent(
@@ -324,7 +346,9 @@ mod tests {
             timestamp(1_000),
         );
         let mut workgate = idle_reconcile_gate();
-        let mut controller = ReconcileController::with_slice_budget(Duration::from_secs(1));
+        let clock = Arc::new(ManualClock::at_now());
+        let mut controller =
+            ReconcileController::with_slice_budget_and_clock(Duration::from_secs(1), clock.clone());
 
         controller
             .try_start_next(
@@ -335,6 +359,24 @@ mod tests {
             )
             .expect("start reconcile");
 
+        // Rewind the wall clock far backwards while the monotonic axis
+        // stays still: under the new contract, no slice expiration.
+        clock.set_system(timestamp(500));
+        assert!(
+            controller
+                .checkpoint(
+                    &mut scheduler,
+                    &mut workgate,
+                    ThrottleState::IdleDrain,
+                    timestamp(500),
+                )
+                .is_none(),
+            "wall-clock rewind alone must not expire the reconcile slice"
+        );
+
+        // Now advance the monotonic clock past the slice budget — pause
+        // is finally legitimate.
+        clock.advance(Duration::from_secs(2));
         let pause = controller
             .checkpoint(
                 &mut scheduler,
@@ -342,8 +384,7 @@ mod tests {
                 ThrottleState::IdleDrain,
                 timestamp(500),
             )
-            .expect("reconcile should pause after clock rewind");
-
+            .expect("monotonic-axis slice budget exceeded");
         assert_eq!(pause.reason, ReconcilePauseReason::SliceBudgetExpired);
     }
 

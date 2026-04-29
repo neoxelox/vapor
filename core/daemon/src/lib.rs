@@ -1,10 +1,12 @@
 #![forbid(unsafe_code)]
 
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use vapor_providers::{Provider, default_provider};
 use vapor_shared::{RunState, StatusSnapshot, ThrottleState};
 
+use crate::clock::{SharedClock, SystemClock};
 use crate::event_intents::BoundedEventIntentMaps;
 use crate::reconcile::{ReconcileCompletion, ReconcileController, ReconcilePause};
 use crate::retry::{RetryDecision, RetryFailureKind};
@@ -21,6 +23,7 @@ pub mod build_info {
     include!(concat!(env!("OUT_DIR"), "/vapor_build_info.rs"));
 }
 
+pub mod clock;
 pub mod debounce;
 pub mod event_intents;
 pub mod executor;
@@ -69,10 +72,14 @@ impl std::fmt::Debug for DaemonApp {
 
 impl DaemonApp {
     pub fn new(provider: Box<dyn Provider>) -> Self {
+        Self::new_with_clock(provider, Arc::new(SystemClock))
+    }
+
+    pub fn new_with_clock(provider: Box<dyn Provider>, clock: SharedClock) -> Self {
         logging::info("Initialized daemon app state", &[]);
         let snapshot = StatusSnapshot::default();
         let initial_throttle_state = snapshot.throttle_state;
-        let throttle_controller = ThrottleController::default();
+        let throttle_controller = ThrottleController::with_clock(clock.clone());
         let throttle_caps = throttle_controller.caps_for(initial_throttle_state);
         Self {
             snapshot,
@@ -80,7 +87,7 @@ impl DaemonApp {
             throttle_controller,
             last_throttle_decision: None,
             retry_slowdown_until: None,
-            reconcile_controller: ReconcileController::default(),
+            reconcile_controller: ReconcileController::with_clock(clock),
             workgate: ThrottleWorkgate::new(initial_throttle_state, throttle_caps),
         }
     }

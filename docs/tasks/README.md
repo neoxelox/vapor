@@ -100,13 +100,13 @@ needs a cross-OS compilable workspace).
 
 ### Wave 3 — Remaining runtime gaps
 
-Status: pending. Platform-agnostic runtime fixes; can run in parallel
-with Wave 2.
+Status: complete. Platform-agnostic runtime fixes; ran in parallel with
+Wave 2.
 
 - `core.md` C2-1 … C2-4 — replace default-`ThrottleInputs` placeholder
   with a real input source, throttle permit-id wrap-around hardening,
   `SystemTime` → `Instant` migration for tick-cadence clocks, throttle
-  controller hysteresis / min-dwell.
+  controller hysteresis / min-dwell. Done.
 
 ### Wave 4 — Platform abstraction layer
 
