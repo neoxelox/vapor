@@ -4,6 +4,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOURCE_SCRIPT="$ROOT_DIR/scripts/version.sh"
 
+# These tests build isolated fixture repos via `git init`. When the test runs
+# inside a parent `git` operation (e.g. the project's pre-commit hook), git
+# exports GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE / etc. into the hook's
+# environment. Those override `git -C "$repo"` and cause `git init` to
+# "re-init" the parent repo instead of the temp dir, which breaks every
+# fixture-based assertion. Drop them so child `git` invocations resolve
+# their repo from the cwd / -C path like a fresh shell would.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+  GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
+
 export GIT_AUTHOR_NAME="Vapor Test"
 export GIT_AUTHOR_EMAIL="vapor-tests@example.com"
 export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
