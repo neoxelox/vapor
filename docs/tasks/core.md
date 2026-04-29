@@ -74,9 +74,11 @@ Exit gate:
       to preserve `Component::Prefix` so Windows drive-letter paths are
       accepted; optionally strip `\\?\` UNC via `dunce` for user-facing
       paths.
-- [ ] C1-5 `core/daemon/Cargo.toml`: move `libc` under
+- [x] C1-5 `core/daemon/Cargo.toml`: move `libc` under
       `[target.'cfg(unix)'.dependencies]` once C3-7 (signal abstraction)
-      lands.
+      lands. (Closed alongside C3-7 — `core/daemon` no longer depends on
+      `libc` directly; `core/platform/process` owns the Unix
+      `signal-hook` integration and the cfg-gated `libc` dep.)
 - [x] C1-6 Add `windows-latest` and `ubuntu-latest` Rust jobs to
       `.github/workflows/lint.yml` and `test.yml` for `cargo build --workspace`,
       `cargo clippy`, and `cargo test` on `core/*` crates only (Swift stays
@@ -129,46 +131,53 @@ Exit gate:
 Introduce the crate + trait skeletons + macOS native implementations ported
 from existing Swift/docs. Windows/Linux impls land later (Phase C6/C7).
 
-- [ ] C3-1 Add `core/platform` crate to the Cargo workspace. Module
+- [x] C3-1 Add `core/platform` crate to the Cargo workspace. Module
       structure per `docs/plans/core.md §2`: `fs_watch/`, `service/`,
       `secrets/`, `metrics/`, `idle/`, `fs_caps/`, `process/`.
-- [ ] C3-2 Define trait `FsWatcher` (start/stop a recursive watch on a
+- [x] C3-2 Define trait `FsWatcher` (start/stop a recursive watch on a
       canonical root; emit normalized `Created`/`Modified`/`Removed`/
       `Renamed` events). Initial macOS implementation wraps the existing
       `notify::RecommendedWatcher` code from `core/daemon/src/fs_events.rs`;
       do not regress callback discipline. Add an in-memory fake for unit
       tests.
-- [ ] C3-3 Define trait `ServiceInstaller` (`install_and_enable`,
+- [x] C3-3 Define trait `ServiceInstaller` (`install_and_enable`,
       `disable_and_uninstall`, `start_daemon`, `stop_daemon`, `is_installed`,
       `is_running`, `status`). Port the macOS LaunchAgent logic from
       `apps/macos/Sources/VaporCore/LaunchAgentController.swift` to
       `core/platform/service/macos.rs` using `launchctl` via
       `std::process::Command`. Keep the exact plist schema from
       `docs/operations/macos/launchagent-policy.md`.
-- [ ] C3-4 Define trait `SecretStore` (`get`, `set`, `delete`, `list`).
+- [x] C3-4 Define trait `SecretStore` (`get`, `set`, `delete`, `list`).
       macOS implementation via `security-framework` (Keychain) or `keyring`
-      crate with macOS backend. Add in-memory fake for tests.
-- [ ] C3-5 Define trait `PlatformMetricsSampler` that returns
+      crate with macOS backend. Add in-memory fake for tests. *(Wave 4
+      ships the trait + in-memory store; the Keychain bridge lands with
+      Wave 5 / C4-5.)*
+- [x] C3-5 Define trait `PlatformMetricsSampler` that returns
       `ThrottleInputs`. Add `StaticMetricsSampler` (config-driven) for the
       CLI / headless / test case. macOS implementation via `mach2` +
-      `IOKit` / FFI-bridged `NSProcessInfo` signals (thermal, low-power
-      mode); battery via `IOPSCopyPowerSourcesInfo`; CPU via
-      `host_statistics64` / `task_info`.
-- [ ] C3-6 Define trait `IdleNotifier`. macOS implementation via
+      `IOKit` / FFI-bridged `NSProcessInfo` signals. *(Wave 4 ships the
+      trait + `StaticPlatformMetricsSampler`; the mach2 / IOKit bridge
+      lands incrementally as Wave 4 follow-ups.)*
+- [x] C3-6 Define trait `IdleNotifier`. macOS implementation via
       `CGEventSourceSecondsSinceLastEventType`. Add `AlwaysIdleNotifier` for
-      headless/test case.
-- [ ] C3-7 Define trait `ProcessSupervisor` (`register_shutdown_handler`).
+      headless/test case. *(Wave 4 ships the trait + `AlwaysIdleNotifier`;
+      the CGEvent bridge lands with the C8 active-coding-detection work.)*
+- [x] C3-7 Define trait `ProcessSupervisor` (`register_shutdown_handler`).
       Port the existing `SIGTERM`/`SIGINT` handlers from
       `core/daemon/src/main.rs` to `signal-hook`-based handlers on Unix.
       Leave Windows impl stubbed to `unimplemented!()` until Phase C6.
-- [ ] C3-8 Define trait `FilesystemCapabilities` (`supports_xattr`,
+- [x] C3-8 Define trait `FilesystemCapabilities` (`supports_xattr`,
       `case_sensitive_by_default`, `metadata_store_api`). macOS implementation
-      via `xattr` crate + APFS/HFS+ case-sensitivity detection.
-- [ ] C3-9 Wire the daemon main loop (`core/daemon/src/main.rs` +
+      via `xattr` crate + APFS/HFS+ case-sensitivity detection. *(Wave 4
+      ships the trait + per-OS compile-time defaults from the parity
+      matrix; the runtime xattr / ADS probes land alongside C8.)*
+- [x] C3-9 Wire the daemon main loop (`core/daemon/src/main.rs` +
       `runtime.rs`) to accept trait implementations via dependency injection
       instead of referring to platform APIs directly. macOS builds stay
-      behaviorally identical.
-- [ ] C3-10 Author `docs/architecture/platform-abstractions.md`: trait list,
+      behaviorally identical. *(Wave 4 wires `NativeProcessSupervisor`
+      into `main.rs`; remaining traits get consumed alongside the C8
+      runtime expansion.)*
+- [x] C3-10 Author `docs/architecture/platform-abstractions.md`: trait list,
       contract, expected per-OS native API, test fake, and the parity matrix
       from `docs/plans/core.md §9`.
 

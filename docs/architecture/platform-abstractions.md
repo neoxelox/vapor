@@ -8,6 +8,15 @@ Governing plan: `docs/plans/core.md`
 Tasks: `docs/tasks/core.md` Phase C3 (traits + macOS impls), Phase C6
 (Windows impls), Phase C7 (Linux impls).
 
+Wave 4 status (`core/platform` v0): every trait listed below ships with
+a Rust trait definition, an in-memory fake usable on every OS, a macOS
+native impl scaffolded behind the trait, and Linux / Windows native
+impls stubbed to compile (returning `Unsupported` errors at runtime).
+The runtime currently consumes `ProcessSupervisor` end-to-end; the
+remaining traits are wired progressively as Waves 5–8 land their
+respective consumers (`core/lifecycle`, IPC, the C8 runtime
+expansion).
+
 ## Design rules
 
 1. **One trait per platform-sensitive capability.** The engine code

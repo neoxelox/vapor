@@ -2,19 +2,21 @@ use vapor_daemon::{
     build_info, logging, runtime, runtime::DaemonRuntime, state_db::DurableStateDb,
     sync_directories,
 };
+use vapor_platform::{NativeProcessSupervisor, ProcessSupervisor};
 use vapor_providers::default_provider;
 
-extern "C" fn handle_shutdown_signal(_signal: libc::c_int) {
-    runtime::request_shutdown();
-}
-
 fn install_shutdown_signal_handlers() {
-    let handler: libc::sighandler_t = handle_shutdown_signal as *const () as libc::sighandler_t;
-    // SAFETY: signal(3) is async-signal-safe; handle_shutdown_signal only performs
-    // an atomic store. Installed exactly once at process start.
-    unsafe {
-        libc::signal(libc::SIGTERM, handler);
-        libc::signal(libc::SIGINT, handler);
+    // Wave 4 routes shutdown signals through `core/platform`'s
+    // `ProcessSupervisor`. The macOS / Linux native impl uses
+    // `signal-hook` to translate `SIGTERM` / `SIGINT` into a flag-flip
+    // on `runtime::SHUTDOWN_REQUESTED`; the Windows native impl
+    // (Wave 12 / C6-7) returns `Unsupported` until its bridge lands.
+    let supervisor = NativeProcessSupervisor::new();
+    if let Err(error) = supervisor.register_shutdown_handler(runtime::request_shutdown) {
+        logging::warning(
+            "Failed to register process supervisor shutdown handler",
+            &[("error", error.to_string())],
+        );
     }
 }
 

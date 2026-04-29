@@ -110,7 +110,7 @@ Wave 2.
 
 ### Wave 4 — Platform abstraction layer
 
-Status: pending. **Foundation** — kept in the primary path. Requires
+Status: complete. **Foundation** — kept in the primary path. Required
 Wave 2.
 
 - `core.md` C3-1 … C3-10 — new `core/platform` crate with trait
