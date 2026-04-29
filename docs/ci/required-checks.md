@@ -7,8 +7,8 @@ See `docs/ci/overview.md` for workflow scope, triggers, and pinned action versio
 ## Required GitHub status checks
 
 Configure branch protection for `main` to require every matrix leg from
-`lint.yml` and `test.yml`. The matrix names land as separate checks, so the
-required-checks list is:
+`lint.yml`, `test.yml`, and `build.yml`. The matrix names land as separate
+checks, so the required-checks list is:
 
 - `lint (macos-26)`
 - `lint (ubuntu-latest)`
@@ -16,6 +16,9 @@ required-checks list is:
 - `test (macos-26)`
 - `test (ubuntu-latest)`
 - `test (windows-latest)`
+- `build (macos-26)`
+- `build (ubuntu-latest)`
+- `build (windows-latest)`
 
 Linux and Windows run only the Rust workspace (Swift wrappers skip on
 non-Darwin); macOS runs both stacks. A regression on any host fails the PR
@@ -58,6 +61,9 @@ Dependency source defaults:
 - Test workflow (`.github/workflows/test.yml`)
   - triggers: `pull_request`, `push` to `main`, `workflow_call`
   - `./scripts/test.sh`
+- Build workflow (`.github/workflows/build.yml`)
+  - triggers: `pull_request`, `push` to `main`, `workflow_call`
+  - `./scripts/build.sh`
 - Perf workflow (`.github/workflows/perf.yml`)
   - trigger: `workflow_call` from `.github/workflows/release.yml`
   - thresholds via env: `VAPOR_PERF_SMOKE_RUST_MAX_SECONDS` (default `600`), `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS` (default `900`)
@@ -77,6 +83,7 @@ Run the same validations locally before opening a PR:
 
 - `./scripts/lint.sh`
 - `./scripts/test.sh`
+- `./scripts/build.sh`
 
 For performance-sensitive changes, run:
 

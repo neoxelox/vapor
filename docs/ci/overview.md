@@ -4,6 +4,7 @@ GitHub Actions workflows are defined in `.github/workflows/`:
 
 - `lint.yml`: runs lint and format checks via repository scripts.
 - `test.yml`: runs test suites via repository scripts.
+- `build.yml`: runs distribution builds via repository scripts.
 - `perf.yml`: reusable performance gate workflow invoked by the release pipeline.
 - `release.yml`: runs tag-driven package and GitHub Release publication flow.
 
@@ -28,7 +29,7 @@ GitHub Actions workflows are defined in `.github/workflows/`:
 - Rust crates: `crates.io` via Cargo
 - Swift packages: SwiftPM package dependencies
 
-`lint.yml` and `test.yml` run on pull requests and pushes to `main`, and also expose `workflow_call` so release automation can reuse the same gates. Both workflows fan out via a `strategy.matrix` over `macos-26`, `ubuntu-latest`, and `windows-latest`; `fail-fast` is disabled so a Linux-only or Windows-only regression is visible even when macOS stays green. The macOS job runs both Rust and Swift; the Linux / Windows jobs run only the Rust workspace (the Swift wrappers detect a non-Darwin `uname -s` and exit cleanly).
+`lint.yml`, `test.yml`, and `build.yml` run on pull requests and pushes to `main`, and also expose `workflow_call` so release automation can reuse the same gates. All three workflows fan out via a `strategy.matrix` over `macos-26`, `ubuntu-latest`, and `windows-latest`; `fail-fast` is disabled so a Linux-only or Windows-only regression is visible even when macOS stays green. The macOS job runs both Rust and Swift; the Linux / Windows jobs run only the Rust workspace (the Swift wrappers detect a non-Darwin `uname -s` and exit cleanly).
 
 `perf.yml` has no standalone triggers; `release.yml` calls it for versioned release runs.
 

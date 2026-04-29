@@ -17,14 +17,14 @@ triggers them, and which ones gate a release.
 
 ## Documents
 
-- `overview.md` — workflow catalog (`lint.yml`, `test.yml`, `perf.yml`,
-  `release.yml`), triggers (`pull_request`, `push` to `main`,
+- `overview.md` — workflow catalog (`lint.yml`, `test.yml`, `build.yml`,
+  `perf.yml`, `release.yml`), triggers (`pull_request`, `push` to `main`,
   `workflow_call`, `v*` tags), toolchain defaults (`macos-latest`,
   latest-stable Xcode/Swift, stable Rust), pinned CI action versions,
   dependency caching strategy.
-- `required-checks.md` — branch-protection guidance (`lint` and `test`
-  required on `main`; `perf` release-only), workflow-to-script mapping,
-  local-parity command set.
+- `required-checks.md` — branch-protection guidance (`lint`, `test`,
+  and `build` required on `main`; `perf` release-only),
+  workflow-to-script mapping, local-parity command set.
 
 ## Test tier model
 
