@@ -13,7 +13,7 @@ if [[ ! -d "$SWIFT_DIR" ]]; then
   exit 0
 fi
 
-"$ROOT_DIR/scripts/swift/sync-locales.sh"
+"$ROOT_DIR/scripts/swift/locales.sh"
 
 if [[ ! -f "$SWIFT_DIR/Package.swift" ]]; then
   echo "[swift-test] Package.swift not found in apps/macos. Skipping Swift tests."

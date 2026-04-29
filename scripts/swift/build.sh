@@ -23,7 +23,7 @@ if [[ ! -d "$SWIFT_DIR" ]]; then
   exit 0
 fi
 
-"$ROOT_DIR/scripts/swift/sync-locales.sh"
+"$ROOT_DIR/scripts/swift/locales.sh"
 
 if [[ -f "$SWIFT_DIR/Package.swift" ]]; then
   if [[ "$MODE" == "package" ]]; then

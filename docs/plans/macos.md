@@ -160,7 +160,8 @@ Full policy in `docs/operations/macos/distribution-trust-chain.md`.
 
 - UI copy catalogs at `assets/locales/*.json` are synced into
   `apps/macos/Sources/VaporCore/Resources/locales/*.json` before
-  Swift build/test/package via `scripts/swift/sync-locales.sh`.
+  Swift build/test/package via `scripts/swift/locales.sh` (or the
+  cross-stack orchestrator `scripts/locales.sh`).
 - `languageCode` (persisted in `vapor.json`) defaults to `en` with English
   fallback when the requested catalog is unavailable.
 - Missing translation keys in non-English catalogs fall back deterministically

@@ -17,7 +17,7 @@ export VAPOR_ENV="${VAPOR_ENV:-prod}"
 "$ROOT_DIR/scripts/version.sh" check-sync >/dev/null
 eval "$("$ROOT_DIR/scripts/version.sh" metadata)"
 
-"$ROOT_DIR/scripts/swift/sync-locales.sh"
+"$ROOT_DIR/scripts/swift/locales.sh"
 
 if [[ "$ICON_PNG" != /* ]]; then
   ICON_PNG="$ROOT_DIR/$ICON_PNG"
