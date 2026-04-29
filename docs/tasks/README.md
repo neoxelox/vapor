@@ -63,10 +63,10 @@ worked in parallel unless a dependency is called out.
 
 ### Wave 0 — Finish the macOS MVP invariants
 
-Status: active. Do this before starting portability work.
+Status: complete. Wave 2 + Wave 3 may begin in parallel.
 
 - `macos.md` M1-6 — LaunchAgent plist + crash-loop validation scenarios
-  (plist audit / SIGKILL / crash-loop pause / clean shutdown).
+  (plist audit / SIGKILL / crash-loop pause / clean shutdown). Done.
 
 ### Wave 1 — Documentation and naming hygiene
 

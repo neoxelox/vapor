@@ -71,6 +71,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
   public var effectiveLanguageCode: String
   public var providerName: String
   public var vaporDirectoryPath: String
+  public var crashLoopPaused: Bool
 
   public init(
     syncState: SyncSurfaceState,
@@ -84,7 +85,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     languageCode: String,
     effectiveLanguageCode: String,
     providerName: String,
-    vaporDirectoryPath: String
+    vaporDirectoryPath: String,
+    crashLoopPaused: Bool = false
   ) {
     self.syncState = syncState
     self.configurationIssuePath = configurationIssuePath
@@ -98,6 +100,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
     self.effectiveLanguageCode = effectiveLanguageCode
     self.providerName = providerName
     self.vaporDirectoryPath = vaporDirectoryPath
+    self.crashLoopPaused = crashLoopPaused
   }
 
   public static let initial = AppShellState(
@@ -112,7 +115,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     languageCode: VaporConfiguration.defaultLanguageCode,
     effectiveLanguageCode: VaporConstants.Localization.defaultLanguageCode,
     providerName: VaporConstants.Daemon.preGADefaultProviderDisplayName,
-    vaporDirectoryPath: VaporPaths.resolveVaporDirectoryURL().path
+    vaporDirectoryPath: VaporPaths.resolveVaporDirectoryURL().path,
+    crashLoopPaused: false
   )
 
   public var statusLine: String {

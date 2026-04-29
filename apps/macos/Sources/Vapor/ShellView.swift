@@ -82,24 +82,38 @@ struct MenuBarContentView: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
-      Text(
-        viewModel.localized(
-          "status_line_format",
-          viewModel.localized(viewModel.state.syncState.labelLocalizationKey),
-          viewModel.state.providerName
+      if viewModel.state.crashLoopPaused {
+        Text(viewModel.localized("crash_loop_paused_title"))
+          .font(.headline)
+        Text(viewModel.localized("crash_loop_paused_detail"))
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+      } else {
+        Text(
+          viewModel.localized(
+            "status_line_format",
+            viewModel.localized(viewModel.state.syncState.labelLocalizationKey),
+            viewModel.state.providerName
+          )
         )
-      )
-      .font(.headline)
-      Text(viewModel.localized(viewModel.state.syncState.detailLocalizationKey))
-        .font(.subheadline)
-        .foregroundStyle(.secondary)
+        .font(.headline)
+        Text(viewModel.localized(viewModel.state.syncState.detailLocalizationKey))
+          .font(.subheadline)
+          .foregroundStyle(.secondary)
+      }
       Divider()
       Button(viewModel.localized("menubar_open_vapor")) {
         openVaporAction()
         openWindow(id: mainWindowID)
       }
-      Button(viewModel.localized("menubar_toggle_auto_launch")) {
-        viewModel.toggleAutoLaunch()
+      if viewModel.state.crashLoopPaused {
+        Button(viewModel.localized("menubar_acknowledge_crash_loop_pause")) {
+          viewModel.acknowledgeCrashLoopPause()
+        }
+      } else {
+        Button(viewModel.localized("menubar_toggle_auto_launch")) {
+          viewModel.toggleAutoLaunch()
+        }
       }
       Divider()
       Button(viewModel.localized("menubar_quit_vapor")) {

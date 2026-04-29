@@ -62,6 +62,34 @@ func quittingFromMenubarStopsDaemonBeforeAppTermination() {
   #expect(events.events == ["daemon.stop", "app.terminate"])
 }
 
+@MainActor
+@Test
+func cleanShutdownFromMenubarLeavesLaunchAgentPassive() {
+  let launchAgent = OrderedRecordingLaunchAgentController()
+  let runtime = RecordingAppRuntimeController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: launchAgent,
+    settingsStore: InMemoryAutoLaunchSettingStore(
+      seed: [DaemonLifecycleManager.autoLaunchSettingKey: true]
+    )
+  )
+  let coordinator = AppLifecycleCoordinator(
+    daemonLifecycleManager: manager,
+    runtimeController: runtime
+  )
+
+  coordinator.handleQuitFromMenuBar()
+
+  // Menubar quit must only stop the daemon and terminate the app process.
+  // It must not bootstrap, install, disable, or start the LaunchAgent —
+  // those actions would either tear down the plist (losing autolaunch on
+  // next login) or coax launchd into a restart cycle. Combined with
+  // KeepAlive=false (audited in LaunchAgentControllerTests), launchd stays
+  // passive after a clean shutdown until the next user-driven trigger.
+  #expect(launchAgent.operations == ["stop"])
+  #expect(runtime.operations == ["terminate"])
+}
+
 private final class EventRecorder {
   var events: [String] = []
 

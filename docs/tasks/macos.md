@@ -54,7 +54,7 @@ engine / platform-abstraction work that used to live here has moved to
       stop-now).
 - [x] M1-5 Crash-loop detection + exponential relaunch delay (policy moves
       to `core/lifecycle::CrashLoopGuard` per `docs/tasks/core.md` C4-2).
-- [ ] M1-6 Validate LaunchAgent plist and crash-loop interaction per
+- [x] M1-6 Validate LaunchAgent plist and crash-loop interaction per
       `docs/operations/macos/launchagent-policy.md`:
       - Plist audit (expected keys exactly, `KeepAlive=false`).
       - SIGKILL scenario (daemon killed with `kill -9`; no auto-restart for

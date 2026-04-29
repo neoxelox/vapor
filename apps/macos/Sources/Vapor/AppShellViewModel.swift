@@ -76,6 +76,7 @@ final class AppShellViewModel: ObservableObject {
     state.vaporDirectoryPath = self.configurationStore.resolveVaporDirectoryURL().path
     state.configurationIssuePath = resolvedConfigurationLoadIssue?.configPath
     state.configurationIssueReason = resolvedConfigurationLoadIssue?.reason
+    state.crashLoopPaused = daemonLifecycleManager.isInCrashLoopPause
     if resolvedConfigurationLoadIssue != nil {
       state.syncState = .error
     }
@@ -157,14 +158,19 @@ final class AppShellViewModel: ObservableObject {
     lifecycleQueue.async { [weak self] in
       do {
         let result = try daemonLifecycleManager.bootstrapIfNeeded()
+        let isPaused = daemonLifecycleManager.isInCrashLoopPause
         Task { @MainActor [weak self] in
-          guard self != nil else {
+          guard let self else {
             return
           }
 
+          self.state.crashLoopPaused = isPaused
           logger.info(
             "Daemon lifecycle bootstrap completed",
-            metadata: ["result": String(describing: result)]
+            metadata: [
+              "result": String(describing: result),
+              "crash_loop_paused": String(isPaused),
+            ]
           )
         }
       } catch {
@@ -181,6 +187,16 @@ final class AppShellViewModel: ObservableObject {
         }
       }
     }
+  }
+
+  func refreshCrashLoopPauseState() {
+    state.crashLoopPaused = daemonLifecycleManager.isInCrashLoopPause
+  }
+
+  func acknowledgeCrashLoopPause() {
+    daemonLifecycleManager.acknowledgeCrashLoopPause()
+    state.crashLoopPaused = daemonLifecycleManager.isInCrashLoopPause
+    logger.warning("Acknowledged crash-loop pause from app surface")
   }
 
   func prepareMenubarOnlyStartupSurface() {

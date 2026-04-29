@@ -88,6 +88,41 @@ func crashLoopDefersRelaunchWithExponentialBackoff() throws {
 }
 
 @Test
+func unexpectedDaemonExitDoesNotTriggerSpontaneousRestartFor30Seconds() throws {
+  let store = InMemoryAutoLaunchSettingStore(
+    seed: [DaemonLifecycleManager.autoLaunchSettingKey: true]
+  )
+  let controller = RecordingLaunchAgentController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: controller,
+    settingsStore: store,
+    crashLoopPolicy: .init(
+      failureWindow: 600,
+      baseDelay: 2,
+      maxDelay: 120,
+      delayStartsAfterFailures: 1,
+      maxConsecutiveFailuresBeforePause: 5
+    )
+  )
+
+  let killedAt = Date(timeIntervalSince1970: 0)
+  _ = manager.registerUnexpectedDaemonExit(now: killedAt)
+
+  // No timer-driven path inside the manager spontaneously restarts the daemon
+  // after an unclean exit; combined with launchd KeepAlive=false (audited in
+  // LaunchAgentControllerTests), nothing in the system attempts a restart for
+  // the next 30 seconds.
+  #expect(controller.operations.isEmpty)
+
+  // Once a coordinator-driven trigger fires (user reopens window, login item,
+  // explicit menubar action) after the backoff has elapsed, the manager owns
+  // the restart — not launchd.
+  let restart = try manager.startDaemonIfAllowed(now: killedAt.addingTimeInterval(30))
+  #expect(restart == .started)
+  #expect(controller.operations == ["start"])
+}
+
+@Test
 func crashHistoryExpiresOutsideFailureWindow() {
   var guardrail = CrashLoopGuard(
     policy: .init(

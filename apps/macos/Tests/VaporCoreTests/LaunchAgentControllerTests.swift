@@ -98,6 +98,70 @@ func startAndStopIssueExpectedLaunchctlCommands() throws {
 }
 
 @Test
+func installedPlistContainsExactPolicyApprovedKeysAndDisablesKeepAlive() throws {
+  let sandboxURL = try makeTemporaryDirectory()
+  defer { try? FileManager.default.removeItem(at: sandboxURL) }
+
+  let daemonExecutableURL = try makeExecutable(named: "vapord", in: sandboxURL)
+  let runner = RecordingLaunchctlRunner()
+  let plistURL = sandboxURL.appendingPathComponent("sh.arn.vapor.daemon.plist")
+  let logsDirectoryURL = sandboxURL.appendingPathComponent("logs", isDirectory: true)
+  let stdoutPath = logsDirectoryURL.appendingPathComponent("vapord.stdout.log").path
+  let stderrPath = logsDirectoryURL.appendingPathComponent("vapord.stderr.log").path
+  let config = LaunchAgentConfiguration(
+    label: "sh.arn.vapor.daemon",
+    plistURL: plistURL,
+    daemonExecutableURL: daemonExecutableURL,
+    runAtLoad: true,
+    keepAlive: false,
+    environment: ["VAPOR_DIR": sandboxURL.path, "VAPOR_ENV": "dev"],
+    standardOutPath: stdoutPath,
+    standardErrorPath: stderrPath,
+    processType: "Background"
+  )
+
+  let controller = LaunchAgentController(
+    configuration: config,
+    runner: runner,
+    userID: 501
+  )
+
+  try controller.installAndEnable()
+
+  let plistData = try Data(contentsOf: plistURL)
+  let decoded =
+    try PropertyListSerialization.propertyList(from: plistData, options: [], format: nil)
+    as? [String: Any]
+  let plist = try #require(decoded)
+
+  let expectedKeys: Set<String> = [
+    "Label",
+    "ProgramArguments",
+    "RunAtLoad",
+    "KeepAlive",
+    "EnvironmentVariables",
+    "StandardOutPath",
+    "StandardErrorPath",
+    "ProcessType",
+  ]
+  #expect(Set(plist.keys) == expectedKeys)
+
+  #expect(plist["Label"] as? String == "sh.arn.vapor.daemon")
+  #expect(plist["RunAtLoad"] as? Bool == true)
+  #expect(plist["KeepAlive"] as? Bool == false)
+  #expect(plist["ProcessType"] as? String == "Background")
+  #expect(plist["StandardOutPath"] as? String == stdoutPath)
+  #expect(plist["StandardErrorPath"] as? String == stderrPath)
+
+  let programArguments = try #require(plist["ProgramArguments"] as? [String])
+  #expect(programArguments == [daemonExecutableURL.path])
+
+  let environment = try #require(plist["EnvironmentVariables"] as? [String: String])
+  #expect(environment["VAPOR_DIR"] == sandboxURL.path)
+  #expect(environment["VAPOR_ENV"] == "dev")
+}
+
+@Test
 func installFailsWhenDaemonExecutableIsMissing() throws {
   let sandboxURL = try makeTemporaryDirectory()
   defer { try? FileManager.default.removeItem(at: sandboxURL) }
