@@ -12,14 +12,31 @@ permissions:
 
 jobs:
   test:
-    runs-on: macos-26
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS runs the full Tier 1 suite (Rust + Swift). Linux and Windows
+        # exercise core/* portability for the Rust workspace only; the Swift
+        # wrapper scripts skip themselves on non-Darwin hosts. Per Wave 2 of
+        # docs/tasks/README.md.
+        include:
+          - os: macos-26
+            scope: full
+          - os: ubuntu-latest
+            scope: rust-only
+          - os: windows-latest
+            scope: rust-only
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Select Xcode
+        if: matrix.scope == 'full'
         uses: maxim-lobanov/setup-xcode@v1.6.0
         with:
           xcode-version: latest-stable
@@ -41,6 +58,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache SwiftPM dependencies
+        if: matrix.scope == 'full'
         uses: actions/cache@v5
         with:
           path: .build
@@ -49,4 +67,5 @@ jobs:
             ${{ runner.os }}-spm-
 
       - name: Run tests
+        shell: bash
         run: ./scripts/test.sh

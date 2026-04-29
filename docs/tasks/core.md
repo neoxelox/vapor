@@ -56,32 +56,32 @@ Exit gate:
 
 ## Phase C1 - Engine portability fixes (compile on all three OSes)
 
-- [ ] C1-1 `core/shared/src/runtime_paths.rs`: gate Unix-only
+- [x] C1-1 `core/shared/src/runtime_paths.rs`: gate Unix-only
       `DirBuilderExt`/`OpenOptionsExt`/`PermissionsExt` calls behind
       `#[cfg(unix)]`; add no-op fallback on Windows or translate to DACL set
       when capabilities warrant. Preserve `0o700`/`0o600` semantics on Unix
       (`PRIVATE_DIRECTORY_MODE` / `PRIVATE_FILE_MODE`).
-- [ ] C1-2 `core/shared/src/runtime_paths.rs` + `core/daemon/src/sync_directories.rs`:
+- [x] C1-2 `core/shared/src/runtime_paths.rs` + `core/daemon/src/sync_directories.rs`:
       replace `HOME`-only lookup with a cross-platform resolution that honors
       `USERPROFILE` on Windows (and, if adopted, `$XDG_*` on Linux when
       present). Recommended crate: `directories` or `etcetera`.
-- [ ] C1-3 `core/daemon/src/state_db.rs`: replace Unix `OsStrExt`/`OsStringExt`
+- [x] C1-3 `core/daemon/src/state_db.rs`: replace Unix `OsStrExt`/`OsStringExt`
       path-as-bytes encoding with UTF-8 storage (`Path::to_str()` /
       `PathBuf::from(&str)`) or `os_str_bytes`-based portable encoding.
       Pre-GA schema bump is allowed per `AGENTS.md §1.1`; add a migration
       that rewrites stored path bytes to the new encoding on first open.
-- [ ] C1-4 `core/daemon/src/fs_events.rs::normalize_absolute_path`: extend
+- [x] C1-4 `core/daemon/src/fs_events.rs::normalize_absolute_path`: extend
       to preserve `Component::Prefix` so Windows drive-letter paths are
       accepted; optionally strip `\\?\` UNC via `dunce` for user-facing
       paths.
 - [ ] C1-5 `core/daemon/Cargo.toml`: move `libc` under
       `[target.'cfg(unix)'.dependencies]` once C3-7 (signal abstraction)
       lands.
-- [ ] C1-6 Add `windows-latest` and `ubuntu-latest` Rust jobs to
+- [x] C1-6 Add `windows-latest` and `ubuntu-latest` Rust jobs to
       `.github/workflows/lint.yml` and `test.yml` for `cargo build --workspace`,
       `cargo clippy`, and `cargo test` on `core/*` crates only (Swift stays
       macOS-only). Gate branch protection on the new jobs.
-- [ ] C1-7 Update `docs/ci/overview.md` and `docs/ci/required-checks.md`
+- [x] C1-7 Update `docs/ci/overview.md` and `docs/ci/required-checks.md`
       with the new per-OS matrix.
 
 Exit gate:

@@ -83,9 +83,10 @@ docs.
 
 ### Wave 2 — Engine portability fixes
 
-Status: pending. **Foundation** — kept in the primary path even though
-macOS-only shipping would technically not need it, because it removes
-Unix-only assumptions and keeps the engine clean.
+Status: in progress (C1-1 … C1-4, C1-6, C1-7 done; C1-5 deferred until
+Wave 4 lands C3-7). **Foundation** — kept in the primary path even
+though macOS-only shipping would technically not need it, because it
+removes Unix-only assumptions and keeps the engine clean.
 
 - `core.md` C1-1 … C1-7 — `runtime_paths` permission gates,
   `HOME`/`USERPROFILE` resolution, UTF-8 path encoding in `state_db`,

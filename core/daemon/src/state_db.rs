@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::fmt;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -10,7 +9,7 @@ use vapor_shared::{constants, logging::sanitize_diagnostic_text, runtime_paths};
 use crate::event_intents::PendingIntentKind;
 use crate::retry::{RetryDecision, RetryFailureKind, RetryPolicy};
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 const STATE_PENDING: &str = "pending";
 const STATE_LEASED: &str = "leased";
 
@@ -28,6 +27,7 @@ pub enum StateDbError {
     InvalidIntentState(String),
     TimeBeforeUnixEpoch,
     MissingIntentRecord(i64),
+    NonUtf8Path(String),
 }
 
 impl fmt::Display for StateDbError {
@@ -51,6 +51,9 @@ impl fmt::Display for StateDbError {
             Self::InvalidIntentState(state) => write!(f, "invalid intent state '{state}'"),
             Self::TimeBeforeUnixEpoch => write!(f, "time before UNIX epoch is unsupported"),
             Self::MissingIntentRecord(id) => write!(f, "missing durable intent record {id}"),
+            Self::NonUtf8Path(display) => {
+                write!(f, "non-UTF-8 path is not storable: {display}")
+            }
         }
     }
 }
@@ -183,16 +186,16 @@ impl DurableStateDb {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let path_bytes = path_to_bytes(path);
+        let path_text = path_to_text(path)?;
         let existing = transaction
             .query_row(
                 "SELECT id, state
                  FROM queue_intents
-                 WHERE path_bytes = ? AND kind = ? AND state IN (?, ?)
+                 WHERE path_text = ? AND kind = ? AND state IN (?, ?)
                  ORDER BY available_at_ms ASC, id ASC
                  LIMIT 1",
                 params![
-                    path_bytes,
+                    path_text,
                     intent_kind_label(PendingIntentKind::ReconcileSubtree),
                     STATE_PENDING,
                     STATE_LEASED
@@ -447,7 +450,7 @@ impl DurableStateDb {
         let inserted = transaction.execute(
             "INSERT INTO failed_intents (
                  id,
-                 path_bytes,
+                 path_text,
                  kind,
                  failure_kind,
                  enqueued_at_ms,
@@ -457,7 +460,7 @@ impl DurableStateDb {
              )
              SELECT
                  id,
-                 path_bytes,
+                 path_text,
                  kind,
                  ?,
                  enqueued_at_ms,
@@ -631,7 +634,7 @@ fn insert_intent(
     let available_at_ms = system_time_to_millis(available_at)?;
     connection.execute(
         "INSERT INTO queue_intents (
-            path_bytes,
+            path_text,
             kind,
             state,
             enqueued_at_ms,
@@ -641,7 +644,7 @@ fn insert_intent(
             last_error
         ) VALUES (?, ?, ?, ?, ?, NULL, 0, NULL)",
         params![
-            path_to_bytes(path),
+            path_to_text(path)?,
             intent_kind_label(kind),
             STATE_PENDING,
             enqueued_at_ms,
@@ -670,7 +673,7 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
          );
          CREATE TABLE IF NOT EXISTS queue_intents (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
-             path_bytes BLOB NOT NULL,
+             path_text TEXT NOT NULL,
              kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
              state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
              enqueued_at_ms INTEGER NOT NULL,
@@ -683,7 +686,7 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
              ON queue_intents(state, available_at_ms, id);
          CREATE TABLE IF NOT EXISTS failed_intents (
              id INTEGER PRIMARY KEY,
-             path_bytes BLOB NOT NULL,
+             path_text TEXT NOT NULL,
              kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
              failure_kind TEXT NOT NULL CHECK(failure_kind IN ('authentication', 'permanent')),
              enqueued_at_ms INTEGER NOT NULL,
@@ -756,14 +759,14 @@ fn fetch_intent(
 ) -> Result<Option<DurableIntentRecord>, StateDbError> {
     let raw_intent = connection
         .query_row(
-            "SELECT id, path_bytes, kind, enqueued_at_ms, available_at_ms, leased_at_ms, attempt_count, last_error
+            "SELECT id, path_text, kind, enqueued_at_ms, available_at_ms, leased_at_ms, attempt_count, last_error
              FROM queue_intents
              WHERE id = ?",
             params![id],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
@@ -779,7 +782,7 @@ fn fetch_intent(
         .map(
             |(
                 row_id,
-                path_bytes,
+                path_text,
                 kind,
                 enqueued_at_ms,
                 available_at_ms,
@@ -789,7 +792,7 @@ fn fetch_intent(
             )| {
                 Ok(DurableIntentRecord {
                     id: row_id,
-                    path: path_from_bytes(path_bytes),
+                    path: path_from_text(path_text),
                     kind: intent_kind_from_label(&kind)?,
                     enqueued_at: millis_to_system_time(enqueued_at_ms)?,
                     available_at: millis_to_system_time(available_at_ms)?,
@@ -808,14 +811,14 @@ fn fetch_failed_intent(
 ) -> Result<Option<DurableFailedIntentRecord>, StateDbError> {
     let raw_intent = connection
         .query_row(
-            "SELECT id, path_bytes, kind, failure_kind, enqueued_at_ms, failed_at_ms, attempt_count, last_error
+            "SELECT id, path_text, kind, failure_kind, enqueued_at_ms, failed_at_ms, attempt_count, last_error
              FROM failed_intents
              WHERE id = ?",
             params![id],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, i64>(4)?,
@@ -831,7 +834,7 @@ fn fetch_failed_intent(
         .map(
             |(
                 row_id,
-                path_bytes,
+                path_text,
                 kind,
                 failure_kind,
                 enqueued_at_ms,
@@ -841,7 +844,7 @@ fn fetch_failed_intent(
             )| {
                 Ok(DurableFailedIntentRecord {
                     id: row_id,
-                    path: path_from_bytes(path_bytes),
+                    path: path_from_text(path_text),
                     kind: intent_kind_from_label(&kind)?,
                     failure_kind: terminal_failure_from_label(&failure_kind)?,
                     enqueued_at: millis_to_system_time(enqueued_at_ms)?,
@@ -854,12 +857,14 @@ fn fetch_failed_intent(
         .transpose()
 }
 
-fn path_to_bytes(path: &Path) -> Vec<u8> {
-    path.as_os_str().as_bytes().to_vec()
+fn path_to_text(path: &Path) -> Result<String, StateDbError> {
+    path.to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| StateDbError::NonUtf8Path(path.display().to_string()))
 }
 
-fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
-    PathBuf::from(std::ffi::OsString::from_vec(bytes))
+fn path_from_text(text: String) -> PathBuf {
+    PathBuf::from(text)
 }
 
 fn system_time_to_millis(time: SystemTime) -> Result<i64, StateDbError> {
@@ -1597,17 +1602,50 @@ mod tests {
     }
 
     #[test]
-    fn non_utf8_paths_round_trip_without_loss() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let database_path = temp_dir.path().join("state/vapor.sqlite");
-        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+    fn non_utf8_paths_are_rejected_when_enqueued() {
+        // Pre-GA we standardize on UTF-8 path storage so the durable schema
+        // is portable across macOS / Linux / Windows. Non-UTF-8 paths are
+        // rejected at the enqueue boundary instead of silently corrupting
+        // either the wire format or the consumer side.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            let temp_dir = TempDir::new().expect("temp dir");
+            let database_path = temp_dir.path().join("state/vapor.sqlite");
+            let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+            let path = PathBuf::from(std::ffi::OsString::from_vec(vec![0x66, 0x6f, 0x80]));
+
+            let error = database
+                .enqueue_intent(&path, PendingIntentKind::Upload, timestamp_ms(100))
+                .expect_err("non-UTF-8 enqueue should be rejected");
+
+            assert!(matches!(error, StateDbError::NonUtf8Path(_)));
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows OS strings can carry unpaired surrogates. The
+            // path_to_text helper returns NonUtf8Path in that case as well;
+            // the unit test for `path_to_text` covers that branch directly
+            // without depending on platform-specific OsString constructors.
+        }
+    }
+
+    #[test]
+    fn path_to_text_returns_utf8_for_ascii_paths() {
+        let path = PathBuf::from("/tmp/vapor/file.txt");
+        let text = path_to_text(&path).expect("ascii path is UTF-8");
+        assert_eq!(text, "/tmp/vapor/file.txt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_to_text_rejects_non_utf8_path_unix() {
+        use std::os::unix::ffi::OsStringExt;
+
         let path = PathBuf::from(std::ffi::OsString::from_vec(vec![0x66, 0x6f, 0x80]));
-
-        let queued = database
-            .enqueue_intent(&path, PendingIntentKind::Upload, timestamp_ms(100))
-            .expect("enqueue intent");
-
-        assert_eq!(path_to_bytes(&queued.path), vec![0x66, 0x6f, 0x80]);
+        let error = path_to_text(&path).expect_err("non-UTF-8 path should error");
+        assert!(matches!(error, StateDbError::NonUtf8Path(_)));
     }
 
     #[test]
@@ -1636,6 +1674,53 @@ mod tests {
             error,
             StateDbError::SchemaVersionMismatch {
                 found: 99,
+                expected: CURRENT_SCHEMA_VERSION
+            }
+        ));
+    }
+
+    #[test]
+    fn version_two_database_is_rejected_after_pre_ga_path_text_bump() {
+        // Schema v2 stored paths as `path_bytes BLOB`. The C1-3 portability
+        // bump moved to `path_text TEXT`. Pre-GA we reject the prior schema
+        // outright per AGENTS.md §1.1; a future GA migration step would
+        // upgrade in place.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        if let Some(parent) = database_path.parent() {
+            fs::create_dir_all(parent).expect("create parent directory");
+        }
+
+        let connection = Connection::open(&database_path).expect("open sqlite connection");
+        configure_connection(&connection).expect("configure connection");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_meta (
+                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                     schema_version INTEGER NOT NULL CHECK(schema_version > 0)
+                 );
+                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 2);
+                 CREATE TABLE queue_intents (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     path_bytes BLOB NOT NULL,
+                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
+                     state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
+                     enqueued_at_ms INTEGER NOT NULL,
+                     available_at_ms INTEGER NOT NULL,
+                     leased_at_ms INTEGER,
+                     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                     last_error TEXT
+                 );",
+            )
+            .expect("seed version two schema");
+        drop(connection);
+
+        let error = DurableStateDb::open(&database_path)
+            .expect_err("version two schema should be rejected");
+        assert!(matches!(
+            error,
+            StateDbError::SchemaVersionMismatch {
+                found: 2,
                 expected: CURRENT_SCHEMA_VERSION
             }
         ));

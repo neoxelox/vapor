@@ -9,9 +9,12 @@ GitHub Actions workflows are defined in `.github/workflows/`:
 
 ## Toolchain defaults in CI
 
-- Runner: `macos-latest`
-- Xcode and Swift: `latest-stable`
-- Rust: `stable`
+- Runners: `macos-26` (full Rust + Swift), `ubuntu-latest` (Rust only),
+  `windows-latest` (Rust only). The Swift wrapper scripts skip themselves on
+  non-Darwin hosts, so `apps/macos` is exercised only on macOS while
+  `core/*` is verified on every supported OS.
+- Xcode and Swift: `latest-stable` (macOS job only).
+- Rust: `stable` (every job).
 
 ## Pinned CI action versions
 
@@ -25,7 +28,7 @@ GitHub Actions workflows are defined in `.github/workflows/`:
 - Rust crates: `crates.io` via Cargo
 - Swift packages: SwiftPM package dependencies
 
-`lint.yml` and `test.yml` run on pull requests and pushes to `main`, and also expose `workflow_call` so release automation can reuse the same gates.
+`lint.yml` and `test.yml` run on pull requests and pushes to `main`, and also expose `workflow_call` so release automation can reuse the same gates. Both workflows fan out via a `strategy.matrix` over `macos-26`, `ubuntu-latest`, and `windows-latest`; `fail-fast` is disabled so a Linux-only or Windows-only regression is visible even when macOS stays green. The macOS job runs both Rust and Swift; the Linux / Windows jobs run only the Rust workspace (the Swift wrappers detect a non-Darwin `uname -s` and exit cleanly).
 
 `perf.yml` has no standalone triggers; `release.yml` calls it for versioned release runs.
 

@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use vapor_shared::constants;
+use vapor_shared::{constants, runtime_paths};
 
 use crate::logging;
 
@@ -130,7 +130,7 @@ fn resolve_path(
 }
 
 fn home_directory() -> Option<PathBuf> {
-    env::var_os("HOME").map(PathBuf::from)
+    runtime_paths::home_directory()
 }
 
 #[cfg(test)]

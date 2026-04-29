@@ -223,10 +223,22 @@ fn normalize_absolute_path(path: PathBuf) -> Option<PathBuf> {
         return None;
     }
 
-    let mut normalized = PathBuf::from("/");
+    // On Windows we keep the drive-letter or UNC `Component::Prefix` so paths
+    // like `C:\Users\alex\Vapor` survive normalization. `Component::Prefix`
+    // is never produced on Unix, so the runtime branches are mutually
+    // exclusive. The push order intentionally preserves prefix-then-root so
+    // the reconstructed path stays absolute on every host.
+    let mut normalized = PathBuf::new();
+    let mut has_root = false;
     for component in path.components() {
         match component {
-            Component::RootDir => {}
+            Component::Prefix(prefix) => {
+                normalized.push(prefix.as_os_str());
+            }
+            Component::RootDir => {
+                normalized.push(component.as_os_str());
+                has_root = true;
+            }
             Component::CurDir => {}
             Component::ParentDir => {
                 if !normalized.pop() {
@@ -234,8 +246,11 @@ fn normalize_absolute_path(path: PathBuf) -> Option<PathBuf> {
                 }
             }
             Component::Normal(part) => normalized.push(part),
-            Component::Prefix(_) => return None,
         }
+    }
+
+    if !has_root && !cfg!(windows) {
+        return None;
     }
 
     Some(normalized)
@@ -310,6 +325,33 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
+
+    #[cfg(windows)]
+    #[test]
+    fn normalize_preserves_drive_letter_prefix_on_windows() {
+        let normalized = normalize_absolute_path(PathBuf::from("C:\\Users\\alex\\Vapor\\file.txt"))
+            .expect("normalized drive-letter path");
+        assert_eq!(
+            normalized,
+            PathBuf::from("C:\\Users\\alex\\Vapor\\file.txt")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalize_resolves_parent_traversal_on_windows() {
+        let normalized = normalize_absolute_path(PathBuf::from("C:\\a\\b\\..\\c"))
+            .expect("normalized prefix path with parent");
+        assert_eq!(normalized, PathBuf::from("C:\\a\\c"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_keeps_unix_root_when_no_prefix_present() {
+        let normalized = normalize_absolute_path(PathBuf::from("/tmp/vapor-root/file.txt"))
+            .expect("normalized unix path");
+        assert_eq!(normalized, PathBuf::from("/tmp/vapor-root/file.txt"));
+    }
 
     #[test]
     fn callback_normalizes_relative_paths_and_records_metadata() {

@@ -18,4 +18,9 @@ if [[ "$MODE" != "build" && "$MODE" != "package" ]]; then
 fi
 
 "$ROOT_DIR/scripts/rust/build.sh" "$MODE"
-"$ROOT_DIR/scripts/swift/build.sh" "$MODE"
+
+if [[ "$(uname -s 2>/dev/null || echo unknown)" == "Darwin" ]]; then
+  "$ROOT_DIR/scripts/swift/build.sh" "$MODE"
+else
+  echo "[build] Host is not macOS. Skipping Swift build (apps/macos is macOS-only)."
+fi

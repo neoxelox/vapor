@@ -6,10 +6,20 @@ See `docs/ci/overview.md` for workflow scope, triggers, and pinned action versio
 
 ## Required GitHub status checks
 
-Configure branch protection for `main` to require the following workflow checks:
+Configure branch protection for `main` to require every matrix leg from
+`lint.yml` and `test.yml`. The matrix names land as separate checks, so the
+required-checks list is:
 
-- `lint`
-- `test`
+- `lint (macos-26)`
+- `lint (ubuntu-latest)`
+- `lint (windows-latest)`
+- `test (macos-26)`
+- `test (ubuntu-latest)`
+- `test (windows-latest)`
+
+Linux and Windows run only the Rust workspace (Swift wrappers skip on
+non-Darwin); macOS runs both stacks. A regression on any host fails the PR
+because `fail-fast` is disabled in the matrix.
 
 Release-only gates:
 
@@ -20,9 +30,10 @@ Release-only gates:
 
 Execution environment defaults:
 
-- GitHub runner: `macos-latest`
-- Xcode/Swift toolchain: `latest-stable` via `setup-xcode`
-- Rust toolchain: `stable`
+- GitHub runners: `macos-26` (full Rust + Swift), `ubuntu-latest` and
+  `windows-latest` (Rust workspace only)
+- Xcode/Swift toolchain: `latest-stable` via `setup-xcode` (macOS leg only)
+- Rust toolchain: `stable` (every leg)
 
 Pinned CI actions:
 

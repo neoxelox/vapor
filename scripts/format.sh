@@ -14,4 +14,9 @@ if [[ "$MODE" != "check" && "$MODE" != "apply" ]]; then
 fi
 
 "$ROOT_DIR/scripts/rust/format.sh" "$MODE"
-"$ROOT_DIR/scripts/swift/format.sh" "$MODE"
+
+if [[ "$(uname -s 2>/dev/null || echo unknown)" == "Darwin" ]]; then
+  "$ROOT_DIR/scripts/swift/format.sh" "$MODE"
+else
+  echo "[format] Host is not macOS. Skipping Swift format (apps/macos is macOS-only)."
+fi

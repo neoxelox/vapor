@@ -8,5 +8,11 @@ export VAPOR_ENV="${VAPOR_ENV:-dev}"
 mkdir -p "$VAPOR_DIR/logs" "$VAPOR_DIR/state"
 
 "$ROOT_DIR/scripts/rust/lint.sh"
-"$ROOT_DIR/scripts/swift/lint.sh"
+
+if [[ "$(uname -s 2>/dev/null || echo unknown)" == "Darwin" ]]; then
+  "$ROOT_DIR/scripts/swift/lint.sh"
+else
+  echo "[lint] Host is not macOS. Skipping Swift lint (apps/macos is macOS-only)."
+fi
+
 "$ROOT_DIR/scripts/format.sh" check
