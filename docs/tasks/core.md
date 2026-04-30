@@ -189,16 +189,16 @@ Exit gate:
 
 ## Phase C4 - Daemon lifecycle moves into Rust (`core/lifecycle`)
 
-- [ ] C4-1 Add `core/lifecycle` crate to the workspace.
-- [ ] C4-2 Port `CrashLoopGuard` from
+- [x] C4-1 Add `core/lifecycle` crate to the workspace.
+- [x] C4-2 Port `CrashLoopGuard` from
       `apps/macos/Sources/VaporCore/DaemonLifecycle.swift` to Rust verbatim
       (same policy: `baseDelay=2s`, `maxDelay=120s`,
       `maxConsecutiveFailuresBeforePause=5`, `failureWindow=600s`). Keep the
       `CrashLoopPaused` semantics.
-- [ ] C4-3 Port `DaemonLifecycleManager` to Rust. Consumes
+- [x] C4-3 Port `DaemonLifecycleManager` to Rust. Consumes
       `core/platform/service::ServiceInstaller`. Keeps `autoLaunch` policy
       semantics from the existing Swift store.
-- [ ] C4-4 Introduce `AutoLaunchSettingStore` in Rust reading/writing the
+- [x] C4-4 Introduce `AutoLaunchSettingStore` in Rust reading/writing the
       `autoLaunch` field in `vapor.json`. Swift + Rust share the same file
       atomically (cross-process safe write).
 - [ ] C4-5 Expose a stable C-ABI (`extern "C"`) or JSON-RPC-over-stdio
@@ -206,12 +206,14 @@ Exit gate:
       Recommended: Swift app invokes `vapor service …` as a subprocess
       (avoids FFI lifecycle complexity). Swift keeps its
       `LaunchAgentControlling` protocol but the default implementation now
-      calls the CLI.
-- [ ] C4-6 Parity tests: `DaemonLifecycleManagerTests` that previously ran
+      calls the CLI. *(Deferred to Wave 6 — the `vapor` CLI ships there.)*
+- [x] C4-6 Parity tests: `DaemonLifecycleManagerTests` that previously ran
       in Swift must pass against the Rust implementation (or an equivalent
       Rust-side test matrix).
 - [ ] C4-7 Remove the duplicate Swift lifecycle logic once parity is proven;
       leave the Swift protocol as a thin shim over the Rust layer.
+      *(Deferred to Wave 6 / M2-1..M2-4 — happens together with the CLI
+      consumer.)*
 
 Exit gate:
 

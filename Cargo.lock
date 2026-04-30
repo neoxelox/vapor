@@ -612,6 +612,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vapor-lifecycle"
+version = "0.2.0-alpha.3"
+dependencies = [
+ "tempfile",
+ "vapor-platform",
+ "vapor-shared",
+]
+
+[[package]]
 name = "vapor-platform"
 version = "0.2.0-alpha.3"
 dependencies = [

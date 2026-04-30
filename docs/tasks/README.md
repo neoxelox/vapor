@@ -127,7 +127,9 @@ stubs stay as-is — the primary deliverable is unaffected.
 
 ### Wave 5 — Daemon lifecycle moves into Rust
 
-Status: pending. Requires Wave 4 (specifically `ServiceInstaller`).
+Status: in progress (C4-1 … C4-4 + C4-6 done; C4-5 + C4-7 + M2-* land
+together with the `vapor` CLI in Wave 6). Requires Wave 4
+(`ServiceInstaller`).
 
 - `core.md` C4-1 … C4-7 — new `core/lifecycle` crate; port
   `CrashLoopGuard` and `DaemonLifecycleManager` from Swift; expose a
