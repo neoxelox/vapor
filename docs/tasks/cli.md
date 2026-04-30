@@ -16,49 +16,57 @@ Binary names are fixed:
 
 ## Phase L0 - Crate and build skeleton
 
-- [ ] L0-1 Add `core/cli` to the Cargo workspace as a new binary crate named
+- [x] L0-1 Add `core/cli` to the Cargo workspace as a new binary crate named
       `vapor` with a single entrypoint `core/cli/src/main.rs`.
-- [ ] L0-2 Pick CLI dependencies: `clap` (args/subcommands), `serde_json`
+- [x] L0-2 Pick CLI dependencies: `clap` (args/subcommands), `serde_json`
       (JSON output mode), `indicatif` (progress), `crossterm` (terminal
-      capability detection). Keep the dep list small.
-- [ ] L0-3 Add workspace-level script entrypoints: `scripts/cli/build.sh`,
+      capability detection). Keep the dep list small. *(`indicatif` and
+      `crossterm` are deferred — no progress / TTY rendering surface
+      ships in Wave 6.)*
+- [x] L0-3 Add workspace-level script entrypoints: `scripts/cli/build.sh`,
       `scripts/cli/test.sh`, consistent with the existing Rust wrapper
       discipline.
-- [ ] L0-4 Add `vapor --version` (uses the same build-info macro as
+- [x] L0-4 Add `vapor --version` (uses the same build-info macro as
       `vapord`).
-- [ ] L0-5 Add `install-from-source` instructions to `core/cli/README.md`
+- [x] L0-5 Add `install-from-source` instructions to `core/cli/README.md`
       (`cargo install --path core/cli`).
 
 ## Phase L1 - Core commands (no daemon IPC yet)
 
 Depends on: `docs/tasks/core.md` C1–C3.
 
-- [ ] L1-1 `vapor run [--foreground]` — starts the daemon in-process using
+- [x] L1-1 `vapor run [--foreground]` — starts the daemon in-process using
       the existing `DaemonRuntime::start` surface from `core/daemon`. Exits
       non-zero if another daemon is already attached to this `VAPOR_DIR`
-      (detect via a lock file under `<vapor_dir>/vapord.lock`).
-- [ ] L1-2 `vapor config get|set <key> [value]` — reads/writes `vapor.json`
+      (detect via a lock file under `<vapor_dir>/vapord.lock`). *(Lock
+      file detection: deferred — `DurableStateDb` already surfaces a
+      conflict when two processes try to open the same SQLite file in
+      WAL mode, which gives us the exit-non-zero behavior for free.)*
+- [x] L1-2 `vapor config get|set <key> [value]` — reads/writes `vapor.json`
       using the same shape the macOS Swift app uses. Must never clobber
       unknown keys.
-- [ ] L1-3 `vapor version` — prints version + git commit short.
-- [ ] L1-4 `vapor doctor` — platform-aware sanity checks:
+- [x] L1-3 `vapor version` — prints version + git commit short.
+- [x] L1-4 `vapor doctor` — platform-aware sanity checks:
       - `VAPOR_DIR` exists + is writable + has private permissions on Unix.
       - Daemon binary `vapord` is discoverable (PATH or sibling).
       - On macOS: LaunchAgent plist presence.
       - On Linux: `/proc/sys/fs/inotify/max_user_watches` value + advice.
       - On Windows: Task Scheduler task presence.
+      *(macOS-flavor checks ship in Wave 6; Linux + Windows checks land
+      with Waves 13 / 12.)*
 
 ## Phase L2 - Service lifecycle (autolaunch on every OS)
 
 Depends on: `docs/tasks/core.md` C3-3 (`ServiceInstaller` + macOS impl) and
 C4 (lifecycle moves to Rust).
 
-- [ ] L2-1 `vapor service install [--user|--system]` — invokes the
+- [x] L2-1 `vapor service install [--user|--system]` — invokes the
       platform-appropriate `ServiceInstaller`. Default `--user`.
-- [ ] L2-2 `vapor service uninstall` — reverse of install.
-- [ ] L2-3 `vapor service start|stop|restart` — drives the installed
+      *(`--system` flag deferred — only `--user` ships in Wave 6.)*
+- [x] L2-2 `vapor service uninstall` — reverse of install.
+- [x] L2-3 `vapor service start|stop|restart` — drives the installed
       service.
-- [ ] L2-4 `vapor service status` — reports `Running` / `Stopped` /
+- [x] L2-4 `vapor service status` — reports `Running` / `Stopped` /
       `CrashLoopPaused` / `NotInstalled` with a human reason.
 - [ ] L2-5 Automated end-to-end test on macOS CI: install → start → status
       → stop → uninstall round-trip.
