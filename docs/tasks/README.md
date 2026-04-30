@@ -143,7 +143,9 @@ other.
 
 ### Wave 6 — IPC channel + `vapor` CLI lifecycle commands (macOS)
 
-Status: pending. Requires Waves 4 and 5.
+Status: in progress. CLI surface (L0/L1/L2) and IPC channel
+(C5-1..C5-5) shipped; the macOS Swift app shim (M2-1..M2-4 / `core.md`
+C4-5, C4-7) remains. Requires Waves 4 and 5.
 
 - `core.md` C5-1 … C5-5 — transport decision (UDS on Unix, named pipe
   on Windows — the Windows transport choice is made now even though

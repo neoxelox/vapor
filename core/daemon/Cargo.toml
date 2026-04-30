@@ -8,6 +8,7 @@ license.workspace = true
 globset = "=0.4.18"
 notify = "=8.2.0"
 rusqlite = "=0.38.0"
+vapor-ipc = { path = "../ipc" }
 vapor-platform = { path = "../platform" }
 vapor-providers = { path = "../providers" }
 vapor-shared = { path = "../shared" }

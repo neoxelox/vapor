@@ -31,6 +31,26 @@ pub mod state {
     pub const MAX_TIMESTAMP_MILLIS: i64 = 32_503_680_000_000;
 }
 
+pub mod ipc {
+    /// Current schema version emitted by every Vapor surface that
+    /// participates in the IPC handshake (`vapor` CLI, future macOS /
+    /// Windows / Linux apps, the daemon). Bump on any backwards-
+    /// incompatible payload shape change. Pre-GA the sliding tolerance
+    /// is `|N - M| <= 1`; see `docs/architecture/ipc-contracts.md`.
+    pub const SCHEMA_VERSION_CURRENT: u32 = 1;
+    /// Minimum peer schema version this build can interoperate with.
+    /// Together with [`SCHEMA_VERSION_CURRENT`] this defines the local
+    /// support window; the handshake fails when both sides cannot find
+    /// an overlapping version.
+    pub const SCHEMA_VERSION_MIN_SUPPORTED: u32 = 1;
+    /// Maximum size of a single IPC frame in bytes. Frames whose
+    /// declared length exceeds this cap are rejected before any
+    /// deserialization attempt.
+    pub const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+    /// Filename of the Unix-domain-socket endpoint inside `vapor_dir`.
+    pub const SOCKET_FILE_NAME: &str = "vapord.sock";
+}
+
 pub mod self_write_cache {
     pub const DEFAULT_TTL_MILLIS: u64 = 30_000;
     pub const MIN_TTL_MILLIS: u64 = 5_000;

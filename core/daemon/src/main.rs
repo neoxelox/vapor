@@ -1,7 +1,14 @@
+use std::sync::Arc;
+
 use vapor_daemon::{
-    build_info, logging, runtime, runtime::DaemonRuntime, state_db::DurableStateDb,
+    build_info, ipc_server,
+    ipc_service::{DaemonIpcService, DaemonStatusSnapshot},
+    logging, runtime,
+    runtime::DaemonRuntime,
+    state_db::DurableStateDb,
     sync_directories,
 };
+use vapor_ipc::Service;
 use vapor_platform::{NativeProcessSupervisor, ProcessSupervisor};
 use vapor_providers::default_provider;
 
@@ -80,6 +87,30 @@ fn main() {
             ("watcher_active", watcher_active),
         ],
     );
+
+    // Wave 6 phase 2: spawn the IPC server so other Vapor surfaces
+    // (`vapor status`, future macOS app diagnostics) can query the
+    // running daemon. The handle is kept alive for the duration of
+    // the runtime loop; its Drop removes the socket file.
+    let initial_snapshot = DaemonStatusSnapshot::from_app(runtime.app());
+    let ipc_service = Arc::new(DaemonIpcService::new(initial_snapshot));
+    let ipc_handle = match ipc_server::spawn(ipc_service.clone() as Arc<dyn Service>) {
+        Ok(handle) => Some(handle),
+        Err(error) => {
+            logging::warning(
+                "Failed to start IPC server; daemon will run without status endpoint",
+                &[("error", error.to_string())],
+            );
+            None
+        }
+    };
+    if let Some(handle) = &ipc_handle {
+        logging::info(
+            "Started IPC server",
+            &[("socket_path", handle.socket_path().display().to_string())],
+        );
+    }
+
     if let Err(error) = runtime.run_forever() {
         logging::error(
             "Daemon runtime loop exited unexpectedly",
@@ -87,4 +118,8 @@ fn main() {
         );
         std::process::exit(1);
     }
+
+    // Drop the IPC handle explicitly so the socket file is removed on
+    // clean shutdown even if drop order is later modified.
+    drop(ipc_handle);
 }

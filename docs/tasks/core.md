@@ -224,23 +224,25 @@ Exit gate:
 
 ## Phase C5 - IPC channel between apps and daemon
 
-- [ ] C5-1 Pick and document the IPC transport: Unix domain socket at
+- [x] C5-1 Pick and document the IPC transport: Unix domain socket at
       `<vapor_dir>/vapord.sock` on Unix; named pipe
       `\\.\pipe\vapord-<user-sid>` on Windows. Protocol: JSON-RPC 2.0,
       length-prefixed frames. Finalize `docs/architecture/ipc-contracts.md`
       and the per-OS transport docs.
-- [ ] C5-2 Implement the daemon-side IPC server in `core/daemon` with the
+- [x] C5-2 Implement the daemon-side IPC server in `core/daemon` with the
       versioning/handshake/skew-matrix discipline already specified (`Hello`
       / `HelloAck` / `IncompatibleVersion`; `schema_version`; unknown-field
-      tolerance; `payload_bytes` bound at `XPC_MAX_PAYLOAD_BYTES` — rename
-      to `IPC_MAX_PAYLOAD_BYTES`).
-- [ ] C5-3 Implement the client library in `core/shared` (or a new
+      tolerance; `payload_bytes` bound at `IPC_MAX_PAYLOAD_BYTES`).
+- [x] C5-3 Implement the client library in `core/shared` (or a new
       `core/ipc` crate) that both the `vapor` CLI and future apps consume.
-- [ ] C5-4 Wire the status/control endpoints: `Status`, `Pause`, `Resume`,
+      *(Lands in a new `core/ipc` crate.)*
+- [x] C5-4 Wire the status/control endpoints: `Status`, `Pause`, `Resume`,
       `FlushNow`, `Reconcile`, `Timeline`, `AutoLaunchToggle`,
       `ConfigUpdate` (subset — full surface aligns with
-      `docs/architecture/ipc-contracts.md`).
-- [ ] C5-5 Add IPC integration tests: app ↔ daemon skew matrix
+      `docs/architecture/ipc-contracts.md`). *(Wave 6 phase 2 ships
+      `Status` only; the control endpoints land alongside the L3
+      consumers in Wave 7.)*
+- [x] C5-5 Add IPC integration tests: app ↔ daemon skew matrix
       (`N ↔ N`, `N ↔ N-1`, `N-1 ↔ N`, `|N-M|=2` rejected), field-omission
       defaults, payload-bounds rejection.
 

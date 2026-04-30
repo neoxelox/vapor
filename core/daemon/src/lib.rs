@@ -28,6 +28,8 @@ pub mod debounce;
 pub mod event_intents;
 pub mod executor;
 pub mod fs_events;
+pub mod ipc_server;
+pub mod ipc_service;
 pub mod logging;
 pub mod metrics;
 pub mod path_filter;

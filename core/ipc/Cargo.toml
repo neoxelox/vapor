@@ -1,0 +1,16 @@
+[package]
+name = "vapor-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.145"
+vapor-shared = { path = "../shared" }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[lib]
+path = "src/lib.rs"

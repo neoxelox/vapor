@@ -577,6 +577,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -746,8 +747,19 @@ dependencies = [
  "notify",
  "rusqlite",
  "tempfile",
+ "vapor-ipc",
  "vapor-platform",
  "vapor-providers",
+ "vapor-shared",
+]
+
+[[package]]
+name = "vapor-ipc"
+version = "0.2.0-alpha.3"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
  "vapor-shared",
 ]
 
