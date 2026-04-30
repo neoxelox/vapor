@@ -11,8 +11,8 @@ use std::path::Path;
 
 use crate::framing::{FrameError, read_frame, write_frame};
 use crate::protocol::{
-    ErrorBody, Hello, IncompatibleVersion, Method, Request, Response, ResponseBody, StatusResponse,
-    daemon_supported_versions,
+    AckResponse, ErrorBody, Hello, IncompatibleVersion, Method, Request, Response, ResponseBody,
+    StatusResponse, TimelineResponse, daemon_supported_versions,
 };
 use crate::transport::{StreamHandle, TransportError, connect_to_socket};
 
@@ -114,19 +114,53 @@ impl Client {
     }
 
     pub fn status(&mut self) -> Result<StatusResponse, ClientError> {
-        let payload = serde_json::to_vec(&Request::Call {
-            method: Method::Status,
-        })
-        .map_err(|error| ClientError::Parse(error.to_string()))?;
+        match self.call(Method::Status)? {
+            ResponseBody::Status(value) => Ok(value),
+            other => Err(ClientError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+
+    pub fn pause(&mut self) -> Result<AckResponse, ClientError> {
+        self.call_for_ack(Method::Pause)
+    }
+
+    pub fn resume(&mut self) -> Result<AckResponse, ClientError> {
+        self.call_for_ack(Method::Resume)
+    }
+
+    pub fn flush_now(&mut self) -> Result<AckResponse, ClientError> {
+        self.call_for_ack(Method::FlushNow)
+    }
+
+    pub fn reconcile(&mut self) -> Result<AckResponse, ClientError> {
+        self.call_for_ack(Method::Reconcile)
+    }
+
+    pub fn timeline(&mut self) -> Result<TimelineResponse, ClientError> {
+        match self.call(Method::Timeline)? {
+            ResponseBody::Timeline(value) => Ok(value),
+            other => Err(ClientError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+
+    fn call_for_ack(&mut self, method: Method) -> Result<AckResponse, ClientError> {
+        match self.call(method)? {
+            ResponseBody::Ack(value) => Ok(value),
+            other => Err(ClientError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+
+    fn call(&mut self, method: Method) -> Result<ResponseBody, ClientError> {
+        let payload = serde_json::to_vec(&Request::Call { method })
+            .map_err(|error| ClientError::Parse(error.to_string()))?;
         write_frame(&mut self.stream, &payload)?;
 
         let frame = read_frame(&mut self.stream)?;
         let response: Response = serde_json::from_slice(&frame)
             .map_err(|error| ClientError::Parse(error.to_string()))?;
         match response {
-            Response::Ok(ResponseBody::Status(value)) => Ok(value),
+            Response::Ok(body) => Ok(body),
             Response::Err(error) => Err(ClientError::Server(error)),
-            other => Err(ClientError::UnexpectedResponse(format!("{other:?}"))),
         }
     }
 }

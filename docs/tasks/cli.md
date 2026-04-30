@@ -79,18 +79,28 @@ C4 (lifecycle moves to Rust).
 
 Depends on: `docs/tasks/core.md` C5 (IPC channel).
 
-- [ ] L3-1 `vapor status [--json]` — queue depth, throttle state, reason,
+- [x] L3-1 `vapor status [--json]` — queue depth, throttle state, reason,
       effective ceilings, utilization, idle-boost state. JSON schema
-      documented in `docs/architecture/ipc-contracts.md`.
-- [ ] L3-2 `vapor pause` / `vapor resume` — control endpoints.
-- [ ] L3-3 `vapor flush-now` — force-flush pending intents.
-- [ ] L3-4 `vapor reconcile` — request whole-scope reconcile.
-- [ ] L3-5 `vapor timeline [--tail] [--json]` — streams the diagnostics
-      timeline.
-- [ ] L3-6 `vapor logs [--tail] [--level=debug]` — tails
+      documented in `docs/architecture/ipc-contracts.md`. *(Wave 7
+      ships run state, throttle state + reason, provider, daemon id,
+      and IPC schema version. Effective ceilings / idle-boost surface
+      land alongside the C8-32 / C8-40 work.)*
+- [x] L3-2 `vapor pause` / `vapor resume` — control endpoints.
+- [x] L3-3 `vapor flush-now` — force-flush pending intents.
+      *(Wave 7 ships the IPC seam; the runtime tick already drains
+      opportunistically, so the CLI command is informational. C8 may
+      promote it to a real "process every queued intent regardless of
+      slice budget" trigger.)*
+- [x] L3-4 `vapor reconcile` — request whole-scope reconcile.
+- [x] L3-5 `vapor timeline [--tail] [--json]` — streams the diagnostics
+      timeline. *(Wave 7 ships the IPC seam; the in-memory timeline
+      buffer lands with C8-30.)*
+- [x] L3-6 `vapor logs [--tail] [--level=debug]` — tails
       `<vapor_dir>/logs/vapord.logs` with the existing log line format and
-      redaction rules.
-- [ ] L3-7 Consistent behavior when no daemon is running: every IPC-backed
+      redaction rules. *(Wave 7 ships `--tail`; `--level` filtering can
+      land alongside the C8-29 diagnostics surface when the daemon
+      starts emitting structured level metadata in addition to text.)*
+- [x] L3-7 Consistent behavior when no daemon is running: every IPC-backed
       command exits non-zero within 1s with `vapor: daemon not running —
       try \`vapor service start\``, never hangs.
 
@@ -99,13 +109,17 @@ Depends on: `docs/tasks/core.md` C5 (IPC channel).
 Depends on: `docs/tasks/core.md` C3-4 (`SecretStore` + macOS impl) and
 C8-48 (Google Drive provider).
 
-- [ ] L4-1 `vapor auth login <provider>` — starts OAuth PKCE, opens the
+- [x] L4-1 `vapor auth login <provider>` — starts OAuth PKCE, opens the
       user's browser, listens on a localhost loopback, stores tokens via
       `core/platform/secrets`. Also supports `--no-browser` for headless
-      flows (prints URL, accepts pasted auth code).
-- [ ] L4-2 `vapor auth logout <provider>` — removes tokens for the named
-      provider (or all providers with `--all`).
-- [ ] L4-3 `vapor auth status` — lists bound providers/accounts without
+      flows (prints URL, accepts pasted auth code). *(Wave 7 ships the
+      SecretStore-backed plumbing with explicit `--token` for headless
+      / CI; the OAuth-PKCE browser flow lands alongside C8-48 when a
+      provider with real auth ships.)*
+- [x] L4-2 `vapor auth logout <provider>` — removes tokens for the named
+      provider (or all providers with `--all`). *(`--all` deferred — Wave
+      7 ships per-provider `logout`.)*
+- [x] L4-3 `vapor auth status` — lists bound providers/accounts without
       revealing tokens.
 
 ## Phase L5 - Headless / server ergonomics

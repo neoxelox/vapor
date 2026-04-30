@@ -6,7 +6,8 @@ use clap::{Parser, Subcommand};
 use vapor_cli::{ConfigCommand, RunOptions, ServiceCommand};
 use vapor_cli::{
     commands::{
-        config as config_cmd, doctor as doctor_cmd, run as run_cmd, service as service_cmd,
+        auth as auth_cmd, config as config_cmd, doctor as doctor_cmd, ipc as ipc_cmd,
+        run as run_cmd, service as service_cmd,
     },
     resolve_configuration_path,
 };
@@ -43,6 +44,51 @@ enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Print live daemon status (queries the IPC server).
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pause the running daemon — stops admitting new work.
+    Pause,
+    /// Resume a paused daemon.
+    Resume,
+    /// Hint the daemon to drain its pending queue as fast as the
+    /// throttle allows.
+    FlushNow,
+    /// Request a fresh whole-scope reconcile.
+    Reconcile,
+    /// Print the diagnostics timeline (Wave 7 returns an empty list
+    /// until the C8-30 in-memory buffer ships).
+    Timeline {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Tail the daemon log file at `<vapor_dir>/logs/vapord.logs`.
+    Logs {
+        #[arg(long)]
+        tail: Option<usize>,
+    },
+    /// Manage stored authentication tokens.
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AuthAction {
+    /// Store a token for `provider`. Pre-Wave-8 the token is supplied
+    /// verbatim via `--token`; the OAuth-PKCE flow lands later.
+    Login {
+        provider: String,
+        #[arg(long)]
+        token: String,
+    },
+    /// Remove the stored token for `provider`.
+    Logout { provider: String },
+    /// List bound providers (never reveals the token value).
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -121,6 +167,93 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Command::Service { action } => dispatch_service(action),
+        Command::Status { json } => dispatch_status(json),
+        Command::Pause => dispatch_ack("pause", ipc_cmd::pause()),
+        Command::Resume => dispatch_ack("resume", ipc_cmd::resume()),
+        Command::FlushNow => dispatch_ack("flush-now", ipc_cmd::flush_now()),
+        Command::Reconcile => dispatch_ack("reconcile", ipc_cmd::reconcile()),
+        Command::Timeline { json } => dispatch_timeline(json),
+        Command::Logs { tail } => dispatch_logs(tail),
+        Command::Auth { action } => dispatch_auth(action),
+    }
+}
+
+fn dispatch_status(json: bool) -> Result<ExitCode, String> {
+    let status = ipc_cmd::status().map_err(|e| e.to_string())?;
+    if json {
+        let serialized = serde_json::to_string_pretty(&status).map_err(|e| e.to_string())?;
+        println!("{serialized}");
+    } else {
+        println!("{}", ipc_cmd::render_status(&status));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn dispatch_ack(
+    command: &str,
+    result: Result<vapor_ipc::AckResponse, ipc_cmd::IpcCliError>,
+) -> Result<ExitCode, String> {
+    let ack = result.map_err(|e| e.to_string())?;
+    if ack.accepted {
+        println!("{command}: ok ({})", ack.note);
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("{command}: not accepted — {}", ack.note);
+        Ok(ExitCode::from(1))
+    }
+}
+
+fn dispatch_timeline(json: bool) -> Result<ExitCode, String> {
+    let timeline = ipc_cmd::timeline().map_err(|e| e.to_string())?;
+    if json {
+        let serialized = serde_json::to_string_pretty(&timeline).map_err(|e| e.to_string())?;
+        println!("{serialized}");
+    } else if timeline.entries.is_empty() {
+        println!(
+            "(timeline is empty — Wave 7 ships the IPC seam; in-memory buffer lands with C8-30)"
+        );
+    } else {
+        for entry in &timeline.entries {
+            println!(
+                "[{}] {} — {}",
+                entry.timestamp_ms, entry.kind, entry.message
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn dispatch_logs(tail: Option<usize>) -> Result<ExitCode, String> {
+    let contents = ipc_cmd::tail_logs(tail).map_err(|e| e.to_string())?;
+    if contents.is_empty() {
+        println!("(no log lines yet)");
+    } else {
+        println!("{contents}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
+    let store = auth_cmd::build_native_store();
+    match action {
+        AuthAction::Login { provider, token } => {
+            auth_cmd::login_into(store.as_ref(), &provider, &token).map_err(|e| e.to_string())?;
+            println!("auth login: stored token for {provider}");
+            Ok(ExitCode::SUCCESS)
+        }
+        AuthAction::Logout { provider } => {
+            auth_cmd::logout_from(store.as_ref(), &provider).map_err(|e| e.to_string())?;
+            println!("auth logout: removed token for {provider}");
+            Ok(ExitCode::SUCCESS)
+        }
+        AuthAction::Status => {
+            let entries = auth_cmd::status_from(store.as_ref()).map_err(|e| e.to_string())?;
+            for entry in entries {
+                let state = if entry.bound { "bound" } else { "not bound" };
+                println!("{}: {}", entry.provider, state);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

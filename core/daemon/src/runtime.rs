@@ -74,6 +74,7 @@ pub struct DaemonRuntime {
     watcher: Option<FsEventsWatcher>,
     metrics_sampler: Arc<dyn MetricsSampler>,
     clock: SharedClock,
+    runtime_control: Option<Arc<crate::runtime_control::RuntimeControl>>,
     last_throttle_sample_inst: Option<Instant>,
     running_reconcile_intent_id: Option<i64>,
     startup_reconstruction_barrier: bool,
@@ -148,11 +149,20 @@ impl DaemonRuntime {
         self.tick_with_inputs(now, inputs)
     }
 
+    /// Attach a `RuntimeControl` so the runtime tick observes IPC-driven
+    /// control requests (pause / resume / flush / reconcile). Wave 7
+    /// `vapor` CLI commands write into this control through the IPC
+    /// service.
+    pub fn attach_control(&mut self, control: Arc<crate::runtime_control::RuntimeControl>) {
+        self.runtime_control = Some(control);
+    }
+
     pub fn tick_with_inputs(
         &mut self,
         now: SystemTime,
         throttle_inputs: ThrottleInputs,
     ) -> Result<RuntimeTickReport, DaemonRuntimeError> {
+        self.apply_pending_control_requests(now)?;
         self.sample_throttle_inputs(now, throttle_inputs);
 
         let mut report = RuntimeTickReport {
@@ -291,6 +301,7 @@ impl DaemonRuntime {
             watcher,
             metrics_sampler,
             clock,
+            runtime_control: None,
             last_throttle_sample_inst: None,
             running_reconcile_intent_id: None,
             startup_reconstruction_barrier: false,
@@ -303,6 +314,46 @@ impl DaemonRuntime {
                 constants::engine::STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS,
             ),
         })
+    }
+
+    /// Drains any pause / resume / flush / reconcile requests recorded
+    /// on the attached `RuntimeControl` and applies them. Called at
+    /// the top of every tick. Wave 7 / `cli.md` L3.
+    fn apply_pending_control_requests(
+        &mut self,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        // Snapshot the pending requests up-front so we can drop the
+        // immutable borrow on `self.runtime_control` before mutating
+        // `self` via `enqueue_startup_reconstruction_reconcile`.
+        let (pause_request, reconcile_request) = match self.runtime_control.as_ref() {
+            Some(control) => {
+                let pause = control.take_pause_request();
+                let reconcile = control.take_reconcile_request();
+                let _ = control.take_flush_request();
+                (pause, reconcile)
+            }
+            None => (None, false),
+        };
+
+        if let Some(pause) = pause_request {
+            if pause {
+                self.app
+                    .set_run_state(RunState::Paused, "user paused via vapor pause");
+            } else {
+                let reason = match self.sync_scope.local_sync_directory.as_ref() {
+                    Some(path) => {
+                        format!("user resumed via vapor resume; watching {}", path.display())
+                    }
+                    None => "user resumed via vapor resume".to_string(),
+                };
+                self.app.set_run_state(RunState::Running, reason);
+            }
+        }
+        if reconcile_request {
+            self.enqueue_startup_reconstruction_reconcile(now)?;
+        }
+        Ok(())
     }
 
     fn sample_throttle_inputs(&mut self, _now: SystemTime, inputs: ThrottleInputs) {

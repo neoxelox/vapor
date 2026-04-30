@@ -12,15 +12,48 @@ use std::io::{Read, Write};
 
 use crate::framing::{FrameError, read_frame, write_frame};
 use crate::protocol::{
-    ErrorBody, Hello, HelloAck, IncompatibleVersion, Method, Request, Response, ResponseBody,
-    StatusResponse, daemon_supported_versions,
+    AckResponse, ErrorBody, Hello, HelloAck, IncompatibleVersion, Method, Request, Response,
+    ResponseBody, StatusResponse, TimelineResponse, daemon_supported_versions,
 };
 
 /// Implemented by the daemon to provide the data each method exposes.
-/// Wave 6 phase 2 only ships [`Method::Status`]; later waves grow the
-/// trait surface.
+/// Wave 7 grows the surface to cover the L3 IPC-driven CLI commands.
+/// Every non-Status method has a default implementation returning an
+/// `unsupported` ack so older daemon binaries that pre-date a method
+/// can still answer the request without code changes.
 pub trait Service: Send + Sync {
     fn status(&self) -> StatusResponse;
+
+    fn pause(&self) -> AckResponse {
+        unsupported_ack("pause")
+    }
+
+    fn resume(&self) -> AckResponse {
+        unsupported_ack("resume")
+    }
+
+    fn flush_now(&self) -> AckResponse {
+        unsupported_ack("flush_now")
+    }
+
+    fn reconcile(&self) -> AckResponse {
+        unsupported_ack("reconcile")
+    }
+
+    fn timeline(&self) -> TimelineResponse {
+        TimelineResponse {
+            schema_version: daemon_supported_versions().0,
+            entries: Vec::new(),
+        }
+    }
+}
+
+fn unsupported_ack(method: &str) -> AckResponse {
+    AckResponse {
+        schema_version: daemon_supported_versions().0,
+        accepted: false,
+        note: format!("{method} not implemented in this daemon build"),
+    }
 }
 
 #[derive(Debug)]
@@ -149,6 +182,11 @@ where
 fn dispatch_method(service: &dyn Service, method: Method) -> Response {
     match method {
         Method::Status => Response::Ok(ResponseBody::Status(service.status())),
+        Method::Pause => Response::Ok(ResponseBody::Ack(service.pause())),
+        Method::Resume => Response::Ok(ResponseBody::Ack(service.resume())),
+        Method::FlushNow => Response::Ok(ResponseBody::Ack(service.flush_now())),
+        Method::Reconcile => Response::Ok(ResponseBody::Ack(service.reconcile())),
+        Method::Timeline => Response::Ok(ResponseBody::Timeline(service.timeline())),
     }
 }
 

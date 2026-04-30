@@ -5,14 +5,18 @@
 //! value the binary can render, or an error type the binary translates
 //! into a non-zero exit code.
 
+pub mod auth;
 pub mod config;
 pub mod doctor;
+pub mod ipc;
 pub mod run;
 pub mod service;
 pub mod version;
 
+pub use auth::{AuthCommand, AuthError, AuthStatusEntry};
 pub use config::{ConfigCommand, ConfigError};
 pub use doctor::{DoctorCheck, DoctorCheckStatus, DoctorReport};
+pub use ipc::IpcCliError;
 pub use run::{RunError, RunOptions};
 pub use service::{ServiceCommand, ServiceCommandError, ServiceStatusReport};
 pub use version::version_string;

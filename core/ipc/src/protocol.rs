@@ -54,7 +54,22 @@ pub struct IncompatibleVersion {
 /// `ErrorBody::MethodNotFound`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Method {
+    /// Read the current daemon snapshot.
     Status,
+    /// Flip `RunState` to `Paused` — idempotent.
+    Pause,
+    /// Flip `RunState` back to `Running` — idempotent.
+    Resume,
+    /// Hint the runtime to drain pending work as fast as the throttle
+    /// allows. The engine already drains opportunistically; Wave 7
+    /// ships this as an acknowledgement.
+    FlushNow,
+    /// Request a fresh whole-scope reconcile against the local sync
+    /// directory.
+    Reconcile,
+    /// Read the (Wave 7) diagnostics timeline. Returns an empty list
+    /// until the C8-30 in-memory timeline buffer ships.
+    Timeline,
 }
 
 /// Top-level request envelope. Wave 6 phase 2 ships only the `Status`
@@ -73,6 +88,36 @@ pub enum ResponseBody {
     HelloAck(HelloAck),
     IncompatibleVersion(IncompatibleVersion),
     Status(StatusResponse),
+    /// Generic acknowledgement for fire-and-forget control endpoints
+    /// (Pause / Resume / FlushNow / Reconcile). The `accepted` flag
+    /// reflects whether the request actually changed any state — Wave 7
+    /// always returns `true` once the request reaches the runtime, but
+    /// future versions may return `false` for no-op cases (e.g.
+    /// pausing an already-paused daemon).
+    Ack(AckResponse),
+    Timeline(TimelineResponse),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AckResponse {
+    pub schema_version: u32,
+    pub accepted: bool,
+    #[serde(default)]
+    pub note: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TimelineEntry {
+    pub timestamp_ms: u64,
+    pub kind: String,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TimelineResponse {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub entries: Vec<TimelineEntry>,
 }
 
 /// Wrapper response sent over the wire. Distinguishes success

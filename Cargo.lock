@@ -733,6 +733,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "vapor-daemon",
+ "vapor-ipc",
  "vapor-lifecycle",
  "vapor-platform",
  "vapor-providers",

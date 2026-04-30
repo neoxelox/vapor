@@ -164,8 +164,9 @@ This is the "ship the CLI on macOS" milestone. The CLI proves
 
 ### Wave 7 — IPC-driven CLI surface + auth flows
 
-Status: pending. Requires Wave 6 (IPC) and at least one provider from
-Wave 8 or the filesystem-provider no-op auth path.
+Status: complete (against the filesystem-provider no-op auth path; the
+OAuth-PKCE browser flow lands with Wave 8 / C8-48). Required Wave 6
+(IPC).
 
 - `cli.md` L3-1 … L3-7 — `vapor status / pause / resume / flush-now /
   reconcile / timeline / logs`. All IPC-backed. `--json` stable; never

@@ -5,6 +5,7 @@ use vapor_daemon::{
     ipc_service::{DaemonIpcService, DaemonStatusSnapshot},
     logging, runtime,
     runtime::DaemonRuntime,
+    runtime_control::RuntimeControl,
     state_db::DurableStateDb,
     sync_directories,
 };
@@ -90,10 +91,18 @@ fn main() {
 
     // Wave 6 phase 2: spawn the IPC server so other Vapor surfaces
     // (`vapor status`, future macOS app diagnostics) can query the
-    // running daemon. The handle is kept alive for the duration of
-    // the runtime loop; its Drop removes the socket file.
+    // running daemon. Wave 7 wires the IPC `pause` / `resume` /
+    // `flush-now` / `reconcile` requests through `RuntimeControl`,
+    // which the runtime tick observes between iterations. The handle
+    // is kept alive for the duration of the runtime loop; its Drop
+    // removes the socket file.
     let initial_snapshot = DaemonStatusSnapshot::from_app(runtime.app());
-    let ipc_service = Arc::new(DaemonIpcService::new(initial_snapshot));
+    let runtime_control = Arc::new(RuntimeControl::new());
+    runtime.attach_control(runtime_control.clone());
+    let ipc_service = Arc::new(DaemonIpcService::new(
+        initial_snapshot,
+        runtime_control.clone(),
+    ));
     let ipc_handle = match ipc_server::spawn(ipc_service.clone() as Arc<dyn Service>) {
         Ok(handle) => Some(handle),
         Err(error) => {
