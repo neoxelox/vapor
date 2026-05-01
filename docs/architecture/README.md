@@ -61,8 +61,10 @@ across platforms, start with `platform-abstractions.md`.
 - `macos/` — macOS-specific architecture: app lifecycle semantics
   (`Window` scene, menubar, Dock, `SMAppService`), and the macOS IPC
   transport (Unix domain socket, optional NSXPC wrapping).
-- (`windows/`, `linux/` subdirectories will be added when those app
-  surfaces start — see `docs/plans/core.md`.)
+- `windows/` — Windows-specific architecture (transport choice
+  documented now; native trait impls land with the optional Wave 12).
+- `linux/` — Linux-specific architecture (transport choice documented
+  now; native trait impls land with the optional Wave 13).
 
 Architecture docs are living references and are expected to evolve as
 implementation lands.

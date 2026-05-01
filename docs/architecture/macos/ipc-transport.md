@@ -24,10 +24,13 @@ transport choice.
 
 ## Framing
 
-Length-prefixed frames, 32-bit big-endian length header followed by a
-UTF-8 JSON-RPC 2.0 body. Frame length bound by `IPC_MAX_PAYLOAD_BYTES`
-(default `4 * 1024 * 1024`). Oversized frames are rejected before
-deserialization.
+Length-prefixed frames, 32-bit little-endian length header followed by
+a UTF-8 JSON-RPC 2.0 body. Frame length bound by
+`vapor_shared::constants::ipc::MAX_PAYLOAD_BYTES` (default
+`4 * 1024 * 1024`). Oversized frames are rejected before
+deserialization. Endianness matches the implementation in
+`core/ipc/src/framing.rs` and applies on every transport
+(macOS / Linux UDS, Windows named pipe).
 
 ## Shutdown
 
