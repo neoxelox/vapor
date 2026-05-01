@@ -52,7 +52,10 @@ pub use windows_impl::{ListenerHandle, StreamHandle, bind_listener, connect_to_s
 mod unix_impl {
     use super::{Path, PathBuf, TransportError};
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::{UnixListener, UnixStream};
+
+    use vapor_shared::constants;
 
     /// Owns the bound listener socket and removes the socket file on
     /// drop, matching the launchd-managed daemon's expected lifecycle.
@@ -69,14 +72,6 @@ mod unix_impl {
 
         pub fn socket_path(&self) -> &Path {
             &self.socket_path
-        }
-
-        pub fn into_inner(self) -> UnixListener {
-            // SAFETY equivalent (no `unsafe` in this crate): we move
-            // the listener out before the Drop runs by reassigning the
-            // socket_path lifecycle into a no-op; the simplest path is
-            // to clone the Listener via `UnixListener::try_clone()`.
-            self.listener.try_clone().expect("clone listener")
         }
     }
 
@@ -101,6 +96,14 @@ mod unix_impl {
             fs::create_dir_all(parent)?;
         }
         let listener = UnixListener::bind(&socket_path)?;
+        // Restrict the socket to the owning user. On a multi-user host
+        // any local user could otherwise connect to the daemon's IPC
+        // and issue control commands. Matches the policy stated in
+        // `docs/architecture/macos/ipc-transport.md`.
+        fs::set_permissions(
+            &socket_path,
+            fs::Permissions::from_mode(constants::runtime::PRIVATE_FILE_MODE),
+        )?;
         Ok(ListenerHandle {
             listener,
             socket_path,
@@ -146,6 +149,26 @@ mod windows_impl {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn bind_listener_restricts_socket_permissions_to_owner_only() {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+        use tempfile::TempDir;
+        use vapor_shared::constants;
+
+        let temp = TempDir::new().expect("temp");
+        let socket_path = temp.path().join("vapord.sock");
+        let handle = bind_listener(socket_path.clone()).expect("bind");
+
+        let mode = std::fs::metadata(handle.socket_path())
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, constants::runtime::PRIVATE_FILE_MODE);
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_listener_round_trips_a_short_message_through_the_socket() {
