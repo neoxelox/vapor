@@ -41,6 +41,15 @@ enum Command {
     Doctor,
     /// Manage the platform-native service installation.
     Service {
+        /// Install / drive the per-user service definition (default).
+        /// `--system` is reserved for a future system-wide install
+        /// flow; today it is rejected with an actionable error so
+        /// scripts that want to opt in to the future surface fail
+        /// loudly rather than silently treating the flag as unknown.
+        #[arg(long, conflicts_with = "system")]
+        user: bool,
+        #[arg(long, conflicts_with = "user")]
+        system: bool,
         #[command(subcommand)]
         action: ServiceAction,
     },
@@ -166,7 +175,21 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
                 _ => Ok(ExitCode::SUCCESS),
             }
         }
-        Command::Service { action } => dispatch_service(action),
+        Command::Service {
+            user: _,
+            system,
+            action,
+        } => {
+            if system {
+                return Err(
+                    "--system service install is not implemented yet (Wave 12 / 13 work); \
+                     pass --user (default) for the per-user LaunchAgent / systemd / Task \
+                     Scheduler entry"
+                        .to_string(),
+                );
+            }
+            dispatch_service(action)
+        }
         Command::Status { json } => dispatch_status(json),
         Command::Pause => dispatch_ack("pause", ipc_cmd::pause()),
         Command::Resume => dispatch_ack("resume", ipc_cmd::resume()),

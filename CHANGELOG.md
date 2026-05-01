@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `vapor service` now accepts a `--user` / `--system` flag pair (per `docs/tasks/cli.md` L2-1). `--user` is the default and drives the per-user LaunchAgent / systemd / Task Scheduler entry that already shipped in Wave 6; `--system` is rejected with an actionable error so scripts that want to opt in to the future system-wide install surface fail loudly instead of silently being interpreted as unknown args. The two flags are mutually exclusive at the clap layer. `--system` lands in the optional Waves 12 / 13 once the matching native installers do.
+
 ### Fixed
 
 - `vapor auth login` no longer silently loses every token. `NativeSecretStore` is still backed by the process-local in-memory store on every OS pre-Wave-5 (the Keychain / libsecret / Credential Manager bridges are part of the deferred C4-5 / Wave 12 / Wave 13 work) but the CLI was reporting `auth login: stored token for {provider}` regardless. The token vanished at process exit and the user had no signal that anything was wrong. `core/platform::SecretStore` now exposes an `is_persistent() -> bool` method (default `false`; the trait fakes / Native pre-bridge return `false`, the future Keychain / libsecret / Credential Manager bridges will return `true`); `vapor auth login` emits a stderr warning and tags the success line with `(process-local only)` when the store is non-persistent. `vapor auth status` prepends a matching note in the same case.
