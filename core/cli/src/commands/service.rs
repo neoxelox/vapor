@@ -20,6 +20,7 @@ use vapor_lifecycle::{
 use vapor_platform::{
     NativeServiceInstaller, ServiceDescriptor, ServiceInstallError, ServiceInstaller, ServiceStatus,
 };
+use vapor_shared::constants;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceCommand {
@@ -116,7 +117,7 @@ pub fn dispatch(
         }
         ServiceCommand::Status => Ok(Some(ServiceStatusReport {
             status: installer.status()?,
-            label: vapor_shared::constants::runtime::DAEMON_LOG_FILE_NAME.to_string(),
+            label: constants::service::DAEMON_LABEL.to_string(),
         })),
     }
 }
@@ -134,7 +135,7 @@ pub fn build_native_macos(
         return Err(ServiceCommandError::DaemonBinaryMissing(daemon_binary));
     }
     let descriptor = ServiceDescriptor {
-        label: "sh.arn.vapor.daemon".to_string(),
+        label: constants::service::DAEMON_LABEL.to_string(),
         executable_path: daemon_binary,
         arguments: vec![],
         environment: vec![],
@@ -265,5 +266,28 @@ mod tests {
         .expect("status")
         .expect("status report");
         assert_eq!(report.status, ServiceStatus::Running);
+    }
+
+    #[test]
+    fn status_report_carries_the_service_label_not_the_log_file_name() {
+        // Regression: status used to emit DAEMON_LOG_FILE_NAME
+        // ("vapord.logs") in the label field, which made
+        // `vapor service status` say `(label: vapord.logs)` — wrong.
+        // The label is supposed to be the reverse-DNS service identifier.
+        let installer = fake_installer();
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+
+        let report = dispatch(
+            ServiceCommand::Status,
+            &manager,
+            installer.as_ref(),
+            Instant::now(),
+        )
+        .expect("status")
+        .expect("status report");
+
+        assert_eq!(report.label, constants::service::DAEMON_LABEL);
+        assert_ne!(report.label, constants::runtime::DAEMON_LOG_FILE_NAME);
     }
 }

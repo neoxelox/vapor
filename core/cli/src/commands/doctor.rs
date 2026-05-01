@@ -14,6 +14,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use vapor_shared::constants;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DoctorCheckStatus {
     Ok,
@@ -118,7 +120,7 @@ fn check_macos_launch_agent_plist() -> DoctorCheck {
     };
     let plist_path = PathBuf::from(home)
         .join("Library/LaunchAgents")
-        .join("sh.arn.vapor.daemon.plist");
+        .join(format!("{}.plist", constants::service::DAEMON_LABEL));
     if plist_path.exists() {
         DoctorCheck {
             name,

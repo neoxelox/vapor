@@ -31,6 +31,15 @@ pub mod state {
     pub const MAX_TIMESTAMP_MILLIS: i64 = 32_503_680_000_000;
 }
 
+pub mod service {
+    /// Reverse-DNS identifier used by every Vapor surface that talks to
+    /// the OS service manager (macOS LaunchAgent, Linux systemd unit,
+    /// Windows Task Scheduler task). Mirrored by the Swift constants
+    /// file under `apps/macos/Sources/VaporCore/VaporConstants.swift`
+    /// per AGENTS.md §8.6.
+    pub const DAEMON_LABEL: &str = "sh.arn.vapor.daemon";
+}
+
 pub mod ipc {
     /// Current schema version emitted by every Vapor surface that
     /// participates in the IPC handshake (`vapor` CLI, future macOS /

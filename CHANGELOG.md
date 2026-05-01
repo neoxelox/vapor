@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- `vapor service status` now reports the reverse-DNS service label (`sh.arn.vapor.daemon`) instead of the daemon log filename (`vapord.logs`). The previous report stamp pulled `runtime::DAEMON_LOG_FILE_NAME` for the label field, which was wrong on its face. Centralizes the label in a new `core/shared::constants::service::DAEMON_LABEL` (mirroring `VaporConstants.Daemon.launchAgentLabel` per AGENTS.md §8.6); `core/cli/src/commands/{service,doctor}.rs` consume the constant directly so the LaunchAgent plist filename, the install-time descriptor, the doctor probe, and the status report all agree on one identifier. Regression test in `service.rs` asserts `report.label == DAEMON_LABEL`.
 - `vapor status` now reflects live runtime state instead of the boot snapshot. The IPC service's status snapshot was previously written only at startup; the runtime never published updates, so pause / resume / throttle transitions were invisible to every client. `core/daemon::ipc_service` now defines a `StatusPublisher` trait that `DaemonRuntime` calls at the end of every tick (and once on attach), and `core/daemon/src/main.rs` wires the IPC service in via the new `attach_status_publisher` hook. Regression test in `core/daemon/src/runtime.rs` (`attached_status_publisher_receives_fresh_snapshot_each_tick`) attaches a recording publisher, requests a pause through `RuntimeControl`, and asserts the post-tick snapshot reports `Paused`.
 
 ### Added
