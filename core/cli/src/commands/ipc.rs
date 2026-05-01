@@ -26,6 +26,13 @@ pub enum IpcCliError {
     /// The socket file is missing / connection refused. Renders as
     /// `vapor: daemon not running — try \`vapor service start\``.
     DaemonNotRunning,
+    /// The connection succeeded but the daemon never answered within
+    /// the per-call deadline. Renders as
+    /// `vapor: daemon is not responding — check \`vapor logs\``.
+    /// L3-7 says the CLI must never hang; this is the variant that
+    /// fires when a wedged but accepting daemon would otherwise stall
+    /// us.
+    DaemonUnresponsive,
     Client(ClientError),
 }
 
@@ -33,6 +40,9 @@ impl Display for IpcCliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DaemonNotRunning => write!(f, "daemon not running — try `vapor service start`"),
+            Self::DaemonUnresponsive => {
+                write!(f, "daemon is not responding — check `vapor logs`")
+            }
             Self::Client(error) => write!(f, "IPC client error: {error}"),
         }
     }
@@ -51,6 +61,8 @@ impl From<ClientError> for IpcCliError {
     fn from(error: ClientError) -> Self {
         if is_daemon_not_running(&error) {
             Self::DaemonNotRunning
+        } else if is_daemon_unresponsive(&error) {
+            Self::DaemonUnresponsive
         } else {
             Self::Client(error)
         }
@@ -66,6 +78,14 @@ fn is_daemon_not_running(error: &ClientError) -> bool {
     }
 }
 
+fn is_daemon_unresponsive(error: &ClientError) -> bool {
+    match error {
+        ClientError::Transport(TransportError::Io(io)) => is_timeout(io.kind()),
+        ClientError::Frame(FrameError::Io(io)) => is_timeout(io.kind()),
+        _ => false,
+    }
+}
+
 fn is_missing_or_refused(kind: io::ErrorKind) -> bool {
     matches!(
         kind,
@@ -74,6 +94,10 @@ fn is_missing_or_refused(kind: io::ErrorKind) -> bool {
             | io::ErrorKind::ConnectionReset
             | io::ErrorKind::ConnectionAborted
     )
+}
+
+fn is_timeout(kind: io::ErrorKind) -> bool {
+    matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
 
 /// Resolve the daemon's UDS endpoint path.
@@ -197,6 +221,26 @@ mod tests {
     fn daemon_not_running_classification_does_not_misclassify_parse_errors() {
         let error = ClientError::Parse("garbage".to_string());
         assert!(!is_daemon_not_running(&error));
+    }
+
+    #[test]
+    fn timeout_at_transport_layer_is_classified_as_daemon_unresponsive() {
+        let error = ClientError::Transport(TransportError::Io(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "deadline expired",
+        )));
+        let cli_error = IpcCliError::from(error);
+        assert!(matches!(cli_error, IpcCliError::DaemonUnresponsive));
+    }
+
+    #[test]
+    fn timeout_at_frame_layer_is_classified_as_daemon_unresponsive() {
+        let error = ClientError::Frame(FrameError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "frame deadline expired",
+        )));
+        let cli_error = IpcCliError::from(error);
+        assert!(matches!(cli_error, IpcCliError::DaemonUnresponsive));
     }
 
     #[test]

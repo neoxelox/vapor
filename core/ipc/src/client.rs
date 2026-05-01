@@ -8,6 +8,7 @@
 use std::error::Error;
 use std::fmt::{self, Display};
 use std::path::Path;
+use std::time::Duration;
 
 use crate::framing::{FrameError, read_frame, write_frame};
 use crate::protocol::{
@@ -15,6 +16,19 @@ use crate::protocol::{
     StatusResponse, TimelineResponse, daemon_supported_versions,
 };
 use crate::transport::{StreamHandle, TransportError, connect_to_socket};
+
+/// Default per-call deadline applied by [`Client::connect`]. Bounds the
+/// CLI's "never hang" guarantee from `cli.md` L3-7: even when the
+/// daemon's accept loop is wedged (e.g., a connection-handler thread
+/// died and the listener is no longer servicing) the client returns
+/// within this window with a `WouldBlock` framing error that the CLI
+/// classifies as "daemon not running" / "daemon unresponsive".
+///
+/// Conservative enough to absorb real daemon latency under load, tight
+/// enough to satisfy the L3-7 1 s exit goal in the common case where
+/// the daemon is genuinely down (the OS returns `ECONNREFUSED` /
+/// `ENOENT` immediately so we never hit this window in that path).
+pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug)]
 pub enum ClientError {
@@ -78,11 +92,27 @@ pub struct Client {
 
 impl Client {
     /// Connects to the daemon listening at `socket_path`. Performs the
-    /// handshake and returns a ready session. Pre-Wave-12 the Windows
-    /// transport is unsupported and returns
-    /// [`TransportError::Unsupported`].
+    /// handshake and returns a ready session. Applies
+    /// [`DEFAULT_CALL_TIMEOUT`] to reads and writes so the client
+    /// never hangs on a wedged daemon — see L3-7 in
+    /// `docs/tasks/cli.md`. Pre-Wave-12 the Windows transport is
+    /// unsupported and returns [`TransportError::Unsupported`].
     pub fn connect(socket_path: &Path, client_id: &str) -> Result<Self, ClientError> {
+        Self::connect_with_timeout(socket_path, client_id, DEFAULT_CALL_TIMEOUT)
+    }
+
+    /// Like [`Client::connect`] but uses an explicit per-call timeout.
+    /// Pass `Duration::MAX` to opt out (e.g., a long-running streaming
+    /// client). The deadline bounds each individual `read` / `write`
+    /// call rather than the whole session, but for the single-call
+    /// CLI shape that is enough to honor L3-7.
+    pub fn connect_with_timeout(
+        socket_path: &Path,
+        client_id: &str,
+        timeout: Duration,
+    ) -> Result<Self, ClientError> {
         let stream = connect_to_socket(socket_path)?;
+        apply_stream_timeout(&stream, timeout)?;
         Self::handshake(stream, client_id)
     }
 
@@ -162,5 +192,78 @@ impl Client {
             Response::Ok(body) => Ok(body),
             Response::Err(error) => Err(ClientError::Server(error)),
         }
+    }
+}
+
+#[cfg(unix)]
+fn apply_stream_timeout(stream: &StreamHandle, timeout: Duration) -> Result<(), ClientError> {
+    if timeout == Duration::MAX {
+        return Ok(());
+    }
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|error| ClientError::Transport(TransportError::Io(error)))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|error| ClientError::Transport(TransportError::Io(error)))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn apply_stream_timeout(_stream: &StreamHandle, _timeout: Duration) -> Result<(), ClientError> {
+    // Windows IPC transport is stubbed until Wave 12. The named-pipe
+    // implementation will set per-call timeouts via the same
+    // signature; until then the connect path returns `Unsupported`
+    // before we reach this helper.
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn connect_with_timeout_returns_promptly_against_wedged_peer() {
+        // L3-7 invariant: the CLI must never hang against a daemon
+        // that accepted the connection but is not answering. We bind
+        // a UDS, accept the client, then sit on the stream without
+        // writing anything; `Client::connect_with_timeout` must
+        // return inside a small window.
+        use crate::transport::bind_listener;
+        use std::time::Instant;
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().expect("temp");
+        let socket_path = temp.path().join("vapord.sock");
+        let listener = bind_listener(socket_path.clone()).expect("bind");
+
+        // Accept on a worker thread so the client's `connect` doesn't
+        // race the listener. The accepted stream is held but never
+        // written to, simulating a wedged daemon.
+        let _accept = std::thread::spawn(move || {
+            let _stream = listener.listener().accept().ok();
+            std::thread::sleep(Duration::from_secs(2));
+        });
+
+        let started = Instant::now();
+        let result = Client::connect_with_timeout(
+            &socket_path,
+            "vapor-cli/test",
+            Duration::from_millis(200),
+        );
+        let elapsed = started.elapsed();
+
+        assert!(
+            result.is_err(),
+            "expected timeout error, got Ok(_) — client did not honor deadline"
+        );
+        // Generous bound — the deadline is 200 ms, but CI can be slow
+        // and the OS scheduler adds noise. Anything well under the
+        // L3-7 1 s budget is fine.
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "client took {elapsed:?} to give up against wedged peer; expected < 900 ms",
+        );
     }
 }
