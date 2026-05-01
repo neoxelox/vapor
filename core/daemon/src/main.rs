@@ -103,6 +103,7 @@ fn main() {
         initial_snapshot,
         runtime_control.clone(),
     ));
+    runtime.attach_status_publisher(ipc_service.clone());
     let ipc_handle = match ipc_server::spawn(ipc_service.clone() as Arc<dyn Service>) {
         Ok(handle) => Some(handle),
         Err(error) => {

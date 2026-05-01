@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `vapor status` now reflects live runtime state instead of the boot snapshot. The IPC service's status snapshot was previously written only at startup; the runtime never published updates, so pause / resume / throttle transitions were invisible to every client. `core/daemon::ipc_service` now defines a `StatusPublisher` trait that `DaemonRuntime` calls at the end of every tick (and once on attach), and `core/daemon/src/main.rs` wires the IPC service in via the new `attach_status_publisher` hook. Regression test in `core/daemon/src/runtime.rs` (`attached_status_publisher_receives_fresh_snapshot_each_tick`) attaches a recording publisher, requests a pause through `RuntimeControl`, and asserts the post-tick snapshot reports `Paused`.
+
 ### Added
 
 - Wave 7 lands the IPC-driven `vapor` CLI surface and the SecretStore-backed auth commands (`docs/tasks/cli.md` L3-1 … L3-7, L4-1 … L4-3). The IPC `Service` trait grows pause / resume / flush_now / reconcile / timeline methods; a new `core/daemon::runtime_control::RuntimeControl` shared-state struct lets the IPC threads write control requests that the runtime tick observes between iterations (pause/resume flips `RunState`; reconcile enqueues a fresh whole-scope reconcile; flush is informational since the tick already drains opportunistically). New CLI subcommands: `vapor status [--json]`, `vapor pause`, `vapor resume`, `vapor flush-now`, `vapor reconcile`, `vapor timeline [--json]`, `vapor logs [--tail]`, `vapor auth login|logout|status`. The IPC client classifies "daemon not running" via the underlying `io::ErrorKind` so every IPC-backed command exits non-zero within 1 s with `vapor: daemon not running — try \`vapor service start\`` instead of hanging (closes L3-7). The auth surface stores tokens under `auth.<provider>.token` keys via `core/platform::SecretStore`; pre-Wave-8 the supported providers are `filesystem` and `google_drive`, and `login` takes an explicit `--token` argument until the OAuth-PKCE browser flow ships with C8-48.

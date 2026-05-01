@@ -45,9 +45,17 @@ impl DaemonStatusSnapshot {
     }
 }
 
+/// Receives the runtime's latest snapshot at the end of each tick.
+/// The runtime owns one of these and calls [`StatusPublisher::publish`]
+/// from the tick loop so consumers (the IPC service today; future
+/// in-process subscribers tomorrow) read fresh state.
+pub trait StatusPublisher: Send + Sync {
+    fn publish(&self, snapshot: DaemonStatusSnapshot);
+}
+
 /// `vapor_ipc::Service` implementation that returns the latest
 /// snapshot the runtime has published. The runtime calls
-/// [`DaemonIpcService::publish`] after every tick.
+/// [`StatusPublisher::publish`] after every tick.
 #[derive(Debug)]
 pub struct DaemonIpcService {
     snapshot: Mutex<DaemonStatusSnapshot>,
@@ -67,6 +75,12 @@ impl DaemonIpcService {
             .snapshot
             .lock()
             .expect("DaemonIpcService mutex poisoned") = snapshot;
+    }
+}
+
+impl StatusPublisher for DaemonIpcService {
+    fn publish(&self, snapshot: DaemonStatusSnapshot) {
+        DaemonIpcService::publish(self, snapshot);
     }
 }
 

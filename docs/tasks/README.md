@@ -83,10 +83,11 @@ docs.
 
 ### Wave 2 — Engine portability fixes
 
-Status: in progress (C1-1 … C1-4, C1-6, C1-7 done; C1-5 deferred until
-Wave 4 lands C3-7). **Foundation** — kept in the primary path even
-though macOS-only shipping would technically not need it, because it
-removes Unix-only assumptions and keeps the engine clean.
+Status: complete. C1-1 … C1-7 all done — C1-5 closed alongside
+Wave 4's `ProcessSupervisor` (C3-7). **Foundation** — kept in the
+primary path even though macOS-only shipping would technically not
+need it, because it removes Unix-only assumptions and keeps the
+engine clean.
 
 - `core.md` C1-1 … C1-7 — `runtime_paths` permission gates,
   `HOME`/`USERPROFILE` resolution, UTF-8 path encoding in `state_db`,
@@ -127,9 +128,12 @@ stubs stay as-is — the primary deliverable is unaffected.
 
 ### Wave 5 — Daemon lifecycle moves into Rust
 
-Status: in progress (C4-1 … C4-4 + C4-6 done; C4-5 + C4-7 + M2-* land
-together with the `vapor` CLI in Wave 6). Requires Wave 4
-(`ServiceInstaller`).
+Status: Rust port complete (C4-1 … C4-4, C4-6). The Swift consumer-
+side work (C4-5 CLI subprocess bridge / C4-7 retire duplicate Swift
+logic / `macos.md` M2-1 … M2-4) intentionally rides with the macOS
+app shim follow-up because it has to land together with that PR. The
+`vapor service` CLI commands the Swift shim consumes are already
+shipping from Wave 6. Requires Wave 4 (`ServiceInstaller`).
 
 - `core.md` C4-1 … C4-7 — new `core/lifecycle` crate; port
   `CrashLoopGuard` and `DaemonLifecycleManager` from Swift; expose a
@@ -143,9 +147,12 @@ other.
 
 ### Wave 6 — IPC channel + `vapor` CLI lifecycle commands (macOS)
 
-Status: in progress. CLI surface (L0/L1/L2) and IPC channel
-(C5-1..C5-5) shipped; the macOS Swift app shim (M2-1..M2-4 / `core.md`
-C4-5, C4-7) remains. Requires Waves 4 and 5.
+Status: Rust side complete. CLI surface (L0/L1/L2) and IPC channel
+(C5-1 … C5-5) shipped end-to-end. The macOS Swift app shim (`macos.md`
+M2-1 … M2-4 / `core.md` C4-5 + C4-7) and the macOS-CI install/start/
+status round-trip (`cli.md` L2-5) intentionally ride with the next
+follow-up PR because they need a packaged `vapor` binary on the
+runner. Required Waves 4 and 5.
 
 - `core.md` C5-1 … C5-5 — transport decision (UDS on Unix, named pipe
   on Windows — the Windows transport choice is made now even though

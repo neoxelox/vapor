@@ -12,6 +12,7 @@ use crate::debounce::{DebounceLoop, DebounceWindows};
 use crate::event_intents::BoundedFsEventRecorder;
 use crate::executor::{StagedExecutor, StagedExecutorSnapshot};
 use crate::fs_events::{FsEventsWatcher, FsEventsWatcherError, normalize_watch_root};
+use crate::ipc_service::{DaemonStatusSnapshot, StatusPublisher};
 use crate::logging;
 use crate::metrics::{MetricsSampler, StaticMetricsSampler};
 use crate::scheduler::KeyedSupersedingScheduler;
@@ -75,6 +76,7 @@ pub struct DaemonRuntime {
     metrics_sampler: Arc<dyn MetricsSampler>,
     clock: SharedClock,
     runtime_control: Option<Arc<crate::runtime_control::RuntimeControl>>,
+    status_publisher: Option<Arc<dyn StatusPublisher>>,
     last_throttle_sample_inst: Option<Instant>,
     running_reconcile_intent_id: Option<i64>,
     startup_reconstruction_barrier: bool,
@@ -157,6 +159,19 @@ impl DaemonRuntime {
         self.runtime_control = Some(control);
     }
 
+    /// Attach a `StatusPublisher` so consumers like the IPC service see
+    /// fresh `DaemonStatusSnapshot`s after every tick. Without this, the
+    /// IPC `Status` endpoint would return whatever snapshot the
+    /// publisher was constructed with — i.e. it would lie about
+    /// pause/throttle changes the tick loop made.
+    pub fn attach_status_publisher(&mut self, publisher: Arc<dyn StatusPublisher>) {
+        // Publish the current state immediately so consumers don't wait
+        // until the first post-startup tick to see anything other than
+        // their construction-time snapshot.
+        publisher.publish(DaemonStatusSnapshot::from_app(&self.app));
+        self.status_publisher = Some(publisher);
+    }
+
     pub fn tick_with_inputs(
         &mut self,
         now: SystemTime,
@@ -208,6 +223,10 @@ impl DaemonRuntime {
         self.process_ready_queue(now, &mut report)?;
 
         report.staged_executor = self.staged_executor.snapshot();
+
+        if let Some(publisher) = self.status_publisher.as_ref() {
+            publisher.publish(DaemonStatusSnapshot::from_app(&self.app));
+        }
 
         Ok(report)
     }
@@ -302,6 +321,7 @@ impl DaemonRuntime {
             metrics_sampler,
             clock,
             runtime_control: None,
+            status_publisher: None,
             last_throttle_sample_inst: None,
             running_reconcile_intent_id: None,
             startup_reconstruction_barrier: false,
@@ -1072,5 +1092,72 @@ mod tests {
 
     fn timestamp_ms(milliseconds: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_millis(milliseconds)
+    }
+
+    #[test]
+    fn attached_status_publisher_receives_fresh_snapshot_each_tick() {
+        // Regression test for the Wave 7 status-stuck bug: without the
+        // publisher hook, `vapor status` would always return the boot
+        // snapshot. We attach a recording publisher and assert the run
+        // state actually flips through it after a pause request.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        std::fs::create_dir_all(&watch_root).expect("create watch root");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+
+        let mut runtime = DaemonRuntime::build(
+            test_sync_scope(&watch_root),
+            state_db,
+            default_provider(),
+            Arc::new(StaticMetricsSampler::default()),
+            system_clock(),
+            false,
+        )
+        .expect("runtime");
+
+        let publisher = Arc::new(RecordingStatusPublisher::default());
+        runtime.attach_status_publisher(publisher.clone());
+
+        // Attaching the publisher must immediately flush an initial
+        // snapshot so consumers don't wait for the first tick.
+        let initial = publisher.last().expect("attach publishes initial snapshot");
+        assert_eq!(initial.run_state, "Running");
+
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        runtime.attach_control(control.clone());
+        control.request_pause();
+
+        runtime
+            .tick_with_inputs(timestamp_ms(1_500), ThrottleInputs::default())
+            .expect("runtime tick");
+
+        let after = publisher
+            .last()
+            .expect("publisher saw a post-tick snapshot");
+        assert_eq!(after.run_state, "Paused");
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingStatusPublisher {
+        last: std::sync::Mutex<Option<crate::ipc_service::DaemonStatusSnapshot>>,
+    }
+
+    impl RecordingStatusPublisher {
+        fn last(&self) -> Option<crate::ipc_service::DaemonStatusSnapshot> {
+            self.last
+                .lock()
+                .expect("RecordingStatusPublisher mutex poisoned")
+                .clone()
+        }
+    }
+
+    impl crate::ipc_service::StatusPublisher for RecordingStatusPublisher {
+        fn publish(&self, snapshot: crate::ipc_service::DaemonStatusSnapshot) {
+            *self
+                .last
+                .lock()
+                .expect("RecordingStatusPublisher mutex poisoned") = Some(snapshot);
+        }
     }
 }
