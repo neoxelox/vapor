@@ -14,7 +14,7 @@
 use std::error::Error;
 use std::fmt::{self, Display};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use vapor_ipc::{
     AckResponse, Client, ClientError, FrameError, StatusResponse, TimelineResponse, TransportError,
@@ -184,15 +184,6 @@ pub fn tail_logs(tail: Option<usize>) -> io::Result<String> {
 
 fn log_path() -> PathBuf {
     runtime_paths::logs_directory().join(constants::runtime::DAEMON_LOG_FILE_NAME)
-}
-
-/// `cli.md` L3-6 documents the log path. Exposed for `vapor doctor`
-/// and any future tooling that needs to surface the location.
-pub fn log_path_for_diagnostics() -> &'static Path {
-    // Cannot return a static PathBuf; keep this for parity with the
-    // log-path-rendering helper. The implementation pulls from
-    // `runtime_paths` so it always reflects the current `VAPOR_DIR`.
-    Path::new("")
 }
 
 #[cfg(test)]

@@ -75,8 +75,7 @@ fn check_vapor_directory(path: &Path) -> DoctorCheck {
         };
     }
 
-    let writable = is_writable(path);
-    if !writable {
+    if !is_writable(path) {
         return DoctorCheck {
             name,
             status: DoctorCheckStatus::Failure,
@@ -84,11 +83,46 @@ fn check_vapor_directory(path: &Path) -> DoctorCheck {
         };
     }
 
+    if let Some(reason) = private_mode_violation(path) {
+        return DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Warning,
+            detail: format!(
+                "{} is writable but has loose permissions: {reason}",
+                path.display()
+            ),
+        };
+    }
+
     DoctorCheck {
         name,
         status: DoctorCheckStatus::Ok,
-        detail: format!("{} is writable", path.display()),
+        detail: format!("{} is writable and private", path.display()),
     }
+}
+
+/// Returns `Some(reason)` when the directory's mode is more permissive
+/// than `PRIVATE_DIRECTORY_MODE` (`0o700`) on Unix. Returns `None` on
+/// Windows because NTFS DACLs scope per-user inheritance handles the
+/// private-directory invariant, and we have no `0o700` analogue.
+#[cfg(unix)]
+fn private_mode_violation(path: &Path) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = fs::metadata(path).ok()?;
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode == constants::runtime::PRIVATE_DIRECTORY_MODE {
+        return None;
+    }
+    Some(format!(
+        "found mode {:#o}, expected {:#o} (group/other access leaks state to other users)",
+        mode,
+        constants::runtime::PRIVATE_DIRECTORY_MODE
+    ))
+}
+
+#[cfg(not(unix))]
+fn private_mode_violation(_path: &Path) -> Option<String> {
+    None
 }
 
 fn check_daemon_binary() -> DoctorCheck {
@@ -184,10 +218,29 @@ mod tests {
     }
 
     #[test]
-    fn vapor_dir_check_succeeds_when_writable() {
+    fn vapor_dir_check_succeeds_when_writable_and_private() {
         let temp = TempDir::new().expect("temp");
-        let check = check_vapor_directory(temp.path());
+        // tempfile sets a non-0o700 mode by default; tighten it so the
+        // private-mode probe is happy on Unix. On non-Unix the helper
+        // skips the probe.
+        let private = temp.path().join("private");
+        vapor_shared::runtime_paths::ensure_private_directory(&private)
+            .expect("ensure private dir");
+        let check = check_vapor_directory(&private);
         assert_eq!(check.status, DoctorCheckStatus::Ok);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vapor_dir_check_warns_when_permissions_are_loose() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().expect("temp");
+        let dir = temp.path().join("loose");
+        fs::create_dir(&dir).expect("create dir");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("set permissions");
+        let check = check_vapor_directory(&dir);
+        assert_eq!(check.status, DoctorCheckStatus::Warning);
+        assert!(check.detail.contains("loose permissions"));
     }
 
     #[test]

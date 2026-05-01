@@ -200,21 +200,12 @@ impl ThrottleController {
             selected.state
         };
 
-        let cause = if next_state == selected.state {
-            selected.cause
-        } else {
-            // We held the prior state under hysteresis. Re-derive a cause
-            // that reflects the held state rather than the (would-be)
-            // selected one — using IdleReady as the neutral "no transition"
-            // signal would drop information, so we pick a representative
-            // cause from the inputs that pinned the prior state. The
-            // simplest stable choice is to mirror the held state's
-            // pressure tier from inputs; in practice the cause field is
-            // diagnostic, not behavioral, so any reasonable mapping is
-            // acceptable. We retain the originally selected cause here so
-            // callers see *why* a transition would have happened.
-            selected.cause
-        };
+        // The cause field is diagnostic, not behavioral. When hysteresis
+        // holds the prior state we still report the cause that *would*
+        // have triggered the transition — operators see why the
+        // controller wanted to move and that the dwell window pinned it.
+        // The held-state ↔ would-be-cause pairing is intentional.
+        let cause = selected.cause;
 
         let decision = ThrottleDecision {
             state: next_state,

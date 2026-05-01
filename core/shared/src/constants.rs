@@ -31,6 +31,35 @@ pub mod state {
     pub const MAX_TIMESTAMP_MILLIS: i64 = 32_503_680_000_000;
 }
 
+pub mod config {
+    /// Top-level keys recognized in `vapor.json`. Mirrors the Swift
+    /// `VaporConfigurationStore` keyspace; AGENTS.md §8.6 mandates
+    /// centralization so the CLI and the macOS app cannot drift.
+    pub const KEY_AUTO_LAUNCH: &str = "autoLaunch";
+    pub const KEY_USE_GIT_IGNORE: &str = "useGitIgnore";
+    pub const KEY_USE_VAPOR_IGNORE: &str = "useVaporIgnore";
+    pub const KEY_LOCAL_SYNC_DIRECTORY: &str = "localSyncDirectory";
+    pub const KEY_CLOUD_SYNC_DIRECTORY: &str = "cloudSyncDirectory";
+    pub const KEY_PRE_IGNORE_RULES: &str = "preIgnoreRules";
+    pub const KEY_POST_IGNORE_RULES: &str = "postIgnoreRules";
+    pub const KEY_LANGUAGE_CODE: &str = "languageCode";
+    pub const KEY_TIMELINE_EVENT_LIMIT: &str = "timelineEventLimit";
+
+    /// Every recognized key in one slice. Kept in lockstep with the
+    /// `KEY_*` constants above; the CLI uses this for `validate_key`.
+    pub const ALL_KEYS: &[&str] = &[
+        KEY_AUTO_LAUNCH,
+        KEY_USE_GIT_IGNORE,
+        KEY_USE_VAPOR_IGNORE,
+        KEY_LOCAL_SYNC_DIRECTORY,
+        KEY_CLOUD_SYNC_DIRECTORY,
+        KEY_PRE_IGNORE_RULES,
+        KEY_POST_IGNORE_RULES,
+        KEY_LANGUAGE_CODE,
+        KEY_TIMELINE_EVENT_LIMIT,
+    ];
+}
+
 pub mod service {
     /// Reverse-DNS identifier used by every Vapor surface that talks to
     /// the OS service manager (macOS LaunchAgent, Linux systemd unit,

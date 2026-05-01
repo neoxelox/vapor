@@ -76,4 +76,18 @@ public enum VaporConstants {
     public static let processPath = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     public static let preGADefaultProviderDisplayName = "Filesystem (stub)"
   }
+
+  /// Top-level keys recognized in `vapor.json`. Mirrors
+  /// `core/shared/src/constants.rs::config::*` per AGENTS.md §8.6.
+  public enum ConfigKeys {
+    public static let autoLaunch = "autoLaunch"
+    public static let useGitIgnore = "useGitIgnore"
+    public static let useVaporIgnore = "useVaporIgnore"
+    public static let localSyncDirectory = "localSyncDirectory"
+    public static let cloudSyncDirectory = "cloudSyncDirectory"
+    public static let preIgnoreRules = "preIgnoreRules"
+    public static let postIgnoreRules = "postIgnoreRules"
+    public static let languageCode = "languageCode"
+    public static let timelineEventLimit = "timelineEventLimit"
+  }
 }

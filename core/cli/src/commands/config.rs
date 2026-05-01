@@ -13,6 +13,7 @@ use std::io;
 use std::path::Path;
 
 use serde_json::Value;
+use vapor_shared::constants;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConfigCommand {
@@ -87,20 +88,8 @@ pub fn set(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-const KNOWN_KEYS: &[&str] = &[
-    "autoLaunch",
-    "useGitIgnore",
-    "useVaporIgnore",
-    "localSyncDirectory",
-    "cloudSyncDirectory",
-    "preIgnoreRules",
-    "postIgnoreRules",
-    "languageCode",
-    "timelineEventLimit",
-];
-
 fn validate_key(key: &str) -> Result<(), ConfigError> {
-    if KNOWN_KEYS.contains(&key) {
+    if constants::config::ALL_KEYS.contains(&key) {
         Ok(())
     } else {
         Err(ConfigError::UnknownKey(key.to_string()))
@@ -120,20 +109,28 @@ fn read_or_empty_object(path: &Path) -> Result<Value, ConfigError> {
 }
 
 fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
-    match key {
-        "autoLaunch" | "useGitIgnore" | "useVaporIgnore" => match raw {
+    use constants::config::{
+        KEY_AUTO_LAUNCH, KEY_TIMELINE_EVENT_LIMIT, KEY_USE_GIT_IGNORE, KEY_USE_VAPOR_IGNORE,
+    };
+    if matches!(
+        key,
+        KEY_AUTO_LAUNCH | KEY_USE_GIT_IGNORE | KEY_USE_VAPOR_IGNORE
+    ) {
+        return match raw {
             "true" => Ok(Value::Bool(true)),
             "false" => Ok(Value::Bool(false)),
             other => Err(ConfigError::Parse(format!(
                 "expected 'true' or 'false' for '{key}', got '{other}'"
             ))),
-        },
-        "timelineEventLimit" => raw
+        };
+    }
+    if key == KEY_TIMELINE_EVENT_LIMIT {
+        return raw
             .parse::<i64>()
             .map(|value| Value::Number(value.into()))
-            .map_err(|error| ConfigError::Parse(format!("expected integer for '{key}': {error}"))),
-        _ => Ok(Value::String(raw.to_string())),
+            .map_err(|error| ConfigError::Parse(format!("expected integer for '{key}': {error}")));
     }
+    Ok(Value::String(raw.to_string()))
 }
 
 fn format_json_scalar(value: &Value) -> String {

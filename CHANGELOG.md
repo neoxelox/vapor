@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- `vapor doctor`'s `vapor_dir` probe now warns when the directory is writable but its mode is more permissive than `PRIVATE_DIRECTORY_MODE` (`0o700`) on Unix. Closes the L1-4 spec line "VAPOR_DIR exists / writable / private" — the previous check only validated the first two. Windows skips the probe (NTFS DACLs scope per-user inheritance and there is no `0o700` analogue). New regression test (`vapor_dir_check_warns_when_permissions_are_loose`) seeds a `0o755` directory and asserts the warning.
+- `vapor.json` config keys are now centralized in `core/shared::constants::config::{KEY_*, ALL_KEYS}` (mirrored in the Swift `VaporConstants.ConfigKeys` per AGENTS.md §8.6). The `vapor config get|set` validator pulls from the shared list instead of an inline string array; the macOS Swift app references the same identifiers so the two surfaces cannot drift.
+- Drop a few small dead-code paper cuts the audit caught: the `let _ = ConfigCommand::Set { … }` no-op binding in `core/cli/src/main.rs::dispatch`, the unused `ConfigCommand` import that fell out with it, and the stub `log_path_for_diagnostics()` in `core/cli/src/commands/ipc.rs` whose own comment admitted it returned `Path::new("")` and had no callers. Also tighten the misleading hysteresis-cause comment in `core/daemon/src/throttle.rs::evaluate` so it states what the code actually does.
+
 ### Added
 
 - `vapor service` now accepts a `--user` / `--system` flag pair (per `docs/tasks/cli.md` L2-1). `--user` is the default and drives the per-user LaunchAgent / systemd / Task Scheduler entry that already shipped in Wave 6; `--system` is rejected with an actionable error so scripts that want to opt in to the future system-wide install surface fail loudly instead of silently being interpreted as unknown args. The two flags are mutually exclusive at the clap layer. `--system` lands in the optional Waves 12 / 13 once the matching native installers do.

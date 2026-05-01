@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use vapor_cli::{ConfigCommand, RunOptions, ServiceCommand};
+use vapor_cli::{RunOptions, ServiceCommand};
 use vapor_cli::{
     commands::{
         auth as auth_cmd, config as config_cmd, doctor as doctor_cmd, ipc as ipc_cmd,
@@ -151,10 +151,6 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
                     Ok(ExitCode::SUCCESS)
                 }
                 ConfigAction::Set { key, value } => {
-                    let _ = ConfigCommand::Set {
-                        key: key.clone(),
-                        value: value.clone(),
-                    };
                     config_cmd::set(&path, &key, &value).map_err(|e| e.to_string())?;
                     Ok(ExitCode::SUCCESS)
                 }
