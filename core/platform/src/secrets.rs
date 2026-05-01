@@ -49,6 +49,19 @@ pub trait SecretStore: Send + Sync {
     fn set(&self, name: &str, value: &str) -> Result<(), SecretStoreError>;
     fn delete(&self, name: &str) -> Result<(), SecretStoreError>;
     fn list(&self) -> Result<Vec<String>, SecretStoreError>;
+
+    /// Whether values written via `set` survive process exit. Process-
+    /// local fakes (the in-memory store, the pre-bridge `NativeSecretStore`
+    /// today on every OS) return `false`; the real Keychain / libsecret /
+    /// Credential Manager backends will return `true` once their
+    /// respective Wave-5 / Wave-12 / Wave-13 work lands. Surfaces of
+    /// the trait that store user-visible secrets must propagate this
+    /// flag so users aren't told "stored" when the value is going to
+    /// disappear at process exit (`vapor auth login` would otherwise
+    /// silently lose every token pre-Wave-5).
+    fn is_persistent(&self) -> bool {
+        false
+    }
 }
 
 /// Process-local in-memory secret store. Default for tests, the
@@ -100,6 +113,10 @@ impl SecretStore for InMemorySecretStore {
             .cloned()
             .collect())
     }
+
+    fn is_persistent(&self) -> bool {
+        false
+    }
 }
 
 /// Native secret store. Until the per-OS Keychain / libsecret /
@@ -135,6 +152,13 @@ impl SecretStore for NativeSecretStore {
     }
     fn list(&self) -> Result<Vec<String>, SecretStoreError> {
         self.inner.list()
+    }
+    fn is_persistent(&self) -> bool {
+        // Wave 5 / C4-5 flips this to `true` once the macOS Keychain
+        // bridge is wired in and the Linux / Windows native bridges
+        // land in the matching deferred waves. Until then this is a
+        // strict process-local store.
+        false
     }
 }
 

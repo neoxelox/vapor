@@ -235,10 +235,20 @@ fn dispatch_logs(tail: Option<usize>) -> Result<ExitCode, String> {
 
 fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
     let store = auth_cmd::build_native_store();
+    let persistent = store.is_persistent();
     match action {
         AuthAction::Login { provider, token } => {
             auth_cmd::login_into(store.as_ref(), &provider, &token).map_err(|e| e.to_string())?;
-            println!("auth login: stored token for {provider}");
+            if persistent {
+                println!("auth login: stored token for {provider}");
+            } else {
+                eprintln!(
+                    "vapor: warning: native secret store is not yet wired in on this OS; \
+                     the token was kept in process memory only and will not survive restart \
+                     (see core/tasks/core.md C4-5 / Waves 12 / 13)."
+                );
+                println!("auth login: stored token for {provider} (process-local only)");
+            }
             Ok(ExitCode::SUCCESS)
         }
         AuthAction::Logout { provider } => {
@@ -248,6 +258,12 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
         }
         AuthAction::Status => {
             let entries = auth_cmd::status_from(store.as_ref()).map_err(|e| e.to_string())?;
+            if !persistent {
+                eprintln!(
+                    "vapor: note: native secret store is not yet wired in on this OS; \
+                     `bound` states below reflect process-local memory only."
+                );
+            }
             for entry in entries {
                 let state = if entry.bound { "bound" } else { "not bound" };
                 println!("{}: {}", entry.provider, state);
