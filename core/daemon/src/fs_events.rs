@@ -356,7 +356,7 @@ mod tests {
 
     #[test]
     fn callback_normalizes_relative_paths_and_records_metadata() {
-        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let watch_root = synthetic_watch_root();
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
@@ -371,18 +371,23 @@ mod tests {
         let events = recorder.events.lock().expect("events mutex poisoned");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, FsEventKind::Created);
-        assert_eq!(events[0].path, PathBuf::from("/tmp/vapor-root/src/main.rs"));
+        assert_eq!(events[0].path, watch_root.join("src/main.rs"));
     }
 
     #[test]
     fn callback_filters_paths_outside_watch_root() {
-        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let watch_root = synthetic_watch_root();
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
         let event = Event {
             kind: EventKind::Modify(ModifyKind::Any),
-            paths: vec![PathBuf::from("/tmp/other-root/file.txt")],
+            paths: vec![
+                watch_root
+                    .parent()
+                    .expect("synthetic watch root has a parent")
+                    .join("other-root/file.txt"),
+            ],
             attrs: Default::default(),
         };
 
@@ -394,7 +399,7 @@ mod tests {
 
     #[test]
     fn callback_rejects_relative_traversal_outside_watch_root() {
-        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let watch_root = synthetic_watch_root();
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
@@ -510,13 +515,13 @@ mod tests {
 
     #[test]
     fn callback_maps_rename_events() {
-        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let watch_root = synthetic_watch_root();
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
         let event = Event {
             kind: EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Any)),
-            paths: vec![PathBuf::from("/tmp/vapor-root/renamed.txt")],
+            paths: vec![watch_root.join("renamed.txt")],
             attrs: Default::default(),
         };
 
@@ -529,7 +534,7 @@ mod tests {
 
     #[test]
     fn callback_records_notify_errors() {
-        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let watch_root = synthetic_watch_root();
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
@@ -547,7 +552,7 @@ mod tests {
 
     #[test]
     fn callback_skips_paths_matching_default_ignore_rules() {
-        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let watch_root = synthetic_watch_root();
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
@@ -565,7 +570,7 @@ mod tests {
 
     #[test]
     fn callback_burst_regression_stays_under_guardrail() {
-        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let watch_root = synthetic_watch_root();
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
@@ -654,5 +659,18 @@ mod tests {
             ..EventPathFilterOptions::default()
         };
         EventPathFilter::for_watch_root(watch_root, &options)
+    }
+
+    /// A host-absolute synthetic watch root for the callback tests, which
+    /// inject events without touching the real filesystem. The root must be
+    /// absolute on the current OS: a Unix-style `/tmp/...` literal is not an
+    /// absolute path on Windows, so the watch-root prefix check would drop
+    /// every event and the tests would observe zero recordings.
+    fn synthetic_watch_root() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from("C:\\vapor-root")
+        } else {
+            PathBuf::from("/tmp/vapor-root")
+        }
     }
 }
