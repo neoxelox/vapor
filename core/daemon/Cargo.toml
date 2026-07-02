@@ -16,6 +16,15 @@ vapor-shared = { path = "../shared" }
 [dev-dependencies]
 tempfile = "=3.27.0"
 
+# Windows has no system `sqlite3.lib` to link against (macOS and Linux ship
+# one), so on Windows build SQLite from source via rusqlite's `bundled`
+# feature. With `resolver = "2"` this stays scoped to Windows targets, so the
+# macOS/Linux builds keep linking the native system library unchanged. This
+# keeps the Windows portability-guard CI leg green; Wave 12 revisits when the
+# Windows surface actually ships.
+[target.'cfg(windows)'.dependencies]
+rusqlite = { version = "=0.38.0", features = ["bundled"] }
+
 [lib]
 path = "src/lib.rs"
 
