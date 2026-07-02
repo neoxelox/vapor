@@ -1,13 +1,20 @@
+// `PathBuf`, `Instant`, and the `service` command module are only referenced
+// by the `#[cfg(target_os = "macos")]` service-install wiring below, so they
+// are unused on the non-macOS build that CI compiles under `-D warnings`.
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 use std::process::ExitCode;
+#[cfg(target_os = "macos")]
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
+#[cfg(target_os = "macos")]
+use vapor_cli::commands::service as service_cmd;
 use vapor_cli::{RunOptions, ServiceCommand};
 use vapor_cli::{
     commands::{
         auth as auth_cmd, config as config_cmd, doctor as doctor_cmd, ipc as ipc_cmd,
-        run as run_cmd, service as service_cmd,
+        run as run_cmd,
     },
     resolve_configuration_path,
 };
