@@ -159,21 +159,33 @@ Exit gate:
 
 ## Phase M4 - Profiles UX on macOS
 
-Depends on: `docs/tasks/core.md` C8-19..26.
+Depends on: `docs/tasks/core.md` C8-19..26 and the sync-modes workstream
+C8-59..66.
 
 - [ ] M4-1 App UI flows to create, rename, select, enable/disable, and
       delete profiles; bind each profile to a provider + authenticated
       account.
 - [ ] M4-2 Settings UI for profile-scoped override knobs (sync roots,
-      ignore rules, resource ceilings, idle-boost).
+      ignore rules, resource ceilings, idle-boost, and the per-profile
+      `syncMode` selector: `two-way` / `pull-only` / `push-only`). Surface
+      each profile's effective mode and, from C8-65, its mirror-driven
+      revert/delete counts.
 - [ ] M4-3 Safe profile disconnect/delete flows that leave other profiles
       untouched.
 - [ ] M4-4 UI flows for multi-provider fan-out (same local root → multiple
       providers/accounts).
+- [ ] M4-5 Strict-mirror safety UX for the one-way modes: a clear
+      first-enable confirmation that states the subordinate side will be made
+      to exactly match the source and that this **permanently** overwrites
+      divergent edits and removes local/cloud-only content (there is no
+      recoverable copy). Follows Apple HIG for destructive-action
+      confirmation. Depends on `docs/architecture/sync-modes.md §Safety`.
 
 Exit gate:
 
 - Profiles can be fully managed from the app without CLI intervention.
+- One-way sync modes cannot be enabled without the destructive-action
+  warning; the app never silently deletes/reverts to converge a mirror.
 
 ## Phase M5 - macOS distribution hardening
 
