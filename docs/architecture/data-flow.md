@@ -24,6 +24,35 @@ Current caveat: the reconcile controller is now idle-biased and interruptible, a
 3. Loop prevention filters self-originated writes.
 4. Apply pipeline writes local changes and records conflict/tombstone outcomes.
 
+## Sync modes (directionality)
+
+`syncMode` selects which direction changes may flow. Full design (semantics,
+safety, config surface, rollout order) lives in `sync-modes.md`; the pipeline
+touch-points are:
+
+- **`two-way`** (default) — both the local→remote and remote→local pipelines
+  above run; divergence resolves by the keep-both conflict policy below.
+- **`pull-only`** (cloud → local, strict mirror) — the local→remote pipeline
+  is gated off: local watcher events do not produce upload/remote-delete/
+  remote-rename intents. The remote→local apply and reconcile actively make
+  local match cloud, including reverting local edits to the cloud canonical
+  and removing local-only files. Cloud is the source of truth; no keep-both.
+- **`push-only`** (local → cloud, strict mirror) — the remote→local pipeline
+  is gated off: nothing is written, deleted, or reverted locally. The
+  local→remote apply and reconcile make cloud match local, including
+  overwriting divergent remote files and removing cloud-only files. Local is
+  the source of truth; no keep-both.
+
+The mode is a property of the sync scope / profile, so every operation
+(upload, download, delete, rename, revert) flows through the same gate — no
+operation bypasses it. `self_write_cache` is orthogonal and stays active in
+every mode. One-way modes are strict-mirror and can delete/overwrite the
+subordinate side, so they are opt-in per profile with the safety
+requirements in `sync-modes.md §Safety`. `syncMode` is per-profile and
+categorical (the top-level value is the default; each profile may override
+outright — not MIN-lowering), so one device can run several `pull-only`
+mirror profiles alongside a `two-way` profile.
+
 ## User resource budgets
 
 User-configurable daemon-process ceilings (`resourceLimits.cpuPercent`, `memoryPercent`, `bandwidthPercent`) and an optional dynamic headroom expansion (`idleBoost`) layer on top of the internal throttle controller and the auto-tuner.
@@ -54,6 +83,12 @@ Idle-boost and the throttle controller update asynchronously on the same 1s cade
 5. **In-flight work during snap-down.** When the effective ceiling drops below current in-flight concurrency as a result of any of the above, no new work is admitted but running work proceeds to its next slice checkpoint before yielding — same discipline as §"Invariants" above.
 
 ## Conflict handling
+
+This section describes the **`two-way`** policy. In the one-way `pull-only`
+and `push-only` modes there is a declared source of truth, so divergence is
+resolved in favor of the authoritative side with no conflict copy (see
+`sync-modes.md`). Keep-both remains the default because `two-way` is the
+default mode.
 
 When local and remote versions of the same path diverge (both sides modified, or rename collides with an existing name), the default policy is "keep both; never silent overwrite." Concrete mechanics:
 

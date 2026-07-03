@@ -29,6 +29,7 @@ In flight and coming next:
 
 - 🔁 Bidirectional cloud sync with durable intent replay and eventual consistency.
 - 🧩 Multiple sync profiles let one folder flow to several clouds or keep separate setups neatly isolated.
+- 🔀 Choose each folder's sync direction — full two-way, or a one-way mirror for read-only backups and copies.
 - 🛡 Conflict-safe behavior with deterministic outcomes (keep both copies, never silent overwrite).
 - ⏸️ Pressure-aware throttle modes that adapt sync intensity to real device load.
 - ⚙️ Configurable hard caps on its share of CPU, memory, and network so streaming, browsing, and other apps always have room.
@@ -65,6 +66,7 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`.
 | `useVaporIgnore`     | `Bool`   | `true`                                              | Applies recursive `.vaporignore` rules during local filtering.                           |
 | `localSyncDirectory` | `String` | `"~/Vapor"`                                         | Sets the local sync root; Vapor creates it if it does not exist yet.                     |
 | `cloudSyncDirectory` | `String` | `"/Vapor"`                                          | Sets the cloud sync root; Vapor creates it if it does not exist yet.                     |
+| `syncMode`           | `String` | `"two-way"`                                         | Chooses the sync direction: `two-way` (bidirectional), `pull-only` (cloud → local, a read-only local mirror), or `push-only` (local → cloud, a read-only cloud backup). |
 | `preIgnoreRules`     | `String` | Embedded `.gitignore`-like low-impact default rules | Provides the baseline ignore rules that run before discovered ignore files.              |
 | `postIgnoreRules`    | `String` | Empty string                                        | Provides the final override rules that run after discovered ignore files.                |
 | `languageCode`       | `String` | `"en"`                                              | Selects the UI language catalog to load.                                                 |

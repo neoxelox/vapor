@@ -10,16 +10,25 @@
 use std::error::Error;
 use std::fmt::{self, Display};
 use std::path::PathBuf;
+// `Arc` is only referenced by the macOS `build_native_macos` constructor and
+// by the tests (which build `Arc<InMemory*>` fakes); it is unused on the
+// non-macOS lib build, which `-D warnings` treats as an error.
+#[cfg(any(target_os = "macos", test))]
 use std::sync::Arc;
 use std::time::Instant;
 
-use vapor_lifecycle::{
-    AutoLaunchSettingStore, DaemonLifecycleError, DaemonLifecycleManager,
-    JsonFileAutoLaunchSettingStore,
-};
-use vapor_platform::{
-    NativeServiceInstaller, ServiceDescriptor, ServiceInstallError, ServiceInstaller, ServiceStatus,
-};
+use vapor_lifecycle::{DaemonLifecycleError, DaemonLifecycleManager};
+// The `AutoLaunchSettingStore` trait is needed by `build_native_macos` (macOS)
+// and by the tests (its `read` method is called on the in-memory store); the
+// concrete `JsonFileAutoLaunchSettingStore` is macOS-only.
+#[cfg(any(target_os = "macos", test))]
+use vapor_lifecycle::AutoLaunchSettingStore;
+#[cfg(target_os = "macos")]
+use vapor_lifecycle::JsonFileAutoLaunchSettingStore;
+use vapor_platform::{ServiceInstallError, ServiceInstaller, ServiceStatus};
+// The macOS installer type + descriptor are only used by `build_native_macos`.
+#[cfg(target_os = "macos")]
+use vapor_platform::{NativeServiceInstaller, ServiceDescriptor};
 use vapor_shared::constants;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

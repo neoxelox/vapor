@@ -209,6 +209,17 @@ Covers the full C8-1 … C8-58 span in `core.md`:
 8. **C8-55 … C8-58** — optional advanced safeguards (active-coding
    detection, mass-change guard, support export).
 
+**Prioritized workstream — sync modes / directionality (C8-59 … C8-66).**
+The `syncMode` feature (`two-way` default, `pull-only`, `push-only`
+strict-mirror one-way modes) layers on the bidirectional runtime shell and is
+**prioritized within Wave 8**: it lands right after sub-block 1 (C8-1 … C8-13)
+provides the download/apply pipeline, and **must be proven in the core runtime
+before Wave 9 exposes it in the app**. Build order is `pull-only` → `two-way`
+→ `push-only` so cloud→local download/mirror is validated first. One-way modes
+are opt-in per profile and destructive to the subordinate side — see
+`docs/architecture/sync-modes.md`. (The high task numbers only keep existing
+IDs stable; they do not imply low priority.)
+
 ### Wave 9 — macOS app UX polish
 
 Status: pending. Requires Wave 8 sub-blocks as noted below.
@@ -219,9 +230,11 @@ Status: pending. Requires Wave 8 sub-blocks as noted below.
   conflicts + failures + effective ceilings + utilization + idle-boost
   reason, per-intent "why stuck" UI, live timeline tab, tests.
   Depends on C8-27 … C8-31.
-- `macos.md` M4-1 … M4-4 — profiles UX: create/rename/select/enable/
-  disable/delete flows, profile-scoped override settings UI, safe
-  disconnect, multi-provider fan-out UI. Depends on C8-19 … C8-26.
+- `macos.md` M4-1 … M4-5 — profiles UX: create/rename/select/enable/
+  disable/delete flows, profile-scoped override settings UI (including the
+  per-profile `syncMode` toggle and its strict-mirror warning), safe
+  disconnect, multi-provider fan-out UI. Depends on C8-19 … C8-26 and the
+  sync-modes workstream C8-59 … C8-66.
 
 ### Wave 10 — macOS distribution hardening
 

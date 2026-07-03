@@ -94,6 +94,16 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 - Default conflict policy: keep both (never silent overwrite).
 - Maintain tombstones and deletion semantics with durable replay.
 - Remote poll/apply pipeline must obey throttle and retry constraints.
+- Sync direction is selected by `syncMode` (`two-way` default; one-way
+  `pull-only` / `push-only`), resolved per profile with the top-level value as
+  the default. Vapor's "never lose data" / keep-both guarantee applies **only
+  to `two-way`**. The one-way modes are an explicit, opt-in, per-profile
+  exception: they are **strict mirror** (the non-authoritative side is driven
+  to exactly match the declared source of truth, permanently overwriting
+  divergent edits and removing extra content). They must never be enabled
+  silently or inferred, and must surface an up-front data-loss warning before
+  activation. There is no recoverable quarantine — the warning is the
+  safeguard. Full design: `docs/architecture/sync-modes.md`.
 
 ## 5) Data durability and migrations
 

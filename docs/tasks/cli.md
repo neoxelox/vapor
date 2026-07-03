@@ -54,6 +54,12 @@ Depends on: `docs/tasks/core.md` C1–C3.
       - On Windows: Task Scheduler task presence.
       *(macOS-flavor checks ship in Wave 6; Linux + Windows checks land
       with Waves 13 / 12.)*
+- [ ] L1-5 `vapor config get|set syncMode <value>` enum-validates the sync
+      mode (`two-way` / `pull-only` / `push-only`) the same way the existing
+      typed keys validate booleans/ints, rejecting unknown values with an
+      actionable error. Ships with the C8-59 config surface; add the `--json`
+      snapshot per LT-1. Per-profile editing arrives with the profiles CLI
+      surface. Depends on `docs/tasks/core.md` C8-59.
 
 ## Phase L2 - Service lifecycle (autolaunch on every OS)
 

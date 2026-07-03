@@ -507,6 +507,83 @@ inherits it.
 - [ ] C8-57 Mass-change / ransomware guard with pause + alert workflow.
 - [ ] C8-58 Diagnostics history + support export bundle.
 
+### Sync modes (directional / one-way sync) — prioritized
+
+Plan reference: `docs/plans/core.md §2.5`. Full design:
+`docs/architecture/sync-modes.md`. Pipeline mechanics: `docs/architecture/data-flow.md §Sync modes (directionality)`.
+
+**Priority + ordering.** Although numbered after the C8-1…C8-58 span (to keep
+existing task IDs stable), this sub-wave is prioritized: it lands as soon as
+the bidirectional runtime shell exists (C8-1…C8-13), *before* the profiles UX
+and *before* any app-surface work (Wave 9). Build order within the sub-wave is
+deliberately `pull-only` → `two-way` → `push-only` so the remote→local
+download/apply path is validated first.
+
+- [ ] C8-59 `syncMode` config surface + `SyncMode` enum (`two-way` default,
+      `pull-only`, `push-only`). Add `config::KEY_SYNC_MODE` + `ALL_KEYS` and
+      the enum + default in `core/shared/src/constants.rs`; mirror in the Swift
+      `VaporConstants` per AGENTS.md §8.6. Thread `sync_mode` onto `SyncScope`
+      (`core/daemon/src/sync_directories.rs`) and classify it as a
+      **profile-override-capable, categorical** setting (top-level value is the
+      default; each profile overrides outright — not MIN-lowering; see C8-19 /
+      C8-21). `vapor config get|set syncMode <value>` enum-validates (see
+      `docs/tasks/cli.md` L1-5). Document in root `README.md` **Configuration**,
+      `docs/architecture/sync-modes.md`, and `data-flow.md`.
+- [ ] C8-60 **`pull-only`** (cloud → local, strict mirror) — *first*. Requires
+      C8-1…C8-13 (download stage + remote-apply pipeline). Gate off all
+      local→remote propagation (no upload / remote-delete / remote-rename). In
+      the remote-apply + reconcile paths make local exactly match cloud: apply
+      remote creates/edits/deletes, revert divergent local edits to the cloud
+      canonical, and remove local-only files. Cloud is authoritative — no
+      keep-both conflict copies. `self_write_cache` still suppresses echoes.
+      Validates cloud→local download/mirror end-to-end.
+- [ ] C8-61 **`two-way`** — *second*. Bind `syncMode = two-way` to the existing
+      bidirectional keep-both pipeline (C8-14…C8-18) and assert the one-way
+      gates are inert in this mode. Primarily a wiring + validation task layered
+      on the conflict/tombstone work.
+- [ ] C8-62 **`push-only`** (local → cloud, strict mirror) — *third*. Gate off
+      all remote→local propagation (no download / local-delete / local-revert).
+      In the local-apply + reconcile paths make cloud exactly match local:
+      upload local creates/edits, propagate local deletes to the cloud,
+      overwrite divergent remote files with the local canonical, and remove
+      cloud-only files. Local is authoritative — no keep-both.
+- [ ] C8-63 Informed opt-in + overwrite warning (owner decision: **no**
+      recoverable quarantine). One-way modes never activate for a profile
+      unless `syncMode` is explicitly set to `pull-only` / `push-only` — never
+      inferred — and the subordinate side is overwritten/deleted **permanently**
+      to match the source. The runtime records the explicit opt-in and exposes
+      it (with the per-profile mode + revert/delete counts, C8-65) so every
+      surface can show a clear data-loss warning before the mode is enabled.
+      Vapor's never-lose-data guarantee is scoped to `two-way`; one-way modes
+      trade it for a faithful mirror with an up-front warning. See
+      `docs/architecture/sync-modes.md §Safety`.
+- [ ] C8-64 Multi-profile mixed modes. Verify different profiles on one device
+      run different `syncMode`s concurrently (e.g. several `pull-only` mirror
+      profiles + one `two-way`), each isolated per the multi-profile watch
+      coordination rules. Requires C8-19…C8-26.
+- [ ] C8-65 Diagnostics / IPC. Expose per-profile `syncMode` and a count of
+      mirror-driven reverts/deletes in the status + diagnostics surface
+      (extends C8-27…C8-31); consumed by macOS UX (`docs/tasks/macos.md` M4-2 /
+      M4-5) and `vapor status`.
+- [ ] C8-66 Tests. `pull-only` reverts a local edit + removes a local-only file
+      + deletes on cloud-delete, never uploads; `push-only` overwrites a remote
+      edit + removes a cloud-only file + deletes on local-delete, never
+      downloads; `two-way` keep-both unaffected and gates inert; mode change
+      mid-run converges; mixed per-profile modes stay isolated;
+      `self_write_cache` still prevents echoes per mode; a one-way mode never
+      activates without an explicit `syncMode` opt-in. Cross-links CT-7.
+
+Exit gate:
+
+- All three `syncMode` values behave per `docs/architecture/sync-modes.md` on
+  the filesystem reference provider, validated in the order pull-only →
+  two-way → push-only.
+- One-way modes are opt-in per profile, surface the destructive-action
+  warning, and are observable (per-profile mode + revert/delete counts in
+  diagnostics).
+- No app-surface work depends on this being incomplete — the runtime behavior
+  is proven before Wave 9 exposes the toggle.
+
 ## Phase C9 - `vapor` CLI delivery
 
 Tracked separately in `docs/tasks/cli.md`; this phase is informational here

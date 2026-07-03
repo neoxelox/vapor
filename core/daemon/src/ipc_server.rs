@@ -13,6 +13,9 @@ use std::sync::Arc;
 use std::thread;
 
 use vapor_ipc::Service;
+// The connection handler is only wired up by the Unix serve loop below; the
+// non-Unix `spawn` stub returns an error before serving anything.
+#[cfg(unix)]
 use vapor_ipc::serve_connection;
 use vapor_shared::{constants, runtime_paths};
 
@@ -89,7 +92,6 @@ pub fn spawn(service: Arc<dyn Service>) -> std::io::Result<IpcServerHandle> {
 
 #[cfg(not(unix))]
 pub fn spawn(_service: Arc<dyn Service>) -> std::io::Result<IpcServerHandle> {
-    let socket_path = resolve_socket_path();
     Err(std::io::Error::other(
         "IPC server is not supported on this OS yet (Wave 12 / C6 named-pipe transport)",
     ))

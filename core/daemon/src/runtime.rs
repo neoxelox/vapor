@@ -943,9 +943,15 @@ mod tests {
         assert_eq!(report.stabilized_events, 150);
         assert_eq!(report.durable_enqueues, 150);
         assert!(report.started_staged_intents >= 4);
+        // Gross-regression guard-rail (Tier 1), not an SLO. One tick that
+        // durably enqueues 150 intents performs 150 SQLite writes, which is
+        // fsync-bound and slow on cold-cache CI runners — Windows disk I/O in
+        // particular measured ~3s. The bound is deliberately generous so it
+        // only trips on an order-of-magnitude regression, never on runner
+        // variance; precise timing lives in the Tier-2 perf suite.
         assert!(
-            elapsed < Duration::from_secs(3),
-            "composed runtime tick took {:?}, expected < 3s",
+            elapsed < Duration::from_secs(10),
+            "composed runtime tick took {:?}, expected < 10s",
             elapsed
         );
     }

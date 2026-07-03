@@ -34,6 +34,11 @@ across platforms, start with `platform-abstractions.md`.
   discipline, fs-watch callback rules, self-write-cache / loop-prevention
   design, multi-profile watch coordination, conflict handling,
   control/observability surface.
+- `sync-modes.md` — sync directionality (`syncMode`): `two-way` (default),
+  `pull-only`, and `push-only` strict-mirror one-way modes; per-profile
+  resolution, interaction with the keep-both conflict policy, safety
+  requirements for the destructive one-way paths, config surface, and the
+  pull-only → two-way → push-only build order.
 - `ipc-contracts.md` — transport-agnostic contract surface between apps
   (macOS, future Windows/Linux, `vapor` CLI) and the `vapord` daemon.
   Versioning, handshake, skew-matrix, field-omission tolerance, payload

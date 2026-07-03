@@ -18,7 +18,8 @@
 - Provide transparent state, diagnostics, and user controls from the macOS app and menubar.
 - Honor user-configured resource ceilings (`resourceLimits`) as hard caps, with optional `idleBoost` that raises ceilings only when the device is genuinely idle with measured headroom.
 - Support multiple sync profiles (planned in Phase 5) so one device can target multiple provider accounts safely with per-profile overrides.
-- Default to the `keep both copies` conflict policy with deterministic conflict-suffix paths (planned in Phase 4) so no edit is silently overwritten.
+- Let the user choose each folder's sync direction (`syncMode`, prioritized in the Wave 8 / C8 runtime work): `two-way` bidirectional by default, or one-way `pull-only` (cloud → local) / `push-only` (local → cloud) strict-mirror modes for read-only backups and copies. Selectable per profile so one device can keep several read-only mirrors alongside a bidirectional folder. Design: `docs/architecture/sync-modes.md`.
+- Default to the `keep both copies` conflict policy with deterministic conflict-suffix paths (planned in Phase 4) so no edit is silently overwritten. The `keep both` / never-lose-data guarantee is scoped to `two-way`; the one-way `syncMode` variants are an explicit, opt-in exception with a declared source of truth and an up-front overwrite warning (see `docs/architecture/sync-modes.md §Safety`).
 
 ## Runtime model
 
@@ -27,4 +28,5 @@
 - User resource ceilings (`resourceLimits.cpuPercent`, `memoryPercent`, `bandwidthPercent`) and `idleBoost` (default-on dynamic headroom) layer over the throttle controller without ever relaxing it.
 - Eventual consistency is guaranteed by durable intent persistence and retry logic.
 - Bidirectional safety includes self-write loop prevention (`self_write_cache`, planned in Phase 3) and deterministic conflict handling (planned in Phase 4).
+- Sync direction is per profile via `syncMode` (`two-way` default; one-way `pull-only` / `push-only` strict mirror). One-way modes have a declared source of truth and drive the subordinate side to match it — opt-in and destructive (permanent overwrite/delete, no recoverable copy), so they carry an up-front data-loss warning. The never-lose-data guarantee applies to `two-way` only. See `docs/architecture/sync-modes.md`.
 - Graceful shutdown on SIGTERM/SIGINT (or the platform-native equivalent on Windows/Linux) and a `CrashLoopPaused` state after 5 unclean exits in 10 minutes. macOS specifics: `docs/operations/macos/launchagent-policy.md`.

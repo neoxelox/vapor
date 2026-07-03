@@ -95,6 +95,35 @@ A headless-first binary that exposes every runtime capability. It ships on
 every supported OS, proves the platform abstractions are correct, and is the
 universal control plane other apps can shell out to. Command surface in §7.
 
+### 2.5 Sync modes (directionality)
+
+The engine supports three sync directions, selected by the `syncMode` setting
+and owned entirely by the core runtime (apps only display it):
+
+- `two-way` (default) — bidirectional local ⇄ cloud with the keep-both
+  conflict policy. Historical behavior.
+- `pull-only` — one-way cloud → local. Cloud is authoritative; local is a
+  read-only replica (strict mirror). Great for keeping several read-only
+  local copies/backups of a cloud folder.
+- `push-only` — one-way local → cloud. Local is authoritative; the cloud is a
+  read-only backup (strict mirror).
+
+`syncMode` is a **per-profile, categorical** setting: the top-level value is
+the default and each profile may override it outright (not MIN-lowering), so
+one device can run several `pull-only` mirror profiles beside a `two-way`
+profile. One-way modes are **strict mirror** — the subordinate side is driven
+to exactly match the source, which can overwrite/delete user data — so they
+are opt-in per profile and carry an up-front data-loss warning. Vapor's
+never-lose-data guarantee is scoped to `two-way`; one-way modes deliberately
+trade it for a faithful mirror (no recoverable quarantine, no conflict copy —
+the declared source of truth wins). Keep-both stays the `two-way` default.
+
+This is a **prioritized** capability: it must be delivered and proven in the
+core runtime (Wave 8) before any app surface exposes it (Wave 9). Full design:
+`docs/architecture/sync-modes.md`. Pipeline mechanics: `data-flow.md`.
+Execution: `docs/tasks/core.md` C8-59…C8-66, built in the order
+`pull-only` → `two-way` → `push-only`.
+
 ## 3) Platform traits
 
 All traits live under `core/platform/src/*`. Each has one native implementation
@@ -378,9 +407,11 @@ trait layer but are not committed deliverables.
 6. **Finish runtime capability completion** (the full C8 span in
    `docs/tasks/core.md`): filesystem reference provider, bidirectional
    runtime shell, `self_write_cache`, conflict policy, tombstones,
-   multi-profile model, IPC diagnostics surface, user resource budgets
-   + idle boost, auto-tuning, provider-system extensibility, Google
-   Drive provider, optional safeguards.
+   **sync modes / directionality (§2.5 — prioritized: land right after the
+   bidirectional runtime shell, before the app UX)**, multi-profile model,
+   IPC diagnostics surface, user resource budgets + idle boost, auto-tuning,
+   provider-system extensibility, Google Drive provider, optional
+   safeguards.
 7. **Polish the macOS app UX** against the completed runtime:
    diagnostics panel, per-intent "why stuck" view, live timeline,
    profiles UX, real IPC-backed controls.

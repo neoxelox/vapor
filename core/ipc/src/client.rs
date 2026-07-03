@@ -218,11 +218,14 @@ fn apply_stream_timeout(_stream: &StreamHandle, _timeout: Duration) -> Result<()
     Ok(())
 }
 
-#[cfg(test)]
+// The only test here exercises the Unix-domain-socket connect path, so the
+// whole module is Unix-only; on Windows it would otherwise leave `use super::*`
+// unused, which `-D warnings` rejects. The named-pipe transport (Wave 12) will
+// add its own `#[cfg(windows)]` tests.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn connect_with_timeout_returns_promptly_against_wedged_peer() {
         // L3-7 invariant: the CLI must never hang against a daemon
