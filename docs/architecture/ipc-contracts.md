@@ -12,8 +12,11 @@ The *transport* is platform-specific and covered by:
 - `docs/architecture/linux/ipc-transport.md` — Linux (Unix domain socket).
 
 The contracts defined in this document are transport-agnostic: the same
-schema, handshake, and skew matrix apply to every transport. The wire format
-is JSON-RPC 2.0 with length-prefixed frames.
+schema, handshake, and skew matrix apply to every transport. The wire
+format is JSON with a `u32` little-endian length prefix per frame; the
+request/response envelopes are Vapor-specific tagged enums
+(`{"kind": …, "payload": …}` / `{"outcome": …, "value": …}`), not
+JSON-RPC.
 
 Historical note: this document was previously titled "XPC Contracts". The
 contract surface has always been wire-agnostic; renaming it removes the
@@ -27,9 +30,10 @@ rules below are pre-GA; backward-compat guarantees tighten at GA.
 
 ### Handshake
 
-- On connection, the app sends a `Hello { app_schema_version }` request. The
-  daemon responds with
-  `HelloAck { daemon_schema_version, supported_min_version }`.
+- On connection, the app sends a
+  `Hello { schema_version, supported_min_version, client_id }` request.
+  The daemon responds with
+  `HelloAck { schema_version, supported_min_version, server_id }`.
 - If `app_schema_version < daemon.supported_min_version` or
   `daemon_schema_version < app.supported_min_version`, the handshake fails
   with `IncompatibleVersion { peer_version, required_min }`. Both sides log
@@ -82,13 +86,18 @@ Concretely:
 
 ### Payload size bounds
 
-- Every IPC payload carries a declared `payload_bytes` hint and is bounded
-  at the transport layer at `IPC_MAX_PAYLOAD_BYTES` (a constant added to
-  `core/shared/src/constants.rs`, default `4 * 1024 * 1024`). Oversized
-  payloads fail with `PayloadTooLarge` before any deserialization attempt
-  and are logged with the declared size.
+- Every frame declares its length in the `u32` prefix and is bounded at
+  the framing layer at `MAX_PAYLOAD_BYTES`
+  (`core/shared/src/constants.rs::ipc`, default `4 * 1024 * 1024`). An
+  oversized declaration is answered with the `PayloadTooLarge` error
+  response (carrying the declared size) before any allocation or
+  deserialization attempt, then the session is closed.
 - Streamed endpoints (diagnostics timeline, activity events) use chunked
   frames; each frame is bounded independently.
+- Server-side connection hygiene: at most
+  `MAX_CONCURRENT_CONNECTIONS` concurrent sessions are served (excess
+  connections are dropped at accept), and a session idle longer than
+  `CONNECTION_IDLE_TIMEOUT_MILLIS` is reaped.
 
 ## Contract groups
 

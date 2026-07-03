@@ -18,24 +18,23 @@ Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/v
 
 Available now:
 
-- ⚡ Fast-feeling background sync designed to stay responsive without stealing your machine.
-- 🪶 Low-impact by design: Vapor defers heavy work under pressure to protect battery and thermals.
-- 🌩 Sudden bursts of file changes stay contained, so one big folder update doesn't snowball.
 - 🔕 Stays out of your way while keeping status and controls one click away.
 - 🚀 Auto-launch at login with resilient crash-loop protection for dependable day-to-day use.
-- 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow.
+- 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow — and apply live when you edit them.
+- ⏯ Pause and resume background work on demand from the command line.
 
 In flight and coming next:
 
 - 🔁 Bidirectional cloud sync with durable intent replay and eventual consistency.
+- ⚡ Fast-feeling background sync designed to stay responsive without stealing your machine.
+- 🪶 Low-impact by design: Vapor defers heavy work under pressure to protect battery and thermals.
+- 🌩 Storm-aware scheduling keeps sudden bursts of file changes contained, so one big folder update doesn't snowball.
 - 🧩 Multiple sync profiles let one folder flow to several clouds or keep separate setups neatly isolated.
 - 🔀 Choose each folder's sync direction — full two-way, or a one-way mirror for read-only backups and copies.
 - 🛡 Conflict-safe behavior with deterministic outcomes (keep both copies, never silent overwrite).
-- ⏸️ Pressure-aware throttle modes that adapt sync intensity to real device load.
 - ⚙️ Configurable hard caps on its share of CPU, memory, and network so streaming, browsing, and other apps always have room.
 - 🌙 Smart idle boost: Vapor catches up faster when your device is genuinely idle, and yields the moment you come back.
 - 📈 Clear diagnostics with status reasons, queue visibility, and live activity timeline.
-- 🌩 Storm-aware scheduling and resilient recovery keep big change bursts under control.
 - 🌍 Cross-platform parity: one portable runtime powers the macOS app, with Windows, Linux, and a CLI following.
 
 ## Providers
@@ -46,7 +45,7 @@ Available now:
 
 In flight and coming next:
 
-- [File System](https://github.com/neoxelox/vapor/blob/main/core/providers/provider_filesystem.rs)
+- File System (the Phase C8 reference provider)
 - [Google Drive](https://workspace.google.com/intl/es/products/drive)
 
 ## Benchmarks
@@ -57,7 +56,10 @@ In flight and coming next:
 
 All user-facing configuration is documented here with meaning and defaults.
 
-All persisted user configuration lives in `<vapor_dir>/vapor.json`.
+All persisted user configuration lives in `<vapor_dir>/vapor.json`. The
+daemon reads this file at startup; the matching `VAPOR_*` environment
+variables (see `.env.example`) act as per-field overrides on top of it.
+Configuration changes take effect the next time the daemon starts.
 
 | Key                  | Type     | Default                                             | Description                                                                              |
 | -------------------- | -------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -66,15 +68,19 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`.
 | `useVaporIgnore`     | `Bool`   | `true`                                              | Applies recursive `.vaporignore` rules during local filtering.                           |
 | `localSyncDirectory` | `String` | `"~/Vapor"`                                         | Sets the local sync root; Vapor creates it if it does not exist yet.                     |
 | `cloudSyncDirectory` | `String` | `"/Vapor"`                                          | Sets the cloud sync root; Vapor creates it if it does not exist yet.                     |
-| `syncMode`           | `String` | `"two-way"`                                         | Chooses the sync direction: `two-way` (bidirectional), `pull-only` (cloud → local, a read-only local mirror), or `push-only` (local → cloud, a read-only cloud backup). |
 | `preIgnoreRules`     | `String` | Embedded `.gitignore`-like low-impact default rules | Provides the baseline ignore rules that run before discovered ignore files.              |
 | `postIgnoreRules`    | `String` | Empty string                                        | Provides the final override rules that run after discovered ignore files.                |
 | `languageCode`       | `String` | `"en"`                                              | Selects the UI language catalog to load.                                                 |
 | `timelineEventLimit` | `Int`    | `1000`                                              | Caps the in-memory timeline length shown in diagnostics.                                 |
-| `resourceLimits`     | `Object` | `{ cpuPercent: 15, memoryPercent: 10, bandwidthPercent: 25 }` | Sets hard ceilings on daemon CPU (share of one core), device memory, and measured bandwidth. Honored by the throttle controller and auto-tuner. Profile overrides may only lower these values. |
-| `idleBoost`          | `Object` | See below                                           | Dynamically raises effective ceilings when the device is user-idle with measured resource headroom, ramping up slowly and down quickly. Setting `enabled: false` in any enabled profile disables boost daemon-wide. |
 
-`idleBoost` defaults: `enabled: true`, `minIdleSeconds: 600`, `headroomCpuPercent: 40`, `headroomMemoryPercent: 40`, `headroomBandwidthPercent: 40`, `boostCpuPercent: 50`, `boostMemoryPercent: 30`, `boostBandwidthPercent: 90`, `rampUpSeconds: 60`, `rampDownSeconds: 20`. Each `boost*Percent` must be `>=` the matching `resourceLimits.*Percent` (lower values are treated as equal to the base ceiling). Boost requires all of: throttle state `IdleDrain`, user-idle for at least `minIdleSeconds`, and non-Vapor utilization at or below each `headroom*Percent`.
+Planned configuration (designed, not yet recognized by the runtime —
+`vapor config set` rejects these keys until their waves land):
+
+| Key              | Ships with | Design                                                        |
+| ---------------- | ---------- | ------------------------------------------------------------- |
+| `syncMode`       | Wave 8     | `docs/architecture/sync-modes.md` — `two-way` (default), `pull-only`, `push-only` per profile. |
+| `resourceLimits` | Wave 8     | `docs/architecture/data-flow.md` §User resource budgets — hard CPU/memory/bandwidth ceilings. |
+| `idleBoost`      | Wave 8     | `docs/architecture/data-flow.md` §User resource budgets — idle headroom expansion. |
 
 ### Ignore rules
 
@@ -91,10 +97,11 @@ Structure:
 
 - `core/daemon`: Rust daemon runtime (`vapord`) — the portable sync engine.
 - `core/providers`: Rust cloud provider integrations.
-- `core/shared`: shared contracts/constants used across the workspace.
-- `core/platform` (planned): traits + per-OS native implementations for fs-watch, service install, secrets, metrics sampling, idle detection, filesystem capabilities, and process supervision.
-- `core/lifecycle` (planned): daemon lifecycle manager and crash-loop guard consumed by every app surface.
-- `core/cli` (planned): the `vapor` CLI — headless-first control plane usable on every supported OS.
+- `core/shared`: shared contracts/constants/config loader used across the workspace.
+- `core/ipc`: framed JSON IPC channel between the daemon and every surface.
+- `core/platform`: traits + per-OS native implementations for fs-watch, service install, secrets, metrics sampling, idle detection, filesystem capabilities, and process supervision.
+- `core/lifecycle`: daemon lifecycle manager and crash-loop guard consumed by every app surface.
+- `core/cli`: the `vapor` CLI — headless-first control plane usable on every supported OS.
 - `apps/macos`: SwiftUI macOS app (`Vapor`).
 - `apps/windows` (planned): Windows app surface consuming `core/*`.
 - `apps/linux` (planned): Linux app surface consuming `core/*`.
@@ -113,7 +120,7 @@ See `.env.example` for the available `VAPOR_*` environment variables used by app
 - Format check both stacks (included in lint): `./scripts/format.sh check`
 - Test both stacks: `./scripts/test.sh`
 - Sync locale catalogs into every app surface: `./scripts/locales.sh`
-- Install git pre-commit hook (clean → lint → test → build): `./scripts/hooks.sh`
+- Install git pre-commit hook (lint → test): `./scripts/hooks.sh`
 - Remove the installed pre-commit hook: `./scripts/hooks.sh uninstall`
 - Version helper: `./scripts/version.sh`
 - Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
