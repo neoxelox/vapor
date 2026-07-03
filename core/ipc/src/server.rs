@@ -120,11 +120,14 @@ where
     W: Write,
 {
     // 1. Handshake.
-    let first_frame = read_frame(reader)?;
+    let Some(first_frame) = read_next_frame(reader, writer)? else {
+        // The client connected and left without speaking — clean close.
+        return Ok(());
+    };
     let request: Request = serde_json::from_slice(&first_frame)
         .map_err(|error| ServeError::Parse(error.to_string()))?;
     let Request::Hello(hello) = request else {
-        let _ = write_response_or_log(
+        let _ = send_response(
             writer,
             Response::Err(ErrorBody::HandshakeRequired(
                 "first frame must be Hello".to_string(),
@@ -136,7 +139,7 @@ where
     let (current, min) = daemon_supported_versions();
     if let Some(violation) = check_skew(hello, current, min) {
         let response = Response::Err(ErrorBody::IncompatibleVersion(violation.clone()));
-        let _ = write_response_or_log(writer, response);
+        let _ = send_response(writer, response);
         return Err(ServeError::HandshakeIncompatible(violation));
     }
 
@@ -145,22 +148,20 @@ where
         supported_min_version: min,
         server_id: format!("vapord/{current}"),
     };
-    write_response_or_log(writer, Response::Ok(ResponseBody::HelloAck(ack)))?;
+    send_response(writer, Response::Ok(ResponseBody::HelloAck(ack)))?;
 
     // 2. Per-method loop.
     loop {
-        let next = match read_frame(reader) {
-            Ok(payload) => payload,
-            // Clean EOF — the client closed cleanly.
-            Err(FrameError::UnexpectedEof) => return Ok(()),
-            Err(error) => return Err(error.into()),
+        let Some(next) = read_next_frame(reader, writer)? else {
+            // Clean EOF — the client closed at a frame boundary.
+            return Ok(());
         };
         let request: Request = match serde_json::from_slice(&next) {
             Ok(value) => value,
             Err(error) => {
                 let response =
                     Response::Err(ErrorBody::Backend(format!("invalid request: {error}")));
-                write_response_or_log(writer, response)?;
+                send_response(writer, response)?;
                 continue;
             }
         };
@@ -169,13 +170,33 @@ where
                 let response = Response::Err(ErrorBody::Backend(
                     "Hello received after handshake completed".to_string(),
                 ));
-                write_response_or_log(writer, response)?;
+                send_response(writer, response)?;
             }
             Request::Call { method } => {
                 let response = dispatch_method(service, method);
-                write_response_or_log(writer, response)?;
+                send_response(writer, response)?;
             }
         }
+    }
+}
+
+/// Reads the next frame; an oversized declaration is answered with the
+/// contract's `PayloadTooLarge` error before the session is torn down, so
+/// well-behaved clients see a typed error instead of a bare disconnect.
+fn read_next_frame<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+) -> Result<Option<Vec<u8>>, ServeError> {
+    match read_frame(reader) {
+        Ok(frame) => Ok(frame),
+        Err(FrameError::OversizedFrame { declared, max }) => {
+            let _ = send_response(writer, Response::Err(ErrorBody::PayloadTooLarge(declared)));
+            Err(ServeError::Frame(FrameError::OversizedFrame {
+                declared,
+                max,
+            }))
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -190,7 +211,7 @@ fn dispatch_method(service: &dyn Service, method: Method) -> Response {
     }
 }
 
-fn write_response_or_log<W: Write>(writer: &mut W, response: Response) -> Result<(), FrameError> {
+fn send_response<W: Write>(writer: &mut W, response: Response) -> Result<(), FrameError> {
     let bytes = serde_json::to_vec(&response).expect("Response always serializes");
     write_frame(writer, &bytes)
 }
@@ -260,8 +281,58 @@ mod tests {
     }
 
     fn read_response_frame<R: Read>(reader: &mut R) -> Response {
-        let frame = read_frame(reader).expect("read frame");
+        let frame = read_frame(reader)
+            .expect("read frame")
+            .expect("frame present");
         serde_json::from_slice(&frame).expect("deserialize response")
+    }
+
+    #[test]
+    fn oversized_request_frame_is_answered_with_payload_too_large() {
+        let service = StaticService {
+            status: fixture_status(),
+        };
+        // Complete the handshake first, then declare an oversized frame.
+        let mut request_buf = Vec::new();
+        write_request_frame(
+            &mut request_buf,
+            &Request::Hello(Hello {
+                schema_version: 1,
+                supported_min_version: 1,
+                client_id: "vapor-cli/test".to_string(),
+            }),
+        );
+        let bogus_length = (vapor_shared::constants::ipc::MAX_PAYLOAD_BYTES as u32) + 1;
+        request_buf.extend_from_slice(&bogus_length.to_le_bytes());
+
+        let mut reader = Cursor::new(request_buf);
+        let mut response_buf = Vec::new();
+        let error = serve_connection(&mut reader, &mut response_buf, &service)
+            .expect_err("oversized frame must fail the session");
+        assert!(matches!(
+            error,
+            ServeError::Frame(FrameError::OversizedFrame { .. })
+        ));
+
+        let mut response_reader = Cursor::new(response_buf);
+        let _ack = read_response_frame(&mut response_reader);
+        let response = read_response_frame(&mut response_reader);
+        assert!(matches!(
+            response,
+            Response::Err(ErrorBody::PayloadTooLarge(declared)) if declared == bogus_length
+        ));
+    }
+
+    #[test]
+    fn silent_client_disconnect_before_hello_is_a_clean_close() {
+        let service = StaticService {
+            status: fixture_status(),
+        };
+        let mut reader = Cursor::new(Vec::new());
+        let mut response_buf = Vec::new();
+        serve_connection(&mut reader, &mut response_buf, &service)
+            .expect("empty session closes cleanly");
+        assert!(response_buf.is_empty());
     }
 
     #[test]

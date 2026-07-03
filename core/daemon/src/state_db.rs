@@ -281,42 +281,34 @@ impl DurableStateDb {
         }
 
         let now_ms = system_time_to_millis(now)?;
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut statement = transaction.prepare(
-            "SELECT id
-             FROM queue_intents
-             WHERE state = ? AND available_at_ms <= ?
-             ORDER BY available_at_ms ASC, id ASC
-             LIMIT ?",
+        // One atomic UPDATE … RETURNING instead of a select + per-row
+        // update + per-row re-fetch: a single statement, a single
+        // implicit transaction. RETURNING row order is unspecified, so
+        // ready order is restored in memory below.
+        let mut statement = self.connection.prepare(
+            "UPDATE queue_intents
+             SET state = ?, leased_at_ms = ?
+             WHERE id IN (
+                 SELECT id FROM queue_intents
+                 WHERE state = ? AND available_at_ms <= ?
+                 ORDER BY available_at_ms ASC, id ASC
+                 LIMIT ?
+             )
+             RETURNING id, path_text, kind, enqueued_at_ms, available_at_ms, leased_at_ms,
+                       attempt_count, last_error",
         )?;
-        let intent_ids: Vec<i64> = statement
-            .query_map(params![STATE_PENDING, now_ms, limit as i64], |row| {
-                row.get::<_, i64>(0)
-            })?
+        let mut leased_intents: Vec<DurableIntentRecord> = statement
+            .query_map(
+                params![STATE_LEASED, now_ms, STATE_PENDING, now_ms, limit as i64],
+                intent_from_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(raw_intent_to_record)
             .collect::<Result<_, _>>()?;
         drop(statement);
 
-        if intent_ids.is_empty() {
-            transaction.commit()?;
-            return Ok(Vec::new());
-        }
-
-        let mut leased_intents = Vec::with_capacity(intent_ids.len());
-        for intent_id in intent_ids {
-            transaction.execute(
-                "UPDATE queue_intents
-                 SET state = ?, leased_at_ms = ?
-                 WHERE id = ? AND state = ?",
-                params![STATE_LEASED, now_ms, intent_id, STATE_PENDING],
-            )?;
-            leased_intents.push(
-                fetch_intent(&transaction, intent_id)?
-                    .ok_or(StateDbError::MissingIntentRecord(intent_id))?,
-            );
-        }
-        transaction.commit()?;
+        leased_intents.sort_by_key(|intent| (intent.available_at, intent.id));
         Ok(leased_intents)
     }
 
@@ -492,7 +484,28 @@ impl DurableStateDb {
         Ok(failed_record)
     }
 
+    /// Startup recovery: every lease belongs to a dead process, so all of
+    /// them are returned to `pending`. Stale leases (older than
+    /// [`constants::engine::LEASE_TIMEOUT_MILLIS`]) additionally reset
+    /// `attempt_count` — documented in `data-flow.md` §Local to remote —
+    /// while fresh leases keep their retry history.
     pub fn recover_leased(&mut self, now: SystemTime) -> Result<usize, StateDbError> {
+        let stale_leases_count = self.recover_stale_leases(now)?;
+        let now_ms = system_time_to_millis(now)?;
+        let fresh_leases_count = self.connection.execute(
+            "UPDATE queue_intents
+             SET state = ?, available_at_ms = ?, leased_at_ms = NULL
+             WHERE state = ?",
+            params![STATE_PENDING, now_ms, STATE_LEASED],
+        )?;
+        Ok(stale_leases_count + fresh_leases_count)
+    }
+
+    /// In-run recovery sweep: returns only leases older than the lease
+    /// timeout to `pending`. Safe to call while the daemon is live —
+    /// legitimately in-flight leases are far younger than the 15-minute
+    /// timeout, so only orphaned leases (a lost execution) are replayed.
+    pub fn recover_stale_leases(&mut self, now: SystemTime) -> Result<usize, StateDbError> {
         let now_ms = system_time_to_millis(now)?;
         let stale_lease_cutoff_ms = now_ms
             .saturating_sub(i64::try_from(constants::engine::LEASE_TIMEOUT_MILLIS).unwrap_or(0));
@@ -514,13 +527,7 @@ impl DurableStateDb {
                 stale_lease_cutoff_ms
             ],
         )?;
-        let fresh_leases_count = self.connection.execute(
-            "UPDATE queue_intents
-             SET state = ?, available_at_ms = ?, leased_at_ms = NULL
-             WHERE state = ?",
-            params![STATE_PENDING, now_ms, STATE_LEASED],
-        )?;
-        Ok(stale_leases_count + fresh_leases_count)
+        Ok(stale_leases_count)
     }
 
     pub fn take_active_retry_slowdown_until(
@@ -621,6 +628,47 @@ impl DurableStateDb {
         self.intent_record(id)?
             .ok_or(StateDbError::MissingIntentRecord(id))
     }
+
+    /// Enqueues a batch of intents in one transaction, coalescing each
+    /// against an existing **pending** row with the same `(path, kind)`:
+    /// a path that is already queued (including one waiting out a retry
+    /// backoff) does not grow a duplicate row. Leased rows do not
+    /// coalesce — work already in flight may have read stale content, so
+    /// a fresh pending row is the correct "run again after" signal.
+    ///
+    /// Returns the number of rows actually inserted.
+    pub fn enqueue_intents_coalesced(
+        &mut self,
+        intents: &[(PathBuf, PendingIntentKind, SystemTime)],
+    ) -> Result<usize, StateDbError> {
+        if intents.is_empty() {
+            return Ok(0);
+        }
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut inserted = 0usize;
+        for (path, kind, observed_at) in intents {
+            let path_text = path_to_text(path)?;
+            let existing_pending = transaction
+                .query_row(
+                    "SELECT id FROM queue_intents
+                     WHERE path_text = ? AND kind = ? AND state = ?
+                     LIMIT 1",
+                    params![path_text, intent_kind_label(*kind), STATE_PENDING],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            if existing_pending.is_some() {
+                continue;
+            }
+            insert_intent(&transaction, path, *kind, *observed_at, *observed_at)?;
+            inserted += 1;
+        }
+        transaction.commit()?;
+        Ok(inserted)
+    }
 }
 
 fn insert_intent(
@@ -655,9 +703,15 @@ fn insert_intent(
 }
 
 fn configure_connection(connection: &Connection) -> Result<(), StateDbError> {
+    // `synchronous = NORMAL` is the documented durability point for WAL
+    // mode: the database can never corrupt, and at most the final
+    // transaction(s) before an OS crash / power loss are rolled back.
+    // The queue's at-least-once semantics plus the startup whole-scope
+    // reconcile already reconstruct anything lost that way, so paying
+    // `FULL`'s per-commit fsync bought nothing the design needs.
     connection.execute_batch(
         "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = FULL;
+         PRAGMA synchronous = NORMAL;
          PRAGMA foreign_keys = ON;
          PRAGMA busy_timeout = 5000;",
     )?;
@@ -666,6 +720,31 @@ fn configure_connection(connection: &Connection) -> Result<(), StateDbError> {
 
 fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+    // Validate the recorded schema version BEFORE running any DDL: an
+    // old-layout database must fail with the clean `SchemaVersionMismatch`
+    // instead of whatever confusing SQLite error a conflicting
+    // `CREATE TABLE / INDEX` would produce first.
+    let schema_meta_exists = transaction
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .is_some();
+    if schema_meta_exists {
+        match read_schema_version(&transaction)? {
+            Some(CURRENT_SCHEMA_VERSION) | None => {}
+            Some(found) => {
+                return Err(StateDbError::SchemaVersionMismatch {
+                    found,
+                    expected: CURRENT_SCHEMA_VERSION,
+                });
+            }
+        }
+    }
+
     transaction.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_meta (
              singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
@@ -701,20 +780,11 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
          );",
     )?;
 
-    match read_schema_version(&transaction)? {
-        Some(CURRENT_SCHEMA_VERSION) => {}
-        Some(found) => {
-            return Err(StateDbError::SchemaVersionMismatch {
-                found,
-                expected: CURRENT_SCHEMA_VERSION,
-            });
-        }
-        None => {
-            transaction.execute(
-                "INSERT INTO schema_meta (singleton, schema_version) VALUES (1, ?)",
-                params![CURRENT_SCHEMA_VERSION],
-            )?;
-        }
+    if read_schema_version(&transaction)?.is_none() {
+        transaction.execute(
+            "INSERT INTO schema_meta (singleton, schema_version) VALUES (1, ?)",
+            params![CURRENT_SCHEMA_VERSION],
+        )?;
     }
 
     transaction.commit()?;
@@ -753,6 +823,56 @@ fn count_intents(connection: &Connection, state: Option<&str>) -> Result<usize, 
     Ok(count as usize)
 }
 
+/// Raw column tuple for a `queue_intents` row, in the canonical
+/// `id, path_text, kind, enqueued_at_ms, available_at_ms, leased_at_ms,
+/// attempt_count, last_error` order.
+type RawIntentRow = (
+    i64,
+    String,
+    String,
+    i64,
+    i64,
+    Option<i64>,
+    i64,
+    Option<String>,
+);
+
+fn intent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawIntentRow> {
+    Ok((
+        row.get::<_, i64>(0)?,
+        row.get::<_, String>(1)?,
+        row.get::<_, String>(2)?,
+        row.get::<_, i64>(3)?,
+        row.get::<_, i64>(4)?,
+        row.get::<_, Option<i64>>(5)?,
+        row.get::<_, i64>(6)?,
+        row.get::<_, Option<String>>(7)?,
+    ))
+}
+
+fn raw_intent_to_record(raw: RawIntentRow) -> Result<DurableIntentRecord, StateDbError> {
+    let (
+        id,
+        path_text,
+        kind,
+        enqueued_at_ms,
+        available_at_ms,
+        leased_at_ms,
+        attempt_count,
+        last_error,
+    ) = raw;
+    Ok(DurableIntentRecord {
+        id,
+        path: path_from_text(path_text),
+        kind: intent_kind_from_label(&kind)?,
+        enqueued_at: millis_to_system_time(enqueued_at_ms)?,
+        available_at: millis_to_system_time(available_at_ms)?,
+        leased_at: leased_at_ms.map(millis_to_system_time).transpose()?,
+        attempt_count: validate_attempt_count(attempt_count)?,
+        last_error: last_error.map(|value| sanitize_persisted_error(&value)),
+    })
+}
+
 fn fetch_intent(
     connection: &Connection,
     id: i64,
@@ -763,46 +883,11 @@ fn fetch_intent(
              FROM queue_intents
              WHERE id = ?",
             params![id],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, Option<i64>>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                ))
-            },
+            intent_from_row,
         )
         .optional()?;
 
-    raw_intent
-        .map(
-            |(
-                row_id,
-                path_text,
-                kind,
-                enqueued_at_ms,
-                available_at_ms,
-                leased_at_ms,
-                attempt_count,
-                last_error,
-            )| {
-                Ok(DurableIntentRecord {
-                    id: row_id,
-                    path: path_from_text(path_text),
-                    kind: intent_kind_from_label(&kind)?,
-                    enqueued_at: millis_to_system_time(enqueued_at_ms)?,
-                    available_at: millis_to_system_time(available_at_ms)?,
-                    leased_at: leased_at_ms.map(millis_to_system_time).transpose()?,
-                    attempt_count: validate_attempt_count(attempt_count)?,
-                    last_error: last_error.map(|value| sanitize_persisted_error(&value)),
-                })
-            },
-        )
-        .transpose()
+    raw_intent.map(raw_intent_to_record).transpose()
 }
 
 fn fetch_failed_intent(
@@ -1804,6 +1889,116 @@ mod tests {
             .intent_record(queued.id)
             .expect_err("oversized attempt count should fail");
         assert!(matches!(error, StateDbError::InvalidAttemptCount(_)));
+    }
+
+    #[test]
+    fn coalesced_enqueue_skips_paths_with_an_existing_pending_row() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let path = PathBuf::from("/tmp/vapor-root/project/file.txt");
+
+        let inserted = database
+            .enqueue_intents_coalesced(&[
+                (path.clone(), PendingIntentKind::Upload, timestamp_ms(100)),
+                (path.clone(), PendingIntentKind::Upload, timestamp_ms(200)),
+            ])
+            .expect("coalesced enqueue");
+        assert_eq!(inserted, 1);
+        assert_eq!(database.pending_depth().expect("pending depth"), 1);
+
+        // A second batch for the same still-pending path coalesces too.
+        let inserted = database
+            .enqueue_intents_coalesced(&[(
+                path.clone(),
+                PendingIntentKind::Upload,
+                timestamp_ms(300),
+            )])
+            .expect("coalesced enqueue");
+        assert_eq!(inserted, 0);
+
+        // A different kind for the same path is separate work.
+        let inserted = database
+            .enqueue_intents_coalesced(&[(
+                path.clone(),
+                PendingIntentKind::Delete,
+                timestamp_ms(400),
+            )])
+            .expect("coalesced enqueue");
+        assert_eq!(inserted, 1);
+        assert_eq!(database.pending_depth().expect("pending depth"), 2);
+    }
+
+    #[test]
+    fn coalesced_enqueue_does_not_coalesce_against_leased_rows() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let path = PathBuf::from("/tmp/vapor-root/project/file.txt");
+
+        database
+            .enqueue_intent(&path, PendingIntentKind::Upload, timestamp_ms(100))
+            .expect("enqueue upload intent");
+        database
+            .lease_next_ready(timestamp_ms(100))
+            .expect("lease next ready")
+            .expect("leased record");
+
+        // The in-flight lease may have read stale content; the new change
+        // must survive as its own pending row.
+        let inserted = database
+            .enqueue_intents_coalesced(&[(
+                path.clone(),
+                PendingIntentKind::Upload,
+                timestamp_ms(200),
+            )])
+            .expect("coalesced enqueue");
+        assert_eq!(inserted, 1);
+        assert_eq!(database.pending_depth().expect("pending depth"), 1);
+        assert_eq!(database.leased_depth().expect("leased depth"), 1);
+    }
+
+    #[test]
+    fn in_run_stale_lease_sweep_recovers_only_stale_leases() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let stale_path = PathBuf::from("/tmp/vapor-root/stale.txt");
+        let fresh_path = PathBuf::from("/tmp/vapor-root/fresh.txt");
+
+        database
+            .enqueue_intent(&stale_path, PendingIntentKind::Upload, timestamp_ms(0))
+            .expect("enqueue stale intent");
+        database
+            .lease_next_ready(timestamp_ms(0))
+            .expect("lease stale")
+            .expect("stale lease");
+
+        let lease_timeout = constants::engine::LEASE_TIMEOUT_MILLIS;
+        database
+            .enqueue_intent(
+                &fresh_path,
+                PendingIntentKind::Upload,
+                timestamp_ms(lease_timeout + 1_000),
+            )
+            .expect("enqueue fresh intent");
+        database
+            .lease_next_ready(timestamp_ms(lease_timeout + 1_000))
+            .expect("lease fresh")
+            .expect("fresh lease");
+
+        let recovered = database
+            .recover_stale_leases(timestamp_ms(lease_timeout + 2_000))
+            .expect("stale sweep");
+
+        assert_eq!(recovered, 1);
+        assert_eq!(database.leased_depth().expect("leased depth"), 1);
+        assert_eq!(database.pending_depth().expect("pending depth"), 1);
+        let replayed = database
+            .lease_next_ready(timestamp_ms(lease_timeout + 3_000))
+            .expect("lease replayed")
+            .expect("replayed record");
+        assert_eq!(replayed.path, stale_path);
     }
 
     fn timestamp_ms(milliseconds: u64) -> SystemTime {

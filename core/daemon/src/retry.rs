@@ -2,24 +2,10 @@ use std::time::{Duration, SystemTime};
 
 use vapor_shared::constants;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RetryFailureKind {
-    Transient,
-    RateLimited { retry_after: Option<Duration> },
-    Authentication,
-    Permanent,
-}
-
-impl RetryFailureKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Transient => "transient",
-            Self::RateLimited { .. } => "rate_limited",
-            Self::Authentication => "authentication",
-            Self::Permanent => "permanent",
-        }
-    }
-}
+// The failure taxonomy is a shared contract (providers classify their own
+// failures with it). Re-exported so existing `crate::retry::…` paths keep
+// working.
+pub use vapor_shared::RetryFailureKind;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetryDecision {

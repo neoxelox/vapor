@@ -4,46 +4,16 @@
 //! static sampler; full FFI lands incrementally as Wave 4 follow-ups.
 //!
 //! See `docs/architecture/platform-abstractions.md` §`PlatformMetricsSampler`.
-//! `StaticPlatformMetricsSampler` mirrors `core/daemon::metrics::
-//! StaticMetricsSampler` from C2-1 — it returns a fixed snapshot every
-//! tick — but it lives here so the engine can substitute the platform
-//! trait directly without taking a dependency on `core/daemon`.
+//! The sample type is `vapor_shared::ThrottleInputs` — one shared struct
+//! consumed directly by the daemon's throttle controller, so the platform
+//! layer and the engine can never drift structurally.
 
 use std::sync::Mutex;
 
-/// Snapshot of throttle inputs returned by the platform sampler.
-///
-/// Mirrors the `ThrottleInputs` shape from
-/// `core/daemon::throttle::ThrottleInputs`. Kept structurally identical
-/// so the engine can convert without re-deriving anything; we duplicate
-/// the type here to keep `core/platform` independent of `core/daemon`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ThrottleInputsSnapshot {
-    pub on_battery: bool,
-    pub low_power_mode: bool,
-    pub system_cpu_load_percent: u8,
-    pub vapor_cpu_load_percent: u8,
-    pub network_error_rate_percent: u8,
-    pub network_throughput_kbps: Option<u32>,
-    pub user_active: bool,
-}
-
-impl Default for ThrottleInputsSnapshot {
-    fn default() -> Self {
-        Self {
-            on_battery: false,
-            low_power_mode: false,
-            system_cpu_load_percent: 10,
-            vapor_cpu_load_percent: 2,
-            network_error_rate_percent: 0,
-            network_throughput_kbps: Some(10_000),
-            user_active: false,
-        }
-    }
-}
+pub use vapor_shared::ThrottleInputs;
 
 pub trait PlatformMetricsSampler: Send + Sync {
-    fn sample(&self) -> ThrottleInputsSnapshot;
+    fn sample(&self) -> ThrottleInputs;
 }
 
 /// Sampler that returns a fixed `ThrottleInputs` every tick. Used by the
@@ -51,17 +21,17 @@ pub trait PlatformMetricsSampler: Send + Sync {
 /// OS until the per-OS native bridges (mach2 / PSI / PDH) land.
 #[derive(Debug)]
 pub struct StaticPlatformMetricsSampler {
-    snapshot: Mutex<ThrottleInputsSnapshot>,
+    snapshot: Mutex<ThrottleInputs>,
 }
 
 impl StaticPlatformMetricsSampler {
-    pub fn new(snapshot: ThrottleInputsSnapshot) -> Self {
+    pub fn new(snapshot: ThrottleInputs) -> Self {
         Self {
             snapshot: Mutex::new(snapshot),
         }
     }
 
-    pub fn set(&self, snapshot: ThrottleInputsSnapshot) {
+    pub fn set(&self, snapshot: ThrottleInputs) {
         *self
             .snapshot
             .lock()
@@ -71,12 +41,12 @@ impl StaticPlatformMetricsSampler {
 
 impl Default for StaticPlatformMetricsSampler {
     fn default() -> Self {
-        Self::new(ThrottleInputsSnapshot::default())
+        Self::new(ThrottleInputs::default())
     }
 }
 
 impl PlatformMetricsSampler for StaticPlatformMetricsSampler {
-    fn sample(&self) -> ThrottleInputsSnapshot {
+    fn sample(&self) -> ThrottleInputs {
         *self
             .snapshot
             .lock()
@@ -104,7 +74,7 @@ impl NativePlatformMetricsSampler {
 }
 
 impl PlatformMetricsSampler for NativePlatformMetricsSampler {
-    fn sample(&self) -> ThrottleInputsSnapshot {
+    fn sample(&self) -> ThrottleInputs {
         self.fallback.sample()
     }
 }
@@ -115,7 +85,7 @@ mod tests {
 
     #[test]
     fn static_sampler_returns_seeded_snapshot() {
-        let sampler = StaticPlatformMetricsSampler::new(ThrottleInputsSnapshot {
+        let sampler = StaticPlatformMetricsSampler::new(ThrottleInputs {
             on_battery: true,
             ..Default::default()
         });
@@ -126,10 +96,28 @@ mod tests {
     fn static_sampler_set_overrides_subsequent_samples() {
         let sampler = StaticPlatformMetricsSampler::default();
         assert!(!sampler.sample().on_battery);
-        sampler.set(ThrottleInputsSnapshot {
+        sampler.set(ThrottleInputs {
             on_battery: true,
             ..Default::default()
         });
         assert!(sampler.sample().on_battery);
+    }
+
+    #[test]
+    fn sample_carries_thermal_and_disk_pressure_fields() {
+        // Regression guard for the pre-fix drift where the platform
+        // snapshot type was missing `thermal_pressure` / `disk_pressure`
+        // despite claiming structural identity with the engine's inputs.
+        let sampler = StaticPlatformMetricsSampler::new(ThrottleInputs {
+            thermal_pressure: vapor_shared::ThermalPressure::Serious,
+            disk_pressure: vapor_shared::ResourcePressure::High,
+            ..Default::default()
+        });
+        let sample = sampler.sample();
+        assert_eq!(
+            sample.thermal_pressure,
+            vapor_shared::ThermalPressure::Serious
+        );
+        assert_eq!(sample.disk_pressure, vapor_shared::ResourcePressure::High);
     }
 }

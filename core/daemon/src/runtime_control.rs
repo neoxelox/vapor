@@ -16,7 +16,9 @@
 //! - `reconcile` — schedule a fresh whole-scope reconcile against the
 //!   local sync directory.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use crate::runtime::TickWaker;
 
 #[derive(Debug, Default)]
 pub struct RuntimeControl {
@@ -30,6 +32,9 @@ struct RuntimeControlInner {
     pause_request: Option<bool>,
     flush_pending: bool,
     reconcile_pending: bool,
+    /// Set by `DaemonRuntime::attach_control` so control requests wake
+    /// the tick loop immediately instead of waiting out the sleep.
+    waker: Option<Arc<TickWaker>>,
 }
 
 impl RuntimeControl {
@@ -37,22 +42,39 @@ impl RuntimeControl {
         Self::default()
     }
 
+    /// Wires the runtime's tick waker in. Called by
+    /// `DaemonRuntime::attach_control`.
+    pub(crate) fn set_waker(&self, waker: Arc<TickWaker>) {
+        self.with_inner(|inner| inner.waker = Some(waker));
+    }
+
+    fn notify_waker(&self) {
+        let waker = self.with_inner(|inner| inner.waker.clone());
+        if let Some(waker) = waker {
+            waker.notify();
+        }
+    }
+
     /// Mark "pause requested". Idempotent.
     pub fn request_pause(&self) {
         self.with_inner(|inner| inner.pause_request = Some(true));
+        self.notify_waker();
     }
 
     /// Mark "resume requested". Idempotent.
     pub fn request_resume(&self) {
         self.with_inner(|inner| inner.pause_request = Some(false));
+        self.notify_waker();
     }
 
     pub fn request_flush(&self) {
         self.with_inner(|inner| inner.flush_pending = true);
+        self.notify_waker();
     }
 
     pub fn request_reconcile(&self) {
         self.with_inner(|inner| inner.reconcile_pending = true);
+        self.notify_waker();
     }
 
     /// Returns + clears any pending pause/resume request.

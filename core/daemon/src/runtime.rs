@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -11,15 +11,24 @@ use crate::clock::{SharedClock, system_clock};
 use crate::debounce::{DebounceLoop, DebounceWindows};
 use crate::event_intents::BoundedFsEventRecorder;
 use crate::executor::{StagedExecutor, StagedExecutorSnapshot};
-use crate::fs_events::{FsEventsWatcher, FsEventsWatcherError, normalize_watch_root};
+use crate::fs_events::{
+    FsEventErrorRecord, FsEventRecord, FsEventRecording, FsEventsWatcher, FsEventsWatcherError,
+    normalize_watch_root,
+};
 use crate::ipc_service::{DaemonStatusSnapshot, StatusPublisher};
 use crate::logging;
 use crate::metrics::{MetricsSampler, StaticMetricsSampler};
+use crate::path_filter::EventPathFilterOptions;
 use crate::scheduler::KeyedSupersedingScheduler;
 use crate::state_db::{DurableIntentRecord, DurableStateDb, StateDbError};
 use crate::sync_directories::SyncScope;
 use crate::throttle::ThrottleInputs;
 use crate::{DaemonApp, event_intents::PendingIntentKind};
+
+/// Consecutive tick failures tolerated before the runtime loop gives up.
+/// One inconsistent row or transient I/O error is logged and survived;
+/// a structurally broken database fails fast after this many attempts.
+const MAX_CONSECUTIVE_TICK_ERRORS: u32 = 5;
 
 #[derive(Debug)]
 pub enum DaemonRuntimeError {
@@ -49,6 +58,59 @@ impl From<StateDbError> for DaemonRuntimeError {
     }
 }
 
+/// Wakes the runtime loop out of its inter-tick sleep. Signaled by the
+/// fs-event callback (via [`NotifyingRecorder`]) and by IPC control
+/// requests so the daemon reacts immediately instead of waiting out the
+/// poll interval — which in turn lets a fully idle daemon sleep at the
+/// longer [`constants::engine::IDLE_TICK_MILLIS`] cadence.
+#[derive(Debug, Default)]
+pub struct TickWaker {
+    signaled: Mutex<bool>,
+    condvar: Condvar,
+}
+
+impl TickWaker {
+    pub fn notify(&self) {
+        let mut signaled = self.signaled.lock().expect("TickWaker mutex poisoned");
+        *signaled = true;
+        self.condvar.notify_all();
+    }
+
+    /// Blocks until notified or until `timeout` elapses, whichever comes
+    /// first, then clears the signal.
+    pub fn wait_timeout(&self, timeout: Duration) {
+        let mut signaled = self.signaled.lock().expect("TickWaker mutex poisoned");
+        if !*signaled {
+            let (guard, _) = self
+                .condvar
+                .wait_timeout(signaled, timeout)
+                .expect("TickWaker mutex poisoned");
+            signaled = guard;
+        }
+        *signaled = false;
+    }
+}
+
+/// Recorder adapter handed to the fs watcher: forwards every callback to
+/// the real bounded recorder and pings the tick waker so the runtime
+/// drains promptly.
+struct NotifyingRecorder {
+    inner: Arc<BoundedFsEventRecorder>,
+    waker: Arc<TickWaker>,
+}
+
+impl FsEventRecording for NotifyingRecorder {
+    fn record_event(&self, event: FsEventRecord) {
+        self.inner.record_event(event);
+        self.waker.notify();
+    }
+
+    fn record_error(&self, error: FsEventErrorRecord) {
+        self.inner.record_error(error);
+        self.waker.notify();
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeTickReport {
     pub released_deferred_reconciles: usize,
@@ -75,14 +137,18 @@ pub struct DaemonRuntime {
     watcher: Option<FsEventsWatcher>,
     metrics_sampler: Arc<dyn MetricsSampler>,
     clock: SharedClock,
+    tick_waker: Arc<TickWaker>,
     runtime_control: Option<Arc<crate::runtime_control::RuntimeControl>>,
     status_publisher: Option<Arc<dyn StatusPublisher>>,
     last_throttle_sample_inst: Option<Instant>,
+    last_stale_lease_sweep_inst: Option<Instant>,
     running_reconcile_intent_id: Option<i64>,
     startup_reconstruction_barrier: bool,
-    startup_barrier_expires_at: Option<SystemTime>,
+    startup_barrier_expires_inst: Option<Instant>,
     tick_interval: Duration,
+    idle_tick_interval: Duration,
     throttle_sample_interval: Duration,
+    stale_lease_sweep_interval: Duration,
     startup_barrier_deadline: Duration,
 }
 
@@ -122,8 +188,30 @@ impl DaemonRuntime {
         metrics_sampler: Arc<dyn MetricsSampler>,
         clock: SharedClock,
     ) -> Result<Self, DaemonRuntimeError> {
+        Self::start_configured(
+            sync_scope,
+            EventPathFilterOptions::from_process_environment(),
+            state_db,
+            provider,
+            metrics_sampler,
+            clock,
+        )
+    }
+
+    /// Fully-parameterized start used by the daemon bootstrap: explicit
+    /// filter options (resolved from `vapor.json` + environment) instead
+    /// of environment-only defaults.
+    pub fn start_configured(
+        sync_scope: SyncScope,
+        filter_options: EventPathFilterOptions,
+        state_db: DurableStateDb,
+        provider: Box<dyn Provider>,
+        metrics_sampler: Arc<dyn MetricsSampler>,
+        clock: SharedClock,
+    ) -> Result<Self, DaemonRuntimeError> {
         let mut runtime = Self::build(
             sync_scope,
+            filter_options,
             state_db,
             provider,
             metrics_sampler,
@@ -135,15 +223,71 @@ impl DaemonRuntime {
     }
 
     pub fn run_forever(&mut self) -> Result<(), DaemonRuntimeError> {
+        let mut consecutive_tick_errors = 0u32;
         while !is_shutdown_requested() {
-            self.tick(self.clock.now_system())?;
-            thread::sleep(self.tick_interval);
+            match self.tick(self.clock.now_system()) {
+                Ok(report) => {
+                    consecutive_tick_errors = 0;
+                    // Fully idle → coarser cadence; fs events and IPC
+                    // requests re-arm the waker for an immediate tick.
+                    let wait = if self.has_pending_work(&report) {
+                        self.tick_interval
+                    } else {
+                        self.idle_tick_interval
+                    };
+                    self.tick_waker.wait_timeout(wait);
+                }
+                Err(error) => {
+                    consecutive_tick_errors += 1;
+                    logging::error(
+                        "Daemon tick failed",
+                        &[
+                            ("error", format!("{error:?}")),
+                            ("consecutive_failures", consecutive_tick_errors.to_string()),
+                        ],
+                    );
+                    if consecutive_tick_errors >= MAX_CONSECUTIVE_TICK_ERRORS {
+                        return Err(error);
+                    }
+                    thread::sleep(self.tick_interval);
+                }
+            }
         }
         logging::warning(
             "Received shutdown signal; exiting daemon runtime loop cleanly",
             &[],
         );
         Ok(())
+    }
+
+    /// Whether anything is in flight or queued that justifies keeping the
+    /// fast tick cadence. When this is false, the loop parks on the tick
+    /// waker at the idle cadence instead.
+    fn has_pending_work(&self, report: &RuntimeTickReport) -> bool {
+        let report_saw_work = report.released_deferred_reconciles > 0
+            || report.drained_pending_intents > 0
+            || report.stabilized_events > 0
+            || report.durable_enqueues > 0
+            || report.leased_intents > 0
+            || report.started_staged_intents > 0
+            || report.completed_intents > 0
+            || report.requeued_intents > 0;
+        if report_saw_work
+            || report.staged_executor.active_total > 0
+            || self.running_reconcile_intent_id.is_some()
+            || self.scheduler.pending_count() > 0
+        {
+            return true;
+        }
+
+        self.recorder
+            .as_ref()
+            .map(|recorder| {
+                recorder.with_state(|maps| {
+                    maps.pending_event_count() > 0 || maps.pending_intent_count() > 0
+                })
+            })
+            .unwrap_or(false)
     }
 
     pub fn tick(&mut self, now: SystemTime) -> Result<RuntimeTickReport, DaemonRuntimeError> {
@@ -154,8 +298,10 @@ impl DaemonRuntime {
     /// Attach a `RuntimeControl` so the runtime tick observes IPC-driven
     /// control requests (pause / resume / flush / reconcile). Wave 7
     /// `vapor` CLI commands write into this control through the IPC
-    /// service.
+    /// service. The control also gets the tick waker so an IPC request
+    /// wakes the loop immediately instead of waiting out the sleep.
     pub fn attach_control(&mut self, control: Arc<crate::runtime_control::RuntimeControl>) {
+        control.set_waker(self.tick_waker.clone());
         self.runtime_control = Some(control);
     }
 
@@ -179,9 +325,21 @@ impl DaemonRuntime {
     ) -> Result<RuntimeTickReport, DaemonRuntimeError> {
         self.apply_pending_control_requests(now)?;
         self.sample_throttle_inputs(now, throttle_inputs);
+        self.reload_path_filter_if_requested();
+        self.sweep_stale_leases_if_due(now)?;
+
+        // Pause semantics ("stops admitting new work"): ingest, debounce,
+        // and the durable flush keep running so intent state is never
+        // lost, and work already in flight runs to completion — but no
+        // new work is released or leased while paused.
+        let paused = self.app.snapshot().run_state == RunState::Paused;
 
         let mut report = RuntimeTickReport {
-            released_deferred_reconciles: self.release_ready_deferred_reconciles(now),
+            released_deferred_reconciles: if paused {
+                0
+            } else {
+                self.release_ready_deferred_reconciles(now)
+            },
             drained_pending_intents: self.drain_pending_intents(),
             stabilized_events: self.stabilize_events(now),
             durable_enqueues: self.flush_scheduler_to_durable_queue()?,
@@ -213,14 +371,16 @@ impl DaemonRuntime {
                     && self.sync_scope.local_sync_directory.as_ref() == Some(&completed_root)
                 {
                     self.startup_reconstruction_barrier = false;
-                    self.startup_barrier_expires_at = None;
+                    self.startup_barrier_expires_inst = None;
                 }
                 report.completed_intents += 1;
                 report.completed_reconcile_root = Some(completed_root);
             }
         }
 
-        self.process_ready_queue(now, &mut report)?;
+        if !paused {
+            self.process_ready_queue(now, &mut report)?;
+        }
 
         report.staged_executor = self.staged_executor.snapshot();
 
@@ -229,6 +389,40 @@ impl DaemonRuntime {
         }
 
         Ok(report)
+    }
+
+    /// Rebuilds the watcher's path filter when the callback observed an
+    /// ignore-file change. The rebuild (tree walk + glob compilation)
+    /// deliberately runs here on the runtime thread, never in the
+    /// callback.
+    fn reload_path_filter_if_requested(&mut self) {
+        if let Some(watcher) = &self.watcher {
+            watcher.path_filter().rebuild_if_requested();
+        }
+    }
+
+    /// Periodic in-run recovery of leases that exceeded the lease
+    /// timeout (an orphaned execution). Startup recovery handles dead
+    /// processes; this sweep handles a lease lost *within* a live run.
+    fn sweep_stale_leases_if_due(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
+        let now_inst = self.clock.now();
+        let due = self
+            .last_stale_lease_sweep_inst
+            .map(|last| now_inst.saturating_duration_since(last) >= self.stale_lease_sweep_interval)
+            .unwrap_or(true);
+        if !due {
+            return Ok(());
+        }
+
+        self.last_stale_lease_sweep_inst = Some(now_inst);
+        let recovered = self.state_db.recover_stale_leases(now)?;
+        if recovered > 0 {
+            logging::warning(
+                "Recovered stale leases during in-run sweep",
+                &[("recovered_leases", recovered.to_string())],
+            );
+        }
+        Ok(())
     }
 
     pub fn app(&self) -> &DaemonApp {
@@ -249,6 +443,7 @@ impl DaemonRuntime {
 
     fn build(
         mut sync_scope: SyncScope,
+        filter_options: EventPathFilterOptions,
         mut state_db: DurableStateDb,
         provider: Box<dyn Provider>,
         metrics_sampler: Arc<dyn MetricsSampler>,
@@ -281,6 +476,7 @@ impl DaemonRuntime {
 
         app.ensure_cloud_sync_directory(sync_scope.cloud_sync_directory.as_str());
 
+        let tick_waker = Arc::new(TickWaker::default());
         let recorder = sync_scope
             .local_sync_directory
             .as_ref()
@@ -289,7 +485,11 @@ impl DaemonRuntime {
             match (&sync_scope.local_sync_directory, &recorder) {
                 (Some(watch_root), Some(recorder)) => Some(FsEventsWatcher::start(
                     watch_root.clone(),
-                    recorder.clone(),
+                    Arc::new(NotifyingRecorder {
+                        inner: recorder.clone(),
+                        waker: tick_waker.clone(),
+                    }),
+                    filter_options,
                 )?),
                 _ => None,
             }
@@ -320,15 +520,21 @@ impl DaemonRuntime {
             watcher,
             metrics_sampler,
             clock,
+            tick_waker,
             runtime_control: None,
             status_publisher: None,
             last_throttle_sample_inst: None,
+            last_stale_lease_sweep_inst: None,
             running_reconcile_intent_id: None,
             startup_reconstruction_barrier: false,
-            startup_barrier_expires_at: None,
+            startup_barrier_expires_inst: None,
             tick_interval,
+            idle_tick_interval: Duration::from_millis(constants::engine::IDLE_TICK_MILLIS),
             throttle_sample_interval: Duration::from_millis(
                 constants::engine::THROTTLE_SAMPLE_INTERVAL_MILLIS,
+            ),
+            stale_lease_sweep_interval: Duration::from_millis(
+                constants::engine::STALE_LEASE_SWEEP_INTERVAL_MILLIS,
             ),
             startup_barrier_deadline: Duration::from_millis(
                 constants::engine::STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS,
@@ -402,7 +608,9 @@ impl DaemonRuntime {
         self.state_db
             .enqueue_startup_reconcile_intent(local_sync_directory, now)?;
         self.startup_reconstruction_barrier = true;
-        self.startup_barrier_expires_at = Some(now + self.startup_barrier_deadline);
+        // Monotonic deadline: a wall-clock rewind must not extend the
+        // barrier (C2-3 discipline, same as every other elapsed check).
+        self.startup_barrier_expires_inst = Some(self.clock.now() + self.startup_barrier_deadline);
         logging::info(
             "Queued startup whole-scope reconcile for volatile-state reconstruction",
             &[
@@ -416,21 +624,21 @@ impl DaemonRuntime {
         Ok(())
     }
 
-    fn evaluate_startup_barrier(&mut self, now: SystemTime) {
+    fn evaluate_startup_barrier(&mut self, _now: SystemTime) {
         if !self.startup_reconstruction_barrier {
             return;
         }
 
-        let Some(expires_at) = self.startup_barrier_expires_at else {
+        let Some(expires_inst) = self.startup_barrier_expires_inst else {
             return;
         };
 
-        if now < expires_at {
+        if self.clock.now() < expires_inst {
             return;
         }
 
         self.startup_reconstruction_barrier = false;
-        self.startup_barrier_expires_at = None;
+        self.startup_barrier_expires_inst = None;
         logging::warning(
             "Cleared startup reconstruction barrier after deadline; allowing non-reconcile work to proceed",
             &[(
@@ -492,11 +700,26 @@ impl DaemonRuntime {
     }
 
     fn flush_scheduler_to_durable_queue(&mut self) -> Result<usize, DaemonRuntimeError> {
-        let mut enqueued = 0;
+        // Claim everything first, then persist in ONE transaction with
+        // per-(path, kind) coalescing against already-pending durable
+        // rows: N pending intents cost one fsync instead of N, and a
+        // checkpoint-paused reconcile (tracked both in the scheduler and
+        // as a requeued durable row) cannot multiply into duplicates.
+        let mut claimed = Vec::new();
         while let Some(intent) = self.scheduler.claim_next() {
-            self.state_db
-                .enqueue_intent(&intent.path, intent.kind, intent.last_observed_at)?;
-            enqueued += 1;
+            claimed.push(intent);
+        }
+        if claimed.is_empty() {
+            return Ok(0);
+        }
+
+        let batch: Vec<_> = claimed
+            .iter()
+            .map(|intent| (intent.path.clone(), intent.kind, intent.last_observed_at))
+            .collect();
+        let enqueued = self.state_db.enqueue_intents_coalesced(&batch)?;
+
+        for intent in &claimed {
             let disposition = self
                 .scheduler
                 .complete_running(&intent.path)
@@ -562,7 +785,7 @@ impl DaemonRuntime {
                             self.scheduler.discard_pending(&intent.path);
                             self.requeue_runtime_intent(
                                 intent.id,
-                                now + self.tick_interval,
+                                now + blocked_intent_requeue_delay(),
                                 "waiting for idle reconcile slot",
                             )?;
                             report.requeued_intents += 1;
@@ -575,7 +798,7 @@ impl DaemonRuntime {
                             self.scheduler.discard_pending(&intent.path);
                             self.requeue_runtime_intent(
                                 intent.id,
-                                now + self.tick_interval,
+                                now + blocked_intent_requeue_delay(),
                                 "waiting for reconcile permit",
                             )?;
                             report.requeued_intents += 1;
@@ -590,7 +813,7 @@ impl DaemonRuntime {
                     if self.startup_reconstruction_barrier {
                         self.requeue_runtime_intent(
                             intent.id,
-                            now + self.tick_interval,
+                            now + blocked_intent_requeue_delay(),
                             "waiting for startup reconstruction reconcile",
                         )?;
                         report.requeued_intents += 1;
@@ -603,7 +826,7 @@ impl DaemonRuntime {
                     } else {
                         self.requeue_runtime_intent(
                             intent_id,
-                            now + self.tick_interval,
+                            now + blocked_intent_requeue_delay(),
                             "waiting for planner permit",
                         )?;
                         report.requeued_intents += 1;
@@ -641,13 +864,26 @@ impl DaemonRuntime {
             .state_db
             .requeue_leased(intent_id, available_at, Some(last_error))?
         {
-            return Err(StateDbError::InvalidIntentState(format!(
-                "intent {intent_id} was not leased during runtime requeue"
-            ))
-            .into());
+            // The row vanished or changed state underneath us — an
+            // inconsistency worth loud logging, but not worth failing the
+            // tick (and, transitively, the daemon) over one intent.
+            logging::warning(
+                "Durable intent was not leased during runtime requeue; dropping it",
+                &[
+                    ("intent_id", intent_id.to_string()),
+                    ("reason", last_error.to_string()),
+                ],
+            );
         }
         Ok(())
     }
+}
+
+/// Requeue delay applied when a leased intent cannot start because no
+/// permit / slot is available. Coarser than the tick interval so blocked
+/// intents don't churn a lease+requeue write pair on every tick.
+fn blocked_intent_requeue_delay() -> Duration {
+    Duration::from_millis(constants::engine::BLOCKED_INTENT_REQUEUE_DELAY_MILLIS)
 }
 
 #[cfg(test)]
@@ -808,6 +1044,7 @@ mod tests {
         let clock = Arc::new(crate::clock::ManualClock::at_now());
         let mut runtime = DaemonRuntime::build(
             test_sync_scope(&watch_root),
+            EventPathFilterOptions::default(),
             state_db,
             default_provider(),
             Arc::new(StaticMetricsSampler::default()),
@@ -879,6 +1116,7 @@ mod tests {
         }
         let mut runtime = DaemonRuntime::build(
             test_sync_scope(&watch_root),
+            EventPathFilterOptions::default(),
             state_db,
             default_provider(),
             Arc::new(StaticMetricsSampler::default()),
@@ -909,6 +1147,7 @@ mod tests {
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let mut runtime = DaemonRuntime::build(
             test_sync_scope(&watch_root),
+            EventPathFilterOptions::default(),
             state_db,
             default_provider(),
             Arc::new(StaticMetricsSampler::default()),
@@ -966,6 +1205,7 @@ mod tests {
         let clock = Arc::new(crate::clock::ManualClock::at_now());
         let mut runtime = DaemonRuntime::build(
             test_sync_scope(&watch_root),
+            EventPathFilterOptions::default(),
             state_db,
             default_provider(),
             Arc::new(StaticMetricsSampler::default()),
@@ -1030,6 +1270,159 @@ mod tests {
         SyncScope {
             local_sync_directory: Some(watch_root.to_path_buf()),
             cloud_sync_directory: "/Vapor".to_string(),
+        }
+    }
+
+    #[test]
+    fn paused_daemon_stops_admitting_new_work_and_resume_restores_it() {
+        // Regression for the "pause is cosmetic" bug: `vapor pause` used
+        // to flip the status string while the runtime kept leasing and
+        // executing. Paused now means: ingest keeps capturing intents,
+        // but nothing new is leased until resume.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        std::fs::create_dir_all(&watch_root).expect("create watch root");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+        state_db
+            .enqueue_intent(
+                &watch_root.join("src/main.rs"),
+                PendingIntentKind::Upload,
+                timestamp_ms(0),
+            )
+            .expect("enqueue upload intent");
+
+        let clock = Arc::new(crate::clock::ManualClock::at_now());
+        let mut runtime = DaemonRuntime::build(
+            test_sync_scope(&watch_root),
+            EventPathFilterOptions::default(),
+            state_db,
+            default_provider(),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            false,
+        )
+        .expect("runtime");
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        runtime.attach_control(control.clone());
+
+        control.request_pause();
+        clock.advance(Duration::from_millis(250));
+        let paused_tick = runtime
+            .tick_with_inputs(timestamp_ms(250), ThrottleInputs::default())
+            .expect("paused tick");
+
+        assert_eq!(runtime.app().snapshot().run_state, RunState::Paused);
+        assert_eq!(paused_tick.leased_intents, 0, "paused must not lease work");
+        assert_eq!(paused_tick.started_staged_intents, 0);
+        assert_eq!(runtime.state_db().pending_depth().expect("pending"), 1);
+
+        // Ingest keeps capturing intent state while paused.
+        let recorder = runtime.recorder.as_ref().expect("recorder").clone();
+        let runtime_watch_root = runtime
+            .sync_scope()
+            .local_sync_directory
+            .clone()
+            .expect("watch root");
+        FsEventRecording::record_event(
+            recorder.as_ref(),
+            FsEventRecord {
+                path: runtime_watch_root.join("src/other.rs"),
+                kind: FsEventKind::Modified,
+                observed_at: timestamp_ms(300),
+            },
+        );
+        clock.advance(Duration::from_millis(1_500));
+        let capture_tick = runtime
+            .tick_with_inputs(timestamp_ms(1_750), ThrottleInputs::default())
+            .expect("capture tick");
+        assert_eq!(capture_tick.stabilized_events, 1);
+        assert_eq!(capture_tick.durable_enqueues, 1);
+        assert_eq!(capture_tick.leased_intents, 0, "still paused");
+        assert_eq!(runtime.state_db().pending_depth().expect("pending"), 2);
+
+        control.request_resume();
+        clock.advance(Duration::from_millis(250));
+        let resumed_tick = runtime
+            .tick_with_inputs(timestamp_ms(2_000), ThrottleInputs::default())
+            .expect("resumed tick");
+        assert_eq!(runtime.app().snapshot().run_state, RunState::Running);
+        assert_eq!(resumed_tick.leased_intents, 2, "resume admits the backlog");
+    }
+
+    #[test]
+    fn checkpoint_paused_reconcile_does_not_duplicate_durable_rows() {
+        // Regression: a checkpoint-paused reconcile is tracked both as a
+        // requeued durable row and as a pending scheduler intent; the
+        // flush used to insert a fresh durable row for the scheduler copy
+        // on every pause, multiplying whole-subtree reconciles.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        std::fs::create_dir_all(&watch_root).expect("create watch root");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+        let subtree_root = watch_root.join("project");
+        state_db
+            .enqueue_intent(
+                &subtree_root,
+                PendingIntentKind::ReconcileSubtree,
+                timestamp_ms(0),
+            )
+            .expect("enqueue reconcile intent");
+
+        let clock = Arc::new(crate::clock::ManualClock::at_now());
+        let mut runtime = DaemonRuntime::build(
+            test_sync_scope(&watch_root),
+            EventPathFilterOptions::default(),
+            state_db,
+            default_provider(),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            false,
+        )
+        .expect("runtime");
+
+        // Tick 1 (idle): the reconcile is leased and starts running.
+        // Ticks step 1 s so each one re-samples the throttle inputs.
+        clock.advance(Duration::from_secs(1));
+        let started = runtime
+            .tick_with_inputs(timestamp_ms(1_000), ThrottleInputs::default())
+            .expect("start tick");
+        assert!(started.started_reconcile_root.is_some());
+        assert_eq!(runtime.state_db().queue_depth().expect("depth"), 1);
+
+        // Tick 2 (user becomes active): the reconcile checkpoint-pauses.
+        clock.advance(Duration::from_secs(1));
+        let paused = runtime
+            .tick_with_inputs(
+                timestamp_ms(2_000),
+                ThrottleInputs {
+                    user_active: true,
+                    ..ThrottleInputs::default()
+                },
+            )
+            .expect("pause tick");
+        assert_eq!(paused.requeued_intents, 1);
+        assert_eq!(runtime.state_db().queue_depth().expect("depth"), 1);
+
+        // Ticks 3..6 (still active): every pause cycle used to add one
+        // duplicate durable row; coalescing must keep the depth at 1.
+        for step in 1..=4u64 {
+            clock.advance(Duration::from_secs(1));
+            runtime
+                .tick_with_inputs(
+                    timestamp_ms(2_000 + step * 1_000),
+                    ThrottleInputs {
+                        user_active: true,
+                        ..ThrottleInputs::default()
+                    },
+                )
+                .expect("busy tick");
+            assert_eq!(
+                runtime.state_db().queue_depth().expect("depth"),
+                1,
+                "paused reconcile must never multiply durable rows"
+            );
         }
     }
 
@@ -1114,6 +1507,7 @@ mod tests {
 
         let mut runtime = DaemonRuntime::build(
             test_sync_scope(&watch_root),
+            EventPathFilterOptions::default(),
             state_db,
             default_provider(),
             Arc::new(StaticMetricsSampler::default()),

@@ -221,7 +221,16 @@ impl KeyedSupersedingScheduler {
                 .intents
                 .get_mut(&path)
                 .expect("scheduled intent disappeared");
-            record.kind = kind;
+            // Latest-wins for per-path work — except a pending subtree
+            // reconcile, which subsumes any per-path action for the same
+            // path. Downgrading a reconcile to (say) an Upload would leave
+            // the compacted-subtree boundary waiting on a reconcile intent
+            // that no longer exists.
+            record.kind = if record.kind == PendingIntentKind::ReconcileSubtree {
+                PendingIntentKind::ReconcileSubtree
+            } else {
+                kind
+            };
             record.first_observed_at = earliest_time(record.first_observed_at, first_observed_at);
             record.last_observed_at = latest_time(record.last_observed_at, last_observed_at);
             record.burst_count = record.burst_count.saturating_add(burst_count);
@@ -476,6 +485,27 @@ mod tests {
 
         assert_eq!(update.kind, PendingIntentKind::ReconcileSubtree);
         let claimed = scheduler.claim_next().unwrap();
+        assert_eq!(claimed.kind, PendingIntentKind::ReconcileSubtree);
+    }
+
+    #[test]
+    fn pending_reconcile_is_not_downgraded_by_a_later_per_path_event() {
+        // A plain fs event on a compacted subtree's root (e.g. a mkdir or
+        // attribute change) must not replace the pending reconcile with an
+        // Upload — the compaction boundary is waiting on that reconcile.
+        let root = PathBuf::from("/tmp/vapor-root/project");
+        let mut scheduler = KeyedSupersedingScheduler::default();
+
+        scheduler.upsert_intent(
+            root.clone(),
+            PendingIntentKind::ReconcileSubtree,
+            timestamp(1),
+        );
+        let update = scheduler.upsert_intent(root.clone(), PendingIntentKind::Upload, timestamp(2));
+
+        assert_eq!(update.kind, PendingIntentKind::ReconcileSubtree);
+        let claimed = scheduler.claim_next_reconcile().expect("reconcile intent");
+        assert_eq!(claimed.path, root);
         assert_eq!(claimed.kind, PendingIntentKind::ReconcileSubtree);
     }
 

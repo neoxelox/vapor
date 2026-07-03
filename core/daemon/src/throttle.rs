@@ -5,45 +5,10 @@ use vapor_shared::{ThrottleState, constants};
 
 use crate::clock::{Clock, SystemClock};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ThermalPressure {
-    #[default]
-    Nominal,
-    Fair,
-    Serious,
-    Critical,
-}
-
-impl ThermalPressure {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Nominal => "nominal",
-            Self::Fair => "fair",
-            Self::Serious => "serious",
-            Self::Critical => "critical",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ResourcePressure {
-    #[default]
-    Nominal,
-    Elevated,
-    High,
-    Severe,
-}
-
-impl ResourcePressure {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Nominal => "nominal",
-            Self::Elevated => "elevated",
-            Self::High => "high",
-            Self::Severe => "severe",
-        }
-    }
-}
+// The sample types are shared contracts: `core/platform`'s metrics
+// sampler produces them and the controller below consumes them.
+// Re-exported here so existing `crate::throttle::…` paths keep working.
+pub use vapor_shared::{ResourcePressure, ThermalPressure, ThrottleInputs};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ThrottleCause {
@@ -68,35 +33,6 @@ pub struct ThrottleCaps {
     pub allow_reconcile: bool,
     pub allow_hashing: bool,
     pub allow_uploads: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ThrottleInputs {
-    pub on_battery: bool,
-    pub low_power_mode: bool,
-    pub thermal_pressure: ThermalPressure,
-    pub system_cpu_load_percent: u8,
-    pub vapor_cpu_load_percent: u8,
-    pub disk_pressure: ResourcePressure,
-    pub network_error_rate_percent: u8,
-    pub network_throughput_kbps: Option<u32>,
-    pub user_active: bool,
-}
-
-impl Default for ThrottleInputs {
-    fn default() -> Self {
-        Self {
-            on_battery: false,
-            low_power_mode: false,
-            thermal_pressure: ThermalPressure::Nominal,
-            system_cpu_load_percent: 10,
-            vapor_cpu_load_percent: 2,
-            disk_pressure: ResourcePressure::Nominal,
-            network_error_rate_percent: 0,
-            network_throughput_kbps: Some(10_000),
-            user_active: false,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -184,14 +120,25 @@ impl ThrottleController {
         // its dwell window, hold the existing state and reuse the cause we
         // recorded on entry. This stops oscillating CPU / network samples
         // from flipping the throttle state more than once per dwell window.
-        // C2-4. The first transition (no prior state) is always honored so
-        // boot still settles to the right tier immediately.
+        // C2-4. Two deliberate carve-outs:
+        //
+        // - The first transition (no prior state) is always honored so
+        //   boot still settles to the right tier immediately.
+        // - Escalations (a candidate *more* conservative than the held
+        //   state) bypass the dwell entirely. Dwell exists to stop
+        //   oscillating samples from relaxing caps too eagerly; making a
+        //   thermally-critical or low-power machine wait out a dwell
+        //   window at full caps would invert the "defer under pressure"
+        //   invariant.
         let now_inst = self.clock.now();
         let next_state = if let (Some(prev_state), Some(changed_at)) =
             (self.last_state, self.last_state_change_inst)
         {
             let dwell = Self::min_dwell_for(prev_state);
-            if now_inst.saturating_duration_since(changed_at) < dwell {
+            let within_dwell = now_inst.saturating_duration_since(changed_at) < dwell;
+            let is_relaxation =
+                throttle_state_rank(selected.state) < throttle_state_rank(prev_state);
+            if within_dwell && is_relaxation {
                 prev_state
             } else {
                 selected.state
@@ -665,6 +612,47 @@ mod tests {
             system_cpu_load_percent: 5,
             ..ThrottleInputs::default()
         });
+        assert_eq!(recovered.state, ThrottleState::IdleDrain);
+    }
+
+    #[test]
+    fn escalation_to_more_conservative_state_bypasses_the_dwell_window() {
+        // Safety invariant: dwell only delays *relaxations*. A machine
+        // that enters Low Power Mode (→ Suspended) one second after
+        // landing in Light must suspend immediately, not keep hashing
+        // and uploading for the remainder of the 5 s dwell.
+        use crate::clock::ManualClock;
+
+        let clock = Arc::new(ManualClock::at_now());
+        let mut controller = ThrottleController::with_clock(clock.clone());
+
+        let light = controller.evaluate(ThrottleInputs {
+            on_battery: true,
+            ..ThrottleInputs::default()
+        });
+        assert_eq!(light.state, ThrottleState::Light);
+
+        clock.advance(Duration::from_secs(1));
+        let suspended = controller.evaluate(ThrottleInputs {
+            on_battery: true,
+            low_power_mode: true,
+            ..ThrottleInputs::default()
+        });
+        assert_eq!(
+            suspended.state,
+            ThrottleState::Suspended,
+            "escalation must not wait out the Light dwell window"
+        );
+
+        // And the subsequent relaxation honors the Suspended dwell (1 s).
+        let held = controller.evaluate(ThrottleInputs::default());
+        assert_eq!(
+            held.state,
+            ThrottleState::Suspended,
+            "relaxation out of Suspended still dwells"
+        );
+        clock.advance(Duration::from_secs(2));
+        let recovered = controller.evaluate(ThrottleInputs::default());
         assert_eq!(recovered.state, ThrottleState::IdleDrain);
     }
 

@@ -95,11 +95,13 @@ enum Command {
 #[derive(Subcommand, Debug)]
 enum AuthAction {
     /// Store a token for `provider`. Pre-Wave-8 the token is supplied
-    /// verbatim via `--token`; the OAuth-PKCE flow lands later.
+    /// verbatim; the OAuth-PKCE flow lands later. Omit `--token` (or
+    /// pass `--token -`) to read the token from stdin, which keeps the
+    /// secret out of shell history and process listings.
     Login {
         provider: String,
         #[arg(long)]
-        token: String,
+        token: Option<String>,
     },
     /// Remove the stored token for `provider`.
     Logout { provider: String },
@@ -264,6 +266,7 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
     let persistent = store.is_persistent();
     match action {
         AuthAction::Login { provider, token } => {
+            let token = resolve_auth_token(token)?;
             auth_cmd::login_into(store.as_ref(), &provider, &token).map_err(|e| e.to_string())?;
             if persistent {
                 println!("auth login: stored token for {provider}");
@@ -271,7 +274,7 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
                 eprintln!(
                     "vapor: warning: native secret store is not yet wired in on this OS; \
                      the token was kept in process memory only and will not survive restart \
-                     (see core/tasks/core.md C4-5 / Waves 12 / 13)."
+                     (see docs/tasks/core.md C4-5 / Waves 12 / 13)."
                 );
                 println!("auth login: stored token for {provider} (process-local only)");
             }
@@ -295,6 +298,37 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
                 println!("{}: {}", entry.provider, state);
             }
             Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// Resolves the login token: an explicit `--token VALUE` is used
+/// verbatim (with a hygiene warning, since argv leaks into shell history
+/// and `ps` output); `--token -` or no flag reads one line from stdin.
+fn resolve_auth_token(token: Option<String>) -> Result<String, String> {
+    match token.as_deref() {
+        Some("-") | None => {
+            use std::io::BufRead;
+            if token.is_none() {
+                eprintln!("vapor: reading token from stdin (end with newline / EOF)");
+            }
+            let mut line = String::new();
+            std::io::stdin()
+                .lock()
+                .read_line(&mut line)
+                .map_err(|error| format!("failed to read token from stdin: {error}"))?;
+            let token = line.trim();
+            if token.is_empty() {
+                return Err("no token provided on stdin".to_string());
+            }
+            Ok(token.to_string())
+        }
+        Some(value) => {
+            eprintln!(
+                "vapor: warning: passing --token on the command line exposes the secret to \
+                 shell history and process listings; prefer piping it via stdin (`--token -`)."
+            );
+            Ok(value.to_string())
         }
     }
 }
@@ -350,6 +384,11 @@ fn locate_daemon_binary() -> Option<PathBuf> {
         for dir in std::env::split_paths(&path_var) {
             let candidate = dir.join("vapord");
             if candidate.is_file() {
+                eprintln!(
+                    "vapor: warning: using vapord from PATH ({}) instead of a sibling of this \
+                     binary; the service definition will pin this path.",
+                    candidate.display()
+                );
                 return Some(candidate);
             }
         }

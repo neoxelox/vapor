@@ -160,8 +160,8 @@ pub struct StatusResponse {
     /// etc.). Empty when no decision has been recorded yet.
     #[serde(default)]
     pub throttle_reason: String,
-    /// Daemon-side schema-version stamp. Lets clients log a diagnostic
-    /// when they see a future version.
+    /// Daemon identity string (`"vapord/<product version>"`). Purely
+    /// diagnostic — lets clients report which daemon build answered.
     #[serde(default)]
     pub daemon_id: String,
 }

@@ -31,26 +31,51 @@ impl Default for EventPathFilterOptions {
 
 impl EventPathFilterOptions {
     pub fn from_process_environment() -> Self {
-        let use_gitignore = resolve_use_gitignore(
+        Self::from_environment_and_config(&vapor_shared::config::VaporConfig::default())
+    }
+
+    /// Resolves the filter options with the canonical precedence:
+    /// `VAPOR_*` environment variable → `vapor.json` value → compiled
+    /// default (already baked into [`vapor_shared::config::VaporConfig`]).
+    pub fn from_environment_and_config(config: &vapor_shared::config::VaporConfig) -> Self {
+        Self::resolve(
             env::var(constants::env::VAPOR_USE_GITIGNORE)
                 .ok()
                 .as_deref(),
-        );
-        let use_vaporignore = resolve_use_vaporignore(
             env::var(constants::env::VAPOR_USE_VAPORIGNORE)
                 .ok()
                 .as_deref(),
-        );
-        let pre_user_rules = resolve_pre_user_rules(
             env::var(constants::env::VAPOR_PRE_IGNORE_RULES)
                 .ok()
                 .as_deref(),
-        );
-        let post_user_rules = resolve_post_user_rules(
             env::var(constants::env::VAPOR_POST_IGNORE_RULES)
                 .ok()
                 .as_deref(),
-        );
+            config,
+        )
+    }
+
+    fn resolve(
+        env_use_gitignore: Option<&str>,
+        env_use_vaporignore: Option<&str>,
+        env_pre_rules: Option<&str>,
+        env_post_rules: Option<&str>,
+        config: &vapor_shared::config::VaporConfig,
+    ) -> Self {
+        let use_gitignore = env_use_gitignore
+            .and_then(parse_bool_flag)
+            .unwrap_or(config.use_git_ignore);
+        let use_vaporignore = env_use_vaporignore
+            .and_then(parse_bool_flag)
+            .unwrap_or(config.use_vapor_ignore);
+        let pre_user_rules = match env_pre_rules {
+            Some(raw) => parse_rule_lines(raw),
+            None => parse_rule_lines(&config.pre_ignore_rules),
+        };
+        let post_user_rules = match env_post_rules {
+            Some(raw) => parse_rule_lines(raw),
+            None => parse_rule_lines(&config.post_ignore_rules),
+        };
 
         Self {
             use_gitignore,
@@ -58,28 +83,6 @@ impl EventPathFilterOptions {
             pre_user_rules,
             post_user_rules,
         }
-    }
-}
-
-fn resolve_use_gitignore(value: Option<&str>) -> bool {
-    value.and_then(parse_bool_flag).unwrap_or(true)
-}
-
-fn resolve_use_vaporignore(value: Option<&str>) -> bool {
-    value.and_then(parse_bool_flag).unwrap_or(true)
-}
-
-fn resolve_pre_user_rules(value: Option<&str>) -> Vec<String> {
-    match value {
-        Some(raw) => parse_rule_lines(raw),
-        None => EventPathFilterOptions::default().pre_user_rules,
-    }
-}
-
-fn resolve_post_user_rules(value: Option<&str>) -> Vec<String> {
-    match value {
-        Some(raw) => parse_rule_lines(raw),
-        None => EventPathFilterOptions::default().post_user_rules,
     }
 }
 
@@ -496,14 +499,11 @@ fn parse_bool_flag(value: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    static NEXT_TEST_DIRECTORY_ID: AtomicU64 = AtomicU64::new(1);
+    use tempfile::TempDir;
 
     #[test]
     fn defaults_ignore_common_cache_and_build_paths() {
-        let watch_root = create_test_directory();
+        let (_watch_root_guard, watch_root) = create_test_directory();
         let filter =
             EventPathFilter::for_watch_root(&watch_root, &EventPathFilterOptions::default());
 
@@ -511,13 +511,11 @@ mod tests {
         assert!(filter.should_ignore(&watch_root.join("node_modules/pkg/index.js")));
         assert!(filter.should_ignore(&watch_root.join("coverage/unit.json")));
         assert!(!filter.should_ignore(&watch_root.join("src/main.rs")));
-
-        remove_test_directory(&watch_root);
     }
 
     #[test]
     fn gitignore_rules_can_be_disabled() {
-        let watch_root = create_test_directory();
+        let (_watch_root_guard, watch_root) = create_test_directory();
         fs::write(watch_root.join(".gitignore"), "generated/\n")
             .expect("failed to write .gitignore");
 
@@ -533,13 +531,11 @@ mod tests {
             },
         );
         assert!(!filter_without_gitignore.should_ignore(&watch_root.join("generated/file.txt")));
-
-        remove_test_directory(&watch_root);
     }
 
     #[test]
     fn vaporignore_rules_can_be_disabled() {
-        let watch_root = create_test_directory();
+        let (_watch_root_guard, watch_root) = create_test_directory();
         fs::write(watch_root.join(".vaporignore"), "scratch/\n")
             .expect("failed to write .vaporignore");
 
@@ -555,13 +551,11 @@ mod tests {
             },
         );
         assert!(!filter_without_vaporignore.should_ignore(&watch_root.join("scratch/file.txt")));
-
-        remove_test_directory(&watch_root);
     }
 
     #[test]
     fn vaporignore_overrides_gitignore_and_pre_user_rules() {
-        let watch_root = create_test_directory();
+        let (_watch_root_guard, watch_root) = create_test_directory();
 
         fs::write(
             watch_root.join(".gitignore"),
@@ -591,13 +585,11 @@ mod tests {
         assert!(filter.should_ignore(&watch_root.join("coverage/from-gitignore.txt")));
         assert!(!filter.should_ignore(&watch_root.join("coverage/from-vaporignore.txt")));
         assert!(filter.should_ignore(&watch_root.join("coverage/from-user-rule.txt")));
-
-        remove_test_directory(&watch_root);
     }
 
     #[test]
     fn post_user_rules_override_vaporignore_rules() {
-        let watch_root = create_test_directory();
+        let (_watch_root_guard, watch_root) = create_test_directory();
 
         fs::write(
             watch_root.join(".vaporignore"),
@@ -616,13 +608,11 @@ mod tests {
         );
 
         assert!(filter.should_ignore(&watch_root.join("coverage/keep.txt")));
-
-        remove_test_directory(&watch_root);
     }
 
     #[test]
     fn ignore_file_discovery_skips_heavy_dependency_directories() {
-        let watch_root = create_test_directory();
+        let (_watch_root_guard, watch_root) = create_test_directory();
         fs::create_dir_all(watch_root.join("node_modules/pkg/deep"))
             .expect("failed to create node_modules tree");
         fs::write(
@@ -646,13 +636,11 @@ mod tests {
 
         assert!(filter.should_ignore(&watch_root.join("src/real-rule/something.txt")));
         assert!(!filter.should_ignore(&watch_root.join("other/leaked-rule/something.txt")));
-
-        remove_test_directory(&watch_root);
     }
 
     #[test]
     fn recursively_loads_nested_gitignore_files() {
-        let watch_root = create_test_directory();
+        let (_watch_root_guard, watch_root) = create_test_directory();
         fs::create_dir_all(watch_root.join("apps/web")).expect("failed to create nested directory");
         fs::write(watch_root.join("apps/web/.gitignore"), "generated/\n")
             .expect("failed to write nested .gitignore");
@@ -669,13 +657,11 @@ mod tests {
 
         assert!(filter.should_ignore(&watch_root.join("apps/web/generated/app.js")));
         assert!(!filter.should_ignore(&watch_root.join("generated/app.js")));
-
-        remove_test_directory(&watch_root);
     }
 
     #[test]
     fn recursively_loads_nested_vaporignore_files() {
-        let watch_root = create_test_directory();
+        let (_watch_root_guard, watch_root) = create_test_directory();
         fs::create_dir_all(watch_root.join("apps/desktop"))
             .expect("failed to create nested directory");
         fs::write(watch_root.join("apps/desktop/.vaporignore"), "scratch/\n")
@@ -693,13 +679,11 @@ mod tests {
 
         assert!(filter.should_ignore(&watch_root.join("apps/desktop/scratch/file.txt")));
         assert!(!filter.should_ignore(&watch_root.join("scratch/file.txt")));
-
-        remove_test_directory(&watch_root);
     }
 
     #[test]
     fn pre_user_rules_accept_gitignore_style_comments_and_unignore() {
-        let watch_root = create_test_directory();
+        let (_watch_root_guard, watch_root) = create_test_directory();
         let filter = EventPathFilter::for_watch_root(
             &watch_root,
             &EventPathFilterOptions {
@@ -718,13 +702,11 @@ mod tests {
         assert!(filter.should_ignore(&watch_root.join("tmp/a.txt")));
         assert!(!filter.should_ignore(&watch_root.join("tmp/keep.txt")));
         assert!(filter.should_ignore(&watch_root.join("#literal-file")));
-
-        remove_test_directory(&watch_root);
     }
 
     #[test]
     fn empty_pre_user_rules_disable_default_ignore_set() {
-        let watch_root = create_test_directory();
+        let (_watch_root_guard, watch_root) = create_test_directory();
         let filter = EventPathFilter::for_watch_root(
             &watch_root,
             &EventPathFilterOptions {
@@ -736,56 +718,69 @@ mod tests {
         );
 
         assert!(!filter.should_ignore(&watch_root.join("node_modules/pkg/index.js")));
-
-        remove_test_directory(&watch_root);
     }
 
     #[test]
-    fn resolves_use_gitignore_with_safe_default() {
-        assert!(resolve_use_gitignore(None));
+    fn options_default_to_config_values_when_environment_is_unset() {
+        let config = vapor_shared::config::VaporConfig {
+            use_git_ignore: false,
+            use_vapor_ignore: true,
+            pre_ignore_rules: "tmp/\n*.cache".to_string(),
+            post_ignore_rules: "keep-out/".to_string(),
+            ..vapor_shared::config::VaporConfig::default()
+        };
+
+        let options = EventPathFilterOptions::resolve(None, None, None, None, &config);
+
+        assert!(!options.use_gitignore);
+        assert!(options.use_vaporignore);
+        assert_eq!(options.pre_user_rules, vec!["tmp/", "*.cache"]);
+        assert_eq!(options.post_user_rules, vec!["keep-out/"]);
     }
 
     #[test]
-    fn resolves_use_gitignore_from_explicit_values() {
-        assert!(resolve_use_gitignore(Some("true")));
-        assert!(!resolve_use_gitignore(Some("false")));
-        assert!(resolve_use_gitignore(Some("invalid")));
+    fn environment_variables_override_config_values() {
+        let config = vapor_shared::config::VaporConfig {
+            use_git_ignore: true,
+            pre_ignore_rules: "from-config/".to_string(),
+            ..vapor_shared::config::VaporConfig::default()
+        };
+
+        let options = EventPathFilterOptions::resolve(
+            Some("false"),
+            Some("invalid-falls-back-to-config"),
+            Some("from-env/\n\n"),
+            None,
+            &config,
+        );
+
+        assert!(!options.use_gitignore, "env override wins");
+        assert!(
+            options.use_vaporignore,
+            "unparseable env value falls back to config"
+        );
+        assert_eq!(options.pre_user_rules, vec!["from-env/"]);
+        assert!(options.post_user_rules.is_empty());
     }
 
     #[test]
-    fn resolves_use_vaporignore_with_safe_default() {
-        assert!(resolve_use_vaporignore(None));
-    }
-
-    #[test]
-    fn resolves_use_vaporignore_from_explicit_values() {
-        assert!(resolve_use_vaporignore(Some("true")));
-        assert!(!resolve_use_vaporignore(Some("false")));
-        assert!(resolve_use_vaporignore(Some("invalid")));
-    }
-
-    #[test]
-    fn resolves_pre_user_rules_with_safe_default() {
-        let rules = resolve_pre_user_rules(None);
-        assert!(rules.iter().any(|rule| rule == "node_modules/"));
-    }
-
-    #[test]
-    fn resolves_pre_user_rules_from_environment_lines() {
-        let rules = resolve_pre_user_rules(Some("tmp/\n*.cache\n\n"));
-        assert_eq!(rules, vec!["tmp/", "*.cache"]);
-    }
-
-    #[test]
-    fn resolves_post_user_rules_with_safe_default() {
-        let rules = resolve_post_user_rules(None);
-        assert!(rules.is_empty());
-    }
-
-    #[test]
-    fn resolves_post_user_rules_from_environment_lines() {
-        let rules = resolve_post_user_rules(Some("tmp/\n*.cache\n\n"));
-        assert_eq!(rules, vec!["tmp/", "*.cache"]);
+    fn default_config_yields_the_compiled_default_rule_set() {
+        let options = EventPathFilterOptions::resolve(
+            None,
+            None,
+            None,
+            None,
+            &vapor_shared::config::VaporConfig::default(),
+        );
+        assert!(options.use_gitignore);
+        assert!(options.use_vaporignore);
+        assert!(
+            options
+                .pre_user_rules
+                .iter()
+                .any(|rule| rule == "node_modules/")
+        );
+        assert!(options.post_user_rules.is_empty());
     }
 
     #[test]
@@ -797,23 +792,13 @@ mod tests {
         assert_eq!(parse_bool_flag("invalid"), None);
     }
 
-    fn create_test_directory() -> PathBuf {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock drift")
-            .as_nanos();
-        let unique_id = NEXT_TEST_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!(
-            "vapor-daemon-path-filter-{}-{}-{}",
-            std::process::id(),
-            timestamp,
-            unique_id,
-        ));
-        fs::create_dir_all(&root).expect("failed to create test directory");
-        root
-    }
-
-    fn remove_test_directory(path: &Path) {
-        let _ = fs::remove_dir_all(path);
+    /// Owns the `TempDir` guard so the directory lives for the test and
+    /// is removed automatically afterwards, per the testing-strategy
+    /// mandate that every integration-style test uses its own
+    /// `tempfile::TempDir`.
+    fn create_test_directory() -> (TempDir, PathBuf) {
+        let guard = TempDir::new().expect("failed to create test directory");
+        let root = guard.path().to_path_buf();
+        (guard, root)
     }
 }

@@ -1,8 +1,54 @@
 #![forbid(unsafe_code)]
 
-use vapor_shared::ThrottleState;
+use std::error::Error;
+use std::fmt::{self, Display};
+
+use vapor_shared::{RetryFailureKind, ThrottleState};
 
 pub mod logging;
+
+/// Typed provider failure. Carries the shared retry taxonomy so the
+/// engine's retry policy can classify provider errors without parsing
+/// strings (AGENTS.md §8: explicit error enums, transient vs permanent).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderError {
+    pub failure: RetryFailureKind,
+    pub message: String,
+}
+
+impl ProviderError {
+    pub fn new(failure: RetryFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            failure,
+            message: message.into(),
+        }
+    }
+
+    pub fn transient(message: impl Into<String>) -> Self {
+        Self::new(RetryFailureKind::Transient, message)
+    }
+
+    pub fn permanent(message: impl Into<String>) -> Self {
+        Self::new(RetryFailureKind::Permanent, message)
+    }
+
+    pub fn authentication(message: impl Into<String>) -> Self {
+        Self::new(RetryFailureKind::Authentication, message)
+    }
+}
+
+impl Display for ProviderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} provider failure: {}",
+            self.failure.label(),
+            self.message
+        )
+    }
+}
+
+impl Error for ProviderError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderCapabilities {
@@ -20,6 +66,7 @@ impl ProviderCapabilities {
 pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
     fn capabilities(&self) -> ProviderCapabilities;
+
     fn poll_allowed(&self, throttle_state: ThrottleState) -> bool {
         let allowed = !matches!(throttle_state, ThrottleState::Suspended);
         if !allowed {
@@ -31,13 +78,10 @@ pub trait Provider: Send + Sync {
         allowed
     }
 
-    fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), String> {
-        logging::info(
-            "Ensuring cloud sync directory",
-            &[("cloud_sync_directory", cloud_sync_directory.to_string())],
-        );
-        Ok(())
-    }
+    /// Ensures the cloud-side sync root exists. Required (no silent-Ok
+    /// default): every provider must state explicitly whether it can
+    /// honor this safety-relevant operation.
+    fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), ProviderError>;
 }
 
 #[derive(Debug, Default)]
@@ -62,6 +106,17 @@ impl Provider for GoogleDriveProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::GDRIVE_MVP
     }
+
+    fn ensure_cloud_sync_directory(
+        &self,
+        _cloud_sync_directory: &str,
+    ) -> Result<(), ProviderError> {
+        // The real Drive integration lands in Phase C8-48. Failing loudly
+        // beats pretending the folder exists.
+        Err(ProviderError::permanent(
+            "GoogleDriveProvider is not implemented yet (Phase C8)",
+        ))
+    }
 }
 
 impl Provider for FilesystemStubProvider {
@@ -74,6 +129,16 @@ impl Provider for FilesystemStubProvider {
             supports_remote_changes_feed: false,
             supports_server_side_rename: false,
         }
+    }
+
+    fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), ProviderError> {
+        // Inert stub: it has no cloud side, so "ensuring" is a logged
+        // no-op by design (not a silent trait default).
+        logging::info(
+            "Filesystem stub provider treats the cloud sync directory as always present",
+            &[("cloud_sync_directory", cloud_sync_directory.to_string())],
+        );
+        Ok(())
     }
 }
 
@@ -106,5 +171,20 @@ mod tests {
         let provider = FilesystemStubProvider;
         assert!(!provider.capabilities().supports_remote_changes_feed);
         assert!(!provider.capabilities().supports_server_side_rename);
+    }
+
+    #[test]
+    fn unimplemented_gdrive_ensure_directory_fails_with_permanent_classification() {
+        let provider = GoogleDriveProvider;
+        let error = provider
+            .ensure_cloud_sync_directory("/Vapor")
+            .expect_err("gdrive stub must not pretend the folder exists");
+        assert_eq!(error.failure, RetryFailureKind::Permanent);
+    }
+
+    #[test]
+    fn filesystem_stub_ensures_directory_without_error() {
+        let provider = FilesystemStubProvider;
+        assert!(provider.ensure_cloud_sync_directory("/Vapor").is_ok());
     }
 }

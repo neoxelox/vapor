@@ -15,6 +15,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use vapor_shared::constants;
+
 #[derive(Debug)]
 pub enum JsonFileError {
     Io(io::Error),
@@ -96,12 +98,12 @@ impl AutoLaunchSettingStore for InMemoryAutoLaunchSettingStore {
 /// (typically `<vapor_dir>/vapor.json`) and writes back atomically via
 /// the temp-file-then-rename pattern.
 ///
-/// The minimal JSON parser embedded here intentionally only handles the
-/// `"autoLaunch"` key — everything else is preserved when other keys
-/// already exist in the file. The Swift `VaporConfigurationStore` is
-/// responsible for the full schema; this writer only updates one key
-/// without touching the rest, mirroring the Swift `set(_:forKey:)`
-/// semantics.
+/// The file is parsed and re-emitted with `serde_json` (the same
+/// serializer the `vapor config` CLI command uses), so every other
+/// top-level key in the file is preserved verbatim on write. A file that
+/// exists but does not parse as a JSON object is a hard error on write —
+/// silently rewriting a corrupt config would destroy whatever the user
+/// (or another surface) had there.
 #[derive(Debug, Clone)]
 pub struct JsonFileAutoLaunchSettingStore {
     path: PathBuf,
@@ -119,150 +121,64 @@ impl JsonFileAutoLaunchSettingStore {
 
 impl AutoLaunchSettingStore for JsonFileAutoLaunchSettingStore {
     fn read(&self) -> Result<Option<bool>, JsonFileError> {
-        match fs::read_to_string(&self.path) {
-            Ok(contents) => parse_auto_launch(&contents).map_err(JsonFileError::Parse),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(JsonFileError::Io(error)),
+        let document = match read_document(&self.path)? {
+            Some(document) => document,
+            None => return Ok(None),
+        };
+        match document.get(constants::config::KEY_AUTO_LAUNCH) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
+            Some(other) => Err(JsonFileError::Parse(format!(
+                "expected boolean for \"{}\", found {other}",
+                constants::config::KEY_AUTO_LAUNCH
+            ))),
         }
     }
 
     fn write(&self, value: bool) -> Result<(), JsonFileError> {
-        let existing = match fs::read_to_string(&self.path) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-            Err(error) => return Err(JsonFileError::Io(error)),
-        };
+        let mut document = read_document(&self.path)?
+            .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
 
-        let updated = upsert_auto_launch(&existing, value);
+        let object = document.as_object_mut().ok_or_else(|| {
+            JsonFileError::Parse("top-level JSON value is not an object".to_string())
+        })?;
+        object.insert(
+            constants::config::KEY_AUTO_LAUNCH.to_string(),
+            serde_json::Value::Bool(value),
+        );
 
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
 
+        let mut serialized = serde_json::to_string_pretty(&document)
+            .map_err(|error| JsonFileError::Parse(error.to_string()))?;
+        serialized.push('\n');
+
         let tmp_path = self.path.with_extension("vapor-tmp");
-        fs::write(&tmp_path, updated.as_bytes())?;
+        fs::write(&tmp_path, serialized.as_bytes())?;
         fs::rename(&tmp_path, &self.path)?;
         Ok(())
     }
 }
 
-/// Tiny, focused parser. Returns `None` when `autoLaunch` is absent or
-/// when the file is empty / whitespace-only.
-fn parse_auto_launch(contents: &str) -> Result<Option<bool>, String> {
-    let trimmed = contents.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    let Some(rest) = find_after(trimmed, "\"autoLaunch\"") else {
-        return Ok(None);
+/// Reads and parses the JSON document at `path`. `Ok(None)` when the
+/// file is missing or effectively empty; `Err(Parse)` when it exists but
+/// is not valid JSON.
+fn read_document(path: &Path) -> Result<Option<serde_json::Value>, JsonFileError> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(JsonFileError::Io(error)),
     };
-    let after_colon = skip_whitespace_and_colon(rest)
-        .ok_or_else(|| "expected ':' after \"autoLaunch\"".to_string())?;
-    if after_colon.starts_with("true") {
-        Ok(Some(true))
-    } else if after_colon.starts_with("false") {
-        Ok(Some(false))
-    } else {
-        Err("expected boolean value for \"autoLaunch\"".to_string())
-    }
-}
 
-/// Returns updated JSON with `"autoLaunch": <value>` set. Preserves all
-/// other top-level keys when the file already exists; otherwise emits a
-/// minimal one-key object so Swift's `VaporConfigurationStore` will
-/// reconcile the remaining fields on next load.
-fn upsert_auto_launch(contents: &str, value: bool) -> String {
-    let trimmed = contents.trim();
-    let needle = "\"autoLaunch\"";
-    if trimmed.is_empty() {
-        return format!(
-            "{{\n  \"autoLaunch\": {}\n}}\n",
-            if value { "true" } else { "false" }
-        );
+    if contents.trim().is_empty() {
+        return Ok(None);
     }
-    if let Some(start) = trimmed.find(needle) {
-        // Replace the boolean literal that follows.
-        let after_key = &trimmed[start + needle.len()..];
-        let Some(rel_value_index) = skip_whitespace_and_colon_index(after_key) else {
-            return contents.to_string();
-        };
-        let value_start = start + needle.len() + rel_value_index;
-        let after_value = &trimmed[value_start..];
-        let len = if after_value.starts_with("true") {
-            4
-        } else if after_value.starts_with("false") {
-            5
-        } else {
-            return contents.to_string();
-        };
-        let mut updated = String::with_capacity(trimmed.len());
-        updated.push_str(&trimmed[..value_start]);
-        updated.push_str(if value { "true" } else { "false" });
-        updated.push_str(&trimmed[value_start + len..]);
-        return ensure_trailing_newline(updated);
-    }
-    // Key missing: insert before the closing `}`. Preserves whatever
-    // content the Swift store already wrote.
-    let last_brace = trimmed.rfind('}').unwrap_or(trimmed.len());
-    let prefix = &trimmed[..last_brace];
-    let suffix = &trimmed[last_brace..];
-    let needs_comma = !prefix.trim_end().ends_with('{')
-        && prefix
-            .trim_end()
-            .chars()
-            .last()
-            .map(|c| c != ',')
-            .unwrap_or(true);
-    let separator = if needs_comma { "," } else { "" };
-    let inserted = format!(
-        "{}{}\n  \"autoLaunch\": {}\n{}",
-        prefix.trim_end(),
-        separator,
-        if value { "true" } else { "false" },
-        suffix
-    );
-    ensure_trailing_newline(inserted)
-}
 
-fn ensure_trailing_newline(mut s: String) -> String {
-    if !s.ends_with('\n') {
-        s.push('\n');
-    }
-    s
-}
-
-fn find_after<'a>(haystack: &'a str, needle: &str) -> Option<&'a str> {
-    let index = haystack.find(needle)?;
-    Some(&haystack[index + needle.len()..])
-}
-
-fn skip_whitespace_and_colon(s: &str) -> Option<&str> {
-    let index = skip_whitespace_and_colon_index(s)?;
-    Some(&s[index..])
-}
-
-fn skip_whitespace_and_colon_index(s: &str) -> Option<usize> {
-    let mut index = 0;
-    let mut saw_colon = false;
-    for (offset, c) in s.char_indices() {
-        if c.is_whitespace() {
-            index = offset + c.len_utf8();
-            continue;
-        }
-        if c == ':' {
-            if saw_colon {
-                return None;
-            }
-            saw_colon = true;
-            index = offset + 1;
-            continue;
-        }
-        if saw_colon {
-            return Some(index);
-        }
-        return None;
-    }
-    saw_colon.then_some(index)
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(|error| JsonFileError::Parse(format!("{error} (at {})", path.display())))
 }
 
 #[cfg(test)]
@@ -350,15 +266,45 @@ mod tests {
     }
 
     #[test]
-    fn parse_auto_launch_handles_whitespace_variants() {
+    fn corrupt_json_is_a_parse_error_on_write_and_the_file_is_preserved() {
+        let temp = TempDir::new().expect("temp");
+        let path = temp.path().join("vapor.json");
+        fs::write(&path, "{ definitely not json").expect("seed corrupt file");
+
+        let store = JsonFileAutoLaunchSettingStore::new(path.clone());
+        let error = store
+            .write(true)
+            .expect_err("corrupt file must not be clobbered");
+        assert!(matches!(error, JsonFileError::Parse(_)));
         assert_eq!(
-            parse_auto_launch("{\"autoLaunch\":true}").expect("ok"),
-            Some(true)
+            fs::read_to_string(&path).expect("file preserved"),
+            "{ definitely not json"
         );
-        assert_eq!(
-            parse_auto_launch("{ \"autoLaunch\" :  false }").expect("ok"),
-            Some(false)
-        );
-        assert_eq!(parse_auto_launch("{}").expect("ok"), None);
+    }
+
+    #[test]
+    fn auto_launch_key_inside_string_values_is_not_misread() {
+        // Regression for the pre-serde parser, which substring-matched
+        // `"autoLaunch"` anywhere in the file — including inside string
+        // values of unrelated keys.
+        let temp = TempDir::new().expect("temp");
+        let path = temp.path().join("vapor.json");
+        fs::write(&path, r#"{ "note": "set \"autoLaunch\": true someday" }"#).expect("seed file");
+
+        let store = JsonFileAutoLaunchSettingStore::new(path);
+        assert_eq!(store.read().expect("read"), None);
+    }
+
+    #[test]
+    fn non_boolean_auto_launch_value_is_a_parse_error() {
+        let temp = TempDir::new().expect("temp");
+        let path = temp.path().join("vapor.json");
+        fs::write(&path, r#"{ "autoLaunch": "yes" }"#).expect("seed file");
+
+        let store = JsonFileAutoLaunchSettingStore::new(path);
+        assert!(matches!(
+            store.read().expect_err("non-boolean must error"),
+            JsonFileError::Parse(_)
+        ));
     }
 }

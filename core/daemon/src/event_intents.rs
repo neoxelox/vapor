@@ -43,7 +43,7 @@ pub struct PendingEventFlags {
 }
 
 impl PendingEventFlags {
-    fn include(&mut self, kind: &FsEventKind) {
+    fn include(&mut self, kind: FsEventKind) {
         match kind {
             FsEventKind::Created => self.created = true,
             FsEventKind::Modified => self.modified = true,
@@ -86,6 +86,7 @@ pub enum BackpressureReason {
     DirectoryUniquePathsStorm,
     DirectoryEventCountStorm,
     GlobalPendingEventCountStorm,
+    IngestOverflow,
 }
 
 impl BackpressureReason {
@@ -96,6 +97,7 @@ impl BackpressureReason {
             Self::GlobalPendingEventCountStorm => {
                 Some(StormReason::GlobalPendingEventCountThreshold)
             }
+            Self::IngestOverflow => Some(StormReason::IngestOverflow),
             Self::SubtreeCapExceeded | Self::GlobalCapExceeded => None,
         }
     }
@@ -107,6 +109,7 @@ impl From<StormReason> for BackpressureReason {
             StormReason::DirectoryUniquePathsThreshold => Self::DirectoryUniquePathsStorm,
             StormReason::DirectoryEventCountThreshold => Self::DirectoryEventCountStorm,
             StormReason::GlobalPendingEventCountThreshold => Self::GlobalPendingEventCountStorm,
+            StormReason::IngestOverflow => Self::IngestOverflow,
         }
     }
 }
@@ -325,8 +328,8 @@ impl BoundedEventIntentMaps {
 
         if let Some(existing) = self.event_map.get_mut(&event.path) {
             existing.last_observed_at = event.observed_at;
-            existing.last_event_kind = event.kind.clone();
-            existing.flags.include(&event.kind);
+            existing.last_event_kind = event.kind;
+            existing.flags.include(event.kind);
             existing.burst_count += 1;
         } else {
             if !self.path_is_tracked(&event.path)
@@ -338,7 +341,7 @@ impl BoundedEventIntentMaps {
             }
 
             let mut flags = PendingEventFlags::default();
-            flags.include(&event.kind);
+            flags.include(event.kind);
             self.track_path(&event.path);
             self.event_map.insert(
                 event.path.clone(),
@@ -625,7 +628,18 @@ impl BoundedEventIntentMaps {
         if let Some(existing) = self.deferred_reconciles.get_mut(subtree_root) {
             existing.reason = reason;
             existing.last_observed_at = observed_at;
-            existing.available_at = existing.available_at.max(available_at);
+            // "Defer until quiet", but bounded: a subtree that never goes
+            // quiet must not push its own reconcile out forever. The cap
+            // is measured from first detection, so continued churn can
+            // delay convergence by at most DEFERRED_RECONCILE_MAX_DELAY.
+            let max_available_at = existing.first_detected_at
+                + std::time::Duration::from_millis(
+                    constants::engine::DEFERRED_RECONCILE_MAX_DELAY_MILLIS,
+                );
+            existing.available_at = existing
+                .available_at
+                .max(available_at)
+                .min(max_available_at);
             existing.reschedule_count += 1;
             return;
         }
@@ -641,6 +655,29 @@ impl BoundedEventIntentMaps {
                 available_at,
                 reschedule_count: 0,
             },
+        );
+    }
+
+    /// Records that the bounded ingest buffer dropped `dropped_count` raw
+    /// fs events before they reached these maps. The dropped changes are
+    /// unknown, so the only safe repair is a whole-scope reconcile —
+    /// scheduled deferred (storm discipline) since overflow implies the
+    /// engine is already saturated.
+    pub fn record_ingest_overflow(&mut self, dropped_count: usize, now: SystemTime) {
+        let watch_root = self.watch_root.clone();
+        let available_at = self.storm_detector.deferred_available_at(now);
+        self.schedule_deferred_reconcile(
+            &watch_root,
+            StormReason::IngestOverflow,
+            now,
+            available_at,
+        );
+        logging::warning(
+            "Scheduled whole-scope reconcile to repair dropped ingest events",
+            &[
+                ("watch_root", watch_root.display().to_string()),
+                ("dropped_event_count", dropped_count.to_string()),
+            ],
         );
     }
 
@@ -724,6 +761,10 @@ pub struct BoundedFsEventRecorder {
     maps: Mutex<BoundedEventIntentMaps>,
     incoming_events: Mutex<Vec<FsEventRecord>>,
     dropped_incoming_events: Mutex<usize>,
+    /// High-water mark of `dropped_incoming_events` already repaired via
+    /// an ingest-overflow reconcile. The cumulative counter stays intact
+    /// for diagnostics; the delta drives repair scheduling.
+    repaired_dropped_events: Mutex<usize>,
     incoming_events_cap: usize,
     error_count: Mutex<usize>,
 }
@@ -739,6 +780,7 @@ impl BoundedFsEventRecorder {
             maps: Mutex::new(BoundedEventIntentMaps::with_limits(watch_root, limits)),
             incoming_events: Mutex::new(Vec::with_capacity(512)),
             dropped_incoming_events: Mutex::new(0),
+            repaired_dropped_events: Mutex::new(0),
             incoming_events_cap: cap,
             error_count: Mutex::new(0),
         }
@@ -775,12 +817,34 @@ impl BoundedFsEventRecorder {
                 .expect("incoming events mutex poisoned");
             std::mem::take(&mut *guard)
         };
-        if batch.is_empty() {
+
+        // Dropped events represent unknown lost changes: schedule a
+        // deferred whole-scope reconcile for the delta since the last
+        // repair so "never lose intent state" holds even through
+        // callback-vs-runtime backpressure.
+        let unrepaired_dropped = {
+            let dropped = *self
+                .dropped_incoming_events
+                .lock()
+                .expect("dropped incoming events mutex poisoned");
+            let mut repaired = self
+                .repaired_dropped_events
+                .lock()
+                .expect("repaired dropped events mutex poisoned");
+            let delta = dropped.saturating_sub(*repaired);
+            *repaired = dropped;
+            delta
+        };
+
+        if batch.is_empty() && unrepaired_dropped == 0 {
             return;
         }
         let mut maps = self.maps.lock().expect("event intent mutex poisoned");
         for event in batch {
             maps.record_event(event);
+        }
+        if unrepaired_dropped > 0 {
+            maps.record_ingest_overflow(unrepaired_dropped, SystemTime::now());
         }
     }
 }
@@ -1309,6 +1373,99 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "multi-subtree storm stress test took {:?}, expected < 5s",
             elapsed
+        );
+    }
+
+    #[test]
+    fn ingest_overflow_schedules_a_deferred_whole_scope_reconcile() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let recorder =
+            BoundedFsEventRecorder::with_limits(watch_root.clone(), EventIntentLimits::new(2, 2));
+
+        // Fill the incoming buffer past its cap so events are dropped at
+        // the callback boundary.
+        for index in 0..5 {
+            FsEventRecording::record_event(
+                &recorder,
+                FsEventRecord {
+                    path: watch_root.join(format!("file-{index}.txt")),
+                    kind: FsEventKind::Modified,
+                    observed_at: timestamp(1),
+                },
+            );
+        }
+        assert_eq!(recorder.dropped_incoming_event_count(), 3);
+
+        recorder.with_state(|maps| {
+            let deferred = maps
+                .deferred_reconcile(&watch_root)
+                .expect("dropped events must schedule a repair reconcile");
+            assert_eq!(deferred.reason, StormReason::IngestOverflow);
+        });
+
+        // The repair is scheduled once per overflow burst, not once per
+        // drain: with no further drops, subsequent drains change nothing.
+        recorder.with_mut_state(|maps| {
+            let record = maps
+                .deferred_reconcile(&watch_root)
+                .expect("repair reconcile persists")
+                .clone();
+            assert_eq!(record.reschedule_count, 0);
+        });
+    }
+
+    #[test]
+    fn deferred_reconcile_reschedules_are_capped_at_the_max_deferral() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let subtree_root = watch_root.join("project/sub");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root,
+            EventIntentLimits::new(100, 100),
+            StormThresholds {
+                window: Duration::from_secs(2),
+                directory_unique_paths_threshold: 2,
+                directory_event_count_threshold: 99,
+                global_pending_event_count_threshold: 99,
+                deferred_reconcile_delay: Duration::from_secs(30),
+            },
+        );
+
+        // Trigger the storm: two unique paths within the window.
+        maps.record_event(fs_event(
+            subtree_root.join("a.txt"),
+            FsEventKind::Modified,
+            1,
+        ));
+        maps.record_event(fs_event(
+            subtree_root.join("b.txt"),
+            FsEventKind::Modified,
+            2,
+        ));
+        let first_detected_at = maps
+            .deferred_reconcile(&subtree_root)
+            .expect("storm scheduled a deferred reconcile")
+            .first_detected_at;
+
+        // A subtree that never goes quiet keeps pushing available_at
+        // forward — but only up to the max-deferral cap.
+        for second in 3..3_000 {
+            maps.record_event(fs_event(
+                subtree_root.join("a.txt"),
+                FsEventKind::Modified,
+                second,
+            ));
+        }
+
+        let record = maps
+            .deferred_reconcile(&subtree_root)
+            .expect("deferred reconcile still tracked");
+        let max_available_at = first_detected_at
+            + Duration::from_millis(
+                vapor_shared::constants::engine::DEFERRED_RECONCILE_MAX_DELAY_MILLIS,
+            );
+        assert_eq!(
+            record.available_at, max_available_at,
+            "continued churn must not defer the reconcile past the cap"
         );
     }
 
