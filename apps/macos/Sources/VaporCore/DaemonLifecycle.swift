@@ -136,6 +136,13 @@ public struct CrashLoopGuard: Sendable {
     pausedIndefinitely
   }
 
+  /// Mirrors the canonical Rust `CrashLoopGuard::register_crash` in
+  /// `core/lifecycle/src/crash_loop.rs` (parity contract:
+  /// `core/lifecycle/tests/crash_loop_parity.rs`). With the default
+  /// policy the schedule is: crash 1 → restart immediately, crash 2 →
+  /// 2 s, crash 3 → 4 s, crash 4 → 8 s, crash 5 → paused.
+  /// `delayStartsAfterFailures = N` means the first N crashes within the
+  /// window are delay-free.
   @discardableResult
   public mutating func registerCrash(at now: Date) -> CrashLoopDecision {
     pruneFailures(relativeTo: now)
@@ -147,7 +154,7 @@ public struct CrashLoopGuard: Sendable {
       return .paused
     }
 
-    let exponent = failureMoments.count - policy.delayStartsAfterFailures
+    let exponent = failureMoments.count - policy.delayStartsAfterFailures - 1
     guard exponent >= 0 else {
       return .noDelay
     }

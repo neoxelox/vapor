@@ -151,9 +151,14 @@ cat >"$info_plist" <<EOF
   <string>AppIcon</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>LSUIElement</key>
+  <true/>
 </dict>
 </plist>
 EOF
+# LSUIElement=true makes launch menubar-first declaratively (no Dock-icon
+# flash before the runtime activation-policy flip); opening the main window
+# switches the activation policy to .regular at runtime.
 
 temp_dir="$(mktemp -d)"
 iconset_dir="$temp_dir/AppIcon.iconset"
@@ -183,22 +188,32 @@ if [[ -d "$ROOT_DIR/apps/macos/Resources" ]]; then
   ditto "$ROOT_DIR/apps/macos/Resources" "$resources_dir"
 fi
 
-codesign_args=(--force --deep)
+# Inside-out signing: the nested daemon binary is signed first with its
+# own invocation, then the app bundle (whose seal covers the already-signed
+# vapord). Apple documents `--deep` as unsuitable for production signing —
+# it forces one entitlements file onto every nested binary, and the app vs
+# daemon entitlement sets will diverge.
+sign_args_base=(--force)
 if [[ -n "$VAPOR_SIGN_IDENTITY" ]]; then
-  codesign_args+=(--options runtime --timestamp --sign "$VAPOR_SIGN_IDENTITY")
+  sign_args_base+=(--options runtime --timestamp --sign "$VAPOR_SIGN_IDENTITY")
 else
-  codesign_args+=(--sign -)
+  sign_args_base+=(--sign -)
 fi
 
+if [[ -n "$VAPOR_ENTITLEMENTS" && ! -f "$VAPOR_ENTITLEMENTS" ]]; then
+  echo "[package] Entitlements file not found: $VAPOR_ENTITLEMENTS"
+  exit 1
+fi
+
+# 1. The bundled daemon (no app entitlements; hardened runtime only).
+codesign "${sign_args_base[@]}" "$macos_dir/vapord"
+
+# 2. The app bundle, with the app entitlements when provided.
+app_sign_args=("${sign_args_base[@]}")
 if [[ -n "$VAPOR_ENTITLEMENTS" ]]; then
-  if [[ ! -f "$VAPOR_ENTITLEMENTS" ]]; then
-    echo "[package] Entitlements file not found: $VAPOR_ENTITLEMENTS"
-    exit 1
-  fi
-  codesign_args+=(--entitlements "$VAPOR_ENTITLEMENTS")
+  app_sign_args+=(--entitlements "$VAPOR_ENTITLEMENTS")
 fi
-
-codesign "${codesign_args[@]}" "$app_bundle"
+codesign "${app_sign_args[@]}" "$app_bundle"
 
 plutil -lint "$info_plist"
 codesign --verify --deep --verbose=4 "$app_bundle"
