@@ -9,15 +9,17 @@ if [[ "$MODE" != "install" && "$MODE" != "uninstall" ]]; then
   exit 1
 fi
 
-GIT_DIR="$ROOT_DIR/.git"
-HOOKS_DIR="$GIT_DIR/hooks"
-PRE_COMMIT_HOOK="$HOOKS_DIR/pre-commit"
-MARKER="# vapor-managed-hook: pre-commit"
-
-if [[ ! -d "$GIT_DIR" ]]; then
-  echo "[hooks] $ROOT_DIR is not a git repository ($GIT_DIR is missing)"
+# Resolve the hooks directory through git itself so worktrees (where
+# `.git` is a file pointing at the shared common dir) work too.
+if ! HOOKS_DIR="$(git -C "$ROOT_DIR" rev-parse --git-path hooks 2>/dev/null)"; then
+  echo "[hooks] $ROOT_DIR is not a git repository"
   exit 1
 fi
+if [[ "$HOOKS_DIR" != /* ]]; then
+  HOOKS_DIR="$ROOT_DIR/$HOOKS_DIR"
+fi
+PRE_COMMIT_HOOK="$HOOKS_DIR/pre-commit"
+MARKER="# vapor-managed-hook: pre-commit"
 
 mkdir -p "$HOOKS_DIR"
 
@@ -46,9 +48,11 @@ cat >"$PRE_COMMIT_HOOK" <<'HOOK'
 #!/usr/bin/env bash
 # vapor-managed-hook: pre-commit
 #
-# Installed by scripts/hooks.sh. Runs the full local validation pipeline
+# Installed by scripts/hooks.sh. Runs the local validation pipeline
 # before every commit so agentic contributors and humans share one bar:
-# clean -> lint -> test -> build. Any failure aborts the commit.
+# lint -> test. Incremental on purpose — a clean/cold rebuild per commit
+# would cost minutes for no additional signal (CI runs the full matrix);
+# run scripts/clean.sh + scripts/build.sh manually when needed.
 #
 # Re-run scripts/hooks.sh install to refresh after updates; remove via
 # scripts/hooks.sh uninstall.
@@ -57,21 +61,15 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-echo "Cleaning build and distribution artifacts..."
-"$REPO_ROOT/scripts/clean.sh"
-
 echo "Linting source files..."
 "$REPO_ROOT/scripts/lint.sh"
 
 echo "Running test suite..."
 "$REPO_ROOT/scripts/test.sh"
 
-echo "Building release binaries..."
-"$REPO_ROOT/scripts/build.sh"
-
 echo "All checks passed."
 HOOK
 
 chmod +x "$PRE_COMMIT_HOOK"
 echo "[hooks] installed pre-commit hook at $PRE_COMMIT_HOOK"
-echo "[hooks] runs: clean -> lint -> test -> build"
+echo "[hooks] runs: lint -> test"

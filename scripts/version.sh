@@ -145,7 +145,11 @@ check_cargo_lock_sync() {
 
 sync_cargo_lock() {
   [[ -f "$CARGO_LOCK" ]] || return 0
-  cargo generate-lockfile --manifest-path "$CARGO_TOML" >/dev/null
+  # `cargo update --workspace` refreshes only the workspace members'
+  # lockfile entries. (`cargo generate-lockfile` would re-resolve every
+  # third-party dependency to its newest compatible version, silently
+  # bundling a dependency bump into the release-prep commit.)
+  cargo update --workspace --manifest-path "$CARGO_TOML" >/dev/null 2>&1
 }
 
 sync_cargo_from_version() {

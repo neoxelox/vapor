@@ -2,6 +2,9 @@ name: perf
 
 on:
   workflow_call:
+  schedule:
+    # Nightly Tier-2 run (06:00 UTC) per docs/architecture/testing-strategy.md.
+    - cron: "0 6 * * *"
 
 permissions:
   contents: read
@@ -35,11 +38,13 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Cache SwiftPM dependencies
         uses: actions/cache@v5
         with:
-          path: .build
+          path: apps/macos/.build
           key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
           restore-keys: |
             ${{ runner.os }}-spm-

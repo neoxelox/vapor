@@ -128,11 +128,13 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
 
       - name: Cache SwiftPM dependencies
         uses: actions/cache@v5
         with:
-          path: .build
+          path: apps/macos/.build
           key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
           restore-keys: |
             ${{ runner.os }}-spm-
@@ -341,6 +343,9 @@ jobs:
               --title "$TAG_NAME" \
               --notes-file dist/release-notes.md
           fi
+
+          echo "[release] created/updated DRAFT release for $TAG_NAME —" \
+            "review the assets and publish manually (release-process step 7)."
 
       - name: Upload release assets
         env:
