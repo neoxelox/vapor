@@ -109,6 +109,7 @@ Finish by stopping the daemon (`kill -TERM <pid>`, verify with
   not byte replication. Replication assertions arrive with the Wave 8
   filesystem reference provider.
 - `vapor timeline` returns an empty list until C8-30 lands.
-- macOS caps Unix-socket paths (~104 bytes); the harness guards this,
-  but hand-rolled deep sandbox paths cost the daemon its IPC endpoint
-  (it logs a WARNING and keeps syncing without `vapor status`).
+- macOS caps Unix-socket paths (~104 bytes). Over-budget `VAPOR_DIR`s
+  relocate the socket deterministically under the OS temp dir (S9
+  covers it; `vapor doctor` explains it) — so a daemon that seems
+  unreachable is a real failure, not a path-length artifact.

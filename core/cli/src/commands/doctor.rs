@@ -4,6 +4,8 @@
 //! alongside Wave 13 / 12 respectively. The current macOS check set:
 //!
 //! - `vapor_dir` exists, is writable, and (Unix) has private permissions.
+//! - The IPC socket path fits the Unix socket-address budget, with an
+//!   explanation when it was relocated under the OS temp directory.
 //! - The daemon binary `vapord` is discoverable via `PATH` or as a
 //!   sibling of the running CLI binary.
 //! - The LaunchAgent plist is present at the documented path.
@@ -54,6 +56,9 @@ pub fn run() -> DoctorReport {
     let mut checks = Vec::new();
     checks.push(check_vapor_directory(
         &vapor_shared::runtime_paths::vapor_directory(),
+    ));
+    checks.push(check_ipc_socket_path(
+        &vapor_shared::runtime_paths::ipc_socket_location(),
     ));
     checks.push(check_daemon_binary());
     if cfg!(target_os = "macos") {
@@ -123,6 +128,43 @@ fn private_mode_violation(path: &Path) -> Option<String> {
 #[cfg(not(unix))]
 fn private_mode_violation(_path: &Path) -> Option<String> {
     None
+}
+
+/// Surfaces the socket relocation so it is never a silent surprise: a
+/// deep `vapor_dir` used to cost the daemon its IPC endpoint with only
+/// a log WARNING while `vapor status` claimed the daemon was not
+/// running. Warning (not Failure) — the relocation is functional, but
+/// the user should know their socket is not at the canonical path.
+fn check_ipc_socket_path(location: &vapor_shared::runtime_paths::IpcSocketLocation) -> DoctorCheck {
+    let name = "ipc_socket_path".to_string();
+    if location.path.as_os_str().len() > constants::ipc::MAX_SOCKET_PATH_BYTES {
+        return DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Failure,
+            detail: format!(
+                "{} exceeds the {}-byte Unix socket-address budget even after relocation; the daemon cannot serve IPC",
+                location.path.display(),
+                constants::ipc::MAX_SOCKET_PATH_BYTES
+            ),
+        };
+    }
+    match &location.relocated_from {
+        None => DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Ok,
+            detail: format!("canonical at {}", location.path.display()),
+        },
+        Some(canonical) => DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Warning,
+            detail: format!(
+                "{} exceeds the {}-byte Unix socket-address budget; daemon and CLI rendezvous at {} instead",
+                canonical.display(),
+                constants::ipc::MAX_SOCKET_PATH_BYTES,
+                location.path.display()
+            ),
+        },
+    }
 }
 
 fn check_daemon_binary() -> DoctorCheck {
@@ -241,6 +283,46 @@ mod tests {
         let check = check_vapor_directory(&dir);
         assert_eq!(check.status, DoctorCheckStatus::Warning);
         assert!(check.detail.contains("loose permissions"));
+    }
+
+    #[test]
+    fn ipc_socket_check_is_ok_for_a_canonical_location() {
+        let location = vapor_shared::runtime_paths::IpcSocketLocation {
+            path: PathBuf::from("/Users/alex/.vapor/vapord.sock"),
+            relocated_from: None,
+        };
+        let check = check_ipc_socket_path(&location);
+        assert_eq!(check.status, DoctorCheckStatus::Ok);
+        assert!(check.detail.contains("canonical"));
+    }
+
+    #[test]
+    fn ipc_socket_check_warns_and_names_both_paths_when_relocated() {
+        let location = vapor_shared::runtime_paths::IpcSocketLocation {
+            path: PathBuf::from("/tmp/vapor-0123456789abcdef/vapord.sock"),
+            relocated_from: Some(PathBuf::from("/very/deep/vapor/dir/vapord.sock")),
+        };
+        let check = check_ipc_socket_path(&location);
+        assert_eq!(check.status, DoctorCheckStatus::Warning);
+        assert!(
+            check.detail.contains("/very/deep/vapor/dir/vapord.sock")
+                && check
+                    .detail
+                    .contains("/tmp/vapor-0123456789abcdef/vapord.sock"),
+            "detail must explain the rendezvous: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn ipc_socket_check_fails_when_even_the_relocated_path_is_too_long() {
+        let too_long = format!("/{}/vapord.sock", "t".repeat(120));
+        let location = vapor_shared::runtime_paths::IpcSocketLocation {
+            path: PathBuf::from(too_long),
+            relocated_from: Some(PathBuf::from("/also/too/deep/vapord.sock")),
+        };
+        let check = check_ipc_socket_path(&location);
+        assert_eq!(check.status, DoctorCheckStatus::Failure);
     }
 
     #[test]

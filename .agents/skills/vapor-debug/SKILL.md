@@ -74,7 +74,7 @@ Once you have the error sites (symbols, component names, file paths) from logs a
 - Trace the call path that led to the failure; classify transient vs permanent per the retry taxonomy.
 - Daemon-exit context: the tick loop tolerates up to 5 consecutive tick failures before exiting; a second daemon on the same `VAPOR_DIR` exits with "daemon already running" (singleton lock).
 - Repeated-crash context: the crash-loop guard schedule is crash 1 → restart immediately, crash 2 → 2s, crash 3 → 4s, crash 4 → 8s, paused on the 5th. "Daemon won't come back" may be the guard doing its job.
-- Known trap: macOS caps UDS paths at ~104 bytes — with a deep `VAPOR_DIR`, the daemon logs a WARNING and runs *without* its IPC endpoint, so `vapor status` reports it unreachable while it is actually syncing.
+- Path-length context: macOS caps UDS paths at ~104 bytes. With a deep `VAPOR_DIR`, daemon and CLI relocate the socket to a deterministic `vapor-<hash>` directory under the OS temp dir (INFO log line "relocated under the OS temp directory"; `vapor doctor`'s `ipc_socket_path` probe reports it). If `vapor status` cannot reach a running daemon, check that both processes resolve the same `VAPOR_DIR` — the socket location is derived from it.
 
 ### Step 4 — Reproduce safely (never against `~/.vapor`)
 

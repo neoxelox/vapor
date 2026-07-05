@@ -108,6 +108,14 @@ pub mod ipc {
     pub const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
     /// Filename of the Unix-domain-socket endpoint inside `vapor_dir`.
     pub const SOCKET_FILE_NAME: &str = "vapord.sock";
+    /// Portable byte budget for a Unix-domain-socket address path.
+    /// `sun_path` is 104 bytes on macOS/BSD and 108 on Linux (both
+    /// including the NUL terminator); one conservative shared ceiling
+    /// keeps a single build behaving identically everywhere. Socket
+    /// paths longer than this are relocated to a short deterministic
+    /// path under the OS temp directory (see
+    /// `runtime_paths::ipc_socket_location`).
+    pub const MAX_SOCKET_PATH_BYTES: usize = 100;
     /// Maximum number of concurrently served IPC connections. Excess
     /// connections are dropped at accept time so a runaway local client
     /// cannot park an unbounded number of daemon threads.

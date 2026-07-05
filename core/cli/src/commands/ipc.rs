@@ -2,8 +2,11 @@
 //!
 //! `vapor status / pause / resume / flush-now / reconcile / timeline`
 //! all share the same shape: connect to the daemon's UDS endpoint at
-//! `<vapor_dir>/vapord.sock`, perform the handshake, dispatch one
-//! method, render the result.
+//! `<vapor_dir>/vapord.sock` (relocated under the OS temp directory
+//! when that path would exceed the socket-address budget — the CLI and
+//! daemon share `runtime_paths::ipc_socket_location`, so both sides
+//! always rendezvous), perform the handshake, dispatch one method,
+//! render the result.
 //!
 //! "No daemon running" is the most common failure mode. This module
 //! turns the underlying transport / framing errors into a single
@@ -100,9 +103,11 @@ fn is_timeout(kind: io::ErrorKind) -> bool {
     matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
 
-/// Resolve the daemon's UDS endpoint path.
+/// Resolve the daemon's UDS endpoint path — shared with the daemon's
+/// bind path so a budget-driven relocation lands both sides on the
+/// same socket.
 pub fn socket_path() -> PathBuf {
-    runtime_paths::vapor_directory().join(constants::ipc::SOCKET_FILE_NAME)
+    runtime_paths::ipc_socket_location().path
 }
 
 fn connect() -> Result<Client, IpcCliError> {

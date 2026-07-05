@@ -138,10 +138,13 @@ socket, lock) is path-scoped there by design — nothing on the host is
 touched. Never run manual experiments against `~/.vapor` or with
 `VAPOR_DIR` unset; that is the project owner's real runtime dir.
 
-Watch out: macOS caps Unix-socket paths at ~104 bytes. The harness
-guards this, but if you hand-roll a deep sandbox path, the daemon logs
-a WARNING and runs *without* its IPC endpoint (`vapor status` then
-reports the daemon as unreachable while it is actually syncing).
+Note on deep paths: macOS caps Unix-socket paths at ~104 bytes. When
+`<vapor_dir>/vapord.sock` exceeds the budget, daemon and CLI
+deterministically rendezvous at a short per-`vapor_dir` socket under
+the OS temp dir instead (the S9 scenario covers this; `vapor doctor`'s
+`ipc_socket_path` probe explains it when active). The harness first
+surfaced this failure mode — pre-fix, a deep `VAPOR_DIR` silently cost
+the daemon its IPC endpoint.
 
 ## Why not a Docker container?
 
@@ -174,6 +177,7 @@ network egress control.
 | S6 | Doctor | `vapor doctor` reports no failures inside the sandbox |
 | S7 | Restart recovery | clean SIGTERM shutdown, restart on the same state DB, post-restart writes still converge |
 | S8 | Log hygiene | a healthy run emits zero `[ERROR]` lines |
+| S9 | Socket relocation | with an over-budget `VAPOR_DIR` the IPC socket relocates deterministically under the OS temp dir; `vapor status` still reaches the daemon and `vapor doctor` explains the relocation |
 
 ## Extending the harness — discipline rules
 

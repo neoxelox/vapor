@@ -1,6 +1,8 @@
 //! Daemon-side IPC server runner.
 //!
-//! Binds the Unix-domain-socket listener at `<vapor_dir>/vapord.sock`,
+//! Binds the Unix-domain-socket listener at `<vapor_dir>/vapord.sock`
+//! (relocated under the OS temp directory when that path would exceed
+//! the socket-address budget — see `runtime_paths::ipc_socket_location`),
 //! accepts connections in a background thread, and dispatches each
 //! session to `vapor_ipc::serve_connection`. The daemon's main thread
 //! keeps a [`IpcServerHandle`] so the listener (and its socket file)
@@ -45,9 +47,12 @@ impl IpcServerHandle {
     }
 }
 
-/// Resolve the canonical IPC socket path for the current `vapor_dir`.
+/// Resolve the IPC socket path for the current `vapor_dir`. Canonically
+/// `<vapor_dir>/vapord.sock`; deterministically relocated under the OS
+/// temp directory when that path exceeds the Unix socket-address budget
+/// (see `runtime_paths::ipc_socket_location`).
 pub fn resolve_socket_path() -> PathBuf {
-    runtime_paths::vapor_directory().join(constants::ipc::SOCKET_FILE_NAME)
+    runtime_paths::ipc_socket_location().path
 }
 
 #[cfg(unix)]
@@ -55,9 +60,33 @@ pub fn spawn(service: Arc<dyn Service>) -> std::io::Result<IpcServerHandle> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    let socket_path = resolve_socket_path();
+    let location = runtime_paths::ipc_socket_location();
+    if let Some(canonical) = &location.relocated_from {
+        crate::logging::info(
+            "IPC socket path exceeds the Unix socket-address budget; relocated under the OS temp directory",
+            &[
+                ("canonical_path", canonical.display().to_string()),
+                ("socket_path", location.path.display().to_string()),
+                (
+                    "budget_bytes",
+                    constants::ipc::MAX_SOCKET_PATH_BYTES.to_string(),
+                ),
+            ],
+        );
+    }
+    let socket_path = location.path;
     if let Some(parent) = socket_path.parent() {
         runtime_paths::ensure_private_directory(parent)?;
+        // `ensure_private_directory` proved we may chmod the directory
+        // (owner or root), but it follows symlinks. Refuse a symlinked
+        // parent so another local user cannot pre-plant a redirect at
+        // the well-known relocation path under a shared temp dir.
+        if std::fs::symlink_metadata(parent)?.file_type().is_symlink() {
+            return Err(std::io::Error::other(format!(
+                "IPC socket parent {} is a symlink; refusing to bind through it",
+                parent.display()
+            )));
+        }
     }
     let listener = bind_listener(socket_path.clone()).map_err(std::io::Error::other)?;
     let listener_clone = listener

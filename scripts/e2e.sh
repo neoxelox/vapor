@@ -37,10 +37,9 @@ for arg in "$@"; do
   esac
 done
 
-# Keep the run id short: the daemon's UDS socket lives at
-# <sandbox>/home/vapord.sock and macOS caps socket paths at ~104 bytes
-# (SUN_LEN). A long repo path + long run id silently costs the daemon
-# its IPC endpoint.
+# Keep the run id short so the default sandbox stays under the Unix
+# socket-address budget and S2 can assert the *canonical* socket
+# placement; the over-budget relocation path gets its own coverage (S9).
 TAG="run"
 [[ "$MODE" == "sandbox" ]] && TAG="sbx"
 RUN_ID="$TAG-$(date +%H%M%S)-$$"
@@ -62,6 +61,7 @@ STATE_DB="$VAPOR_DIR/state/vapor.sqlite"
 DAEMON_LOG="$VAPOR_DIR/logs/vapord.logs"
 DAEMON_OUT="$E2E_ROOT/daemon.out"
 DAEMON_PID=""
+DEEP_PID=""
 FAILED=0
 
 log() { echo "[e2e] $*"; }
@@ -109,6 +109,7 @@ stop_daemon() {
 
 cleanup() {
   stop_daemon "$DAEMON_PID" || true
+  stop_daemon "$DEEP_PID" || true
   if [[ "$FAILED" -eq 1 || "$KEEP_SANDBOX" -eq 1 ]]; then
     log "sandbox preserved at $E2E_ROOT (remove with ./scripts/clean.sh)"
   else
@@ -178,13 +179,6 @@ converge() {
 # --- run ---
 
 socket_path="$VAPOR_DIR/vapord.sock"
-if [[ "${#socket_path}" -gt 100 ]]; then
-  echo "[e2e] socket path would exceed the macOS SUN_LEN limit (~104 bytes):" >&2
-  echo "[e2e]   $socket_path (${#socket_path} bytes)" >&2
-  echo "[e2e] the daemon would start without its IPC endpoint. Move the" >&2
-  echo "[e2e] repository to a shorter path and re-run." >&2
-  exit 2
-fi
 
 log "sandbox: $E2E_ROOT"
 mkdir -p "$VAPOR_DIR" "$E2E_ROOT/cloud"
@@ -235,7 +229,11 @@ fi
 # S2 — daemon starts from that config and creates the missing local root.
 start_daemon
 [[ -d "$LOCAL_ROOT" ]] || fail "S2: daemon did not create the missing local sync root"
-[[ -S "$VAPOR_DIR/vapord.sock" ]] || fail "S2: IPC socket not present under VAPOR_DIR"
+# Canonical socket placement is only asserted when the sandbox path fits
+# the socket-address budget; deeper checkouts legitimately relocate (S9).
+if [[ "${#socket_path}" -le 100 ]]; then
+  [[ -S "$socket_path" ]] || fail "S2: IPC socket not present under VAPOR_DIR"
+fi
 log "PASS S2 — daemon Running; local sync root auto-created; IPC socket up"
 
 # S3 — local writes propagate: ingest -> debounce -> durable queue -> executor -> drained.
@@ -291,5 +289,32 @@ if grep -q "\[ERROR\]" "$DAEMON_LOG"; then
 fi
 warning_count="$(grep -c "\[WARNING\]" "$DAEMON_LOG" || true)"
 log "PASS S8 — no ERROR lines in daemon log (${warning_count} warnings)"
+
+# S9 — over-budget VAPOR_DIR: the IPC socket relocates deterministically
+# under the OS temp dir, the CLI still reaches the daemon, and doctor
+# explains the relocation instead of leaving it silent.
+DEEP_HOME="$E2E_ROOT/deep-$(printf 'x%.0s' {1..70})/home"
+mkdir -p "$DEEP_HOME"
+VAPOR_DIR="$DEEP_HOME" "$VAPOR_BIN" config set localSyncDirectory "$E2E_ROOT/deep-local" >/dev/null
+VAPOR_DIR="$DEEP_HOME" "$VAPOR_BIN" config set cloudSyncDirectory "$E2E_ROOT/cloud/DeepE2E" >/dev/null
+VAPOR_DIR="$DEEP_HOME" "$VAPOR_BIN" run --foreground >>"$E2E_ROOT/deep-daemon.out" 2>&1 &
+DEEP_PID=$!
+deep_running() {
+  VAPOR_DIR="$DEEP_HOME" "$VAPOR_BIN" status --json 2>/dev/null \
+    | grep -q '"run_state": "Running"'
+}
+wait_until 30 "deep-VAPOR_DIR daemon to be reachable over the relocated socket" deep_running \
+  || fail "S9: daemon with over-budget socket path is not reachable via vapor status"
+[[ ! -S "$DEEP_HOME/vapord.sock" ]] \
+  || fail "S9: socket bound at the canonical over-budget path instead of relocating"
+VAPOR_DIR="$DEEP_HOME" "$VAPOR_BIN" doctor | grep -q "rendezvous" \
+  || fail "S9: vapor doctor does not explain the socket relocation"
+deep_socket="$(grep "relocated under the OS temp directory" "$DEEP_HOME/logs/vapord.logs" \
+  | tail -n 1 | sed 's/.*socket_path=\([^ ]*\).*/\1/')"
+[[ -n "$deep_socket" ]] || fail "S9: daemon log does not record the relocation"
+stop_daemon "$DEEP_PID" || fail "S9: deep-VAPOR_DIR daemon did not stop cleanly"
+DEEP_PID=""
+rm -rf "$(dirname "$deep_socket")"
+log "PASS S9 — over-budget socket path relocated; CLI + doctor work; temp residue removed"
 
 log "OK — all e2e scenarios passed"
