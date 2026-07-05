@@ -17,6 +17,10 @@ workspace.
 - **Running the same checks as CI?** `docs/ci/README.md` maps every
   workflow to the same `./scripts/*` entry points listed in the
   runbook, so local and CI validation stay identical.
+- **Shipping a feature or fix that changes runtime behavior?** After
+  Tier 1 passes, run `./scripts/e2e.sh` and read
+  `e2e-verification.md` for when the tier is required and how to
+  extend it.
 
 ## Documents
 
@@ -29,6 +33,11 @@ workspace.
   version, Rust/Cargo, Swift driver, Swift compiler). Pre-GA this is a
   reference, not a hard pin; the project targets latest stable by
   default.
+- `e2e-verification.md` — the Tier E2E process: black-box verification
+  of the real `vapor`/`vapord` binaries inside a disposable
+  `.vapor/e2e/` sandbox (`./scripts/e2e.sh`). Covers the safety
+  contract, when a change requires an E2E run, the scenario catalog,
+  and the discipline rules for adding scenarios.
 
 ## Related references
 

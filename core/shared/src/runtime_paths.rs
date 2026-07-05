@@ -37,6 +37,68 @@ pub fn logs_directory() -> PathBuf {
     vapor_directory().join(constants::runtime::LOGS_DIRECTORY_NAME)
 }
 
+/// Where the daemon binds its IPC socket and the CLI dials it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IpcSocketLocation {
+    /// The path both sides use.
+    pub path: PathBuf,
+    /// Set when the canonical `<vapor_dir>/vapord.sock` exceeded the
+    /// socket-address byte budget and the path was relocated. Holds the
+    /// canonical path that was passed over, for logs and diagnostics.
+    pub relocated_from: Option<PathBuf>,
+}
+
+/// Resolve the IPC socket location for the current `vapor_dir`.
+///
+/// Unix sockets carry a hard address-length cap (`sun_path`: 104 bytes
+/// on macOS/BSD, 108 on Linux). The canonical location is
+/// `<vapor_dir>/vapord.sock`, but with a deep `vapor_dir` binding it
+/// fails outright — pre-fix the daemon degraded to running without its
+/// IPC endpoint while `vapor status` reported it as not running. When
+/// the canonical path exceeds [`constants::ipc::MAX_SOCKET_PATH_BYTES`],
+/// both sides deterministically relocate to
+/// `<os-temp>/vapor-<fnv1a64(vapor_dir)>/vapord.sock`: same `vapor_dir`
+/// → same socket path in every process, distinct `vapor_dir`s cannot
+/// collide, and the daemon's one-socket-per-`vapor_dir` invariant is
+/// preserved.
+pub fn ipc_socket_location() -> IpcSocketLocation {
+    resolve_ipc_socket_location(&vapor_directory(), &env::temp_dir())
+}
+
+fn resolve_ipc_socket_location(
+    vapor_dir: &std::path::Path,
+    temp_dir: &std::path::Path,
+) -> IpcSocketLocation {
+    let canonical = vapor_dir.join(constants::ipc::SOCKET_FILE_NAME);
+    if canonical.as_os_str().len() <= constants::ipc::MAX_SOCKET_PATH_BYTES {
+        return IpcSocketLocation {
+            path: canonical,
+            relocated_from: None,
+        };
+    }
+    let hash = fnv1a64(vapor_dir.as_os_str().as_encoded_bytes());
+    IpcSocketLocation {
+        path: temp_dir
+            .join(format!("vapor-{hash:016x}"))
+            .join(constants::ipc::SOCKET_FILE_NAME),
+        relocated_from: Some(canonical),
+    }
+}
+
+/// FNV-1a 64-bit. Implemented here (six lines) instead of relying on
+/// `DefaultHasher` because the CLI and daemon are separate binaries that
+/// may be built by different compiler versions during upgrade skew, and
+/// `DefaultHasher`'s algorithm is explicitly not guaranteed stable. The
+/// socket rendezvous only works if every build hashes identically.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 pub fn state_directory() -> PathBuf {
     vapor_directory().join(constants::runtime::STATE_DIRECTORY_NAME)
 }
@@ -346,6 +408,67 @@ mod tests {
 
         ensure_private_file(&file).expect("ensure private file on non-unix");
         assert!(file.is_file());
+    }
+
+    #[test]
+    fn ipc_socket_stays_canonical_when_within_the_address_budget() {
+        let vapor_dir = PathBuf::from("/Users/alex/.vapor");
+        let location = resolve_ipc_socket_location(&vapor_dir, &PathBuf::from("/tmp"));
+        assert_eq!(location.path, vapor_dir.join("vapord.sock"));
+        assert_eq!(location.relocated_from, None);
+    }
+
+    #[test]
+    fn ipc_socket_relocation_triggers_exactly_past_the_budget() {
+        // Build a vapor_dir whose canonical socket path is exactly at
+        // the budget, then one byte past it.
+        let file_len = constants::ipc::SOCKET_FILE_NAME.len() + 1; // "/vapord.sock"
+        let at_budget = PathBuf::from(format!(
+            "/{}",
+            "d".repeat(constants::ipc::MAX_SOCKET_PATH_BYTES - file_len - 1)
+        ));
+        let over_budget = PathBuf::from(format!(
+            "/{}",
+            "d".repeat(constants::ipc::MAX_SOCKET_PATH_BYTES - file_len)
+        ));
+        let temp = PathBuf::from("/tmp");
+
+        let at = resolve_ipc_socket_location(&at_budget, &temp);
+        assert_eq!(at.relocated_from, None, "at-budget path must not relocate");
+
+        let over = resolve_ipc_socket_location(&over_budget, &temp);
+        assert_eq!(
+            over.relocated_from,
+            Some(over_budget.join("vapord.sock")),
+            "over-budget path must relocate and report the canonical path"
+        );
+        assert!(
+            over.path.as_os_str().len() <= constants::ipc::MAX_SOCKET_PATH_BYTES,
+            "relocated path must itself fit the budget: {}",
+            over.path.display()
+        );
+        assert!(over.path.starts_with(&temp));
+        assert!(over.path.ends_with("vapord.sock"));
+    }
+
+    #[test]
+    fn ipc_socket_relocation_is_deterministic_and_collision_free() {
+        let temp = PathBuf::from("/tmp");
+        let deep_a = PathBuf::from(format!("/{}/a", "d".repeat(120)));
+        let deep_b = PathBuf::from(format!("/{}/b", "d".repeat(120)));
+
+        let first = resolve_ipc_socket_location(&deep_a, &temp);
+        let second = resolve_ipc_socket_location(&deep_a, &temp);
+        assert_eq!(
+            first.path, second.path,
+            "same vapor_dir must resolve to the same socket in every process"
+        );
+
+        let other = resolve_ipc_socket_location(&deep_b, &temp);
+        assert_ne!(
+            first.path, other.path,
+            "distinct vapor_dirs must not share a socket"
+        );
     }
 
     #[test]

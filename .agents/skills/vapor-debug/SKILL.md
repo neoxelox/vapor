@@ -1,6 +1,6 @@
 ---
 name: vapor-debug
-description: Debug Vapor app and vapord daemon by analyzing logs, crash reports, and source code to diagnose errors and propose fixes
+description: Debug Vapor app and vapord daemon by analyzing logs, crash reports, live CLI diagnostics, and durable state to diagnose errors and propose fixes
 license: MIT
 compatibility: opencode
 metadata:
@@ -12,7 +12,7 @@ metadata:
 
 I help you debug issues with the **Vapor** macOS application and its **vapord** sync daemon. I will:
 
-1. Collect and analyze application logs and system crash reports
+1. Collect and analyze daemon/app logs, live CLI diagnostics, durable state, and system crash reports
 2. Cross-reference errors against the actual source code
 3. Produce a clear diagnostic report with root cause analysis
 4. Propose a concrete fix plan and wait for your go-ahead before touching any code
@@ -26,39 +26,67 @@ Use this skill when:
 - You want a systematic review of recent log output
 - You need help correlating a crash report back to your source code
 
+## Where Vapor's state lives
+
+Everything runtime lives under one directory root, `VAPOR_DIR`. Resolve it first — reading the wrong instance's logs wastes the whole session:
+
+1. `VAPOR_DIR` environment variable, if set (explicit override)
+2. `./.vapor` (repo-local) when running via repository scripts / `VAPOR_ENV=dev` — this is what dev, test, CI, and e2e workflows use
+3. `~/.vapor` — the real user install (the project owner's machine)
+
+E2E sandboxes live under `<repo>/.vapor/e2e/<run-id>/home`. When debugging a failed `./scripts/e2e.sh` run, that preserved sandbox is your `VAPOR_DIR`.
+
+Inside `VAPOR_DIR`:
+
+| Artifact | Path |
+|----------|------|
+| Config | `vapor.json` |
+| Daemon log | `logs/vapord.logs` |
+| Durable queue/state DB | `state/vapor.sqlite` (tables: `queue_intents`, `failed_intents`, `state_entries`, `schema_meta`) |
+| IPC socket (framed JSON over UDS — Vapor does not use XPC) | `vapord.sock` |
+| Singleton lock | `vapord.lock` |
+
 ## How I work
 
-### Step 1 — Gather logs
+### Step 1 — Live diagnostics first (when a daemon is running)
 
-Read the application logs and any recent crash reports:
+The `vapor` CLI is the fastest signal — use it before reading raw files:
 
-- **App/daemon logs:** `~/.vapor/logs/*.logs` — read all files, paying close attention to timestamps, error levels, stack traces, and any `FATAL`, `ERROR`, or `WARN` entries.
-- **Crash reports:** `~/Library/Logs/DiagnosticReports/Vapor*.crash` and `~/Library/Logs/DiagnosticReports/Vapor*.ips` — these are macOS-generated crash reports for the Vapor app or vapord daemon. Parse the exception type, termination reason, faulting thread, and backtrace.
+- `vapor status --json` — run state, throttle state + reason, provider, daemon id. "daemon not running" vs "daemon is not responding" are different failures (no socket vs wedged process).
+- `vapor doctor` — sanity probes (vapor_dir writable/private, `vapord` binary discoverable, LaunchAgent plist present).
+- `vapor logs --tail 100` — recent daemon log lines, already redacted.
+- `vapor timeline --json` — diagnostics timeline (empty until C8-30 lands; don't be surprised).
+- `launchctl list | grep sh.arn.vapor` and `ps aux | grep vapord` — is the service loaded / process alive? (The LaunchAgent label is `sh.arn.vapor.daemon`.)
 
-**Time-sensitive:** Logs are append-only and older entries may have been rotated out. Before reading any logs, get the current time in **both formats** — a human-readable string and a numeric Unix timestamp (milliseconds) — since logs use both styles. For example: `date +"%Y-%m-%d %H:%M:%S"` and `date +%s000`. Then focus on log entries within a **±15 minute window** around the current time. If nothing relevant is found in that window, gradually widen it (±1 hour, then ±4 hours). Do not waste time reading ancient log entries that are unlikely to be related to the current issue. The same applies to crash reports — prioritize those with the most recent modification timestamps first.
+### Step 2 — Gather logs and crash reports
 
-### Step 2 — Review the source code
+- **Daemon log:** `$VAPOR_DIR/logs/vapord.logs`. Line format is `unix_millis [LEVEL] (component): message. key=value key=value`, levels `DEBUG`/`INFO`/`WARNING`/`ERROR`. Grep `\[ERROR\]` and `\[WARNING\]` first, then read the surrounding context.
+- **Crash reports:** `~/Library/Logs/DiagnosticReports/Vapor*.{crash,ips}` and `vapord*.{crash,ips}` — both process names matter. `.ips` files are JSON (parse exception type, termination reason, faulting thread); `.crash` files are plain text.
+- **Durable state:** query read-only, never mutate: `sqlite3 -readonly "$VAPOR_DIR/state/vapor.sqlite" 'SELECT path_text, kind, failure_kind, last_error FROM failed_intents;'` — permanently failed intents carry their final error. `queue_intents` shows what's stuck pending/leased.
 
-Once you have identified the relevant error sites (symbols, function names, file paths, line numbers) from the logs and crash reports:
+**Time-sensitive:** log timestamps are Unix **milliseconds**. Get the current time in both forms — `date +"%Y-%m-%d %H:%M:%S"` and `date +%s000` — and focus on a ±15 minute window around the incident, widening to ±1 hour, then ±4 hours only if needed. Prioritize crash reports by modification time.
 
-- Read the corresponding source files in the project.
-- Trace the call path that led to the failure.
-- Check for obvious issues: nil/force-unwrap crashes, out-of-bounds access, threading problems, file handle leaks, unhandled errors, incorrect state transitions, etc.
-- If the crash involves `vapord`, pay special attention to the sync logic, IPC, XPC connections, file coordination, and daemon lifecycle.
+### Step 3 — Review the source code
 
-### Step 3 — Ask for more context if needed
+Once you have the error sites (symbols, component names, file paths) from logs and crash reports:
 
-Do not guess. If you need more information to confidently diagnose the issue, ask the user. Examples of things you might ask:
+- Read the corresponding sources: the Rust runtime lives in `core/daemon` (tick loop, scheduler, throttle, executor, state DB), `core/ipc` (framed-JSON UDS server/client), `core/lifecycle` (crash-loop guard, daemon lifecycle), `core/shared` (config, runtime paths, logging), `core/platform` (fs-watch, secrets, metrics); the macOS app is `apps/macos`.
+- Trace the call path that led to the failure; classify transient vs permanent per the retry taxonomy.
+- Daemon-exit context: the tick loop tolerates up to 5 consecutive tick failures before exiting; a second daemon on the same `VAPOR_DIR` exits with "daemon already running" (singleton lock).
+- Repeated-crash context: the crash-loop guard schedule is crash 1 → restart immediately, crash 2 → 2s, crash 3 → 4s, crash 4 → 8s, paused on the 5th. "Daemon won't come back" may be the guard doing its job.
+- Path-length context: macOS caps UDS paths at ~104 bytes. With a deep `VAPOR_DIR`, daemon and CLI relocate the socket to a deterministic `vapor-<hash>` directory under the OS temp dir (INFO log line "relocated under the OS temp directory"; `vapor doctor`'s `ipc_socket_path` probe reports it). If `vapor status` cannot reach a running daemon, check that both processes resolve the same `VAPOR_DIR` — the socket location is derived from it.
 
-- "Can you reproduce this crash? If so, what steps trigger it?"
-- "Was there a specific user action right before the crash (e.g., clicking sync, opening a file)?"
-- "Did this start after a recent code change? If so, which files did you modify?"
-- "Is vapord running right now? Can you check with `ps aux | grep vapord` or `launchctl list | grep vapor`?"
-- "Can you trigger the issue again and share the new log output?"
+### Step 4 — Reproduce safely (never against `~/.vapor`)
 
-Never be afraid to ask — a precise diagnosis is more valuable than a fast but wrong one.
+To reproduce a bug hands-on, use the sandboxed manual environment instead of the real runtime dir:
 
-### Step 4 — Write a diagnostic report
+```
+./scripts/e2e.sh --sandbox
+```
+
+It provisions a disposable `VAPOR_DIR` under `<repo>/.vapor/e2e/`, starts a daemon, and prints a command cheat-sheet (see the `vapor-e2e` skill). Do not guess either — if you need missing context (repro steps, the user action right before the crash, recent code changes, whether vapord is running), ask. A precise diagnosis beats a fast wrong one.
+
+### Step 5 — Write a diagnostic report
 
 Present your findings in this format:
 
@@ -71,7 +99,7 @@ One or two sentence description of what went wrong.
 ### Error Source
 - **Component:** Vapor app | vapord daemon | both
 - **File(s):** list the relevant source files
-- **Log evidence:** quote the key log lines or crash report fields
+- **Log evidence:** quote the key log lines, crash report fields, or state-DB rows
 
 ### Root Cause Analysis
 Explain why the crash or error happened. Be specific — reference
@@ -86,10 +114,10 @@ and why each change addresses the root cause.
 
 ### Risks & Side Effects
 Note anything the fix might affect, any edge cases to watch for,
-or any additional testing the user should do.
+and which e2e scenario (scripts/e2e.sh) should cover the regression.
 ```
 
-### Step 5 — Wait for confirmation
+### Step 6 — Wait for confirmation
 
 After presenting the report, **stop and wait** for the user to:
 
@@ -101,8 +129,7 @@ After presenting the report, **stop and wait** for the user to:
 
 ## Important notes
 
-- Always check both Vapor app and vapord logs — issues in one often manifest as errors in the other.
-- macOS `.ips` crash reports are JSON-formatted. Parse them to extract the exception type, faulting thread, and symbolicated backtrace.
-- macOS `.crash` reports are plain text. Look for the `Exception Type`, `Termination Reason`, and the thread backtraces.
-- If logs are very large, summarize the overall health first, then zero in on the errors.
-- When reading crash reports, match addresses to symbols using the project's source where possible.
+- Always check both the app and daemon sides — issues in one often manifest as errors in the other.
+- Logs are already redacted (tokens, auth headers, sensitive keys become `[REDACTED]`); if you see a secret in a log line, that itself is a bug worth reporting.
+- If logs are very large, summarize overall health first (error/warning counts, restart markers like "vapord started"), then zero in.
+- Never mutate `state/vapor.sqlite`; always open it with `-readonly`. The durable queue is the product's source of truth for intent state.

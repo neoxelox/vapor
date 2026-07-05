@@ -24,6 +24,7 @@
 - Install git pre-commit hook: `./scripts/hooks.sh` (uninstall: `./scripts/hooks.sh uninstall`)
 - Version helper: `./scripts/version.sh`
 - Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
+- End-to-end verification of the real binaries in a disposable sandbox: `./scripts/e2e.sh` (`--keep`, `--skip-build`; see `docs/development/e2e-verification.md`)
 
 ## Stack helpers
 
@@ -117,6 +118,10 @@ Fast facts for local dev:
   `AGENTS.md §9.3` and `docs/architecture/testing-strategy.md`.
 - **Performance SLO tests** run via `./scripts/perf.sh` (Tier 2;
   release gate only, not a PR gate).
+- **End-to-end verification** runs via `./scripts/e2e.sh` (Tier E2E)
+  after Tier 1 passes, whenever a change alters runtime behavior a
+  user would observe through the daemon or CLI. Fully sandboxed under
+  `.vapor/e2e/`; see `docs/development/e2e-verification.md`.
 
 ## Release build policy
 

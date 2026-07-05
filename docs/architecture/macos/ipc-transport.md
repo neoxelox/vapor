@@ -19,6 +19,18 @@ transport choice.
   `<vapor_dir>`.
 - Clients (Swift app, `vapor` CLI, future tools) discover the socket using
   the same `VAPOR_DIR` resolution as every other runtime artifact.
+- **Deep-path relocation:** `sockaddr_un` caps the socket path at 104
+  bytes on macOS/BSD (108 on Linux). When `<vapor_dir>/vapord.sock`
+  exceeds the shared budget
+  (`vapor_shared::constants::ipc::MAX_SOCKET_PATH_BYTES`, 100 bytes),
+  daemon and CLI both resolve
+  `<os-temp>/vapor-<fnv1a64(vapor_dir)>/vapord.sock` via
+  `runtime_paths::ipc_socket_location` — deterministic per `vapor_dir`,
+  collision-free across `vapor_dir`s, stable across separately built
+  binaries (FNV-1a, not `DefaultHasher`). The daemon logs the
+  relocation at INFO and `vapor doctor` reports it (`ipc_socket_path`
+  probe); the relocated parent directory is created `0o700` and a
+  symlinked parent is refused before `bind()`.
 - On install/update the daemon must remove any stale socket file at startup
   before `bind()` (after verifying no live process is attached).
 

@@ -206,6 +206,23 @@ Commands to snapshot:
 - `vapor config get <key> --json`
 - Every other `--json` command that exists at the time.
 
+### End-to-end tests (Tier E2E; runtime-affecting changes)
+
+`./scripts/e2e.sh` runs the real `vapor` + `vapord` binaries black-box
+through the CLI against a disposable sandbox under the repo-local
+`.vapor/e2e/` directory — real process boundaries, real FSEvents, real
+durable DB, real IPC socket, real signals. It is how an autonomous
+agent verifies "the product actually works", not just "the modules are
+correct". Fully sandboxed: never `~/.vapor`, never a host service
+install, never the macOS app, no network.
+
+Required after Tier 1 passes for any feature or fix that changes
+behavior a user would observe through the daemon or CLI; when a change
+adds e2e-observable behavior, the harness gains a scenario for it in
+the same change set. Full process, scenario catalog, and extension
+discipline: `docs/development/e2e-verification.md`; policy summary:
+`AGENTS.md §9.8`.
+
 ### Fuzz tests (Tier 2; release gate)
 
 Via `cargo-fuzz`. Target the parsers and format handlers that accept
@@ -303,6 +320,13 @@ value", the test is not worth writing.
   counts), fuzz corpora, and any `loom`-backed tests. Release gate
   only: `perf.yml` has no standalone triggers and is invoked solely by
   `release.yml`.
+- **Tier E2E** — `scripts/e2e.sh`, the final step of `test.yml`'s
+  macOS job (every PR; part of the required `test` check on `main`).
+  Also part of the local contributor validation loop for
+  runtime-affecting changes (`AGENTS.md §9.8`). Runs the shipped
+  binaries sandboxed under `.vapor/e2e/`; budget ~60 s after the
+  build. macOS only — it exercises the native FSEvents watcher on the
+  shipping surface.
 
 ## Per-surface scope
 
