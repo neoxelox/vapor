@@ -21,7 +21,7 @@ Available now:
 - 🔕 Stays out of your way while keeping status and controls one click away.
 - 🚀 Auto-launch at login with resilient crash-loop protection for dependable day-to-day use.
 - 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow.
-- ⏯ Pause and resume background work on demand from the command line.
+- ⏯ Pause and resume background work on demand.
 
 In flight and coming next:
 
@@ -36,7 +36,7 @@ In flight and coming next:
 - ⚙️ Configurable hard caps on its share of CPU, memory, and network so streaming, browsing, and other apps always have room.
 - 🌙 Smart idle boost: Vapor catches up faster when your device is genuinely idle, and yields the moment you come back.
 - 📈 Clear diagnostics with status reasons, queue visibility, and live activity timeline.
-- 🌍 Cross-platform parity: one portable runtime powers the macOS app, with Windows, Linux, and a CLI following.
+- 🌍 Cross-platform parity: one portable runtime powers the macOS, Windows, and Linux apps and the CLI.
 
 ## Providers
 
@@ -57,10 +57,7 @@ In flight and coming next:
 
 All user-facing configuration is documented here with meaning and defaults.
 
-All persisted user configuration lives in `<vapor_dir>/vapor.json`. The
-daemon reads this file at startup; the matching `VAPOR_*` environment
-variables (see `.env.example`) act as per-field overrides on top of it.
-Configuration changes take effect the next time the daemon starts.
+All persisted user configuration lives in `<vapor_dir>/vapor.json`; Vapor reads it at startup, so changes apply the next time it starts.
 
 | Key                  | Type     | Default                                             | Description                                                                              |
 | -------------------- | -------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
