@@ -21,7 +21,7 @@ Available now:
 - 🔕 Stays out of your way while keeping status and controls one click away.
 - 🚀 Auto-launch at login with resilient crash-loop protection for dependable day-to-day use.
 - 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow.
-- ⏯ Pause and resume background work on demand.
+- ⏯️ Pause and resume background work on demand; nothing is lost while paused, and Vapor picks up right where it left off.
 
 In flight and coming next:
 
