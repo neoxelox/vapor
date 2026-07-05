@@ -19,7 +19,12 @@ use vapor_ipc::Service;
 // non-Unix `spawn` stub returns an error before serving anything.
 #[cfg(unix)]
 use vapor_ipc::serve_connection;
-use vapor_shared::{constants, runtime_paths};
+// `constants` is consumed only by the Unix `spawn` path (socket budget,
+// connection caps); the non-Unix stub resolves paths via `runtime_paths`
+// alone, so an unconditional import fails `-D warnings` on Windows.
+#[cfg(unix)]
+use vapor_shared::constants;
+use vapor_shared::runtime_paths;
 
 #[cfg(unix)]
 use vapor_ipc::transport::{ListenerHandle, bind_listener};
