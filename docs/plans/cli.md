@@ -44,8 +44,11 @@ recompile + CI job once those waves land, not a rewrite.
 ```
 vapor run [--foreground]                # run the daemon in-process
 vapor service install [--user|--system] # native ServiceInstaller
-vapor service uninstall
+vapor service uninstall [--keep-running]
+vapor service bootstrap                 # install+start only when autolaunch is enabled
 vapor service start|stop|restart|status
+vapor service check                     # one crash-loop supervision tick
+vapor service acknowledge               # clear a crash-loop pause
 vapor config get|set <key> [value]      # edits vapor.json
 vapor auth login <provider>             # OAuth PKCE via localhost loopback
 vapor auth logout <provider>
@@ -67,8 +70,16 @@ vapor version
 - `service install` — picks the right installer for the host OS
   automatically; `--user` (default) vs `--system` switch. Configures the OS
   restart policy to match `core/lifecycle::CrashLoopGuard`.
-- `service status` — reports `Running` / `Stopped` / `CrashLoopPaused` /
-  `NotInstalled` with a human-readable reason.
+- `service status` — reports `running` / `stopped` / `not_installed` /
+  `crash_loop_paused` (the crash-loop pause is overlaid from durable
+  lifecycle state) plus `label`, `auto_launch`, and a `crash_loop`
+  object with `--json`.
+- `service bootstrap` / `check` / `acknowledge` — the surfaces' shared
+  lifecycle entry points (app startup, the periodic supervision tick,
+  and clearing a crash-loop pause). All crash-loop policy runs in
+  `core/lifecycle` against `<vapor_dir>/state/lifecycle.json`, so
+  backoff and pause survive restarts and are shared across surfaces;
+  the macOS app shells out to these same subcommands.
 - `auth login <provider>` — runs PKCE in the user's browser with a
   localhost-loopback redirect; stores tokens via `core/platform/secrets`.
 - `status`, `pause`, `resume`, `flush-now`, `reconcile` — talk to a running
@@ -147,10 +158,12 @@ specific scope is:
 - **Tested** — argument parsing (`clap`), exit code discipline,
   `--json` output schema via `insta` snapshots (one snapshot per
   `--json` command), IPC client correctness against a fake daemon,
-  `vapor doctor` detection logic, `vapor service {install,start,stop,
-  status,uninstall}` round-trip on macOS CI (and on each additional
-  OS once its optional wave lands), "no daemon running" error paths
-  (every IPC-backed command exits non-zero within 1 s; never hangs).
+  `vapor doctor` detection logic, the `vapor service` round-trip
+  (install → start → status → crash-loop supervision → acknowledge →
+  stop → uninstall) on macOS CI via the `--full` phase of
+  `./scripts/e2e.sh` (and on each additional OS once its optional
+  wave lands), "no daemon running" error paths (every IPC-backed
+  command exits non-zero within 1 s; never hangs).
 - **Not tested** — color codes, cursor positioning, terminal resize
   handling, ncurses or TTY-capability interactions, progress-bar
   rendering timing.

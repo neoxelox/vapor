@@ -2,9 +2,9 @@
 
 ## Repository bootstrap
 
-- Rust workspace: root `Cargo.toml` with crates in `core/daemon`, `core/providers`, `core/shared` (with `core/platform`, `core/lifecycle`, and `core/cli` arriving per `docs/plans/core.md`).
+- Rust workspace: root `Cargo.toml` with crates in `core/daemon`, `core/providers`, `core/shared`, `core/ipc`, `core/platform`, `core/lifecycle`, and `core/cli`.
 - Daemon binary: `vapord`.
-- CLI binary (arriving soon): `vapor` (`core/cli`).
+- CLI binary: `vapor` (`core/cli`).
 - Swift package: `apps/macos/Package.swift` (`Vapor`, `VaporCore`) — macOS-only.
 - Implementation sequencing references:
   - Runtime + platform + CLI: `docs/tasks/core.md`.
@@ -82,8 +82,9 @@ Operational notes:
 - `VERSION` is the release version source-of-truth; wrapper scripts fail fast when `Cargo.toml` is out of sync with it.
 - `./scripts/version.sh` is the release-prep entrypoint: it requires a clean `main` branch except for `CHANGELOG.md`, then writes `VERSION`, syncs Cargo, creates `release: v...` commit, and creates the matching tag.
 - Override runtime root with `VAPOR_DIR=/path/to/vapor ./scripts/test.sh` (same for build, lint, and format).
-- `Vapor.app` is a single package that ships both binaries: `Contents/MacOS/Vapor` and `Contents/MacOS/vapord`.
-- Runtime daemon launch path is always the bundled sibling binary (`vapord`) next to the app executable.
+- `Vapor.app` is a single package that ships three executables: `Contents/MacOS/Vapor` (app), `Contents/MacOS/vapord` (daemon), and `Contents/Helpers/vapor` (CLI — it cannot live in `Contents/MacOS/` because the default macOS filesystem is case-insensitive and `vapor` would collide with `Vapor`).
+- Runtime daemon launch path is always the bundled `vapord`: a sibling of the launching binary, or `../MacOS/vapord` when resolved from the bundled CLI in `Contents/Helpers/`.
+- Daemon lifecycle (install/start/stop/supervision, crash-loop state) is driven through `vapor service` on every surface; `vapor service check` is one supervision tick, `vapor service acknowledge` clears a crash-loop pause, and durable crash-loop state lives at `<vapor_dir>/state/lifecycle.json`.
 - Swift lint and format scripts intentionally use `swift format` only.
 - If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild build` in `./scripts/swift/build.sh`.
 

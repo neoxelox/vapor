@@ -6,7 +6,9 @@
   - Onboarding, provider auth, root selection, settings, diagnostics,
     menubar state.
   - Auto-launch toggle and daemon control surface (delegates to
-    `core/lifecycle` via the `vapor` CLI / FFI).
+    `core/lifecycle` by invoking the bundled `vapor` CLI at
+    `Contents/Helpers/vapor` as a subprocess — `vapor service …
+    --json`; Swift keeps no lifecycle policy).
 - Rust daemon `vapord` (`core/daemon`, registered as a per-user LaunchAgent)
   - Fs-watch ingestion, debounce/coalescing, scheduler, throttle controller.
   - Durable queue/state, retries, deferred reconcile, provider execution.
@@ -59,12 +61,19 @@
   then terminate app process). The daemon installs SIGTERM/SIGINT handlers
   via `core/platform/process::macos` so `launchctl kill TERM` (or Ctrl-C
   in dev) exits its tick loop cleanly at the next tick boundary.
-- Crash-loop protection is owned by `core/lifecycle::CrashLoopGuard` and
-  the app's lifecycle coordinator (not `launchd`). After 5 consecutive
-  unclean exits within 10 minutes the coordinator enters a
-  `CrashLoopPaused` state, stops attempting auto-restart, and surfaces a
-  reasoned diagnostic to the menubar; the user must invoke
-  `acknowledgeCrashLoopPause` (wired through a menubar action) before
-  automatic restarts resume. See
+- Crash-loop protection is owned by `core/lifecycle::CrashLoopGuard`
+  (not `launchd`, and not Swift — the former Swift guard was deleted;
+  the app only relays outcomes). Crash counters, backoff, and pause
+  persist in `<vapor_dir>/state/lifecycle.json`, so they survive
+  process restarts and are shared across surfaces. The app's
+  `DaemonHealthMonitor` runs `vapor service check` every 30 seconds
+  (`VaporConstants.Daemon.healthTickIntervalSeconds`) so unexpected
+  daemon exits are detected and routed through the guard. After 5
+  consecutive unclean exits within 10 minutes the guard enters a
+  durable `CrashLoopPaused` state, stops attempting auto-restart, and
+  the app surfaces a reasoned diagnostic to the menubar; the user must
+  acknowledge (the menubar action invokes `vapor service acknowledge`)
+  before automatic restarts resume. Pause and crash counters are
+  reported by `vapor service status [--json]`. See
   `docs/operations/macos/launchagent-policy.md` for the full backoff
   schedule, plist policy, and validation scenarios.

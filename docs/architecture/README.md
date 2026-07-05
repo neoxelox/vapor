@@ -27,7 +27,7 @@ across platforms, start with `platform-abstractions.md`.
 ## Common documents
 
 - `system-overview.md` — component map (`core/daemon`, `core/providers`,
-  `core/shared`, planned `core/platform` / `core/lifecycle` / `core/cli`,
+  `core/shared`, `core/platform`, `core/lifecycle`, `core/cli`,
   and the app surfaces under `apps/*`), boundary rules, and the planned
   implementation sequence.
 - `data-flow.md` — local→remote and remote→local pipelines, throttle

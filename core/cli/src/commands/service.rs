@@ -1,8 +1,16 @@
-//! `vapor service install|uninstall|start|stop|restart|status`.
+//! `vapor service bootstrap|install|uninstall|start|stop|restart|status|check|acknowledge`.
 //!
 //! Drives `core/lifecycle::DaemonLifecycleManager` over the platform's
 //! native `ServiceInstaller`. macOS today; Windows / Linux land in
-//! Waves 12 / 13 respectively. Closes `cli.md` L2-1 … L2-4.
+//! Waves 12 / 13. Closes `cli.md` L2-1 … L2-4 and, together with the
+//! durable lifecycle state in `core/lifecycle`, provides the stable
+//! subprocess surface the macOS Swift app consumes (`core.md` C4-5,
+//! `macos.md` M2-1 … M2-6).
+//!
+//! Every subcommand renders both a human line and, with `--json`, a
+//! stable machine shape (documented per-variant on
+//! [`ServiceCommandOutcome`]). The Swift shim parses only the JSON
+//! form; treat key names and value enums as a versioned contract.
 //!
 //! The `restart` command is a stop-then-start sequence; both halves
 //! tolerate the daemon already being in the target state.
@@ -15,16 +23,21 @@ use std::path::PathBuf;
 // non-macOS lib build, which `-D warnings` treats as an error.
 #[cfg(any(target_os = "macos", test))]
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use vapor_lifecycle::{DaemonLifecycleError, DaemonLifecycleManager};
+use vapor_lifecycle::{
+    CrashLoopStateSnapshot, DaemonHealthCheckOutcome, DaemonLifecycleActionResult,
+    DaemonLifecycleError, DaemonLifecycleManager,
+};
 // The `AutoLaunchSettingStore` trait is needed by `build_native_macos` (macOS)
 // and by the tests (its `read` method is called on the in-memory store); the
-// concrete `JsonFileAutoLaunchSettingStore` is macOS-only.
+// concrete JSON-file stores are macOS-only.
 #[cfg(any(target_os = "macos", test))]
 use vapor_lifecycle::AutoLaunchSettingStore;
 #[cfg(target_os = "macos")]
-use vapor_lifecycle::JsonFileAutoLaunchSettingStore;
+use vapor_lifecycle::{
+    CrashLoopPolicy, JsonFileAutoLaunchSettingStore, JsonFileLifecycleStateStore, SystemWallClock,
+};
 use vapor_platform::{ServiceInstallError, ServiceInstaller, ServiceStatus};
 // The macOS installer type + descriptor are only used by `build_native_macos`.
 #[cfg(target_os = "macos")]
@@ -33,12 +46,28 @@ use vapor_shared::constants;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceCommand {
+    /// App-startup path: install + start only when autolaunch is
+    /// enabled; a disabled autolaunch is a silent no-op.
+    Bootstrap,
     Install,
-    Uninstall,
+    Uninstall {
+        /// Skip the explicit stop signal (the "disable autolaunch"
+        /// toggle path); default is to send one. On macOS the daemon
+        /// exits regardless — launchd tears the job down when its
+        /// service definition is booted out — so this only controls
+        /// whether *we* signal it; it matters on service managers that
+        /// keep a disabled unit running (e.g. systemd).
+        keep_running: bool,
+    },
     Start,
     Stop,
     Restart,
     Status,
+    /// One supervision tick: detect an unexpected daemon exit, register
+    /// it with the crash-loop guard, restart when policy allows.
+    Check,
+    /// Clear a crash-loop pause so restarts may resume.
+    Acknowledge,
 }
 
 #[derive(Debug)]
@@ -46,7 +75,8 @@ pub enum ServiceCommandError {
     /// The platform installer rejected the request (e.g. `launchctl`
     /// returned a non-zero exit code or the daemon binary was missing).
     Install(ServiceInstallError),
-    /// Some other lifecycle layer (autolaunch settings persistence) failed.
+    /// Some other lifecycle layer (autolaunch settings or durable
+    /// lifecycle state persistence) failed.
     Lifecycle(DaemonLifecycleError),
     /// We couldn't locate the bundled daemon binary that the service
     /// definition needs to point at.
@@ -91,6 +121,24 @@ impl From<DaemonLifecycleError> for ServiceCommandError {
 pub struct ServiceStatusReport {
     pub status: ServiceStatus,
     pub label: String,
+    pub auto_launch: bool,
+    pub crash_loop: CrashLoopStateSnapshot,
+}
+
+/// What a service subcommand produced. Rendered by [`render_text`] /
+/// [`render_json`]; the JSON form is the contract the macOS app shim
+/// parses.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ServiceCommandOutcome {
+    /// `bootstrap` / `install` / `uninstall` / `start` / `stop` /
+    /// `restart` — a lifecycle action result.
+    Action(DaemonLifecycleActionResult),
+    /// `check` — a supervision-tick outcome.
+    Health(DaemonHealthCheckOutcome),
+    /// `status` — the full report.
+    Status(ServiceStatusReport),
+    /// `acknowledge` — pause cleared.
+    Acknowledged,
 }
 
 /// Entry point for the binary's `clap` dispatch. The `manager`,
@@ -101,33 +149,187 @@ pub fn dispatch(
     manager: &DaemonLifecycleManager,
     installer: &dyn ServiceInstaller,
     now: Instant,
-) -> Result<Option<ServiceStatusReport>, ServiceCommandError> {
+) -> Result<ServiceCommandOutcome, ServiceCommandError> {
     match command {
-        ServiceCommand::Install => {
-            manager.set_auto_launch_enabled(true, false, now)?;
-            Ok(None)
-        }
-        ServiceCommand::Uninstall => {
-            manager.set_auto_launch_enabled(false, true, now)?;
-            Ok(None)
-        }
-        ServiceCommand::Start => {
-            manager.start_daemon_if_allowed(now)?;
-            Ok(None)
-        }
+        ServiceCommand::Bootstrap => Ok(ServiceCommandOutcome::Action(
+            manager.bootstrap_if_needed(now)?,
+        )),
+        ServiceCommand::Install => Ok(ServiceCommandOutcome::Action(
+            manager.set_auto_launch_enabled(true, false, now)?,
+        )),
+        ServiceCommand::Uninstall { keep_running } => Ok(ServiceCommandOutcome::Action(
+            manager.set_auto_launch_enabled(false, !keep_running, now)?,
+        )),
+        ServiceCommand::Start => Ok(ServiceCommandOutcome::Action(
+            manager.start_daemon_if_allowed(now)?,
+        )),
         ServiceCommand::Stop => {
-            manager.stop_daemon_for_termination()?;
-            Ok(None)
+            manager.stop_daemon_for_termination(now)?;
+            Ok(ServiceCommandOutcome::Action(
+                DaemonLifecycleActionResult::Stopped,
+            ))
         }
         ServiceCommand::Restart => {
-            manager.stop_daemon_for_termination()?;
-            manager.start_daemon_if_allowed(now)?;
-            Ok(None)
+            manager.stop_daemon_for_termination(now)?;
+            Ok(ServiceCommandOutcome::Action(
+                manager.start_daemon_if_allowed(now)?,
+            ))
         }
-        ServiceCommand::Status => Ok(Some(ServiceStatusReport {
-            status: installer.status()?,
-            label: constants::service::DAEMON_LABEL.to_string(),
-        })),
+        ServiceCommand::Status => {
+            let probed = installer.status()?;
+            // The installer can only see the OS service manager; the
+            // crash-loop pause lives in the durable lifecycle state.
+            // Overlay it so `CrashLoopPaused` is a real, reportable
+            // state (L2-4) — unless the daemon is observably running.
+            let status = if manager.is_in_crash_loop_pause() && probed != ServiceStatus::Running {
+                ServiceStatus::CrashLoopPaused
+            } else {
+                probed
+            };
+            Ok(ServiceCommandOutcome::Status(ServiceStatusReport {
+                status,
+                label: constants::service::DAEMON_LABEL.to_string(),
+                auto_launch: manager.auto_launch_enabled()?,
+                crash_loop: manager.crash_loop_state(now),
+            }))
+        }
+        ServiceCommand::Check => Ok(ServiceCommandOutcome::Health(
+            manager.check_daemon_health(now)?,
+        )),
+        ServiceCommand::Acknowledge => {
+            manager.acknowledge_crash_loop_pause(now)?;
+            Ok(ServiceCommandOutcome::Acknowledged)
+        }
+    }
+}
+
+fn seconds(duration: Duration) -> f64 {
+    (duration.as_secs_f64() * 10.0).round() / 10.0
+}
+
+fn status_wire_name(status: ServiceStatus) -> &'static str {
+    match status {
+        ServiceStatus::NotInstalled => "not_installed",
+        ServiceStatus::Stopped => "stopped",
+        ServiceStatus::Running => "running",
+        ServiceStatus::CrashLoopPaused => "crash_loop_paused",
+    }
+}
+
+/// Stable machine-readable rendering (`--json`). The Swift app shim
+/// parses this; key names and value enums are a versioned contract —
+/// change them only with a coordinated Swift-side update.
+pub fn render_json(outcome: &ServiceCommandOutcome) -> serde_json::Value {
+    match outcome {
+        ServiceCommandOutcome::Action(action) => match action {
+            DaemonLifecycleActionResult::Unchanged => serde_json::json!({"result": "unchanged"}),
+            DaemonLifecycleActionResult::Started => serde_json::json!({"result": "started"}),
+            DaemonLifecycleActionResult::Stopped => serde_json::json!({"result": "stopped"}),
+            DaemonLifecycleActionResult::RelaunchDeferred(remaining) => {
+                if *remaining == Duration::MAX {
+                    serde_json::json!({"result": "crash_loop_paused"})
+                } else {
+                    serde_json::json!({
+                        "result": "relaunch_deferred",
+                        "remaining_seconds": seconds(*remaining),
+                    })
+                }
+            }
+        },
+        ServiceCommandOutcome::Health(health) => match health {
+            DaemonHealthCheckOutcome::Running => serde_json::json!({"health": "running"}),
+            DaemonHealthCheckOutcome::NotInstalled => {
+                serde_json::json!({"health": "not_installed"})
+            }
+            DaemonHealthCheckOutcome::StoppedExpected => {
+                serde_json::json!({"health": "stopped_expected"})
+            }
+            DaemonHealthCheckOutcome::RestartedAfterCrash => {
+                serde_json::json!({"health": "restarted_after_crash"})
+            }
+            DaemonHealthCheckOutcome::RestartDeferred(remaining) => serde_json::json!({
+                "health": "restart_deferred",
+                "remaining_seconds": seconds(*remaining),
+            }),
+            DaemonHealthCheckOutcome::CrashLoopPaused => {
+                serde_json::json!({"health": "crash_loop_paused"})
+            }
+        },
+        ServiceCommandOutcome::Status(report) => serde_json::json!({
+            "status": status_wire_name(report.status),
+            "label": report.label,
+            "auto_launch": report.auto_launch,
+            "crash_loop": {
+                "paused": report.crash_loop.paused,
+                "consecutive_crashes": report.crash_loop.consecutive_crashes,
+                "last_crash_at_ms": report.crash_loop.last_crash_at_ms,
+                "awaiting_restart": report.crash_loop.awaiting_restart,
+            },
+        }),
+        ServiceCommandOutcome::Acknowledged => serde_json::json!({"result": "acknowledged"}),
+    }
+}
+
+/// Human rendering (default, no `--json`).
+pub fn render_text(outcome: &ServiceCommandOutcome) -> String {
+    match outcome {
+        ServiceCommandOutcome::Action(action) => match action {
+            DaemonLifecycleActionResult::Unchanged => "service: no change".to_string(),
+            DaemonLifecycleActionResult::Started => "service: daemon started".to_string(),
+            DaemonLifecycleActionResult::Stopped => "service: daemon stopped".to_string(),
+            DaemonLifecycleActionResult::RelaunchDeferred(remaining) => {
+                if *remaining == Duration::MAX {
+                    "service: crash-loop pause active — run `vapor service acknowledge` \
+                     to allow restarts"
+                        .to_string()
+                } else {
+                    format!(
+                        "service: start deferred {:.1}s by crash-loop backoff",
+                        remaining.as_secs_f64()
+                    )
+                }
+            }
+        },
+        ServiceCommandOutcome::Health(health) => match health {
+            DaemonHealthCheckOutcome::Running => "service check: daemon running".to_string(),
+            DaemonHealthCheckOutcome::NotInstalled => {
+                "service check: service not installed".to_string()
+            }
+            DaemonHealthCheckOutcome::StoppedExpected => {
+                "service check: daemon stopped (expected)".to_string()
+            }
+            DaemonHealthCheckOutcome::RestartedAfterCrash => {
+                "service check: unexpected exit detected — daemon restarted".to_string()
+            }
+            DaemonHealthCheckOutcome::RestartDeferred(remaining) => format!(
+                "service check: unexpected exit detected — restart deferred {:.1}s",
+                remaining.as_secs_f64()
+            ),
+            DaemonHealthCheckOutcome::CrashLoopPaused => {
+                "service check: crash-loop pause active — run `vapor service acknowledge`"
+                    .to_string()
+            }
+        },
+        ServiceCommandOutcome::Status(report) => {
+            let mut line = format!(
+                "service status: {:?} (label: {}, autolaunch: {})",
+                report.status,
+                report.label,
+                if report.auto_launch { "on" } else { "off" }
+            );
+            if report.crash_loop.paused {
+                line.push_str(
+                    "\ncrash-loop: paused — run `vapor service acknowledge` to allow restarts",
+                );
+            } else if report.crash_loop.consecutive_crashes > 0 {
+                line.push_str(&format!(
+                    "\ncrash-loop: {} recent crash(es) in window",
+                    report.crash_loop.consecutive_crashes
+                ));
+            }
+            line
+        }
+        ServiceCommandOutcome::Acknowledged => "service: crash-loop pause acknowledged".to_string(),
     }
 }
 
@@ -141,8 +343,12 @@ pub fn dispatch(
 /// redirected under `<vapor_dir>/logs/`, and the environment carries
 /// only `VAPOR_DIR` (plus `VAPOR_ENV` when set in the invoking
 /// environment) — every other setting reaches the daemon through
-/// `vapor.json`. This keeps the plist identical to the one the macOS
-/// app writes, so the two surfaces stop clobbering each other.
+/// `vapor.json`. This keeps the plist identical no matter which surface
+/// (CLI or macOS app shim) drives the install.
+///
+/// The manager is built over the durable lifecycle state at
+/// `<vapor_dir>/state/lifecycle.json`, so crash-loop backoff and pause
+/// survive across invocations and surfaces (M2-6).
 #[cfg(target_os = "macos")]
 pub fn build_native_macos(
     config_path: PathBuf,
@@ -178,14 +384,26 @@ pub fn build_native_macos(
     let installer = Arc::new(NativeServiceInstaller::for_current_user(descriptor)?);
     let settings: Arc<dyn AutoLaunchSettingStore> =
         Arc::new(JsonFileAutoLaunchSettingStore::new(config_path));
-    let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+    let state_store = Arc::new(JsonFileLifecycleStateStore::new(
+        vapor_shared::runtime_paths::lifecycle_state_path(),
+    ));
+    let manager = DaemonLifecycleManager::with_durable_state(
+        installer.clone(),
+        settings,
+        CrashLoopPolicy::default(),
+        state_store,
+        Arc::new(SystemWallClock),
+    )?;
     Ok((manager, installer))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vapor_lifecycle::InMemoryAutoLaunchSettingStore;
+    use vapor_lifecycle::{
+        CrashLoopPolicy, FixedWallClock, InMemoryAutoLaunchSettingStore,
+        InMemoryLifecycleStateStore,
+    };
     use vapor_platform::{InMemoryServiceInstaller, ServiceDescriptor};
 
     fn fake_installer() -> Arc<InMemoryServiceInstaller> {
@@ -199,13 +417,33 @@ mod tests {
         }))
     }
 
+    fn durable_manager(
+        installer: Arc<InMemoryServiceInstaller>,
+        store: Arc<InMemoryLifecycleStateStore>,
+    ) -> DaemonLifecycleManager {
+        DaemonLifecycleManager::with_durable_state(
+            installer,
+            Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true))),
+            CrashLoopPolicy::new(
+                Duration::from_secs(600),
+                Duration::from_secs(2),
+                Duration::from_secs(120),
+                1,
+                3,
+            ),
+            store,
+            Arc::new(FixedWallClock::at(1_000)),
+        )
+        .expect("durable manager")
+    }
+
     #[test]
     fn install_sets_auto_launch_and_records_install_then_start() {
         let installer = fake_installer();
         let settings = Arc::new(InMemoryAutoLaunchSettingStore::new());
         let manager = DaemonLifecycleManager::new(installer.clone(), settings.clone());
 
-        dispatch(
+        let outcome = dispatch(
             ServiceCommand::Install,
             &manager,
             installer.as_ref(),
@@ -213,6 +451,10 @@ mod tests {
         )
         .expect("install");
 
+        assert_eq!(
+            outcome,
+            ServiceCommandOutcome::Action(DaemonLifecycleActionResult::Started)
+        );
         assert_eq!(installer.operations(), vec!["install", "start"]);
         assert_eq!(settings.read().expect("read"), Some(true));
     }
@@ -223,16 +465,90 @@ mod tests {
         let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
         let manager = DaemonLifecycleManager::new(installer.clone(), settings.clone());
 
-        dispatch(
-            ServiceCommand::Uninstall,
+        let outcome = dispatch(
+            ServiceCommand::Uninstall {
+                keep_running: false,
+            },
             &manager,
             installer.as_ref(),
             Instant::now(),
         )
         .expect("uninstall");
 
+        assert_eq!(
+            outcome,
+            ServiceCommandOutcome::Action(DaemonLifecycleActionResult::Stopped)
+        );
         assert_eq!(installer.operations(), vec!["uninstall", "stop"]);
         assert_eq!(settings.read().expect("read"), Some(false));
+    }
+
+    #[test]
+    fn uninstall_keep_running_skips_the_explicit_stop_signal() {
+        // `--keep-running` suppresses the explicit stop; on macOS the
+        // real installer's bootout still terminates the job (launchd
+        // semantics), so the name promises signal behavior, not
+        // process survival.
+        let installer = fake_installer();
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings.clone());
+
+        let outcome = dispatch(
+            ServiceCommand::Uninstall { keep_running: true },
+            &manager,
+            installer.as_ref(),
+            Instant::now(),
+        )
+        .expect("uninstall");
+
+        assert_eq!(
+            outcome,
+            ServiceCommandOutcome::Action(DaemonLifecycleActionResult::Unchanged)
+        );
+        assert_eq!(installer.operations(), vec!["uninstall"]);
+        assert_eq!(settings.read().expect("read"), Some(false));
+    }
+
+    #[test]
+    fn bootstrap_respects_disabled_auto_launch() {
+        let installer = fake_installer();
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(false)));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+
+        let outcome = dispatch(
+            ServiceCommand::Bootstrap,
+            &manager,
+            installer.as_ref(),
+            Instant::now(),
+        )
+        .expect("bootstrap");
+
+        assert_eq!(
+            outcome,
+            ServiceCommandOutcome::Action(DaemonLifecycleActionResult::Unchanged)
+        );
+        assert!(installer.operations().is_empty());
+    }
+
+    #[test]
+    fn bootstrap_installs_and_starts_when_auto_launch_enabled() {
+        let installer = fake_installer();
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+
+        let outcome = dispatch(
+            ServiceCommand::Bootstrap,
+            &manager,
+            installer.as_ref(),
+            Instant::now(),
+        )
+        .expect("bootstrap");
+
+        assert_eq!(
+            outcome,
+            ServiceCommandOutcome::Action(DaemonLifecycleActionResult::Started)
+        );
+        assert_eq!(installer.operations(), vec!["install", "start"]);
     }
 
     #[test]
@@ -257,13 +573,17 @@ mod tests {
         let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
         let manager = DaemonLifecycleManager::new(installer.clone(), settings);
 
-        dispatch(
+        let outcome = dispatch(
             ServiceCommand::Stop,
             &manager,
             installer.as_ref(),
             Instant::now(),
         )
         .expect("stop");
+        assert_eq!(
+            outcome,
+            ServiceCommandOutcome::Action(DaemonLifecycleActionResult::Stopped)
+        );
         assert_eq!(installer.operations(), vec!["stop"]);
     }
 
@@ -290,15 +610,18 @@ mod tests {
         let manager = DaemonLifecycleManager::new(installer.clone(), settings);
         installer.set_status_for_testing(ServiceStatus::Running);
 
-        let report = dispatch(
+        let outcome = dispatch(
             ServiceCommand::Status,
             &manager,
             installer.as_ref(),
             Instant::now(),
         )
-        .expect("status")
-        .expect("status report");
+        .expect("status");
+        let ServiceCommandOutcome::Status(report) = outcome else {
+            panic!("expected status outcome");
+        };
         assert_eq!(report.status, ServiceStatus::Running);
+        assert!(report.auto_launch);
     }
 
     #[test]
@@ -311,16 +634,204 @@ mod tests {
         let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
         let manager = DaemonLifecycleManager::new(installer.clone(), settings);
 
-        let report = dispatch(
+        let outcome = dispatch(
             ServiceCommand::Status,
             &manager,
             installer.as_ref(),
             Instant::now(),
         )
-        .expect("status")
-        .expect("status report");
+        .expect("status");
+        let ServiceCommandOutcome::Status(report) = outcome else {
+            panic!("expected status outcome");
+        };
 
         assert_eq!(report.label, constants::service::DAEMON_LABEL);
         assert_ne!(report.label, constants::runtime::DAEMON_LOG_FILE_NAME);
+    }
+
+    #[test]
+    fn status_overlays_crash_loop_pause_over_a_stopped_service() {
+        let installer = fake_installer();
+        let store = Arc::new(InMemoryLifecycleStateStore::new());
+        let manager = durable_manager(installer.clone(), store);
+
+        let t0 = Instant::now();
+        // Three crashes with the test policy → paused.
+        let _ = manager.register_unexpected_daemon_exit(t0).expect("crash");
+        let _ = manager
+            .register_unexpected_daemon_exit(t0 + Duration::from_millis(10))
+            .expect("crash");
+        let _ = manager
+            .register_unexpected_daemon_exit(t0 + Duration::from_millis(20))
+            .expect("crash");
+        installer.set_status_for_testing(ServiceStatus::Stopped);
+
+        let outcome = dispatch(
+            ServiceCommand::Status,
+            &manager,
+            installer.as_ref(),
+            t0 + Duration::from_secs(1),
+        )
+        .expect("status");
+        let ServiceCommandOutcome::Status(report) = outcome else {
+            panic!("expected status outcome");
+        };
+        assert_eq!(report.status, ServiceStatus::CrashLoopPaused);
+        assert!(report.crash_loop.paused);
+        assert_eq!(report.crash_loop.consecutive_crashes, 3);
+    }
+
+    #[test]
+    fn check_and_acknowledge_round_trip_through_dispatch() {
+        let installer = fake_installer();
+        let store = Arc::new(InMemoryLifecycleStateStore::new());
+        let manager = durable_manager(installer.clone(), store);
+
+        let t0 = Instant::now();
+        dispatch(ServiceCommand::Start, &manager, installer.as_ref(), t0).expect("start");
+
+        // Healthy tick.
+        assert_eq!(
+            dispatch(
+                ServiceCommand::Check,
+                &manager,
+                installer.as_ref(),
+                t0 + Duration::from_secs(1)
+            )
+            .expect("check"),
+            ServiceCommandOutcome::Health(DaemonHealthCheckOutcome::Running)
+        );
+
+        // Daemon dies → first tick restarts it immediately.
+        installer.set_status_for_testing(ServiceStatus::Stopped);
+        assert_eq!(
+            dispatch(
+                ServiceCommand::Check,
+                &manager,
+                installer.as_ref(),
+                t0 + Duration::from_secs(2)
+            )
+            .expect("check"),
+            ServiceCommandOutcome::Health(DaemonHealthCheckOutcome::RestartedAfterCrash)
+        );
+
+        // Acknowledge clears any pause state through dispatch too.
+        assert_eq!(
+            dispatch(
+                ServiceCommand::Acknowledge,
+                &manager,
+                installer.as_ref(),
+                t0 + Duration::from_secs(3)
+            )
+            .expect("acknowledge"),
+            ServiceCommandOutcome::Acknowledged
+        );
+    }
+
+    // --- JSON contract (consumed by the macOS app shim; LT-1 style) ---
+
+    fn json_string(outcome: &ServiceCommandOutcome) -> String {
+        serde_json::to_string(&render_json(outcome)).expect("serialize")
+    }
+
+    #[test]
+    fn json_contract_for_action_results_is_stable() {
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Action(
+                DaemonLifecycleActionResult::Unchanged
+            )),
+            r#"{"result":"unchanged"}"#
+        );
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Action(
+                DaemonLifecycleActionResult::Started
+            )),
+            r#"{"result":"started"}"#
+        );
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Action(
+                DaemonLifecycleActionResult::Stopped
+            )),
+            r#"{"result":"stopped"}"#
+        );
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Action(
+                DaemonLifecycleActionResult::RelaunchDeferred(Duration::from_millis(1_500))
+            )),
+            r#"{"remaining_seconds":1.5,"result":"relaunch_deferred"}"#
+        );
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Action(
+                DaemonLifecycleActionResult::RelaunchDeferred(Duration::MAX)
+            )),
+            r#"{"result":"crash_loop_paused"}"#
+        );
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Acknowledged),
+            r#"{"result":"acknowledged"}"#
+        );
+    }
+
+    #[test]
+    fn json_contract_for_health_outcomes_is_stable() {
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Health(
+                DaemonHealthCheckOutcome::Running
+            )),
+            r#"{"health":"running"}"#
+        );
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Health(
+                DaemonHealthCheckOutcome::NotInstalled
+            )),
+            r#"{"health":"not_installed"}"#
+        );
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Health(
+                DaemonHealthCheckOutcome::StoppedExpected
+            )),
+            r#"{"health":"stopped_expected"}"#
+        );
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Health(
+                DaemonHealthCheckOutcome::RestartedAfterCrash
+            )),
+            r#"{"health":"restarted_after_crash"}"#
+        );
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Health(
+                DaemonHealthCheckOutcome::RestartDeferred(Duration::from_secs(2))
+            )),
+            r#"{"health":"restart_deferred","remaining_seconds":2.0}"#
+        );
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Health(
+                DaemonHealthCheckOutcome::CrashLoopPaused
+            )),
+            r#"{"health":"crash_loop_paused"}"#
+        );
+    }
+
+    #[test]
+    fn json_contract_for_status_report_is_stable() {
+        let report = ServiceStatusReport {
+            status: ServiceStatus::CrashLoopPaused,
+            label: constants::service::DAEMON_LABEL.to_string(),
+            auto_launch: true,
+            crash_loop: CrashLoopStateSnapshot {
+                paused: true,
+                consecutive_crashes: 5,
+                last_crash_at_ms: Some(1_750_000_000_000),
+                awaiting_restart: true,
+            },
+        };
+        assert_eq!(
+            json_string(&ServiceCommandOutcome::Status(report)),
+            concat!(
+                r#"{"auto_launch":true,"crash_loop":{"awaiting_restart":true,"#,
+                r#""consecutive_crashes":5,"last_crash_at_ms":1750000000000,"paused":true},"#,
+                r#""label":"sh.arn.vapor.daemon","status":"crash_loop_paused"}"#
+            )
+        );
     }
 }

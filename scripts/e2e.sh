@@ -4,17 +4,32 @@
 # Black-box exercise of the real `vapor` binary + in-process daemon
 # against a disposable sandbox. Everything (runtime dir, watched local
 # root, logs, state DB) lives under `<repo>/.vapor/e2e/<run-id>/`, so a
-# run never touches `~/.vapor`, LaunchAgents, the network, or anything
-# else on the host, and `./scripts/clean.sh` removes all residue.
+# default run never touches `~/.vapor`, LaunchAgents, the network, or
+# anything else on the host, and `./scripts/clean.sh` removes all
+# residue.
+#
+# `--full` additionally runs the service lifecycle round-trip
+# (`cli.md` L2-5 / `macos.md` M2-4) against the REAL macOS service
+# manager: install → start → status → crash-loop supervision
+# (`vapor service check`) through backoff and pause → acknowledge →
+# stop → uninstall. That phase is the one part of Tier E2E that
+# mutates host state (a LaunchAgent plist + launchd registration for
+# `sh.arn.vapor.daemon`), which is why it is opt-in and runs on
+# disposable CI runners (`AGENTS.md §9.7`); it refuses outright when a
+# `sh.arn.vapor.daemon` LaunchAgent already exists so it can never
+# clobber a real Vapor install, and it removes the LaunchAgent on exit.
 #
 # Full process doc: docs/development/e2e-verification.md
 #
 # Usage:
-#   ./scripts/e2e.sh [--keep] [--skip-build]     run the scenario suite
-#   ./scripts/e2e.sh --sandbox [--skip-build]    provision a manual sandbox
+#   ./scripts/e2e.sh [--keep] [--skip-build] [--full]  run the scenario suite
+#   ./scripts/e2e.sh --sandbox [--skip-build]          provision a manual sandbox
 #     --keep        preserve the sandbox directory after a green run
 #                   (failed runs always keep it for debugging)
 #     --skip-build  reuse an existing target/debug/vapor binary
+#     --full        also run the host-mutating service round-trip
+#                   (installs a real LaunchAgent; macOS only; intended
+#                   for disposable CI runners)
 #     --sandbox     build + configure + start a daemon in a fresh
 #                   sandbox, print a command cheat-sheet, and leave it
 #                   running for manual/exploratory testing
@@ -25,10 +40,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="suite"
 KEEP_SANDBOX=0
 SKIP_BUILD=0
+FULL=0
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP_SANDBOX=1 ;;
     --skip-build) SKIP_BUILD=1 ;;
+    --full) FULL=1 ;;
     --sandbox) MODE="sandbox" ;;
     *)
       echo "[e2e] unknown argument: $arg" >&2
@@ -36,6 +53,11 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+if [[ "$MODE" == "sandbox" && "$FULL" -eq 1 ]]; then
+  echo "[e2e] --full and --sandbox are mutually exclusive" >&2
+  exit 2
+fi
 
 # Keep the run id short so the default sandbox stays under the Unix
 # socket-address budget and S2 can assert the *canonical* socket
@@ -64,6 +86,16 @@ DAEMON_PID=""
 DEEP_PID=""
 FAILED=0
 
+# --full service round-trip phase (host-mutating; see header). The
+# phase gets its own runtime home so the R scenarios never share state
+# with the in-process S scenarios.
+DAEMON_LABEL="sh.arn.vapor.daemon"
+PLIST_PATH="$HOME/Library/LaunchAgents/$DAEMON_LABEL.plist"
+DOMAIN_TARGET="gui/$(id -u)"
+SERVICE_HOME="$E2E_ROOT/service-home"
+SERVICE_PHASE_STARTED=0
+SERVICE_LAST_OUTPUT=""
+
 log() { echo "[e2e] $*"; }
 
 dump_diagnostics() {
@@ -79,6 +111,18 @@ dump_diagnostics() {
   if [[ -s "$DAEMON_OUT" ]]; then
     echo "[e2e] daemon stdout/stderr tail:"
     tail -n 20 "$DAEMON_OUT" | sed 's/^/[e2e]   /'
+  fi
+  if [[ "$SERVICE_PHASE_STARTED" -eq 1 ]]; then
+    echo "[e2e] last service command output: $SERVICE_LAST_OUTPUT"
+    launchctl print "$DOMAIN_TARGET/$DAEMON_LABEL" 2>&1 | head -n 25 | sed 's/^/[e2e]   /' || true
+    if [[ -f "$SERVICE_HOME/state/lifecycle.json" ]]; then
+      echo "[e2e] lifecycle.json:"
+      sed 's/^/[e2e]   /' "$SERVICE_HOME/state/lifecycle.json"
+    fi
+    if [[ -f "$SERVICE_HOME/logs/vapord.logs" ]]; then
+      echo "[e2e] last 20 service-daemon log lines:"
+      tail -n 20 "$SERVICE_HOME/logs/vapord.logs" | sed 's/^/[e2e]   /'
+    fi
   fi
   echo "[e2e] ---------------------"
 }
@@ -110,6 +154,16 @@ stop_daemon() {
 cleanup() {
   stop_daemon "$DAEMON_PID" || true
   stop_daemon "$DEEP_PID" || true
+  if [[ "$SERVICE_PHASE_STARTED" -eq 1 ]]; then
+    # Best-effort teardown so the host is left clean even on failure:
+    # unregister the service, remove the plist, kill any straggler
+    # daemon launched from this repo's target directory. Default runs
+    # (no --full) never reach this branch and never touch launchd.
+    VAPOR_DIR="$SERVICE_HOME" "$VAPOR_BIN" service uninstall >/dev/null 2>&1 || true
+    launchctl bootout "$DOMAIN_TARGET" "$PLIST_PATH" >/dev/null 2>&1 || true
+    rm -f "$PLIST_PATH" 2>/dev/null || true
+    pkill -f "$ROOT_DIR/target/debug/vapord" 2>/dev/null || true
+  fi
   if [[ "$FAILED" -eq 1 || "$KEEP_SANDBOX" -eq 1 ]]; then
     log "sandbox preserved at $E2E_ROOT (remove with ./scripts/clean.sh)"
   else
@@ -190,6 +244,19 @@ fi
 [[ -x "$VAPOR_BIN" ]] || fail "vapor binary missing at $VAPOR_BIN (run without --skip-build)"
 [[ -x "$ROOT_DIR/target/debug/vapord" ]] \
   || fail "vapord binary missing next to vapor (doctor's sibling probe needs it)"
+
+# --full preflight: fail fast (before the sandbox scenarios) when the
+# host-mutating service phase cannot run safely.
+if [[ "$FULL" -eq 1 ]]; then
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    log "NOTE — --full service round-trip is macOS-only; it will be skipped"
+    FULL=0
+  elif [[ -f "$PLIST_PATH" ]]; then
+    fail "--full refused: $PLIST_PATH already exists (a real Vapor install?) — the round-trip would uninstall it; remove the LaunchAgent manually first"
+  elif ! launchctl print "$DOMAIN_TARGET" >/dev/null 2>&1; then
+    fail "--full refused: launchctl domain $DOMAIN_TARGET is unavailable in this session"
+  fi
+fi
 
 # S1 — configuration reaches disk through the CLI, not env vars.
 "$VAPOR_BIN" config set localSyncDirectory "$LOCAL_ROOT" >/dev/null
@@ -317,4 +384,171 @@ DEEP_PID=""
 rm -rf "$(dirname "$deep_socket")"
 log "PASS S9 — over-budget socket path relocated; CLI + doctor work; temp residue removed"
 
-log "OK — all e2e scenarios passed"
+# --- service lifecycle round-trip (--full only; cli.md L2-5 / macos.md M2-4) ---
+#
+# Everything below drives `vapor service` against the REAL macOS
+# service manager: install → start → status → crash-loop supervision
+# (`vapor service check`) through backoff and pause → acknowledge →
+# stop → uninstall. It is the only Tier E2E phase that mutates host
+# state (a LaunchAgent plist + launchd registration), which is why it
+# is opt-in and intended for disposable CI runners. Runtime state
+# (config, logs, durable DBs, lifecycle state) stays in the sandbox via
+# VAPOR_DIR; cleanup removes the LaunchAgent and any straggler daemon.
+
+if [[ "$FULL" -ne 1 ]]; then
+  log "OK — all e2e scenarios passed (service round-trip skipped; opt in with --full)"
+  exit 0
+fi
+
+# The in-process S-phase daemon is done; stop it so the launchd-managed
+# daemon is the only vapord running from this repo.
+stop_daemon "$DAEMON_PID" || fail "could not stop the S-phase daemon before the service phase"
+DAEMON_PID=""
+
+SERVICE_PHASE_STARTED=1
+export VAPOR_DIR="$SERVICE_HOME"
+mkdir -p "$VAPOR_DIR"
+"$VAPOR_BIN" config set localSyncDirectory "$E2E_ROOT/service-local" >/dev/null
+"$VAPOR_BIN" config set cloudSyncDirectory "$E2E_ROOT/cloud/VaporServiceRT" >/dev/null
+
+# svc <subcommand...> — runs the CLI, captures output for assertions
+# and diagnostics. Service subcommands exit 0 even for deferred/paused
+# outcomes; a non-zero exit is always a failure worth diagnostics.
+svc() {
+  if ! SERVICE_LAST_OUTPUT="$("$VAPOR_BIN" service "$@" 2>&1)"; then
+    fail "vapor service $* exited non-zero: $SERVICE_LAST_OUTPUT"
+  fi
+}
+
+expect_last() {
+  local needle="$1" description="$2"
+  if ! grep -qF "$needle" <<<"$SERVICE_LAST_OUTPUT"; then
+    fail "$description — expected '$needle' in: $SERVICE_LAST_OUTPUT"
+  fi
+}
+
+service_status_is() {
+  "$VAPOR_BIN" service status --json 2>/dev/null | grep -q "\"status\": \"$1\""
+}
+
+daemon_pid_from_launchd() {
+  launchctl print "$DOMAIN_TARGET/$DAEMON_LABEL" 2>/dev/null \
+    | awk '/pid = /{print $3; exit}'
+}
+
+kill_service_daemon() {
+  local pid
+  pid="$(daemon_pid_from_launchd)"
+  [[ -n "$pid" ]] || fail "cannot simulate a crash — daemon pid not found via launchctl"
+  kill -KILL "$pid" 2>/dev/null || fail "could not SIGKILL daemon pid $pid"
+  wait_until 15 "launchd to observe the daemon exit" service_status_is "stopped" \
+    || fail "launchd did not observe the daemon exit"
+}
+
+# R1 — fresh runner reports not_installed.
+svc status --json
+expect_last '"status": "not_installed"' "R1: fresh status"
+log "PASS R1 — status reports not_installed before install"
+
+# R2 — install: plist on disk, daemon running, IPC reachable.
+svc install --json
+expect_last '"result": "started"' "R2: install result"
+[[ -f "$PLIST_PATH" ]] || fail "R2: LaunchAgent plist not written at $PLIST_PATH"
+wait_until 30 "service status to report running" service_status_is "running" \
+  || fail "R2: daemon did not reach running after install"
+# The plist embeds VAPOR_DIR, so the daemon must come up inside the
+# sandbox — reaching it over the sandbox IPC socket proves the env
+# wiring end to end.
+wait_until 30 "daemon IPC endpoint inside the sandbox" run_state_is "Running" \
+  || fail "R2: daemon not reachable over the sandbox IPC socket"
+svc check --json
+expect_last '"health": "running"' "R2: healthy check"
+log "PASS R2 — install: plist written, daemon Running, sandbox IPC reachable"
+
+# R3 — crash 1: check restarts immediately (NoDelay).
+kill_service_daemon
+svc check --json
+expect_last '"health": "restarted_after_crash"' "R3: first crash restarts immediately"
+wait_until 30 "daemon running again after crash-1 restart" service_status_is "running" \
+  || fail "R3: daemon not running after crash-1 restart"
+log "PASS R3 — unexpected exit detected; immediate restart (crash 1)"
+
+# R4 — crash 2: backoff defers, same exit not double-counted, then restart.
+kill_service_daemon
+svc check --json
+expect_last '"health": "restart_deferred"' "R4: second crash defers restart"
+svc status --json
+expect_last '"consecutive_crashes": 2' "R4: durable crash count"
+svc check --json
+expect_last '"health": "restart_deferred"' "R4: repeat check while deferred"
+svc status --json
+expect_last '"consecutive_crashes": 2' "R4: repeat check must not double-count"
+sleep 2.5 # default policy: crash 2 backs off 2 s (bounded external wait)
+svc check --json
+expect_last '"health": "restarted_after_crash"' "R4: restart after backoff elapsed"
+wait_until 30 "daemon running after crash-2 restart" service_status_is "running" \
+  || fail "R4: daemon not running after crash-2 restart"
+log "PASS R4 — backoff deferral honored; no double-count; restarted after 2s"
+
+# R5 — crashes 3+4 walk the backoff schedule (4 s, 8 s).
+kill_service_daemon
+svc check --json
+expect_last '"health": "restart_deferred"' "R5: third crash defers"
+sleep 4.5
+svc check --json
+expect_last '"health": "restarted_after_crash"' "R5: restart after 4s backoff"
+wait_until 30 "daemon running after crash-3 restart" service_status_is "running" \
+  || fail "R5: daemon not running after crash-3 restart"
+kill_service_daemon
+svc check --json
+expect_last '"health": "restart_deferred"' "R5: fourth crash defers"
+sleep 8.5
+svc check --json
+expect_last '"health": "restarted_after_crash"' "R5: restart after 8s backoff"
+wait_until 30 "daemon running after crash-4 restart" service_status_is "running" \
+  || fail "R5: daemon not running after crash-4 restart"
+log "PASS R5 — exponential backoff schedule (4s, 8s) walked end to end"
+
+# R6 — crash 5: durable crash-loop pause; start refuses.
+kill_service_daemon
+svc check --json
+expect_last '"health": "crash_loop_paused"' "R6: fifth crash pauses"
+svc status --json
+expect_last '"status": "crash_loop_paused"' "R6: status overlays the pause"
+expect_last '"paused": true' "R6: crash_loop.paused"
+svc start --json
+expect_last '"result": "crash_loop_paused"' "R6: start refused while paused"
+# The pause must be durable state, not process memory: every CLI
+# invocation above was a separate process (M2-6).
+grep -q '"paused_indefinitely": true' "$VAPOR_DIR/state/lifecycle.json" \
+  || fail "R6: pause not persisted in lifecycle.json"
+log "PASS R6 — crash-loop pause engaged, durable, and refusing restarts"
+
+# R7 — acknowledge, then start works again.
+svc acknowledge --json
+expect_last '"result": "acknowledged"' "R7: acknowledge"
+svc start --json
+expect_last '"result": "started"' "R7: start after acknowledge"
+wait_until 30 "daemon running after acknowledge + start" service_status_is "running" \
+  || fail "R7: daemon not running after acknowledge + start"
+log "PASS R7 — acknowledge cleared the pause; daemon started"
+
+# R8 — an expected stop is not a crash.
+svc stop --json
+expect_last '"result": "stopped"' "R8: stop"
+wait_until 15 "service status to report stopped" service_status_is "stopped" \
+  || fail "R8: daemon did not stop"
+svc check --json
+expect_last '"health": "stopped_expected"' "R8: expected stop is not a crash"
+log "PASS R8 — clean stop; check does not treat it as a crash"
+
+# R9 — uninstall removes the plist; status returns to not_installed.
+svc uninstall --json
+[[ ! -f "$PLIST_PATH" ]] || fail "R9: plist still present after uninstall"
+svc status --json
+expect_last '"status": "not_installed"' "R9: status after uninstall"
+svc check --json
+expect_last '"health": "not_installed"' "R9: check after uninstall"
+log "PASS R9 — uninstall removed the LaunchAgent; status/check report not_installed"
+
+log "OK — all e2e scenarios passed, including the --full service round-trip"

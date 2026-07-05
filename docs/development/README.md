@@ -45,6 +45,5 @@ workspace.
 - `docs/architecture/testing-strategy.md` — the authoritative reference
   for the test taxonomy, discipline rules, per-surface scope, and the
   explicit "do not test" list. Read before writing or reviewing a test.
-- `docs/plans/core.md` — upcoming crates and structure changes that will
-  extend what the runbook covers (`core/platform`, `core/lifecycle`,
-  `core/cli`).
+- `docs/plans/core.md` — the runtime plan behind the workspace structure
+  the runbook covers (`core/platform`, `core/lifecycle`, `core/cli`).

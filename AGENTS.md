@@ -47,7 +47,9 @@ This file defines the operating rules for contributors (human and AI) working on
 - SwiftUI app (`apps/macos`)
   - UX, onboarding, settings, diagnostics, menubar state.
   - Delegates autolaunch, crash-loop, and daemon control to
-    `core/lifecycle` (via FFI or the `vapor` CLI).
+    `core/lifecycle` by invoking the bundled `vapor` CLI
+    (`Contents/Helpers/vapor`) as a subprocess with `--json` output;
+    no lifecycle policy is implemented in Swift.
   - Calls the macOS-native `SecretStore` implementation for Keychain access.
 - Future apps (`apps/windows`, `apps/linux`) consume the same `core/*`
   stack; no business logic in UI code.
@@ -152,10 +154,13 @@ Full policy: `docs/operations/macos/distribution-trust-chain.md`.
 
 - Distribution model must include: code signing, hardened runtime,
   notarization, entitlement review.
-- `Vapor.app` is the single distributable package and must contain both
-  executables:
+- `Vapor.app` is the single distributable package and must contain the
+  three executables:
   - `Contents/MacOS/Vapor`
   - `Contents/MacOS/vapord`
+  - `Contents/Helpers/vapor` (the CLI the app shim drives; it lives in
+    `Helpers/` because the default macOS filesystem is case-insensitive
+    and `vapor` would collide with `Vapor` inside `MacOS/`)
 - GitHub Releases must publish file assets, so release uploads should use a
   zip that contains `Vapor.app`; the raw `.app` bundle directory remains a
   local packaging/validation artifact rather than a direct release asset.
@@ -407,11 +412,15 @@ If a test's failure mode is "I typo'd a default value", skip it.
   Performance SLO tests, long-running property cases (higher case
   counts), fuzz corpora, `loom`-backed concurrency tests.
   Not a PR gate.
-- **Tier E2E** — `./scripts/e2e.sh`, run on every PR as the final
-  step of `test.yml`'s macOS job and locally by the contributor.
+- **Tier E2E** — `./scripts/e2e.sh`, run on every PR in `test.yml`'s
+  macOS job and locally by the contributor.
   Black-box verification of the real `vapor` + `vapord` binaries in a
   disposable sandbox. Required locally for runtime-affecting features
-  and fixes; contract in §9.8.
+  and fixes; contract in §9.8. CI runs it with `--full`, which appends
+  the L2-5 service lifecycle round-trip: that phase installs a real
+  LaunchAgent, so it is opt-in, meant for disposable CI runners, and
+  refuses outright when a `sh.arn.vapor.daemon` LaunchAgent already
+  exists. Contributors run the default (host-safe) suite locally.
 
 ### 9.6) Flaky-test policy
 

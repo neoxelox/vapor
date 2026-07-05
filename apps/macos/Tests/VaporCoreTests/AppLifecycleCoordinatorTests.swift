@@ -5,12 +5,9 @@ import Testing
 @MainActor
 @Test
 func closingMainWindowKeepsDaemonRunning() {
-  let launchAgent = OrderedRecordingLaunchAgentController()
+  let launchAgent = OrderedRecordingServiceController()
   let runtime = RecordingAppRuntimeController()
-  let manager = DaemonLifecycleManager(
-    launchAgentController: launchAgent,
-    settingsStore: InMemoryAutoLaunchSettingStore()
-  )
+  let manager = DaemonLifecycleManager(launchAgentController: launchAgent)
   let coordinator = AppLifecycleCoordinator(
     daemonLifecycleManager: manager,
     runtimeController: runtime
@@ -25,12 +22,9 @@ func closingMainWindowKeepsDaemonRunning() {
 @MainActor
 @Test
 func openFromMenubarRestoresDockPresence() {
-  let launchAgent = OrderedRecordingLaunchAgentController()
+  let launchAgent = OrderedRecordingServiceController()
   let runtime = RecordingAppRuntimeController()
-  let manager = DaemonLifecycleManager(
-    launchAgentController: launchAgent,
-    settingsStore: InMemoryAutoLaunchSettingStore()
-  )
+  let manager = DaemonLifecycleManager(launchAgentController: launchAgent)
   let coordinator = AppLifecycleCoordinator(
     daemonLifecycleManager: manager,
     runtimeController: runtime
@@ -46,12 +40,9 @@ func openFromMenubarRestoresDockPresence() {
 @Test
 func quittingFromMenubarStopsDaemonBeforeAppTermination() {
   let events = EventRecorder()
-  let launchAgent = OrderedRecordingLaunchAgentController(eventRecorder: events)
+  let launchAgent = OrderedRecordingServiceController(eventRecorder: events)
   let runtime = RecordingAppRuntimeController(eventRecorder: events)
-  let manager = DaemonLifecycleManager(
-    launchAgentController: launchAgent,
-    settingsStore: InMemoryAutoLaunchSettingStore()
-  )
+  let manager = DaemonLifecycleManager(launchAgentController: launchAgent)
   let coordinator = AppLifecycleCoordinator(
     daemonLifecycleManager: manager,
     runtimeController: runtime
@@ -65,14 +56,9 @@ func quittingFromMenubarStopsDaemonBeforeAppTermination() {
 @MainActor
 @Test
 func cleanShutdownFromMenubarLeavesLaunchAgentPassive() {
-  let launchAgent = OrderedRecordingLaunchAgentController()
+  let launchAgent = OrderedRecordingServiceController()
   let runtime = RecordingAppRuntimeController()
-  let manager = DaemonLifecycleManager(
-    launchAgentController: launchAgent,
-    settingsStore: InMemoryAutoLaunchSettingStore(
-      seed: [DaemonLifecycleManager.autoLaunchSettingKey: true]
-    )
-  )
+  let manager = DaemonLifecycleManager(launchAgentController: launchAgent)
   let coordinator = AppLifecycleCoordinator(
     daemonLifecycleManager: manager,
     runtimeController: runtime
@@ -81,11 +67,12 @@ func cleanShutdownFromMenubarLeavesLaunchAgentPassive() {
   coordinator.handleQuitFromMenuBar()
 
   // Menubar quit must only stop the daemon and terminate the app process.
-  // It must not bootstrap, install, disable, or start the LaunchAgent —
-  // those actions would either tear down the plist (losing autolaunch on
-  // next login) or coax launchd into a restart cycle. Combined with
-  // KeepAlive=false (audited in LaunchAgentControllerTests), launchd stays
-  // passive after a clean shutdown until the next user-driven trigger.
+  // It must not bootstrap, install, disable, or start the service —
+  // those actions would either tear down the LaunchAgent (losing
+  // autolaunch on next login) or coax launchd into a restart cycle.
+  // Combined with KeepAlive=false (locked by the plist-policy tests in
+  // core/platform/src/service/macos.rs), launchd stays passive after a
+  // clean shutdown until the next user-driven trigger.
   #expect(launchAgent.operations == ["stop"])
   #expect(runtime.operations == ["terminate"])
 }
@@ -98,7 +85,7 @@ private final class EventRecorder {
   }
 }
 
-private final class OrderedRecordingLaunchAgentController: LaunchAgentControlling {
+private final class OrderedRecordingServiceController: LaunchAgentControlling {
   var operations: [String] = []
   private let eventRecorder: EventRecorder?
 
@@ -106,24 +93,52 @@ private final class OrderedRecordingLaunchAgentController: LaunchAgentControllin
     self.eventRecorder = eventRecorder
   }
 
-  func installAndEnable() {
+  func bootstrap() throws -> DaemonLifecycleActionResult {
+    operations.append("bootstrap")
+    eventRecorder?.append("daemon.bootstrap")
+    return .started
+  }
+
+  func installAndEnable() throws -> DaemonLifecycleActionResult {
     operations.append("install")
     eventRecorder?.append("daemon.install")
+    return .started
   }
 
-  func disableAndUninstall() {
+  func disableAndUninstall(stopDaemonNow: Bool) throws -> DaemonLifecycleActionResult {
     operations.append("disable")
     eventRecorder?.append("daemon.disable")
+    return stopDaemonNow ? .stopped : .unchanged
   }
 
-  func startDaemon() {
+  func startDaemon() throws -> DaemonLifecycleActionResult {
     operations.append("start")
     eventRecorder?.append("daemon.start")
+    return .started
   }
 
-  func stopDaemon() {
+  func stopDaemon() throws {
     operations.append("stop")
     eventRecorder?.append("daemon.stop")
+  }
+
+  func status() throws -> ServiceStatusSnapshot {
+    ServiceStatusSnapshot(
+      status: "running",
+      label: VaporConstants.Daemon.launchAgentLabel,
+      autoLaunchEnabled: true,
+      crashLoopPaused: false,
+      consecutiveCrashes: 0
+    )
+  }
+
+  func checkDaemonHealth() throws -> ServiceHealthOutcome {
+    operations.append("check")
+    return .running
+  }
+
+  func acknowledgeCrashLoopPause() throws {
+    operations.append("acknowledge")
   }
 }
 

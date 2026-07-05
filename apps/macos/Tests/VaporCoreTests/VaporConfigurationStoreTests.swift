@@ -75,29 +75,9 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
   try fileManager.removeItem(at: rootURL)
 }
 
-@Test
-func autoLaunchSettingStorePersistsIntoVaporJSON() throws {
-  let fileManager = FileManager.default
-  let rootURL = fileManager.temporaryDirectory
-    .appendingPathComponent("vapor-config-tests")
-    .appendingPathComponent(UUID().uuidString, isDirectory: true)
-
-  let configurationStore = VaporConfigurationStore(
-    fileManager: fileManager,
-    environment: ["VAPOR_DIR": rootURL.path]
-  )
-  let autoLaunchStore = VaporConfigurationAutoLaunchSettingStore(
-    configurationStore: configurationStore)
-
-  #expect(autoLaunchStore.bool(forKey: DaemonLifecycleManager.autoLaunchSettingKey) == true)
-
-  try autoLaunchStore.set(false, forKey: DaemonLifecycleManager.autoLaunchSettingKey)
-
-  let configuration = configurationStore.load()
-  #expect(configuration.autoLaunch == false)
-
-  try fileManager.removeItem(at: rootURL)
-}
+// The `autoLaunch` key in `vapor.json` is owned by the Rust lifecycle
+// core since M2-1/C4-7 (`JsonFileAutoLaunchSettingStore`, covered in
+// core/lifecycle); Swift only reads it as part of the configuration.
 
 @Test
 func loadDefaultsMissingKeysWithoutDroppingOtherSavedValues() throws {

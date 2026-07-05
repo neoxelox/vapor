@@ -22,12 +22,16 @@ or durable state in Swift.
 - Latest macOS target only (`26.0`).
 - Distribution is script-first and CI-runnable; Xcode project/workspace is an
   optional debugging convenience, never the release source of truth.
-- `Vapor.app` is the single distributable package and must embed both
+- `Vapor.app` is the single distributable package and must embed three
   executables:
-  - `Contents/MacOS/Vapor`
-  - `Contents/MacOS/vapord`
-- Runtime daemon launch targets the bundled sibling binary only
-  (`Contents/MacOS/vapord`) — never a global install path.
+  - `Contents/MacOS/Vapor` (app)
+  - `Contents/MacOS/vapord` (daemon)
+  - `Contents/Helpers/vapor` (CLI — kept out of `Contents/MacOS/`
+    because the default macOS filesystem is case-insensitive and
+    `vapor` would collide with `Vapor`)
+- Runtime daemon launch targets the bundled binary only
+  (`Contents/MacOS/vapord`; the bundled CLI resolves it first as a
+  sibling, then at `../MacOS/vapord`) — never a global install path.
 - Autolaunch at login is on by default and restores Vapor as a menubar-only
   surface (no automatic main-window presentation).
 - Closing the main window is a UI action only; `vapord` keeps running.
@@ -43,8 +47,10 @@ or durable state in Swift.
    - Consumes Keychain via macOS-native APIs (production `SecretStore`
      implementation in `core/platform/secrets/macos.rs`).
    - Invokes the Rust-backed lifecycle layer (`core/lifecycle`) for
-     autolaunch install, daemon start/stop, and crash-loop state — either via
-     FFI or by invoking the `vapor` CLI.
+     autolaunch install, daemon start/stop, supervision, and crash-loop
+     state by running the bundled `vapor` CLI (`Contents/Helpers/vapor`)
+     as a subprocess (`vapor service … --json`); no lifecycle policy in
+     Swift.
 2. **Rust daemon (`vapord`)** — see `docs/plans/core.md`.
 3. **Shared runtime/platform layer** — see `docs/plans/core.md`.
 
@@ -82,11 +88,13 @@ Behavior invariants:
 - Quitting from menubar performs full shutdown (stop daemon, then terminate
   app process). The daemon installs platform-native shutdown handlers so
   `launchctl kill TERM` exits the tick loop at the next tick boundary.
-- Crash-loop protection is owned by the daemon + `core/lifecycle` (not
-  `launchd`). After 5 consecutive unclean exits within 10 minutes the
-  coordinator enters `CrashLoopPaused` and surfaces a reasoned menubar
-  diagnostic; the user must invoke `acknowledgeCrashLoopPause` (wired through
-  a menubar action) to resume.
+- Crash-loop protection is owned by `core/lifecycle` (not `launchd` and
+  not Swift): the app's `DaemonHealthMonitor` runs `vapor service check`
+  every 30 seconds, and crash counters/backoff/pause persist in
+  `<vapor_dir>/state/lifecycle.json`. After 5 consecutive unclean exits
+  within 10 minutes the guard enters `CrashLoopPaused` and the app
+  surfaces a reasoned menubar diagnostic; the user must acknowledge (the
+  menubar action invokes `vapor service acknowledge`) to resume.
 
 ## 5) Native app bundle and distribution foundation
 
@@ -107,10 +115,11 @@ Xcode archive flow.
 Ordered steps:
 
 1. Build release binary via SwiftPM.
-2. Build `vapord` release binary via `cargo`.
-3. Create `dist/Vapor.app/Contents/{MacOS,Resources}`.
-4. Copy `Vapor` and `vapord` into `Contents/MacOS/`; set execute permissions;
-   assert both exist and are executable.
+2. Build `vapord` and `vapor` release binaries via `cargo`.
+3. Create `dist/Vapor.app/Contents/{MacOS,Helpers,Resources}`.
+4. Copy `Vapor` and `vapord` into `Contents/MacOS/` and `vapor` into
+   `Contents/Helpers/`; set execute permissions; assert all three exist
+   and are executable.
 5. Generate `Info.plist` with bundle metadata (`CFBundleShortVersionString`
    from root `VERSION`; `CFBundleVersion` from an Apple-valid mapping;
    `VaporVersion` + `VaporGitCommit` for provenance;
@@ -141,7 +150,7 @@ Required environment inputs:
 
 Full policy in `docs/operations/macos/distribution-trust-chain.md`.
 
-- Code signing (Developer ID Application) for both executables.
+- Code signing (Developer ID Application) for all three executables.
 - Hardened runtime enabled for distributable binaries.
 - Notarization + staple required for release artifacts.
 - Entitlement review for least-privilege access.
@@ -174,8 +183,9 @@ Full policy in `docs/operations/macos/distribution-trust-chain.md`.
   automated — see §7.1).
 - Window-close vs menubar-quit vs daemon-stop semantics pass automated
   logic coverage (see §4) via `AppLifecycleCoordinator` state transitions.
-- `dist/Vapor.app` always embeds both `Contents/MacOS/Vapor` and
-  `Contents/MacOS/vapord`; runtime launch resolves the bundled sibling only.
+- `dist/Vapor.app` always embeds `Contents/MacOS/Vapor`,
+  `Contents/MacOS/vapord`, and `Contents/Helpers/vapor`; runtime launch
+  resolves the bundled binaries only.
 - Signed + notarized path works end-to-end when credentials are supplied.
 - `AGENTS.md` invariants for throttle discipline, durability, and low-impact
   goals are preserved — validated via the core runtime's platform-native
@@ -190,15 +200,18 @@ Logic tests only. The full policy lives in `AGENTS.md §9` and
   `AppLifecycleCoordinator` state transitions, `AppShellViewModel` state
   mapping, localization fallback, `StructuredLogger` redaction,
   `VaporPaths` resolution, `VaporBundleLayout` validation, the Swift shim
-  over `core/lifecycle` once wave 5 lands.
+  over `core/lifecycle` (`VaporCLIServiceController` JSON decoding, the
+  `DaemonLifecycleManager` facade, `DaemonHealthMonitor` outcome
+  routing).
 - **Not tested** — SwiftUI view rendering, menubar layout, Dock
   transitions, window focus, keyboard handling, animation timing,
   accessibility audit. UI correctness is verified by the project owner
   manually.
 
-When `core/lifecycle` lands (wave 5), the Swift-side
-`DaemonLifecycleManagerTests` becomes redundant with the Rust-side
-tests and is retired per M2-2 rather than maintained as a duplicate.
+Lifecycle *policy* tests live with the Rust `core/lifecycle` crate; the
+Swift-side `DaemonLifecycleManagerTests` covers only what Swift still
+owns (delegation order, outcome mapping, login-item coupling) rather
+than duplicating the Rust policy tests.
 
 ## 8) Doc deliverables tied to this plan
 

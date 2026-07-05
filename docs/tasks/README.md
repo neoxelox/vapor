@@ -128,12 +128,12 @@ stubs stay as-is — the primary deliverable is unaffected.
 
 ### Wave 5 — Daemon lifecycle moves into Rust
 
-Status: Rust port complete (C4-1 … C4-4, C4-6). The Swift consumer-
-side work (C4-5 CLI subprocess bridge / C4-7 retire duplicate Swift
-logic / `macos.md` M2-1 … M2-4) intentionally rides with the macOS
-app shim follow-up because it has to land together with that PR. The
-`vapor service` CLI commands the Swift shim consumes are already
-shipping from Wave 6. Requires Wave 4 (`ServiceInstaller`).
+Status: complete. Rust port (C4-1 … C4-4, C4-6) shipped first; the
+Swift consumer side (C4-5 subprocess bridge, C4-7 duplicate-logic
+removal, `macos.md` M2-1 … M2-6) landed together in the macOS
+app-shim follow-up, which also bundled the `vapor` CLI into
+`Vapor.app` (`Contents/Helpers/vapor`). Required Wave 4
+(`ServiceInstaller`).
 
 - `core.md` C4-1 … C4-7 — new `core/lifecycle` crate; port
   `CrashLoopGuard` and `DaemonLifecycleManager` from Swift; expose a
@@ -147,12 +147,14 @@ other.
 
 ### Wave 6 — IPC channel + `vapor` CLI lifecycle commands (macOS)
 
-Status: Rust side complete. CLI surface (L0/L1/L2) and IPC channel
-(C5-1 … C5-5) shipped end-to-end. The macOS Swift app shim (`macos.md`
-M2-1 … M2-4 / `core.md` C4-5 + C4-7) and the macOS-CI install/start/
-status round-trip (`cli.md` L2-5) intentionally ride with the next
-follow-up PR because they need a packaged `vapor` binary on the
-runner. Required Waves 4 and 5.
+Status: complete. CLI surface (L0/L1/L2) and IPC channel (C5-1 …
+C5-5) shipped end-to-end; the macOS Swift app shim (`macos.md` M2-1 …
+M2-6 / `core.md` C4-5 + C4-7) and the macOS-CI service round-trip
+(`cli.md` L2-5, the `./scripts/e2e.sh --full` phase) landed in the
+follow-up PR. Crash-loop state is now durable
+(`<vapor_dir>/state/lifecycle.json`) and `vapor service` gained
+`bootstrap` / `check` / `acknowledge` + `--json` for the app shim.
+Required Waves 4 and 5.
 
 - `core.md` C5-1 … C5-5 — transport decision (UDS on Unix, named pipe
   on Windows — the Windows transport choice is made now even though

@@ -11,14 +11,16 @@ Define release trust requirements for macOS app + daemon distribution.
 
 ## Required controls
 
-- Code signing for app bundle and daemon executable.
+- Code signing for the app bundle and every bundled executable
+  (app, daemon, CLI).
 - Hardened runtime enabled for distributable binaries.
 - Notarization for release artifacts.
 - Entitlement review for least-privilege access.
 
 ## Release pipeline policy
 
-1. Build signed artifacts for app (`Vapor`) and daemon (`vapord`).
+1. Build signed artifacts for app (`Vapor`), daemon (`vapord`), and
+   CLI (`vapor`).
 2. Validate signatures and entitlements.
 3. Submit for notarization and verify staple status.
 4. Publish only notarization-passing artifacts.
@@ -29,11 +31,15 @@ Implementation requirements:
   and CI-runnable.
 - Pipeline must produce `dist/Vapor.app` and zip artifacts without
   requiring Xcode archive UI flows.
-- `dist/Vapor.app` must include both executables in `Contents/MacOS/`:
-  - `Vapor`
-  - `vapord`
-- Runtime daemon launch path must be the bundled sibling binary
-  (`Contents/MacOS/vapord`) only.
+- `dist/Vapor.app` must include three executables:
+  - `Contents/MacOS/Vapor`
+  - `Contents/MacOS/vapord`
+  - `Contents/Helpers/vapor` (the CLI; kept out of `Contents/MacOS/`
+    because the default macOS filesystem is case-insensitive and
+    `vapor` would collide with `Vapor`)
+- Runtime daemon launch path must be the bundled binary
+  (`Contents/MacOS/vapord`) only; the bundled CLI resolves it first as
+  a sibling, then at `../MacOS/vapord`.
 - Xcode project/workspace support remains optional debugging convenience
   only.
 

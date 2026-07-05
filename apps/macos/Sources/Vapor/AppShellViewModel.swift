@@ -16,24 +16,18 @@ final class AppShellViewModel: ObservableObject {
   private var runtimeController: (any AppRuntimeControlling)?
   private var lifecycleCoordinator: AppLifecycleCoordinator?
   private var hasScheduledBootstrap = false
+  private var healthMonitor: DaemonHealthMonitor?
 
   convenience init() {
     let configurationStore = VaporConfigurationStore()
     let configurationLoadResult = configurationStore.loadResult()
     let configuration = configurationLoadResult.configuration
-    let vaporDirectoryURL = configurationStore.resolveVaporDirectoryURL()
     let localizationStore = VaporLocalizationStore()
-    let autoLaunchSettingStore = VaporConfigurationAutoLaunchSettingStore(
-      configurationStore: configurationStore)
-    // Sync/filter settings reach the daemon through `vapor.json` (the
-    // daemon reads it at startup), so the launch definition no longer
-    // depends on the configuration values — the factory stays for tests
-    // and future launch-relevant settings.
+    // Lifecycle policy lives in the Rust core behind the bundled
+    // `vapor` CLI; the manager is configuration-independent — the
+    // factory stays for tests and future launch-relevant settings.
     let lifecycleManagerFactory: (VaporConfiguration) -> DaemonLifecycleManager = { _ in
-      AppShellViewModel.makeDefaultLifecycleManager(
-        vaporDirectoryURL: vaporDirectoryURL,
-        autoLaunchSettingStore: autoLaunchSettingStore
-      )
+      AppShellViewModel.makeDefaultLifecycleManager()
     }
     self.init(
       daemonLifecycleManager: lifecycleManagerFactory(configuration),
@@ -64,7 +58,12 @@ final class AppShellViewModel: ObservableObject {
     self.configuration = resolvedConfiguration
     self.localization = localizationStore.resolve(languageCode: resolvedConfiguration.languageCode)
 
-    state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
+    // Startup reads must stay in-process (config file only). The
+    // lifecycle-backed values (`autoLaunchEnabled`, `crashLoopPaused`)
+    // would each spawn a `vapor` CLI subprocess, so the UI seeds from
+    // `vapor.json` / defaults here and refreshes asynchronously once
+    // the bootstrap and health-tick paths report back.
+    state.autoLaunchEnabled = self.configuration.autoLaunch
     state.useGitIgnore = self.configuration.useGitIgnore
     state.useVaporIgnore = self.configuration.useVaporIgnore
     state.preIgnoreRules = self.configuration.preIgnoreRules
@@ -74,7 +73,7 @@ final class AppShellViewModel: ObservableObject {
     state.vaporDirectoryPath = self.configurationStore.resolveVaporDirectoryURL().path
     state.configurationIssuePath = resolvedConfigurationLoadIssue?.configPath
     state.configurationIssueReason = resolvedConfigurationLoadIssue?.reason
-    state.crashLoopPaused = daemonLifecycleManager.isInCrashLoopPause
+    state.crashLoopPaused = false
     if resolvedConfigurationLoadIssue != nil {
       state.syncState = .error
     }
@@ -156,13 +155,15 @@ final class AppShellViewModel: ObservableObject {
     lifecycleQueue.async { [weak self] in
       do {
         let result = try daemonLifecycleManager.bootstrapIfNeeded()
-        let isPaused = daemonLifecycleManager.isInCrashLoopPause
+        let isPaused = result == .relaunchDeferred(.infinity)
         Task { @MainActor [weak self] in
           guard let self else {
             return
           }
 
           self.state.crashLoopPaused = isPaused
+          self.state.autoLaunchEnabled = self.configuration.autoLaunch
+          self.startDaemonHealthMonitoringIfNeeded()
           logger.info(
             "Daemon lifecycle bootstrap completed",
             metadata: [
@@ -178,6 +179,7 @@ final class AppShellViewModel: ObservableObject {
           }
 
           self.state.syncState = .error
+          self.startDaemonHealthMonitoringIfNeeded()
           logger.error(
             "Daemon lifecycle bootstrap failed",
             metadata: ["error": String(describing: error)]
@@ -185,6 +187,24 @@ final class AppShellViewModel: ObservableObject {
         }
       }
     }
+  }
+
+  /// M2-5: periodic supervision. The Rust core (via `vapor service
+  /// check`) owns detection and restart policy; the monitor only owns
+  /// the timer and reflects the outcome into UI state.
+  private func startDaemonHealthMonitoringIfNeeded() {
+    guard healthMonitor == nil else {
+      return
+    }
+
+    let monitor = DaemonHealthMonitor(manager: daemonLifecycleManager) { [weak self] outcome in
+      Task { @MainActor [weak self] in
+        self?.state.crashLoopPaused = outcome == .crashLoopPaused
+      }
+    }
+    healthMonitor = monitor
+    monitor.start()
+    logger.info("Daemon health monitoring active")
   }
 
   func refreshCrashLoopPauseState() {
@@ -217,6 +237,7 @@ final class AppShellViewModel: ObservableObject {
   }
 
   func handleQuitFromMenuBar() {
+    healthMonitor?.stop()
     lifecycleCoordinator?.handleQuitFromMenuBar()
   }
 
@@ -456,7 +477,9 @@ final class AppShellViewModel: ObservableObject {
 
   private func refreshDaemonLifecycleManagerForCurrentConfiguration() {
     daemonLifecycleManager = lifecycleManagerFactory(configuration)
-    state.autoLaunchEnabled = daemonLifecycleManager.autoLaunchEnabled
+    // `state.autoLaunchEnabled` is deliberately not re-read here: the
+    // manager-backed read spawns a CLI subprocess (main-thread jank)
+    // and sync/filter config changes cannot affect autolaunch.
     refreshLifecycleCoordinator()
   }
 
@@ -491,55 +514,27 @@ final class AppShellViewModel: ObservableObject {
       .count
   }
 
-  /// Builds the production lifecycle manager. The LaunchAgent follows
-  /// `docs/operations/macos/launchagent-policy.md`: the environment
-  /// carries only `VAPOR_DIR` (plus `VAPOR_ENV` pass-through) — every
-  /// other setting reaches the daemon through `vapor.json`, which the
-  /// daemon reads at startup. This keeps the plist byte-identical to the
-  /// one `vapor service install` writes, so the two surfaces never
-  /// clobber each other's daemon configuration.
-  private static func makeDefaultLifecycleManager(
-    vaporDirectoryURL: URL,
-    autoLaunchSettingStore: any AutoLaunchSettingStore
-  ) -> DaemonLifecycleManager {
+  /// Builds the production lifecycle manager: a thin facade over the
+  /// bundled `vapor` CLI (M2-1). The Rust `core/lifecycle` layer behind
+  /// the CLI owns the LaunchAgent definition (per
+  /// `docs/operations/macos/launchagent-policy.md`), autolaunch
+  /// persistence, and crash-loop policy — one implementation for every
+  /// surface, so the CLI and the app can never clobber each other.
+  private static func makeDefaultLifecycleManager() -> DaemonLifecycleManager {
     if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
       return .placeholder()
     }
 
-    let daemonExecutableURL = bundledDaemonExecutableURL()
-    let launchAgentLabel = VaporConstants.Daemon.launchAgentLabel
-    var daemonEnvironment = [
-      VaporPaths.directoryEnvironmentKey: vaporDirectoryURL.path
-    ]
-    if let runtimeEnvironment = ProcessInfo.processInfo.environment[VaporPaths.environmentKey],
-      !runtimeEnvironment.isEmpty
-    {
-      daemonEnvironment[VaporPaths.environmentKey] = runtimeEnvironment
-    }
-    let logsDirectoryURL = VaporPaths.logsDirectoryURL(vaporDirectoryURL: vaporDirectoryURL)
-    let configuration = LaunchAgentConfiguration(
-      label: launchAgentLabel,
-      plistURL: LaunchAgentConfiguration.defaultPlistURL(label: launchAgentLabel),
-      daemonExecutableURL: daemonExecutableURL,
-      environment: daemonEnvironment,
-      standardOutPath:
-        logsDirectoryURL
-        .appendingPathComponent(VaporConstants.Runtime.daemonStdoutLogFileName).path,
-      standardErrorPath:
-        logsDirectoryURL
-        .appendingPathComponent(VaporConstants.Runtime.daemonStderrLogFileName).path,
-      processType: "Background"
-    )
-
     return DaemonLifecycleManager(
-      launchAgentController: LaunchAgentController(configuration: configuration),
-      settingsStore: autoLaunchSettingStore,
+      launchAgentController: VaporCLIServiceController(
+        cliExecutableURL: bundledCLIExecutableURL()
+      ),
       loginItemController: makeOptionalLoginItemController()
     )
   }
 
-  private static func bundledDaemonExecutableURL() -> URL {
-    VaporBundleLayout.bundledDaemonExecutableURL(
+  private static func bundledCLIExecutableURL() -> URL {
+    VaporBundleLayout.bundledCLIExecutableURL(
       bundleURL: Bundle.main.bundleURL,
       executableURL: Bundle.main.executableURL
     )

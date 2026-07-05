@@ -78,7 +78,27 @@ func validateRequiredExecutablesRejectsNonExecutableDaemonBinary() throws {
 }
 
 @Test
-func validateRequiredExecutablesAcceptsAppBundleWithBothBinaries() throws {
+func bundledCLIExecutableUsesSiblingOfRunningExecutable() {
+  let bundleURL = URL(fileURLWithPath: "/Applications/Vapor.app", isDirectory: true)
+  let executableURL =
+    bundleURL
+    .appendingPathComponent("Contents", isDirectory: true)
+    .appendingPathComponent("MacOS", isDirectory: true)
+    .appendingPathComponent("Vapor")
+
+  let cliURL = VaporBundleLayout.bundledCLIExecutableURL(
+    bundleURL: bundleURL,
+    executableURL: executableURL
+  )
+
+  // Contents/Helpers, not Contents/MacOS: on the default
+  // case-insensitive macOS filesystem `vapor` would collide with the
+  // `Vapor` app executable.
+  #expect(cliURL.path == "/Applications/Vapor.app/Contents/Helpers/vapor")
+}
+
+@Test
+func validateRequiredExecutablesRejectsMissingCLIBinary() throws {
   let fileManager = FileManager.default
   let bundleURL = try makeBundleRoot(fileManager: fileManager)
   defer { try? fileManager.removeItem(at: bundleURL.deletingLastPathComponent()) }
@@ -89,6 +109,34 @@ func validateRequiredExecutablesAcceptsAppBundleWithBothBinaries() throws {
   )
   try makeExecutable(
     at: bundleURL.appendingPathComponent(VaporBundleLayout.daemonExecutableRelativePath),
+    fileManager: fileManager
+  )
+
+  #expect(
+    throws: VaporBundleLayout.ValidationError.missingExecutable(
+      path: bundleURL.appendingPathComponent(VaporBundleLayout.cliExecutableRelativePath).path
+    )
+  ) {
+    try VaporBundleLayout.validateRequiredExecutables(in: bundleURL, fileManager: fileManager)
+  }
+}
+
+@Test
+func validateRequiredExecutablesAcceptsAppBundleWithAllThreeBinaries() throws {
+  let fileManager = FileManager.default
+  let bundleURL = try makeBundleRoot(fileManager: fileManager)
+  defer { try? fileManager.removeItem(at: bundleURL.deletingLastPathComponent()) }
+
+  try makeExecutable(
+    at: bundleURL.appendingPathComponent(VaporBundleLayout.appExecutableRelativePath),
+    fileManager: fileManager
+  )
+  try makeExecutable(
+    at: bundleURL.appendingPathComponent(VaporBundleLayout.daemonExecutableRelativePath),
+    fileManager: fileManager
+  )
+  try makeExecutable(
+    at: bundleURL.appendingPathComponent(VaporBundleLayout.cliExecutableRelativePath),
     fileManager: fileManager
   )
 

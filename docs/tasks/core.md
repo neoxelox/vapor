@@ -201,19 +201,24 @@ Exit gate:
 - [x] C4-4 Introduce `AutoLaunchSettingStore` in Rust reading/writing the
       `autoLaunch` field in `vapor.json`. Swift + Rust share the same file
       atomically (cross-process safe write).
-- [ ] C4-5 Expose a stable C-ABI (`extern "C"`) or JSON-RPC-over-stdio
+- [x] C4-5 Expose a stable C-ABI (`extern "C"`) or JSON-RPC-over-stdio
       surface so the macOS Swift app can invoke the Rust lifecycle layer.
       Recommended: Swift app invokes `vapor service …` as a subprocess
       (avoids FFI lifecycle complexity). Swift keeps its
       `LaunchAgentControlling` protocol but the default implementation now
-      calls the CLI. *(Deferred to Wave 6 — the `vapor` CLI ships there.)*
+      calls the CLI. *(Shipped as the subprocess route: every `vapor
+      service` subcommand takes `--json` and renders the stable contract
+      locked by the `json_contract_*` tests in
+      `core/cli/src/commands/service.rs`; the Swift
+      `VaporCLIServiceController` decodes it.)*
 - [x] C4-6 Parity tests: `DaemonLifecycleManagerTests` that previously ran
       in Swift must pass against the Rust implementation (or an equivalent
       Rust-side test matrix).
-- [ ] C4-7 Remove the duplicate Swift lifecycle logic once parity is proven;
+- [x] C4-7 Remove the duplicate Swift lifecycle logic once parity is proven;
       leave the Swift protocol as a thin shim over the Rust layer.
-      *(Deferred to Wave 6 / M2-1..M2-4 — happens together with the CLI
-      consumer.)*
+      *(Swift `CrashLoopGuard` / `CrashLoopPolicy` / launchctl plumbing /
+      `AutoLaunchSettingStore` deleted; `DaemonLifecycleManager` is a thin
+      facade over the CLI-backed `LaunchAgentControlling` seam.)*
 
 Exit gate:
 

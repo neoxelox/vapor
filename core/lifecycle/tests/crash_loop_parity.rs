@@ -1,12 +1,12 @@
-//! Cross-surface parity contract for the crash-loop backoff schedule.
+//! Contract lock for the crash-loop backoff schedule.
 //!
-//! These scenarios are mirrored, case for case, by the Swift tests in
-//! `apps/macos/Tests/VaporCoreTests/DaemonLifecycleManagerTests.swift`.
-//! If either implementation's schedule drifts, exactly one side of the
-//! pair fails and the divergence is visible at PR time. The canonical
-//! schedule is documented in `docs/operations/macos/launchagent-policy.md`:
-//! with the default policy, crash 1 restarts immediately and backoff
-//! starts at crash 2 (`2s → 4s → 8s → Paused on the 5th crash`).
+//! Originally the Rust half of a Rust↔Swift parity pair (C4-6); the
+//! Swift `CrashLoopGuard` retired with M2-2 / C4-7, so this file is now
+//! the single contract every surface inherits through the `vapor
+//! service` CLI. The canonical schedule is documented in
+//! `docs/operations/macos/launchagent-policy.md`: with the default
+//! policy, crash 1 restarts immediately and backoff starts at crash 2
+//! (`2s → 4s → 8s → Paused on the 5th crash`).
 
 use std::time::{Duration, Instant};
 
