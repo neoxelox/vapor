@@ -18,6 +18,16 @@ pub mod runtime {
     pub const SQLITE_DATABASE_FILE_NAME: &str = "vapor.sqlite";
     pub const APP_LOG_FILE_NAME: &str = "vapor.logs";
     pub const DAEMON_LOG_FILE_NAME: &str = "vapord.logs";
+    /// launchd / service-manager stdout & stderr redirection targets for
+    /// the daemon, under `vapor_dir/logs/`. Referenced by every surface
+    /// that writes a service definition (macOS app, `vapor` CLI) per
+    /// `docs/operations/macos/launchagent-policy.md`.
+    pub const DAEMON_STDOUT_LOG_FILE_NAME: &str = "vapord.stdout.log";
+    pub const DAEMON_STDERR_LOG_FILE_NAME: &str = "vapord.stderr.log";
+    /// Advisory lock file inside `vapor_dir` that enforces the
+    /// one-daemon-per-vapor-dir invariant. Held (via OS file locking)
+    /// for the lifetime of the daemon process.
+    pub const DAEMON_LOCK_FILE_NAME: &str = "vapord.lock";
     pub const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
     pub const PRIVATE_FILE_MODE: u32 = 0o600;
 }
@@ -58,6 +68,17 @@ pub mod config {
         KEY_LANGUAGE_CODE,
         KEY_TIMELINE_EVENT_LIMIT,
     ];
+
+    /// Default values for the config keys whose defaults are not already
+    /// hosted by another constants module (`filtering::*` owns the
+    /// directory + ignore-rule defaults). Mirrored by the Swift
+    /// `VaporConstants.Defaults` per AGENTS.md §8.6 — the Rust side is
+    /// the source of truth.
+    pub const DEFAULT_AUTO_LAUNCH: bool = true;
+    pub const DEFAULT_USE_GIT_IGNORE: bool = true;
+    pub const DEFAULT_USE_VAPOR_IGNORE: bool = true;
+    pub const DEFAULT_LANGUAGE_CODE: &str = "en";
+    pub const DEFAULT_TIMELINE_EVENT_LIMIT: i64 = 1_000;
 }
 
 pub mod service {
@@ -87,6 +108,14 @@ pub mod ipc {
     pub const MAX_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
     /// Filename of the Unix-domain-socket endpoint inside `vapor_dir`.
     pub const SOCKET_FILE_NAME: &str = "vapord.sock";
+    /// Maximum number of concurrently served IPC connections. Excess
+    /// connections are dropped at accept time so a runaway local client
+    /// cannot park an unbounded number of daemon threads.
+    pub const MAX_CONCURRENT_CONNECTIONS: usize = 32;
+    /// Per-connection idle read timeout on the daemon side. A client
+    /// that connects and then goes silent for longer than this has its
+    /// session reaped instead of holding a thread forever.
+    pub const CONNECTION_IDLE_TIMEOUT_MILLIS: u64 = 300_000;
 }
 
 pub mod self_write_cache {
@@ -176,6 +205,27 @@ pub mod engine {
     pub const STORM_DIRECTORY_EVENT_COUNT_THRESHOLD: usize = 600;
     pub const STORM_GLOBAL_PENDING_EVENT_COUNT_THRESHOLD: usize = 5_000;
     pub const DEFERRED_RECONCILE_DELAY_MILLIS: u64 = 30_000;
+    /// Upper bound on how long a storm-deferred reconcile may keep being
+    /// pushed back by continued churn. Measured from the moment the storm
+    /// was first detected; once reached, the reconcile becomes releasable
+    /// even if the subtree never goes quiet, so a permanently-busy subtree
+    /// cannot starve its own convergence forever.
+    pub const DEFERRED_RECONCILE_MAX_DELAY_MILLIS: u64 = 600_000;
+    /// Requeue delay for durable intents that could not start because a
+    /// workgate permit or reconcile slot was unavailable. Deliberately
+    /// coarser than the tick interval so blocked intents do not churn the
+    /// durable queue with a lease + requeue write pair on every tick.
+    pub const BLOCKED_INTENT_REQUEUE_DELAY_MILLIS: u64 = 1_000;
+    /// Cadence of the in-run stale-lease recovery sweep. Complements the
+    /// startup `recover_leased` pass so a lease orphaned mid-run (a bug or
+    /// a lost execution) is replayed without waiting for a restart.
+    pub const STALE_LEASE_SWEEP_INTERVAL_MILLIS: u64 = 60_000;
+    /// Tick interval used when the previous tick found no work anywhere:
+    /// no pending events, no in-flight executions, nothing stabilizing.
+    /// Bounded by the throttle sample interval so state decisions stay
+    /// fresh; fs events and IPC requests wake the loop immediately via the
+    /// tick waker, so a fully idle daemon polls at 1 Hz instead of 4 Hz.
+    pub const IDLE_TICK_MILLIS: u64 = 1_000;
     pub const RECONCILE_SLICE_MILLIS: u64 = 500;
     /// Minimum dwell time before the throttle controller may down-shift to
     /// or out of `Light`. Pairs with `MIN_DWELL_THROTTLED_SECONDS` to keep

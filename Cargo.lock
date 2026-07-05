@@ -769,6 +769,7 @@ dependencies = [
 name = "vapor-lifecycle"
 version = "0.2.0-alpha.3"
 dependencies = [
+ "serde_json",
  "tempfile",
  "vapor-platform",
  "vapor-shared",
@@ -796,6 +797,8 @@ dependencies = [
 name = "vapor-shared"
 version = "0.2.0-alpha.3"
 dependencies = [
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

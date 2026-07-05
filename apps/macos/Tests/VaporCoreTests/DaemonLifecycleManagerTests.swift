@@ -74,17 +74,36 @@ func crashLoopDefersRelaunchWithExponentialBackoff() throws {
     )
   )
 
+  // Canonical schedule (parity with core/lifecycle): the first
+  // `delayStartsAfterFailures` crashes are delay-free; backoff starts on
+  // the next crash at `baseDelay` and doubles from there.
   let t0 = Date(timeIntervalSince1970: 0)
   #expect(manager.registerUnexpectedDaemonExit(now: t0) == .noDelay)
-  #expect(manager.registerUnexpectedDaemonExit(now: t0.addingTimeInterval(1)) == .backoff(4))
+  #expect(manager.registerUnexpectedDaemonExit(now: t0.addingTimeInterval(1)) == .noDelay)
+  #expect(manager.registerUnexpectedDaemonExit(now: t0.addingTimeInterval(2)) == .backoff(4))
 
-  let deferred = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(2))
+  let deferred = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(3))
   #expect(deferred == .relaunchDeferred(3))
   #expect(controller.operations.isEmpty)
 
-  let started = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(5))
+  let started = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(6))
   #expect(started == .started)
   #expect(controller.operations == ["start"])
+}
+
+@Test
+func defaultPolicyScheduleMatchesTheRustParityContract() {
+  // Mirrors `default_policy_schedule_is_nodelay_then_doubling_backoff_then_pause`
+  // in core/lifecycle/tests/crash_loop_parity.rs. If either side's
+  // schedule drifts, exactly one of the pair fails.
+  var guardrail = CrashLoopGuard(policy: .default)
+
+  let t0 = Date(timeIntervalSince1970: 0)
+  #expect(guardrail.registerCrash(at: t0) == .noDelay)
+  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(1)) == .backoff(2))
+  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(2)) == .backoff(4))
+  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(3)) == .backoff(8))
+  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(4)) == .paused)
 }
 
 @Test
@@ -136,7 +155,10 @@ func crashHistoryExpiresOutsideFailureWindow() {
 
   let t0 = Date(timeIntervalSince1970: 0)
   #expect(guardrail.registerCrash(at: t0) == .noDelay)
-  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(1)) == .backoff(2))
+  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(1)) == .noDelay)
+  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(2)) == .backoff(2))
+  // 20 seconds later every prior crash fell out of the 10 s window, so
+  // the count restarts and the crash is delay-free again.
   #expect(guardrail.registerCrash(at: t0.addingTimeInterval(20)) == .noDelay)
 }
 

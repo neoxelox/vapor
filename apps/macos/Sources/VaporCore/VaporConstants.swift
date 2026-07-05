@@ -20,6 +20,8 @@ public enum VaporConstants {
     public static let sqliteDatabaseFileName = "vapor.sqlite"
     public static let appLogFileName = "vapor.logs"
     public static let daemonLogFileName = "vapord.logs"
+    public static let daemonStdoutLogFileName = "vapord.stdout.log"
+    public static let daemonStderrLogFileName = "vapord.stderr.log"
     public static let vaporDirectoryName = ".vapor"
   }
 
@@ -73,7 +75,6 @@ public enum VaporConstants {
 
   public enum Daemon {
     public static let launchAgentLabel = "sh.arn.vapor.daemon"
-    public static let processPath = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     public static let preGADefaultProviderDisplayName = "Filesystem (stub)"
   }
 

@@ -53,11 +53,26 @@ impl From<io::Error> for FrameError {
     }
 }
 
-/// Reads a single length-prefixed frame from `reader`. Returns the raw
-/// JSON payload bytes (without the length prefix).
-pub fn read_frame<R: Read>(reader: &mut R) -> Result<Vec<u8>, FrameError> {
+/// Reads a single length-prefixed frame from `reader`.
+///
+/// Returns `Ok(Some(payload))` for a complete frame and `Ok(None)` when
+/// the peer closed the connection cleanly **at a frame boundary** (EOF
+/// before any prefix byte). EOF in the middle of a prefix or payload is a
+/// protocol error and surfaces as [`FrameError::UnexpectedEof`], so
+/// truncation is distinguishable from a polite hangup in diagnostics.
+pub fn read_frame<R: Read>(reader: &mut R) -> Result<Option<Vec<u8>>, FrameError> {
     let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf)?;
+    let mut filled = 0usize;
+    while filled < len_buf.len() {
+        match reader.read(&mut len_buf[filled..]) {
+            Ok(0) if filled == 0 => return Ok(None),
+            Ok(0) => return Err(FrameError::UnexpectedEof),
+            Ok(read) => filled += read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
     let declared = u32::from_le_bytes(len_buf);
     if (declared as usize) > constants::ipc::MAX_PAYLOAD_BYTES {
         return Err(FrameError::OversizedFrame {
@@ -67,7 +82,7 @@ pub fn read_frame<R: Read>(reader: &mut R) -> Result<Vec<u8>, FrameError> {
     }
     let mut payload = vec![0u8; declared as usize];
     reader.read_exact(&mut payload)?;
-    Ok(payload)
+    Ok(Some(payload))
 }
 
 /// Writes a single length-prefixed frame to `writer`.
@@ -96,8 +111,22 @@ mod tests {
         let mut buffer = Vec::new();
         write_frame(&mut buffer, &payload).expect("write");
         let mut reader = Cursor::new(buffer);
-        let decoded = read_frame(&mut reader).expect("read");
+        let decoded = read_frame(&mut reader).expect("read").expect("frame");
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn eof_at_frame_boundary_is_a_clean_close() {
+        let mut reader = Cursor::new(Vec::new());
+        assert!(read_frame(&mut reader).expect("clean eof").is_none());
+    }
+
+    #[test]
+    fn eof_inside_length_prefix_is_a_protocol_error() {
+        // Two of the four prefix bytes, then EOF: truncation, not hangup.
+        let mut reader = Cursor::new(vec![0x10, 0x00]);
+        let error = read_frame(&mut reader).expect_err("mid-prefix eof");
+        assert!(matches!(error, FrameError::UnexpectedEof));
     }
 
     #[test]

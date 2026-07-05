@@ -18,16 +18,17 @@ Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/v
 
 Available now:
 
-- ⚡ Fast-feeling background sync designed to stay responsive without stealing your machine.
-- 🪶 Low-impact by design: Vapor defers heavy work under pressure to protect battery and thermals.
-- 🌩 Sudden bursts of file changes stay contained, so one big folder update doesn't snowball.
 - 🔕 Stays out of your way while keeping status and controls one click away.
 - 🚀 Auto-launch at login with resilient crash-loop protection for dependable day-to-day use.
 - 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow.
+- ⏯️ Pause and resume background work on demand; nothing is lost while paused, and Vapor picks up right where it left off.
 
 In flight and coming next:
 
 - 🔁 Bidirectional cloud sync with durable intent replay and eventual consistency.
+- ⚡ Fast-feeling background sync designed to stay responsive without stealing your machine.
+- 🪶 Low-impact by design: Vapor defers heavy work under pressure to protect battery and thermals.
+- 🌩 Storm-aware scheduling keeps sudden bursts of file changes contained, so one big folder update doesn't snowball.
 - 🧩 Multiple sync profiles let one folder flow to several clouds or keep separate setups neatly isolated.
 - 🔀 Choose each folder's sync direction — full two-way, or a one-way mirror for read-only backups and copies.
 - 🛡 Conflict-safe behavior with deterministic outcomes (keep both copies, never silent overwrite).
@@ -35,8 +36,7 @@ In flight and coming next:
 - ⚙️ Configurable hard caps on its share of CPU, memory, and network so streaming, browsing, and other apps always have room.
 - 🌙 Smart idle boost: Vapor catches up faster when your device is genuinely idle, and yields the moment you come back.
 - 📈 Clear diagnostics with status reasons, queue visibility, and live activity timeline.
-- 🌩 Storm-aware scheduling and resilient recovery keep big change bursts under control.
-- 🌍 Cross-platform parity: one portable runtime powers the macOS app, with Windows, Linux, and a CLI following.
+- 🌍 Cross-platform parity: one portable runtime powers the macOS, Windows, and Linux apps and the CLI.
 
 ## Providers
 
@@ -57,7 +57,7 @@ In flight and coming next:
 
 All user-facing configuration is documented here with meaning and defaults.
 
-All persisted user configuration lives in `<vapor_dir>/vapor.json`.
+All persisted user configuration lives in `<vapor_dir>/vapor.json`; Vapor reads it at startup, so changes apply the next time it starts. Matching `VAPOR_*` environment variables, when set, take priority over the file.
 
 | Key                  | Type     | Default                                             | Description                                                                              |
 | -------------------- | -------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -91,10 +91,11 @@ Structure:
 
 - `core/daemon`: Rust daemon runtime (`vapord`) — the portable sync engine.
 - `core/providers`: Rust cloud provider integrations.
-- `core/shared`: shared contracts/constants used across the workspace.
-- `core/platform` (planned): traits + per-OS native implementations for fs-watch, service install, secrets, metrics sampling, idle detection, filesystem capabilities, and process supervision.
-- `core/lifecycle` (planned): daemon lifecycle manager and crash-loop guard consumed by every app surface.
-- `core/cli` (planned): the `vapor` CLI — headless-first control plane usable on every supported OS.
+- `core/shared`: shared contracts/constants/config loader used across the workspace.
+- `core/ipc`: framed JSON IPC channel between the daemon and every surface.
+- `core/platform`: traits + per-OS native implementations for fs-watch, service install, secrets, metrics sampling, idle detection, filesystem capabilities, and process supervision.
+- `core/lifecycle`: daemon lifecycle manager and crash-loop guard consumed by every app surface.
+- `core/cli`: the `vapor` CLI — headless-first control plane usable on every supported OS.
 - `apps/macos`: SwiftUI macOS app (`Vapor`).
 - `apps/windows` (planned): Windows app surface consuming `core/*`.
 - `apps/linux` (planned): Linux app surface consuming `core/*`.

@@ -142,6 +142,8 @@ fn normalize_override_path(path: PathBuf) -> Option<PathBuf> {
         return None;
     }
 
+    let path = expand_tilde(path)?;
+
     let candidate = if path.is_absolute() {
         path
     } else {
@@ -149,6 +151,28 @@ fn normalize_override_path(path: PathBuf) -> Option<PathBuf> {
     };
 
     normalize_absolute_path(candidate)
+}
+
+/// Expands a leading `~` / `~/…` against the home directory so
+/// `VAPOR_DIR=~/vapor-dir` behaves identically on every surface (the
+/// Swift app expands tildes too). Without this, launchd-style contexts
+/// that don't go through a shell would resolve `~/x` to a literal `./~/x`
+/// directory. Returns `None` when a tilde is present but no home
+/// directory can be resolved.
+fn expand_tilde(path: PathBuf) -> Option<PathBuf> {
+    let Some(text) = path.to_str() else {
+        return Some(path);
+    };
+
+    if text == "~" {
+        return home_directory();
+    }
+
+    if let Some(suffix) = text.strip_prefix("~/") {
+        return Some(home_directory()?.join(suffix));
+    }
+
+    Some(path)
 }
 
 fn normalize_absolute_path(path: PathBuf) -> Option<PathBuf> {
@@ -195,6 +219,21 @@ fn normalize_absolute_path(path: PathBuf) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn tilde_override_expands_against_home_directory() {
+        // `expand_tilde` reads the real HOME/USERPROFILE; assert only the
+        // structural property (prefix replaced) so the test is hermetic.
+        let Some(home) = home_directory() else {
+            return;
+        };
+        let expanded =
+            normalize_override_path(PathBuf::from("~/vapor-tilde-test")).expect("expanded");
+        assert_eq!(expanded, home.join("vapor-tilde-test"));
+
+        let bare = normalize_override_path(PathBuf::from("~")).expect("expanded bare tilde");
+        assert_eq!(bare, home);
+    }
 
     #[test]
     fn relative_vapor_dir_override_is_normalized_against_current_directory() {

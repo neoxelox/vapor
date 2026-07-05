@@ -83,8 +83,9 @@ the default mode and *keep-both* remains its policy, exactly as
 
 ## Where it lives in the pipeline
 
-`syncMode` is carried on the sync scope (`core/daemon/src/sync_directories.rs`
-`SyncScope`) and, once profiles land, on the per-profile resolved settings.
+`syncMode` will be carried on the sync scope
+(`core/daemon/src/sync_directories.rs` `SyncScope` — the field lands with
+C8-59) and, once profiles land, on the per-profile resolved settings.
 The engine consults it at these points (see `data-flow.md`):
 
 - **Local→remote suppression** (`pull-only`): local watcher events do not

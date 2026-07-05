@@ -86,14 +86,21 @@ mod unix_impl {
     pub type StreamHandle = UnixStream;
 
     pub fn bind_listener(socket_path: PathBuf) -> Result<ListenerHandle, TransportError> {
+        // The parent directory is created 0o700 *before* the socket file
+        // exists, which closes the bind-then-chmod window: even while the
+        // freshly-bound socket briefly carries umask-default permissions,
+        // no other local user can traverse into the directory to reach
+        // it. The socket chmod below stays as defense in depth.
+        if let Some(parent) = socket_path.parent() {
+            vapor_shared::runtime_paths::ensure_private_directory(parent)?;
+        }
         // launchctl + crash recovery may leave a stale socket file
         // around. Remove it before binding so the daemon can come up
-        // again without a manual `rm`.
+        // again without a manual `rm`. Safe against a *live* daemon's
+        // socket because the daemon singleton lock
+        // (`core/daemon::singleton`) is acquired before any bind.
         if socket_path.exists() {
             let _ = fs::remove_file(&socket_path);
-        }
-        if let Some(parent) = socket_path.parent() {
-            fs::create_dir_all(parent)?;
         }
         let listener = UnixListener::bind(&socket_path)?;
         // Restrict the socket to the owning user. On a multi-user host

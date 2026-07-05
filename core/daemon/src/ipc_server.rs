@@ -52,9 +52,12 @@ pub fn resolve_socket_path() -> PathBuf {
 
 #[cfg(unix)]
 pub fn spawn(service: Arc<dyn Service>) -> std::io::Result<IpcServerHandle> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
     let socket_path = resolve_socket_path();
     if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        runtime_paths::ensure_private_directory(parent)?;
     }
     let listener = bind_listener(socket_path.clone()).map_err(std::io::Error::other)?;
     let listener_clone = listener
@@ -62,6 +65,11 @@ pub fn spawn(service: Arc<dyn Service>) -> std::io::Result<IpcServerHandle> {
         .try_clone()
         .map_err(std::io::Error::other)?;
     let service = service.clone();
+    // Bounded connection handling: a cap on concurrent sessions plus a
+    // per-connection idle read timeout, so misbehaving local clients can
+    // neither park unbounded daemon threads nor hold one forever.
+    let active_connections = Arc::new(AtomicUsize::new(0));
+    let idle_timeout = Duration::from_millis(constants::ipc::CONNECTION_IDLE_TIMEOUT_MILLIS);
     let join = thread::Builder::new()
         .name("vapor-ipc".to_string())
         .spawn(move || {
@@ -69,18 +77,42 @@ pub fn spawn(service: Arc<dyn Service>) -> std::io::Result<IpcServerHandle> {
                 let Ok(stream) = stream else {
                     continue;
                 };
+                if active_connections.load(Ordering::Acquire)
+                    >= constants::ipc::MAX_CONCURRENT_CONNECTIONS
+                {
+                    crate::logging::warning(
+                        "Dropped IPC connection: concurrent connection cap reached",
+                        &[(
+                            "max_connections",
+                            constants::ipc::MAX_CONCURRENT_CONNECTIONS.to_string(),
+                        )],
+                    );
+                    continue;
+                }
+                let _ = stream.set_read_timeout(Some(idle_timeout));
                 let service = service.clone();
-                thread::Builder::new()
+                let connection_counter = active_connections.clone();
+                connection_counter.fetch_add(1, Ordering::AcqRel);
+                let spawned = thread::Builder::new()
                     .name("vapor-ipc-conn".to_string())
-                    .spawn(move || {
-                        let mut reader = match stream.try_clone() {
-                            Ok(reader) => reader,
-                            Err(_) => return,
-                        };
-                        let mut writer = stream;
-                        let _ = serve_connection(&mut reader, &mut writer, service.as_ref());
-                    })
-                    .ok();
+                    .spawn({
+                        let connection_counter = connection_counter.clone();
+                        move || {
+                            let mut reader = match stream.try_clone() {
+                                Ok(reader) => reader,
+                                Err(_) => {
+                                    connection_counter.fetch_sub(1, Ordering::AcqRel);
+                                    return;
+                                }
+                            };
+                            let mut writer = stream;
+                            let _ = serve_connection(&mut reader, &mut writer, service.as_ref());
+                            connection_counter.fetch_sub(1, Ordering::AcqRel);
+                        }
+                    });
+                if spawned.is_err() {
+                    connection_counter.fetch_sub(1, Ordering::AcqRel);
+                }
             }
         })?;
     Ok(IpcServerHandle {

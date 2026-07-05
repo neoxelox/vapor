@@ -135,6 +135,14 @@ pub fn dispatch(
 /// for the bundled daemon binary at `<cli-binary-parent>/vapord`,
 /// falling back to `PATH` lookup. Returns the manager + installer pair
 /// so the binary can call `dispatch` against them.
+///
+/// The service descriptor follows
+/// `docs/operations/macos/launchagent-policy.md`: stdout/stderr are
+/// redirected under `<vapor_dir>/logs/`, and the environment carries
+/// only `VAPOR_DIR` (plus `VAPOR_ENV` when set in the invoking
+/// environment) — every other setting reaches the daemon through
+/// `vapor.json`. This keeps the plist identical to the one the macOS
+/// app writes, so the two surfaces stop clobbering each other.
 #[cfg(target_os = "macos")]
 pub fn build_native_macos(
     config_path: PathBuf,
@@ -143,13 +151,29 @@ pub fn build_native_macos(
     if !daemon_binary.is_file() {
         return Err(ServiceCommandError::DaemonBinaryMissing(daemon_binary));
     }
+
+    let vapor_directory = vapor_shared::runtime_paths::vapor_directory();
+    let logs_directory = vapor_shared::runtime_paths::logs_directory();
+    let mut environment = vec![(
+        vapor_shared::constants::env::VAPOR_DIR.to_string(),
+        vapor_directory.display().to_string(),
+    )];
+    if let Ok(vapor_env) = std::env::var(vapor_shared::constants::env::VAPOR_ENV)
+        && !vapor_env.trim().is_empty()
+    {
+        environment.push((
+            vapor_shared::constants::env::VAPOR_ENV.to_string(),
+            vapor_env,
+        ));
+    }
+
     let descriptor = ServiceDescriptor {
         label: constants::service::DAEMON_LABEL.to_string(),
         executable_path: daemon_binary,
         arguments: vec![],
-        environment: vec![],
-        stdout_path: None,
-        stderr_path: None,
+        environment,
+        stdout_path: Some(logs_directory.join(constants::runtime::DAEMON_STDOUT_LOG_FILE_NAME)),
+        stderr_path: Some(logs_directory.join(constants::runtime::DAEMON_STDERR_LOG_FILE_NAME)),
     };
     let installer = Arc::new(NativeServiceInstaller::for_current_user(descriptor)?);
     let settings: Arc<dyn AutoLaunchSettingStore> =

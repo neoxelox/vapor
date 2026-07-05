@@ -130,7 +130,8 @@ impl Client {
             .map_err(|error| ClientError::Parse(error.to_string()))?;
         write_frame(&mut client.stream, &payload)?;
 
-        let frame = read_frame(&mut client.stream)?;
+        let frame =
+            read_frame(&mut client.stream)?.ok_or(ClientError::Frame(FrameError::UnexpectedEof))?;
         let response: Response = serde_json::from_slice(&frame)
             .map_err(|error| ClientError::Parse(error.to_string()))?;
         match response {
@@ -185,7 +186,8 @@ impl Client {
             .map_err(|error| ClientError::Parse(error.to_string()))?;
         write_frame(&mut self.stream, &payload)?;
 
-        let frame = read_frame(&mut self.stream)?;
+        let frame =
+            read_frame(&mut self.stream)?.ok_or(ClientError::Frame(FrameError::UnexpectedEof))?;
         let response: Response = serde_json::from_slice(&frame)
             .map_err(|error| ClientError::Parse(error.to_string()))?;
         match response {

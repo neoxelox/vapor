@@ -41,8 +41,9 @@
 ## Pre-commit hook (optional but recommended for agentic workflows)
 
 `./scripts/hooks.sh` installs a git `pre-commit` hook into the local
-clone. The hook runs the full local validation pipeline before any
-commit is allowed to land:
+clone (worktrees included — the hooks directory is resolved through
+git, so `.git`-as-a-file layouts work). The hook runs the full local
+validation pipeline before any commit is allowed to land:
 
 1. `./scripts/clean.sh` — remove stale build/dist artifacts.
 2. `./scripts/lint.sh` — Rust + Swift lint plus `format.sh check`.

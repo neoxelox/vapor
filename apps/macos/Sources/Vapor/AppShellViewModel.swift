@@ -25,16 +25,14 @@ final class AppShellViewModel: ObservableObject {
     let localizationStore = VaporLocalizationStore()
     let autoLaunchSettingStore = VaporConfigurationAutoLaunchSettingStore(
       configurationStore: configurationStore)
-    let lifecycleManagerFactory: (VaporConfiguration) -> DaemonLifecycleManager = { configuration in
+    // Sync/filter settings reach the daemon through `vapor.json` (the
+    // daemon reads it at startup), so the launch definition no longer
+    // depends on the configuration values — the factory stays for tests
+    // and future launch-relevant settings.
+    let lifecycleManagerFactory: (VaporConfiguration) -> DaemonLifecycleManager = { _ in
       AppShellViewModel.makeDefaultLifecycleManager(
         vaporDirectoryURL: vaporDirectoryURL,
-        autoLaunchSettingStore: autoLaunchSettingStore,
-        useGitIgnore: configuration.useGitIgnore,
-        useVaporIgnore: configuration.useVaporIgnore,
-        localSyncDirectory: configuration.localSyncDirectory,
-        cloudSyncDirectory: configuration.cloudSyncDirectory,
-        preIgnoreRules: configuration.preIgnoreRules,
-        postIgnoreRules: configuration.postIgnoreRules
+        autoLaunchSettingStore: autoLaunchSettingStore
       )
     }
     self.init(
@@ -322,7 +320,7 @@ final class AppShellViewModel: ObservableObject {
         "Updated useGitIgnore setting",
         metadata: [
           "use_gitignore": String(enabled),
-          "note": "launch configuration refreshed; running daemon picks it up on next restart",
+          "note": "persisted to vapor.json; the daemon reads it on next start",
         ]
       )
     } catch {
@@ -350,7 +348,7 @@ final class AppShellViewModel: ObservableObject {
         "Updated useVaporIgnore setting",
         metadata: [
           "use_vaporignore": String(enabled),
-          "note": "launch configuration refreshed; running daemon picks it up on next restart",
+          "note": "persisted to vapor.json; the daemon reads it on next start",
         ]
       )
     } catch {
@@ -397,7 +395,7 @@ final class AppShellViewModel: ObservableObject {
         metadata: [
           "pre_rule_count": String(Self.countConfiguredRules(in: normalizedPreIgnoreRules)),
           "post_rule_count": String(Self.countConfiguredRules(in: normalizedPostIgnoreRules)),
-          "note": "launch configuration refreshed; running daemon picks it up on next restart",
+          "note": "persisted to vapor.json; the daemon reads it on next start",
         ]
       )
     } catch {
@@ -493,15 +491,16 @@ final class AppShellViewModel: ObservableObject {
       .count
   }
 
+  /// Builds the production lifecycle manager. The LaunchAgent follows
+  /// `docs/operations/macos/launchagent-policy.md`: the environment
+  /// carries only `VAPOR_DIR` (plus `VAPOR_ENV` pass-through) — every
+  /// other setting reaches the daemon through `vapor.json`, which the
+  /// daemon reads at startup. This keeps the plist byte-identical to the
+  /// one `vapor service install` writes, so the two surfaces never
+  /// clobber each other's daemon configuration.
   private static func makeDefaultLifecycleManager(
     vaporDirectoryURL: URL,
-    autoLaunchSettingStore: any AutoLaunchSettingStore,
-    useGitIgnore: Bool,
-    useVaporIgnore: Bool,
-    localSyncDirectory: String,
-    cloudSyncDirectory: String,
-    preIgnoreRules: String,
-    postIgnoreRules: String
+    autoLaunchSettingStore: any AutoLaunchSettingStore
   ) -> DaemonLifecycleManager {
     if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {
       return .placeholder()
@@ -510,14 +509,7 @@ final class AppShellViewModel: ObservableObject {
     let daemonExecutableURL = bundledDaemonExecutableURL()
     let launchAgentLabel = VaporConstants.Daemon.launchAgentLabel
     var daemonEnvironment = [
-      "PATH": VaporConstants.Daemon.processPath,
-      VaporPaths.directoryEnvironmentKey: vaporDirectoryURL.path,
-      VaporPaths.useGitIgnoreEnvironmentKey: useGitIgnore ? "true" : "false",
-      VaporPaths.useVaporIgnoreEnvironmentKey: useVaporIgnore ? "true" : "false",
-      VaporPaths.localSyncDirectoryEnvironmentKey: localSyncDirectory,
-      VaporPaths.cloudSyncDirectoryEnvironmentKey: cloudSyncDirectory,
-      VaporPaths.preIgnoreRulesEnvironmentKey: preIgnoreRules,
-      VaporPaths.postIgnoreRulesEnvironmentKey: postIgnoreRules,
+      VaporPaths.directoryEnvironmentKey: vaporDirectoryURL.path
     ]
     if let runtimeEnvironment = ProcessInfo.processInfo.environment[VaporPaths.environmentKey],
       !runtimeEnvironment.isEmpty
@@ -529,10 +521,13 @@ final class AppShellViewModel: ObservableObject {
       label: launchAgentLabel,
       plistURL: LaunchAgentConfiguration.defaultPlistURL(label: launchAgentLabel),
       daemonExecutableURL: daemonExecutableURL,
-      workingDirectoryURL: vaporDirectoryURL,
       environment: daemonEnvironment,
-      standardOutPath: logsDirectoryURL.appendingPathComponent("vapord.stdout.log").path,
-      standardErrorPath: logsDirectoryURL.appendingPathComponent("vapord.stderr.log").path,
+      standardOutPath:
+        logsDirectoryURL
+        .appendingPathComponent(VaporConstants.Runtime.daemonStdoutLogFileName).path,
+      standardErrorPath:
+        logsDirectoryURL
+        .appendingPathComponent(VaporConstants.Runtime.daemonStderrLogFileName).path,
       processType: "Background"
     )
 

@@ -23,6 +23,7 @@ pub mod build_info {
     include!(concat!(env!("OUT_DIR"), "/vapor_build_info.rs"));
 }
 
+pub mod bootstrap;
 pub mod clock;
 pub mod debounce;
 pub mod event_intents;
@@ -38,6 +39,7 @@ pub mod retry;
 pub mod runtime;
 pub mod runtime_control;
 pub mod scheduler;
+pub mod singleton;
 pub mod state_db;
 pub mod storm;
 pub mod sync_directories;
@@ -283,7 +285,8 @@ impl DaemonApp {
                 "Failed to ensure cloud sync directory",
                 &[
                     ("cloud_sync_directory", cloud_sync_directory.to_string()),
-                    ("error", error),
+                    ("failure_kind", error.failure.label().to_string()),
+                    ("error", error.message),
                 ],
             ),
         }

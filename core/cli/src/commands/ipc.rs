@@ -173,12 +173,47 @@ pub fn tail_logs(tail: Option<usize>) -> io::Result<String> {
     if !path.exists() {
         return Ok(String::new());
     }
-    let contents = std::fs::read_to_string(&path)?;
-    let Some(n) = tail else {
-        return Ok(contents);
-    };
-    let lines: Vec<&str> = contents.lines().collect();
-    let take_from = lines.len().saturating_sub(n);
+    match tail {
+        None => std::fs::read_to_string(&path),
+        Some(line_count) => read_last_lines(&path, line_count),
+    }
+}
+
+/// Reads the final `line_count` lines of `path` by scanning backwards in
+/// fixed-size chunks from the end of the file, so tailing a large
+/// unrotated log does not load the whole file into memory.
+fn read_last_lines(path: &std::path::Path, line_count: usize) -> io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if line_count == 0 {
+        return Ok(String::new());
+    }
+
+    const CHUNK_BYTES: u64 = 64 * 1024;
+    let mut file = std::fs::File::open(path)?;
+    let file_length = file.seek(SeekFrom::End(0))?;
+    if file_length == 0 {
+        return Ok(String::new());
+    }
+
+    let mut collected: Vec<u8> = Vec::new();
+    let mut position = file_length;
+    let mut newline_count = 0usize;
+
+    while position > 0 && newline_count <= line_count {
+        let chunk_length = CHUNK_BYTES.min(position);
+        position -= chunk_length;
+        file.seek(SeekFrom::Start(position))?;
+        let mut chunk = vec![0u8; chunk_length as usize];
+        file.read_exact(&mut chunk)?;
+        newline_count += chunk.iter().filter(|byte| **byte == b'\n').count();
+        chunk.extend_from_slice(&collected);
+        collected = chunk;
+    }
+
+    let text = String::from_utf8_lossy(&collected);
+    let lines: Vec<&str> = text.lines().collect();
+    let take_from = lines.len().saturating_sub(line_count);
     Ok(lines[take_from..].join("\n"))
 }
 
@@ -261,5 +296,77 @@ mod tests {
         // test. Skip when a log file already exists.
         let result = tail_logs(Some(10));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn read_last_lines_returns_exactly_the_requested_tail() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let path = temp.path().join("vapord.logs");
+        let contents: String = (0..1_000).map(|index| format!("line-{index}\n")).collect();
+        std::fs::write(&path, contents).expect("seed log");
+
+        let tail = read_last_lines(&path, 3).expect("tail");
+        assert_eq!(tail, "line-997\nline-998\nline-999");
+
+        let everything = read_last_lines(&path, 5_000).expect("tail larger than file");
+        assert!(everything.starts_with("line-0\n"));
+        assert!(everything.ends_with("line-999"));
+
+        let nothing = read_last_lines(&path, 0).expect("zero tail");
+        assert!(nothing.is_empty());
+    }
+
+    // JSON output shape locks for the `--json` commands (§9.2 snapshot
+    // coverage): a field rename or reorder is a wire-format change for
+    // scripts consuming `vapor status --json` / `vapor timeline --json`,
+    // and must show up as a diff here.
+    #[test]
+    fn status_json_shape_is_stable() {
+        let status = StatusResponse {
+            schema_version: 1,
+            run_state: "Running".to_string(),
+            throttle_state: "IdleDrain".to_string(),
+            provider_name: "Filesystem (stub)".to_string(),
+            throttle_reason: "idle, plugged in, and cool".to_string(),
+            daemon_id: "vapord/0.0.0-test".to_string(),
+        };
+        let rendered = serde_json::to_string_pretty(&status).expect("serialize");
+        assert_eq!(
+            rendered,
+            r#"{
+  "schema_version": 1,
+  "run_state": "Running",
+  "throttle_state": "IdleDrain",
+  "provider_name": "Filesystem (stub)",
+  "throttle_reason": "idle, plugged in, and cool",
+  "daemon_id": "vapord/0.0.0-test"
+}"#
+        );
+    }
+
+    #[test]
+    fn timeline_json_shape_is_stable() {
+        let timeline = TimelineResponse {
+            schema_version: 1,
+            entries: vec![vapor_ipc::TimelineEntry {
+                timestamp_ms: 1_700_000_000_000,
+                kind: "throttle".to_string(),
+                message: "entered IdleDrain".to_string(),
+            }],
+        };
+        let rendered = serde_json::to_string_pretty(&timeline).expect("serialize");
+        assert_eq!(
+            rendered,
+            r#"{
+  "schema_version": 1,
+  "entries": [
+    {
+      "timestamp_ms": 1700000000000,
+      "kind": "throttle",
+      "message": "entered IdleDrain"
+    }
+  ]
+}"#
+        );
     }
 }

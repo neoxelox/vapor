@@ -176,7 +176,7 @@ and memory ordering actually matter:
   backpressure.
 
 Loom tests are slow. Keep them small, keep them few, and run them in
-**Tier 2** (nightly or release gate), not on every PR.
+**Tier 2** (release gate), not on every PR.
 
 ### Performance regression tests (Tier 2; release gate)
 
@@ -206,7 +206,7 @@ Commands to snapshot:
 - `vapor config get <key> --json`
 - Every other `--json` command that exists at the time.
 
-### Fuzz tests (Tier 2; nightly)
+### Fuzz tests (Tier 2; release gate)
 
 Via `cargo-fuzz`. Target the parsers and format handlers that accept
 external input:
@@ -217,8 +217,8 @@ external input:
   the Rust-side equivalent when lifecycle moves over).
 - Path normalization (`fs_events.rs`).
 
-Short corpora live in-tree. Long fuzz runs are scheduled nightly and
-post a GitHub issue on failure. Fuzzing is **not** a PR gate.
+Short corpora live in-tree. Long fuzz runs ride the Tier-2 release gate
+alongside the perf suite. Fuzzing is **not** a PR gate.
 
 ## What we deliberately do NOT test
 
@@ -298,10 +298,11 @@ value", the test is not worth writing.
   integration + platform-trait contract + property + snapshot tests.
   Runs on every PR. Required check on `main`. Target budget: under
   **5 minutes** per OS in the matrix.
-- **Tier 2** — `perf.yml`, nightly workflow. Runs performance SLO
-  tests (`scripts/perf.sh`), long-running property cases (higher case
+- **Tier 2** — `perf.yml`. Runs performance SLO tests
+  (`scripts/perf.sh`), long-running property cases (higher case
   counts), fuzz corpora, and any `loom`-backed tests. Release gate
-  only.
+  only: `perf.yml` has no standalone triggers and is invoked solely by
+  `release.yml`.
 
 ## Per-surface scope
 

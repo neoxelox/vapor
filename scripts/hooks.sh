@@ -9,15 +9,17 @@ if [[ "$MODE" != "install" && "$MODE" != "uninstall" ]]; then
   exit 1
 fi
 
-GIT_DIR="$ROOT_DIR/.git"
-HOOKS_DIR="$GIT_DIR/hooks"
-PRE_COMMIT_HOOK="$HOOKS_DIR/pre-commit"
-MARKER="# vapor-managed-hook: pre-commit"
-
-if [[ ! -d "$GIT_DIR" ]]; then
-  echo "[hooks] $ROOT_DIR is not a git repository ($GIT_DIR is missing)"
+# Resolve the hooks directory through git itself so worktrees (where
+# `.git` is a file pointing at the shared common dir) work too.
+if ! HOOKS_DIR="$(git -C "$ROOT_DIR" rev-parse --git-path hooks 2>/dev/null)"; then
+  echo "[hooks] $ROOT_DIR is not a git repository"
   exit 1
 fi
+if [[ "$HOOKS_DIR" != /* ]]; then
+  HOOKS_DIR="$ROOT_DIR/$HOOKS_DIR"
+fi
+PRE_COMMIT_HOOK="$HOOKS_DIR/pre-commit"
+MARKER="# vapor-managed-hook: pre-commit"
 
 mkdir -p "$HOOKS_DIR"
 

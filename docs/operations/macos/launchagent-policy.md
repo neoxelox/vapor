@@ -37,7 +37,13 @@ surface produced by `core/platform/service::macos`.
   `<vapor_dir>/logs/vapord.stderr.log` respectively, created with `0o600`
   if absent.
 - `EnvironmentVariables`: pass-through of `VAPOR_DIR` and `VAPOR_ENV` only.
-  All other runtime behavior is code-defined or read from `vapor.json`.
+  All other runtime behavior is code-defined or read from `vapor.json`
+  (the daemon loads `vapor.json` at startup; `VAPOR_*` variables remain
+  per-field overrides).
+- Both plist writers — the macOS app's `LaunchAgentController` and the
+  Rust `NativeServiceInstaller` driven by `vapor service install` —
+  emit this same shape, so either surface may (re)install the agent
+  without clobbering the other's configuration.
 - `ProcessType`: `Background` so the daemon participates in background
   resource-management policy.
 
@@ -61,19 +67,24 @@ protection. `launchd` is intentionally passive (`KeepAlive = false`):
    daemon stays stopped until the next user trigger (app launch, login,
    explicit restart via menubar).
 2. On an unclean exit (panic, SIGSEGV, SIGKILL from external signal, OOM),
-   the app's lifecycle coordinator detects daemon absence on its next
-   health tick, classifies the situation, and applies exponential backoff
-   before attempting restart. The backoff sequence starts at
-   `baseDelay = 2s` and doubles each crash up to `maxDelay = 120s`. With
-   the `maxConsecutiveFailuresBeforePause = 5` cap, the practical schedule
-   before pause hits is `2s → 4s → 8s → 16s → paused on 5th crash`. The
-   longer theoretical sequence (`32s, 60s, 120s`) is only reachable if a
-   deployment raises `maxConsecutiveFailuresBeforePause`; the default never
-   reaches it. The failure window resets after a successful run that lasts
-   at least the documented reset-on-successful-run-for window
-   (`failureWindow = 600s`). The daemon's durable state carries a
-   `last_crash_at_ms` and `consecutive_crashes` counter persisted via the
-   state DB so backoff survives app restarts.
+   the lifecycle owner registers the crash with the shared
+   `CrashLoopGuard` and applies exponential backoff before attempting
+   restart. The canonical schedule (locked in by
+   `core/lifecycle/tests/crash_loop_parity.rs` and mirrored by the Swift
+   tests) with the default policy — `delayStartsAfterFailures = 1`,
+   `baseDelay = 2s`, `maxDelay = 120s`,
+   `maxConsecutiveFailuresBeforePause = 5` — is:
+   `crash 1 → restart immediately, crash 2 → 2s, crash 3 → 4s,
+   crash 4 → 8s, paused on the 5th crash`. The longer theoretical
+   sequence (`16s, 32s, …, 120s`) is only reachable if a deployment
+   raises `maxConsecutiveFailuresBeforePause`; the default never reaches
+   it. Crashes age out of the sliding `failureWindow = 600s`, so a run
+   that stays healthy for the window length resets the schedule.
+   Planned (M-wave, not yet implemented): a periodic app-side health
+   tick that *detects* unexpected daemon absence, and durable
+   `last_crash_at_ms` / `consecutive_crashes` counters in the state DB so
+   backoff survives app restarts — today each surface counts crashes in
+   process memory only.
 3. After 5 consecutive crashes within the `failureWindow` (default 10
    minutes), the coordinator enters a `CrashLoopPaused` state, stops
    attempting auto-restart, and surfaces a reasoned diagnostic to the

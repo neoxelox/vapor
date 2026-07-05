@@ -189,10 +189,16 @@ impl StagedExecutor {
 
                     app.release_work(*permit);
                     if !state_db.complete_leased(execution.intent_id)? {
-                        return Err(StateDbError::InvalidIntentState(format!(
-                            "intent {} was not leased during staged completion",
-                            execution.intent_id
-                        )));
+                        // The row is gone or no longer leased — a
+                        // recovered-elsewhere or externally-mutated
+                        // intent. Dropping this one execution is safe
+                        // (at-least-once semantics); killing the whole
+                        // daemon over one inconsistent row is not.
+                        crate::logging::warning(
+                            "Dropped staged execution whose durable intent was no longer leased",
+                            &[("intent_id", execution.intent_id.to_string())],
+                        );
+                        continue;
                     }
                     report.completed += 1;
                     continue;

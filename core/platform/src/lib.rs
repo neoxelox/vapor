@@ -44,7 +44,7 @@ pub use idle::{
 };
 pub use metrics::{
     InMemoryPlatformMetricsSampler, NativePlatformMetricsSampler, PlatformMetricsSampler,
-    StaticPlatformMetricsSampler, ThrottleInputsSnapshot,
+    StaticPlatformMetricsSampler, ThrottleInputs,
 };
 pub use process::{NativeProcessSupervisor, NoopProcessSupervisor, ProcessSupervisor};
 pub use secrets::{InMemorySecretStore, NativeSecretStore, SecretStore, SecretStoreError};

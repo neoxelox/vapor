@@ -9,6 +9,11 @@ pub enum StormReason {
     DirectoryUniquePathsThreshold,
     DirectoryEventCountThreshold,
     GlobalPendingEventCountThreshold,
+    /// The bounded fs-event ingest buffer dropped events (callbacks
+    /// outpaced the runtime drain). The dropped changes are unknown, so
+    /// a deferred whole-scope reconcile reconstructs them once the
+    /// engine is idle.
+    IngestOverflow,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,6 +57,7 @@ pub struct StormDetector {
     watch_root: PathBuf,
     thresholds: StormThresholds,
     directory_windows: BTreeMap<PathBuf, DirectoryStormWindow>,
+    last_global_prune: Option<SystemTime>,
 }
 
 impl StormDetector {
@@ -64,6 +70,7 @@ impl StormDetector {
             watch_root: watch_root.into(),
             thresholds,
             directory_windows: BTreeMap::new(),
+            last_global_prune: None,
         }
     }
 
@@ -112,21 +119,19 @@ impl StormDetector {
             }
         }
 
+        self.maybe_prune_inactive_windows(observed_at);
+
         if let Some((root, reason)) = candidate {
-            self.prune_inactive_windows(observed_at);
             return Some(self.deferred_record(root, reason, observed_at));
         }
 
         if pending_event_count >= self.thresholds.global_pending_event_count_threshold {
-            self.prune_inactive_windows(observed_at);
             return Some(self.deferred_record(
                 self.watch_root.clone(),
                 StormReason::GlobalPendingEventCountThreshold,
                 observed_at,
             ));
         }
-
-        self.prune_inactive_windows(observed_at);
 
         None
     }
@@ -147,7 +152,25 @@ impl StormDetector {
         }
     }
 
-    fn prune_inactive_windows(&mut self, observed_at: SystemTime) {
+    /// Global window pruning runs at most once per storm window instead
+    /// of on every event: per-event pruning made a burst quadratic in the
+    /// number of active directories (every event iterated every window).
+    /// Individual windows still self-prune on each `observe`, so the
+    /// thresholds themselves never see stale entries — this pass only
+    /// reclaims memory for directories that went quiet.
+    fn maybe_prune_inactive_windows(&mut self, observed_at: SystemTime) {
+        let due = match self.last_global_prune {
+            None => true,
+            Some(last) => observed_at
+                .duration_since(last)
+                .map(|age| age >= self.thresholds.window)
+                .unwrap_or(true),
+        };
+        if !due {
+            return;
+        }
+
+        self.last_global_prune = Some(observed_at);
         let window = self.thresholds.window;
         self.directory_windows.retain(|_, state| {
             state.prune(observed_at, window);
@@ -155,26 +178,24 @@ impl StormDetector {
         });
     }
 
+    /// Ancestor directories whose per-directory windows observe this
+    /// event. The watch root itself is deliberately excluded: rolled-up
+    /// per-directory counts at the root would compact the *entire* sync
+    /// scope for any moderately parallel workload (600 events anywhere in
+    /// the tree within 2 s), while whole-root compaction is exactly what
+    /// the separate — and much higher — global pending threshold governs.
     fn directory_roots_for_path(&self, path: &Path) -> Vec<PathBuf> {
-        if path == self.watch_root {
-            return vec![self.watch_root.clone()];
-        }
-
         let Some(start) = path.parent() else {
-            return vec![self.watch_root.clone()];
+            return Vec::new();
         };
         let mut roots = Vec::new();
         for ancestor in start.ancestors() {
-            if ancestor.starts_with(&self.watch_root) {
-                roots.push(ancestor.to_path_buf());
-            }
             if ancestor == self.watch_root {
                 break;
             }
-        }
-
-        if roots.is_empty() {
-            roots.push(self.watch_root.clone());
+            if ancestor.starts_with(&self.watch_root) {
+                roots.push(ancestor.to_path_buf());
+            }
         }
         roots
     }
@@ -321,14 +342,75 @@ mod tests {
                 .observe_event(&watch_root.join("alpha/file.txt"), timestamp(1), 1)
                 .is_none()
         );
-        assert_eq!(detector.directory_window_count(), 2);
+        assert_eq!(detector.directory_window_count(), 1);
 
+        // 9 seconds later alpha's window is stale; the periodic prune
+        // reclaims it while beta's window is created.
         assert!(
             detector
                 .observe_event(&watch_root.join("beta/file.txt"), timestamp(10), 1)
                 .is_none()
         );
-        assert_eq!(detector.directory_window_count(), 2);
+        assert_eq!(detector.directory_window_count(), 1);
+    }
+
+    #[test]
+    fn events_directly_under_the_watch_root_never_trip_per_directory_thresholds() {
+        // The watch root is exempt from the per-directory thresholds:
+        // otherwise rolled-up counts would compact the entire sync scope
+        // for any busy-but-healthy workload. Only the (higher) global
+        // pending threshold may compact the root.
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let mut detector = StormDetector::with_thresholds(
+            watch_root.clone(),
+            StormThresholds {
+                directory_unique_paths_threshold: 2,
+                directory_event_count_threshold: 2,
+                global_pending_event_count_threshold: 99,
+                ..StormThresholds::default()
+            },
+        );
+
+        for index in 0..10 {
+            assert!(
+                detector
+                    .observe_event(
+                        &watch_root.join(format!("file-{index}.txt")),
+                        timestamp(1),
+                        index + 1,
+                    )
+                    .is_none(),
+                "root-level events must not trigger a per-directory storm"
+            );
+        }
+    }
+
+    #[test]
+    fn spread_out_events_across_subdirectories_do_not_compact_the_watch_root() {
+        // A parallel build touching a few files in many unrelated
+        // directories used to roll up into the watch-root window and
+        // compact the whole scope. The per-directory thresholds now apply
+        // strictly below the root.
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let mut detector = StormDetector::with_thresholds(
+            watch_root.clone(),
+            StormThresholds {
+                directory_unique_paths_threshold: 5,
+                directory_event_count_threshold: 5,
+                global_pending_event_count_threshold: 999,
+                ..StormThresholds::default()
+            },
+        );
+
+        for directory in 0..20 {
+            for file in 0..2 {
+                let path = watch_root.join(format!("dir-{directory}/file-{file}.txt"));
+                assert!(
+                    detector.observe_event(&path, timestamp(1), 1).is_none(),
+                    "two files per directory is below every per-directory threshold"
+                );
+            }
+        }
     }
 
     fn timestamp(seconds: u64) -> SystemTime {

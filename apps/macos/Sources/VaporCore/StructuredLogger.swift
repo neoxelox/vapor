@@ -140,8 +140,10 @@ public final class StructuredLogger: @unchecked Sendable {
 
     do {
       try handle.seekToEnd()
+      // No synchronize() here: fsyncing every log line is battery-hostile
+      // for an "invisible-first" app, and losing the last few lines on a
+      // power cut is an acceptable trade for a diagnostics log.
       try handle.write(contentsOf: data)
-      try? handle.synchronize()
       return true
     } catch {
       cachedFileHandle = nil

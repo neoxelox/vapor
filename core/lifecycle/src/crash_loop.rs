@@ -1,13 +1,21 @@
 //! `CrashLoopGuard` — pure-logic crash-loop backoff policy.
 //!
-//! Verbatim port of the Swift implementation in
-//! `apps/macos/Sources/VaporCore/DaemonLifecycle.swift`. Same defaults
-//! (`baseDelay = 2s`, `maxDelay = 120s`, `delayStartsAfterFailures = 1`,
-//! `maxConsecutiveFailuresBeforePause = 5`, `failureWindow = 600s`),
-//! same `CrashLoopPaused` semantics, same exponential schedule. The
-//! parity tests under `core/lifecycle/tests/crash_loop_parity.rs`
-//! exercise the same scenarios as the Swift tests so any drift is
-//! visible at PR time.
+//! This is the canonical implementation; the Swift `CrashLoopGuard` in
+//! `apps/macos/Sources/VaporCore/DaemonLifecycle.swift` mirrors it 1:1
+//! until the Swift copy retires (Wave 5 / M2-1). Shared defaults:
+//! `baseDelay = 2s`, `maxDelay = 120s`, `delayStartsAfterFailures = 1`,
+//! `maxConsecutiveFailuresBeforePause = 5`, `failureWindow = 600s`.
+//!
+//! The canonical schedule with the default policy — the contract locked
+//! in by `core/lifecycle/tests/crash_loop_parity.rs` and mirrored by the
+//! Swift tests, per `docs/operations/macos/launchagent-policy.md`:
+//!
+//! > crash 1 → restart immediately (`NoDelay`), crash 2 → 2 s,
+//! > crash 3 → 4 s, crash 4 → 8 s, crash 5 → `Paused`.
+//!
+//! `delay_starts_after_failures = N` means the first N crashes within
+//! the window restart without delay; crash N+1 gets `base_delay`,
+//! doubling per crash after that.
 //!
 //! Closes `core.md` C4-2.
 

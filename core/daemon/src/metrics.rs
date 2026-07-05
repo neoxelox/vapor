@@ -1,15 +1,14 @@
-//! Throttle-input sampling abstraction for the daemon runtime.
+//! Throttle-input sampling for the daemon runtime.
 //!
-//! `MetricsSampler` is the seam the runtime tick path consumes to obtain
-//! a fresh [`ThrottleInputs`] every sample interval. Wave 4's
-//! `core/platform/metrics::PlatformMetricsSampler` will plug in OS-native
-//! samplers behind this trait.
+//! The trait is `core/platform`'s [`PlatformMetricsSampler`], consumed
+//! directly (the engine already depends on `core/platform`; a duplicate
+//! engine-side trait bought nothing but drift). The runtime tick path
+//! samples fresh [`ThrottleInputs`] from it every sample interval.
 //!
-//! Pre-platform-layer code uses [`StaticMetricsSampler`] so the runtime
-//! exercises real sampler plumbing instead of `ThrottleInputs::default()`.
-//! The sampler is also valuable for the headless `vapor` CLI and for
-//! deterministic tests, which feed scripted [`ThrottleInputs`] sequences
-//! through [`ScriptedMetricsSampler`].
+//! Production wires [`NativePlatformMetricsSampler`] (per-OS FFI lands
+//! incrementally; it currently forwards static idle inputs). Tests use
+//! [`StaticMetricsSampler`] for fixed inputs or [`ScriptedMetricsSampler`]
+//! to walk a deterministic sequence.
 //!
 //! See `docs/tasks/core.md` C2-1.
 
@@ -17,40 +16,10 @@ use std::sync::Mutex;
 
 use crate::throttle::ThrottleInputs;
 
-/// Per-tick sampler returning fresh [`ThrottleInputs`] for the runtime.
-pub trait MetricsSampler: Send + Sync {
-    fn sample(&self) -> ThrottleInputs;
-}
-
-/// Returns a fixed [`ThrottleInputs`] every tick. Equivalent to a config-
-/// driven sampler: the engine treats the value as the current ground truth
-/// without consulting any OS-specific signal.
-#[derive(Clone, Debug)]
-pub struct StaticMetricsSampler {
-    inputs: ThrottleInputs,
-}
-
-impl StaticMetricsSampler {
-    pub fn new(inputs: ThrottleInputs) -> Self {
-        Self { inputs }
-    }
-
-    pub fn inputs(&self) -> ThrottleInputs {
-        self.inputs
-    }
-}
-
-impl Default for StaticMetricsSampler {
-    fn default() -> Self {
-        Self::new(ThrottleInputs::default())
-    }
-}
-
-impl MetricsSampler for StaticMetricsSampler {
-    fn sample(&self) -> ThrottleInputs {
-        self.inputs
-    }
-}
+pub use vapor_platform::{
+    NativePlatformMetricsSampler, PlatformMetricsSampler as MetricsSampler,
+    StaticPlatformMetricsSampler as StaticMetricsSampler,
+};
 
 /// Test sampler that walks through a scripted sequence of [`ThrottleInputs`].
 /// After the sequence is exhausted, the sampler keeps returning the last
@@ -105,7 +74,7 @@ mod tests {
         let sampler = StaticMetricsSampler::new(inputs);
         let sampled = sampler.sample();
         assert!(sampled.on_battery);
-        assert_eq!(sampler.inputs().system_cpu_load_percent, 10);
+        assert_eq!(sampled.system_cpu_load_percent, 10);
     }
 
     #[test]
