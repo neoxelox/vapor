@@ -124,6 +124,17 @@ Depends on: `docs/tasks/core.md` C4.
 - [ ] M2-4 End-to-end regression test: install / uninstall / start / stop /
       crash-loop pause / acknowledge flows through the Rust-backed stack
       with the existing Swift UI unchanged.
+- [ ] M2-5 App-side daemon health tick: periodically detect unexpected
+      daemon absence (IPC ping or pid probe) and route the crash through
+      `registerUnexpectedDaemonExit` so the crash-loop guard actually
+      fires in production — today nothing detects an unclean daemon exit
+      (see `docs/operations/macos/launchagent-policy.md` §Crash-loop
+      interaction, "Planned").
+- [ ] M2-6 Persist crash-loop state durably (`last_crash_at_ms`,
+      `consecutive_crashes` in the state DB or a lifecycle side-file) so
+      backoff survives app restarts and is shared across surfaces —
+      today each surface counts crashes in process memory only (same
+      policy-doc "Planned" note).
 
 Exit gate:
 
