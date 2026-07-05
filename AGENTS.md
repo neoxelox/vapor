@@ -258,6 +258,9 @@ It does not override the "latest stable" policy above.
   1. `./scripts/format.sh`
   2. `./scripts/lint.sh`
   3. `./scripts/test.sh`
+- For changes that alter runtime behavior a user would observe through
+  the daemon or CLI, additionally run `./scripts/e2e.sh` after the
+  steps above (Tier E2E; see §9.8).
 - Rationale: wrapper scripts set required project environment (for example log routing and other workflow invariants).
 
 ## 8.5) Runtime data directory policy
@@ -404,6 +407,11 @@ If a test's failure mode is "I typo'd a default value", skip it.
   Performance SLO tests, long-running property cases (higher case
   counts), fuzz corpora, `loom`-backed concurrency tests.
   Not a PR gate.
+- **Tier E2E** — `./scripts/e2e.sh`, run on every PR as the final
+  step of `test.yml`'s macOS job and locally by the contributor.
+  Black-box verification of the real `vapor` + `vapord` binaries in a
+  disposable sandbox. Required locally for runtime-affecting features
+  and fixes; contract in §9.8.
 
 ### 9.6) Flaky-test policy
 
@@ -429,6 +437,35 @@ If a test's failure mode is "I typo'd a default value", skip it.
 - `vapor service install` + `vapor run` + `vapor status` round-trip
   must pass on every OS that currently ships a surface before that OS
   is considered shipped.
+
+### 9.8) End-to-end verification (Tier E2E)
+
+Unit and integration tests are not the whole feedback loop. An agent
+that ships a runtime-affecting change must also watch the real product
+work once, end to end. Full process:
+`docs/development/e2e-verification.md`.
+
+- `./scripts/e2e.sh` builds the shipping binaries (`vapor`, `vapord`)
+  and drives the daemon black-box through the CLI only — never the
+  macOS app — asserting via `vapor status --json`, `vapor doctor`,
+  exit codes, daemon logs, and read-only durable-DB queries.
+- Sandbox discipline is absolute: everything runs under the repo-local
+  `.vapor/e2e/` directory (removed by `./scripts/clean.sh`). Tier E2E
+  must never touch `~/.vapor`, install host services (LaunchAgents,
+  login items), launch packaged apps, or use the network.
+- Required after Tier 1 passes for: features or fixes in `core/*` that
+  change daemon/CLI-observable behavior, startup/shutdown/IPC/schema
+  changes, and build changes to the shipping binaries. Not required
+  for doc-only, UI-only, or test-only changes.
+- When a change adds e2e-observable behavior, extend the harness with
+  a scenario for it in the same change set — a green run of old
+  scenarios proves non-regression, not the new feature.
+- UI-affecting changes additionally get a short manual-verification
+  handoff checklist for the project owner, since agents never verify
+  UI.
+- Live cloud-provider E2E (real Google Drive, dedicated test account)
+  is a future, explicitly gated tier — never part of the default run,
+  never a PR gate, never run implicitly by an agent.
 
 ## 10) Pull request checklist
 
