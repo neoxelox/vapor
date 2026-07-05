@@ -28,7 +28,7 @@ triggers them, and which ones gate a release.
 
 ## Test tier model
 
-Testing runs in two tiers. Authoritative definition:
+Testing runs in three tiers. Authoritative definition:
 `docs/architecture/testing-strategy.md §CI tier execution`.
 
 - **Tier 1** — `lint.yml` + `test.yml` (runs on every PR; required
@@ -40,6 +40,13 @@ Testing runs in two tiers. Authoritative definition:
   invoked solely by `release.yml`). Performance SLO tests, long-running
   property cases (higher case counts), fuzz corpora, `loom`-backed
   concurrency tests. **Not a PR gate.**
+- **Tier E2E** — `./scripts/e2e.sh` as the final step of `test.yml`'s
+  macOS job (every PR; part of the required `test` check). Black-box
+  run of the real `vapor` + `vapord` binaries in a sandbox under the
+  repo-local `.vapor/e2e/` — macOS only, because it drives the native
+  FSEvents watcher on the shipping surface. Also part of the local
+  validation loop for runtime-affecting changes (`AGENTS.md §9.8`;
+  process in `docs/development/e2e-verification.md`).
 
 A CI timing guard (tracked as `core.md` CT-2) fails the job if Tier 1
 exceeds the 5-minute budget on a matrix runner. The failure message

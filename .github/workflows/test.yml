@@ -71,3 +71,12 @@ jobs:
       - name: Run tests
         shell: bash
         run: ./scripts/test.sh
+
+      # Tier E2E: black-box run of the real vapor + vapord binaries in a
+      # sandbox under the repo-local .vapor/e2e/. macOS only — it drives
+      # the native FSEvents watcher, and macOS is the shipping surface.
+      # See docs/development/e2e-verification.md.
+      - name: Run e2e verification
+        if: matrix.scope == 'full'
+        shell: bash
+        run: ./scripts/e2e.sh
