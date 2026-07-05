@@ -57,7 +57,7 @@ In flight and coming next:
 
 All user-facing configuration is documented here with meaning and defaults.
 
-All persisted user configuration lives in `<vapor_dir>/vapor.json`; Vapor reads it at startup, so changes apply the next time it starts.
+All persisted user configuration lives in `<vapor_dir>/vapor.json`; Vapor reads it at startup, so changes apply the next time it starts. Matching `VAPOR_*` environment variables, when set, take priority over the file.
 
 | Key                  | Type     | Default                                             | Description                                                                              |
 | -------------------- | -------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
