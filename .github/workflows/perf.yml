@@ -1,10 +1,9 @@
 name: perf
 
+# No standalone triggers: the performance gate runs only as part of the
+# release pipeline (release.yml invokes it via workflow_call).
 on:
   workflow_call:
-  schedule:
-    # Nightly Tier-2 run (06:00 UTC) per docs/architecture/testing-strategy.md.
-    - cron: "0 6 * * *"
 
 permissions:
   contents: read

@@ -20,7 +20,7 @@ Available now:
 
 - 🔕 Stays out of your way while keeping status and controls one click away.
 - 🚀 Auto-launch at login with resilient crash-loop protection for dependable day-to-day use.
-- 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow — and apply live when you edit them.
+- 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow.
 - ⏯ Pause and resume background work on demand from the command line.
 
 In flight and coming next:
@@ -32,6 +32,7 @@ In flight and coming next:
 - 🧩 Multiple sync profiles let one folder flow to several clouds or keep separate setups neatly isolated.
 - 🔀 Choose each folder's sync direction — full two-way, or a one-way mirror for read-only backups and copies.
 - 🛡 Conflict-safe behavior with deterministic outcomes (keep both copies, never silent overwrite).
+- ⏸️ Pressure-aware throttle modes that adapt sync intensity to real device load.
 - ⚙️ Configurable hard caps on its share of CPU, memory, and network so streaming, browsing, and other apps always have room.
 - 🌙 Smart idle boost: Vapor catches up faster when your device is genuinely idle, and yields the moment you come back.
 - 📈 Clear diagnostics with status reasons, queue visibility, and live activity timeline.
@@ -45,7 +46,7 @@ Available now:
 
 In flight and coming next:
 
-- File System (the Phase C8 reference provider)
+- [File System](https://github.com/neoxelox/vapor/blob/main/core/providers/provider_filesystem.rs)
 - [Google Drive](https://workspace.google.com/intl/es/products/drive)
 
 ## Benchmarks
@@ -68,19 +69,15 @@ Configuration changes take effect the next time the daemon starts.
 | `useVaporIgnore`     | `Bool`   | `true`                                              | Applies recursive `.vaporignore` rules during local filtering.                           |
 | `localSyncDirectory` | `String` | `"~/Vapor"`                                         | Sets the local sync root; Vapor creates it if it does not exist yet.                     |
 | `cloudSyncDirectory` | `String` | `"/Vapor"`                                          | Sets the cloud sync root; Vapor creates it if it does not exist yet.                     |
+| `syncMode`           | `String` | `"two-way"`                                         | Chooses the sync direction: `two-way` (bidirectional), `pull-only` (cloud → local, a read-only local mirror), or `push-only` (local → cloud, a read-only cloud backup). |
 | `preIgnoreRules`     | `String` | Embedded `.gitignore`-like low-impact default rules | Provides the baseline ignore rules that run before discovered ignore files.              |
 | `postIgnoreRules`    | `String` | Empty string                                        | Provides the final override rules that run after discovered ignore files.                |
 | `languageCode`       | `String` | `"en"`                                              | Selects the UI language catalog to load.                                                 |
 | `timelineEventLimit` | `Int`    | `1000`                                              | Caps the in-memory timeline length shown in diagnostics.                                 |
+| `resourceLimits`     | `Object` | `{ cpuPercent: 15, memoryPercent: 10, bandwidthPercent: 25 }` | Sets hard ceilings on daemon CPU (share of one core), device memory, and measured bandwidth. Honored by the throttle controller and auto-tuner. Profile overrides may only lower these values. |
+| `idleBoost`          | `Object` | See below                                           | Dynamically raises effective ceilings when the device is user-idle with measured resource headroom, ramping up slowly and down quickly. Setting `enabled: false` in any enabled profile disables boost daemon-wide. |
 
-Planned configuration (designed, not yet recognized by the runtime —
-`vapor config set` rejects these keys until their waves land):
-
-| Key              | Ships with | Design                                                        |
-| ---------------- | ---------- | ------------------------------------------------------------- |
-| `syncMode`       | Wave 8     | `docs/architecture/sync-modes.md` — `two-way` (default), `pull-only`, `push-only` per profile. |
-| `resourceLimits` | Wave 8     | `docs/architecture/data-flow.md` §User resource budgets — hard CPU/memory/bandwidth ceilings. |
-| `idleBoost`      | Wave 8     | `docs/architecture/data-flow.md` §User resource budgets — idle headroom expansion. |
+`idleBoost` defaults: `enabled: true`, `minIdleSeconds: 600`, `headroomCpuPercent: 40`, `headroomMemoryPercent: 40`, `headroomBandwidthPercent: 40`, `boostCpuPercent: 50`, `boostMemoryPercent: 30`, `boostBandwidthPercent: 90`, `rampUpSeconds: 60`, `rampDownSeconds: 20`. Each `boost*Percent` must be `>=` the matching `resourceLimits.*Percent` (lower values are treated as equal to the base ceiling). Boost requires all of: throttle state `IdleDrain`, user-idle for at least `minIdleSeconds`, and non-Vapor utilization at or below each `headroom*Percent`.
 
 ### Ignore rules
 
@@ -120,7 +117,7 @@ See `.env.example` for the available `VAPOR_*` environment variables used by app
 - Format check both stacks (included in lint): `./scripts/format.sh check`
 - Test both stacks: `./scripts/test.sh`
 - Sync locale catalogs into every app surface: `./scripts/locales.sh`
-- Install git pre-commit hook (lint → test): `./scripts/hooks.sh`
+- Install git pre-commit hook (clean → lint → test → build): `./scripts/hooks.sh`
 - Remove the installed pre-commit hook: `./scripts/hooks.sh uninstall`
 - Version helper: `./scripts/version.sh`
 - Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)

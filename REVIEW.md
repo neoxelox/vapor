@@ -16,6 +16,15 @@ Scope: all of `core/*`, `apps/macos`, `scripts/`, `.github/workflows`, `docs/` (
 > claims them as shipped. F-PLAT-1 (Keychain-backed secret store) remains
 > Wave-5/C4-5 work; the CLI's honest `is_persistent` warnings stay. See
 > `CHANGELOG.md` [Unreleased] for the change-by-change record.
+>
+> **Owner decisions (post-review):** the pre-commit hook keeps the full
+> `clean → lint → test → build` pipeline by design (the hook *is* the
+> agentic feedback loop; only the worktree-resolution fix from F-OPS-3 was
+> kept). The Tier-2 perf gate runs **only** on release — no nightly
+> schedule — and the testing/CI docs now say so (supersedes part of
+> F-OPS-1). The root README intentionally documents the full designed
+> configuration surface docs-first, including Wave-8 keys, rather than
+> only runtime-recognized keys (supersedes part of F-DOC-2/3).
 
 Severity legend:
 

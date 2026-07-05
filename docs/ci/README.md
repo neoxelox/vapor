@@ -36,10 +36,10 @@ Testing runs in two tiers. Authoritative definition:
   property + snapshot + guard-rail timing tests. **Budget: under
   5 minutes per OS on CI.** If a change pushes this past the budget,
   split slow tests out to Tier 2 or make them faster.
-- **Tier 2** — `perf.yml` (release gate) and scheduled nightly
-  workflows. Performance SLO tests, long-running property cases
-  (higher case counts), fuzz corpora, `loom`-backed concurrency
-  tests. **Not a PR gate.**
+- **Tier 2** — `perf.yml` (release gate only; no standalone triggers —
+  invoked solely by `release.yml`). Performance SLO tests, long-running
+  property cases (higher case counts), fuzz corpora, `loom`-backed
+  concurrency tests. **Not a PR gate.**
 
 A CI timing guard (tracked as `core.md` CT-2) fails the job if Tier 1
 exceeds the 5-minute budget on a matrix runner. The failure message

@@ -345,7 +345,7 @@ jobs:
           fi
 
           echo "[release] created/updated DRAFT release for $TAG_NAME —" \
-            "review the assets and publish manually (release-process step 7)."
+            "review the assets and publish manually."
 
       - name: Upload release assets
         env:

@@ -399,9 +399,10 @@ If a test's failure mode is "I typo'd a default value", skip it.
   `workflow_call`. Unit + integration + platform-trait contract +
   property + snapshot + guard-rail timing tests. Runs on every PR.
   Required check on `main`. Budget: under 5 minutes per OS on CI.
-- **Tier 2** — `scripts/perf.sh` (release gate) and scheduled nightly
-  workflows. Performance SLO tests, long-running property cases
-  (higher case counts), fuzz corpora, `loom`-backed concurrency tests.
+- **Tier 2** — `scripts/perf.sh` via `perf.yml`, which runs only as
+  part of the release pipeline (no standalone or scheduled triggers).
+  Performance SLO tests, long-running property cases (higher case
+  counts), fuzz corpora, `loom`-backed concurrency tests.
   Not a PR gate.
 
 ### 9.6) Flaky-test policy

@@ -48,11 +48,9 @@ cat >"$PRE_COMMIT_HOOK" <<'HOOK'
 #!/usr/bin/env bash
 # vapor-managed-hook: pre-commit
 #
-# Installed by scripts/hooks.sh. Runs the local validation pipeline
+# Installed by scripts/hooks.sh. Runs the full local validation pipeline
 # before every commit so agentic contributors and humans share one bar:
-# lint -> test. Incremental on purpose — a clean/cold rebuild per commit
-# would cost minutes for no additional signal (CI runs the full matrix);
-# run scripts/clean.sh + scripts/build.sh manually when needed.
+# clean -> lint -> test -> build. Any failure aborts the commit.
 #
 # Re-run scripts/hooks.sh install to refresh after updates; remove via
 # scripts/hooks.sh uninstall.
@@ -61,15 +59,21 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+echo "Cleaning build and distribution artifacts..."
+"$REPO_ROOT/scripts/clean.sh"
+
 echo "Linting source files..."
 "$REPO_ROOT/scripts/lint.sh"
 
 echo "Running test suite..."
 "$REPO_ROOT/scripts/test.sh"
 
+echo "Building release binaries..."
+"$REPO_ROOT/scripts/build.sh"
+
 echo "All checks passed."
 HOOK
 
 chmod +x "$PRE_COMMIT_HOOK"
 echo "[hooks] installed pre-commit hook at $PRE_COMMIT_HOOK"
-echo "[hooks] runs: lint -> test"
+echo "[hooks] runs: clean -> lint -> test -> build"

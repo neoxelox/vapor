@@ -648,20 +648,22 @@ introduces the code they apply to.
       test in the same PR that adds the command. Applies to every
       `cli.md` task from L1 onward.
 
-### Nightly / Tier-2 (deferred setup)
+### Tier-2 release gate (deferred setup)
+
+Tier 2 runs only as part of the release pipeline (`perf.yml` invoked by
+`release.yml`; no standalone or scheduled triggers).
 
 - [ ] CT-9 Add a `cargo-fuzz` harness for parsers: ignore-rule parser,
       IPC frame parser (once wave 6 lands), JSON config loader, path
-      normalization. Short corpus committed in-tree. Scheduled
-      nightly GitHub Actions workflow that opens an issue on failure.
-      Not a PR gate.
+      normalization. Short corpus committed in-tree; long runs ride the
+      Tier-2 release gate. Not a PR gate.
 - [ ] CT-10 Add `loom`-backed tests for `ThrottleWorkgate` permit
       allocation under contention and `BoundedFsEventRecorder`
-      drop-count semantics. Run under Tier 2 (nightly); not a PR gate.
-      Keep the test set small — `loom` is slow.
-- [ ] CT-11 Nightly workflow that reruns Tier-1 property tests with a
-      higher case count (1 000–4 000 per property) to catch rare
-      counterexamples the PR budget does not reach.
+      drop-count semantics. Run under the Tier-2 release gate; not a PR
+      gate. Keep the test set small — `loom` is slow.
+- [ ] CT-11 Rerun Tier-1 property tests with a higher case count
+      (1 000–4 000 per property) under the Tier-2 release gate to catch
+      rare counterexamples the PR budget does not reach.
 
 Exit gate (ongoing): Tier 1 stays under 5 minutes per OS on CI; no
 flaky tests carried across two consecutive weeks; every trait in

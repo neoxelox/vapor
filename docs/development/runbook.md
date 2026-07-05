@@ -41,19 +41,19 @@
 ## Pre-commit hook (optional but recommended for agentic workflows)
 
 `./scripts/hooks.sh` installs a git `pre-commit` hook into the local
-clone. The hook runs the incremental validation pipeline before any
-commit is allowed to land:
+clone (worktrees included — the hooks directory is resolved through
+git, so `.git`-as-a-file layouts work). The hook runs the full local
+validation pipeline before any commit is allowed to land:
 
-1. `./scripts/lint.sh` — Rust + Swift lint plus `format.sh check`.
-2. `./scripts/test.sh` — Tier 1 test suite for both stacks.
+1. `./scripts/clean.sh` — remove stale build/dist artifacts.
+2. `./scripts/lint.sh` — Rust + Swift lint plus `format.sh check`.
+3. `./scripts/test.sh` — Tier 1 test suite for both stacks.
+4. `./scripts/build.sh` — release-mode build of every shipping binary.
 
 Any failure aborts the commit. This is the same gate the agent's
 feedback loop uses, which is what makes it suitable for autonomous
-contributors: when a commit lands, `lint → test` is known-green on the
-working tree. The hook is deliberately incremental — a cold
-`clean → build` per commit costs minutes without adding signal (CI runs
-the full matrix, and `./scripts/build.sh` remains available for manual
-release-mode verification).
+contributors: when a commit lands, `clean → lint → test → build` is
+known-green on the working tree.
 
 Operational notes:
 
