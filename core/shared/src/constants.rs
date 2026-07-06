@@ -172,6 +172,44 @@ pub mod profile {
     pub const MAX_PROFILE_ID_LENGTH: usize = 32;
 }
 
+pub mod resource_limits {
+    /// Keys of the `resourceLimits` config group (C8-32): hard user
+    /// ceilings on the daemon's device impact, all `1..=100` percent.
+    pub const KEY_CPU_PERCENT: &str = "cpuPercent";
+    pub const KEY_MEMORY_PERCENT: &str = "memoryPercent";
+    pub const KEY_BANDWIDTH_PERCENT: &str = "bandwidthPercent";
+    pub const DEFAULT_CPU_PERCENT: u8 = 15;
+    pub const DEFAULT_MEMORY_PERCENT: u8 = 10;
+    pub const DEFAULT_BANDWIDTH_PERCENT: u8 = 25;
+    pub const MIN_PERCENT: u8 = 1;
+    pub const MAX_PERCENT: u8 = 100;
+}
+
+pub mod idle_boost {
+    /// Keys of the `idleBoost` config group (C8-33): optional dynamic
+    /// headroom expansion while the device is verifiably idle.
+    pub const KEY_ENABLED: &str = "enabled";
+    pub const KEY_MIN_IDLE_SECONDS: &str = "minIdleSeconds";
+    pub const KEY_BOOST_CPU_PERCENT: &str = "boostCpuPercent";
+    pub const KEY_BOOST_MEMORY_PERCENT: &str = "boostMemoryPercent";
+    pub const KEY_BOOST_BANDWIDTH_PERCENT: &str = "boostBandwidthPercent";
+    pub const KEY_HEADROOM_CPU_PERCENT: &str = "headroomCpuPercent";
+    pub const KEY_RAMP_UP_SECONDS: &str = "rampUpSeconds";
+    pub const KEY_RAMP_DOWN_SECONDS: &str = "rampDownSeconds";
+    pub const DEFAULT_ENABLED: bool = true;
+    pub const DEFAULT_MIN_IDLE_SECONDS: u64 = 300;
+    pub const DEFAULT_BOOST_CPU_PERCENT: u8 = 50;
+    pub const DEFAULT_BOOST_MEMORY_PERCENT: u8 = 20;
+    pub const DEFAULT_BOOST_BANDWIDTH_PERCENT: u8 = 80;
+    /// Non-Vapor utilization must stay at or below this for boost to
+    /// engage (per-resource headroom gate).
+    pub const DEFAULT_HEADROOM_CPU_PERCENT: u8 = 30;
+    pub const DEFAULT_RAMP_UP_SECONDS: u64 = 30;
+    /// Must stay <= ramp-up so activity resumption is non-invasive
+    /// (`data-flow.md §User resource budgets`).
+    pub const DEFAULT_RAMP_DOWN_SECONDS: u64 = 10;
+}
+
 pub mod sync_mode {
     /// Accepted `syncMode` config values (C8-59). The names describe the
     /// direction from the local device's perspective; see
@@ -344,6 +382,17 @@ pub mod engine {
     /// tick while a reconcile slice is active. Bounds per-tick I/O so
     /// the slice checkpoints keep their interruptibility guarantee.
     pub const RECONCILE_DIRS_PER_CHECKPOINT: usize = 8;
+    /// Assumed link capacity when the platform sampler reports no
+    /// measured throughput; the bandwidth ceiling applies against this
+    /// until a real measurement exists (C8-38).
+    pub const ASSUMED_LINK_CAPACITY_KBPS: u32 = 100_000;
+    /// Auto-tuning cadence (C8-42): one small change per cycle within
+    /// the documented 60-120s window.
+    pub const AUTO_TUNE_INTERVAL_SECONDS: u64 = 90;
+    /// Auto-tuned transfer step budget bounds, as multiples of
+    /// `TRANSFER_STAGE_STEP_BYTES` expressed in percent (50% .. 200%).
+    pub const AUTO_TUNE_MIN_STEP_PERCENT: u64 = 50;
+    pub const AUTO_TUNE_MAX_STEP_PERCENT: u64 = 200;
     pub const RETRY_BASE_DELAY_MILLIS: u64 = 2_000;
     pub const RETRY_RATE_LIMIT_BASE_DELAY_MILLIS: u64 = 15_000;
     pub const RETRY_MAX_DELAY_MILLIS: u64 = 900_000;

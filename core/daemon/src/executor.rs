@@ -91,6 +91,12 @@ pub struct ExecutionEnv<'a> {
     /// Stable device identifier (C8-15): the conflict-suffix component
     /// and the op-id prefix.
     pub device_id: &'a str,
+    /// Auto-tuned per-tick transfer step budget (C8-42).
+    pub transfer_step_bytes: u64,
+    /// Daemon-wide bandwidth shaper (C8-38): every transfer step asks
+    /// it for a byte grant; a zero grant holds the session at its
+    /// checkpoint until tokens refill.
+    pub bandwidth: &'a std::sync::Mutex<vapor_providers::BandwidthShaper>,
     /// Op-id tag store for the local side (downloads tag the applied
     /// file so watcher echoes correlate).
     pub tags: &'a OpIdTagStore,
@@ -626,7 +632,18 @@ impl StagedExecutor {
                     };
                     return Ok(Some(execution));
                 }
-                match session.step(constants::engine::TRANSFER_STAGE_STEP_BYTES) {
+                let step_budget = grant_transfer_budget(env, &self.clock);
+                if step_budget == 0 {
+                    // Bandwidth ceiling exhausted: hold at the slice
+                    // checkpoint until tokens refill (C8-38).
+                    execution.stage = ActiveStage::Upload {
+                        permit,
+                        plan,
+                        work: UploadWork::Session(session),
+                    };
+                    return Ok(Some(execution));
+                }
+                match session.step(step_budget) {
                     Ok(TransferStep::Progressed { .. }) => {
                         execution.stage = ActiveStage::Upload {
                             permit,
@@ -765,7 +782,16 @@ impl StagedExecutor {
                     };
                     return Ok(Some(execution));
                 }
-                match session.step(constants::engine::TRANSFER_STAGE_STEP_BYTES) {
+                let step_budget = grant_transfer_budget(env, &self.clock);
+                if step_budget == 0 {
+                    execution.stage = ActiveStage::Download {
+                        permit,
+                        plan,
+                        session,
+                    };
+                    return Ok(Some(execution));
+                }
+                match session.step(step_budget) {
                     Ok(TransferStep::Progressed { .. }) => {
                         execution.stage = ActiveStage::Download {
                             permit,
@@ -1526,6 +1552,15 @@ fn sanitize_for_file_name(raw: &str) -> String {
         .collect()
 }
 
+/// One transfer step's byte grant: the auto-tuned step budget, capped
+/// by the bandwidth shaper's available tokens.
+fn grant_transfer_budget(env: &ExecutionEnv<'_>, clock: &Arc<dyn Clock>) -> u64 {
+    env.bandwidth
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .budget(env.transfer_step_bytes, clock.now())
+}
+
 fn path_key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
@@ -1590,6 +1625,7 @@ mod tests {
         local_root: PathBuf,
         cloud_root: PathBuf,
         sync_mode: vapor_shared::SyncMode,
+        bandwidth: std::sync::Mutex<vapor_providers::BandwidthShaper>,
         app: DaemonApp,
         state_db: DurableStateDb,
         executor: StagedExecutor,
@@ -1615,6 +1651,7 @@ mod tests {
                 local_root,
                 cloud_root,
                 sync_mode: vapor_shared::SyncMode::TwoWay,
+                bandwidth: std::sync::Mutex::new(vapor_providers::BandwidthShaper::unlimited()),
                 _temp: temp,
                 app,
                 state_db,
@@ -1650,6 +1687,8 @@ mod tests {
                     local_root: Some(&self.local_root),
                     sync_mode: self.sync_mode,
                     device_id: "testdev",
+                    transfer_step_bytes: constants::engine::TRANSFER_STAGE_STEP_BYTES,
+                    bandwidth: &self.bandwidth,
                     tags: &self.tags,
                     local_echoes: &mut self.local_echoes,
                     remote_echoes: &mut self.remote_echoes,
@@ -2021,6 +2060,8 @@ mod tests {
             local_root: Some(&fixture.local_root),
             sync_mode: fixture.sync_mode,
             device_id: "testdev",
+            transfer_step_bytes: constants::engine::TRANSFER_STAGE_STEP_BYTES,
+            bandwidth: &fixture.bandwidth,
             tags: &fixture.tags,
             local_echoes: &mut fixture.local_echoes,
             remote_echoes: &mut fixture.remote_echoes,

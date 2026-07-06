@@ -115,6 +115,7 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // exercised in production, not just in tests.
     let metrics_sampler = Arc::new(NativePlatformMetricsSampler::for_current_host());
 
+    let budget_config = crate::resource_budget::EffectiveBudgetConfig::resolve(&config);
     let mut runtime = MultiProfileRuntime::start(
         profiles,
         filter_options,
@@ -122,6 +123,7 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
         system_clock(),
         &device_id,
         true,
+        budget_config,
     )?;
 
     log_started(&runtime);

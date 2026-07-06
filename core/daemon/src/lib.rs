@@ -23,6 +23,7 @@ pub mod build_info {
     include!(concat!(env!("OUT_DIR"), "/vapor_build_info.rs"));
 }
 
+pub mod auto_tune;
 pub mod bootstrap;
 pub mod clock;
 pub mod conflict;
@@ -40,6 +41,7 @@ pub mod profiles;
 pub mod reconcile;
 pub mod reconcile_walk;
 pub mod remote_sync;
+pub mod resource_budget;
 pub mod retry;
 pub mod runtime;
 pub mod runtime_control;
@@ -59,6 +61,10 @@ pub struct DaemonApp {
     throttle_controller: ThrottleController,
     last_throttle_decision: Option<ThrottleDecision>,
     retry_slowdown_until: Option<SystemTime>,
+    /// Effective CPU ceiling from the resource budget (C8-37). `None`
+    /// until the budget runtime publishes; caps then scale relative to
+    /// the default ceiling.
+    resource_cpu_ceiling_percent: Option<u8>,
     reconcile_controller: ReconcileController,
     /// Shared behind a mutex so multiple profile runtimes gate against
     /// ONE daemon-level cap set (`data-flow.md §Multi-profile watch
@@ -119,9 +125,25 @@ impl DaemonApp {
             throttle_controller: ThrottleController::with_clock(clock.clone()),
             last_throttle_decision: None,
             retry_slowdown_until: None,
+            resource_cpu_ceiling_percent: None,
             reconcile_controller: ReconcileController::with_clock(clock),
             workgate,
         }
+    }
+
+    /// Applies the effective CPU ceiling from the resource budget
+    /// (C8-37): concurrency caps scale proportionally to the ceiling
+    /// relative to the default `resourceLimits.cpuPercent`. Interacts
+    /// with throttle caps via MIN semantics — a `Suspended` zero cap
+    /// stays zero under any ceiling, and lowering the ceiling lowers
+    /// caps for in-flight admission immediately (running work yields at
+    /// its next slice checkpoint).
+    pub fn apply_resource_cpu_ceiling(&mut self, ceiling_percent: u8, now: SystemTime) {
+        if self.resource_cpu_ceiling_percent == Some(ceiling_percent) {
+            return;
+        }
+        self.resource_cpu_ceiling_percent = Some(ceiling_percent);
+        self.refresh_workgate_caps(now);
     }
 
     fn lock_workgate(&self) -> std::sync::MutexGuard<'_, ThrottleWorkgate> {
@@ -394,6 +416,24 @@ impl DaemonApp {
         let mut caps = self.base_throttle_caps();
         if self.retry_slowdown_active(now) {
             caps.upload_concurrency = caps.upload_concurrency.min(1);
+        }
+        if let Some(ceiling) = self.resource_cpu_ceiling_percent {
+            let scale = f64::from(ceiling)
+                / f64::from(vapor_shared::constants::resource_limits::DEFAULT_CPU_PERCENT);
+            let scale_cap = |cap: usize| -> usize {
+                if cap == 0 {
+                    // A throttle-imposed zero (Suspended) is never
+                    // relaxed by a user ceiling.
+                    0
+                } else {
+                    (((cap as f64) * scale).round() as usize).max(1)
+                }
+            };
+            caps.planner_workers = scale_cap(caps.planner_workers);
+            caps.hash_workers = scale_cap(caps.hash_workers);
+            caps.read_tokens = scale_cap(caps.read_tokens);
+            caps.upload_concurrency = scale_cap(caps.upload_concurrency);
+            caps.download_concurrency = scale_cap(caps.download_concurrency);
         }
         caps
     }

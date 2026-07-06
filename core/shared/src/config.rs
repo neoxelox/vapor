@@ -54,6 +54,107 @@ pub struct VaporConfig {
     /// entry overrides the profile-capable fields outright; unset
     /// fields inherit the top-level values.
     pub profiles: Vec<ProfileConfig>,
+    /// Hard user ceilings on daemon device impact (C8-32). Values are
+    /// clamped into `1..=100` at load with a classified warning
+    /// surfaced through `load_issue`.
+    pub resource_limits: ResourceLimitsConfig,
+    /// Idle-boost group (C8-33). `boost*Percent` values below their
+    /// matching `resourceLimits` ceiling are clamped up at load.
+    pub idle_boost: IdleBoostConfig,
+}
+
+/// The `resourceLimits` config group (C8-32).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceLimitsConfig {
+    #[serde(default = "default_cpu_percent")]
+    pub cpu_percent: u8,
+    #[serde(default = "default_memory_percent")]
+    pub memory_percent: u8,
+    #[serde(default = "default_bandwidth_percent")]
+    pub bandwidth_percent: u8,
+}
+
+fn default_cpu_percent() -> u8 {
+    constants::resource_limits::DEFAULT_CPU_PERCENT
+}
+fn default_memory_percent() -> u8 {
+    constants::resource_limits::DEFAULT_MEMORY_PERCENT
+}
+fn default_bandwidth_percent() -> u8 {
+    constants::resource_limits::DEFAULT_BANDWIDTH_PERCENT
+}
+
+impl Default for ResourceLimitsConfig {
+    fn default() -> Self {
+        Self {
+            cpu_percent: default_cpu_percent(),
+            memory_percent: default_memory_percent(),
+            bandwidth_percent: default_bandwidth_percent(),
+        }
+    }
+}
+
+/// The `idleBoost` config group (C8-33).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdleBoostConfig {
+    #[serde(default = "default_boost_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_min_idle_seconds")]
+    pub min_idle_seconds: u64,
+    #[serde(default = "default_boost_cpu")]
+    pub boost_cpu_percent: u8,
+    #[serde(default = "default_boost_memory")]
+    pub boost_memory_percent: u8,
+    #[serde(default = "default_boost_bandwidth")]
+    pub boost_bandwidth_percent: u8,
+    #[serde(default = "default_headroom_cpu")]
+    pub headroom_cpu_percent: u8,
+    #[serde(default = "default_ramp_up")]
+    pub ramp_up_seconds: u64,
+    #[serde(default = "default_ramp_down")]
+    pub ramp_down_seconds: u64,
+}
+
+fn default_boost_enabled() -> bool {
+    constants::idle_boost::DEFAULT_ENABLED
+}
+fn default_min_idle_seconds() -> u64 {
+    constants::idle_boost::DEFAULT_MIN_IDLE_SECONDS
+}
+fn default_boost_cpu() -> u8 {
+    constants::idle_boost::DEFAULT_BOOST_CPU_PERCENT
+}
+fn default_boost_memory() -> u8 {
+    constants::idle_boost::DEFAULT_BOOST_MEMORY_PERCENT
+}
+fn default_boost_bandwidth() -> u8 {
+    constants::idle_boost::DEFAULT_BOOST_BANDWIDTH_PERCENT
+}
+fn default_headroom_cpu() -> u8 {
+    constants::idle_boost::DEFAULT_HEADROOM_CPU_PERCENT
+}
+fn default_ramp_up() -> u64 {
+    constants::idle_boost::DEFAULT_RAMP_UP_SECONDS
+}
+fn default_ramp_down() -> u64 {
+    constants::idle_boost::DEFAULT_RAMP_DOWN_SECONDS
+}
+
+impl Default for IdleBoostConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_boost_enabled(),
+            min_idle_seconds: default_min_idle_seconds(),
+            boost_cpu_percent: default_boost_cpu(),
+            boost_memory_percent: default_boost_memory(),
+            boost_bandwidth_percent: default_boost_bandwidth(),
+            headroom_cpu_percent: default_headroom_cpu(),
+            ramp_up_seconds: default_ramp_up(),
+            ramp_down_seconds: default_ramp_down(),
+        }
+    }
 }
 
 /// One entry of the `profiles` array. Every field except `id` is
@@ -77,6 +178,14 @@ pub struct ProfileConfig {
     pub sync_mode: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Optional per-profile ceilings; resolved by MIN-lowering against
+    /// the top-level group (C8-34) — a profile can only tighten.
+    #[serde(default)]
+    pub resource_limits: Option<ResourceLimitsConfig>,
+    /// Optional per-profile idle-boost override. Any enabled profile
+    /// with `enabled = false` disables boost daemon-wide (C8-34).
+    #[serde(default)]
+    pub idle_boost: Option<IdleBoostConfig>,
 }
 
 impl Default for VaporConfig {
@@ -94,6 +203,8 @@ impl Default for VaporConfig {
             provider: constants::provider::DEFAULT.to_string(),
             sync_mode: constants::sync_mode::DEFAULT.to_string(),
             profiles: Vec::new(),
+            resource_limits: ResourceLimitsConfig::default(),
+            idle_boost: IdleBoostConfig::default(),
         }
     }
 }
@@ -179,6 +290,8 @@ struct RawVaporConfig {
     provider: Option<String>,
     sync_mode: Option<String>,
     profiles: Option<Vec<ProfileConfig>>,
+    resource_limits: Option<ResourceLimitsConfig>,
+    idle_boost: Option<IdleBoostConfig>,
 }
 
 impl RawVaporConfig {
@@ -203,6 +316,8 @@ impl RawVaporConfig {
             provider: self.provider.unwrap_or(defaults.provider),
             sync_mode: self.sync_mode.unwrap_or(defaults.sync_mode),
             profiles: self.profiles.unwrap_or_default(),
+            resource_limits: self.resource_limits.unwrap_or_default(),
+            idle_boost: self.idle_boost.unwrap_or_default(),
         }
     }
 }

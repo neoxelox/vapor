@@ -16,11 +16,13 @@ use std::time::{Duration, SystemTime};
 
 use vapor_shared::{ProviderErrorKind, ThrottleState};
 
+pub mod bandwidth;
 pub mod filesystem;
 pub mod logging;
 mod paths;
 pub mod tags;
 
+pub use bandwidth::BandwidthShaper;
 pub use paths::{RemotePath, RemotePathError};
 
 /// Typed provider failure carrying the provider-neutral taxonomy from

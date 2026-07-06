@@ -199,6 +199,20 @@ pub struct DaemonRuntime {
     conflict_count: u64,
     /// Daemon-wide activity timeline (C8-30); shared across profiles.
     timeline: Option<Arc<crate::timeline::TimelineBuffer>>,
+    /// Daemon-wide resource budget (C8-36); shared across profiles.
+    resource_budget: Arc<Mutex<crate::resource_budget::ResourceBudget>>,
+    /// Daemon-wide bandwidth shaper (C8-38); shared across profiles.
+    bandwidth_shaper: Arc<Mutex<vapor_providers::BandwidthShaper>>,
+    /// User-idle signal for the idle-boost gates. The native HID bridge
+    /// is a platform follow-up; headless semantics (always idle) apply
+    /// until it lands.
+    idle_notifier: Arc<dyn vapor_platform::IdleNotifier>,
+    /// Auto-tuned per-tick transfer step budget (C8-42), shared across
+    /// profiles.
+    transfer_step_bytes: Arc<std::sync::atomic::AtomicU64>,
+    /// Latest published ceilings + last sampled inputs (C8-40).
+    latest_ceilings: Option<crate::resource_budget::EffectiveCeilings>,
+    last_sampled_inputs: Option<ThrottleInputs>,
     /// Last states emitted to the timeline, so transitions emit once.
     last_timeline_run_state: Option<RunState>,
     last_timeline_throttle: Option<vapor_shared::ThrottleState>,
@@ -437,6 +451,10 @@ impl DaemonRuntime {
                 local_root: self.sync_scope.local_sync_directory.as_deref(),
                 sync_mode: self.sync_scope.sync_mode,
                 device_id: &self.device_id,
+                transfer_step_bytes: self
+                    .transfer_step_bytes
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                bandwidth: &self.bandwidth_shaper,
                 tags: &self.tags,
                 local_echoes: &mut self.local_echoes,
                 remote_echoes: &mut self.remote_echoes,
@@ -761,6 +779,18 @@ impl DaemonRuntime {
             mirror_delete_count: 0,
             conflict_count: 0,
             timeline: None,
+            resource_budget: Arc::new(Mutex::new(crate::resource_budget::ResourceBudget::new(
+                crate::resource_budget::EffectiveBudgetConfig::resolve(
+                    &vapor_shared::config::VaporConfig::default(),
+                ),
+            ))),
+            bandwidth_shaper: Arc::new(Mutex::new(vapor_providers::BandwidthShaper::unlimited())),
+            idle_notifier: Arc::new(vapor_platform::AlwaysIdleNotifier),
+            transfer_step_bytes: Arc::new(std::sync::atomic::AtomicU64::new(
+                constants::engine::TRANSFER_STAGE_STEP_BYTES,
+            )),
+            latest_ceilings: None,
+            last_sampled_inputs: None,
             last_timeline_run_state: None,
             last_timeline_throttle: None,
             device_id: vapor_shared::device_id::derive_device_id(),
@@ -770,6 +800,47 @@ impl DaemonRuntime {
     /// Wires the shared daemon activity timeline in (C8-30).
     pub fn attach_timeline(&mut self, timeline: Arc<crate::timeline::TimelineBuffer>) {
         self.timeline = Some(timeline);
+    }
+
+    /// Wires the daemon-wide resource management set in (C8-36..C8-42):
+    /// the budget, the bandwidth shaper, the shared transfer step knob,
+    /// and the idle signal. The multi-profile runtime shares one of
+    /// each across every profile.
+    pub fn attach_resource_management(
+        &mut self,
+        budget: Arc<Mutex<crate::resource_budget::ResourceBudget>>,
+        shaper: Arc<Mutex<vapor_providers::BandwidthShaper>>,
+        transfer_step_bytes: Arc<std::sync::atomic::AtomicU64>,
+        idle_notifier: Arc<dyn vapor_platform::IdleNotifier>,
+    ) {
+        self.resource_budget = budget;
+        self.bandwidth_shaper = shaper;
+        self.transfer_step_bytes = transfer_step_bytes;
+        self.idle_notifier = idle_notifier;
+    }
+
+    /// Latest effective ceilings + utilization for the IPC surface
+    /// (C8-40). `None` until the first 1s sample.
+    pub fn resource_budget_status(&self) -> Option<vapor_ipc::ResourceBudgetStatus> {
+        let ceilings = self.latest_ceilings.as_ref()?;
+        let inputs = self.last_sampled_inputs.as_ref();
+        let bandwidth_rate_kbps = self
+            .bandwidth_shaper
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .rate()
+            .map(|bytes_per_sec| bytes_per_sec * 8 / 1_000)
+            .unwrap_or(0);
+        Some(vapor_ipc::ResourceBudgetStatus {
+            effective_cpu_percent: ceilings.cpu_percent,
+            effective_memory_percent: ceilings.memory_percent,
+            effective_bandwidth_percent: ceilings.bandwidth_percent,
+            cpu_utilization_percent: inputs.map(|i| i.vapor_cpu_load_percent).unwrap_or(0),
+            memory_utilization_percent: 0,
+            bandwidth_utilization_kbps: bandwidth_rate_kbps,
+            idle_boost_state: ceilings.boost_state.to_string(),
+            idle_boost_reason: ceilings.reason.clone(),
+        })
     }
 
     /// Cumulative loop-prevention suppressions across both echo caches.
@@ -1080,6 +1151,68 @@ impl DaemonRuntime {
             // (`data-flow.md §Loop prevention`).
             self.local_echoes.purge_expired(now);
             self.remote_echoes.purge_expired(now);
+
+            // Resource budget evaluation (C8-36..C8-40) on the same
+            // cadence: resolve ceilings, scale workgate caps, retarget
+            // the bandwidth shaper, and react to the memory ceiling.
+            let idle_for = self.idle_notifier.idle_for();
+            let throttle_state = self.app.snapshot().throttle_state;
+            let ceilings = self
+                .resource_budget
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .tick(throttle_state, &inputs, idle_for, now_inst);
+            self.app
+                .apply_resource_cpu_ceiling(ceilings.cpu_percent, now);
+            let capacity_kbps = inputs
+                .network_throughput_kbps
+                .unwrap_or(constants::engine::ASSUMED_LINK_CAPACITY_KBPS);
+            let rate_bytes_per_sec =
+                u64::from(capacity_kbps) * 1_000 / 8 * u64::from(ceilings.bandwidth_percent) / 100;
+            self.bandwidth_shaper
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .set_rate(Some(rate_bytes_per_sec.max(1)));
+            self.apply_memory_ceiling(ceilings.memory_percent);
+            self.latest_ceilings = Some(ceilings);
+            self.last_sampled_inputs = Some(inputs);
+        }
+    }
+
+    /// Memory-ceiling reactions (C8-39): bounded caches trim toward
+    /// their documented floors when the entry population outgrows the
+    /// ceiling-derived budget, and restore when clearly under it
+    /// (hysteresis at half the budget). Floors are enforced by the
+    /// caches themselves — loop prevention and observability never
+    /// degrade below their guarantees.
+    fn apply_memory_ceiling(&mut self, memory_percent: u8) {
+        const ENTRIES_PER_MEMORY_PERCENT: usize = 400;
+        let budget_entries = usize::from(memory_percent) * ENTRIES_PER_MEMORY_PERCENT;
+        let usage = self.local_echoes.len()
+            + self.remote_echoes.len()
+            + self
+                .timeline
+                .as_ref()
+                .map(|timeline| timeline.len())
+                .unwrap_or(0);
+
+        if usage > budget_entries {
+            let squeezed_ttl =
+                Duration::from_millis(vapor_shared::constants::self_write_cache::MIN_TTL_MILLIS);
+            let squeezed_entries = vapor_shared::constants::self_write_cache::MIN_ENTRIES;
+            self.local_echoes.set_bounds(squeezed_ttl, squeezed_entries);
+            self.remote_echoes
+                .set_bounds(squeezed_ttl, squeezed_entries);
+            if let Some(timeline) = &self.timeline {
+                timeline.set_max_entries(budget_entries / 4);
+            }
+        } else if usage < budget_entries / 2 {
+            let default_ttl = Duration::from_millis(
+                vapor_shared::constants::self_write_cache::DEFAULT_TTL_MILLIS,
+            );
+            let default_entries = vapor_shared::constants::self_write_cache::MAX_ENTRIES;
+            self.local_echoes.set_bounds(default_ttl, default_entries);
+            self.remote_echoes.set_bounds(default_ttl, default_entries);
         }
     }
 
@@ -2593,6 +2726,124 @@ mod tests {
                 "burst-{index} must land remotely"
             );
         }
+    }
+
+    #[test]
+    fn bandwidth_ceiling_holds_transfers_until_tokens_refill() {
+        // C8-38/C8-41: with a tiny measured link capacity the shaper
+        // grants almost nothing per second, so an upload holds at its
+        // checkpoint; restoring capacity lets it complete.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline (default inputs)
+
+        let starved_inputs = ThrottleInputs {
+            network_throughput_kbps: Some(1), // ~31 bytes/s at 25%
+            ..ThrottleInputs::default()
+        };
+        // Sample the starved inputs so the shaper rate collapses.
+        fixture.clock.advance(Duration::from_millis(6_000));
+        fixture.now_ms += 6_000;
+        fixture
+            .runtime
+            .tick_with_inputs(timestamp_ms(fixture.now_ms), starved_inputs)
+            .expect("tick");
+
+        let local_file = fixture.watch_root.join("starved.bin");
+        std::fs::write(&local_file, vec![9_u8; 64 * 1024]).expect("seed 64KiB");
+        fixture.record_local_event(&local_file, FsEventKind::Created, fixture.now_ms);
+
+        // Several ticks under starvation: the payload must NOT complete
+        // (a few stray bytes may trickle, the file cannot finish).
+        let mut completed = 0;
+        for _ in 0..6 {
+            fixture.clock.advance(Duration::from_millis(1_500));
+            fixture.now_ms += 1_500;
+            let report = fixture
+                .runtime
+                .tick_with_inputs(timestamp_ms(fixture.now_ms), starved_inputs)
+                .expect("tick");
+            completed += report.completed_intents;
+        }
+        assert_eq!(completed, 0, "starved bandwidth must hold the upload");
+        assert!(!fixture.cloud_root.join("starved.bin").exists());
+
+        // Capacity restored: the transfer completes.
+        let restored = ThrottleInputs::default();
+        for _ in 0..12 {
+            fixture.clock.advance(Duration::from_millis(6_000));
+            fixture.now_ms += 6_000;
+            let report = fixture
+                .runtime
+                .tick_with_inputs(timestamp_ms(fixture.now_ms), restored)
+                .expect("tick");
+            completed += report.completed_intents;
+            if completed > 0 {
+                break;
+            }
+        }
+        assert!(
+            completed >= 1,
+            "restored bandwidth must complete the upload"
+        );
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("starved.bin"))
+                .expect("uploaded")
+                .len(),
+            64 * 1024
+        );
+    }
+
+    #[test]
+    fn idle_boost_scales_workgate_caps_and_snaps_back_on_throttle_exit() {
+        // C8-37/C8-41: the AlwaysIdle notifier + IdleDrain inputs engage
+        // boost; after the ramp the workgate caps exceed their base, and
+        // a throttle exit snaps them back in the same sample.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+
+        // Ride out the min-idle + ramp (AlwaysIdle reports a day).
+        for _ in 0..8 {
+            fixture.tick(6_000);
+        }
+        let boosted = fixture.runtime.app().workgate_snapshot();
+        assert!(
+            boosted.caps.planner_workers
+                > vapor_shared::constants::engine::IDLE_DRAIN_PLANNER_WORKERS,
+            "boost must raise caps above the base ({} <= {})",
+            boosted.caps.planner_workers,
+            vapor_shared::constants::engine::IDLE_DRAIN_PLANNER_WORKERS
+        );
+        let status = fixture
+            .runtime
+            .resource_budget_status()
+            .expect("published after first sample");
+        assert_eq!(status.idle_boost_state, "active");
+        assert!(status.effective_cpu_percent > 15);
+
+        // Heavy foreign load drives the throttle out of IdleDrain: caps
+        // snap to (at most) their throttled base values immediately.
+        let busy = ThrottleInputs {
+            system_cpu_load_percent: 70,
+            ..ThrottleInputs::default()
+        };
+        fixture.clock.advance(Duration::from_millis(6_000));
+        fixture.now_ms += 6_000;
+        fixture
+            .runtime
+            .tick_with_inputs(timestamp_ms(fixture.now_ms), busy)
+            .expect("tick");
+        let snapped = fixture.runtime.app().workgate_snapshot();
+        assert!(
+            snapped.caps.planner_workers
+                <= vapor_shared::constants::engine::IDLE_DRAIN_PLANNER_WORKERS,
+            "post-IdleDrain states never run against boosted caps"
+        );
+        let status = fixture
+            .runtime
+            .resource_budget_status()
+            .expect("still published");
+        assert_eq!(status.idle_boost_state, "off");
+        assert_eq!(status.effective_cpu_percent, 15);
     }
 
     #[test]

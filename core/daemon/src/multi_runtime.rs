@@ -101,6 +101,7 @@ pub struct MultiProfileRuntime {
     external_control: Option<Arc<RuntimeControl>>,
     status_publisher: Option<Arc<dyn StatusPublisher>>,
     timeline: Arc<crate::timeline::TimelineBuffer>,
+    auto_tuner: crate::auto_tune::AutoTuner,
     clock: SharedClock,
     tick_interval: Duration,
     idle_tick_interval: Duration,
@@ -110,6 +111,7 @@ impl MultiProfileRuntime {
     /// Composes the full multi-profile daemon: shared workgate, one
     /// runtime per enabled profile (each on its own durable DB), and
     /// deduplicated watchers with per-profile fan-out.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         profiles: Vec<ResolvedProfile>,
         filter_options: EventPathFilterOptions,
@@ -117,6 +119,7 @@ impl MultiProfileRuntime {
         clock: SharedClock,
         device_id: &str,
         start_watchers: bool,
+        budget_config: crate::resource_budget::EffectiveBudgetConfig,
     ) -> Result<Self, DaemonRuntimeError> {
         Self::start_with_state_root(
             profiles,
@@ -126,6 +129,7 @@ impl MultiProfileRuntime {
             device_id,
             start_watchers,
             None,
+            budget_config,
         )
     }
 
@@ -156,6 +160,7 @@ impl MultiProfileRuntime {
         device_id: &str,
         start_watchers: bool,
         state_root: Option<PathBuf>,
+        budget_config: crate::resource_budget::EffectiveBudgetConfig,
     ) -> Result<Self, DaemonRuntimeError> {
         let now = clock.now_system();
         let tick_waker = Arc::new(TickWaker::default());
@@ -167,6 +172,17 @@ impl MultiProfileRuntime {
             initial_state,
             initial_caps(initial_state),
         )));
+        // Daemon-wide resource management (C8-36..C8-42): one budget,
+        // one bandwidth shaper, one tuned step knob for every profile.
+        let shared_budget = Arc::new(Mutex::new(crate::resource_budget::ResourceBudget::new(
+            budget_config,
+        )));
+        let shared_shaper = Arc::new(Mutex::new(vapor_providers::BandwidthShaper::unlimited()));
+        let shared_step = Arc::new(std::sync::atomic::AtomicU64::new(
+            constants::engine::TRANSFER_STAGE_STEP_BYTES,
+        ));
+        let idle_notifier: Arc<dyn vapor_platform::IdleNotifier> =
+            Arc::new(vapor_platform::NativeIdleNotifier::for_current_host());
 
         let mut slots = Vec::new();
         for profile in profiles.into_iter().filter(|profile| profile.enabled) {
@@ -204,6 +220,12 @@ impl MultiProfileRuntime {
             )?;
             runtime.set_device_id(device_id);
             runtime.attach_timeline(timeline.clone());
+            runtime.attach_resource_management(
+                shared_budget.clone(),
+                shared_shaper.clone(),
+                shared_step.clone(),
+                idle_notifier.clone(),
+            );
             runtime.schedule_startup_reconcile(now)?;
             let control = Arc::new(RuntimeControl::new());
             runtime.attach_control(control.clone());
@@ -229,6 +251,7 @@ impl MultiProfileRuntime {
             external_control: None,
             status_publisher: None,
             timeline,
+            auto_tuner: crate::auto_tune::AutoTuner::new(shared_step),
             clock,
             tick_interval: Duration::from_millis(constants::engine::DEBOUNCE_TICK_MILLIS),
             idle_tick_interval: Duration::from_millis(constants::engine::IDLE_TICK_MILLIS),
@@ -344,6 +367,21 @@ impl MultiProfileRuntime {
             }
         }
 
+        // Auto-tuning (C8-42): one small change per cycle, driven by
+        // aggregate rate-limit + queue-depth signals, bounded by the
+        // ceilings via the bandwidth shaper.
+        let rate_limited = self
+            .slots
+            .iter()
+            .any(|slot| slot.runtime.app().retry_slowdown_until().is_some());
+        let total_queue_depth: u64 = self
+            .slots
+            .iter()
+            .map(|slot| slot.runtime.state_db().queue_depth().unwrap_or(0) as u64)
+            .sum();
+        self.auto_tuner
+            .evaluate(rate_limited, total_queue_depth, self.clock.now());
+
         if let Some(publisher) = self.status_publisher.as_ref() {
             publisher.publish(self.aggregate_status(now));
         }
@@ -433,6 +471,10 @@ impl MultiProfileRuntime {
 
         let mut snapshot = DaemonStatusSnapshot::from_app(worst.runtime.app());
         snapshot.run_state = format!("{:?}", slot_effective_run_state(worst));
+        snapshot.resource_budget = self
+            .slots
+            .iter()
+            .find_map(|slot| slot.runtime.resource_budget_status());
         if self.slots.len() > 1 {
             let live = self.slots.iter().filter(|s| s.failed.is_none()).count();
             snapshot.throttle_reason = format!(
@@ -655,6 +697,9 @@ mod tests {
                 "testdev",
                 false,
                 Some(temp.path().join("state")),
+                crate::resource_budget::EffectiveBudgetConfig::resolve(
+                    &vapor_shared::config::VaporConfig::default(),
+                ),
             )
             .expect("multi runtime");
 
