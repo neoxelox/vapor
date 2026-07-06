@@ -71,7 +71,7 @@ pub mod config {
     pub const KEY_LANGUAGE_CODE: &str = "languageCode";
     pub const KEY_TIMELINE_EVENT_LIMIT: &str = "timelineEventLimit";
     /// Provider selection (C8-2): `filesystem` (default pre-GA) or
-    /// `google_drive`. See `provider::*` for the accepted values.
+    /// `gdrive`. See `provider::*` for the accepted values.
     pub const KEY_PROVIDER: &str = "provider";
     /// Sync direction selector (C8-59): `two-way` (default),
     /// `pull-only`, `push-only`. See `sync_mode::*` and
@@ -128,12 +128,12 @@ pub mod provider {
     /// Accepted `provider` config values. `filesystem` is the pre-GA
     /// default (C8-2); when selected, `cloudSyncDirectory` is
     /// reinterpreted as an absolute local directory that plays the role
-    /// of the cloud side. `google_drive` selects the real cloud
+    /// of the cloud side. `gdrive` selects the real cloud
     /// provider once C8-54 flips it selectable.
     pub const FILESYSTEM: &str = "filesystem";
-    pub const GOOGLE_DRIVE: &str = "google_drive";
+    pub const GDRIVE: &str = "gdrive";
     pub const DEFAULT: &str = FILESYSTEM;
-    pub const ALL: &[&str] = &[FILESYSTEM, GOOGLE_DRIVE];
+    pub const ALL: &[&str] = &[FILESYSTEM, GDRIVE];
 
     /// Extended-attribute name carrying the daemon's operation id on
     /// files the daemon itself wrote (self-write loop prevention, C8-7).

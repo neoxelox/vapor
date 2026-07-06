@@ -156,7 +156,7 @@ func loadSaveRoundTripPreservesRuntimeOwnedKeysAndDeviceId() throws {
     {
       "languageCode": "en",
       "deviceId": "mac-studio-01",
-      "provider": "google_drive",
+      "provider": "gdrive",
       "syncMode": "pull-only",
       "profiles": [{"id": "work", "localSyncDirectory": "~/Work"}],
       "resourceLimits": {"cpuPercent": 20},
@@ -172,7 +172,7 @@ func loadSaveRoundTripPreservesRuntimeOwnedKeysAndDeviceId() throws {
   var configuration = store.load()
   #expect(configuration.deviceId == "mac-studio-01")
   #expect(
-    configuration.additionalKeys[VaporConstants.ConfigKeys.provider] == .string("google_drive"))
+    configuration.additionalKeys[VaporConstants.ConfigKeys.provider] == .string("gdrive"))
   #expect(configuration.additionalKeys[VaporConstants.ConfigKeys.syncMode] == .string("pull-only"))
 
   // The app edits one of its own settings and saves.
@@ -185,7 +185,7 @@ func loadSaveRoundTripPreservesRuntimeOwnedKeysAndDeviceId() throws {
     ) as! [String: Any]
   #expect(reloaded["autoLaunch"] as? Bool == false)
   #expect(reloaded["deviceId"] as? String == "mac-studio-01")
-  #expect(reloaded["provider"] as? String == "google_drive")
+  #expect(reloaded["provider"] as? String == "gdrive")
   #expect(reloaded["syncMode"] as? String == "pull-only")
   #expect((reloaded["profiles"] as? [[String: Any]])?.first?["id"] as? String == "work")
   #expect((reloaded["resourceLimits"] as? [String: Any])?["cpuPercent"] as? Double == 20)

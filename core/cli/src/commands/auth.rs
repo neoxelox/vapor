@@ -81,7 +81,7 @@ impl From<SecretStoreError> for AuthError {
     }
 }
 
-const SUPPORTED_PROVIDERS: &[&str] = &["filesystem", "google_drive"];
+const SUPPORTED_PROVIDERS: &[&str] = vapor_shared::constants::provider::ALL;
 
 fn validate_provider(name: &str) -> Result<(), AuthError> {
     if SUPPORTED_PROVIDERS.contains(&name) {
@@ -266,8 +266,8 @@ mod tests {
         assert!(filesystem.bound);
         let google = entries
             .iter()
-            .find(|e| e.provider == "google_drive")
-            .expect("google_drive entry");
+            .find(|e| e.provider == "gdrive")
+            .expect("gdrive entry");
         assert!(!google.bound);
     }
 
@@ -276,9 +276,9 @@ mod tests {
         // C8-20: a token bound to one profile must be invisible to
         // every other profile.
         let store = InMemorySecretStore::new();
-        login_into(&store, "work", "google_drive", "ya29.work").expect("login");
+        login_into(&store, "work", "gdrive", "ya29.work").expect("login");
         let work = status_from(&store, "work").expect("status");
-        assert!(work.iter().any(|e| e.provider == "google_drive" && e.bound));
+        assert!(work.iter().any(|e| e.provider == "gdrive" && e.bound));
         let home = status_from(&store, "home").expect("status");
         assert!(home.iter().all(|e| !e.bound));
     }
@@ -286,8 +286,8 @@ mod tests {
     #[test]
     fn logout_clears_token_from_store() {
         let store = InMemorySecretStore::new();
-        login_into(&store, "default", "google_drive", "ya29.x").expect("login");
-        logout_from(&store, "default", "google_drive").expect("logout");
+        login_into(&store, "default", "gdrive", "ya29.x").expect("login");
+        logout_from(&store, "default", "gdrive").expect("logout");
         let entries = status_from(&store, "default").expect("status");
         assert!(entries.iter().all(|entry| !entry.bound));
     }

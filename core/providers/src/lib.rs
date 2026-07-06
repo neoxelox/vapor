@@ -351,12 +351,12 @@ pub fn select_provider(kind: &str) -> Result<Box<dyn Provider>, ProviderError> {
     )
 }
 
-/// Profile-aware provider selection (C8-54): `google_drive` is now
+/// Profile-aware provider selection (C8-54): `gdrive` is now
 /// selectable, constructed against the profile's namespaced
 /// credentials. Missing credentials do not fail selection — they
 /// surface as an actionable `Authentication` error when the engine
 /// ensures the cloud root, which blocks sync until
-/// `vapor auth login google_drive` runs (C8-50).
+/// `vapor auth login gdrive` runs (C8-50).
 pub fn select_provider_for_profile(
     kind: &str,
     profile_id: &str,
@@ -365,7 +365,7 @@ pub fn select_provider_for_profile(
         value if value == vapor_shared::constants::provider::FILESYSTEM => {
             Ok(Box::new(FilesystemProvider::new()))
         }
-        value if value == vapor_shared::constants::provider::GOOGLE_DRIVE => {
+        value if value == vapor_shared::constants::provider::GDRIVE => {
             Ok(Box::new(GoogleDriveProvider::for_profile(profile_id)?))
         }
         other => Err(ProviderError::permanent(format!(

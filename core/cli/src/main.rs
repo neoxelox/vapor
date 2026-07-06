@@ -467,7 +467,8 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
             // Google Drive without an explicit --token runs the full
             // OAuth-PKCE browser flow (C8-48); every other path keeps
             // the explicit/stdin token behavior.
-            let token = if provider == "google_drive" && token.is_none() {
+            let token = if provider == vapor_shared::constants::provider::GDRIVE && token.is_none()
+            {
                 auth_cmd::run_gdrive_pkce_flow()?
             } else {
                 resolve_auth_token(token)?

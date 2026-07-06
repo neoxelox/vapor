@@ -119,7 +119,7 @@ public enum VaporConstants {
   /// `core/shared/src/constants.rs::provider::*` per AGENTS.md §8.6.
   public enum Providers {
     public static let filesystem = "filesystem"
-    public static let googleDrive = "google_drive"
-    public static let all = [filesystem, googleDrive]
+    public static let gdrive = "gdrive"
+    public static let all = [filesystem, gdrive]
   }
 }

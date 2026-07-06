@@ -249,7 +249,7 @@ mod tests {
         let temp = TempDir::new().expect("temp");
         let path = config_path(&temp);
         set(&path, "provider", "filesystem").expect("filesystem accepted");
-        set(&path, "provider", "google_drive").expect("google_drive accepted");
+        set(&path, "provider", "gdrive").expect("gdrive accepted");
         let error = set(&path, "provider", "dropbox").expect_err("unknown provider");
         assert!(matches!(error, ConfigError::Parse(_)));
         assert!(error.to_string().contains("filesystem"));

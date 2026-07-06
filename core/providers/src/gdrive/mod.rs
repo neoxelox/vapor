@@ -5,7 +5,7 @@
 //! is testable offline. Highlights:
 //!
 //! - **Auth** (C8-48): profile-scoped tokens from the `SecretStore`
-//!   (`auth.{profile}.google_drive.token`), proactive refresh 60s
+//!   (`auth.{profile}.gdrive.token`), proactive refresh 60s
 //!   before expiry, `invalid_grant` → `Authentication` (user
 //!   re-consent), one forced-refresh retry on a 401.
 //! - **Root handling** (C8-49/C8-50): `ensure_cloud_sync_directory`
@@ -68,7 +68,7 @@ impl GdriveConfig {
     /// The secret-store entry holding this profile's tokens (C8-20
     /// namespacing).
     pub fn token_secret_name(&self) -> String {
-        format!("auth.{}.google_drive.token", self.profile_id)
+        format!("auth.{}.gdrive.token", self.profile_id)
     }
 }
 
@@ -101,13 +101,13 @@ impl TokenManager {
             .get(&self.config.token_secret_name())
             .map_err(|_| {
                 ProviderError::authentication(format!(
-                    "no Google Drive credentials for profile '{}'; run `vapor auth login google_drive --profile {}`",
+                    "no Google Drive credentials for profile '{}'; run `vapor auth login gdrive --profile {}`",
                     self.config.profile_id, self.config.profile_id
                 ))
             })?;
         let tokens: StoredTokens = serde_json::from_str(&raw).map_err(|_| {
             ProviderError::authentication(
-                "stored Google Drive credentials are unreadable; run `vapor auth login google_drive`",
+                "stored Google Drive credentials are unreadable; run `vapor auth login gdrive`",
             )
         })?;
         *self
@@ -146,7 +146,7 @@ impl TokenManager {
     fn force_refresh(&self, current: &StoredTokens) -> Result<String, ProviderError> {
         let Some(refresh_token) = current.refresh_token.as_deref() else {
             return Err(ProviderError::authentication(
-                "Google Drive access token expired and no refresh token is stored; run `vapor auth login google_drive`",
+                "Google Drive access token expired and no refresh token is stored; run `vapor auth login gdrive`",
             ));
         };
         let refreshed = oauth::refresh_tokens(
@@ -589,7 +589,7 @@ impl GoogleDriveProvider {
 
 impl Provider for GoogleDriveProvider {
     fn name(&self) -> &'static str {
-        vapor_shared::constants::provider::GOOGLE_DRIVE
+        vapor_shared::constants::provider::GDRIVE
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -1290,7 +1290,7 @@ fn classify_api_failure(response: &HttpResponse) -> ProviderError {
         .map(Duration::from_secs);
     match response.status {
         401 => ProviderError::authentication(
-            "Google Drive rejected the credentials; run `vapor auth login google_drive`",
+            "Google Drive rejected the credentials; run `vapor auth login gdrive`",
         ),
         403 if body_text.contains("ateLimitExceeded") || body_text.contains("quotaExceeded") => {
             ProviderError::rate_limited(retry_after, "Drive rate limit exceeded")

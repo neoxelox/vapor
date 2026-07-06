@@ -26,7 +26,7 @@ pub struct ResolvedProfile {
     pub id: String,
     pub display_name: String,
     /// Provider selection for this profile (`filesystem` /
-    /// `google_drive`).
+    /// `gdrive`).
     pub provider_kind: String,
     pub scope: SyncScope,
     pub enabled: bool,
@@ -325,23 +325,19 @@ mod tests {
         use vapor_platform::SecretStore;
         let store = vapor_platform::InMemorySecretStore::new();
         store
-            .set(&secret_key("work", "google_drive", "token"), "secret-a")
+            .set(&secret_key("work", "gdrive", "token"), "secret-a")
             .expect("seed");
         store
-            .set(&secret_key("home", "google_drive", "token"), "secret-b")
+            .set(&secret_key("home", "gdrive", "token"), "secret-b")
             .expect("seed");
 
         purge_profile_state("work", &store).expect("purge");
         assert!(
-            store
-                .get(&secret_key("work", "google_drive", "token"))
-                .is_err(),
+            store.get(&secret_key("work", "gdrive", "token")).is_err(),
             "purged profile secrets must be gone"
         );
         assert!(
-            store
-                .get(&secret_key("home", "google_drive", "token"))
-                .is_ok(),
+            store.get(&secret_key("home", "gdrive", "token")).is_ok(),
             "other profiles' secrets must survive"
         );
 
@@ -352,8 +348,8 @@ mod tests {
     #[test]
     fn secret_keys_are_namespaced_by_profile_and_provider() {
         assert_eq!(
-            secret_key("work", "google_drive", "token"),
-            "auth.work.google_drive.token"
+            secret_key("work", "gdrive", "token"),
+            "auth.work.gdrive.token"
         );
     }
 }

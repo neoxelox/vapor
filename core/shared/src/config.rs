@@ -39,7 +39,7 @@ pub struct VaporConfig {
     pub language_code: String,
     pub timeline_event_limit: i64,
     /// Provider selection (C8-2): `filesystem` (default pre-GA) or
-    /// `google_drive`. When `filesystem` is selected,
+    /// `gdrive`. When `filesystem` is selected,
     /// `cloud_sync_directory` is reinterpreted as an absolute local
     /// directory that plays the cloud role.
     pub provider: String,

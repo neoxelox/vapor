@@ -11,7 +11,7 @@ fn provider_with(transport: Arc<ScriptedHttpTransport>) -> GoogleDriveProvider {
     let secrets = InMemorySecretStore::new();
     secrets
         .set(
-            "auth.default.google_drive.token",
+            "auth.default.gdrive.token",
             &format!(
                 r#"{{"accessToken":"ya29.test","refreshToken":"1//rt","expiresAtMs":{}}}"#,
                 // Far future so no refresh fires unless a test wants it.
@@ -403,7 +403,7 @@ fn missing_credentials_surface_an_actionable_auth_error() {
         .ensure_cloud_sync_directory("/Vapor")
         .expect_err("no credentials must fail");
     assert_eq!(error.kind, ProviderErrorKind::Authentication);
-    assert!(error.message.contains("vapor auth login google_drive"));
+    assert!(error.message.contains("vapor auth login gdrive"));
     assert!(error.message.contains("workp"), "names the profile");
 }
 

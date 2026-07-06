@@ -9,7 +9,7 @@ are provider-neutral unless a section says otherwise.
 ## OAuth flow baseline (Google Drive)
 
 - OAuth 2.0 with PKCE (`S256` code challenge, RFC 7636).
-  `vapor auth login google_drive` runs the whole flow: it starts a
+  `vapor auth login gdrive` runs the whole flow: it starts a
   loopback listener on `127.0.0.1`, opens the consent page in the
   default browser, receives the redirect, and exchanges the code.
 - Client credentials are per-deployment, supplied via environment:
@@ -34,7 +34,7 @@ are provider-neutral unless a section says otherwise.
 - Failure classification (`ProviderErrorKind`):
   - `invalid_grant` / `invalid_client` → `Authentication`
     (user-action-required; the message names the exact command:
-    `vapor auth login google_drive`).
+    `vapor auth login gdrive`).
   - Token-endpoint 5xx or transport failure → `Transient` (bounded
     retries with backoff through the normal retry policy).
 - Missing client credentials surface as an actionable `Authentication`
@@ -46,7 +46,7 @@ are provider-neutral unless a section says otherwise.
 - Repeated refresh failures degrade to a blocked-sync state with the
   reason visible in `vapor status` / the timeline; queued work is
   preserved, never dropped.
-- Re-auth (`vapor auth login google_drive --profile <id>`) replaces the
+- Re-auth (`vapor auth login gdrive --profile <id>`) replaces the
   stored token set; the daemon picks it up on its next provider call.
 - `vapor auth logout <provider> --profile <id>` removes the stored
   token; `vapor auth status` reports bound/not-bound without ever

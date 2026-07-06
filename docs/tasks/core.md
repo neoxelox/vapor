@@ -348,7 +348,7 @@ inherits it.
       `ProviderCapabilities::supports_remote_changes_feed`. Error taxonomy:
       `Transient`, `RateLimited`, `Authentication`, `PreconditionFailed`,
       `NotFound`, `Permanent`.
-- [x] C8-2 `provider` config field (`filesystem` default, `google_drive`
+- [x] C8-2 `provider` config field (`filesystem` default, `gdrive`
       accepted but inert). Document `cloudSyncDirectory` reinterpretation
       when `provider = "filesystem"`. Mirror constant in
       `apps/macos/Sources/VaporCore/VaporConstants.swift` and
