@@ -35,10 +35,12 @@ pub mod logging;
 pub mod metrics;
 pub mod path_filter;
 pub mod reconcile;
+pub mod remote_sync;
 pub mod retry;
 pub mod runtime;
 pub mod runtime_control;
 pub mod scheduler;
+pub mod self_write_cache;
 pub mod singleton;
 pub mod state_db;
 pub mod storm;
@@ -103,6 +105,13 @@ impl DaemonApp {
 
     pub fn provider_name(&self) -> &'static str {
         self.provider.name()
+    }
+
+    /// The injected provider. The staged executor and the remote poller
+    /// drive uploads / downloads / deletes / change polls through this
+    /// trait boundary — engine code never names a concrete provider.
+    pub fn provider(&self) -> &dyn Provider {
+        self.provider.as_ref()
     }
 
     pub fn throttle_decision(&self) -> Option<&ThrottleDecision> {
@@ -272,23 +281,36 @@ impl DaemonApp {
         allowed
     }
 
-    pub fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) {
+    /// Ensures the provider-side sync root exists (C8-8). Returns the
+    /// actionable error when it cannot; the runtime blocks regular sync
+    /// work until a later attempt succeeds (C8-50) — intents keep
+    /// accumulating durably, they are never dropped.
+    pub fn ensure_cloud_sync_directory(
+        &self,
+        cloud_sync_directory: &str,
+    ) -> Result<(), vapor_providers::ProviderError> {
         match self
             .provider
             .ensure_cloud_sync_directory(cloud_sync_directory)
         {
-            Ok(_) => logging::info(
-                "Cloud sync directory is ready",
-                &[("cloud_sync_directory", cloud_sync_directory.to_string())],
-            ),
-            Err(error) => logging::error(
-                "Failed to ensure cloud sync directory",
-                &[
-                    ("cloud_sync_directory", cloud_sync_directory.to_string()),
-                    ("failure_kind", error.failure.label().to_string()),
-                    ("error", error.message),
-                ],
-            ),
+            Ok(_) => {
+                logging::info(
+                    "Cloud sync directory is ready",
+                    &[("cloud_sync_directory", cloud_sync_directory.to_string())],
+                );
+                Ok(())
+            }
+            Err(error) => {
+                logging::error(
+                    "Failed to ensure cloud sync directory",
+                    &[
+                        ("cloud_sync_directory", cloud_sync_directory.to_string()),
+                        ("failure_kind", error.kind.label().to_string()),
+                        ("error", error.message.clone()),
+                    ],
+                );
+                Err(error)
+            }
         }
     }
 
@@ -434,7 +456,8 @@ mod tests {
     #[test]
     fn ensure_cloud_sync_directory_does_not_panic() {
         let app = DaemonApp::default();
-        app.ensure_cloud_sync_directory("/Vapor");
+        // The stub provider treats the cloud root as always present.
+        assert!(app.ensure_cloud_sync_directory("/Vapor").is_ok());
     }
 
     #[test]

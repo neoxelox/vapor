@@ -9,7 +9,12 @@ use vapor_shared::{constants, logging::sanitize_diagnostic_text, runtime_paths};
 use crate::event_intents::PendingIntentKind;
 use crate::retry::{RetryDecision, RetryFailureKind, RetryPolicy};
 
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
+/// The last schema version this build can migrate forward in place.
+/// v3 → v4 widened the intent-kind vocabulary with the remote→local
+/// pipeline kinds (`download`, `apply_remote_delete`; C8-6), which only
+/// requires recreating the two intent tables with the wider CHECK.
+const MIGRATABLE_SCHEMA_VERSION: i64 = 3;
 const STATE_PENDING: &str = "pending";
 const STATE_LEASED: &str = "leased";
 
@@ -736,6 +741,9 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
     if schema_meta_exists {
         match read_schema_version(&transaction)? {
             Some(CURRENT_SCHEMA_VERSION) | None => {}
+            Some(MIGRATABLE_SCHEMA_VERSION) => {
+                migrate_v3_to_v4(&transaction)?;
+            }
             Some(found) => {
                 return Err(StateDbError::SchemaVersionMismatch {
                     found,
@@ -753,7 +761,7 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
          CREATE TABLE IF NOT EXISTS queue_intents (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              path_text TEXT NOT NULL,
-             kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
+             kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
              state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
              enqueued_at_ms INTEGER NOT NULL,
              available_at_ms INTEGER NOT NULL,
@@ -766,7 +774,7 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
          CREATE TABLE IF NOT EXISTS failed_intents (
              id INTEGER PRIMARY KEY,
              path_text TEXT NOT NULL,
-             kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
+             kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
              failure_kind TEXT NOT NULL CHECK(failure_kind IN ('authentication', 'permanent')),
              enqueued_at_ms INTEGER NOT NULL,
              failed_at_ms INTEGER NOT NULL,
@@ -788,6 +796,59 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
     }
 
     transaction.commit()?;
+    Ok(())
+}
+
+/// Forward migration v3 → v4: rebuilds the two intent tables with the
+/// widened `kind` CHECK (SQLite cannot alter CHECK constraints in
+/// place) while preserving every row and the AUTOINCREMENT sequence.
+/// Rollback story: v4 rows using the new kinds cannot exist in a v3
+/// database, so rolling back to a v3 build after remote-sourced intents
+/// were enqueued is unsupported — pre-GA policy (AGENTS.md §1.1) with
+/// the change documented in `docs/architecture/state-schema-migrations.md`.
+fn migrate_v3_to_v4(transaction: &rusqlite::Transaction<'_>) -> Result<(), StateDbError> {
+    transaction.execute_batch(
+        "CREATE TABLE queue_intents_v4 (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             path_text TEXT NOT NULL,
+             kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
+             state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
+             enqueued_at_ms INTEGER NOT NULL,
+             available_at_ms INTEGER NOT NULL,
+             leased_at_ms INTEGER,
+             attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+             last_error TEXT
+         );
+         INSERT INTO queue_intents_v4
+             SELECT id, path_text, kind, state, enqueued_at_ms, available_at_ms,
+                    leased_at_ms, attempt_count, last_error
+             FROM queue_intents;
+         DROP TABLE queue_intents;
+         ALTER TABLE queue_intents_v4 RENAME TO queue_intents;
+         CREATE INDEX IF NOT EXISTS idx_queue_intents_ready
+             ON queue_intents(state, available_at_ms, id);
+         CREATE TABLE failed_intents_v4 (
+             id INTEGER PRIMARY KEY,
+             path_text TEXT NOT NULL,
+             kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
+             failure_kind TEXT NOT NULL CHECK(failure_kind IN ('authentication', 'permanent')),
+             enqueued_at_ms INTEGER NOT NULL,
+             failed_at_ms INTEGER NOT NULL,
+             attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),
+             last_error TEXT NOT NULL
+         );
+         INSERT INTO failed_intents_v4
+             SELECT id, path_text, kind, failure_kind, enqueued_at_ms, failed_at_ms,
+                    attempt_count, last_error
+             FROM failed_intents;
+         DROP TABLE failed_intents;
+         ALTER TABLE failed_intents_v4 RENAME TO failed_intents;
+         UPDATE schema_meta SET schema_version = 4 WHERE singleton = 1;",
+    )?;
+    crate::logging::info(
+        "Migrated durable state schema v3 -> v4 (remote-sourced intent kinds)",
+        &[],
+    );
     Ok(())
 }
 
@@ -1016,6 +1077,8 @@ fn intent_kind_label(kind: PendingIntentKind) -> &'static str {
         PendingIntentKind::Upload => "upload",
         PendingIntentKind::Delete => "delete",
         PendingIntentKind::Rename => "rename",
+        PendingIntentKind::Download => "download",
+        PendingIntentKind::ApplyRemoteDelete => "apply_remote_delete",
         PendingIntentKind::ReconcileSubtree => "reconcile_subtree",
     }
 }
@@ -1025,6 +1088,8 @@ fn intent_kind_from_label(label: &str) -> Result<PendingIntentKind, StateDbError
         "upload" => Ok(PendingIntentKind::Upload),
         "delete" => Ok(PendingIntentKind::Delete),
         "rename" => Ok(PendingIntentKind::Rename),
+        "download" => Ok(PendingIntentKind::Download),
+        "apply_remote_delete" => Ok(PendingIntentKind::ApplyRemoteDelete),
         "reconcile_subtree" => Ok(PendingIntentKind::ReconcileSubtree),
         other => Err(StateDbError::InvalidIntentKind(other.to_string())),
     }
@@ -1858,6 +1923,82 @@ mod tests {
                 expected: CURRENT_SCHEMA_VERSION
             }
         ));
+    }
+
+    #[test]
+    fn version_three_database_migrates_in_place_to_v4_preserving_rows() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        if let Some(parent) = database_path.parent() {
+            fs::create_dir_all(parent).expect("create parent directory");
+        }
+
+        let connection = Connection::open(&database_path).expect("open sqlite connection");
+        configure_connection(&connection).expect("configure connection");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_meta (
+                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                     schema_version INTEGER NOT NULL CHECK(schema_version > 0)
+                 );
+                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 3);
+                 CREATE TABLE queue_intents (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     path_text TEXT NOT NULL,
+                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
+                     state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
+                     enqueued_at_ms INTEGER NOT NULL,
+                     available_at_ms INTEGER NOT NULL,
+                     leased_at_ms INTEGER,
+                     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                     last_error TEXT
+                 );
+                 CREATE INDEX idx_queue_intents_ready
+                     ON queue_intents(state, available_at_ms, id);
+                 CREATE TABLE failed_intents (
+                     id INTEGER PRIMARY KEY,
+                     path_text TEXT NOT NULL,
+                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
+                     failure_kind TEXT NOT NULL CHECK(failure_kind IN ('authentication', 'permanent')),
+                     enqueued_at_ms INTEGER NOT NULL,
+                     failed_at_ms INTEGER NOT NULL,
+                     attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),
+                     last_error TEXT NOT NULL
+                 );
+                 CREATE TABLE state_entries (
+                     key TEXT PRIMARY KEY,
+                     value TEXT NOT NULL,
+                     updated_at_ms INTEGER NOT NULL
+                 );
+                 INSERT INTO queue_intents
+                     (path_text, kind, state, enqueued_at_ms, available_at_ms,
+                      leased_at_ms, attempt_count, last_error)
+                     VALUES ('/tmp/vapor-root/preserved.txt', 'upload', 'pending',
+                             100, 100, NULL, 2, 'retry me');",
+            )
+            .expect("seed version three schema");
+        drop(connection);
+
+        let mut migrated = DurableStateDb::open(&database_path)
+            .expect("version three database must migrate forward in place");
+        // The pre-migration row survived with its retry bookkeeping.
+        let preserved = migrated
+            .intent_record(1)
+            .expect("read preserved row")
+            .expect("preserved row exists");
+        assert_eq!(
+            preserved.path,
+            PathBuf::from("/tmp/vapor-root/preserved.txt")
+        );
+        assert_eq!(preserved.attempt_count, 2);
+        // The widened kind vocabulary is accepted post-migration.
+        migrated
+            .enqueue_intent(
+                &PathBuf::from("/tmp/vapor-root/downloaded.txt"),
+                PendingIntentKind::Download,
+                timestamp_ms(200),
+            )
+            .expect("v4 kinds must be storable after migration");
     }
 
     #[test]

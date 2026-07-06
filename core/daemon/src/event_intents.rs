@@ -66,10 +66,27 @@ pub struct PendingEventRecord {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PendingIntentKind {
+    /// Local create/modify → upload to the provider.
     Upload,
+    /// Local delete → propagate the delete to the provider.
     Delete,
+    /// Local rename destination → upload under the new name (paired
+    /// renames split into delete + create at ingest).
     Rename,
+    /// Remote create/modify → download and apply locally (the
+    /// remote→local pipeline, C8-6).
+    Download,
+    /// Remote delete → remove the local replica (C8-6).
+    ApplyRemoteDelete,
     ReconcileSubtree,
+}
+
+impl PendingIntentKind {
+    /// Whether this intent originated from the remote changes feed
+    /// (the remote→local pipeline) rather than local fs events.
+    pub fn is_remote_sourced(self) -> bool {
+        matches!(self, Self::Download | Self::ApplyRemoteDelete)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

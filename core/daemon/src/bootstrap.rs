@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use vapor_ipc::Service;
 use vapor_platform::{NativeProcessSupervisor, ProcessSupervisor};
-use vapor_providers::default_provider;
+use vapor_providers::{Provider, default_provider, select_provider};
 use vapor_shared::config::{self, VaporConfigLoadResult};
 
 use crate::clock::system_clock;
@@ -96,12 +96,13 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // currently reports static idle inputs) — wired here so the seam is
     // exercised in production, not just in tests.
     let metrics_sampler = Arc::new(NativePlatformMetricsSampler::for_current_host());
+    let provider = resolve_provider(&config.provider);
 
     let mut runtime = DaemonRuntime::start_configured(
         sync_scope,
         filter_options,
         state_db,
-        default_provider(),
+        provider,
         metrics_sampler,
         system_clock(),
     )?;
@@ -141,6 +142,28 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     drop(ipc_handle);
 
     result.map_err(BootstrapError::from)
+}
+
+/// Maps the configured `provider` value onto a provider instance
+/// (C8-9). `filesystem` is the pre-GA default; `google_drive` is
+/// selectable but inert until C8-54 flips it live. An unknown value is
+/// a configuration error: the daemon keeps running on the inert stub
+/// (which performs no sync work) so the user can fix the config through
+/// the normal surfaces instead of facing a crash loop.
+fn resolve_provider(configured: &str) -> Box<dyn Provider> {
+    match select_provider(configured) {
+        Ok(provider) => provider,
+        Err(error) => {
+            logging::error(
+                "Invalid provider configuration; running inert until it is fixed",
+                &[
+                    ("configured_provider", configured.to_string()),
+                    ("error", error.message),
+                ],
+            );
+            default_provider()
+        }
+    }
 }
 
 fn install_shutdown_signal_handlers() {

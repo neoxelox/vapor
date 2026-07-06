@@ -9,6 +9,7 @@ pub enum WorkClass {
     Planner,
     Hash,
     Upload,
+    Download,
     Reconcile,
 }
 
@@ -31,8 +32,10 @@ pub enum WorkPermitDeniedReason {
     HashWorkersExhausted,
     ReadTokensExhausted,
     UploadConcurrencyExhausted,
+    DownloadConcurrencyExhausted,
     HashingDisabled,
     UploadsDisabled,
+    DownloadsDisabled,
     ReconcileDisabled,
 }
 
@@ -50,6 +53,7 @@ pub struct WorkgateSnapshot {
     pub active_planner_workers: usize,
     pub active_hash_workers: usize,
     pub active_uploads: usize,
+    pub active_downloads: usize,
     pub active_reconciles: usize,
     pub active_read_tokens: usize,
 }
@@ -73,6 +77,12 @@ impl WorkgateSnapshot {
             .saturating_sub(self.active_uploads)
     }
 
+    pub fn available_downloads(&self) -> usize {
+        self.caps
+            .download_concurrency
+            .saturating_sub(self.active_downloads)
+    }
+
     pub fn available_read_tokens(&self) -> usize {
         self.caps
             .read_tokens
@@ -87,6 +97,7 @@ pub struct ThrottleWorkgate {
     active_planner_workers: usize,
     active_hash_workers: usize,
     active_uploads: usize,
+    active_downloads: usize,
     active_reconciles: usize,
     active_read_tokens: usize,
     next_permit_id: u64,
@@ -101,6 +112,7 @@ impl ThrottleWorkgate {
             active_planner_workers: 0,
             active_hash_workers: 0,
             active_uploads: 0,
+            active_downloads: 0,
             active_reconciles: 0,
             active_read_tokens: 0,
             next_permit_id: 1,
@@ -120,6 +132,7 @@ impl ThrottleWorkgate {
             active_planner_workers: self.active_planner_workers,
             active_hash_workers: self.active_hash_workers,
             active_uploads: self.active_uploads,
+            active_downloads: self.active_downloads,
             active_reconciles: self.active_reconciles,
             active_read_tokens: self.active_read_tokens,
         }
@@ -145,6 +158,14 @@ impl ThrottleWorkgate {
             }
             WorkClass::Upload => {
                 self.ensure_upload_capacity()?;
+                ActivePermit {
+                    class,
+                    uses_planner_slot: false,
+                    uses_read_token: false,
+                }
+            }
+            WorkClass::Download => {
+                self.ensure_download_capacity()?;
                 ActivePermit {
                     class,
                     uses_planner_slot: false,
@@ -239,6 +260,22 @@ impl ThrottleWorkgate {
         Ok(())
     }
 
+    fn ensure_download_capacity(&self) -> Result<(), WorkPermitDenied> {
+        if !self.caps.allow_downloads {
+            return Err(self.denied(
+                WorkClass::Download,
+                WorkPermitDeniedReason::DownloadsDisabled,
+            ));
+        }
+        if self.active_downloads >= self.caps.download_concurrency {
+            return Err(self.denied(
+                WorkClass::Download,
+                WorkPermitDeniedReason::DownloadConcurrencyExhausted,
+            ));
+        }
+        Ok(())
+    }
+
     fn ensure_reconcile_capacity(&self) -> Result<(), WorkPermitDenied> {
         if !self.caps.allow_reconcile {
             return Err(self.denied(
@@ -267,6 +304,9 @@ impl ThrottleWorkgate {
             WorkClass::Upload => {
                 self.active_uploads += 1;
             }
+            WorkClass::Download => {
+                self.active_downloads += 1;
+            }
             WorkClass::Reconcile => {
                 self.active_reconciles += 1;
             }
@@ -290,6 +330,9 @@ impl ThrottleWorkgate {
             }
             WorkClass::Upload => {
                 self.active_uploads = self.active_uploads.saturating_sub(1);
+            }
+            WorkClass::Download => {
+                self.active_downloads = self.active_downloads.saturating_sub(1);
             }
             WorkClass::Reconcile => {
                 self.active_reconciles = self.active_reconciles.saturating_sub(1);

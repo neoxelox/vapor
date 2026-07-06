@@ -38,6 +38,11 @@ pub struct VaporConfig {
     pub post_ignore_rules: String,
     pub language_code: String,
     pub timeline_event_limit: i64,
+    /// Provider selection (C8-2): `filesystem` (default pre-GA) or
+    /// `google_drive`. When `filesystem` is selected,
+    /// `cloud_sync_directory` is reinterpreted as an absolute local
+    /// directory that plays the cloud role.
+    pub provider: String,
 }
 
 impl Default for VaporConfig {
@@ -52,6 +57,7 @@ impl Default for VaporConfig {
             post_ignore_rules: String::new(),
             language_code: constants::config::DEFAULT_LANGUAGE_CODE.to_string(),
             timeline_event_limit: constants::config::DEFAULT_TIMELINE_EVENT_LIMIT,
+            provider: constants::provider::DEFAULT.to_string(),
         }
     }
 }
@@ -134,6 +140,7 @@ struct RawVaporConfig {
     post_ignore_rules: Option<String>,
     language_code: Option<String>,
     timeline_event_limit: Option<i64>,
+    provider: Option<String>,
 }
 
 impl RawVaporConfig {
@@ -155,6 +162,7 @@ impl RawVaporConfig {
             timeline_event_limit: self
                 .timeline_event_limit
                 .unwrap_or(defaults.timeline_event_limit),
+            provider: self.provider.unwrap_or(defaults.provider),
         }
     }
 }

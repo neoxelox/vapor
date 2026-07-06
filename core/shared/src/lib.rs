@@ -123,6 +123,109 @@ impl RetryFailureKind {
     }
 }
 
+/// Provider-neutral error taxonomy (C8-1). Every provider classifies its
+/// failures with this enum; the engine maps it onto [`RetryFailureKind`]
+/// for retry scheduling and keeps the richer classification for
+/// diagnostics and race resolution (`NotFound` and `PreconditionFailed`
+/// carry meaning the retry policy alone does not need).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderErrorKind {
+    /// Recoverable environment failure (network blip, EINTR, 5xx).
+    Transient,
+    /// The provider asked us to slow down (429; quota exhaustion).
+    RateLimited { retry_after: Option<Duration> },
+    /// Credentials are missing, expired beyond refresh, or revoked.
+    Authentication,
+    /// The remote object changed underneath the planned operation
+    /// (etag/revision mismatch, concurrent writer). Retryable after
+    /// re-planning against fresh remote state.
+    PreconditionFailed,
+    /// The remote object does not exist. Terminal for the operation as
+    /// planned, but callers may treat it as convergence (deleting a
+    /// file that is already gone is success, not failure).
+    NotFound,
+    /// Anything that will keep failing no matter how often we retry.
+    Permanent,
+}
+
+impl ProviderErrorKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Transient => "transient",
+            Self::RateLimited { .. } => "rate_limited",
+            Self::Authentication => "authentication",
+            Self::PreconditionFailed => "precondition_failed",
+            Self::NotFound => "not_found",
+            Self::Permanent => "permanent",
+        }
+    }
+
+    /// Collapses the provider taxonomy onto the retry taxonomy the durable
+    /// queue schedules with. `PreconditionFailed` retries as transient
+    /// (the re-lease re-plans against fresh remote state); `NotFound`
+    /// finalizes as permanent unless the caller already resolved it as
+    /// convergence.
+    pub fn retry_classification(self) -> RetryFailureKind {
+        match self {
+            Self::Transient => RetryFailureKind::Transient,
+            Self::RateLimited { retry_after } => RetryFailureKind::RateLimited { retry_after },
+            Self::Authentication => RetryFailureKind::Authentication,
+            Self::PreconditionFailed => RetryFailureKind::Transient,
+            Self::NotFound | Self::Permanent => RetryFailureKind::Permanent,
+        }
+    }
+}
+
+/// Direction selector for a sync scope (C8-59). `TwoWay` is the default
+/// and the historical behavior; the one-way modes are strict mirrors and
+/// opt-in per profile. Full design: `docs/architecture/sync-modes.md`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SyncMode {
+    #[default]
+    TwoWay,
+    PullOnly,
+    PushOnly,
+}
+
+impl SyncMode {
+    /// The wire/config value (`vapor.json` `syncMode` field).
+    pub fn as_config_value(self) -> &'static str {
+        match self {
+            Self::TwoWay => crate::constants::sync_mode::TWO_WAY,
+            Self::PullOnly => crate::constants::sync_mode::PULL_ONLY,
+            Self::PushOnly => crate::constants::sync_mode::PUSH_ONLY,
+        }
+    }
+
+    /// Parses a config value; `None` for unknown values so callers can
+    /// surface an actionable error instead of silently defaulting a
+    /// destructive mode selector.
+    pub fn from_config_value(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            v if v == crate::constants::sync_mode::TWO_WAY => Some(Self::TwoWay),
+            v if v == crate::constants::sync_mode::PULL_ONLY => Some(Self::PullOnly),
+            v if v == crate::constants::sync_mode::PUSH_ONLY => Some(Self::PushOnly),
+            _ => None,
+        }
+    }
+
+    /// Whether local changes may propagate to the cloud in this mode.
+    pub fn allows_local_to_remote(self) -> bool {
+        !matches!(self, Self::PullOnly)
+    }
+
+    /// Whether remote changes may propagate to local in this mode.
+    pub fn allows_remote_to_local(self) -> bool {
+        !matches!(self, Self::PushOnly)
+    }
+
+    /// One-way modes are strict mirrors: the subordinate side is driven to
+    /// exactly match the source, permanently overwriting divergence.
+    pub fn is_strict_mirror(self) -> bool {
+        !matches!(self, Self::TwoWay)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusSnapshot {
     pub run_state: RunState,

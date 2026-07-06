@@ -4,26 +4,35 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use vapor_platform::fs_caps::NativeFilesystemCapabilities;
 use vapor_providers::Provider;
+use vapor_providers::filesystem::hash_hex_of_file;
+use vapor_providers::tags::OpIdTagStore;
 use vapor_shared::{RunState, constants};
 
 use crate::clock::{SharedClock, system_clock};
 use crate::debounce::{DebounceLoop, DebounceWindows};
 use crate::event_intents::BoundedFsEventRecorder;
-use crate::executor::{StagedExecutor, StagedExecutorSnapshot};
+use crate::executor::{ExecutionEnv, StagedExecutor, StagedExecutorSnapshot};
 use crate::fs_events::{
-    FsEventErrorRecord, FsEventRecord, FsEventRecording, FsEventsWatcher, FsEventsWatcherError,
-    normalize_watch_root,
+    FsEventErrorRecord, FsEventKind, FsEventRecord, FsEventRecording, FsEventsWatcher,
+    FsEventsWatcherError, normalize_watch_root,
 };
 use crate::ipc_service::{DaemonStatusSnapshot, StatusPublisher};
 use crate::logging;
 use crate::metrics::{MetricsSampler, StaticMetricsSampler};
 use crate::path_filter::EventPathFilterOptions;
+use crate::remote_sync::{RemotePollReport, RemotePoller};
 use crate::scheduler::KeyedSupersedingScheduler;
+use crate::self_write_cache::SelfWriteCache;
 use crate::state_db::{DurableIntentRecord, DurableStateDb, StateDbError};
 use crate::sync_directories::SyncScope;
 use crate::throttle::ThrottleInputs;
 use crate::{DaemonApp, event_intents::PendingIntentKind};
+
+/// The single implicit profile id used until the multi-profile model
+/// (C8-19) fans the runtime out per profile.
+pub const DEFAULT_PROFILE_ID: &str = "default";
 
 /// Consecutive tick failures tolerated before the runtime loop gives up.
 /// One inconsistent row or transient I/O error is logged and survived;
@@ -116,14 +125,21 @@ pub struct RuntimeTickReport {
     pub released_deferred_reconciles: usize,
     pub drained_pending_intents: usize,
     pub stabilized_events: usize,
+    /// Stabilized local events suppressed as echoes of the daemon's own
+    /// local applies (loop prevention, C8-7).
+    pub suppressed_local_echoes: usize,
     pub durable_enqueues: usize,
     pub leased_intents: usize,
     pub started_staged_intents: usize,
     pub completed_intents: usize,
     pub requeued_intents: usize,
+    /// Intents finalized as terminal failures this tick.
+    pub failed_intents: usize,
     pub started_reconcile_root: Option<PathBuf>,
     pub completed_reconcile_root: Option<PathBuf>,
     pub staged_executor: StagedExecutorSnapshot,
+    /// Remote changes-feed poll outcome (C8-6).
+    pub remote_poll: RemotePollReport,
 }
 
 pub struct DaemonRuntime {
@@ -150,6 +166,21 @@ pub struct DaemonRuntime {
     throttle_sample_interval: Duration,
     stale_lease_sweep_interval: Duration,
     startup_barrier_deadline: Duration,
+    /// Local-side op-id tag store (downloads tag applied files; echo
+    /// suppression reads the tags back).
+    tags: OpIdTagStore,
+    /// Echo cache keyed by local path (suppresses watcher echoes of
+    /// downloads / local applies).
+    local_echoes: SelfWriteCache,
+    /// Echo cache keyed by remote path (suppresses feed echoes of
+    /// uploads / remote deletes).
+    remote_echoes: SelfWriteCache,
+    remote_poller: RemotePoller,
+    /// Whether the provider-side sync root has been ensured. While
+    /// `false`, no work is leased and the remote feed is not polled;
+    /// ingest keeps capturing intent state durably (C8-50).
+    cloud_root_ready: bool,
+    last_cloud_root_attempt_inst: Option<Instant>,
 }
 
 impl DaemonRuntime {
@@ -271,7 +302,9 @@ impl DaemonRuntime {
             || report.leased_intents > 0
             || report.started_staged_intents > 0
             || report.completed_intents > 0
-            || report.requeued_intents > 0;
+            || report.requeued_intents > 0
+            || report.failed_intents > 0
+            || report.remote_poll.enqueued_intents > 0;
         if report_saw_work
             || report.staged_executor.active_total > 0
             || self.running_reconcile_intent_id.is_some()
@@ -327,13 +360,16 @@ impl DaemonRuntime {
         self.sample_throttle_inputs(now, throttle_inputs);
         self.reload_path_filter_if_requested();
         self.sweep_stale_leases_if_due(now)?;
+        self.retry_cloud_root_if_needed();
 
         // Pause semantics ("stops admitting new work"): ingest, debounce,
         // and the durable flush keep running so intent state is never
         // lost, and work already in flight runs to completion — but no
-        // new work is released or leased while paused.
-        let paused = self.app.snapshot().run_state == RunState::Paused;
+        // new work is released or leased while paused. An unavailable
+        // cloud root blocks the same way (C8-50).
+        let paused = self.app.snapshot().run_state == RunState::Paused || !self.cloud_root_ready;
 
+        let (stabilized_events, suppressed_local_echoes) = self.stabilize_events(now);
         let mut report = RuntimeTickReport {
             released_deferred_reconciles: if paused {
                 0
@@ -341,15 +377,41 @@ impl DaemonRuntime {
                 self.release_ready_deferred_reconciles(now)
             },
             drained_pending_intents: self.drain_pending_intents(),
-            stabilized_events: self.stabilize_events(now),
+            stabilized_events,
+            suppressed_local_echoes,
             durable_enqueues: self.flush_scheduler_to_durable_queue()?,
             ..RuntimeTickReport::default()
         };
 
-        let staged_report = self
-            .staged_executor
-            .advance(&mut self.app, &mut self.state_db, now)?;
+        // Remote→local ingest: poll the provider changes feed on its
+        // throttle-aware cadence and durably enqueue surviving changes.
+        // Requires an ensured cloud root; a paused daemon also skips
+        // polling (nothing would be leased anyway) but keeps every
+        // already-enqueued intent durable.
+        if self.cloud_root_ready {
+            report.remote_poll = self.remote_poller.poll_if_due(
+                &mut self.app,
+                &mut self.state_db,
+                &mut self.remote_echoes,
+                self.sync_scope.local_sync_directory.as_deref(),
+                &self.clock,
+                now,
+            )?;
+        }
+
+        let staged_report = {
+            let mut env = ExecutionEnv {
+                local_root: self.sync_scope.local_sync_directory.as_deref(),
+                tags: &self.tags,
+                local_echoes: &mut self.local_echoes,
+                remote_echoes: &mut self.remote_echoes,
+            };
+            self.staged_executor
+                .advance(&mut self.app, &mut self.state_db, &mut env, now)?
+        };
         report.completed_intents += staged_report.completed;
+        report.requeued_intents += staged_report.retried;
+        report.failed_intents += staged_report.failed;
 
         if let Some(reconcile_intent_id) = self.running_reconcile_intent_id {
             if self
@@ -474,7 +536,9 @@ impl DaemonRuntime {
             .map(normalize_watch_root)
             .transpose()?;
 
-        app.ensure_cloud_sync_directory(sync_scope.cloud_sync_directory.as_str());
+        let cloud_root_ready = app
+            .ensure_cloud_sync_directory(sync_scope.cloud_sync_directory.as_str())
+            .is_ok();
 
         let tick_waker = Arc::new(TickWaker::default());
         let recorder = sync_scope
@@ -497,7 +561,15 @@ impl DaemonRuntime {
             None
         };
 
-        if let Some(local_sync_directory) = &sync_scope.local_sync_directory {
+        if !cloud_root_ready {
+            app.set_run_state(
+                RunState::Error,
+                format!(
+                    "cloud sync directory {} is unavailable; sync work is blocked until it can be ensured",
+                    sync_scope.cloud_sync_directory
+                ),
+            );
+        } else if let Some(local_sync_directory) = &sync_scope.local_sync_directory {
             app.set_run_state(
                 RunState::Running,
                 format!("watching {}", local_sync_directory.display()),
@@ -515,7 +587,7 @@ impl DaemonRuntime {
             state_db,
             recorder,
             debounce,
-            staged_executor: StagedExecutor::with_clock(tick_interval, clock.clone()),
+            staged_executor: StagedExecutor::with_clock(clock.clone()),
             scheduler: KeyedSupersedingScheduler::default(),
             watcher,
             metrics_sampler,
@@ -539,7 +611,52 @@ impl DaemonRuntime {
             startup_barrier_deadline: Duration::from_millis(
                 constants::engine::STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS,
             ),
+            tags: OpIdTagStore::new(Arc::new(NativeFilesystemCapabilities::for_current_host())),
+            local_echoes: SelfWriteCache::new(),
+            remote_echoes: SelfWriteCache::new(),
+            remote_poller: RemotePoller::new(DEFAULT_PROFILE_ID),
+            cloud_root_ready,
+            last_cloud_root_attempt_inst: None,
         })
+    }
+
+    /// Retries ensuring the provider-side sync root while it is
+    /// unavailable (C8-50). Between attempts, sync work stays blocked
+    /// and intents accumulate durably — never dropped.
+    fn retry_cloud_root_if_needed(&mut self) {
+        if self.cloud_root_ready {
+            return;
+        }
+        let now_inst = self.clock.now();
+        let retry_interval =
+            Duration::from_secs(constants::engine::CLOUD_ROOT_ENSURE_RETRY_SECONDS);
+        let due = self
+            .last_cloud_root_attempt_inst
+            .map(|last| now_inst.saturating_duration_since(last) >= retry_interval)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.last_cloud_root_attempt_inst = Some(now_inst);
+        if self
+            .app
+            .ensure_cloud_sync_directory(self.sync_scope.cloud_sync_directory.as_str())
+            .is_ok()
+        {
+            self.cloud_root_ready = true;
+            match self.sync_scope.local_sync_directory.as_ref() {
+                Some(path) => self.app.set_run_state(
+                    RunState::Running,
+                    format!(
+                        "cloud sync directory recovered; watching {}",
+                        path.display()
+                    ),
+                ),
+                None => self
+                    .app
+                    .set_run_state(RunState::Paused, "no local sync directory configured"),
+            }
+        }
     }
 
     /// Drains any pause / resume / flush / reconcile requests recorded
@@ -582,7 +699,7 @@ impl DaemonRuntime {
         Ok(())
     }
 
-    fn sample_throttle_inputs(&mut self, _now: SystemTime, inputs: ThrottleInputs) {
+    fn sample_throttle_inputs(&mut self, now: SystemTime, inputs: ThrottleInputs) {
         // Sampling cadence uses the monotonic clock so wall-clock rewinds
         // cannot force an extra sample (or skip one). The injected clock
         // makes that property test-checkable. C2-3.
@@ -594,6 +711,10 @@ impl DaemonRuntime {
         if should_sample {
             self.app.apply_throttle_inputs(inputs);
             self.last_throttle_sample_inst = Some(now_inst);
+            // Loop-prevention TTL sweeps share the 1s sampling cadence
+            // (`data-flow.md §Loop prevention`).
+            self.local_echoes.purge_expired(now);
+            self.remote_echoes.purge_expired(now);
         }
     }
 
@@ -671,17 +792,18 @@ impl DaemonRuntime {
         count
     }
 
-    fn stabilize_events(&mut self, now: SystemTime) -> usize {
+    fn stabilize_events(&mut self, now: SystemTime) -> (usize, usize) {
         let Some(recorder) = &self.recorder else {
-            return 0;
+            return (0, 0);
         };
 
         let Some(watch_root) = self.sync_scope.local_sync_directory.as_ref() else {
-            return 0;
+            return (0, 0);
         };
 
         let stabilized = self.debounce.run_tick_for_recorder(recorder, now);
         let mut accepted = 0;
+        let mut suppressed = 0;
         for event in stabilized {
             if !crate::fs_events::resolve_event_path_within_watch_root(watch_root, &event.path) {
                 logging::warning(
@@ -693,10 +815,18 @@ impl DaemonRuntime {
                 );
                 continue;
             }
+            if is_local_self_write_echo(&self.tags, &mut self.local_echoes, &event, now) {
+                suppressed += 1;
+                logging::debug(
+                    "Suppressed stabilized event as a self-write echo",
+                    &[("path", event.path.display().to_string())],
+                );
+                continue;
+            }
             self.scheduler.upsert_stabilized_event(event);
             accepted += 1;
         }
-        accepted
+        (accepted, suppressed)
     }
 
     fn flush_scheduler_to_durable_queue(&mut self) -> Result<usize, DaemonRuntimeError> {
@@ -886,6 +1016,49 @@ fn blocked_intent_requeue_delay() -> Duration {
     Duration::from_millis(constants::engine::BLOCKED_INTENT_REQUEUE_DELAY_MILLIS)
 }
 
+/// Loop prevention on the local ingest path (C8-7): decides whether a
+/// stabilized local event is an echo of a write/delete the daemon itself
+/// performed while applying remote changes.
+///
+/// Removals correlate by path + recency. Writes correlate by op-id tag
+/// first; the content-hash fallback runs only when a live write record
+/// exists for the path and the observed size matches the recorded size,
+/// so the fallback never hashes a file that obviously diverged.
+fn is_local_self_write_echo(
+    tags: &OpIdTagStore,
+    local_echoes: &mut SelfWriteCache,
+    event: &crate::debounce::StabilizedEvent,
+    now: SystemTime,
+) -> bool {
+    let key = event.path.to_string_lossy();
+    if event.last_event_kind == FsEventKind::Removed {
+        return local_echoes.matches_delete(&key, now);
+    }
+
+    let op_id = tags.read_op_id(&event.path);
+    if local_echoes.matches_write(&key, op_id.as_deref(), None, now) {
+        return true;
+    }
+    if !local_echoes.has_write_record(&key, now) {
+        return false;
+    }
+    let Ok(metadata) = std::fs::symlink_metadata(&event.path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    if let Some(expected_size) = local_echoes.expected_write_size(&key, now)
+        && expected_size != metadata.len()
+    {
+        return false;
+    }
+    let Ok(content_hash) = hash_hex_of_file(&event.path) else {
+        return false;
+    };
+    local_echoes.matches_write(&key, None, Some(&content_hash), now)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1038,15 +1211,22 @@ mod tests {
     fn runtime_tick_moves_stabilized_event_through_scheduler_and_durable_queue() {
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
+        let cloud_root = temp_dir.path().join("cloud");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let clock = Arc::new(crate::clock::ManualClock::at_now());
+        // A real filesystem provider rooted in the sandbox: the scope's
+        // cloud directory names the provider-side root (C8-2).
+        let sync_scope = SyncScope {
+            local_sync_directory: Some(watch_root.clone()),
+            cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+        };
         let mut runtime = DaemonRuntime::build(
-            test_sync_scope(&watch_root),
+            sync_scope,
             EventPathFilterOptions::default(),
             state_db,
-            default_provider(),
+            Box::new(vapor_providers::FilesystemProvider::new()),
             Arc::new(StaticMetricsSampler::default()),
             clock.clone(),
             false,
@@ -1057,45 +1237,58 @@ mod tests {
             .local_sync_directory
             .clone()
             .expect("runtime watch root");
+        // Real payload on disk: the pipeline hashes and uploads actual
+        // bytes — no simulator (C8-13).
+        let local_file = runtime_watch_root.join("src/main.rs");
+        std::fs::create_dir_all(local_file.parent().unwrap()).expect("dirs");
+        std::fs::write(&local_file, b"fn main() {}\n").expect("seed local file");
         let recorder = runtime.recorder.as_ref().expect("runtime recorder");
         FsEventRecording::record_event(
             recorder.as_ref(),
             FsEventRecord {
-                path: runtime_watch_root.join("src/main.rs"),
+                path: local_file.clone(),
                 kind: FsEventKind::Modified,
                 observed_at: timestamp_ms(0),
             },
         );
 
         // Each scripted tick advances the monotonic clock by 250 ms so the
-        // debounce / staged-executor elapsed-time gates fire deterministically.
-        // The SystemTime arg keeps documenting the durable wall-clock value
-        // recorded in the state DB.
+        // debounce elapsed-time gates fire deterministically. The SystemTime
+        // arg keeps documenting the durable wall-clock value recorded in the
+        // state DB.
         clock.advance(Duration::from_millis(1_500));
         let first_tick = runtime
             .tick_with_inputs(timestamp_ms(1_500), ThrottleInputs::default())
             .expect("runtime tick");
-        clock.advance(Duration::from_millis(250));
-        let second_tick = runtime
-            .tick_with_inputs(timestamp_ms(1_750), ThrottleInputs::default())
-            .expect("runtime tick");
-        clock.advance(Duration::from_millis(250));
-        let third_tick = runtime
-            .tick_with_inputs(timestamp_ms(2_000), ThrottleInputs::default())
-            .expect("runtime tick");
-        clock.advance(Duration::from_millis(250));
-        let fourth_tick = runtime
-            .tick_with_inputs(timestamp_ms(2_250), ThrottleInputs::default())
-            .expect("runtime tick");
-
         assert_eq!(first_tick.stabilized_events, 1);
         assert_eq!(first_tick.durable_enqueues, 1);
         assert_eq!(first_tick.started_staged_intents, 1);
         assert_eq!(first_tick.completed_intents, 0);
-        assert_eq!(second_tick.staged_executor.hash_running, 1);
-        assert_eq!(third_tick.staged_executor.upload_running, 1);
-        assert_eq!(fourth_tick.completed_intents, 1);
+
+        // Drive follow-up ticks until the pipeline completes the upload.
+        let mut completed = 0;
+        for tick_index in 0..8 {
+            clock.advance(Duration::from_millis(250));
+            let report = runtime
+                .tick_with_inputs(
+                    timestamp_ms(1_750 + tick_index * 250),
+                    ThrottleInputs::default(),
+                )
+                .expect("runtime tick");
+            completed += report.completed_intents;
+            if completed > 0 {
+                break;
+            }
+        }
+
+        assert_eq!(completed, 1);
         assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 0);
+        // The provider holds the real bytes: local→remote propagation is
+        // observable, not simulated.
+        assert_eq!(
+            std::fs::read(cloud_root.join("src/main.rs")).expect("uploaded payload"),
+            b"fn main() {}\n"
+        );
     }
 
     #[test]
@@ -1271,6 +1464,376 @@ mod tests {
             local_sync_directory: Some(watch_root.to_path_buf()),
             cloud_sync_directory: "/Vapor".to_string(),
         }
+    }
+
+    /// Bidirectional tick-harness fixture (C8-10): a real filesystem
+    /// provider with a manually-driven changes feed, composed into a
+    /// full `DaemonRuntime`. Tests drive local events through the
+    /// recorder and remote events through the feed handle, then tick
+    /// with a manual clock.
+    struct BidirectionalFixture {
+        _temp: TempDir,
+        watch_root: PathBuf,
+        cloud_root: PathBuf,
+        runtime: DaemonRuntime,
+        feed: vapor_providers::filesystem::ManualFeedHandle,
+        clock: Arc<crate::clock::ManualClock>,
+        now_ms: u64,
+    }
+
+    impl BidirectionalFixture {
+        fn new() -> Self {
+            let temp = TempDir::new().expect("temp dir");
+            let watch_root = temp.path().join("watch");
+            let cloud_root = temp.path().join("cloud");
+            std::fs::create_dir_all(&watch_root).expect("watch root");
+            std::fs::create_dir_all(&cloud_root).expect("cloud root");
+            let cloud_root = cloud_root.canonicalize().expect("canonical cloud root");
+            let database_path = temp.path().join("state/vapor.sqlite");
+            let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+            let clock = Arc::new(crate::clock::ManualClock::at_now());
+            let caps: Arc<dyn vapor_platform::fs_caps::FilesystemCapabilities> =
+                Arc::new(vapor_platform::fs_caps::NativeFilesystemCapabilities::for_current_host());
+            let (provider, feed) =
+                vapor_providers::FilesystemProvider::with_manual_feed(&cloud_root, caps)
+                    .expect("manual-feed provider");
+            let sync_scope = SyncScope {
+                local_sync_directory: Some(watch_root.clone()),
+                cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            };
+            let runtime = DaemonRuntime::build(
+                sync_scope,
+                EventPathFilterOptions::default(),
+                state_db,
+                Box::new(provider),
+                Arc::new(StaticMetricsSampler::default()),
+                clock.clone(),
+                false,
+            )
+            .expect("runtime");
+            let watch_root = runtime
+                .sync_scope()
+                .local_sync_directory
+                .clone()
+                .expect("normalized watch root");
+            Self {
+                _temp: temp,
+                watch_root,
+                cloud_root,
+                runtime,
+                feed,
+                clock,
+                now_ms: 0,
+            }
+        }
+
+        /// One tick, advancing both clocks by `advance_ms`.
+        fn tick(&mut self, advance_ms: u64) -> RuntimeTickReport {
+            self.clock.advance(Duration::from_millis(advance_ms));
+            self.now_ms += advance_ms;
+            self.runtime
+                .tick_with_inputs(timestamp_ms(self.now_ms), ThrottleInputs::default())
+                .expect("runtime tick")
+        }
+
+        /// Ticks until the durable queue drains and the executor goes
+        /// quiet (or the budget runs out). Remote polls gate on a 5s
+        /// idle cadence, so ticks advance well past it.
+        fn converge(&mut self, max_ticks: usize) -> usize {
+            let mut completed = 0;
+            for _ in 0..max_ticks {
+                let report = self.tick(6_000);
+                completed += report.completed_intents;
+                let quiet = report.staged_executor.active_total == 0
+                    && self.runtime.state_db().queue_depth().expect("depth") == 0;
+                if quiet {
+                    break;
+                }
+            }
+            completed
+        }
+
+        fn record_local_event(&self, path: &std::path::Path, kind: FsEventKind, at_ms: u64) {
+            let recorder = self.runtime.recorder.as_ref().expect("recorder");
+            FsEventRecording::record_event(
+                recorder.as_ref(),
+                FsEventRecord {
+                    path: path.to_path_buf(),
+                    kind,
+                    observed_at: timestamp_ms(at_ms),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn remote_create_flows_through_download_pipeline_to_local_file() {
+        let mut fixture = BidirectionalFixture::new();
+        // First tick baselines the changes-feed cursor.
+        fixture.tick(6_000);
+
+        std::fs::create_dir_all(fixture.cloud_root.join("docs")).expect("dirs");
+        std::fs::write(
+            fixture.cloud_root.join("docs/from-cloud.txt"),
+            b"cloud payload",
+        )
+        .expect("seed remote");
+        fixture.feed.emit_created(
+            fixture.cloud_root.join("docs/from-cloud.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+
+        let completed = fixture.converge(12);
+        assert!(completed >= 1, "download intent must complete");
+        let local_target = fixture.watch_root.join("docs/from-cloud.txt");
+        assert_eq!(
+            std::fs::read(&local_target).expect("applied payload"),
+            b"cloud payload"
+        );
+        assert_eq!(
+            fixture.runtime.state_db().queue_depth().expect("depth"),
+            0,
+            "remote apply must complete durably"
+        );
+    }
+
+    #[test]
+    fn remote_delete_flows_through_apply_pipeline_and_removes_local_file() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+
+        let local_file = fixture.watch_root.join("stale.txt");
+        std::fs::write(&local_file, b"stale").expect("seed local");
+        fixture.feed.emit_removed(
+            fixture.cloud_root.join("stale.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+
+        let completed = fixture.converge(12);
+        assert!(completed >= 1, "apply-remote-delete must complete");
+        assert!(!local_file.exists(), "local replica must be removed");
+    }
+
+    #[test]
+    fn upload_echo_from_remote_feed_is_suppressed_by_loop_prevention() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+
+        // Local file → upload completes for real.
+        let local_file = fixture.watch_root.join("mine.txt");
+        std::fs::write(&local_file, b"my payload").expect("seed local");
+        fixture.record_local_event(&local_file, FsEventKind::Created, fixture.now_ms);
+        let completed = fixture.converge(12);
+        assert!(completed >= 1, "upload must complete");
+        let remote_file = fixture.cloud_root.join("mine.txt");
+        assert!(remote_file.exists(), "upload must land remotely");
+
+        // The remote watcher would now observe our own write: emit that
+        // echo through the feed. Loop prevention must suppress it — no
+        // new intents, no re-download.
+        fixture
+            .feed
+            .emit_created(remote_file.clone(), timestamp_ms(fixture.now_ms));
+        let report = fixture.tick(6_000);
+        assert_eq!(
+            report.remote_poll.suppressed_echoes, 1,
+            "the upload echo must be suppressed, not re-applied"
+        );
+        assert_eq!(report.remote_poll.enqueued_intents, 0);
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+    }
+
+    #[test]
+    fn remote_delete_echo_is_suppressed_after_local_delete_propagates() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+
+        // Seed both sides, then delete locally and propagate.
+        let local_file = fixture.watch_root.join("shared.txt");
+        std::fs::write(fixture.cloud_root.join("shared.txt"), b"payload").expect("seed remote");
+        std::fs::write(&local_file, b"payload").expect("seed local");
+        std::fs::remove_file(&local_file).expect("local delete");
+        fixture.record_local_event(&local_file, FsEventKind::Removed, fixture.now_ms);
+        let completed = fixture.converge(12);
+        assert!(completed >= 1, "remote delete must complete");
+        assert!(!fixture.cloud_root.join("shared.txt").exists());
+
+        // The feed echoes the removal we caused; suppression must catch it.
+        fixture.feed.emit_removed(
+            fixture.cloud_root.join("shared.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        let report = fixture.tick(6_000);
+        assert_eq!(report.remote_poll.suppressed_echoes, 1);
+        assert_eq!(report.remote_poll.enqueued_intents, 0);
+    }
+
+    #[test]
+    fn download_echo_from_local_watcher_is_suppressed_by_loop_prevention() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+
+        // Remote create → download applies locally.
+        std::fs::write(fixture.cloud_root.join("inbound.txt"), b"inbound").expect("seed remote");
+        fixture.feed.emit_created(
+            fixture.cloud_root.join("inbound.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        let completed = fixture.converge(12);
+        assert!(completed >= 1, "download must complete");
+        let local_target = fixture.watch_root.join("inbound.txt");
+        assert!(local_target.exists());
+
+        // The local watcher would now observe the daemon's own apply:
+        // record that echo. It must be suppressed before the scheduler —
+        // no upload back to the cloud.
+        fixture.record_local_event(&local_target, FsEventKind::Created, fixture.now_ms);
+        let mut suppressed = 0;
+        for _ in 0..4 {
+            let report = fixture.tick(6_000);
+            suppressed += report.suppressed_local_echoes;
+            if suppressed > 0 {
+                break;
+            }
+        }
+        assert_eq!(suppressed, 1, "the download echo must be suppressed");
+        assert_eq!(
+            fixture.runtime.state_db().queue_depth().expect("depth"),
+            0,
+            "no upload intent may be born from the echo"
+        );
+    }
+
+    #[test]
+    fn burst_of_real_uploads_drains_without_admission_serialization() {
+        // C8-11 guard-rail: a burst of provider-backed uploads must
+        // drain with parallel admission (planner cap 4 in IdleDrain),
+        // not one-intent-per-tick serialization. 40 files with 4-wide
+        // stages should finish comfortably under 60 ticks; a regression
+        // to serialized admission would need 120+.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+
+        const BURST: usize = 40;
+        for index in 0..BURST {
+            let path = fixture.watch_root.join(format!("burst-{index}.txt"));
+            std::fs::write(&path, format!("payload {index}")).expect("seed");
+            fixture.record_local_event(&path, FsEventKind::Created, fixture.now_ms);
+        }
+
+        let mut completed = 0;
+        let mut ticks = 0;
+        for _ in 0..60 {
+            ticks += 1;
+            let report = fixture.tick(6_000);
+            completed += report.completed_intents;
+            if completed >= BURST && fixture.runtime.state_db().queue_depth().expect("depth") == 0 {
+                break;
+            }
+        }
+        assert_eq!(completed, BURST, "every upload must complete");
+        assert!(
+            ticks < 60,
+            "burst did not drain within the tick budget ({ticks} ticks)"
+        );
+        for index in 0..BURST {
+            assert!(
+                fixture
+                    .cloud_root
+                    .join(format!("burst-{index}.txt"))
+                    .exists(),
+                "burst-{index} must land remotely"
+            );
+        }
+    }
+
+    #[test]
+    fn restart_recovers_in_flight_upload_and_completes_it() {
+        let temp = TempDir::new().expect("temp dir");
+        let watch_root = temp.path().join("watch");
+        let cloud_root = temp.path().join("cloud");
+        std::fs::create_dir_all(&watch_root).expect("watch root");
+        std::fs::create_dir_all(&cloud_root).expect("cloud root");
+        // Durable intent paths must live under the runtime's *canonical*
+        // watch root, exactly like real watcher events do.
+        let watch_root = watch_root.canonicalize().expect("canonical watch root");
+        let database_path = temp.path().join("state/vapor.sqlite");
+        let local_file = watch_root.join("durable.txt");
+        std::fs::write(&local_file, b"survives restarts").expect("seed local");
+
+        let sync_scope = || SyncScope {
+            local_sync_directory: Some(watch_root.clone()),
+            cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+        };
+
+        // First daemon: lease the intent into flight, then "crash"
+        // (drop) before completing it.
+        {
+            let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+            state_db
+                .enqueue_intent(&local_file, PendingIntentKind::Upload, timestamp_ms(0))
+                .expect("enqueue");
+            let clock = Arc::new(crate::clock::ManualClock::at_now());
+            let mut runtime = DaemonRuntime::build(
+                sync_scope(),
+                EventPathFilterOptions::default(),
+                state_db,
+                Box::new(vapor_providers::FilesystemProvider::new()),
+                Arc::new(StaticMetricsSampler::default()),
+                clock.clone(),
+                false,
+            )
+            .expect("first runtime");
+            clock.advance(Duration::from_millis(250));
+            let report = runtime
+                .tick_with_inputs(timestamp_ms(250), ThrottleInputs::default())
+                .expect("tick");
+            assert_eq!(report.leased_intents, 1, "intent must be in flight");
+            assert_eq!(runtime.state_db().leased_depth().expect("leased"), 1);
+            // Dropped here with the lease still open — simulated crash.
+        }
+
+        // Second daemon on the same durable state: startup recovery
+        // re-pends the lease and the pipeline completes it for real.
+        let state_db = DurableStateDb::open(&database_path).expect("reopen durable state db");
+        let clock = Arc::new(crate::clock::ManualClock::at_now());
+        let mut runtime = DaemonRuntime::build(
+            sync_scope(),
+            EventPathFilterOptions::default(),
+            state_db,
+            Box::new(vapor_providers::FilesystemProvider::new()),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            false,
+        )
+        .expect("second runtime");
+        assert_eq!(
+            runtime.state_db().leased_depth().expect("leased"),
+            0,
+            "startup recovery must re-pend the orphaned lease"
+        );
+
+        // Recovery re-pends the intent at the *recovery* wall time, so
+        // ticks must use the fixture clock's wall axis, not synthetic
+        // 1970-based stamps.
+        use crate::clock::Clock as _;
+        let mut completed = 0;
+        for _ in 0..12 {
+            clock.advance(Duration::from_millis(250));
+            clock.advance_system(Duration::from_millis(250));
+            let report = runtime
+                .tick_with_inputs(clock.now_system(), ThrottleInputs::default())
+                .expect("tick");
+            completed += report.completed_intents;
+            if completed > 0 && runtime.state_db().queue_depth().expect("depth") == 0 {
+                break;
+            }
+        }
+        assert!(completed >= 1);
+        assert_eq!(
+            std::fs::read(cloud_root.join("durable.txt")).expect("uploaded after restart"),
+            b"survives restarts"
+        );
     }
 
     #[test]
