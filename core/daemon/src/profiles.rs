@@ -244,9 +244,17 @@ mod tests {
         let mirror = &profiles[0];
         assert_eq!(mirror.display_name, "Cloud Mirror");
         assert_eq!(mirror.scope.sync_mode, SyncMode::PullOnly, "override wins");
-        assert_eq!(
-            mirror.scope.local_sync_directory.as_deref(),
-            Some(std::path::Path::new("/tmp/vapor-mirror"))
+        // Windows absolutizes "/tmp/…" against the current drive, so
+        // assert resolution shape rather than a Unix-literal path.
+        let mirror_local = mirror
+            .scope
+            .local_sync_directory
+            .as_deref()
+            .expect("override resolves a local root");
+        assert!(mirror_local.is_absolute());
+        assert!(
+            mirror_local.ends_with("tmp/vapor-mirror"),
+            "override wins: {mirror_local:?}"
         );
         assert_eq!(
             mirror.scope.cloud_sync_directory, "/tmp/vapor-top-cloud",

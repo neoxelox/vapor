@@ -239,7 +239,17 @@ impl Provider for FilesystemProvider {
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities::FILESYSTEM
+        let mut capabilities = ProviderCapabilities::FILESYSTEM;
+        // Capability honesty (C8-43): the native changes feed rides the
+        // platform fs-watcher; on hosts where that is still a stub the
+        // feed is unadvertised and the engine falls back to reconcile
+        // enumeration. Manual feeds (tests) are host-independent.
+        if matches!(self.feed_mode, FeedMode::Native)
+            && !vapor_platform::fs_watch::native_watcher_available()
+        {
+            capabilities.supports_remote_changes_feed = false;
+        }
+        capabilities
     }
 
     fn content_hash_algorithm(&self) -> HashAlgorithm {
