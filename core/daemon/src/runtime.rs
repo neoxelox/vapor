@@ -1448,7 +1448,7 @@ impl DaemonRuntime {
                 );
                 continue;
             }
-            if is_local_self_write_echo(&self.tags, &mut self.local_echoes, &event, now) {
+            if is_local_self_write_echo(&mut self.local_echoes, &event, now) {
                 suppressed += 1;
                 logging::debug(
                     "Suppressed stabilized event as a self-write echo",
@@ -1777,7 +1777,6 @@ fn blocked_intent_requeue_delay() -> Duration {
 /// exists for the path and the observed size matches the recorded size,
 /// so the fallback never hashes a file that obviously diverged.
 fn is_local_self_write_echo(
-    tags: &OpIdTagStore,
     local_echoes: &mut SelfWriteCache,
     event: &crate::debounce::StabilizedEvent,
     now: SystemTime,
@@ -1787,10 +1786,13 @@ fn is_local_self_write_echo(
         return local_echoes.matches_delete(&key, now);
     }
 
-    let op_id = tags.read_op_id(&event.path);
-    if local_echoes.matches_write(&key, op_id.as_deref(), None, now) {
-        return true;
-    }
+    // Write echoes correlate by the file's *current* content, never by
+    // the op-id tag alone: the tag survives later writes, so a tag-only
+    // match would keep suppressing genuine user edits for the record's
+    // whole TTL after a download-apply (an edit made right after a
+    // download would silently never upload). The size gate keeps the
+    // hash off every obviously-diverged file; the record always carries
+    // both (the executor records size + hash on apply).
     if !local_echoes.has_write_record(&key, now) {
         return false;
     }
@@ -3718,6 +3720,54 @@ mod tests {
             !fixture.cloud_root.join("doomed.txt").exists(),
             "the local deletion must propagate to the cloud"
         );
+    }
+
+    #[test]
+    fn editing_a_file_last_synced_from_an_external_write_uploads_without_conflict() {
+        // Real-provider everyday shape: an external writer changes the
+        // cloud file (no op-id tag), we download it, then the user edits
+        // locally. The upload must overwrite — the index hash proves the
+        // remote is exactly what we synced from. This used to
+        // manufacture a keep-both copy on every such round-trip.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+
+        std::fs::write(fixture.cloud_root.join("shared.txt"), b"external v1")
+            .expect("external cloud write");
+        fixture.feed.emit_created(
+            fixture.cloud_root.join("shared.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        fixture.converge(12);
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("shared.txt")).expect("downloaded"),
+            b"external v1"
+        );
+
+        std::fs::write(fixture.watch_root.join("shared.txt"), b"local edit v2")
+            .expect("local edit");
+        fixture.record_local_event(
+            &fixture.watch_root.join("shared.txt"),
+            FsEventKind::Modified,
+            fixture.now_ms,
+        );
+        fixture.converge(12);
+
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("shared.txt")).expect("uploaded"),
+            b"local edit v2"
+        );
+        for root in [&fixture.watch_root, &fixture.cloud_root] {
+            let conflicts: Vec<_> = std::fs::read_dir(root)
+                .expect("read root")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains("~conflict-"))
+                .collect();
+            assert!(
+                conflicts.is_empty(),
+                "editing after syncing from an external write must not conflict: {conflicts:?}"
+            );
+        }
     }
 
     // ---- Optional advanced safeguards (C8-55..C8-57) ----

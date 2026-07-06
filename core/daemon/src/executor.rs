@@ -1180,10 +1180,29 @@ fn plan_upload(
                 plan.precondition = RemotePrecondition::HashEquals(index.content_hash);
                 PlanOutcome::Upload(plan)
             }
-            Some(_) => {
-                // Another writer changed the remote since our last sync:
-                // concurrent divergence — keep both.
-                resolve_upload_conflict(env, state_db, intent, now)
+            Some(index) => {
+                // An op-id mismatch is not yet divergence: the tag is
+                // absent on any externally-written remote file (which we
+                // may have already synced *from*), and provider-side
+                // copies can strip tags. The content hash is the ground
+                // truth — an equal hash means the remote is
+                // byte-identical to our last sync, so the upload is a
+                // safe guarded overwrite. Without this check, editing a
+                // file whose last change arrived from an untagged
+                // external write manufactured a keep-both conflict on
+                // every upload (and could revert a just-resolved one).
+                let remote_hash = remote_entry
+                    .content_hash
+                    .clone()
+                    .or_else(|| app.provider().content_hash(&plan.remote_path).ok());
+                if remote_hash.as_deref() == Some(index.content_hash.as_str()) {
+                    plan.precondition = RemotePrecondition::HashEquals(index.content_hash);
+                    PlanOutcome::Upload(plan)
+                } else {
+                    // Another writer genuinely changed the remote since
+                    // our last sync: concurrent divergence — keep both.
+                    resolve_upload_conflict(env, state_db, intent, now)
+                }
             }
             None => {
                 // Remote exists but this path has never synced (first
@@ -1895,6 +1914,61 @@ mod tests {
                 .local_echoes
                 .matches_delete(&local_file.to_string_lossy(), timestamp_ms(1))
         );
+    }
+
+    #[test]
+    fn upload_over_untagged_remote_matching_the_index_overwrites_without_conflict() {
+        // The remote was last written externally (no op-id tag) and we
+        // synced *from* it, so the index holds its exact hash. A local
+        // edit must upload as a guarded overwrite — the op-id mismatch
+        // alone is not divergence. The old behavior manufactured a
+        // keep-both copy here on every such upload (and could revert a
+        // freshly resolved conflict, the S15 e2e flake).
+        let mut fixture = Fixture::new();
+        let local_file = fixture.local_root.join("doc.txt");
+        std::fs::write(&local_file, b"local edit v2").expect("seed local");
+        std::fs::write(fixture.cloud_root.join("doc.txt"), b"external content")
+            .expect("seed remote externally");
+        let mtime = std::fs::symlink_metadata(&local_file)
+            .and_then(|m| m.modified())
+            .ok();
+        fixture
+            .state_db
+            .set_sync_index(
+                &local_file,
+                &hash_hex_of_bytes(b"external content"),
+                16,
+                mtime,
+                "op-of-the-download",
+                timestamp_ms(0),
+            )
+            .expect("seed sync index");
+
+        let intent = fixture.enqueue_and_lease(&local_file, PendingIntentKind::Upload);
+        assert!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0))
+        );
+        let report = fixture.run_to_quiescence(32);
+
+        assert_eq!(report.completed, 1);
+        assert_eq!(report.conflicts, 0, "no keep-both copy may be created");
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("doc.txt")).expect("remote bytes"),
+            b"local edit v2"
+        );
+        for root in [&fixture.local_root, &fixture.cloud_root] {
+            let conflicts: Vec<_> = std::fs::read_dir(root)
+                .expect("read root")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains("~conflict-"))
+                .collect();
+            assert!(
+                conflicts.is_empty(),
+                "spurious conflict copies: {conflicts:?}"
+            );
+        }
     }
 
     #[test]

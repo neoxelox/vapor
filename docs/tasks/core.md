@@ -638,6 +638,17 @@ Design: `docs/architecture/conflict-resolution.md`.
       scan pruned by the ignore rules, locked JSON contract for app
       surfaces, resolution via plain file operations that sync like user
       edits and work with the daemon stopped. E2E S15.
+- [x] C8-72 Hash-verified divergence for uploads onto untagged remotes:
+      an op-id mismatch alone no longer means conflict — the planner
+      compares the remote content hash against the sync index first, so
+      the everyday "external cloud edit → download → local edit →
+      upload" round-trip overwrites safely instead of manufacturing a
+      keep-both copy (or reverting a just-resolved conflict).
+- [x] C8-73 Local write-echo correlation hardened: the op-id tag
+      survives later writes, so tag-match alone suppressed genuine user
+      edits made within the echo TTL after a download-apply. Echoes now
+      require the file's current content to match the daemon's write
+      (size-gated hash), with the tag never sufficient by itself.
 - [ ] C8-71 Per-path detail on timeline `conflict` events (today the event
       carries only the per-tick count), so app notifications can name the
       conflicted file without an immediate list scan. Needed by macos.md
