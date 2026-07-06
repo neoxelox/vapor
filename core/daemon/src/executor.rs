@@ -1038,8 +1038,13 @@ fn plan_intent(
                 Ok(metadata) if metadata.is_dir() => {
                     PlanOutcome::Noop("directories materialize through their children")
                 }
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    PlanOutcome::Noop("symlinks are outside the sync contract")
+                Ok(metadata) if !metadata.is_file() => {
+                    // Symlinks, FIFOs, sockets, device nodes. Must be
+                    // refused at planning: opening a FIFO for hashing
+                    // blocks until a writer appears, and the intent
+                    // otherwise sits in the queue forever (observed as
+                    // a permanently-WaitingForHash row).
+                    PlanOutcome::Noop("symlinks and special files are outside the sync contract")
                 }
                 Ok(_) => plan_upload(app, env, state_db, intent, remote_path, op_id, now),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1969,6 +1974,37 @@ mod tests {
                 "spurious conflict copies: {conflicts:?}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upload_of_a_fifo_completes_as_noop_instead_of_wedging() {
+        // Special files are outside the sync contract and must be
+        // refused at planning: hashing a FIFO blocks until a writer
+        // appears, and before this guard the intent sat in the queue
+        // forever as a permanently-WaitingForHash row.
+        let mut fixture = Fixture::new();
+        let fifo = fixture.local_root.join("pipe.fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(status.success(), "mkfifo must succeed");
+
+        let intent = fixture.enqueue_and_lease(&fifo, PendingIntentKind::Upload);
+        assert!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0))
+        );
+        let report = fixture.run_to_quiescence(8);
+
+        assert_eq!(report.completed, 1, "the intent must complete, not wedge");
+        assert_eq!(report.failed, 0);
+        assert!(
+            !fixture.cloud_root.join("pipe.fifo").exists(),
+            "no remote object may be created for a special file"
+        );
     }
 
     #[test]

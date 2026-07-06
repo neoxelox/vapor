@@ -189,7 +189,11 @@ impl ReconcileWalker {
                     let Ok(metadata) = entry.path().symlink_metadata() else {
                         continue;
                     };
-                    if metadata.file_type().is_symlink() {
+                    // Regular files and directories only: symlinks,
+                    // FIFOs, sockets, and device nodes are outside the
+                    // sync contract (the executor refuses them too —
+                    // hashing a FIFO would block forever).
+                    if !metadata.is_file() && !metadata.is_dir() {
                         continue;
                     }
                     pairs.entry(name).or_default().local = Some(LocalEntry {

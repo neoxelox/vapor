@@ -51,6 +51,21 @@ In flight and coming next:
 
 - More cloud providers as demand surfaces (the provider system is pluggable; see `docs/architecture/provider-onboarding.md`).
 
+## What Syncs
+
+Vapor syncs file content. Everything else on a filesystem is handled deliberately:
+
+| Item | How Vapor treats it |
+| ---- | ------------------- |
+| 📄 Regular files | Fully synced, byte-for-byte, in both directions (following the configured sync direction). |
+| 📁 Folders | Containers, not synced objects: each side creates them automatically as the files inside them sync, and deleting a folder propagates. An empty folder does not appear on the other side, and renaming a folder re-syncs its contents under the new name. |
+| 🙈 Ignored files | Anything matching the ignore rules never syncs in either direction — it can't be pulled down from the cloud, and it never causes a conflict. |
+| ⚔️ Conflicting edits | When both sides change the same file, both versions are kept — the other device's version stays next to yours as a `~conflict-` copy until you resolve it. Nothing is ever silently overwritten. |
+| 🔗 Symlinks | Never followed and never synced: a link could pull content from outside your sync folder into scope, and cloud providers can't represent them faithfully. |
+| 🪢 Hard links | Synced as an ordinary independent file; the link relationship is not preserved on the other side. |
+| 🕳 Special files (pipes, sockets, devices) | Ignored entirely — they carry no transferable content and never block the files around them. |
+| 🏷 Metadata (permissions, extended attributes, timestamps) | Not synced; content only. Vapor's own bookkeeping tags stay invisible and never appear in your listings. |
+
 ## Benchmarks
 
 > TBD

@@ -97,19 +97,31 @@ Idle-boost and the throttle controller update asynchronously on the same 1s cade
 
 ## Directory and symlink semantics
 
-**Directories are implicit containers today, not synced objects.** They
-materialize on the other side only through the files inside them: uploads
-create the remote parent chain, downloads create local parent
-directories, and the executor no-ops a directory upload intent outright
-("directories materialize through their children"). The reconcile walk
-descends into directories but never emits an intent for the directory
-itself. Consequences: an **empty folder does not sync** in either
-direction, and a **folder rename/move propagates as a recursive delete
-plus child-by-child re-upload** rather than one rename. Directory
-*deletions* do propagate (both directions, including strict-mirror
-removals). Making folders first-class synced objects — creation
-(including empty), rename/move via the provider `rename` op, and
-reconcile coverage — is tracked as `docs/tasks/core.md` C8-74 … C8-77.
+**The engine is file-only by decision: directories are implicit
+containers, not synced objects.** They materialize on the other side only
+through the files inside them: uploads create the remote parent chain,
+downloads create local parent directories, and the executor no-ops a
+directory upload intent outright ("directories materialize through their
+children"). The reconcile walk descends into directories but never emits
+an intent for the directory itself. Consequences: an **empty folder does
+not sync** in either direction, and a **folder rename/move propagates as
+a recursive delete plus child-by-child re-upload** rather than one
+rename (data-safe, just not cheap). Directory *deletions* do propagate
+(both directions, including strict-mirror removals). First-class folder
+sync was evaluated and rejected (project-owner decision, 2026-07-07):
+keeping every synced object content-shaped is what keeps the conflict,
+echo-suppression, and transfer machinery simple — folders cannot
+"conflict", and parent materialization is idempotent by construction.
+The user-facing contract lives in the root `README.md` **What Syncs**
+table.
+
+**Special files (FIFOs, sockets, device nodes) are inert.** The executor
+refuses them at planning and the reconcile walk skips them — this must
+stay an *explicit* guard, not an accident of ordering: hashing a FIFO
+blocks until a writer appears, and without the guard the intent sat in
+the durable queue forever as a permanently-`WaitingForHash` row. Hard
+links are indistinguishable from regular files at the path level and
+sync as independent files (the link relationship is not preserved).
 
 **Symlinks are outside the sync contract entirely.** They are never
 followed, never uploaded, and never created locally: the reconcile walk

@@ -561,6 +561,20 @@ wait_until 30 "local deletion to remove the cloud copy" \
 converge 30 || fail "S16: queue did not drain after the deletion"
 log "PASS S16 — a plain local delete removes the cloud copy"
 
+# S17 — special files are inert: a FIFO in the watched root never
+# becomes a remote object and never wedges the queue (hashing a FIFO
+# would block forever; before the guard the intent sat permanently in
+# WaitingForHash).
+mkfifo "$LOCAL_ROOT/e2e-pipe.fifo"
+echo "s17 control" >"$LOCAL_ROOT/e2e-s17-control.txt"
+wait_until 30 "control file to sync around the FIFO" \
+  file_exists "$CLOUD_ROOT/e2e-s17-control.txt" \
+  || fail "S17: control file did not sync"
+converge 30 || fail "S17: queue did not drain with a FIFO in the watched root"
+[[ ! -e "$CLOUD_ROOT/e2e-pipe.fifo" ]] \
+  || fail "S17: a special file produced a remote object"
+log "PASS S17 — special files are ignored; queue drains with a FIFO present"
+
 # --- service lifecycle round-trip (--full only; cli.md L2-5 / macos.md M2-4) ---
 #
 # Everything below drives `vapor service` against the REAL macOS

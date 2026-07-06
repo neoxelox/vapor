@@ -194,6 +194,7 @@ network egress control.
 | S14 | Symmetric ignore filtering | ignored names (`.DS_Store`, `*.tmp`) never sync in either direction — divergent copies on both sides survive untouched, a cloud-side ignored file never downloads, and no `~conflict-` copy is manufactured |
 | S15 | Conflict surfacing | `vapor conflicts list --json` finds the S11 keep-both copy from durable file state; `resolve --keep copy` promotes the preserved version, the resolution syncs to the cloud, and the list drains to empty |
 | S16 | Local delete propagation | a plain `rm` in the watched root removes the cloud copy — deletion classification comes from ground truth, not fs-watch fragment order |
+| S17 | Special files are inert | a FIFO in the watched root never becomes a remote object and never wedges the queue; files around it keep syncing |
 
 ## Extending the harness — discipline rules
 
