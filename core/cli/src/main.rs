@@ -95,6 +95,16 @@ enum Command {
         #[command(subcommand)]
         action: AuthAction,
     },
+    /// Export a shareable support bundle: config, logs, and (when the
+    /// daemon is running) live status / diagnostics / timeline.
+    SupportBundle {
+        /// Directory to create the bundle under (defaults to
+        /// `<vapor_dir>/support`).
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -268,7 +278,50 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
         Command::Diagnostics { json } => dispatch_diagnostics(json),
         Command::Logs { tail } => dispatch_logs(tail),
         Command::Auth { action } => dispatch_auth(action),
+        Command::SupportBundle { output, json } => dispatch_support_bundle(output, json),
     }
+}
+
+fn dispatch_support_bundle(
+    output: Option<std::path::PathBuf>,
+    json: bool,
+) -> Result<ExitCode, String> {
+    use vapor_cli::commands::support;
+
+    // Live captures are best-effort: an unreachable daemon still yields
+    // a useful bundle from the on-disk artifacts.
+    let live = match (
+        ipc_cmd::status(),
+        ipc_cmd::diagnostics(),
+        ipc_cmd::timeline(),
+    ) {
+        (Ok(status), Ok(diagnostics), Ok(timeline)) => Some(support::LiveCaptures {
+            status_json: serde_json::to_string_pretty(&status).map_err(|e| e.to_string())?,
+            diagnostics_json: serde_json::to_string_pretty(&diagnostics)
+                .map_err(|e| e.to_string())?,
+            timeline_json: serde_json::to_string_pretty(&timeline).map_err(|e| e.to_string())?,
+        }),
+        _ => None,
+    };
+
+    let vapor_dir = vapor_shared::runtime_paths::vapor_directory();
+    let output_root = output.unwrap_or_else(|| vapor_dir.join("support"));
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    let report = support::collect_support_bundle(&vapor_dir, &output_root, live, timestamp_ms)
+        .map_err(|e| format!("cannot collect support bundle: {e}"))?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+    } else {
+        print!("{}", support::render_report(&report));
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn dispatch_status(json: bool) -> Result<ExitCode, String> {

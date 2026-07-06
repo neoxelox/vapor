@@ -78,6 +78,13 @@ impl RemotePoller {
         }
     }
 
+    /// Clears the poll cadence so the next tick polls immediately.
+    /// Used by the flush boost (C8-56): `vapor flush` should surface
+    /// pending remote changes now, not at the next scheduled poll.
+    pub fn request_immediate_poll(&mut self) {
+        self.last_poll_inst = None;
+    }
+
     /// Runs one poll when the provider supports a feed, the throttle
     /// state permits it, and the cadence is due.
     #[allow(clippy::too_many_arguments)]

@@ -220,6 +220,16 @@ pub struct DaemonRuntime {
     /// bootstrap; ephemeral (hostname-derived, unpersisted) in ad-hoc
     /// embeddings and tests.
     device_id: String,
+    /// C8-55 — heuristic active-coding signal; ORs `user_active` into
+    /// the throttle inputs when code-class files churn rapidly.
+    active_coding: crate::safeguards::ActiveCodingHeuristic,
+    /// C8-57 — mass-deletion guard; pauses the daemon and raises a
+    /// timeline alert on a local deletion storm.
+    mass_change_guard: crate::safeguards::MassChangeGuard,
+    /// C8-56 — flush boost deadline (monotonic). While set and in the
+    /// future, deferred reconciles release immediately regardless of
+    /// the idle gate.
+    flush_boost_until_inst: Option<Instant>,
 }
 
 impl DaemonRuntime {
@@ -401,15 +411,17 @@ impl DaemonRuntime {
         self.sweep_stale_leases_if_due(now)?;
         self.retry_cloud_root_if_needed();
 
+        let (stabilized_events, suppressed_local_echoes, stabilize_mirror_reverts) =
+            self.stabilize_events(now);
+
         // Pause semantics ("stops admitting new work"): ingest, debounce,
         // and the durable flush keep running so intent state is never
         // lost, and work already in flight runs to completion — but no
         // new work is released or leased while paused. An unavailable
-        // cloud root blocks the same way (C8-50).
+        // cloud root blocks the same way (C8-50). Evaluated *after*
+        // stabilization so a mass-deletion guard trip (C8-57) stops
+        // admission in the same tick that detected the storm.
         let paused = self.app.snapshot().run_state == RunState::Paused || !self.cloud_root_ready;
-
-        let (stabilized_events, suppressed_local_echoes, stabilize_mirror_reverts) =
-            self.stabilize_events(now);
         self.mirror_revert_count += stabilize_mirror_reverts as u64;
         let mut report = RuntimeTickReport {
             released_deferred_reconciles: if paused {
@@ -794,6 +806,9 @@ impl DaemonRuntime {
             last_timeline_run_state: None,
             last_timeline_throttle: None,
             device_id: vapor_shared::device_id::derive_device_id(),
+            active_coding: crate::safeguards::ActiveCodingHeuristic::default(),
+            mass_change_guard: crate::safeguards::MassChangeGuard::default(),
+            flush_boost_until_inst: None,
         })
     }
 
@@ -1105,14 +1120,15 @@ impl DaemonRuntime {
         // Snapshot the pending requests up-front so we can drop the
         // immutable borrow on `self.runtime_control` before mutating
         // `self` via `enqueue_startup_reconstruction_reconcile`.
-        let (pause_request, reconcile_request) = match self.runtime_control.as_ref() {
+        let (pause_request, reconcile_request, flush_request) = match self.runtime_control.as_ref()
+        {
             Some(control) => {
                 let pause = control.take_pause_request();
                 let reconcile = control.take_reconcile_request();
-                let _ = control.take_flush_request();
-                (pause, reconcile)
+                let flush = control.take_flush_request();
+                (pause, reconcile, flush)
             }
-            None => (None, false),
+            None => (None, false, false),
         };
 
         if let Some(pause) = pause_request {
@@ -1127,7 +1143,39 @@ impl DaemonRuntime {
                     None => "user resumed via vapor resume".to_string(),
                 };
                 self.app.set_run_state(RunState::Running, reason);
+                // An explicit resume is the human-in-the-loop reset for
+                // the mass-deletion guard (C8-57): the operator looked
+                // at the alert and decided the changes are legitimate.
+                self.mass_change_guard.reset();
             }
+        }
+        if flush_request {
+            // Flush boost (C8-56): pull deferred work forward for a
+            // bounded window. Deferred reconciles release immediately
+            // (bypassing the idle gate) and the remote feed polls on
+            // the next tick; execution still answers to the normal
+            // throttle ladder, so device-impact invariants hold.
+            let window = Duration::from_secs(constants::engine::FLUSH_BOOST_SECONDS);
+            self.flush_boost_until_inst = Some(self.clock.now() + window);
+            self.remote_poller.request_immediate_poll();
+            if let Some(timeline) = &self.timeline {
+                timeline.push(
+                    "flush",
+                    DEFAULT_PROFILE_ID,
+                    format!(
+                        "flush requested: deferred work released for {}s",
+                        constants::engine::FLUSH_BOOST_SECONDS
+                    ),
+                    now,
+                );
+            }
+            logging::info(
+                "Flush boost activated",
+                &[(
+                    "window_seconds",
+                    constants::engine::FLUSH_BOOST_SECONDS.to_string(),
+                )],
+            );
         }
         if reconcile_request {
             self.enqueue_startup_reconstruction_reconcile(now)?;
@@ -1136,6 +1184,13 @@ impl DaemonRuntime {
     }
 
     fn sample_throttle_inputs(&mut self, now: SystemTime, inputs: ThrottleInputs) {
+        // Active-coding heuristic (C8-55): rapid code-class churn means
+        // the user is working even when no permissioned HID signal is
+        // available. Strictly additive — it can only raise caution.
+        let mut inputs = inputs;
+        if !inputs.user_active && self.active_coding.is_active(now) {
+            inputs.user_active = true;
+        }
         // Sampling cadence uses the monotonic clock so wall-clock rewinds
         // cannot force an extra sample (or skip one). The injected clock
         // makes that property test-checkable. C2-3.
@@ -1272,9 +1327,31 @@ impl DaemonRuntime {
             return 0;
         };
 
+        // Flush boost (C8-56): while boosted, deferred reconciles
+        // release immediately, bypassing both their not-before times
+        // and the IdleDrain gate. Execution still answers to the
+        // throttle ladder — this only moves work from "deferred" to
+        // "queued".
+        if self.flush_boost_active() {
+            let scheduler = &mut self.scheduler;
+            return recorder.with_mut_state(|maps| {
+                let released = maps.take_all_deferred_reconcile_intents();
+                for intent in &released {
+                    scheduler.upsert_pending_intent_record(intent.clone());
+                }
+                released.len()
+            });
+        }
+
         let app = &mut self.app;
         let scheduler = &mut self.scheduler;
         recorder.with_mut_state(|maps| app.release_ready_deferred_reconciles(maps, scheduler, now))
+    }
+
+    fn flush_boost_active(&self) -> bool {
+        self.flush_boost_until_inst
+            .map(|until| self.clock.now() < until)
+            .unwrap_or(false)
     }
 
     fn drain_pending_intents(&mut self) -> usize {
@@ -1322,6 +1399,41 @@ impl DaemonRuntime {
                 );
                 continue;
             }
+            // Safeguard taps (post-echo-suppression, so the engine's own
+            // applied writes never count as user activity or deletions).
+            self.active_coding
+                .record_stabilized(event.debounce_class, now);
+            if event.last_event_kind == crate::fs_events::FsEventKind::Removed
+                && self.mass_change_guard.record_delete(now)
+            {
+                // Mass-change / ransomware guard (C8-57): stop admitting
+                // work before the deletion storm replicates to the cloud.
+                // Ingest keeps capturing intent state durably; an explicit
+                // `vapor resume` is the human-in-the-loop reset.
+                let reason = format!(
+                    "mass-deletion guard: {} or more local deletions inside {}s; \
+                     sync paused — review the changes, then run `vapor resume`",
+                    constants::engine::MASS_DELETE_THRESHOLD,
+                    constants::engine::MASS_DELETE_WINDOW_SECONDS,
+                );
+                self.app.set_run_state(RunState::Paused, reason.clone());
+                if let Some(timeline) = &self.timeline {
+                    timeline.push("guard", DEFAULT_PROFILE_ID, reason.clone(), now);
+                }
+                logging::warning(
+                    "Mass-deletion guard tripped; pausing sync",
+                    &[
+                        (
+                            "threshold",
+                            constants::engine::MASS_DELETE_THRESHOLD.to_string(),
+                        ),
+                        (
+                            "window_seconds",
+                            constants::engine::MASS_DELETE_WINDOW_SECONDS.to_string(),
+                        ),
+                    ],
+                );
+            }
             if self.sync_scope.sync_mode == vapor_shared::SyncMode::PullOnly {
                 // Pull-only (C8-60): local events never produce
                 // local-to-remote intents. A local change is divergence
@@ -1357,6 +1469,15 @@ impl DaemonRuntime {
         if claimed.is_empty() {
             return Ok(0);
         }
+
+        // Priority classes (C8-56): within one flush batch, key config
+        // and code paths enqueue before lockfile noise, so they get the
+        // lower durable ids that break lease-order ties. Stable sort
+        // preserves arrival order inside each class.
+        let windows = crate::debounce::DebounceWindows::default();
+        claimed.sort_by_key(|intent| {
+            crate::safeguards::intent_priority_rank(windows.classify_path(&intent.path).0)
+        });
 
         let batch: Vec<_> = claimed
             .iter()
@@ -3321,5 +3442,120 @@ mod tests {
                 .lock()
                 .expect("RecordingStatusPublisher mutex poisoned") = Some(snapshot);
         }
+    }
+
+    // ---- Optional advanced safeguards (C8-55..C8-57) ----
+
+    #[test]
+    fn mass_deletion_storm_pauses_daemon_raises_alert_and_resume_rearms() {
+        let mut fixture = BidirectionalFixture::new();
+        let timeline = crate::timeline::TimelineBuffer::new(256);
+        fixture.runtime.attach_timeline(timeline.clone());
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+        fixture.tick(6_000); // baseline
+
+        // A deletion storm: threshold-many distinct paths removed inside
+        // one window. Spread across sibling directories so the storm
+        // compactor does not swallow them before they stabilize.
+        for index in 0..constants::engine::MASS_DELETE_THRESHOLD {
+            let path = fixture
+                .watch_root
+                .join(format!("dir-{}", index % 40))
+                .join(format!("victim-{index}.bin"));
+            fixture.record_local_event(&path, FsEventKind::Removed, fixture.now_ms);
+        }
+        fixture.tick(6_000); // stabilize the burst
+
+        assert_eq!(
+            fixture.runtime.app.snapshot().run_state,
+            RunState::Paused,
+            "guard must pause on a mass-deletion storm"
+        );
+        assert!(
+            fixture
+                .runtime
+                .app
+                .snapshot()
+                .reason
+                .contains("vapor resume"),
+            "pause reason must tell the user the way out"
+        );
+        assert!(
+            timeline
+                .snapshot(None)
+                .iter()
+                .any(|entry| entry.kind == "guard"),
+            "guard trip must land on the activity timeline"
+        );
+
+        // Explicit resume re-arms the guard with an empty window: the
+        // daemon runs again and a single further delete does not re-trip.
+        control.request_resume();
+        fixture.tick(1_000);
+        assert_eq!(fixture.runtime.app.snapshot().run_state, RunState::Running);
+        let lone = fixture.watch_root.join("post-resume.bin");
+        fixture.record_local_event(&lone, FsEventKind::Removed, fixture.now_ms);
+        fixture.tick(6_000);
+        assert_eq!(
+            fixture.runtime.app.snapshot().run_state,
+            RunState::Running,
+            "one delete after resume is normal use, not a storm"
+        );
+    }
+
+    #[test]
+    fn code_file_churn_trips_active_coding_heuristic_into_user_active_throttle() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        assert_eq!(
+            fixture.runtime.app.snapshot().throttle_state,
+            vapor_shared::ThrottleState::IdleDrain,
+            "quiet defaults sample as idle"
+        );
+
+        // Rapid code-class churn: threshold-many stabilized .rs events.
+        for index in 0..constants::engine::ACTIVE_CODING_EVENT_THRESHOLD {
+            let path = fixture.watch_root.join(format!("src/module-{index}.rs"));
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(&path, b"fn main() {}").expect("seed code file");
+            fixture.record_local_event(&path, FsEventKind::Modified, fixture.now_ms);
+        }
+        fixture.tick(6_000); // stabilize → heuristic records the churn
+        fixture.tick(2_000); // next sample sees the heuristic signal
+
+        assert_eq!(
+            fixture.runtime.app.snapshot().throttle_state,
+            vapor_shared::ThrottleState::Throttled,
+            "active-coding heuristic must sample as user-active"
+        );
+    }
+
+    #[test]
+    fn flush_request_boosts_remote_poll_cadence_and_lands_on_timeline() {
+        let mut fixture = BidirectionalFixture::new();
+        let timeline = crate::timeline::TimelineBuffer::new(256);
+        fixture.runtime.attach_timeline(timeline.clone());
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+
+        let first = fixture.tick(6_000); // baseline poll
+        assert!(first.remote_poll.polled);
+        let quiet = fixture.tick(1_000); // 1s later: cadence not due
+        assert!(!quiet.remote_poll.polled);
+
+        control.request_flush();
+        let boosted = fixture.tick(1_000);
+        assert!(
+            boosted.remote_poll.polled,
+            "flush boost must clear the remote poll cadence"
+        );
+        assert!(
+            timeline
+                .snapshot(None)
+                .iter()
+                .any(|entry| entry.kind == "flush"),
+            "flush boost must land on the activity timeline"
+        );
     }
 }

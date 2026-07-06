@@ -1130,6 +1130,7 @@ name = "vapor-cli"
 version = "0.2.0-alpha.3"
 dependencies = [
  "clap",
+ "serde",
  "serde_json",
  "tempfile",
  "vapor-daemon",

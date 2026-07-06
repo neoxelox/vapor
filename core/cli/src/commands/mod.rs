@@ -11,6 +11,7 @@ pub mod doctor;
 pub mod ipc;
 pub mod run;
 pub mod service;
+pub mod support;
 pub mod version;
 
 pub use auth::{AuthCommand, AuthError, AuthStatusEntry};
@@ -19,4 +20,5 @@ pub use doctor::{DoctorCheck, DoctorCheckStatus, DoctorReport};
 pub use ipc::IpcCliError;
 pub use run::{RunError, RunOptions};
 pub use service::{ServiceCommand, ServiceCommandError, ServiceStatusReport};
+pub use support::{LiveCaptures, SupportBundleReport};
 pub use version::version_string;

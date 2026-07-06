@@ -400,6 +400,19 @@ pub mod engine {
     /// `TRANSFER_STAGE_STEP_BYTES` expressed in percent (50% .. 200%).
     pub const AUTO_TUNE_MIN_STEP_PERCENT: u64 = 50;
     pub const AUTO_TUNE_MAX_STEP_PERCENT: u64 = 200;
+    /// Active-coding heuristic (C8-55): this many stabilized code-file
+    /// events inside the window treat the user as actively working even
+    /// when no HID signal is available.
+    pub const ACTIVE_CODING_WINDOW_SECONDS: u64 = 60;
+    pub const ACTIVE_CODING_EVENT_THRESHOLD: usize = 5;
+    /// Mass-change guard (C8-57): local deletions above this rate pause
+    /// the daemon and raise an alert instead of propagating what may be
+    /// ransomware or an accidental recursive delete.
+    pub const MASS_DELETE_WINDOW_SECONDS: u64 = 60;
+    pub const MASS_DELETE_THRESHOLD: usize = 200;
+    /// FlushNow boost window (C8-56): after an explicit flush request
+    /// the runtime releases deferred work eagerly for this long.
+    pub const FLUSH_BOOST_SECONDS: u64 = 30;
     pub const RETRY_BASE_DELAY_MILLIS: u64 = 2_000;
     pub const RETRY_RATE_LIMIT_BASE_DELAY_MILLIS: u64 = 15_000;
     pub const RETRY_MAX_DELAY_MILLIS: u64 = 900_000;

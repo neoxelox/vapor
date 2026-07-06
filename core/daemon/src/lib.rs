@@ -45,6 +45,7 @@ pub mod resource_budget;
 pub mod retry;
 pub mod runtime;
 pub mod runtime_control;
+pub mod safeguards;
 pub mod scheduler;
 pub mod self_write_cache;
 pub mod singleton;

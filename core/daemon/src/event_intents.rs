@@ -294,6 +294,26 @@ impl BoundedEventIntentMaps {
         pending_intents
     }
 
+    /// Releases every deferred reconcile regardless of its not-before
+    /// time. Flush boost (C8-56): an explicit `vapor flush` pulls
+    /// deferred work forward instead of waiting out the defer window.
+    pub fn take_all_deferred_reconcile_intents(&mut self) -> Vec<PendingIntentRecord> {
+        let roots: Vec<PathBuf> = self.deferred_reconciles.keys().cloned().collect();
+        let mut intents = Vec::with_capacity(roots.len());
+        for root in roots {
+            if let Some(record) = self.deferred_reconciles.remove(&root) {
+                self.untrack_path(&root);
+                intents.push(PendingIntentRecord {
+                    path: root,
+                    kind: PendingIntentKind::ReconcileSubtree,
+                    observed_at: record.available_at,
+                });
+            }
+        }
+
+        intents
+    }
+
     pub fn take_ready_deferred_reconcile_intents(
         &mut self,
         now: SystemTime,
@@ -1155,6 +1175,41 @@ mod tests {
         assert_eq!(ready[0].kind, PendingIntentKind::ReconcileSubtree);
         assert_eq!(maps.deferred_reconcile_count(), 0);
         assert_eq!(maps.pending_intent_count(), 0);
+    }
+
+    #[test]
+    fn take_all_deferred_reconciles_ignores_not_before_times() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let subtree_root = watch_root.join("project/sub");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root,
+            EventIntentLimits::new(100, 100),
+            StormThresholds {
+                window: Duration::from_secs(2),
+                directory_unique_paths_threshold: 2,
+                directory_event_count_threshold: 99,
+                global_pending_event_count_threshold: 99,
+                deferred_reconcile_delay: Duration::from_secs(30),
+            },
+        );
+        maps.record_event(fs_event(
+            subtree_root.join("a.txt"),
+            FsEventKind::Modified,
+            1,
+        ));
+        maps.record_event(fs_event(
+            subtree_root.join("b.txt"),
+            FsEventKind::Modified,
+            2,
+        ));
+        assert_eq!(maps.deferred_reconcile_count(), 1);
+
+        // Flush boost (C8-56): released well before the 30s not-before.
+        let released = maps.take_all_deferred_reconcile_intents();
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].path, subtree_root);
+        assert_eq!(released[0].kind, PendingIntentKind::ReconcileSubtree);
+        assert_eq!(maps.deferred_reconcile_count(), 0);
     }
 
     #[test]
