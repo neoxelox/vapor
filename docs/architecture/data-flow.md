@@ -95,6 +95,36 @@ Idle-boost and the throttle controller update asynchronously on the same 1s cade
 4. **Config reload mid-ramp.** Lowering `resourceLimits.*Percent` mid-ramp immediately clamps the current ramped value to the new (lower) base ceiling; raising it does not retroactively raise the ramp target, which remains the original `boost*Percent`. Changing `boost*Percent` or `rampUpSeconds` mid-ramp snaps the in-progress ramp to the new targets on the next tick (no restart, no glitch).
 5. **In-flight work during snap-down.** When the effective ceiling drops below current in-flight concurrency as a result of any of the above, no new work is admitted but running work proceeds to its next slice checkpoint before yielding — same discipline as §"Invariants" above.
 
+## Directory and symlink semantics
+
+**Directories are implicit containers today, not synced objects.** They
+materialize on the other side only through the files inside them: uploads
+create the remote parent chain, downloads create local parent
+directories, and the executor no-ops a directory upload intent outright
+("directories materialize through their children"). The reconcile walk
+descends into directories but never emits an intent for the directory
+itself. Consequences: an **empty folder does not sync** in either
+direction, and a **folder rename/move propagates as a recursive delete
+plus child-by-child re-upload** rather than one rename. Directory
+*deletions* do propagate (both directions, including strict-mirror
+removals). Making folders first-class synced objects — creation
+(including empty), rename/move via the provider `rename` op, and
+reconcile coverage — is tracked as `docs/tasks/core.md` C8-74 … C8-77.
+
+**Symlinks are outside the sync contract entirely.** They are never
+followed, never uploaded, and never created locally: the reconcile walk
+and the conflict scan skip them, the executor no-ops upload intents for
+them, and the filesystem provider treats symlinks inside the cloud root
+as invisible while its scope enforcement rejects any path that resolves
+through a symlink to *outside* the configured root (classic
+path-traversal risk). Event paths are symlink-resolved per component on
+the runtime thread, and events that resolve outside the watch root are
+dropped with a logged warning. This is deliberate: following symlinks
+would let one link pull an arbitrary external tree (or a cycle) into
+sync scope, cloud providers have no faithful symlink representation, and
+Windows symlink creation requires elevated privileges — so the safe,
+portable contract is "symlinks are invisible to sync."
+
 ## Conflict handling
 
 This section describes the **`two-way`** policy. In the one-way `pull-only`

@@ -654,6 +654,42 @@ Design: `docs/architecture/conflict-resolution.md`.
       conflicted file without an immediate list scan. Needed by macos.md
       M3-8.
 
+### Directory-object sync — folders as first-class citizens (pending)
+
+Today directories are implicit containers: they materialize on the other
+side only through the files inside them (the executor no-ops directory
+uploads with "directories materialize through their children"; the
+reconcile walk descends into directories without emitting intents for
+them). Consequences, found by project-owner manual testing: an **empty
+folder never syncs** in either direction, and a **folder rename/move
+propagates as a recursive delete + child-by-child re-upload** instead of
+one rename. Directory *deletion* already propagates. Current semantics
+are documented in `data-flow.md §Directory and symlink semantics`.
+
+- [ ] C8-74 Provider directory operations: expose `create_directory` on
+      the `Provider` trait (+ a capability flag for backends with no
+      folder notion, e.g. S3-style stores). Both shipped providers
+      already have the machinery internally (filesystem `create_dir_all`,
+      Drive folder-chain resolve/create) — it is just not reachable as an
+      intent. Platform/provider parity review per AGENTS.md §8.
+- [ ] C8-75 Directory intents end to end: watcher `Created` on a
+      directory becomes a durable dir-create intent (replacing the
+      executor no-op); the reconcile walk emits dir-creates for
+      local-only and remote-only empty directories in both directions;
+      strict-mirror modes materialize/remove empty directories like any
+      other divergence; loop prevention for our own mkdir echoes (deletes
+      already propagate — cover them in the same contract tests).
+- [ ] C8-76 Directory rename/move as a real rename: map watcher rename
+      pairs for directories onto the provider `rename` op (already on the
+      trait) instead of recursive delete + re-upload, preserving children
+      without retransfer; deterministic fallback to the current behavior
+      when the provider cannot rename.
+- [ ] C8-77 Tests + e2e: walker/executor unit coverage for dir intents,
+      integration round-trips (empty dir both directions, rename
+      preserves children without retransfer, delete), and a Tier E2E
+      scenario; update `data-flow.md` and the README when the limitation
+      falls.
+
 ## Phase C9 - `vapor` CLI delivery
 
 Tracked separately in `docs/tasks/cli.md`; this phase is informational here
