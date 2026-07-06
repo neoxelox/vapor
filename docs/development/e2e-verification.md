@@ -191,6 +191,7 @@ network egress control.
 | S11 | Keep-both conflict | the same path diverges on both sides while the daemon is down; the restart reconcile preserves BOTH payloads (canonical + `~conflict-` copy), never overwriting |
 | S12 | Pull-only mirror | a `syncMode = pull-only` runtime materializes cloud content locally and removes a local-only file (never uploading it) |
 | S13 | Observability | `vapor diagnostics --json` answers over IPC; `vapor support-bundle` exports config + logs + live status/diagnostics/timeline with a manifest |
+| S14 | Symmetric ignore filtering | ignored names (`.DS_Store`, `*.tmp`) never sync in either direction — divergent copies on both sides survive untouched, a cloud-side ignored file never downloads, and no `~conflict-` copy is manufactured |
 
 ## Extending the harness — discipline rules
 

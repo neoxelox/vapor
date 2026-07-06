@@ -26,7 +26,14 @@ Current caveat: real system-driven throttle metrics sampling (power/thermal/HID)
 ## Remote to local (bidirectional MVP)
 
 1. Provider poll fetches remote changes on throttle-aware cadence.
-2. Changes are mapped into durable intents with operation IDs.
+2. Changes are mapped into durable intents with operation IDs. A change
+   whose local-equivalent path matches the ignore rules is dropped here
+   (counted as `ignored_changes`): ignore filtering is symmetric, so an
+   ignored name never syncs in either direction. The reconcile
+   comparison walk applies the same rules to both the local and the
+   remote side of every directory pair — an ignored name (`.DS_Store`,
+   `node_modules/`) is never descended into, never uploaded, never
+   downloaded, and can never manufacture a keep-both conflict copy.
 3. Loop prevention filters self-originated writes.
 4. Apply pipeline writes local changes and records conflict/tombstone outcomes.
 

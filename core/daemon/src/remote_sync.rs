@@ -22,6 +22,7 @@ use vapor_shared::{SyncMode, ThrottleState, constants};
 use crate::DaemonApp;
 use crate::clock::SharedClock;
 use crate::event_intents::PendingIntentKind;
+use crate::fs_events::SharedEventPathFilter;
 use crate::logging;
 use crate::self_write_cache::SelfWriteCache;
 use crate::state_db::{DurableStateDb, StateDbError};
@@ -31,6 +32,10 @@ pub struct RemotePollReport {
     pub polled: bool,
     pub observed_changes: usize,
     pub suppressed_echoes: usize,
+    /// Remote changes dropped because their local-equivalent path
+    /// matches the ignore rules — ignore filtering is symmetric, so an
+    /// ignored name never syncs in either direction.
+    pub ignored_changes: usize,
     pub enqueued_intents: usize,
     pub cursor_expired: bool,
     /// Push-only strict-mirror restores scheduled this poll (remote
@@ -94,6 +99,7 @@ impl RemotePoller {
         state_db: &mut DurableStateDb,
         remote_echoes: &mut SelfWriteCache,
         local_root: Option<&Path>,
+        path_filter: Option<&SharedEventPathFilter>,
         sync_mode: SyncMode,
         clock: &SharedClock,
         now: SystemTime,
@@ -169,6 +175,13 @@ impl RemotePoller {
                 let mut batch = Vec::new();
                 for change in &page.changes {
                     let local_target = change.path.to_local(local_root);
+                    if path_filter
+                        .map(|filter| filter.should_ignore(&local_target))
+                        .unwrap_or(false)
+                    {
+                        report.ignored_changes += 1;
+                        continue;
+                    }
                     match change.kind {
                         RemoteChangeKind::CreatedOrModified => {
                             if remote_echoes.matches_write(
@@ -291,6 +304,7 @@ mod tests {
         local_root: PathBuf,
         cloud_root: PathBuf,
         sync_mode: SyncMode,
+        path_filter: Option<Arc<SharedEventPathFilter>>,
         app: DaemonApp,
         state_db: DurableStateDb,
         poller: RemotePoller,
@@ -324,6 +338,7 @@ mod tests {
                 local_root,
                 cloud_root,
                 sync_mode: SyncMode::TwoWay,
+                path_filter: None,
                 _temp: temp,
                 app,
                 state_db,
@@ -344,6 +359,7 @@ mod tests {
                     &mut self.state_db,
                     &mut self.remote_echoes,
                     Some(&self.local_root),
+                    self.path_filter.as_deref(),
                     self.sync_mode,
                     &clock,
                     now,
@@ -395,6 +411,39 @@ mod tests {
             .expect("intent");
         assert_eq!(intent.kind, PendingIntentKind::Download);
         assert_eq!(intent.path, fixture.local_root.join("fresh.txt"));
+    }
+
+    #[test]
+    fn ignored_remote_changes_are_dropped_not_enqueued() {
+        let mut fixture = Fixture::new();
+        fixture.path_filter = Some(Arc::new(SharedEventPathFilter::new(
+            &fixture.local_root,
+            crate::path_filter::EventPathFilterOptions::default(),
+        )));
+        fixture.poll(ts(0)); // baseline
+
+        // A `.DS_Store` appearing on the cloud side (e.g. someone
+        // browsed the mirror folder in Finder) matches the default
+        // ignore rules and must never become a download intent.
+        std::fs::write(fixture.cloud_root.join(".DS_Store"), b"finder").expect("seed remote");
+        fixture.feed.emit(
+            fixture.cloud_root.join(".DS_Store"),
+            WatchEventKind::Created,
+            ts(10),
+        );
+
+        let report = fixture.poll(ts(20));
+        assert_eq!(report.observed_changes, 1);
+        assert_eq!(report.ignored_changes, 1);
+        assert_eq!(report.enqueued_intents, 0);
+        assert!(
+            fixture
+                .state_db
+                .lease_next_ready(ts(30))
+                .expect("lease")
+                .is_none(),
+            "no intent may exist for an ignored remote path"
+        );
     }
 
     #[test]

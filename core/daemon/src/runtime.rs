@@ -157,6 +157,12 @@ pub struct DaemonRuntime {
     staged_executor: StagedExecutor,
     scheduler: KeyedSupersedingScheduler,
     watcher: Option<FsEventsWatcher>,
+    /// Ignore-rule filter for this scope, shared with the watcher (when
+    /// one runs in-process) or with the multi-profile deduplicated
+    /// watcher for the same root. Consulted by the reconcile walk and
+    /// the remote-change mapping so ignore rules apply symmetrically —
+    /// an ignored name never syncs in either direction.
+    path_filter: Option<Arc<crate::fs_events::SharedEventPathFilter>>,
     metrics_sampler: Arc<dyn MetricsSampler>,
     clock: SharedClock,
     tick_waker: Arc<TickWaker>,
@@ -448,6 +454,7 @@ impl DaemonRuntime {
                 &mut self.state_db,
                 &mut self.remote_echoes,
                 self.sync_scope.local_sync_directory.as_deref(),
+                self.path_filter.as_deref(),
                 self.sync_scope.sync_mode,
                 &self.clock,
                 now,
@@ -581,8 +588,8 @@ impl DaemonRuntime {
     /// deliberately runs here on the runtime thread, never in the
     /// callback.
     fn reload_path_filter_if_requested(&mut self) {
-        if let Some(watcher) = &self.watcher {
-            watcher.path_filter().rebuild_if_requested();
+        if let Some(path_filter) = &self.path_filter {
+            path_filter.rebuild_if_requested();
         }
     }
 
@@ -631,6 +638,25 @@ impl DaemonRuntime {
     /// these per-profile recorders (C8-23).
     pub(crate) fn event_recorder(&self) -> Option<Arc<BoundedFsEventRecorder>> {
         self.recorder.clone()
+    }
+
+    /// This scope's ignore-rule filter (present whenever a local sync
+    /// directory is configured). The multi-profile runtime keys these
+    /// by canonical root to share one instance per watched directory.
+    pub(crate) fn shared_path_filter(
+        &self,
+    ) -> Option<Arc<crate::fs_events::SharedEventPathFilter>> {
+        self.path_filter.clone()
+    }
+
+    /// Replaces this runtime's filter with a shared per-root instance so
+    /// profiles watching the same directory — and the deduplicated
+    /// watcher feeding them — reload ignore-rule changes together.
+    pub(crate) fn adopt_shared_path_filter(
+        &mut self,
+        path_filter: Arc<crate::fs_events::SharedEventPathFilter>,
+    ) {
+        self.path_filter = Some(path_filter);
     }
 
     /// Whether any queued or in-flight work justifies the fast tick
@@ -733,16 +759,27 @@ impl DaemonRuntime {
             .local_sync_directory
             .as_ref()
             .map(|watch_root| Arc::new(BoundedFsEventRecorder::new(watch_root.clone())));
+        // Built even when no watcher starts (multi-profile, tests): the
+        // reconcile walk and remote-change mapping filter through it, so
+        // remote-side ingest honors the same rules as local ingest.
+        let path_filter = sync_scope.local_sync_directory.as_ref().map(|watch_root| {
+            Arc::new(crate::fs_events::SharedEventPathFilter::new(
+                watch_root,
+                filter_options,
+            ))
+        });
         let watcher = if start_watcher {
-            match (&sync_scope.local_sync_directory, &recorder) {
-                (Some(watch_root), Some(recorder)) => Some(FsEventsWatcher::start(
-                    watch_root.clone(),
-                    Arc::new(NotifyingRecorder {
-                        inner: recorder.clone(),
-                        waker: tick_waker.clone(),
-                    }),
-                    filter_options,
-                )?),
+            match (&sync_scope.local_sync_directory, &recorder, &path_filter) {
+                (Some(watch_root), Some(recorder), Some(path_filter)) => {
+                    Some(FsEventsWatcher::start_with_shared_filter(
+                        watch_root.clone(),
+                        Arc::new(NotifyingRecorder {
+                            inner: recorder.clone(),
+                            waker: tick_waker.clone(),
+                        }),
+                        path_filter.clone(),
+                    )?)
+                }
                 _ => None,
             }
         } else {
@@ -778,6 +815,7 @@ impl DaemonRuntime {
             staged_executor: StagedExecutor::with_clock(clock.clone()),
             scheduler: KeyedSupersedingScheduler::default(),
             watcher,
+            path_filter,
             metrics_sampler,
             clock,
             tick_waker,
@@ -1667,6 +1705,7 @@ impl DaemonRuntime {
             self.reconcile_walker = Some(crate::reconcile_walk::ReconcileWalker::new(
                 &scope_root,
                 &running_root,
+                self.path_filter.clone(),
             ));
         }
         let walker = self
@@ -3577,6 +3616,63 @@ mod tests {
             drained,
             "queue must drain and the external file must download; leftovers: {leftovers:?}"
         );
+    }
+
+    #[test]
+    fn ignored_names_never_cross_sides_or_manufacture_conflicts() {
+        // The `.DS_Store` shape from manual testing: Finder writes
+        // divergent metadata into both the watched root and the cloud
+        // mirror. Ignore rules must hold in *both* directions — through
+        // the changes feed and through a requested reconcile — so the
+        // divergence never downloads, never uploads, and never produces
+        // a keep-both conflict copy.
+        let mut fixture = BidirectionalFixture::new();
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+        fixture.tick(6_000); // baseline
+
+        std::fs::write(fixture.watch_root.join(".DS_Store"), b"local finder state")
+            .expect("seed local");
+        std::fs::write(
+            fixture.cloud_root.join(".DS_Store"),
+            b"divergent cloud bytes",
+        )
+        .expect("seed cloud");
+        fixture.feed.emit_created(
+            fixture.cloud_root.join(".DS_Store"),
+            timestamp_ms(fixture.now_ms),
+        );
+        // Control file proving the pipeline still moves real content.
+        std::fs::write(fixture.cloud_root.join("real.txt"), b"real payload").expect("seed cloud");
+
+        control.request_reconcile();
+        fixture.converge(20);
+
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("real.txt")).expect("control file downloads"),
+            b"real payload"
+        );
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join(".DS_Store")).expect("local bytes"),
+            b"local finder state",
+            "local ignored file must never be overwritten from the cloud side"
+        );
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join(".DS_Store")).expect("cloud bytes"),
+            b"divergent cloud bytes",
+            "cloud ignored file must never be overwritten from the local side"
+        );
+        for root in [&fixture.watch_root, &fixture.cloud_root] {
+            let conflicts: Vec<_> = std::fs::read_dir(root)
+                .expect("read root")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains("~conflict-"))
+                .collect();
+            assert!(
+                conflicts.is_empty(),
+                "ignored divergence must not manufacture conflict copies: {conflicts:?}"
+            );
+        }
     }
 
     // ---- Optional advanced safeguards (C8-55..C8-57) ----

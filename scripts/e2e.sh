@@ -491,6 +491,31 @@ compgen -G "$SUPPORT_OUT/vapor-support-*/status.json" >/dev/null \
   || fail "S13: support bundle live status capture missing"
 log "PASS S13 — diagnostics respond; support bundle exported with live captures"
 
+# S14 — symmetric ignore filtering (Wave 8 fix): ignored names (Finder
+# metadata, temp files) never sync in either direction — not through
+# the changes feed, not through reconcile — and divergence between the
+# two sides never manufactures a ~conflict copy.
+echo "local finder state" >"$LOCAL_ROOT/.DS_Store"
+echo "divergent cloud finder state" >"$CLOUD_ROOT/.DS_Store"
+echo "cloud temp residue" >"$CLOUD_ROOT/e2e-residue.tmp"
+echo "s14 control" >"$LOCAL_ROOT/e2e-s14-control.txt"
+"$VAPOR_BIN" reconcile >/dev/null
+wait_until 30 "control file to upload around the ignored names" \
+  file_exists "$CLOUD_ROOT/e2e-s14-control.txt" \
+  || fail "S14: control file did not sync"
+converge 30 || fail "S14: queue did not drain after the ignore-filter reconcile"
+grep -q "local finder state" "$LOCAL_ROOT/.DS_Store" \
+  || fail "S14: local .DS_Store was overwritten from the cloud side"
+grep -q "divergent cloud finder state" "$CLOUD_ROOT/.DS_Store" \
+  || fail "S14: cloud .DS_Store was overwritten from the local side"
+[[ ! -e "$LOCAL_ROOT/e2e-residue.tmp" ]] \
+  || fail "S14: an ignored cloud-side name downloaded into the local root"
+if conflict_copy_exists "$LOCAL_ROOT" ".DS_Store" \
+  || conflict_copy_exists "$CLOUD_ROOT" ".DS_Store"; then
+  fail "S14: ignored divergence manufactured a ~conflict copy"
+fi
+log "PASS S14 — ignore rules hold in both directions; no conflict copies for ignored names"
+
 # --- service lifecycle round-trip (--full only; cli.md L2-5 / macos.md M2-4) ---
 #
 # Everything below drives `vapor service` against the REAL macOS

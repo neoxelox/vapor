@@ -33,7 +33,8 @@ use vapor_shared::{RunState, ThrottleState, constants};
 use crate::DaemonApp;
 use crate::clock::SharedClock;
 use crate::fs_events::{
-    FsEventErrorRecord, FsEventRecord, FsEventRecording, FsEventsWatcher, normalize_watch_root,
+    FsEventErrorRecord, FsEventRecord, FsEventRecording, FsEventsWatcher, SharedEventPathFilter,
+    normalize_watch_root,
 };
 use crate::ipc_service::{DaemonStatusSnapshot, StatusPublisher};
 use crate::logging;
@@ -185,6 +186,11 @@ impl MultiProfileRuntime {
             Arc::new(vapor_platform::NativeIdleNotifier::for_current_host());
 
         let mut slots = Vec::new();
+        // One ignore-rule filter per canonical local root: profiles that
+        // watch the same directory share the instance, so an
+        // ignore-file reload observed by the deduplicated watcher
+        // reaches every runtime that filters through it.
+        let mut filters_by_root: BTreeMap<PathBuf, Arc<SharedEventPathFilter>> = BTreeMap::new();
         for profile in profiles.into_iter().filter(|profile| profile.enabled) {
             let database_path = match &state_root {
                 Some(root) => root
@@ -221,6 +227,17 @@ impl MultiProfileRuntime {
                 clock.clone(),
                 false, // watchers are deduplicated at this level
             )?;
+            if let Some(built_filter) = runtime.shared_path_filter() {
+                let canonical_root = built_filter.watch_root().to_path_buf();
+                match filters_by_root.entry(canonical_root) {
+                    std::collections::btree_map::Entry::Occupied(shared) => {
+                        runtime.adopt_shared_path_filter(shared.get().clone());
+                    }
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(built_filter);
+                    }
+                }
+            }
             runtime.set_device_id(device_id);
             runtime.attach_timeline(timeline.clone());
             runtime.attach_resource_management(
@@ -242,7 +259,7 @@ impl MultiProfileRuntime {
         }
 
         let watchers = if start_watchers {
-            start_deduplicated_watchers(&slots, &filter_options, &tick_waker)?
+            start_deduplicated_watchers(&slots, &tick_waker)?
         } else {
             Vec::new()
         };
@@ -579,13 +596,16 @@ fn initial_caps(state: ThrottleState) -> ThrottleCaps {
 }
 
 /// One watcher per distinct canonical local root, fanning out to every
-/// profile that watches that root (C8-23).
+/// profile that watches that root (C8-23). Each watcher adopts the
+/// per-root shared filter its profile runtimes already hold, so the
+/// callback path and the runtimes' reconcile/remote filtering stay one
+/// instance (and reload together).
 fn start_deduplicated_watchers(
     slots: &[ProfileSlot],
-    filter_options: &EventPathFilterOptions,
     waker: &Arc<TickWaker>,
 ) -> Result<Vec<FsEventsWatcher>, DaemonRuntimeError> {
-    let mut by_root: BTreeMap<PathBuf, FanOutRecorder> = BTreeMap::new();
+    let mut by_root: BTreeMap<PathBuf, (FanOutRecorder, Arc<SharedEventPathFilter>)> =
+        BTreeMap::new();
     for slot in slots {
         let Some(root) = slot.profile.scope.local_sync_directory.clone() else {
             continue;
@@ -593,24 +613,33 @@ fn start_deduplicated_watchers(
         let Some(recorder) = slot.runtime.event_recorder() else {
             continue;
         };
+        let Some(path_filter) = slot.runtime.shared_path_filter() else {
+            continue;
+        };
         let canonical = normalize_watch_root(root)?;
         by_root
             .entry(canonical.clone())
-            .or_insert_with(|| FanOutRecorder {
-                targets: Vec::new(),
-                waker: waker.clone(),
+            .or_insert_with(|| {
+                (
+                    FanOutRecorder {
+                        targets: Vec::new(),
+                        waker: waker.clone(),
+                    },
+                    path_filter,
+                )
             })
+            .0
             .targets
             .push((canonical, recorder));
     }
 
     let mut watchers = Vec::new();
-    for (root, recorder) in by_root {
+    for (root, (recorder, path_filter)) in by_root {
         let shared_profiles = recorder.targets.len();
-        watchers.push(FsEventsWatcher::start(
+        watchers.push(FsEventsWatcher::start_with_shared_filter(
             root.clone(),
             Arc::new(recorder),
-            filter_options.clone(),
+            path_filter,
         )?);
         logging::info(
             "Started deduplicated fs watcher",

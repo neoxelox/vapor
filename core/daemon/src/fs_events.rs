@@ -145,6 +145,14 @@ impl SharedEventPathFilter {
             .should_ignore(path)
     }
 
+    /// Canonical root the filter's relative-path matching is anchored
+    /// to. The multi-profile runtime keys shared filter instances by
+    /// this root so profiles watching the same directory reload
+    /// together.
+    pub fn watch_root(&self) -> &Path {
+        &self.watch_root
+    }
+
     /// Called from the fs-watch callback when an ignore file changed.
     pub fn request_reload(&self) {
         self.reload_requested.store(true, Ordering::Release);
@@ -199,9 +207,24 @@ impl FsEventsWatcher {
         filter_options: EventPathFilterOptions,
     ) -> Result<Self, FsEventsWatcherError> {
         let watch_root = normalize_watch_root(watch_root.into())?;
+        let path_filter = Arc::new(SharedEventPathFilter::new(&watch_root, filter_options));
+        Self::start_with_shared_filter(watch_root, recorder, path_filter)
+    }
+
+    /// Starts the watcher around a caller-owned filter so the runtime's
+    /// non-callback consumers (reconcile walk, remote-change mapping)
+    /// observe the exact same rules — including ignore-file reloads —
+    /// as the callback path. The filter must be anchored to the same
+    /// canonical root.
+    pub fn start_with_shared_filter(
+        watch_root: impl Into<PathBuf>,
+        recorder: Arc<dyn FsEventRecording>,
+        path_filter: Arc<SharedEventPathFilter>,
+    ) -> Result<Self, FsEventsWatcherError> {
+        let watch_root = normalize_watch_root(watch_root.into())?;
+        debug_assert_eq!(path_filter.watch_root(), watch_root.as_path());
         let callback_watch_root = watch_root.clone();
         let callback_recorder = Arc::clone(&recorder);
-        let path_filter = Arc::new(SharedEventPathFilter::new(&watch_root, filter_options));
         let callback_path_filter = Arc::clone(&path_filter);
 
         let mut watcher = notify::recommended_watcher(move |result| {

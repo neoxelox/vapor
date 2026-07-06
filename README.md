@@ -85,6 +85,7 @@ Google Drive credentials are supplied per deployment through the `VAPOR_GDRIVE_C
 ### Ignore rules
 
 - Filesystem callback filtering applies before event metadata is recorded.
+- Ignore rules are symmetric: a name that matches them never syncs in either direction — it is skipped by local ingest, by the remote changes feed, and by reconcile comparison on both sides — so an ignored file (for example `.DS_Store`) can never be pulled down from the cloud or produce a conflict copy.
 - Rule precedence (lowest to highest): `preIgnoreRules` -> `.gitignore` (when enabled, recursive per-directory) -> `.vaporignore` (when enabled, recursive per-directory) -> `postIgnoreRules`.
 - `.vaporignore` supports glob-like rules and `!` unignore rules.
 - `preIgnoreRules` default content covers common low-signal paths such as `.git/`, `node_modules/`, build outputs (`dist/`, `build/`, `out/`), caches, swap/tmp files, logs, and `.env.local`.

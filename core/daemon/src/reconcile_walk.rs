@@ -26,12 +26,14 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use vapor_providers::{Provider, ProviderError, RemoteEntry, RemoteEntryKind, RemotePath};
 use vapor_shared::{ProviderErrorKind, SyncMode};
 
 use crate::event_intents::PendingIntentKind;
+use crate::fs_events::SharedEventPathFilter;
 use crate::state_db::{DurableStateDb, StateDbError};
 
 #[derive(Debug)]
@@ -76,18 +78,37 @@ pub struct ReconcileWalker {
     scope_root: PathBuf,
     /// The subtree being reconciled (== scope_root for whole-scope).
     subtree_root: PathBuf,
+    /// Ignore rules, applied symmetrically: local entries and remote
+    /// entries (via their local-equivalent path) that match never
+    /// produce intents and are never descended into. Without this the
+    /// walk would pull ignored names (`.DS_Store`, `node_modules/`)
+    /// down from the cloud side — and manufacture keep-both conflicts
+    /// against local counterparts the watcher rightly never uploaded.
+    path_filter: Option<Arc<SharedEventPathFilter>>,
     pending_dirs: VecDeque<PathBuf>,
     stats: WalkStats,
 }
 
 impl ReconcileWalker {
-    pub fn new(scope_root: &Path, subtree_root: &Path) -> Self {
+    pub fn new(
+        scope_root: &Path,
+        subtree_root: &Path,
+        path_filter: Option<Arc<SharedEventPathFilter>>,
+    ) -> Self {
         Self {
             scope_root: scope_root.to_path_buf(),
             subtree_root: subtree_root.to_path_buf(),
+            path_filter,
             pending_dirs: VecDeque::from([subtree_root.to_path_buf()]),
             stats: WalkStats::default(),
         }
+    }
+
+    fn ignores(&self, local_path: &Path) -> bool {
+        self.path_filter
+            .as_ref()
+            .map(|filter| filter.should_ignore(local_path))
+            .unwrap_or(false)
     }
 
     pub fn subtree_root(&self) -> &Path {
@@ -162,6 +183,9 @@ impl ReconcileWalker {
                     if vapor_providers::filesystem::is_internal_file_name(&name) {
                         continue;
                     }
+                    if self.ignores(&entry.path()) {
+                        continue;
+                    }
                     let Ok(metadata) = entry.path().symlink_metadata() else {
                         continue;
                     };
@@ -194,6 +218,12 @@ impl ReconcileWalker {
                     let Some(name) = entry.path.file_name().map(ToOwned::to_owned) else {
                         continue;
                     };
+                    // Remote entries are judged by the local path they
+                    // would converge onto, so one rule set governs both
+                    // directions.
+                    if self.ignores(&directory.join(&name)) {
+                        continue;
+                    }
                     pairs.entry(name).or_default().remote = Some(entry);
                 }
             }
@@ -415,7 +445,7 @@ mod tests {
         }
 
         fn run_walk(&mut self, mode: SyncMode) -> WalkStats {
-            let mut walker = ReconcileWalker::new(&self.local_root, &self.local_root);
+            let mut walker = ReconcileWalker::new(&self.local_root, &self.local_root, None);
             for _ in 0..64 {
                 let done = walker
                     .process(&self.provider, mode, &mut self.state_db, 8, ts(0))
@@ -648,6 +678,62 @@ mod tests {
     }
 
     #[test]
+    fn walk_applies_ignore_rules_to_both_sides() {
+        let mut fixture = Fixture::new();
+        let filter = Arc::new(crate::fs_events::SharedEventPathFilter::new(
+            &fixture.local_root,
+            crate::path_filter::EventPathFilterOptions::default(),
+        ));
+
+        // Divergent Finder metadata on both sides: without symmetric
+        // filtering this pairs as content divergence and manufactures a
+        // keep-both conflict for a file the watcher rightly never syncs.
+        std::fs::write(fixture.local_root.join(".DS_Store"), b"local finder state").expect("seed");
+        std::fs::write(
+            fixture.cloud_root.join(".DS_Store"),
+            b"different cloud bytes",
+        )
+        .expect("seed");
+        // Cloud-only ignored subtree: must not be descended into or
+        // downloaded.
+        std::fs::create_dir_all(fixture.cloud_root.join("node_modules/pkg")).expect("dirs");
+        std::fs::write(fixture.cloud_root.join("node_modules/pkg/index.js"), b"x").expect("seed");
+        // Local-only ignored file: must not be uploaded by the walk.
+        std::fs::write(fixture.local_root.join("scratch.tmp"), b"t").expect("seed");
+        // Control: real divergence still converges.
+        std::fs::write(fixture.cloud_root.join("real.txt"), b"content").expect("seed");
+
+        let mut walker =
+            ReconcileWalker::new(&fixture.local_root, &fixture.local_root, Some(filter));
+        let mut done = false;
+        for _ in 0..64 {
+            done = walker
+                .process(
+                    &fixture.provider,
+                    SyncMode::TwoWay,
+                    &mut fixture.state_db,
+                    8,
+                    ts(0),
+                )
+                .expect("walk step");
+            if done {
+                break;
+            }
+        }
+        assert!(done, "walk must finish");
+
+        let kinds = fixture.queued_kinds();
+        assert_eq!(
+            kinds,
+            vec![(
+                fixture.local_root.join("real.txt"),
+                PendingIntentKind::Download
+            )],
+            "only the non-ignored file may produce an intent"
+        );
+    }
+
+    #[test]
     fn walk_is_incremental_across_process_calls() {
         let mut fixture = Fixture::new();
         for index in 0..5 {
@@ -656,7 +742,7 @@ mod tests {
             std::fs::write(dir.join("f.txt"), b"x").expect("seed");
         }
 
-        let mut walker = ReconcileWalker::new(&fixture.local_root, &fixture.local_root);
+        let mut walker = ReconcileWalker::new(&fixture.local_root, &fixture.local_root, None);
         // Budget of 2 directories per call: the root plus one child.
         let first_done = walker
             .process(
