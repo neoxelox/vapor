@@ -1079,6 +1079,10 @@ mod tests {
         assert_eq!(entries[1].kind, RemoteEntryKind::Directory);
     }
 
+    // Symlink scope tests are Unix-only: creating symlinks on Windows
+    // requires elevation, and the escape vector under test is a Unix
+    // filesystem shape.
+    #[cfg(unix)]
     #[test]
     fn scope_enforcement_rejects_symlink_escape() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1088,17 +1092,15 @@ mod tests {
         fs::write(outside.join("secret.txt"), b"secret").expect("seed outside");
         let provider = provider_at(&cloud);
 
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&outside, cloud.join("escape")).expect("symlink");
-            let error = provider
-                .stat(&RemotePath::new("escape/secret.txt").expect("path"))
-                .expect_err("symlink escape must be rejected");
-            assert_eq!(error.kind, vapor_shared::ProviderErrorKind::Permanent);
-            assert!(error.message.contains("escapes"));
-        }
+        std::os::unix::fs::symlink(&outside, cloud.join("escape")).expect("symlink");
+        let error = provider
+            .stat(&RemotePath::new("escape/secret.txt").expect("path"))
+            .expect_err("symlink escape must be rejected");
+        assert_eq!(error.kind, vapor_shared::ProviderErrorKind::Permanent);
+        assert!(error.message.contains("escapes"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn stat_treats_symlinks_inside_root_as_invisible() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1106,7 +1108,6 @@ mod tests {
         let provider = provider_at(&cloud);
         fs::write(cloud.join("real.txt"), b"real").expect("seed");
 
-        #[cfg(unix)]
         {
             std::os::unix::fs::symlink(cloud.join("real.txt"), cloud.join("link.txt"))
                 .expect("symlink");

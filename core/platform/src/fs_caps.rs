@@ -211,7 +211,7 @@ impl FilesystemCapabilities for NativeFilesystemCapabilities {
 
     #[cfg(unix)]
     fn read_tag(&self, path: &Path, name: &str) -> io::Result<Option<String>> {
-        match xattr::get(path, name) {
+        match xattr::get(path, native_tag_name(name).as_ref()) {
             Ok(Some(bytes)) => Ok(Some(String::from_utf8(bytes).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "metadata tag is not UTF-8")
             })?)),
@@ -222,16 +222,19 @@ impl FilesystemCapabilities for NativeFilesystemCapabilities {
 
     #[cfg(unix)]
     fn write_tag(&self, path: &Path, name: &str, value: &str) -> io::Result<()> {
-        xattr::set(path, name, value.as_bytes())
+        xattr::set(path, native_tag_name(name).as_ref(), value.as_bytes())
     }
 
     #[cfg(unix)]
     fn remove_tag(&self, path: &Path, name: &str) -> io::Result<()> {
-        match xattr::remove(path, name) {
+        match xattr::remove(path, native_tag_name(name).as_ref()) {
             Ok(()) => Ok(()),
-            // Removing an absent tag is convergence, not failure.
+            // Removing an absent tag is convergence, not failure —
+            // including on filesystems that cannot hold tags at all
+            // (there is definitionally nothing to remove).
             Err(error) if error.raw_os_error() == Some(NO_ATTR_ERRNO) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -250,6 +253,21 @@ impl FilesystemCapabilities for NativeFilesystemCapabilities {
     fn remove_tag(&self, _path: &Path, _name: &str) -> io::Result<()> {
         Err(unsupported_tag_error())
     }
+}
+
+/// Linux user-space extended attributes require the `user.` namespace
+/// prefix — an un-namespaced name is rejected by the kernel with
+/// `EOPNOTSUPP` regardless of filesystem support. macOS accepts
+/// arbitrary reverse-DNS names directly. The trait-level tag name stays
+/// portable (`sh.arn.vapor.op-id`); the prefix is a Linux storage
+/// detail.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn native_tag_name(name: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Owned(format!("user.{name}"))
+}
+#[cfg(target_os = "macos")]
+fn native_tag_name(name: &str) -> std::borrow::Cow<'_, str> {
+    std::borrow::Cow::Borrowed(name)
 }
 
 /// `ENOATTR` on macOS (93); Linux reports absent attributes as `ENODATA`
