@@ -2686,6 +2686,105 @@ mod tests {
     }
 
     #[test]
+    fn loop_prevention_survives_a_provider_without_xattr_support() {
+        // C8-45 constraint compatibility: on filesystems without xattr
+        // (FAT, network mounts), op-id tags fall back to side-files.
+        // The full echo-suppression flow must still hold.
+        let temp = TempDir::new().expect("temp dir");
+        let watch_root = temp.path().join("watch");
+        let cloud_root = temp.path().join("cloud");
+        std::fs::create_dir_all(&watch_root).expect("watch root");
+        std::fs::create_dir_all(&cloud_root).expect("cloud root");
+        let cloud_root = cloud_root.canonicalize().expect("canonical cloud");
+        let state_db = DurableStateDb::open(temp.path().join("state/vapor.sqlite"))
+            .expect("open durable state db");
+        let clock = Arc::new(crate::clock::ManualClock::at_now());
+        let no_xattr: Arc<dyn vapor_platform::fs_caps::FilesystemCapabilities> = Arc::new(
+            vapor_platform::fs_caps::InMemoryFilesystemCapabilities::new(
+                false,
+                vapor_platform::fs_caps::CaseSensitivity::Sensitive,
+            ),
+        );
+        let (provider, feed) =
+            vapor_providers::FilesystemProvider::with_manual_feed(&cloud_root, no_xattr)
+                .expect("no-xattr provider");
+        let mut runtime = DaemonRuntime::build(
+            SyncScope {
+                local_sync_directory: Some(watch_root.clone()),
+                cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+                sync_mode: vapor_shared::SyncMode::TwoWay,
+            },
+            EventPathFilterOptions::default(),
+            state_db,
+            Box::new(provider),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            false,
+        )
+        .expect("runtime");
+        let watch_root = runtime
+            .sync_scope()
+            .local_sync_directory
+            .clone()
+            .expect("normalized root");
+
+        fn tick_once(
+            runtime: &mut DaemonRuntime,
+            clock: &Arc<crate::clock::ManualClock>,
+            now_ms: &mut u64,
+            advance: u64,
+        ) -> RuntimeTickReport {
+            clock.advance(Duration::from_millis(advance));
+            *now_ms += advance;
+            runtime
+                .tick_with_inputs(timestamp_ms(*now_ms), ThrottleInputs::default())
+                .expect("tick")
+        }
+        let mut now_ms: u64 = 0;
+        tick_once(&mut runtime, &clock, &mut now_ms, 6_000); // baseline
+
+        // Upload a local file: the remote copy gets a SIDE-FILE tag.
+        let local_file = watch_root.join("side-file-mode.txt");
+        std::fs::write(&local_file, b"payload").expect("seed");
+        {
+            let recorder = runtime.recorder.as_ref().expect("recorder");
+            FsEventRecording::record_event(
+                recorder.as_ref(),
+                FsEventRecord {
+                    path: local_file.clone(),
+                    kind: FsEventKind::Created,
+                    observed_at: timestamp_ms(now_ms),
+                },
+            );
+        }
+        let mut completed = 0;
+        for _ in 0..12 {
+            let report = tick_once(&mut runtime, &clock, &mut now_ms, 6_000);
+            completed += report.completed_intents;
+            if completed > 0 && runtime.state_db().queue_depth().expect("depth") == 0 {
+                break;
+            }
+        }
+        assert!(completed >= 1, "upload must complete");
+        assert!(
+            cloud_root
+                .join("side-file-mode.txt.vapor-meta.json")
+                .exists(),
+            "op-id must land in a side-file when xattr is unsupported"
+        );
+
+        // The feed echo of our own upload must still be suppressed —
+        // correlated through the side-file, not xattr.
+        feed.emit_created(cloud_root.join("side-file-mode.txt"), timestamp_ms(now_ms));
+        let report = tick_once(&mut runtime, &clock, &mut now_ms, 6_000);
+        assert_eq!(
+            report.remote_poll.suppressed_echoes, 1,
+            "side-file op-id must still suppress the echo"
+        );
+        assert_eq!(runtime.state_db().queue_depth().expect("depth"), 0);
+    }
+
+    #[test]
     fn burst_of_real_uploads_drains_without_admission_serialization() {
         // C8-11 guard-rail: a burst of provider-backed uploads must
         // drain with parallel admission (planner cap 4 in IdleDrain),
