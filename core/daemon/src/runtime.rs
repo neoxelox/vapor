@@ -511,7 +511,41 @@ impl DaemonRuntime {
                         self.mirror_revert_count += mirror_reverts as u64;
                         self.mirror_delete_count += mirror_deletes as u64;
                     }
-                    if self
+                    if walk_done {
+                        // A finished walk completes regardless of the slice
+                        // checkpoint: there is nothing left to slice, and
+                        // yielding here would re-lease the done walk every
+                        // tick (spinning forever under a coarse clock while
+                        // holding the startup barrier up and starving every
+                        // non-reconcile intent behind it).
+                        if let Some(completed_root) = self.complete_running_reconcile()? {
+                            self.reconcile_walker = None;
+                            self.state_db.complete_leased(reconcile_intent_id)?;
+                            self.running_reconcile_intent_id = None;
+                            if self.startup_reconstruction_barrier
+                                && self.sync_scope.local_sync_directory.as_ref()
+                                    == Some(&completed_root)
+                            {
+                                self.startup_reconstruction_barrier = false;
+                                self.startup_barrier_expires_inst = None;
+                            }
+                            report.completed_intents += 1;
+                            report.completed_reconcile_root = Some(completed_root);
+                        } else {
+                            // The controller lost the running reconcile —
+                            // abort defensively so the durable intent can
+                            // retry instead of wedging leased.
+                            self.reconcile_walker = None;
+                            self.app.abort_reconcile(&mut self.scheduler, now);
+                            self.requeue_runtime_intent(
+                                reconcile_intent_id,
+                                now + blocked_intent_requeue_delay(),
+                                "reconcile completed its walk without a controller; will retry",
+                            )?;
+                            self.running_reconcile_intent_id = None;
+                            report.requeued_intents += 1;
+                        }
+                    } else if self
                         .app
                         .checkpoint_reconcile(&mut self.scheduler, now)
                         .is_some()
@@ -523,21 +557,6 @@ impl DaemonRuntime {
                         )?;
                         self.running_reconcile_intent_id = None;
                         report.requeued_intents += 1;
-                    } else if walk_done
-                        && let Some(completed_root) = self.complete_running_reconcile()?
-                    {
-                        self.reconcile_walker = None;
-                        self.state_db.complete_leased(reconcile_intent_id)?;
-                        self.running_reconcile_intent_id = None;
-                        if self.startup_reconstruction_barrier
-                            && self.sync_scope.local_sync_directory.as_ref()
-                                == Some(&completed_root)
-                        {
-                            self.startup_reconstruction_barrier = false;
-                            self.startup_barrier_expires_inst = None;
-                        }
-                        report.completed_intents += 1;
-                        report.completed_reconcile_root = Some(completed_root);
                     }
                 }
             }
@@ -1526,7 +1545,15 @@ impl DaemonRuntime {
                 + usize::from(self.running_reconcile_intent_id.is_none() && next_is_reconcile)
         };
 
-        for intent in self.state_db.lease_ready_batch(now, batch_limit)? {
+        // `lease_ready_batch` marks every returned row leased up front, so
+        // any early `break` below must hand the unprocessed remainder back
+        // to the pending state — an abandoned leased row would sit invisible
+        // until the stale-lease sweep.
+        let mut leased_batch = self
+            .state_db
+            .lease_ready_batch(now, batch_limit)?
+            .into_iter();
+        for intent in leased_batch.by_ref() {
             report.leased_intents += 1;
 
             match intent.kind {
@@ -1600,6 +1627,15 @@ impl DaemonRuntime {
                     }
                 }
             }
+        }
+
+        for abandoned in leased_batch {
+            self.requeue_runtime_intent(
+                abandoned.id,
+                now + blocked_intent_requeue_delay(),
+                "requeued unprocessed remainder of an interrupted lease batch",
+            )?;
+            report.requeued_intents += 1;
         }
 
         Ok(())
@@ -3242,9 +3278,26 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
+        // Canonical paths throughout: the walker maps local paths under
+        // the runtime's canonicalized scope root, so the enqueued
+        // subtree intent must live under the same canonical form.
+        let watch_root = watch_root.canonicalize().expect("canonical watch root");
+        let cloud_root = temp_dir.path().join("cloud");
+        std::fs::create_dir_all(&cloud_root).expect("create cloud root");
+        let cloud_root = cloud_root.canonicalize().expect("canonical cloud root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let subtree_root = watch_root.join("project");
+        // Enough matched directories on BOTH sides that one walk chunk
+        // (RECONCILE_DIRS_PER_CHECKPOINT) cannot finish the comparison:
+        // a finished walk completes instead of pausing, so observing
+        // pause cycles requires a genuinely in-progress walk.
+        for index in 0..(constants::engine::RECONCILE_DIRS_PER_CHECKPOINT * 4) {
+            std::fs::create_dir_all(subtree_root.join(format!("dir-{index}")))
+                .expect("create local walk fodder");
+            std::fs::create_dir_all(cloud_root.join(format!("project/dir-{index}")))
+                .expect("create cloud walk fodder");
+        }
         state_db
             .enqueue_intent(
                 &subtree_root,
@@ -3254,11 +3307,21 @@ mod tests {
             .expect("enqueue reconcile intent");
 
         let clock = Arc::new(crate::clock::ManualClock::at_now());
+        let caps: Arc<dyn vapor_platform::fs_caps::FilesystemCapabilities> =
+            Arc::new(vapor_platform::fs_caps::NativeFilesystemCapabilities::for_current_host());
+        let (provider, _feed) =
+            vapor_providers::FilesystemProvider::with_manual_feed(&cloud_root, caps)
+                .expect("manual-feed provider");
+        let sync_scope = SyncScope {
+            local_sync_directory: Some(watch_root.clone()),
+            cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            sync_mode: vapor_shared::SyncMode::TwoWay,
+        };
         let mut runtime = DaemonRuntime::build(
-            test_sync_scope(&watch_root),
+            sync_scope,
             EventPathFilterOptions::default(),
             state_db,
-            default_provider(),
+            Box::new(provider),
             Arc::new(StaticMetricsSampler::default()),
             clock.clone(),
             false,
@@ -3285,7 +3348,7 @@ mod tests {
                 },
             )
             .expect("pause tick");
-        assert_eq!(paused.requeued_intents, 1);
+        assert_eq!(paused.requeued_intents, 1, "report: {paused:?}");
         assert_eq!(runtime.state_db().queue_depth().expect("depth"), 1);
 
         // Ticks 3..6 (still active): every pause cycle used to add one
@@ -3442,6 +3505,78 @@ mod tests {
                 .lock()
                 .expect("RecordingStatusPublisher mutex poisoned") = Some(snapshot);
         }
+    }
+
+    #[test]
+    fn repeated_download_intent_for_an_already_synced_path_completes() {
+        // Overlapping whole-scope reconciles (startup + cursor-expiry +
+        // user-requested) can schedule a second download for a path the
+        // first pass already converged. The second intent must complete
+        // (as a no-op or harmless re-download), never wedge leased.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+
+        std::fs::write(fixture.cloud_root.join("twice.txt"), b"payload").expect("seed remote");
+        fixture.feed.emit_created(
+            fixture.cloud_root.join("twice.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        fixture.converge(12);
+        assert!(fixture.watch_root.join("twice.txt").is_file());
+
+        fixture
+            .runtime
+            .state_db
+            .enqueue_intent(
+                &fixture.watch_root.join("twice.txt"),
+                PendingIntentKind::Download,
+                timestamp_ms(fixture.now_ms),
+            )
+            .expect("second download enqueues");
+        fixture.converge(12);
+        assert_eq!(
+            fixture.runtime.state_db().queue_depth().expect("depth"),
+            0,
+            "duplicate download must complete, not wedge leased"
+        );
+    }
+
+    #[test]
+    fn requested_reconcile_with_flush_boost_downloads_external_cloud_file_and_drains() {
+        // The e2e S10 shape: a file appears in the cloud root without a
+        // feed event (external write), the user runs `vapor reconcile`
+        // (startup-barrier semantics) and `vapor flush-now` (boost).
+        // The scheduled download must complete and the queue drain —
+        // nothing may wedge leased.
+        let mut fixture = BidirectionalFixture::new();
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+        fixture.tick(6_000); // baseline
+
+        std::fs::write(fixture.cloud_root.join("external.txt"), b"external payload")
+            .expect("seed cloud file without a feed event");
+        control.request_reconcile();
+        control.request_flush();
+
+        let mut drained = false;
+        for _ in 0..30 {
+            fixture.tick(1_000);
+            if fixture.runtime.state_db().queue_depth().expect("depth") == 0
+                && fixture.watch_root.join("external.txt").is_file()
+            {
+                drained = true;
+                break;
+            }
+        }
+        let leftovers = fixture
+            .runtime
+            .state_db()
+            .list_queue_intents(16)
+            .expect("list");
+        assert!(
+            drained,
+            "queue must drain and the external file must download; leftovers: {leftovers:?}"
+        );
     }
 
     // ---- Optional advanced safeguards (C8-55..C8-57) ----

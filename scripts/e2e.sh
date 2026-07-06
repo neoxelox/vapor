@@ -84,6 +84,7 @@ DAEMON_LOG="$VAPOR_DIR/logs/vapord.logs"
 DAEMON_OUT="$E2E_ROOT/daemon.out"
 DAEMON_PID=""
 DEEP_PID=""
+PULL_PID=""
 FAILED=0
 
 # --full service round-trip phase (host-mutating; see header). The
@@ -103,6 +104,14 @@ dump_diagnostics() {
   echo "[e2e] sandbox: $E2E_ROOT"
   if [[ -n "$DAEMON_PID" ]] && kill -0 "$DAEMON_PID" 2>/dev/null; then
     "$VAPOR_BIN" status --json 2>&1 | sed 's/^/[e2e] status: /' || true
+    # Per-intent "why stuck" rows (C8-29) — names the exact stage and
+    # blocker for anything wedged in the pipeline.
+    "$VAPOR_BIN" diagnostics --json 2>&1 | sed 's/^/[e2e] diag: /' || true
+  fi
+  if [[ -f "$STATE_DB" ]]; then
+    echo "[e2e] durable queue rows:"
+    sqlite3 -readonly "$STATE_DB" "SELECT * FROM queue_intents;" 2>/dev/null \
+      | sed 's/^/[e2e]   /' || true
   fi
   if [[ -f "$DAEMON_LOG" ]]; then
     echo "[e2e] last 40 daemon log lines:"
@@ -154,6 +163,7 @@ stop_daemon() {
 cleanup() {
   stop_daemon "$DAEMON_PID" || true
   stop_daemon "$DEEP_PID" || true
+  stop_daemon "$PULL_PID" || true
   if [[ "$SERVICE_PHASE_STARTED" -eq 1 ]]; then
     # Best-effort teardown so the host is left clean even on failure:
     # unregister the service, remove the plist, kill any straggler
@@ -215,6 +225,14 @@ enqueues_reached() {
   local baseline="$1" delta="$2" current
   current="$(enqueue_high_water)"
   [[ "$current" -ge 0 && $((current - baseline)) -ge "$delta" ]]
+}
+
+file_exists() { [[ -f "$1" ]]; }
+file_absent() { [[ ! -e "$1" ]]; }
+
+# True when a keep-both conflict copy for stem $2 exists under root $1.
+conflict_copy_exists() {
+  compgen -G "$1/$2~conflict-*" >/dev/null
 }
 
 start_daemon() {
@@ -383,6 +401,95 @@ stop_daemon "$DEEP_PID" || fail "S9: deep-VAPOR_DIR daemon did not stop cleanly"
 DEEP_PID=""
 rm -rf "$(dirname "$deep_socket")"
 log "PASS S9 — over-budget socket path relocated; CLI + doctor work; temp residue removed"
+
+# S10 — bidirectional filesystem sync (Wave 8): local writes land in the
+# cloud root byte-for-byte, and cloud-born content flows back down.
+[[ -f "$CLOUD_ROOT/e2e-file-1.txt" ]] \
+  || fail "S10: uploaded file missing in cloud root"
+cmp -s "$LOCAL_ROOT/e2e-file-1.txt" "$CLOUD_ROOT/e2e-file-1.txt" \
+  || fail "S10: cloud copy diverges from the local original"
+echo "born in the cloud" >"$CLOUD_ROOT/e2e-from-cloud.txt"
+# External cloud writes bypass the provider's changes feed, so a
+# reconcile is the designed discovery path for them.
+"$VAPOR_BIN" reconcile >/dev/null
+wait_until 30 "cloud-born file to download into the local root" \
+  file_exists "$LOCAL_ROOT/e2e-from-cloud.txt" \
+  || fail "S10: cloud-born file did not download"
+cmp -s "$CLOUD_ROOT/e2e-from-cloud.txt" "$LOCAL_ROOT/e2e-from-cloud.txt" \
+  || fail "S10: downloaded content diverges from the cloud original"
+converge 30 || fail "S10: queue did not drain after bidirectional round-trip"
+log "PASS S10 — local→cloud upload and cloud→local download round-trip byte-for-byte"
+
+# S11 — keep-both conflict (Wave 8): the same path diverges on both
+# sides while the daemon is down; the restart reconcile must preserve
+# BOTH payloads (one canonical, one ~conflict copy) — never overwrite.
+echo "conflict v1" >"$LOCAL_ROOT/e2e-conflict.txt"
+converge 30 || fail "S11: seed file did not sync"
+stop_daemon "$DAEMON_PID" || fail "S11: daemon did not stop for the divergence window"
+DAEMON_PID=""
+echo "edited locally while down" >"$LOCAL_ROOT/e2e-conflict.txt"
+echo "edited in cloud while down" >"$CLOUD_ROOT/e2e-conflict.txt"
+start_daemon
+"$VAPOR_BIN" reconcile >/dev/null
+conflict_somewhere() {
+  conflict_copy_exists "$LOCAL_ROOT" "e2e-conflict" \
+    || conflict_copy_exists "$CLOUD_ROOT" "e2e-conflict"
+}
+wait_until 30 "a keep-both conflict copy to appear" conflict_somewhere \
+  || fail "S11: no ~conflict copy appeared for the diverged path"
+converge 30 || fail "S11: queue did not drain after conflict resolution"
+grep -rq "edited locally while down" "$LOCAL_ROOT" "$CLOUD_ROOT" \
+  || fail "S11: the local edit was lost"
+grep -rq "edited in cloud while down" "$LOCAL_ROOT" "$CLOUD_ROOT" \
+  || fail "S11: the cloud edit was lost"
+log "PASS S11 — diverged edits kept both payloads via a ~conflict copy; nothing lost"
+
+# S12 — pull-only strict mirror (Wave 8 sync modes): its own runtime
+# home; cloud is authoritative — cloud content materializes locally and
+# a local-only file is removed, never uploaded.
+PULL_HOME="$E2E_ROOT/pull-home"
+PULL_LOCAL="$E2E_ROOT/pull-local"
+PULL_CLOUD="$E2E_ROOT/cloud/PullE2E"
+mkdir -p "$PULL_HOME" "$PULL_CLOUD"
+echo "cloud canonical" >"$PULL_CLOUD/doc.txt"
+VAPOR_DIR="$PULL_HOME" "$VAPOR_BIN" config set localSyncDirectory "$PULL_LOCAL" >/dev/null
+VAPOR_DIR="$PULL_HOME" "$VAPOR_BIN" config set cloudSyncDirectory "$PULL_CLOUD" >/dev/null
+VAPOR_DIR="$PULL_HOME" "$VAPOR_BIN" config set syncMode pull-only >/dev/null
+VAPOR_DIR="$PULL_HOME" "$VAPOR_BIN" run --foreground >>"$E2E_ROOT/pull-daemon.out" 2>&1 &
+PULL_PID=$!
+pull_running() {
+  VAPOR_DIR="$PULL_HOME" "$VAPOR_BIN" status --json 2>/dev/null \
+    | grep -q '"run_state": "Running"'
+}
+wait_until 30 "pull-only daemon to be reachable" pull_running \
+  || fail "S12: pull-only daemon did not reach Running"
+wait_until 30 "cloud canonical to materialize locally" \
+  file_exists "$PULL_LOCAL/doc.txt" \
+  || fail "S12: cloud content did not mirror down (startup reconcile)"
+echo "local intruder" >"$PULL_LOCAL/extra.txt"
+VAPOR_DIR="$PULL_HOME" "$VAPOR_BIN" reconcile >/dev/null
+wait_until 30 "local-only file to be mirror-removed" \
+  file_absent "$PULL_LOCAL/extra.txt" \
+  || fail "S12: local-only file survived in pull-only mode"
+[[ ! -e "$PULL_CLOUD/extra.txt" ]] \
+  || fail "S12: pull-only mode uploaded a local file"
+stop_daemon "$PULL_PID" || fail "S12: pull-only daemon did not stop cleanly"
+PULL_PID=""
+log "PASS S12 — pull-only mirror: cloud materialized locally; local-only file removed, never uploaded"
+
+# S13 — Wave 8 CLI observability: per-intent diagnostics answer over
+# IPC and the support bundle exports with live captures.
+"$VAPOR_BIN" diagnostics --json | grep -q '"schema_version"' \
+  || fail "S13: vapor diagnostics --json did not answer"
+SUPPORT_OUT="$E2E_ROOT/support"
+"$VAPOR_BIN" support-bundle --output "$SUPPORT_OUT" --json \
+  | grep -q '"daemonReachable": true' \
+  || fail "S13: support bundle did not capture the live daemon"
+compgen -G "$SUPPORT_OUT/vapor-support-*/manifest.json" >/dev/null \
+  || fail "S13: support bundle manifest missing"
+compgen -G "$SUPPORT_OUT/vapor-support-*/status.json" >/dev/null \
+  || fail "S13: support bundle live status capture missing"
+log "PASS S13 — diagnostics respond; support bundle exported with live captures"
 
 # --- service lifecycle round-trip (--full only; cli.md L2-5 / macos.md M2-4) ---
 #
