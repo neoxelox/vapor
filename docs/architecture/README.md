@@ -44,6 +44,12 @@ across platforms, start with `platform-abstractions.md`.
   resolution, interaction with the keep-both conflict policy, safety
   requirements for the destructive one-way paths, config surface, and the
   pull-only → two-way → push-only build order.
+- `conflict-resolution.md` — what happens *after* a keep-both conflict
+  copy exists: why the copy files themselves are the durable registry
+  (never the capped timeline), the notify → list → resolve lifecycle,
+  the `vapor conflicts` CLI contract every app surface drives, and the
+  per-surface responsibility table. Creation mechanics stay in
+  `data-flow.md §Conflict handling`.
 - `ipc-contracts.md` — transport-agnostic contract surface between apps
   (macOS, future Windows/Linux, `vapor` CLI) and the `vapord` daemon.
   Versioning, handshake, skew-matrix, field-omission tolerance, payload

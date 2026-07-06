@@ -103,6 +103,10 @@ resolved in favor of the authoritative side with no conflict copy (see
 `sync-modes.md`). Keep-both remains the default because `two-way` is the
 default mode.
 
+This section owns conflict *creation*. Everything after a copy exists —
+notification, listing, and resolution through `vapor conflicts` and the
+app surfaces — lives in `conflict-resolution.md`.
+
 When local and remote versions of the same path diverge (both sides modified, or rename collides with an existing name), the default policy is "keep both; never silent overwrite." Concrete mechanics:
 
 - **Winner and loser.** The side whose provider op-id completes first retains the canonical path. The losing side is renamed in-place to a derived "conflict copy" path.

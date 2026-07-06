@@ -611,6 +611,38 @@ Exit gate:
 - No app-surface work depends on this being incomplete — the runtime behavior
   is proven before Wave 9 exposes the toggle.
 
+### Post-Wave-8 follow-ups — conflict surfacing + real-watcher fixes
+
+Born from project-owner manual verification of Wave 8 (PR #5): the manual
+pass surfaced runtime gaps the synthetic-event suites could not see, plus
+the need to make keep-both conflicts a first-class, resolvable surface.
+Design: `docs/architecture/conflict-resolution.md`.
+
+- [x] C8-67 Symmetric ignore filtering: the reconcile walk and the
+      remote-change mapping consult the scope's shared path filter (one
+      instance per canonical root, shared with the watcher and across
+      profiles sharing a root), so an ignored name (`.DS_Store`,
+      `node_modules/`) never syncs in either direction and can never
+      manufacture a conflict copy. E2E S14.
+- [x] C8-68 Ground-truth deletion classification: a stabilized burst
+      carrying a removal/rename for a path that is gone at stabilization
+      maps to `Delete` regardless of fs-watch fragment order (FSEvents
+      flag coalescing made real deletions plan as uploads that no-op'd
+      "vanished before upload", leaving remote copies immortal); the
+      mass-deletion guard taps the same classification decision. E2E S16.
+- [x] C8-69 Conflict-copy name parser
+      (`conflict::parse_conflict_copy_name`, strict inverse of the
+      generator, rejects marker-lookalike user files) + `CONFLICT_MARKER`.
+- [x] C8-70 `vapor conflicts list [--json]` + `vapor conflicts resolve
+      <copy> --keep <canonical|copy>` (cli.md L3-8): files-as-registry
+      scan pruned by the ignore rules, locked JSON contract for app
+      surfaces, resolution via plain file operations that sync like user
+      edits and work with the daemon stopped. E2E S15.
+- [ ] C8-71 Per-path detail on timeline `conflict` events (today the event
+      carries only the per-tick count), so app notifications can name the
+      conflicted file without an immediate list scan. Needed by macos.md
+      M3-8.
+
 ## Phase C9 - `vapor` CLI delivery
 
 Tracked separately in `docs/tasks/cli.md`; this phase is informational here

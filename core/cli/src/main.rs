@@ -13,8 +13,8 @@ use vapor_cli::commands::service as service_cmd;
 use vapor_cli::{RunOptions, ServiceCommand};
 use vapor_cli::{
     commands::{
-        auth as auth_cmd, config as config_cmd, doctor as doctor_cmd, ipc as ipc_cmd,
-        run as run_cmd,
+        auth as auth_cmd, config as config_cmd, conflicts as conflicts_cmd, doctor as doctor_cmd,
+        ipc as ipc_cmd, run as run_cmd,
     },
     resolve_configuration_path,
 };
@@ -102,6 +102,34 @@ enum Command {
         /// `<vapor_dir>/support`).
         #[arg(long)]
         output: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List and resolve keep-both sync conflicts.
+    Conflicts {
+        #[command(subcommand)]
+        action: ConflictsAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConflictsAction {
+    /// Scan every enabled profile's local root for unresolved
+    /// `~conflict-` copies. Works with or without a running daemon.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resolve one conflict: keep either the canonical file or the
+    /// conflict copy; the discarded version is deleted and the change
+    /// syncs like any other edit.
+    Resolve {
+        /// Path to the `…~conflict-…` copy (as printed by `list`).
+        path: std::path::PathBuf,
+        /// Which version survives under the canonical name:
+        /// 'canonical' or 'copy'.
+        #[arg(long)]
+        keep: String,
         #[arg(long)]
         json: bool,
     },
@@ -279,6 +307,41 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
         Command::Logs { tail } => dispatch_logs(tail),
         Command::Auth { action } => dispatch_auth(action),
         Command::SupportBundle { output, json } => dispatch_support_bundle(output, json),
+        Command::Conflicts { action } => dispatch_conflicts(action),
+    }
+}
+
+fn dispatch_conflicts(action: ConflictsAction) -> Result<ExitCode, String> {
+    match action {
+        ConflictsAction::List { json } => {
+            let loaded = vapor_shared::config::load_from(&resolve_configuration_path());
+            if let Some(issue) = loaded.load_issue {
+                eprintln!("vapor: warning: {issue}");
+            }
+            let report = conflicts_cmd::list_conflicts(&loaded.config);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("{}", conflicts_cmd::render_list(&report));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ConflictsAction::Resolve { path, keep, json } => {
+            let keep = conflicts_cmd::KeepSide::parse(&keep)?;
+            let report = conflicts_cmd::resolve_conflict(&path, keep)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("{}", conflicts_cmd::render_resolution(&report));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

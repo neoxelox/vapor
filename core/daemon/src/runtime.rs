@@ -1460,8 +1460,11 @@ impl DaemonRuntime {
             // applied writes never count as user activity or deletions).
             self.active_coding
                 .record_stabilized(event.debounce_class, now);
-            if event.last_event_kind == crate::fs_events::FsEventKind::Removed
-                && self.mass_change_guard.record_delete(now)
+            // One classification decision feeds both the guard and the
+            // scheduled intent — the existence probe inside must not
+            // run twice with the filesystem moving underneath.
+            let intent_kind = crate::scheduler::intent_kind_for_stabilized_event(&event);
+            if intent_kind == PendingIntentKind::Delete && self.mass_change_guard.record_delete(now)
             {
                 // Mass-change / ransomware guard (C8-57): stop admitting
                 // work before the deletion storm replicates to the cloud.
@@ -1507,7 +1510,8 @@ impl DaemonRuntime {
                 accepted += 1;
                 continue;
             }
-            self.scheduler.upsert_stabilized_event(event);
+            self.scheduler
+                .upsert_stabilized_event_as(event, intent_kind);
             accepted += 1;
         }
         (accepted, suppressed, mirror_reverts)
@@ -3673,6 +3677,47 @@ mod tests {
                 "ignored divergence must not manufacture conflict copies: {conflicts:?}"
             );
         }
+    }
+
+    #[test]
+    fn local_deletion_propagates_even_when_a_write_fragment_arrives_last() {
+        // Real fs-watch backends split one unlink into several
+        // fragments and the write-kind one can land last (FSEvents flag
+        // coalescing). The delete must still reach the cloud — this
+        // exact shape used to become an Upload plan that no-op'd as
+        // "vanished before upload", leaving the remote copy immortal.
+        let mut fixture = BidirectionalFixture::new();
+        std::fs::write(fixture.watch_root.join("doomed.txt"), b"payload").expect("seed");
+        fixture.record_local_event(
+            &fixture.watch_root.join("doomed.txt"),
+            FsEventKind::Created,
+            fixture.now_ms,
+        );
+        fixture.converge(12);
+        assert!(
+            fixture.cloud_root.join("doomed.txt").is_file(),
+            "seed file must upload first"
+        );
+
+        std::fs::remove_file(fixture.watch_root.join("doomed.txt")).expect("unlink");
+        fixture.record_local_event(
+            &fixture.watch_root.join("doomed.txt"),
+            FsEventKind::Removed,
+            fixture.now_ms,
+        );
+        // The trailing write-kind fragment notify delivers after the
+        // unlink — the part that used to flip the intent to Upload.
+        fixture.record_local_event(
+            &fixture.watch_root.join("doomed.txt"),
+            FsEventKind::Modified,
+            fixture.now_ms,
+        );
+
+        fixture.converge(12);
+        assert!(
+            !fixture.cloud_root.join("doomed.txt").exists(),
+            "the local deletion must propagate to the cloud"
+        );
     }
 
     // ---- Optional advanced safeguards (C8-55..C8-57) ----

@@ -7,6 +7,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod conflicts;
 pub mod doctor;
 pub mod ipc;
 pub mod run;
@@ -16,6 +17,7 @@ pub mod version;
 
 pub use auth::{AuthCommand, AuthError, AuthStatusEntry};
 pub use config::{ConfigCommand, ConfigError};
+pub use conflicts::{ConflictListReport, ConflictRecord, KeepSide, ResolutionReport};
 pub use doctor::{DoctorCheck, DoctorCheckStatus, DoctorReport};
 pub use ipc::IpcCliError;
 pub use run::{RunError, RunOptions};

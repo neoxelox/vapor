@@ -192,6 +192,8 @@ network egress control.
 | S12 | Pull-only mirror | a `syncMode = pull-only` runtime materializes cloud content locally and removes a local-only file (never uploading it) |
 | S13 | Observability | `vapor diagnostics --json` answers over IPC; `vapor support-bundle` exports config + logs + live status/diagnostics/timeline with a manifest |
 | S14 | Symmetric ignore filtering | ignored names (`.DS_Store`, `*.tmp`) never sync in either direction — divergent copies on both sides survive untouched, a cloud-side ignored file never downloads, and no `~conflict-` copy is manufactured |
+| S15 | Conflict surfacing | `vapor conflicts list --json` finds the S11 keep-both copy from durable file state; `resolve --keep copy` promotes the preserved version, the resolution syncs to the cloud, and the list drains to empty |
+| S16 | Local delete propagation | a plain `rm` in the watched root removes the cloud copy — deletion classification comes from ground truth, not fs-watch fragment order |
 
 ## Extending the harness — discipline rules
 

@@ -516,6 +516,51 @@ if conflict_copy_exists "$LOCAL_ROOT" ".DS_Store" \
 fi
 log "PASS S14 — ignore rules hold in both directions; no conflict copies for ignored names"
 
+# S15 — conflict surfacing: `vapor conflicts list` finds the keep-both
+# copy S11 left behind (the files are the durable registry — no
+# timeline cap applies), `resolve --keep copy` promotes the preserved
+# version, and the resolution syncs like any other edit.
+"$VAPOR_BIN" conflicts list --json | grep -q 'e2e-conflict~conflict-' \
+  || fail "S15: conflicts list did not find the S11 conflict copy"
+"$VAPOR_BIN" conflicts list --json | grep -q '"deviceId"' \
+  || fail "S15: conflict record is missing the origin device id"
+# S11 can preserve a divergent copy per side; promote the first and
+# discard any others so the scope ends conflict-free.
+S15_COPY="$(compgen -G "$LOCAL_ROOT/e2e-conflict~conflict-*" | head -n 1)"
+[[ -n "$S15_COPY" ]] || fail "S15: local conflict copy missing"
+S15_KEPT_PAYLOAD="$(cat "$S15_COPY")"
+"$VAPOR_BIN" conflicts resolve "$S15_COPY" --keep copy >/dev/null \
+  || fail "S15: conflicts resolve exited non-zero"
+[[ "$(cat "$LOCAL_ROOT/e2e-conflict.txt")" == "$S15_KEPT_PAYLOAD" ]] \
+  || fail "S15: the kept copy's payload did not become the canonical content"
+[[ ! -e "$S15_COPY" ]] || fail "S15: resolved conflict copy still exists locally"
+for leftover in "$LOCAL_ROOT"/e2e-conflict~conflict-*; do
+  [[ -e "$leftover" ]] || continue
+  "$VAPOR_BIN" conflicts resolve "$leftover" --keep canonical >/dev/null \
+    || fail "S15: resolving a leftover copy with --keep canonical failed"
+done
+converge 30 || fail "S15: queue did not drain after conflict resolution"
+no_cloud_conflict_copy() { ! conflict_copy_exists "$CLOUD_ROOT" "e2e-conflict"; }
+wait_until 30 "resolved conflict copy to disappear from the cloud root" \
+  no_cloud_conflict_copy \
+  || fail "S15: resolution did not propagate the copy's deletion to the cloud"
+"$VAPOR_BIN" conflicts list --json | grep -q '"conflicts": \[\]' \
+  || fail "S15: conflicts list is not empty after resolution"
+log "PASS S15 — conflicts listed from durable file state; resolve promoted the copy and synced"
+
+# S16 — local deletion propagates through the real watcher. Real
+# fs-watch backends split one unlink into several fragments; the
+# classification must come from ground truth, not fragment order
+# (deletes used to become uploads that no-op'd as "vanished", leaving
+# the remote copy immortal).
+[[ -f "$CLOUD_ROOT/e2e-file-2.txt" ]] || fail "S16: expected S3 file in the cloud root"
+rm "$LOCAL_ROOT/e2e-file-2.txt"
+wait_until 30 "local deletion to remove the cloud copy" \
+  file_absent "$CLOUD_ROOT/e2e-file-2.txt" \
+  || fail "S16: local deletion never propagated to the cloud"
+converge 30 || fail "S16: queue did not drain after the deletion"
+log "PASS S16 — a plain local delete removes the cloud copy"
+
 # --- service lifecycle round-trip (--full only; cli.md L2-5 / macos.md M2-4) ---
 #
 # Everything below drives `vapor service` against the REAL macOS

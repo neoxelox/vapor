@@ -229,12 +229,17 @@ IDs stable; they do not imply low priority.)
 Status: pending — **now unblocked** (every Wave 8 dependency below has
 landed).
 
-- `macos.md` M3-1 … M3-6 — diagnostics UX in the macOS app: real
+- `macos.md` M3-1 … M3-8 — diagnostics UX in the macOS app: real
   IPC-backed controls (`Pause`/`Resume`/`Flush now`), full menubar
   state model, diagnostics panel with throttle reason + queue depth +
   conflicts + failures + effective ceilings + utilization + idle-boost
-  reason, per-intent "why stuck" UI, live timeline tab, tests.
-  Depends on C8-27 … C8-31.
+  reason, per-intent "why stuck" UI, live timeline tab, tests, plus the
+  conflicts pane and conflict notifications (M3-7/M3-8, driving the
+  shipped `vapor conflicts` CLI per
+  `docs/architecture/conflict-resolution.md`). Depends on C8-27 … C8-31
+  and the post-Wave-8 follow-ups C8-67 … C8-70 (all landed; C8-71
+  per-path timeline detail is the one open core dependency, only for
+  naming files inside notifications).
 - `macos.md` M4-1 … M4-5 — profiles UX: create/rename/select/enable/
   disable/delete flows, profile-scoped override settings UI (including the
   per-profile `syncMode` toggle and its strict-mirror warning), safe

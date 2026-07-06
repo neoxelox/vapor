@@ -11,6 +11,12 @@
 
 use std::path::{Path, PathBuf};
 
+/// The marker every keep-both conflict copy carries in its file name.
+/// Surfaces that list or resolve conflicts (the `vapor conflicts`
+/// command, and the app UIs driving it) recognize copies by this
+/// marker via [`parse_conflict_copy_name`].
+pub const CONFLICT_MARKER: &str = "~conflict-";
+
 /// Derives the keep-both conflict-copy path for `original`.
 /// `path_exists` abstracts the existence probe so derivation stays
 /// pure and testable.
@@ -31,7 +37,7 @@ pub fn conflict_copy_path(
         Some(index) => file_name.split_at(index),
     };
 
-    let base = format!("{stem}~conflict-{device_id}-{timestamp_ms}");
+    let base = format!("{stem}{CONFLICT_MARKER}{device_id}-{timestamp_ms}");
     let candidate = original.with_file_name(format!("{base}{extension}"));
     if !path_exists(&candidate) {
         return candidate;
@@ -44,6 +50,72 @@ pub fn conflict_copy_path(
         }
         sequence += 1;
     }
+}
+
+/// A conflict-copy file name decomposed back into its parts — the
+/// inverse of [`conflict_copy_path`] for names that machine derived.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConflictCopyName {
+    /// The canonical file name the copy diverged from
+    /// (`report~conflict-dev-17….md` → `report.md`).
+    pub canonical_file_name: String,
+    /// The device whose divergent version the copy preserves.
+    pub device_id: String,
+    /// When the divergence was observed (the conflicting intent's
+    /// event time, epoch milliseconds).
+    pub timestamp_ms: u64,
+    /// Collision sequence (`-2`, `-3`, …); `None` for the first copy.
+    pub sequence: Option<u64>,
+}
+
+/// Epoch-millisecond timestamps are 12+ digits for any date past 2001.
+/// Requiring that length is what disambiguates the timestamp segment
+/// from device ids that end in digits (`mbp2`) and from the small
+/// collision sequence.
+const TIMESTAMP_MIN_DIGITS: usize = 12;
+
+/// Parses a file name produced by [`conflict_copy_path`]. Returns
+/// `None` for anything that does not match the machine-generated
+/// grammar (`{stem}~conflict-{device_id}-{timestamp_ms}[-{seq}]{ext}`),
+/// so user files that merely contain the marker text do not
+/// false-positive.
+pub fn parse_conflict_copy_name(file_name: &str) -> Option<ConflictCopyName> {
+    let marker_index = file_name.find(CONFLICT_MARKER)?;
+    let stem = &file_name[..marker_index];
+    if stem.is_empty() {
+        return None;
+    }
+    let rest = &file_name[marker_index + CONFLICT_MARKER.len()..];
+    // The generator splits the original name at its last dot, so the
+    // copy's extension is whatever follows the last dot after the
+    // marker (device ids are hostname-derived slugs; they never
+    // contain dots).
+    let (meta, extension) = match rest.rfind('.') {
+        Some(index) => rest.split_at(index),
+        None => (rest, ""),
+    };
+
+    let segments: Vec<&str> = meta.split('-').collect();
+    let timestamp_index = segments
+        .iter()
+        .rposition(|s| s.len() >= TIMESTAMP_MIN_DIGITS && s.chars().all(|c| c.is_ascii_digit()))?;
+    if timestamp_index == 0 {
+        return None; // no device id segment before the timestamp
+    }
+    let timestamp_ms = segments[timestamp_index].parse::<u64>().ok()?;
+    let device_id = segments[..timestamp_index].join("-");
+    let sequence = match &segments[timestamp_index + 1..] {
+        [] => None,
+        [seq] => Some(seq.parse::<u64>().ok()?),
+        _ => return None,
+    };
+
+    Some(ConflictCopyName {
+        canonical_file_name: format!("{stem}{extension}"),
+        device_id,
+        timestamp_ms,
+        sequence,
+    })
 }
 
 #[cfg(test)]
@@ -98,6 +170,60 @@ mod tests {
             taken.iter().any(|t| t == candidate)
         });
         assert_eq!(derived, PathBuf::from("/r/a~conflict-dev-9-3.txt"));
+    }
+
+    #[test]
+    fn parse_round_trips_generated_names() {
+        // Realistic epoch-ms timestamps: the parser requires 12+ digits
+        // to tell the timestamp apart from digit-suffixed device ids.
+        let cases = [
+            ("report.md", "alexs-mbp", 1_750_000_000_123_u64),
+            ("Makefile", "dev", 1_750_000_000_123),
+            (".env", "mbp2", 1_750_000_000_123),
+            ("archive.tar.gz", "work-mac-2", 1_750_000_000_123),
+        ];
+        for (original, device_id, timestamp_ms) in cases {
+            let derived = conflict_copy_path(
+                &PathBuf::from("/r").join(original),
+                device_id,
+                timestamp_ms,
+                never_exists,
+            );
+            let name = derived.file_name().unwrap().to_str().unwrap();
+            let parsed = parse_conflict_copy_name(name)
+                .unwrap_or_else(|| panic!("generated name must parse: {name}"));
+            // Multi-dot originals lose their inner stem dots to the
+            // canonical reconstruction only when the generator split
+            // them — round-trip must restore the full original name.
+            assert_eq!(parsed.canonical_file_name, original, "for {name}");
+            assert_eq!(parsed.device_id, device_id, "for {name}");
+            assert_eq!(parsed.timestamp_ms, timestamp_ms, "for {name}");
+            assert_eq!(parsed.sequence, None, "for {name}");
+        }
+    }
+
+    #[test]
+    fn parse_recovers_the_collision_sequence() {
+        let parsed = parse_conflict_copy_name("a~conflict-dev-1750000000123-3.txt").expect("parse");
+        assert_eq!(parsed.canonical_file_name, "a.txt");
+        assert_eq!(parsed.device_id, "dev");
+        assert_eq!(parsed.timestamp_ms, 1_750_000_000_123);
+        assert_eq!(parsed.sequence, Some(3));
+    }
+
+    #[test]
+    fn parse_rejects_names_that_only_look_conflicted() {
+        // User files containing the marker text but not the generated
+        // grammar must not be treated as conflict copies.
+        for name in [
+            "notes~conflict-resolution.md",         // no timestamp segment
+            "~conflict-dev-1750000000123.md",       // empty stem
+            "a~conflict-1750000000123.txt",         // no device id segment
+            "a~conflict-dev-1750000000123-2-9.txt", // trailing garbage
+            "plain.txt",
+        ] {
+            assert_eq!(parse_conflict_copy_name(name), None, "{name}");
+        }
     }
 
     #[test]

@@ -20,6 +20,7 @@ Available now:
 
 - 🔁 Bidirectional cloud sync with durable intent replay and eventual consistency.
 - 🛡 Conflict-safe behavior with deterministic outcomes (keep both copies, never silent overwrite).
+- 🧭 Conflicts stay visible until you settle them: list every kept-both copy and resolve each one with a single command, from any device.
 - 🔀 Choose each folder's sync direction — full two-way, or a one-way mirror for read-only backups and copies.
 - 🧩 Multiple sync profiles let one folder flow to several clouds or keep separate setups neatly isolated.
 - 🪶 Low-impact by design: Vapor defers heavy work under pressure to protect battery and thermals.
