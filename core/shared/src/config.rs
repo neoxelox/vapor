@@ -49,6 +49,34 @@ pub struct VaporConfig {
     /// an explicit, enum-validated set — see
     /// `docs/architecture/sync-modes.md`.
     pub sync_mode: String,
+    /// Sync profiles (C8-19). Empty means one implicit profile
+    /// (`default`) assembled from the top-level fields above. Each
+    /// entry overrides the profile-capable fields outright; unset
+    /// fields inherit the top-level values.
+    pub profiles: Vec<ProfileConfig>,
+}
+
+/// One entry of the `profiles` array. Every field except `id` is
+/// optional on the wire; unset fields inherit the top-level defaults
+/// (categorical override semantics per C8-21 — a profile value wins
+/// outright, no merging).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileConfig {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub local_sync_directory: Option<String>,
+    #[serde(default)]
+    pub cloud_sync_directory: Option<String>,
+    #[serde(default)]
+    pub sync_mode: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 impl Default for VaporConfig {
@@ -65,6 +93,7 @@ impl Default for VaporConfig {
             timeline_event_limit: constants::config::DEFAULT_TIMELINE_EVENT_LIMIT,
             provider: constants::provider::DEFAULT.to_string(),
             sync_mode: constants::sync_mode::DEFAULT.to_string(),
+            profiles: Vec::new(),
         }
     }
 }
@@ -149,6 +178,7 @@ struct RawVaporConfig {
     timeline_event_limit: Option<i64>,
     provider: Option<String>,
     sync_mode: Option<String>,
+    profiles: Option<Vec<ProfileConfig>>,
 }
 
 impl RawVaporConfig {
@@ -172,6 +202,7 @@ impl RawVaporConfig {
                 .unwrap_or(defaults.timeline_event_limit),
             provider: self.provider.unwrap_or(defaults.provider),
             sync_mode: self.sync_mode.unwrap_or(defaults.sync_mode),
+            profiles: self.profiles.unwrap_or_default(),
         }
     }
 }

@@ -153,6 +153,25 @@ pub mod provider {
     pub const CHANGES_FEED_RING_MAX_EVENTS: usize = 8_192;
 }
 
+pub mod profile {
+    /// Keys of each object in the top-level `profiles` array (C8-19).
+    /// A profile inherits any unset override-capable field from the
+    /// top-level configuration.
+    pub const KEY_ID: &str = "id";
+    pub const KEY_NAME: &str = "name";
+    pub const KEY_PROVIDER: &str = "provider";
+    pub const KEY_LOCAL_SYNC_DIRECTORY: &str = "localSyncDirectory";
+    pub const KEY_CLOUD_SYNC_DIRECTORY: &str = "cloudSyncDirectory";
+    pub const KEY_SYNC_MODE: &str = "syncMode";
+    pub const KEY_ENABLED: &str = "enabled";
+    /// The implicit profile id used when no `profiles` array is
+    /// configured (single-scope setups; the pre-profile behavior).
+    pub const DEFAULT_PROFILE_ID: &str = "default";
+    /// Profile ids must be short filesystem-safe slugs: they name the
+    /// per-profile durable state directory and namespace secrets.
+    pub const MAX_PROFILE_ID_LENGTH: usize = 32;
+}
+
 pub mod sync_mode {
     /// Accepted `syncMode` config values (C8-59). The names describe the
     /// direction from the local device's perspective; see

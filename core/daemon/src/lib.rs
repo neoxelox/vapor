@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use vapor_providers::{Provider, default_provider};
@@ -34,7 +34,9 @@ pub mod ipc_server;
 pub mod ipc_service;
 pub mod logging;
 pub mod metrics;
+pub mod multi_runtime;
 pub mod path_filter;
+pub mod profiles;
 pub mod reconcile;
 pub mod reconcile_walk;
 pub mod remote_sync;
@@ -57,7 +59,11 @@ pub struct DaemonApp {
     last_throttle_decision: Option<ThrottleDecision>,
     retry_slowdown_until: Option<SystemTime>,
     reconcile_controller: ReconcileController,
-    workgate: ThrottleWorkgate,
+    /// Shared behind a mutex so multiple profile runtimes gate against
+    /// ONE daemon-level cap set (`data-flow.md §Multi-profile watch
+    /// coordination`); a single-profile daemon simply owns the only
+    /// clone.
+    workgate: Arc<Mutex<ThrottleWorkgate>>,
 }
 
 impl Default for DaemonApp {
@@ -74,7 +80,6 @@ impl std::fmt::Debug for DaemonApp {
             .field("last_throttle_decision", &self.last_throttle_decision)
             .field("retry_slowdown_until", &self.retry_slowdown_until)
             .field("reconcile_controller", &self.reconcile_controller)
-            .field("workgate", &self.workgate)
             .finish()
     }
 }
@@ -85,20 +90,47 @@ impl DaemonApp {
     }
 
     pub fn new_with_clock(provider: Box<dyn Provider>, clock: SharedClock) -> Self {
-        logging::info("Initialized daemon app state", &[]);
         let snapshot = StatusSnapshot::default();
         let initial_throttle_state = snapshot.throttle_state;
         let throttle_controller = ThrottleController::with_clock(clock.clone());
         let throttle_caps = throttle_controller.caps_for(initial_throttle_state);
-        Self {
-            snapshot,
+        Self::new_with_shared_workgate(
             provider,
-            throttle_controller,
+            clock,
+            Arc::new(Mutex::new(ThrottleWorkgate::new(
+                initial_throttle_state,
+                throttle_caps,
+            ))),
+        )
+    }
+
+    /// Composes an app around a shared daemon-level workgate (the
+    /// multi-profile runtime hands every profile the same instance).
+    pub fn new_with_shared_workgate(
+        provider: Box<dyn Provider>,
+        clock: SharedClock,
+        workgate: Arc<Mutex<ThrottleWorkgate>>,
+    ) -> Self {
+        logging::info("Initialized daemon app state", &[]);
+        Self {
+            snapshot: StatusSnapshot::default(),
+            provider,
+            throttle_controller: ThrottleController::with_clock(clock.clone()),
             last_throttle_decision: None,
             retry_slowdown_until: None,
             reconcile_controller: ReconcileController::with_clock(clock),
-            workgate: ThrottleWorkgate::new(initial_throttle_state, throttle_caps),
+            workgate,
         }
+    }
+
+    fn lock_workgate(&self) -> std::sync::MutexGuard<'_, ThrottleWorkgate> {
+        // Poison recovery: a panicking profile must not wedge the
+        // shared workgate for its healthy siblings (C8-24). Counts are
+        // rebuilt by the next reconfigure; a leaked permit slot is
+        // bounded and self-corrects as caps refresh.
+        self.workgate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn snapshot(&self) -> &StatusSnapshot {
@@ -114,6 +146,11 @@ impl DaemonApp {
     /// trait boundary — engine code never names a concrete provider.
     pub fn provider(&self) -> &dyn Provider {
         self.provider.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_provider_for_testing(&mut self, provider: Box<dyn Provider>) {
+        self.provider = provider;
     }
 
     pub fn throttle_decision(&self) -> Option<&ThrottleDecision> {
@@ -167,16 +204,16 @@ impl DaemonApp {
     }
 
     pub fn workgate_snapshot(&self) -> WorkgateSnapshot {
-        self.workgate.snapshot()
+        self.lock_workgate().snapshot()
     }
 
     pub fn try_acquire_work(&mut self, class: WorkClass) -> Result<WorkPermit, WorkPermitDenied> {
         self.refresh_workgate_caps(SystemTime::now());
-        self.workgate.try_acquire(class)
+        self.lock_workgate().try_acquire(class)
     }
 
     pub fn release_work(&mut self, permit: WorkPermit) -> bool {
-        self.workgate.release(permit)
+        self.lock_workgate().release(permit)
     }
 
     pub fn release_ready_deferred_reconciles(
@@ -198,9 +235,13 @@ impl DaemonApp {
         scheduler: &mut KeyedSupersedingScheduler,
         now: SystemTime,
     ) -> Result<Option<std::path::PathBuf>, WorkPermitDenied> {
+        let workgate = self.workgate.clone();
+        let mut workgate = workgate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.reconcile_controller.try_start_next(
             scheduler,
-            &mut self.workgate,
+            &mut workgate,
             self.snapshot.throttle_state,
             now,
         )
@@ -211,9 +252,13 @@ impl DaemonApp {
         scheduler: &mut KeyedSupersedingScheduler,
         now: SystemTime,
     ) -> Option<ReconcilePause> {
+        let workgate = self.workgate.clone();
+        let mut workgate = workgate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.reconcile_controller.checkpoint(
             scheduler,
-            &mut self.workgate,
+            &mut workgate,
             self.snapshot.throttle_state,
             now,
         )
@@ -230,8 +275,12 @@ impl DaemonApp {
         scheduler: &mut KeyedSupersedingScheduler,
         now: SystemTime,
     ) -> Option<std::path::PathBuf> {
+        let workgate = self.workgate.clone();
+        let mut workgate = workgate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.reconcile_controller
-            .abort_running(scheduler, &mut self.workgate, now)
+            .abort_running(scheduler, &mut workgate, now)
     }
 
     pub fn complete_reconcile(
@@ -239,8 +288,12 @@ impl DaemonApp {
         maps: &mut BoundedEventIntentMaps,
         scheduler: &mut KeyedSupersedingScheduler,
     ) -> Option<ReconcileCompletion> {
+        let workgate = self.workgate.clone();
+        let mut workgate = workgate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.reconcile_controller
-            .complete_success(maps, scheduler, &mut self.workgate)
+            .complete_success(maps, scheduler, &mut workgate)
     }
 
     pub fn schedule_retry(
@@ -367,7 +420,7 @@ impl DaemonApp {
         }
 
         let throttle_caps = self.effective_throttle_caps(now);
-        self.workgate
+        self.lock_workgate()
             .reconfigure(self.snapshot.throttle_state, throttle_caps);
     }
 }

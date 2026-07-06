@@ -571,17 +571,71 @@ impl DaemonRuntime {
         self.watcher.is_some()
     }
 
+    /// The bounded event recorder this runtime ingests from. The
+    /// multi-profile runtime fans deduplicated watcher callbacks into
+    /// these per-profile recorders (C8-23).
+    pub(crate) fn event_recorder(&self) -> Option<Arc<BoundedFsEventRecorder>> {
+        self.recorder.clone()
+    }
+
+    /// Whether any queued or in-flight work justifies the fast tick
+    /// cadence — the multi-profile loop aggregates this across
+    /// profiles.
+    pub(crate) fn profile_has_pending_work(&self, report: &RuntimeTickReport) -> bool {
+        self.has_pending_work(report)
+    }
+
+    /// Schedules the startup whole-scope reconcile (exposed for the
+    /// multi-profile composition, which builds runtimes watcher-less).
+    pub(crate) fn schedule_startup_reconcile(
+        &mut self,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        self.enqueue_startup_reconstruction_reconcile(now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_provider_for_testing(
+        &mut self,
+        provider: Box<dyn vapor_providers::Provider>,
+    ) {
+        self.app.replace_provider_for_testing(provider);
+    }
+
     fn build(
-        mut sync_scope: SyncScope,
+        sync_scope: SyncScope,
         filter_options: EventPathFilterOptions,
-        mut state_db: DurableStateDb,
+        state_db: DurableStateDb,
         provider: Box<dyn Provider>,
         metrics_sampler: Arc<dyn MetricsSampler>,
         clock: SharedClock,
         start_watcher: bool,
     ) -> Result<Self, DaemonRuntimeError> {
+        let app = DaemonApp::new_with_clock(provider, clock.clone());
+        Self::build_with_app(
+            sync_scope,
+            filter_options,
+            state_db,
+            app,
+            metrics_sampler,
+            clock,
+            start_watcher,
+        )
+    }
+
+    /// Composition seam for the multi-profile runtime: the caller
+    /// builds the `DaemonApp` (possibly around a shared workgate) and
+    /// manages watchers itself.
+    pub(crate) fn build_with_app(
+        mut sync_scope: SyncScope,
+        filter_options: EventPathFilterOptions,
+        mut state_db: DurableStateDb,
+        mut app: DaemonApp,
+        metrics_sampler: Arc<dyn MetricsSampler>,
+        clock: SharedClock,
+        start_watcher: bool,
+    ) -> Result<Self, DaemonRuntimeError> {
         let now = clock.now_system();
-        let mut app = DaemonApp::new_with_clock(provider, clock.clone());
         let recovered_count = state_db.recover_leased(now)?;
         match state_db.prune_tombstones(now) {
             Ok(pruned) if pruned > 0 => logging::info(

@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 use vapor_ipc::Service;
 use vapor_platform::{NativeProcessSupervisor, ProcessSupervisor};
-use vapor_providers::{Provider, default_provider, select_provider};
 use vapor_shared::config::{self, VaporConfigLoadResult};
 
 use crate::clock::system_clock;
@@ -21,12 +20,12 @@ use crate::ipc_server;
 use crate::ipc_service::{DaemonIpcService, DaemonStatusSnapshot};
 use crate::logging;
 use crate::metrics::NativePlatformMetricsSampler;
+use crate::multi_runtime::MultiProfileRuntime;
 use crate::path_filter::EventPathFilterOptions;
-use crate::runtime::{self, DaemonRuntime, DaemonRuntimeError};
+use crate::runtime::{self, DaemonRuntimeError};
 use crate::runtime_control::RuntimeControl;
 use crate::singleton::{SingletonLock, SingletonLockError};
-use crate::state_db::{DurableStateDb, StateDbError};
-use crate::sync_directories;
+use crate::state_db::StateDbError;
 
 #[derive(Debug)]
 pub enum BootstrapError {
@@ -105,27 +104,25 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
         }
     };
 
-    let state_db = DurableStateDb::open_with_corruption_recovery(
-        vapor_shared::runtime_paths::sqlite_database_path(),
-        std::time::SystemTime::now(),
-    )?;
-    let sync_scope = sync_directories::resolve_with_config(&config);
+    // One runtime per enabled profile over a shared workgate and
+    // deduplicated watchers (C8-19..C8-24). A configuration without a
+    // `profiles` array runs the single implicit `default` profile on
+    // the legacy state paths.
+    let profiles = crate::profiles::resolve_profiles(&config);
     let filter_options = EventPathFilterOptions::from_environment_and_config(&config);
     // The native platform sampler (per-OS FFI lands incrementally; it
     // currently reports static idle inputs) — wired here so the seam is
     // exercised in production, not just in tests.
     let metrics_sampler = Arc::new(NativePlatformMetricsSampler::for_current_host());
-    let provider = resolve_provider(&config.provider);
 
-    let mut runtime = DaemonRuntime::start_configured(
-        sync_scope,
+    let mut runtime = MultiProfileRuntime::start(
+        profiles,
         filter_options,
-        state_db,
-        provider,
         metrics_sampler,
         system_clock(),
+        &device_id,
+        true,
     )?;
-    runtime.set_device_id(device_id);
 
     log_started(&runtime);
 
@@ -133,7 +130,12 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // macOS app) can query and control the running daemon. The handle is
     // kept alive for the duration of the runtime loop; its Drop removes
     // the socket file.
-    let initial_snapshot = DaemonStatusSnapshot::from_app(runtime.app());
+    let initial_snapshot = DaemonStatusSnapshot {
+        run_state: "Starting".to_string(),
+        throttle_state: vapor_shared::ThrottleState::Light,
+        provider_name: config.provider.clone(),
+        throttle_reason: "starting up".to_string(),
+    };
     let runtime_control = Arc::new(RuntimeControl::new());
     runtime.attach_control(runtime_control.clone());
     let ipc_service = Arc::new(DaemonIpcService::new(initial_snapshot, runtime_control));
@@ -164,28 +166,6 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     result.map_err(BootstrapError::from)
 }
 
-/// Maps the configured `provider` value onto a provider instance
-/// (C8-9). `filesystem` is the pre-GA default; `google_drive` is
-/// selectable but inert until C8-54 flips it live. An unknown value is
-/// a configuration error: the daemon keeps running on the inert stub
-/// (which performs no sync work) so the user can fix the config through
-/// the normal surfaces instead of facing a crash loop.
-fn resolve_provider(configured: &str) -> Box<dyn Provider> {
-    match select_provider(configured) {
-        Ok(provider) => provider,
-        Err(error) => {
-            logging::error(
-                "Invalid provider configuration; running inert until it is fixed",
-                &[
-                    ("configured_provider", configured.to_string()),
-                    ("error", error.message),
-                ],
-            );
-            default_provider()
-        }
-    }
-}
-
 fn install_shutdown_signal_handlers() {
     // Shutdown signals route through `core/platform`'s
     // `ProcessSupervisor`. The macOS / Linux native impl uses
@@ -201,13 +181,20 @@ fn install_shutdown_signal_handlers() {
     }
 }
 
-fn log_started(runtime: &DaemonRuntime) {
-    let local_sync_directory = runtime
-        .sync_scope()
-        .local_sync_directory
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "none".to_string());
+fn log_started(runtime: &MultiProfileRuntime) {
+    let profile_summary = runtime
+        .profile_summaries()
+        .iter()
+        .map(|profile| {
+            format!(
+                "{}({}, {})",
+                profile.id,
+                profile.provider_kind,
+                profile.sync_mode.as_config_value()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     logging::info(
         "vapord started",
         &[
@@ -216,21 +203,8 @@ fn log_started(runtime: &DaemonRuntime) {
                 "git_commit",
                 crate::build_info::GIT_COMMIT_SHORT.to_string(),
             ),
-            ("provider", runtime.app().provider_name().to_string()),
-            (
-                "run_state",
-                format!("{:?}", runtime.app().snapshot().run_state),
-            ),
-            (
-                "throttle_state",
-                format!("{:?}", runtime.app().snapshot().throttle_state),
-            ),
-            ("local_sync_directory", local_sync_directory),
-            (
-                "cloud_sync_directory",
-                runtime.sync_scope().cloud_sync_directory.clone(),
-            ),
-            ("watcher_active", runtime.has_live_watcher().to_string()),
+            ("profile_count", runtime.profile_count().to_string()),
+            ("profiles", profile_summary),
         ],
     );
 }
