@@ -68,6 +68,7 @@ struct LocalEntry {
     path: PathBuf,
     is_dir: bool,
     size_bytes: u64,
+    modified_at: Option<SystemTime>,
 }
 
 pub struct ReconcileWalker {
@@ -171,6 +172,7 @@ impl ReconcileWalker {
                         path: entry.path(),
                         is_dir: metadata.is_dir(),
                         size_bytes: metadata.len(),
+                        modified_at: metadata.modified().ok(),
                     });
                 }
             }
@@ -275,6 +277,14 @@ impl ReconcileWalker {
                     SyncMode::TwoWay | SyncMode::PushOnly => {
                         if local.is_dir {
                             self.pending_dirs.push_back(local.path);
+                        } else if sync_mode == SyncMode::TwoWay
+                            && remote_deletion_wins(state_db, &local_path, local.modified_at)
+                        {
+                            // Restart-safe deletion replay (C8-16): the
+                            // remote deleted this path and the local copy
+                            // has not been modified since — finish the
+                            // apply instead of resurrecting the file.
+                            batch.push((local_path, PendingIntentKind::ApplyRemoteDelete, now));
                         } else {
                             batch.push((local_path, PendingIntentKind::Upload, now));
                         }
@@ -295,7 +305,18 @@ impl ReconcileWalker {
                             self.pending_dirs.push_back(local_path);
                         }
                         RemoteEntryKind::File => {
-                            batch.push((local_path, PendingIntentKind::Download, now));
+                            if sync_mode == SyncMode::TwoWay
+                                && local_deletion_wins(state_db, &local_path, remote.modified_at)
+                            {
+                                // Restart-safe deletion replay (C8-16):
+                                // we deleted this path locally and the
+                                // remote copy has not changed since —
+                                // finish propagating the delete instead
+                                // of re-downloading.
+                                batch.push((local_path, PendingIntentKind::Delete, now));
+                            } else {
+                                batch.push((local_path, PendingIntentKind::Download, now));
+                            }
                         }
                     },
                     SyncMode::PushOnly => {
@@ -314,6 +335,42 @@ impl ReconcileWalker {
             self.stats.intents_enqueued += state_db.enqueue_intents_coalesced(&batch)?;
         }
         Ok(())
+    }
+}
+
+/// Whether a remote-origin tombstone should win over a surviving local
+/// file: the deletion wins only when the local copy was not modified
+/// after the deletion ("data preservation wins over deletion" — a newer
+/// local edit uploads instead; C8-17).
+fn remote_deletion_wins(
+    state_db: &DurableStateDb,
+    local_path: &Path,
+    local_modified_at: Option<SystemTime>,
+) -> bool {
+    match state_db.tombstone(local_path) {
+        Ok(Some(tombstone)) if tombstone.origin == crate::state_db::TombstoneOrigin::Remote => {
+            match local_modified_at {
+                Some(modified_at) => modified_at <= tombstone.deleted_at,
+                None => true,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Whether a local-origin tombstone should win over a surviving remote
+/// file: symmetric to [`remote_deletion_wins`] — a remote copy modified
+/// after our deletion re-downloads instead.
+fn local_deletion_wins(
+    state_db: &DurableStateDb,
+    local_path: &Path,
+    remote_modified_at: SystemTime,
+) -> bool {
+    match state_db.tombstone(local_path) {
+        Ok(Some(tombstone)) if tombstone.origin == crate::state_db::TombstoneOrigin::Local => {
+            remote_modified_at <= tombstone.deleted_at
+        }
+        _ => false,
     }
 }
 
@@ -471,6 +528,113 @@ mod tests {
         );
         assert_eq!(stats.mirror_deletes, 1);
         assert_eq!(stats.mirror_reverts, 1);
+    }
+
+    #[test]
+    fn local_tombstone_replays_the_deletion_when_remote_is_unchanged() {
+        // C8-16 restart-safe replay: we deleted locally, the propagation
+        // was lost, and the remote copy has not changed since — the
+        // reconcile finishes the deletion instead of resurrecting it.
+        let mut fixture = Fixture::new();
+        let remote_file = fixture.cloud_root.join("deleted-here.txt");
+        std::fs::write(&remote_file, b"old remote copy").expect("seed remote");
+
+        // Tombstone is NEWER than the remote copy's mtime.
+        fixture
+            .state_db
+            .record_tombstone(
+                &fixture.local_root.join("deleted-here.txt"),
+                crate::state_db::TombstoneOrigin::Local,
+                SystemTime::now() + std::time::Duration::from_secs(60),
+            )
+            .expect("tombstone");
+
+        fixture.run_walk(SyncMode::TwoWay);
+        let kinds = fixture.queued_kinds();
+        assert_eq!(
+            kinds,
+            vec![(
+                fixture.local_root.join("deleted-here.txt"),
+                PendingIntentKind::Delete
+            )],
+            "the walk must finish propagating the deletion"
+        );
+    }
+
+    #[test]
+    fn remote_recreation_after_local_tombstone_downloads_again() {
+        // The remote copy is newer than our deletion: it was recreated
+        // or edited after we deleted — data preservation wins.
+        let mut fixture = Fixture::new();
+        std::fs::write(fixture.cloud_root.join("recreated.txt"), b"newer").expect("seed remote");
+
+        fixture
+            .state_db
+            .record_tombstone(
+                &fixture.local_root.join("recreated.txt"),
+                crate::state_db::TombstoneOrigin::Local,
+                SystemTime::now() - std::time::Duration::from_secs(3_600),
+            )
+            .expect("tombstone");
+
+        fixture.run_walk(SyncMode::TwoWay);
+        let kinds = fixture.queued_kinds();
+        assert_eq!(
+            kinds,
+            vec![(
+                fixture.local_root.join("recreated.txt"),
+                PendingIntentKind::Download
+            )]
+        );
+    }
+
+    #[test]
+    fn remote_tombstone_replays_the_local_removal_when_local_is_unchanged() {
+        let mut fixture = Fixture::new();
+        let local_file = fixture.local_root.join("deleted-there.txt");
+        std::fs::write(&local_file, b"stale local copy").expect("seed local");
+
+        fixture
+            .state_db
+            .record_tombstone(
+                &local_file,
+                crate::state_db::TombstoneOrigin::Remote,
+                SystemTime::now() + std::time::Duration::from_secs(60),
+            )
+            .expect("tombstone");
+
+        fixture.run_walk(SyncMode::TwoWay);
+        let kinds = fixture.queued_kinds();
+        assert_eq!(
+            kinds,
+            vec![(local_file, PendingIntentKind::ApplyRemoteDelete)],
+            "the walk must finish applying the remote deletion"
+        );
+    }
+
+    #[test]
+    fn local_edit_after_remote_tombstone_uploads_instead_of_deleting() {
+        let mut fixture = Fixture::new();
+        let local_file = fixture.local_root.join("revived.txt");
+        std::fs::write(&local_file, b"edited after the deletion").expect("seed local");
+
+        // Tombstone predates the local file's mtime.
+        fixture
+            .state_db
+            .record_tombstone(
+                &local_file,
+                crate::state_db::TombstoneOrigin::Remote,
+                SystemTime::now() - std::time::Duration::from_secs(3_600),
+            )
+            .expect("tombstone");
+
+        fixture.run_walk(SyncMode::TwoWay);
+        let kinds = fixture.queued_kinds();
+        assert_eq!(
+            kinds,
+            vec![(local_file, PendingIntentKind::Upload)],
+            "data preservation must win over the stale deletion"
+        );
     }
 
     #[test]

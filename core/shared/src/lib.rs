@@ -4,6 +4,7 @@ use std::time::Duration;
 
 pub mod config;
 pub mod constants;
+pub mod device_id;
 pub mod logging;
 pub mod runtime_paths;
 

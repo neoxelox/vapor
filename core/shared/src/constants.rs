@@ -40,6 +40,11 @@ pub mod runtime {
 
 pub mod state {
     pub const RETRY_SLOWDOWN_UNTIL_KEY: &str = "queue.retry_slowdown_until_ms";
+    /// Tombstones older than this are pruned at daemon startup: after a
+    /// month, a divergent replica reconciles through content comparison
+    /// anyway, and unbounded tombstone growth would violate the memory
+    /// and storage bounds (C8-16).
+    pub const TOMBSTONE_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
     pub const MAX_ATTEMPT_COUNT: u32 = 10_000;
     pub const MAX_DIAGNOSTIC_TEXT_LENGTH: usize = 1_024;
     pub const MAX_STATE_KEY_LENGTH: usize = 128;

@@ -89,7 +89,26 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
         );
     }
 
-    let state_db = DurableStateDb::open_default()?;
+    // Stable device identifier (C8-15): persisted at first run, never
+    // silently regenerated. A write failure degrades to an ephemeral id
+    // for this run rather than blocking the daemon.
+    let config_path = vapor_shared::runtime_paths::vapor_directory()
+        .join(vapor_shared::constants::runtime::CONFIGURATION_FILE_NAME);
+    let device_id = match vapor_shared::device_id::resolve_or_persist(&config_path) {
+        Ok(device_id) => device_id,
+        Err(error) => {
+            logging::warning(
+                "Could not persist device id; using an ephemeral one for this run",
+                &[("error", error.to_string())],
+            );
+            vapor_shared::device_id::derive_device_id()
+        }
+    };
+
+    let state_db = DurableStateDb::open_with_corruption_recovery(
+        vapor_shared::runtime_paths::sqlite_database_path(),
+        std::time::SystemTime::now(),
+    )?;
     let sync_scope = sync_directories::resolve_with_config(&config);
     let filter_options = EventPathFilterOptions::from_environment_and_config(&config);
     // The native platform sampler (per-OS FFI lands incrementally; it
@@ -106,6 +125,7 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
         metrics_sampler,
         system_clock(),
     )?;
+    runtime.set_device_id(device_id);
 
     log_started(&runtime);
 

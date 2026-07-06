@@ -25,6 +25,7 @@ pub mod build_info {
 
 pub mod bootstrap;
 pub mod clock;
+pub mod conflict;
 pub mod debounce;
 pub mod event_intents;
 pub mod executor;

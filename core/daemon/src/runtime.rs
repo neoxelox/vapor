@@ -139,6 +139,8 @@ pub struct RuntimeTickReport {
     pub mirror_reverts: usize,
     /// Strict-mirror deletions performed this tick (one-way modes; C8-65).
     pub mirror_deletes: usize,
+    /// Keep-both conflict copies created this tick (C8-14).
+    pub conflicts: usize,
     pub started_reconcile_root: Option<PathBuf>,
     pub completed_reconcile_root: Option<PathBuf>,
     pub staged_executor: StagedExecutorSnapshot,
@@ -193,6 +195,12 @@ pub struct DaemonRuntime {
     /// one-way modes must never be silent about the data they rewrite.
     mirror_revert_count: u64,
     mirror_delete_count: u64,
+    /// Cumulative keep-both conflict copies created (C8-14).
+    conflict_count: u64,
+    /// Stable device identifier (C8-15). Resolved and persisted by the
+    /// bootstrap; ephemeral (hostname-derived, unpersisted) in ad-hoc
+    /// embeddings and tests.
+    device_id: String,
 }
 
 impl DaemonRuntime {
@@ -423,6 +431,7 @@ impl DaemonRuntime {
             let mut env = ExecutionEnv {
                 local_root: self.sync_scope.local_sync_directory.as_deref(),
                 sync_mode: self.sync_scope.sync_mode,
+                device_id: &self.device_id,
                 tags: &self.tags,
                 local_echoes: &mut self.local_echoes,
                 remote_echoes: &mut self.remote_echoes,
@@ -435,6 +444,8 @@ impl DaemonRuntime {
         report.failed_intents += staged_report.failed;
         report.mirror_deletes += staged_report.mirror_deletes;
         self.mirror_delete_count += staged_report.mirror_deletes as u64;
+        report.conflicts += staged_report.conflicts;
+        self.conflict_count += staged_report.conflicts as u64;
 
         if let Some(reconcile_intent_id) = self.running_reconcile_intent_id {
             // A running reconcile performs one bounded chunk of real
@@ -572,6 +583,17 @@ impl DaemonRuntime {
         let now = clock.now_system();
         let mut app = DaemonApp::new_with_clock(provider, clock.clone());
         let recovered_count = state_db.recover_leased(now)?;
+        match state_db.prune_tombstones(now) {
+            Ok(pruned) if pruned > 0 => logging::info(
+                "Pruned tombstones past the retention window",
+                &[("pruned", pruned.to_string())],
+            ),
+            Ok(_) => {}
+            Err(error) => logging::warning(
+                "Tombstone pruning failed; continuing",
+                &[("error", error.to_string())],
+            ),
+        }
         logging::info(
             "Durable queue/state DB is ready",
             &[
@@ -677,7 +699,20 @@ impl DaemonRuntime {
             reconcile_walker: None,
             mirror_revert_count: 0,
             mirror_delete_count: 0,
+            conflict_count: 0,
+            device_id: vapor_shared::device_id::derive_device_id(),
         })
+    }
+
+    /// Overrides the device identifier (the bootstrap passes the value
+    /// persisted in `vapor.json`; C8-15 forbids silent regeneration).
+    pub fn set_device_id(&mut self, device_id: impl Into<String>) {
+        self.device_id = device_id.into();
+    }
+
+    /// Cumulative keep-both conflict copies created since daemon start.
+    pub fn conflict_count(&self) -> u64 {
+        self.conflict_count
     }
 
     /// Cumulative count of strict-mirror reverts / deletions performed
@@ -1730,13 +1765,23 @@ mod tests {
         let mut fixture = BidirectionalFixture::new();
         fixture.tick(6_000); // baseline
 
+        // Sync the file for real first (download establishes the sync
+        // index); only a synced, unmodified file may be deleted by a
+        // remote deletion (C8-17 preservation guard).
+        std::fs::write(fixture.cloud_root.join("stale.txt"), b"stale").expect("seed remote");
+        fixture.feed.emit_created(
+            fixture.cloud_root.join("stale.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        fixture.converge(12);
         let local_file = fixture.watch_root.join("stale.txt");
-        std::fs::write(&local_file, b"stale").expect("seed local");
+        assert!(local_file.exists(), "download must land first");
+
+        std::fs::remove_file(fixture.cloud_root.join("stale.txt")).expect("cloud delete");
         fixture.feed.emit_removed(
             fixture.cloud_root.join("stale.txt"),
             timestamp_ms(fixture.now_ms),
         );
-
         let completed = fixture.converge(12);
         assert!(completed >= 1, "apply-remote-delete must complete");
         assert!(!local_file.exists(), "local replica must be removed");
@@ -2056,6 +2101,191 @@ mod tests {
             !cloud_root.join("pending-upload.txt").exists(),
             "the gated direction must not fire after the mode change"
         );
+    }
+
+    /// Simulates a foreign device editing a remote file: new content,
+    /// and no Vapor op-id tag (foreign writers do not tag).
+    fn foreign_remote_edit(fixture: &BidirectionalFixture, name: &str, content: &[u8]) {
+        let remote_file = fixture.cloud_root.join(name);
+        std::fs::write(&remote_file, content).expect("foreign remote edit");
+        let tags = vapor_providers::tags::OpIdTagStore::new(Arc::new(
+            vapor_platform::fs_caps::NativeFilesystemCapabilities::for_current_host(),
+        ));
+        let _ = tags.remove(&remote_file);
+    }
+
+    fn files_in(directory: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .filter(|name| !name.starts_with(".vapor-tmp-"))
+                    .filter(|name| !name.ends_with(".vapor-meta.json"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn concurrent_edit_conflict_keeps_both_versions_on_both_sides() {
+        // C8-14: simultaneous local + foreign remote edits of a synced
+        // file resolve as keep-both — the remote canonical lands at the
+        // original path, the local edit survives as a conflict copy, and
+        // the copy propagates to the cloud.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+
+        // Establish a synced file (upload → sync index).
+        let local_file = fixture.watch_root.join("doc.txt");
+        std::fs::write(&local_file, b"v1 shared").expect("seed local");
+        fixture.record_local_event(&local_file, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(12);
+        assert!(fixture.cloud_root.join("doc.txt").exists());
+
+        // Concurrent divergence.
+        foreign_remote_edit(&fixture, "doc.txt", b"v2 from another device");
+        std::fs::write(&local_file, b"v2 local edit").expect("local edit");
+        fixture.record_local_event(&local_file, FsEventKind::Modified, fixture.now_ms);
+
+        fixture.converge(24);
+
+        // Local side: canonical carries the remote version; the local
+        // edit survives in a conflict copy named per the C8-14 template.
+        assert_eq!(
+            std::fs::read(&local_file).expect("canonical"),
+            b"v2 from another device"
+        );
+        let local_files = files_in(&fixture.watch_root);
+        let conflict_name = local_files
+            .iter()
+            .find(|name| name.contains("~conflict-"))
+            .expect("a conflict copy must exist locally");
+        assert!(
+            conflict_name.starts_with("doc~conflict-") && conflict_name.ends_with(".txt"),
+            "conflict name must follow {{stem}}~conflict-{{device}}-{{ts}}{{ext}}: {conflict_name}"
+        );
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join(conflict_name)).expect("conflict copy"),
+            b"v2 local edit",
+            "the losing local edit must survive in the conflict copy"
+        );
+        // Cloud side: both versions present after the copy uploads.
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("doc.txt")).expect("cloud canonical"),
+            b"v2 from another device"
+        );
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join(conflict_name)).expect("cloud conflict copy"),
+            b"v2 local edit"
+        );
+        assert!(fixture.runtime.conflict_count() >= 1);
+    }
+
+    #[test]
+    fn delete_modify_race_resolves_for_the_modification() {
+        // C8-17: a remote deletion racing a local modification loses —
+        // data preservation wins over deletion, deterministically, in
+        // both intent orderings.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+
+        let local_file = fixture.watch_root.join("contested.txt");
+        std::fs::write(&local_file, b"v1").expect("seed local");
+        fixture.record_local_event(&local_file, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(12);
+        assert!(fixture.cloud_root.join("contested.txt").exists());
+
+        // Remote deletes while local modifies.
+        std::fs::remove_file(fixture.cloud_root.join("contested.txt")).expect("cloud delete");
+        fixture.feed.emit_removed(
+            fixture.cloud_root.join("contested.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        std::fs::write(&local_file, b"v2 modified during delete").expect("local modify");
+        fixture.record_local_event(&local_file, FsEventKind::Modified, fixture.now_ms);
+
+        fixture.converge(24);
+
+        assert_eq!(
+            std::fs::read(&local_file).expect("local survives"),
+            b"v2 modified during delete",
+            "the modification must survive the racing deletion"
+        );
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("contested.txt"))
+                .expect("modification restored remotely"),
+            b"v2 modified during delete"
+        );
+    }
+
+    #[test]
+    fn concurrent_write_race_smoke_converges_across_runs() {
+        // C8-12 happy-path race smoke: five runs alternating which side
+        // wins the enqueue race; every run converges with no version
+        // lost (canonical matches on both sides; the other version, when
+        // divergent, survives as a conflict copy).
+        for run in 0..5 {
+            let mut fixture = BidirectionalFixture::new();
+            fixture.tick(6_000); // baseline
+
+            let local_file = fixture.watch_root.join("raced.txt");
+            std::fs::write(&local_file, b"base").expect("seed local");
+            fixture.record_local_event(&local_file, FsEventKind::Created, fixture.now_ms);
+            fixture.converge(12);
+
+            let local_content = format!("local-{run}");
+            let remote_content = format!("remote-{run}");
+            if run % 2 == 0 {
+                std::fs::write(&local_file, &local_content).expect("local edit");
+                fixture.record_local_event(&local_file, FsEventKind::Modified, fixture.now_ms);
+                foreign_remote_edit(&fixture, "raced.txt", remote_content.as_bytes());
+                fixture.feed.emit_modified(
+                    fixture.cloud_root.join("raced.txt"),
+                    timestamp_ms(fixture.now_ms),
+                );
+            } else {
+                foreign_remote_edit(&fixture, "raced.txt", remote_content.as_bytes());
+                fixture.feed.emit_modified(
+                    fixture.cloud_root.join("raced.txt"),
+                    timestamp_ms(fixture.now_ms),
+                );
+                std::fs::write(&local_file, &local_content).expect("local edit");
+                fixture.record_local_event(&local_file, FsEventKind::Modified, fixture.now_ms);
+            }
+
+            fixture.converge(24);
+
+            // Convergence: local and cloud canonicals agree.
+            let local_canonical = std::fs::read(&local_file).expect("local canonical");
+            let cloud_canonical =
+                std::fs::read(fixture.cloud_root.join("raced.txt")).expect("cloud canonical");
+            assert_eq!(
+                local_canonical, cloud_canonical,
+                "run {run}: both sides must converge on one canonical"
+            );
+            // No version lost: every written content exists somewhere.
+            let mut all_contents: Vec<Vec<u8>> = files_in(&fixture.watch_root)
+                .iter()
+                .map(|name| std::fs::read(fixture.watch_root.join(name)).expect("read"))
+                .collect();
+            all_contents.extend(
+                files_in(&fixture.cloud_root)
+                    .iter()
+                    .map(|name| std::fs::read(fixture.cloud_root.join(name)).expect("read")),
+            );
+            assert!(
+                all_contents.iter().any(|c| c == local_content.as_bytes()),
+                "run {run}: the local edit must survive somewhere"
+            );
+            assert!(
+                all_contents.iter().any(|c| c == remote_content.as_bytes()),
+                "run {run}: the remote edit must survive somewhere"
+            );
+        }
     }
 
     #[test]
