@@ -35,6 +35,7 @@ pub mod logging;
 pub mod metrics;
 pub mod path_filter;
 pub mod reconcile;
+pub mod reconcile_walk;
 pub mod remote_sync;
 pub mod retry;
 pub mod runtime;
@@ -215,6 +216,21 @@ impl DaemonApp {
             self.snapshot.throttle_state,
             now,
         )
+    }
+
+    /// Root of the reconcile currently holding the reconcile permit.
+    pub fn running_reconcile_root(&self) -> Option<std::path::PathBuf> {
+        self.reconcile_controller.running_root().cloned()
+    }
+
+    /// Aborts the running reconcile after a comparison-walk failure.
+    pub fn abort_reconcile(
+        &mut self,
+        scheduler: &mut KeyedSupersedingScheduler,
+        now: SystemTime,
+    ) -> Option<std::path::PathBuf> {
+        self.reconcile_controller
+            .abort_running(scheduler, &mut self.workgate, now)
     }
 
     pub fn complete_reconcile(

@@ -70,6 +70,9 @@ pub struct StagedExecutorReport {
     pub completed: usize,
     pub retried: usize,
     pub failed: usize,
+    /// Strict-mirror local removals performed this advance (pull-only
+    /// restore path found no remote counterpart; C8-60 / C8-65).
+    pub mirror_deletes: usize,
 }
 
 /// Everything stage work needs beyond the app + durable queue. The
@@ -78,6 +81,11 @@ pub struct ExecutionEnv<'a> {
     /// Canonical local sync root; `None` means no local scope is
     /// configured and every local-touching intent fails permanent.
     pub local_root: Option<&'a Path>,
+    /// Sync direction for the scope (C8-59). Direction gates live in
+    /// the planner so no intent kind can bypass them; intents enqueued
+    /// before a mode change complete as logged no-ops, which is what
+    /// makes a mid-run mode change converge deterministically.
+    pub sync_mode: vapor_shared::SyncMode,
     /// Op-id tag store for the local side (downloads tag the applied
     /// file so watcher echoes correlate).
     pub tags: &'a OpIdTagStore,
@@ -598,9 +606,31 @@ impl StagedExecutor {
                         Ok(Some(execution))
                     }
                     Err(error) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
-                        // The remote object vanished between the feed
-                        // event and now; the Removed change follows.
                         app.release_work(permit);
+                        if env.sync_mode == vapor_shared::SyncMode::PullOnly {
+                            // Strict mirror: a pull-only restore that finds
+                            // no remote counterpart means the local file is
+                            // local-only content — remove it (C8-60).
+                            match apply_remote_delete_locally(env, &execution.intent.path, now) {
+                                PlanOutcome::AppliedLocally => report.mirror_deletes += 1,
+                                PlanOutcome::Noop(_) => {}
+                                PlanOutcome::Fail { failure, message } => {
+                                    self.resolve_failure(
+                                        app,
+                                        state_db,
+                                        &execution.intent,
+                                        failure,
+                                        &message,
+                                        now,
+                                        report,
+                                    )?;
+                                    return Ok(None);
+                                }
+                                _ => unreachable!("local delete apply has no other outcomes"),
+                            }
+                        }
+                        // Otherwise the remote object vanished between the
+                        // feed event and now; the Removed change follows.
                         self.complete(state_db, &execution.intent, report)?;
                         Ok(None)
                     }
@@ -808,6 +838,26 @@ fn plan_intent(
         };
     };
     let op_id = allocate_op_id(intent, now);
+
+    // Direction gates (C8-60 / C8-62): a one-way mode drops intents of
+    // the gated direction as logged no-ops. This also absorbs stale
+    // intents that were durably enqueued before a mode change.
+    if matches!(
+        intent.kind,
+        PendingIntentKind::Upload | PendingIntentKind::Rename | PendingIntentKind::Delete
+    ) && !env.sync_mode.allows_local_to_remote()
+    {
+        return PlanOutcome::Noop("local-to-remote propagation is gated off in pull-only mode")
+            .tap_provider(app);
+    }
+    if matches!(
+        intent.kind,
+        PendingIntentKind::Download | PendingIntentKind::ApplyRemoteDelete
+    ) && !env.sync_mode.allows_remote_to_local()
+    {
+        return PlanOutcome::Noop("remote-to-local propagation is gated off in push-only mode")
+            .tap_provider(app);
+    }
 
     match intent.kind {
         PendingIntentKind::Upload | PendingIntentKind::Rename => {
@@ -1030,6 +1080,7 @@ mod tests {
         _temp: tempfile::TempDir,
         local_root: PathBuf,
         cloud_root: PathBuf,
+        sync_mode: vapor_shared::SyncMode,
         app: DaemonApp,
         state_db: DurableStateDb,
         executor: StagedExecutor,
@@ -1054,6 +1105,7 @@ mod tests {
             Self {
                 local_root,
                 cloud_root,
+                sync_mode: vapor_shared::SyncMode::TwoWay,
                 _temp: temp,
                 app,
                 state_db,
@@ -1087,6 +1139,7 @@ mod tests {
                 self.clock.advance(Duration::from_millis(250));
                 let mut env = ExecutionEnv {
                     local_root: Some(&self.local_root),
+                    sync_mode: self.sync_mode,
                     tags: &self.tags,
                     local_echoes: &mut self.local_echoes,
                     remote_echoes: &mut self.remote_echoes,
@@ -1439,6 +1492,7 @@ mod tests {
         fixture.clock.advance(Duration::from_millis(250));
         let mut env = ExecutionEnv {
             local_root: Some(&fixture.local_root),
+            sync_mode: fixture.sync_mode,
             tags: &fixture.tags,
             local_echoes: &mut fixture.local_echoes,
             remote_echoes: &mut fixture.remote_echoes,

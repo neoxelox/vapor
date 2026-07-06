@@ -17,7 +17,7 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use vapor_providers::{ChangesPoll, RemoteChangeKind};
-use vapor_shared::{ThrottleState, constants};
+use vapor_shared::{SyncMode, ThrottleState, constants};
 
 use crate::DaemonApp;
 use crate::clock::SharedClock;
@@ -33,6 +33,12 @@ pub struct RemotePollReport {
     pub suppressed_echoes: usize,
     pub enqueued_intents: usize,
     pub cursor_expired: bool,
+    /// Push-only strict-mirror restores scheduled this poll (remote
+    /// divergence overwritten with the local canonical; C8-62 / C8-65).
+    pub mirror_reverts: usize,
+    /// Push-only strict-mirror removals scheduled this poll (cloud-only
+    /// content deleted; C8-62 / C8-65).
+    pub mirror_deletes: usize,
 }
 
 pub struct RemotePoller {
@@ -74,12 +80,14 @@ impl RemotePoller {
 
     /// Runs one poll when the provider supports a feed, the throttle
     /// state permits it, and the cadence is due.
+    #[allow(clippy::too_many_arguments)]
     pub fn poll_if_due(
         &mut self,
         app: &mut DaemonApp,
         state_db: &mut DurableStateDb,
         remote_echoes: &mut SelfWriteCache,
         local_root: Option<&Path>,
+        sync_mode: SyncMode,
         clock: &SharedClock,
         now: SystemTime,
     ) -> Result<RemotePollReport, StateDbError> {
@@ -165,11 +173,36 @@ impl RemotePoller {
                                 report.suppressed_echoes += 1;
                                 continue;
                             }
+                            if sync_mode == SyncMode::PushOnly {
+                                // Push-only (C8-62): remote changes never
+                                // produce remote-to-local intents. Remote
+                                // divergence is driven back to the local
+                                // canonical: overwrite when a local
+                                // counterpart exists, remove cloud-only
+                                // content when it does not.
+                                if local_file_exists(&local_target) {
+                                    batch.push((local_target, PendingIntentKind::Upload, now));
+                                    report.mirror_reverts += 1;
+                                } else {
+                                    batch.push((local_target, PendingIntentKind::Delete, now));
+                                    report.mirror_deletes += 1;
+                                }
+                                continue;
+                            }
                             batch.push((local_target, PendingIntentKind::Download, now));
                         }
                         RemoteChangeKind::Removed => {
                             if remote_echoes.matches_delete(change.path.as_str(), now) {
                                 report.suppressed_echoes += 1;
+                                continue;
+                            }
+                            if sync_mode == SyncMode::PushOnly {
+                                // A remote deletion of backed-up content is
+                                // divergence too: restore from local.
+                                if local_file_exists(&local_target) {
+                                    batch.push((local_target, PendingIntentKind::Upload, now));
+                                    report.mirror_reverts += 1;
+                                }
                                 continue;
                             }
                             batch.push((local_target, PendingIntentKind::ApplyRemoteDelete, now));
@@ -227,6 +260,14 @@ impl RemotePoller {
     }
 }
 
+/// Whether a regular file exists at `path` (symlinks and directories
+/// do not count as restorable local canonicals).
+fn local_file_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,6 +283,7 @@ mod tests {
         _temp: tempfile::TempDir,
         local_root: PathBuf,
         cloud_root: PathBuf,
+        sync_mode: SyncMode,
         app: DaemonApp,
         state_db: DurableStateDb,
         poller: RemotePoller,
@@ -274,6 +316,7 @@ mod tests {
             Self {
                 local_root,
                 cloud_root,
+                sync_mode: SyncMode::TwoWay,
                 _temp: temp,
                 app,
                 state_db,
@@ -294,6 +337,7 @@ mod tests {
                     &mut self.state_db,
                     &mut self.remote_echoes,
                     Some(&self.local_root),
+                    self.sync_mode,
                     &clock,
                     now,
                 )

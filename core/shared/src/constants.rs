@@ -316,6 +316,10 @@ pub mod engine {
     /// initial attempt failed (C8-50). Sync work stays blocked (and
     /// intents accumulate durably) between attempts.
     pub const CLOUD_ROOT_ENSURE_RETRY_SECONDS: u64 = 60;
+    /// Directories the reconcile comparison walk processes per runtime
+    /// tick while a reconcile slice is active. Bounds per-tick I/O so
+    /// the slice checkpoints keep their interruptibility guarantee.
+    pub const RECONCILE_DIRS_PER_CHECKPOINT: usize = 8;
     pub const RETRY_BASE_DELAY_MILLIS: u64 = 2_000;
     pub const RETRY_RATE_LIMIT_BASE_DELAY_MILLIS: u64 = 15_000;
     pub const RETRY_MAX_DELAY_MILLIS: u64 = 900_000;

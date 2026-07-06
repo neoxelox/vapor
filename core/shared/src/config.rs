@@ -43,6 +43,12 @@ pub struct VaporConfig {
     /// `cloud_sync_directory` is reinterpreted as an absolute local
     /// directory that plays the cloud role.
     pub provider: String,
+    /// Sync direction selector (C8-59): `two-way` (default),
+    /// `pull-only`, `push-only`. One-way values are strict mirrors and
+    /// destructive to the subordinate side; they only activate through
+    /// an explicit, enum-validated set — see
+    /// `docs/architecture/sync-modes.md`.
+    pub sync_mode: String,
 }
 
 impl Default for VaporConfig {
@@ -58,6 +64,7 @@ impl Default for VaporConfig {
             language_code: constants::config::DEFAULT_LANGUAGE_CODE.to_string(),
             timeline_event_limit: constants::config::DEFAULT_TIMELINE_EVENT_LIMIT,
             provider: constants::provider::DEFAULT.to_string(),
+            sync_mode: constants::sync_mode::DEFAULT.to_string(),
         }
     }
 }
@@ -141,6 +148,7 @@ struct RawVaporConfig {
     language_code: Option<String>,
     timeline_event_limit: Option<i64>,
     provider: Option<String>,
+    sync_mode: Option<String>,
 }
 
 impl RawVaporConfig {
@@ -163,6 +171,7 @@ impl RawVaporConfig {
                 .timeline_event_limit
                 .unwrap_or(defaults.timeline_event_limit),
             provider: self.provider.unwrap_or(defaults.provider),
+            sync_mode: self.sync_mode.unwrap_or(defaults.sync_mode),
         }
     }
 }

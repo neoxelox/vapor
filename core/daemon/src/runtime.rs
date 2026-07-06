@@ -135,6 +135,10 @@ pub struct RuntimeTickReport {
     pub requeued_intents: usize,
     /// Intents finalized as terminal failures this tick.
     pub failed_intents: usize,
+    /// Strict-mirror reverts observed this tick (one-way modes; C8-65).
+    pub mirror_reverts: usize,
+    /// Strict-mirror deletions performed this tick (one-way modes; C8-65).
+    pub mirror_deletes: usize,
     pub started_reconcile_root: Option<PathBuf>,
     pub completed_reconcile_root: Option<PathBuf>,
     pub staged_executor: StagedExecutorSnapshot,
@@ -181,6 +185,14 @@ pub struct DaemonRuntime {
     /// ingest keeps capturing intent state durably (C8-50).
     cloud_root_ready: bool,
     last_cloud_root_attempt_inst: Option<Instant>,
+    /// Incremental comparison walk of the currently-running reconcile.
+    /// Survives slice pauses so a large tree converges across slices
+    /// instead of restarting from scratch (C8-60/C8-62 strict mirror).
+    reconcile_walker: Option<crate::reconcile_walk::ReconcileWalker>,
+    /// Cumulative strict-mirror observability counters (C8-63/C8-65):
+    /// one-way modes must never be silent about the data they rewrite.
+    mirror_revert_count: u64,
+    mirror_delete_count: u64,
 }
 
 impl DaemonRuntime {
@@ -369,7 +381,9 @@ impl DaemonRuntime {
         // cloud root blocks the same way (C8-50).
         let paused = self.app.snapshot().run_state == RunState::Paused || !self.cloud_root_ready;
 
-        let (stabilized_events, suppressed_local_echoes) = self.stabilize_events(now);
+        let (stabilized_events, suppressed_local_echoes, stabilize_mirror_reverts) =
+            self.stabilize_events(now);
+        self.mirror_revert_count += stabilize_mirror_reverts as u64;
         let mut report = RuntimeTickReport {
             released_deferred_reconciles: if paused {
                 0
@@ -379,6 +393,7 @@ impl DaemonRuntime {
             drained_pending_intents: self.drain_pending_intents(),
             stabilized_events,
             suppressed_local_echoes,
+            mirror_reverts: stabilize_mirror_reverts,
             durable_enqueues: self.flush_scheduler_to_durable_queue()?,
             ..RuntimeTickReport::default()
         };
@@ -394,14 +409,20 @@ impl DaemonRuntime {
                 &mut self.state_db,
                 &mut self.remote_echoes,
                 self.sync_scope.local_sync_directory.as_deref(),
+                self.sync_scope.sync_mode,
                 &self.clock,
                 now,
             )?;
+            report.mirror_reverts += report.remote_poll.mirror_reverts;
+            report.mirror_deletes += report.remote_poll.mirror_deletes;
+            self.mirror_revert_count += report.remote_poll.mirror_reverts as u64;
+            self.mirror_delete_count += report.remote_poll.mirror_deletes as u64;
         }
 
         let staged_report = {
             let mut env = ExecutionEnv {
                 local_root: self.sync_scope.local_sync_directory.as_deref(),
+                sync_mode: self.sync_scope.sync_mode,
                 tags: &self.tags,
                 local_echoes: &mut self.local_echoes,
                 remote_echoes: &mut self.remote_echoes,
@@ -412,31 +433,67 @@ impl DaemonRuntime {
         report.completed_intents += staged_report.completed;
         report.requeued_intents += staged_report.retried;
         report.failed_intents += staged_report.failed;
+        report.mirror_deletes += staged_report.mirror_deletes;
+        self.mirror_delete_count += staged_report.mirror_deletes as u64;
 
         if let Some(reconcile_intent_id) = self.running_reconcile_intent_id {
-            if self
-                .app
-                .checkpoint_reconcile(&mut self.scheduler, now)
-                .is_some()
-            {
-                self.requeue_runtime_intent(
-                    reconcile_intent_id,
-                    now + self.tick_interval,
-                    "reconcile yielded for next safe slice",
-                )?;
-                self.running_reconcile_intent_id = None;
-                report.requeued_intents += 1;
-            } else if let Some(completed_root) = self.complete_running_reconcile()? {
-                self.state_db.complete_leased(reconcile_intent_id)?;
-                self.running_reconcile_intent_id = None;
-                if self.startup_reconstruction_barrier
-                    && self.sync_scope.local_sync_directory.as_ref() == Some(&completed_root)
-                {
-                    self.startup_reconstruction_barrier = false;
-                    self.startup_barrier_expires_inst = None;
+            // A running reconcile performs one bounded chunk of real
+            // comparison work per tick, then answers to the controller's
+            // slice/throttle checkpoint. The walker survives pauses so a
+            // large tree converges across slices instead of restarting.
+            match self.process_reconcile_walk(now) {
+                Err(walk_error) => {
+                    logging::warning(
+                        "Reconcile comparison walk failed; yielding and retrying later",
+                        &[("error", format!("{walk_error:?}"))],
+                    );
+                    self.reconcile_walker = None;
+                    self.app.abort_reconcile(&mut self.scheduler, now);
+                    self.requeue_runtime_intent(
+                        reconcile_intent_id,
+                        now + blocked_intent_requeue_delay(),
+                        "reconcile comparison walk failed; will retry",
+                    )?;
+                    self.running_reconcile_intent_id = None;
+                    report.requeued_intents += 1;
                 }
-                report.completed_intents += 1;
-                report.completed_reconcile_root = Some(completed_root);
+                Ok(walk_done) => {
+                    if let Some(walker) = self.reconcile_walker.as_mut() {
+                        let (mirror_reverts, mirror_deletes) = walker.take_mirror_deltas();
+                        report.mirror_reverts += mirror_reverts;
+                        report.mirror_deletes += mirror_deletes;
+                        self.mirror_revert_count += mirror_reverts as u64;
+                        self.mirror_delete_count += mirror_deletes as u64;
+                    }
+                    if self
+                        .app
+                        .checkpoint_reconcile(&mut self.scheduler, now)
+                        .is_some()
+                    {
+                        self.requeue_runtime_intent(
+                            reconcile_intent_id,
+                            now + self.tick_interval,
+                            "reconcile yielded for next safe slice",
+                        )?;
+                        self.running_reconcile_intent_id = None;
+                        report.requeued_intents += 1;
+                    } else if walk_done
+                        && let Some(completed_root) = self.complete_running_reconcile()?
+                    {
+                        self.reconcile_walker = None;
+                        self.state_db.complete_leased(reconcile_intent_id)?;
+                        self.running_reconcile_intent_id = None;
+                        if self.startup_reconstruction_barrier
+                            && self.sync_scope.local_sync_directory.as_ref()
+                                == Some(&completed_root)
+                        {
+                            self.startup_reconstruction_barrier = false;
+                            self.startup_barrier_expires_inst = None;
+                        }
+                        report.completed_intents += 1;
+                        report.completed_reconcile_root = Some(completed_root);
+                    }
+                }
             }
         }
 
@@ -617,7 +674,16 @@ impl DaemonRuntime {
             remote_poller: RemotePoller::new(DEFAULT_PROFILE_ID),
             cloud_root_ready,
             last_cloud_root_attempt_inst: None,
+            reconcile_walker: None,
+            mirror_revert_count: 0,
+            mirror_delete_count: 0,
         })
+    }
+
+    /// Cumulative count of strict-mirror reverts / deletions performed
+    /// by the one-way modes since daemon start (C8-65 diagnostics).
+    pub fn mirror_counters(&self) -> (u64, u64) {
+        (self.mirror_revert_count, self.mirror_delete_count)
     }
 
     /// Retries ensuring the provider-side sync root while it is
@@ -792,18 +858,19 @@ impl DaemonRuntime {
         count
     }
 
-    fn stabilize_events(&mut self, now: SystemTime) -> (usize, usize) {
+    fn stabilize_events(&mut self, now: SystemTime) -> (usize, usize, usize) {
         let Some(recorder) = &self.recorder else {
-            return (0, 0);
+            return (0, 0, 0);
         };
 
         let Some(watch_root) = self.sync_scope.local_sync_directory.as_ref() else {
-            return (0, 0);
+            return (0, 0, 0);
         };
 
         let stabilized = self.debounce.run_tick_for_recorder(recorder, now);
         let mut accepted = 0;
         let mut suppressed = 0;
+        let mut mirror_reverts = 0;
         for event in stabilized {
             if !crate::fs_events::resolve_event_path_within_watch_root(watch_root, &event.path) {
                 logging::warning(
@@ -823,10 +890,26 @@ impl DaemonRuntime {
                 );
                 continue;
             }
+            if self.sync_scope.sync_mode == vapor_shared::SyncMode::PullOnly {
+                // Pull-only (C8-60): local events never produce
+                // local-to-remote intents. A local change is divergence
+                // from the cloud source of truth, so it schedules a
+                // restore-from-cloud for that path instead: the download
+                // reverts edits, re-materializes deletions, and removes
+                // local-only files when no remote counterpart exists.
+                self.scheduler.upsert_intent(
+                    event.path.clone(),
+                    PendingIntentKind::Download,
+                    event.last_observed_at,
+                );
+                mirror_reverts += 1;
+                accepted += 1;
+                continue;
+            }
             self.scheduler.upsert_stabilized_event(event);
             accepted += 1;
         }
-        (accepted, suppressed)
+        (accepted, suppressed, mirror_reverts)
     }
 
     fn flush_scheduler_to_durable_queue(&mut self) -> Result<usize, DaemonRuntimeError> {
@@ -973,6 +1056,43 @@ impl DaemonRuntime {
         self.staged_executor.try_start(&mut self.app, intent, now)
     }
 
+    /// One bounded chunk of the running reconcile's comparison walk.
+    /// Creates (or re-targets) the walker for the currently-running
+    /// root; returns whether the walk has finished.
+    fn process_reconcile_walk(
+        &mut self,
+        now: SystemTime,
+    ) -> Result<bool, crate::reconcile_walk::WalkError> {
+        let Some(scope_root) = self.sync_scope.local_sync_directory.clone() else {
+            return Ok(true);
+        };
+        let Some(running_root) = self.app.running_reconcile_root() else {
+            return Ok(true);
+        };
+        let needs_new_walker = self
+            .reconcile_walker
+            .as_ref()
+            .map(|walker| walker.subtree_root() != running_root.as_path())
+            .unwrap_or(true);
+        if needs_new_walker {
+            self.reconcile_walker = Some(crate::reconcile_walk::ReconcileWalker::new(
+                &scope_root,
+                &running_root,
+            ));
+        }
+        let walker = self
+            .reconcile_walker
+            .as_mut()
+            .expect("walker was just ensured");
+        walker.process(
+            self.app.provider(),
+            self.sync_scope.sync_mode,
+            &mut self.state_db,
+            constants::engine::RECONCILE_DIRS_PER_CHECKPOINT,
+            now,
+        )
+    }
+
     fn complete_running_reconcile(&mut self) -> Result<Option<PathBuf>, DaemonRuntimeError> {
         let Some(recorder) = &self.recorder else {
             return Ok(None);
@@ -1101,6 +1221,7 @@ mod tests {
             SyncScope {
                 local_sync_directory: None,
                 cloud_sync_directory: "/Vapor".to_string(),
+                sync_mode: vapor_shared::SyncMode::TwoWay,
             },
             state_db,
             default_provider(),
@@ -1221,6 +1342,7 @@ mod tests {
         let sync_scope = SyncScope {
             local_sync_directory: Some(watch_root.clone()),
             cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            sync_mode: vapor_shared::SyncMode::TwoWay,
         };
         let mut runtime = DaemonRuntime::build(
             sync_scope,
@@ -1463,6 +1585,7 @@ mod tests {
         SyncScope {
             local_sync_directory: Some(watch_root.to_path_buf()),
             cloud_sync_directory: "/Vapor".to_string(),
+            sync_mode: vapor_shared::SyncMode::TwoWay,
         }
     }
 
@@ -1483,6 +1606,10 @@ mod tests {
 
     impl BidirectionalFixture {
         fn new() -> Self {
+            Self::new_with_mode(vapor_shared::SyncMode::TwoWay)
+        }
+
+        fn new_with_mode(sync_mode: vapor_shared::SyncMode) -> Self {
             let temp = TempDir::new().expect("temp dir");
             let watch_root = temp.path().join("watch");
             let cloud_root = temp.path().join("cloud");
@@ -1500,6 +1627,7 @@ mod tests {
             let sync_scope = SyncScope {
                 local_sync_directory: Some(watch_root.clone()),
                 cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+                sync_mode,
             };
             let runtime = DaemonRuntime::build(
                 sync_scope,
@@ -1705,6 +1833,232 @@ mod tests {
     }
 
     #[test]
+    fn pull_only_reverts_local_edits_and_removes_local_only_files_without_uploading() {
+        // C8-60 / C8-66: cloud is authoritative. A local edit converges
+        // back to the cloud canonical, local-only content is removed,
+        // and nothing is ever uploaded.
+        let mut fixture = BidirectionalFixture::new_with_mode(vapor_shared::SyncMode::PullOnly);
+        std::fs::write(fixture.cloud_root.join("shared.txt"), b"canonical").expect("seed remote");
+        std::fs::write(fixture.watch_root.join("shared.txt"), b"canonical").expect("seed local");
+        fixture.tick(6_000); // baseline
+
+        // Local divergence: an edit and a brand-new local-only file.
+        std::fs::write(fixture.watch_root.join("shared.txt"), b"local tampering")
+            .expect("local edit");
+        fixture.record_local_event(
+            &fixture.watch_root.join("shared.txt"),
+            FsEventKind::Modified,
+            fixture.now_ms,
+        );
+        std::fs::write(fixture.watch_root.join("local-only.txt"), b"L").expect("local only");
+        fixture.record_local_event(
+            &fixture.watch_root.join("local-only.txt"),
+            FsEventKind::Created,
+            fixture.now_ms,
+        );
+
+        fixture.converge(16);
+
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("shared.txt")).expect("restored"),
+            b"canonical",
+            "the local edit must be reverted to the cloud canonical"
+        );
+        assert!(
+            !fixture.watch_root.join("local-only.txt").exists(),
+            "local-only content must be removed in pull-only"
+        );
+        // The cloud side is untouched: same single file, same content.
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("shared.txt")).expect("cloud intact"),
+            b"canonical"
+        );
+        assert!(
+            !fixture.cloud_root.join("local-only.txt").exists(),
+            "pull-only must never upload"
+        );
+        let (reverts, deletes) = fixture.runtime.mirror_counters();
+        assert!(reverts >= 1, "the revert must be observable (C8-63)");
+        assert!(deletes >= 1, "the removal must be observable (C8-63)");
+    }
+
+    #[test]
+    fn pull_only_applies_cloud_deletions_locally() {
+        let mut fixture = BidirectionalFixture::new_with_mode(vapor_shared::SyncMode::PullOnly);
+        std::fs::write(fixture.cloud_root.join("doomed.txt"), b"x").expect("seed remote");
+        std::fs::write(fixture.watch_root.join("doomed.txt"), b"x").expect("seed local");
+        fixture.tick(6_000); // baseline
+
+        std::fs::remove_file(fixture.cloud_root.join("doomed.txt")).expect("cloud delete");
+        fixture.feed.emit_removed(
+            fixture.cloud_root.join("doomed.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        fixture.converge(12);
+        assert!(
+            !fixture.watch_root.join("doomed.txt").exists(),
+            "a cloud deletion removes the local replica"
+        );
+    }
+
+    #[test]
+    fn push_only_overwrites_remote_divergence_and_removes_cloud_only_files_without_downloading() {
+        // C8-62 / C8-66: local is authoritative. Remote edits are
+        // overwritten with the local canonical, cloud-only content is
+        // removed, and nothing is ever downloaded or deleted locally.
+        let mut fixture = BidirectionalFixture::new_with_mode(vapor_shared::SyncMode::PushOnly);
+        std::fs::write(fixture.cloud_root.join("shared.txt"), b"canonical").expect("seed remote");
+        std::fs::write(fixture.watch_root.join("shared.txt"), b"canonical").expect("seed local");
+        fixture.tick(6_000); // baseline
+
+        // Remote divergence: a tampered edit and a cloud-only file.
+        std::fs::write(fixture.cloud_root.join("shared.txt"), b"remote tampering!")
+            .expect("remote edit");
+        fixture.feed.emit_modified(
+            fixture.cloud_root.join("shared.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        std::fs::write(fixture.cloud_root.join("cloud-only.txt"), b"C").expect("cloud only");
+        fixture.feed.emit_created(
+            fixture.cloud_root.join("cloud-only.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+
+        fixture.converge(16);
+
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("shared.txt")).expect("restored"),
+            b"canonical",
+            "the remote edit must be overwritten with the local canonical"
+        );
+        assert!(
+            !fixture.cloud_root.join("cloud-only.txt").exists(),
+            "cloud-only content must be removed in push-only"
+        );
+        assert!(
+            !fixture.watch_root.join("cloud-only.txt").exists(),
+            "push-only must never download"
+        );
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("shared.txt")).expect("local intact"),
+            b"canonical"
+        );
+        let (reverts, deletes) = fixture.runtime.mirror_counters();
+        assert!(reverts >= 1);
+        assert!(deletes >= 1);
+    }
+
+    #[test]
+    fn push_only_propagates_local_deletions_to_the_cloud() {
+        let mut fixture = BidirectionalFixture::new_with_mode(vapor_shared::SyncMode::PushOnly);
+        std::fs::write(fixture.cloud_root.join("gone.txt"), b"x").expect("seed remote");
+        std::fs::write(fixture.watch_root.join("gone.txt"), b"x").expect("seed local");
+        fixture.tick(6_000); // baseline
+
+        std::fs::remove_file(fixture.watch_root.join("gone.txt")).expect("local delete");
+        fixture.record_local_event(
+            &fixture.watch_root.join("gone.txt"),
+            FsEventKind::Removed,
+            fixture.now_ms,
+        );
+        fixture.converge(12);
+        assert!(
+            !fixture.cloud_root.join("gone.txt").exists(),
+            "a local deletion removes the cloud copy"
+        );
+    }
+
+    #[test]
+    fn two_way_mode_keeps_the_one_way_gates_inert() {
+        // C8-61: the default mode still moves both directions and never
+        // records a mirror revert/delete.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+
+        std::fs::write(fixture.watch_root.join("up.txt"), b"up").expect("seed local");
+        fixture.record_local_event(
+            &fixture.watch_root.join("up.txt"),
+            FsEventKind::Created,
+            fixture.now_ms,
+        );
+        std::fs::write(fixture.cloud_root.join("down.txt"), b"down").expect("seed remote");
+        fixture.feed.emit_created(
+            fixture.cloud_root.join("down.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+
+        fixture.converge(16);
+        assert!(fixture.cloud_root.join("up.txt").exists());
+        assert!(fixture.watch_root.join("down.txt").exists());
+        assert_eq!(
+            fixture.runtime.mirror_counters(),
+            (0, 0),
+            "two-way must never take a strict-mirror action"
+        );
+    }
+
+    #[test]
+    fn mode_change_mid_run_converges_by_dropping_stale_direction_intents() {
+        // C8-66: intents durably enqueued under the previous mode must
+        // not fire after a mode change (restart with new config). Stale
+        // Upload intents complete as gated no-ops in pull-only.
+        let temp = TempDir::new().expect("temp dir");
+        let watch_root = temp.path().join("watch");
+        let cloud_root = temp.path().join("cloud");
+        std::fs::create_dir_all(&watch_root).expect("watch root");
+        std::fs::create_dir_all(&cloud_root).expect("cloud root");
+        let watch_root = watch_root.canonicalize().expect("canonical watch root");
+        let database_path = temp.path().join("state/vapor.sqlite");
+        let local_file = watch_root.join("pending-upload.txt");
+        std::fs::write(&local_file, b"was queued in two-way").expect("seed local");
+
+        // Durably enqueue an Upload intent as a two-way daemon would
+        // have, then "restart" into pull-only.
+        {
+            let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+            state_db
+                .enqueue_intent(&local_file, PendingIntentKind::Upload, timestamp_ms(0))
+                .expect("enqueue");
+        }
+        let state_db = DurableStateDb::open(&database_path).expect("reopen durable state db");
+        let clock = Arc::new(crate::clock::ManualClock::at_now());
+        let mut runtime = DaemonRuntime::build(
+            SyncScope {
+                local_sync_directory: Some(watch_root.clone()),
+                cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+                sync_mode: vapor_shared::SyncMode::PullOnly,
+            },
+            EventPathFilterOptions::default(),
+            state_db,
+            Box::new(vapor_providers::FilesystemProvider::new()),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            false,
+        )
+        .expect("runtime");
+
+        let mut completed = 0;
+        for tick_index in 0..8 {
+            clock.advance(Duration::from_millis(250));
+            let report = runtime
+                .tick_with_inputs(
+                    timestamp_ms(250 + tick_index * 250),
+                    ThrottleInputs::default(),
+                )
+                .expect("tick");
+            completed += report.completed_intents;
+            if completed > 0 {
+                break;
+            }
+        }
+        assert!(completed >= 1, "the stale intent must complete as a no-op");
+        assert!(
+            !cloud_root.join("pending-upload.txt").exists(),
+            "the gated direction must not fire after the mode change"
+        );
+    }
+
+    #[test]
     fn burst_of_real_uploads_drains_without_admission_serialization() {
         // C8-11 guard-rail: a burst of provider-backed uploads must
         // drain with parallel admission (planner cap 4 in IdleDrain),
@@ -1764,6 +2118,7 @@ mod tests {
         let sync_scope = || SyncScope {
             local_sync_directory: Some(watch_root.clone()),
             cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            sync_mode: vapor_shared::SyncMode::TwoWay,
         };
 
         // First daemon: lease the intent into flight, then "crash"

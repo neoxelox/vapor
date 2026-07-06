@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use vapor_shared::{constants, runtime_paths};
+use vapor_shared::{SyncMode, constants, runtime_paths};
 
 use crate::logging;
 
@@ -10,6 +10,10 @@ use crate::logging;
 pub struct SyncScope {
     pub local_sync_directory: Option<PathBuf>,
     pub cloud_sync_directory: String,
+    /// Sync direction for this scope (C8-59). Carried on the scope so
+    /// every pipeline gate (ingest, remote apply, reconcile, executor)
+    /// consults the same value — no operation can bypass it.
+    pub sync_mode: SyncMode,
 }
 
 /// Resolves the sync scope from environment variables layered over
@@ -66,6 +70,29 @@ fn resolve_scope(
     SyncScope {
         local_sync_directory,
         cloud_sync_directory,
+        sync_mode: resolve_sync_mode(&config.sync_mode),
+    }
+}
+
+/// Resolves the configured `syncMode` string. Unknown values fall back
+/// to the safe default (`two-way` never deletes or overwrites to
+/// converge) with a loud warning — a typo must not silently activate a
+/// destructive strict-mirror mode, and equally must not activate any
+/// mode the user did not spell exactly (C8-63: one-way is explicit
+/// opt-in, never inferred).
+fn resolve_sync_mode(raw: &str) -> SyncMode {
+    match SyncMode::from_config_value(raw) {
+        Some(mode) => mode,
+        None => {
+            logging::warning(
+                "Unknown syncMode value; using the safe two-way default",
+                &[
+                    ("configured_sync_mode", raw.to_string()),
+                    ("accepted", constants::sync_mode::ALL.join(", ")),
+                ],
+            );
+            SyncMode::TwoWay
+        }
     }
 }
 
@@ -343,6 +370,48 @@ mod tests {
         assert!(configured.exists());
         assert_ne!(scope.local_sync_directory, Some(current_directory));
         assert_ne!(scope.local_sync_directory, Some(home_directory));
+    }
+
+    #[test]
+    fn sync_mode_defaults_to_two_way_and_requires_explicit_opt_in() {
+        // C8-63 / C8-66: one-way modes are never inferred. Only the
+        // exact configured value activates them; anything else lands on
+        // the safe two-way default.
+        let scope = resolve_scope(None, None, &default_config(), Path::new("/tmp"), None);
+        assert_eq!(scope.sync_mode, vapor_shared::SyncMode::TwoWay);
+
+        let pull = VaporConfig {
+            sync_mode: "pull-only".to_string(),
+            ..VaporConfig::default()
+        };
+        assert_eq!(
+            resolve_scope(None, None, &pull, Path::new("/tmp"), None).sync_mode,
+            vapor_shared::SyncMode::PullOnly
+        );
+
+        let push = VaporConfig {
+            sync_mode: "push-only".to_string(),
+            ..VaporConfig::default()
+        };
+        assert_eq!(
+            resolve_scope(None, None, &push, Path::new("/tmp"), None).sync_mode,
+            vapor_shared::SyncMode::PushOnly
+        );
+    }
+
+    #[test]
+    fn unknown_sync_mode_values_fall_back_to_the_safe_default() {
+        for bogus in ["mirror", "Pull-Only", "pullonly", "one-way", ""] {
+            let config = VaporConfig {
+                sync_mode: bogus.to_string(),
+                ..VaporConfig::default()
+            };
+            assert_eq!(
+                resolve_scope(None, None, &config, Path::new("/tmp"), None).sync_mode,
+                vapor_shared::SyncMode::TwoWay,
+                "'{bogus}' must not activate any mode"
+            );
+        }
     }
 
     fn create_test_directory() -> (TempDir, PathBuf) {
