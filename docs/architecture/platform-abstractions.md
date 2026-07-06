@@ -135,6 +135,13 @@ Metadata tagging + case-sensitivity discovery.
 Loop-prevention and conflict-path derivation consult this trait so
 comparisons respect local filesystem semantics.
 
+Tag API (Wave 8): `read_tag` / `write_tag` / `remove_tag` carry the
+engine's op-id (`sh.arn.vapor.op-id`) on files. The Unix native impl
+uses the `xattr` crate; `supports_xattr()` reports whether the store is
+real, and `OpIdTagStore` in `core/providers` layers the atomic
+`{path}.vapor-meta.json` side-file fallback (xattr wins on read when
+both exist; side-files are hidden from provider enumeration).
+
 ### `ProcessSupervisor`
 
 Graceful shutdown handler registration.

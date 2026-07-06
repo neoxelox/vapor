@@ -186,13 +186,15 @@ OAuth-PKCE browser flow lands with Wave 8 / C8-48). Required Wave 6
 
 ### Wave 8 — Runtime capability completion
 
-Status: pending. This is the big wave — it covers everything the
-original macOS Phases 3–10 used to cover, now platform-agnostic so
-every surface inherits it.
+Status: **complete** (landed 2026-07 in a single change set on the
+portable runtime; see `core.md` Phase C8 for per-task notes). The
+runtime now runs real bidirectional sync end to end on the filesystem
+reference provider and Google Drive, with sync modes, profiles,
+resource budgets, diagnostics, and safeguards. Tier-2 perf fixtures
+(10k-file / adapter-overhead microbenches) are the only carve-out,
+tracked under `core.md` "Deferred tasks".
 
-Parallelizable with Waves 6–7 except where noted internally.
-
-Covers the full C8-1 … C8-58 span in `core.md`:
+Covered the full C8-1 … C8-58 span in `core.md`:
 
 1. **C8-1 … C8-13** — filesystem reference provider + bidirectional
    runtime shell + `self_write_cache` + simulator removal. Blocks
@@ -224,7 +226,8 @@ IDs stable; they do not imply low priority.)
 
 ### Wave 9 — macOS app UX polish
 
-Status: pending. Requires Wave 8 sub-blocks as noted below.
+Status: pending — **now unblocked** (every Wave 8 dependency below has
+landed).
 
 - `macos.md` M3-1 … M3-6 — diagnostics UX in the macOS app: real
   IPC-backed controls (`Pause`/`Resume`/`Flush now`), full menubar

@@ -11,6 +11,8 @@ public enum VaporConstants {
     public static let cloudSyncDirectory = "VAPOR_CLOUD_SYNC_DIRECTORY"
     public static let preIgnoreRules = "VAPOR_PRE_IGNORE_RULES"
     public static let postIgnoreRules = "VAPOR_POST_IGNORE_RULES"
+    public static let gdriveClientId = "VAPOR_GDRIVE_CLIENT_ID"
+    public static let gdriveClientSecret = "VAPOR_GDRIVE_CLIENT_SECRET"
   }
 
   public enum Runtime {
@@ -34,6 +36,9 @@ public enum VaporConstants {
     public static let postIgnoreRules = ""
     public static let languageCode = VaporConstants.Localization.defaultLanguageCode
     public static let timelineEventLimit = 1000
+    /// Mirrors `constants.rs::provider::DEFAULT` / `sync_mode::DEFAULT`.
+    public static let provider = "filesystem"
+    public static let syncMode = "two-way"
 
     public static let preIgnoreRuleLines: [String] = [
       ".git/",
@@ -93,5 +98,28 @@ public enum VaporConstants {
     public static let postIgnoreRules = "postIgnoreRules"
     public static let languageCode = "languageCode"
     public static let timelineEventLimit = "timelineEventLimit"
+    public static let provider = "provider"
+    public static let syncMode = "syncMode"
+    public static let deviceId = "deviceId"
+    public static let profiles = "profiles"
+    public static let resourceLimits = "resourceLimits"
+    public static let idleBoost = "idleBoost"
+  }
+
+  /// Accepted `syncMode` values (C8-59). Mirrors
+  /// `core/shared/src/constants.rs::sync_mode::*` per AGENTS.md §8.6.
+  public enum SyncModes {
+    public static let twoWay = "two-way"
+    public static let pullOnly = "pull-only"
+    public static let pushOnly = "push-only"
+    public static let all = [twoWay, pullOnly, pushOnly]
+  }
+
+  /// Accepted `provider` values (C8-2 / C8-54). Mirrors
+  /// `core/shared/src/constants.rs::provider::*` per AGENTS.md §8.6.
+  public enum Providers {
+    public static let filesystem = "filesystem"
+    public static let googleDrive = "google_drive"
+    public static let all = [filesystem, googleDrive]
   }
 }

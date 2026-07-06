@@ -28,6 +28,24 @@ Every request and response payload carries an explicit `schema_version: u32`
 field at the top level. The concrete version handshake and skew tolerance
 rules below are pre-GA; backward-compat guarantees tighten at GA.
 
+### Schema history
+
+Source of truth: `core/shared/src/constants.rs::ipc`
+(`SCHEMA_VERSION_CURRENT`, `SCHEMA_VERSION_MIN`) and the payload types in
+`core/ipc/src/protocol.rs`.
+
+- **v1** — Wave 7 baseline: `Hello`/`HelloAck`, `Status`, `Pause`,
+  `Resume`, `FlushNow`, `Reconcile`, `Timeline`, `Logs` seam.
+- **v2** (current; min supported v1) — Wave 8 finalisation, all additive
+  (every new field is serde-defaulted so a v1 peer's frames still parse):
+  `StatusResponse` gains sync-scope/provider/sync-mode fields, per-profile
+  summaries (`ProfileStatus`), effective resource ceilings + idle-boost
+  state (`ResourceBudgetStatus`), and cumulative conflict/mirror counters;
+  new `Diagnostics` method returns per-intent "why stuck" rows
+  (`DiagnosticsResponse` / `IntentDiagnostic`); new `SetAutoLaunch` and
+  `UpdateExcludes` control methods persist config through the daemon; and
+  `TimelineEntry` carries `profile_id`.
+
 ### Handshake
 
 - On connection, the app sends a

@@ -73,21 +73,39 @@ module — it is the template).
 Priority scenarios:
 
 - Local write propagates through debounce → scheduler → durable queue
-  → staged executor → provider upload (or loopback, pre-C8).
+  → staged executor → provider upload against the real filesystem
+  provider (the `BidirectionalFixture` manual-feed harness in
+  `runtime.rs` is the template).
+- Remote create/modify/delete propagates through poll → durable intent
+  → download/apply, including keep-both conflict copies and the
+  deletion-preservation guard.
 - Restart recovery with pending intents and in-flight leases; no
   duplication, no loss.
 - Throttle transitions during real work (`Suspended` halts new
   admission; running work completes cleanly or yields at the next
-  slice checkpoint).
+  slice checkpoint; chunked transfers hold at their checkpoint).
 - Storm-scale event bursts stay bounded; compaction triggers and the
   reconcile marker takes over.
 - Reconcile is interruptible at slice boundaries and on throttle
   changes.
 - Retry slowdown is restored from durable state after restart.
-- Self-write-cache (once C8-7 lands) suppresses echo uploads of our
-  own remote writes.
-- Multi-profile runtime preserves isolation (once C8-19..26 lands).
+- Self-write-cache suppresses echo uploads of our own remote writes
+  (and echo downloads of our own uploads).
+- Sync-mode gates: pull-only reverts local divergence instead of
+  uploading; push-only restores remote divergence instead of applying.
+- Multi-profile runtime preserves isolation (own DB per profile,
+  shared workgate caps, blast-radius containment on a panicking
+  profile).
+- Safeguards: mass-deletion storm pauses + alerts + `resume` re-arms;
+  code-churn heuristic flips throttle to user-active; flush boost
+  re-polls the remote feed.
 - Config reload mid-work does not lose in-flight intents.
+
+Cloud-provider logic (Google Drive) is tested entirely offline through
+the injectable `HttpTransport` seam: `ScriptedHttpTransport` scripts
+exact HTTP responses (including rate limits, 401s, resumable-upload
+`Content-Range` handshakes, and changes-feed pages) and records
+requests for assertion. No Tier 1 test may contact the network.
 
 Integration tests must stay fast. Each test uses its own `TempDir`,
 cleans up automatically, and avoids real network. Fixtures with
