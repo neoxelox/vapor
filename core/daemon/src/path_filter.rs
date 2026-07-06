@@ -174,6 +174,14 @@ impl EventPathFilter {
     }
 
     pub fn should_ignore(&self, path: &Path) -> bool {
+        // Engine-internal artifacts (atomic-write temp files, op-id
+        // side-files) are unconditionally invisible: loop prevention
+        // depends on them never becoming intents, so no user rule may
+        // re-include them.
+        if is_internal_artifact(path) {
+            return true;
+        }
+
         let Ok(relative_path) = path.strip_prefix(&self.watch_root) else {
             return false;
         };
@@ -192,6 +200,20 @@ impl EventPathFilter {
 
         ignored
     }
+}
+
+/// Whether the file name marks a Vapor-internal artifact
+/// (`constants::filtering::INTERNAL_IGNORE_FILE_*`).
+fn is_internal_artifact(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    constants::filtering::INTERNAL_IGNORE_FILE_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || constants::filtering::INTERNAL_IGNORE_FILE_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
 }
 
 fn append_rules_from_file_tree(
@@ -511,6 +533,26 @@ mod tests {
         assert!(filter.should_ignore(&watch_root.join("node_modules/pkg/index.js")));
         assert!(filter.should_ignore(&watch_root.join("coverage/unit.json")));
         assert!(!filter.should_ignore(&watch_root.join("src/main.rs")));
+    }
+
+    #[test]
+    fn internal_artifacts_are_ignored_unconditionally() {
+        let (_watch_root_guard, watch_root) = create_test_directory();
+        // Even an explicit user re-include cannot surface engine
+        // internals: loop prevention depends on it.
+        let options = EventPathFilterOptions {
+            pre_user_rules: vec![
+                "!.vapor-tmp-*".to_string(),
+                "!*.vapor-meta.json".to_string(),
+            ],
+            ..EventPathFilterOptions::default()
+        };
+        let filter = EventPathFilter::for_watch_root(&watch_root, &options);
+
+        assert!(filter.should_ignore(&watch_root.join(".vapor-tmp-dl-op42")));
+        assert!(filter.should_ignore(&watch_root.join("docs/.vapor-tmp-upload")));
+        assert!(filter.should_ignore(&watch_root.join("docs/report.md.vapor-meta.json")));
+        assert!(!filter.should_ignore(&watch_root.join("docs/report.md")));
     }
 
     #[test]

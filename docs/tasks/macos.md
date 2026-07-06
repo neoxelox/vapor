@@ -171,11 +171,25 @@ surface).
       events; non-persistent across relaunch).
 - [ ] M3-6 Tests for timeline ordering, truncation at max length,
       IPC field-omission.
+- [ ] M3-7 Conflicts pane: list unresolved keep-both conflicts by driving
+      the bundled CLI (`vapor conflicts list --json` — the same shim
+      pattern as lifecycle) with per-row keep-canonical / keep-copy
+      actions via `vapor conflicts resolve --json`, plus a Reveal in
+      Finder affordance. No scan or resolution logic in Swift; the CLI is
+      the single engine (`docs/architecture/conflict-resolution.md`).
+- [ ] M3-8 Conflict notification: menubar badge + native user
+      notification on `conflict` timeline events, opening the M3-7 pane.
+      Timeline events are the trigger, never the ledger — the pane always
+      lists from the CLI scan, so the timeline's 1000-event cap can never
+      hide a conflict. Naming the file inside the notification depends on
+      core.md C8-71.
 
 Exit gate:
 
 - User can understand "what is happening" and "why" from the app without
   shell access.
+- Unresolved conflicts are discoverable (badge + notification), listable,
+  and resolvable entirely from the app.
 
 ## Phase M4 - Profiles UX on macOS
 

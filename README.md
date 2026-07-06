@@ -18,6 +18,18 @@ Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/v
 
 Available now:
 
+- 🔁 Bidirectional cloud sync with durable intent replay and eventual consistency.
+- 🛡 Conflict-safe behavior with deterministic outcomes (keep both copies, never silent overwrite).
+- 🧭 Conflicts stay visible until you settle them: list every kept-both copy and resolve each one with a single command, from any device.
+- 🔀 Choose each folder's sync direction — full two-way, or a one-way mirror for read-only backups and copies.
+- 🧩 Multiple sync profiles let one folder flow to several clouds or keep separate setups neatly isolated.
+- 🪶 Low-impact by design: Vapor defers heavy work under pressure to protect battery and thermals.
+- ⏸️ Pressure-aware throttle modes that adapt sync intensity to real device load.
+- ⚙️ Configurable hard caps on its share of CPU, memory, and network so streaming, browsing, and other apps always have room.
+- 🌙 Smart idle boost: Vapor catches up faster when your device is genuinely idle, and yields the moment you come back.
+- 🌩 Storm-aware scheduling keeps sudden bursts of file changes contained, so one big folder update doesn't snowball.
+- 🛟 Mass-deletion guard pauses sync before a suspicious local wipe can replicate to the cloud.
+- 📈 Clear diagnostics with status reasons, queue visibility, a live activity timeline, and a one-command support bundle.
 - 🔕 Stays out of your way while keeping status and controls one click away.
 - 🚀 Auto-launch at login with resilient crash-loop protection for dependable day-to-day use.
 - 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow.
@@ -25,29 +37,34 @@ Available now:
 
 In flight and coming next:
 
-- 🔁 Bidirectional cloud sync with durable intent replay and eventual consistency.
 - ⚡ Fast-feeling background sync designed to stay responsive without stealing your machine.
-- 🪶 Low-impact by design: Vapor defers heavy work under pressure to protect battery and thermals.
-- 🌩 Storm-aware scheduling keeps sudden bursts of file changes contained, so one big folder update doesn't snowball.
-- 🧩 Multiple sync profiles let one folder flow to several clouds or keep separate setups neatly isolated.
-- 🔀 Choose each folder's sync direction — full two-way, or a one-way mirror for read-only backups and copies.
-- 🛡 Conflict-safe behavior with deterministic outcomes (keep both copies, never silent overwrite).
-- ⏸️ Pressure-aware throttle modes that adapt sync intensity to real device load.
-- ⚙️ Configurable hard caps on its share of CPU, memory, and network so streaming, browsing, and other apps always have room.
-- 🌙 Smart idle boost: Vapor catches up faster when your device is genuinely idle, and yields the moment you come back.
-- 📈 Clear diagnostics with status reasons, queue visibility, and live activity timeline.
 - 🌍 Cross-platform parity: one portable runtime powers the macOS, Windows, and Linux apps and the CLI.
 
 ## Providers
 
 Available now:
 
-- Soon 🏗️
+- [File System](https://github.com/neoxelox/vapor/tree/main/core/providers/src/filesystem) — any locally mounted folder (external drives, network mounts, another directory).
+- [Google Drive](https://workspace.google.com/intl/es/products/drive) — OAuth sign-in via `vapor auth login gdrive`.
 
 In flight and coming next:
 
-- [File System](https://github.com/neoxelox/vapor/blob/main/core/providers/provider_filesystem.rs)
-- [Google Drive](https://workspace.google.com/intl/es/products/drive)
+- More cloud providers as demand surfaces (the provider system is pluggable; see `docs/architecture/provider-onboarding.md`).
+
+## What Syncs
+
+Vapor syncs file content. Everything else on a filesystem is handled deliberately:
+
+| Item | How Vapor treats it |
+| ---- | ------------------- |
+| 📄 Regular files | Fully synced, byte-for-byte, in both directions (following the configured sync direction). |
+| 📁 Folders | Containers, not synced objects: each side creates them automatically as the files inside them sync, and deleting a folder propagates. An empty folder does not appear on the other side, and renaming a folder re-syncs its contents under the new name. |
+| 🙈 Ignored files | Anything matching the ignore rules never syncs in either direction — it can't be pulled down from the cloud, and it never causes a conflict. |
+| ⚔️ Conflicting edits | When both sides change the same file, both versions are kept — the other device's version stays next to yours as a `~conflict-` copy until you resolve it. Nothing is ever silently overwritten. |
+| 🔗 Symlinks | Never followed and never synced: a link could pull content from outside your sync folder into scope, and cloud providers can't represent them faithfully. |
+| 🪢 Hard links | Synced as an ordinary independent file; the link relationship is not preserved on the other side. |
+| 🕳 Special files (pipes, sockets, devices) | Ignored entirely — they carry no transferable content and never block the files around them. |
+| 🏷 Metadata (permissions, extended attributes, timestamps) | Not synced; content only. Vapor's own bookkeeping tags stay invisible and never appear in your listings. |
 
 ## Benchmarks
 
@@ -66,19 +83,25 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`; Vapor reads 
 | `useVaporIgnore`     | `Bool`   | `true`                                              | Applies recursive `.vaporignore` rules during local filtering.                           |
 | `localSyncDirectory` | `String` | `"~/Vapor"`                                         | Sets the local sync root; Vapor creates it if it does not exist yet.                     |
 | `cloudSyncDirectory` | `String` | `"/Vapor"`                                          | Sets the cloud sync root; Vapor creates it if it does not exist yet.                     |
+| `provider`           | `String` | `"filesystem"`                                      | Chooses the cloud backend: `filesystem` (a local folder acting as the cloud side) or `gdrive` (requires `vapor auth login gdrive`). |
 | `syncMode`           | `String` | `"two-way"`                                         | Chooses the sync direction: `two-way` (bidirectional), `pull-only` (cloud → local, a read-only local mirror), or `push-only` (local → cloud, a read-only cloud backup). |
 | `preIgnoreRules`     | `String` | Embedded `.gitignore`-like low-impact default rules | Provides the baseline ignore rules that run before discovered ignore files.              |
 | `postIgnoreRules`    | `String` | Empty string                                        | Provides the final override rules that run after discovered ignore files.                |
 | `languageCode`       | `String` | `"en"`                                              | Selects the UI language catalog to load.                                                 |
 | `timelineEventLimit` | `Int`    | `1000`                                              | Caps the in-memory timeline length shown in diagnostics.                                 |
+| `deviceId`           | `String` | Derived from the hostname on first run              | Stable per-device identifier used in conflict-copy names (for example `report~conflict-mac-studio-....pdf`). Written by the daemon; never regenerated silently. |
+| `profiles`           | `Array`  | Absent (single implicit profile)                    | Optional named sync profiles. Each entry (`id`, `name`, `enabled`, plus optional `provider`, `localSyncDirectory`, `cloudSyncDirectory`, `syncMode`, `resourceLimits`, `idleBoost` overrides) runs as an isolated pipeline with its own durable state; unset fields inherit the top-level values. |
 | `resourceLimits`     | `Object` | `{ cpuPercent: 15, memoryPercent: 10, bandwidthPercent: 25 }` | Sets hard ceilings on daemon CPU (share of one core), device memory, and measured bandwidth. Honored by the throttle controller and auto-tuner. Profile overrides may only lower these values. |
 | `idleBoost`          | `Object` | See below                                           | Dynamically raises effective ceilings when the device is user-idle with measured resource headroom, ramping up slowly and down quickly. Setting `enabled: false` in any enabled profile disables boost daemon-wide. |
 
-`idleBoost` defaults: `enabled: true`, `minIdleSeconds: 600`, `headroomCpuPercent: 40`, `headroomMemoryPercent: 40`, `headroomBandwidthPercent: 40`, `boostCpuPercent: 50`, `boostMemoryPercent: 30`, `boostBandwidthPercent: 90`, `rampUpSeconds: 60`, `rampDownSeconds: 20`. Each `boost*Percent` must be `>=` the matching `resourceLimits.*Percent` (lower values are treated as equal to the base ceiling). Boost requires all of: throttle state `IdleDrain`, user-idle for at least `minIdleSeconds`, and non-Vapor utilization at or below each `headroom*Percent`.
+`idleBoost` defaults: `enabled: true`, `minIdleSeconds: 300`, `headroomCpuPercent: 30`, `boostCpuPercent: 50`, `boostMemoryPercent: 20`, `boostBandwidthPercent: 80`, `rampUpSeconds: 30`, `rampDownSeconds: 10`. Each `boost*Percent` must be `>=` the matching `resourceLimits.*Percent` (lower values are treated as equal to the base ceiling). Boost requires all of: throttle state `IdleDrain`, user-idle for at least `minIdleSeconds`, and non-Vapor CPU utilization at or below `headroomCpuPercent`. Ramp-down is deliberately faster than ramp-up so returning to your device is never met with a busy daemon.
+
+Google Drive credentials are supplied per deployment through the `VAPOR_GDRIVE_CLIENT_ID` / `VAPOR_GDRIVE_CLIENT_SECRET` environment variables (see `.env.example` and `docs/operations/provider-auth-operations.md`); user tokens are stored only in the platform secret store, never in `vapor.json`.
 
 ### Ignore rules
 
 - Filesystem callback filtering applies before event metadata is recorded.
+- Ignore rules are symmetric: a name that matches them never syncs in either direction — it is skipped by local ingest, by the remote changes feed, and by reconcile comparison on both sides — so an ignored file (for example `.DS_Store`) can never be pulled down from the cloud or produce a conflict copy.
 - Rule precedence (lowest to highest): `preIgnoreRules` -> `.gitignore` (when enabled, recursive per-directory) -> `.vaporignore` (when enabled, recursive per-directory) -> `postIgnoreRules`.
 - `.vaporignore` supports glob-like rules and `!` unignore rules.
 - `preIgnoreRules` default content covers common low-signal paths such as `.git/`, `node_modules/`, build outputs (`dist/`, `build/`, `out/`), caches, swap/tmp files, logs, and `.env.local`.

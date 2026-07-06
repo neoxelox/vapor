@@ -52,7 +52,7 @@ pub struct IncompatibleVersion {
 /// Methods exposed by the daemon. Each variant is the name that goes
 /// on the wire. Unknown method names are rejected with
 /// `ErrorBody::MethodNotFound`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Method {
     /// Read the current daemon snapshot.
     Status,
@@ -67,9 +67,22 @@ pub enum Method {
     /// Request a fresh whole-scope reconcile against the local sync
     /// directory.
     Reconcile,
-    /// Read the (Wave 7) diagnostics timeline. Returns an empty list
-    /// until the C8-30 in-memory timeline buffer ships.
+    /// Read the bounded daemon activity timeline (C8-30).
     Timeline,
+    /// Per-intent "why stuck" diagnostics (schema v2, C8-29).
+    Diagnostics,
+    /// Persist the `autoLaunch` config value (schema v2, C8-27). The
+    /// service-manager (un)install itself stays with `vapor service`.
+    SetAutoLaunch { enabled: bool },
+    /// Persist updated ignore rules (schema v2, C8-27). Applied to the
+    /// live path filter at the next daemon restart (pre-GA contract;
+    /// the ack note says so).
+    UpdateExcludes {
+        #[serde(default)]
+        pre_ignore_rules: Option<String>,
+        #[serde(default)]
+        post_ignore_rules: Option<String>,
+    },
 }
 
 /// Top-level request envelope. Wave 6 phase 2 ships only the `Status`
@@ -84,6 +97,7 @@ pub enum Request {
 /// Successful response payloads, indexed by which method they answer.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
+#[allow(clippy::large_enum_variant)] // wire envelope; boxing would change the JSON shape reasoning for zero wins
 pub enum ResponseBody {
     HelloAck(HelloAck),
     IncompatibleVersion(IncompatibleVersion),
@@ -96,6 +110,7 @@ pub enum ResponseBody {
     /// pausing an already-paused daemon).
     Ack(AckResponse),
     Timeline(TimelineResponse),
+    Diagnostics(DiagnosticsResponse),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -111,6 +126,49 @@ pub struct TimelineEntry {
     pub timestamp_ms: u64,
     pub kind: String,
     pub message: String,
+    /// Profile the event belongs to (schema v2; empty on v1 peers).
+    #[serde(default)]
+    pub profile_id: String,
+}
+
+/// One pending or in-flight intent with its "why stuck" context
+/// (schema v2, C8-29).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct IntentDiagnostic {
+    pub intent_id: i64,
+    #[serde(default)]
+    pub profile_id: String,
+    pub path: String,
+    /// Intent kind label (`upload`, `download`, `delete`,
+    /// `apply_remote_delete`, `rename`, `reconcile_subtree`).
+    pub action: String,
+    /// Current stage (`Queued`, `Retrying`, `Planner`, `Hash`,
+    /// `WaitingForUpload`, `Upload`, `WaitingForDownload`, `Download`,
+    /// ...).
+    pub stage: String,
+    #[serde(default)]
+    pub elapsed_in_stage_ms: u64,
+    #[serde(default)]
+    pub attempt_count: u32,
+    #[serde(default)]
+    pub last_error: String,
+    /// Human-readable reason the intent is not progressing right now.
+    #[serde(default)]
+    pub blocker_reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DiagnosticsResponse {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub intents: Vec<IntentDiagnostic>,
+    /// True when the daemon truncated the list to its per-response cap.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Events dropped at the bounded fs-event ingest boundary since
+    /// startup (callback-vs-runtime backpressure signal, C8-29).
+    #[serde(default)]
+    pub dropped_incoming_events: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -124,6 +182,7 @@ pub struct TimelineResponse {
 /// (`Ok(body)`) from protocol-level failures (`Err(error)`).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", content = "value")]
+#[allow(clippy::large_enum_variant)] // short-lived wire envelope
 pub enum Response {
     Ok(ResponseBody),
     Err(ErrorBody),
@@ -150,7 +209,7 @@ pub enum ErrorBody {
 /// throttle state, and the last decision reason. Wave 7 expands it
 /// (queue depth, ceilings, idle-boost state, etc.) per the contracts
 /// doc.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub schema_version: u32,
     pub run_state: String,
@@ -164,6 +223,85 @@ pub struct StatusResponse {
     /// diagnostic — lets clients report which daemon build answered.
     #[serde(default)]
     pub daemon_id: String,
+    /// Schema v2 (C8-27/C8-28/C8-65) — every field defaulted so v1
+    /// peers interoperate under the skew rules.
+    /// Total durable queue depth across profiles.
+    #[serde(default)]
+    pub queue_depth: u64,
+    /// Terminally-failed intents across profiles.
+    #[serde(default)]
+    pub failed_intents: u64,
+    /// Self-write echoes suppressed by loop prevention since startup.
+    #[serde(default)]
+    pub loop_prevention_suppressions: u64,
+    /// Keep-both conflict copies created since startup.
+    #[serde(default)]
+    pub conflicts: u64,
+    /// Strict-mirror reverts/deletes since startup (one-way modes).
+    #[serde(default)]
+    pub mirror_reverts: u64,
+    #[serde(default)]
+    pub mirror_deletes: u64,
+    /// Per-profile status rows (C8-65).
+    #[serde(default)]
+    pub profiles: Vec<ProfileStatus>,
+    /// Effective resource ceilings + utilization + idle-boost state
+    /// (C8-40). `None` until the resource-budget runtime publishes.
+    #[serde(default)]
+    pub resource_budget: Option<ResourceBudgetStatus>,
+}
+
+/// One profile's status row inside [`StatusResponse`] (schema v2).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub struct ProfileStatus {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub provider_name: String,
+    /// `two-way` / `pull-only` / `push-only` (C8-65).
+    #[serde(default)]
+    pub sync_mode: String,
+    #[serde(default)]
+    pub run_state: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub queue_depth: u64,
+    #[serde(default)]
+    pub failed_intents: u64,
+    #[serde(default)]
+    pub conflicts: u64,
+    #[serde(default)]
+    pub mirror_reverts: u64,
+    #[serde(default)]
+    pub mirror_deletes: u64,
+    /// Set when the profile was suspended by blast-radius containment.
+    #[serde(default)]
+    pub suspended_reason: Option<String>,
+}
+
+/// Effective resource ceilings, measured utilization, and idle-boost
+/// state (schema v2, C8-40).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResourceBudgetStatus {
+    #[serde(default)]
+    pub effective_cpu_percent: u8,
+    #[serde(default)]
+    pub effective_memory_percent: u8,
+    #[serde(default)]
+    pub effective_bandwidth_percent: u8,
+    #[serde(default)]
+    pub cpu_utilization_percent: u8,
+    #[serde(default)]
+    pub memory_utilization_percent: u8,
+    #[serde(default)]
+    pub bandwidth_utilization_kbps: u64,
+    /// `off` / `ramping-up` / `active` / `ramping-down`.
+    #[serde(default)]
+    pub idle_boost_state: String,
+    #[serde(default)]
+    pub idle_boost_reason: String,
 }
 
 #[cfg(test)]
@@ -222,6 +360,7 @@ mod tests {
             provider_name: "Filesystem (stub)".to_string(),
             throttle_reason: "idle, plugged in, and cool".to_string(),
             daemon_id: "vapord/test".to_string(),
+            ..StatusResponse::default()
         }));
         let err = Response::Err(ErrorBody::PayloadTooLarge(8_388_608));
 
@@ -235,6 +374,43 @@ mod tests {
             serde_json::from_slice::<Response>(&err_bytes).expect("err"),
             err
         );
+    }
+
+    #[test]
+    fn v1_status_payload_without_v2_fields_parses_with_defaults() {
+        // Field-omission tolerance across the v1 -> v2 bump: a v1
+        // daemon's status omits every v2 field; a v2 client must read
+        // it with defaults instead of failing.
+        let raw = r#"{
+            "schema_version": 1,
+            "run_state": "Running",
+            "throttle_state": "IdleDrain",
+            "provider_name": "filesystem",
+            "throttle_reason": "idle",
+            "daemon_id": "vapord/old"
+        }"#;
+        let decoded: StatusResponse = serde_json::from_str(raw).expect("v1 payload parses");
+        assert_eq!(decoded.queue_depth, 0);
+        assert!(decoded.profiles.is_empty());
+        assert!(decoded.resource_budget.is_none());
+    }
+
+    #[test]
+    fn v2_method_payloads_round_trip() {
+        let set = Request::Call {
+            method: Method::SetAutoLaunch { enabled: false },
+        };
+        let update = Request::Call {
+            method: Method::UpdateExcludes {
+                pre_ignore_rules: Some(".git/\nnode_modules/".to_string()),
+                post_ignore_rules: None,
+            },
+        };
+        for request in [set, update] {
+            let bytes = serde_json::to_vec(&request).expect("serialize");
+            let decoded: Request = serde_json::from_slice(&bytes).expect("deserialize");
+            assert_eq!(decoded, request);
+        }
     }
 
     #[test]

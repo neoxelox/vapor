@@ -13,8 +13,8 @@ use vapor_cli::commands::service as service_cmd;
 use vapor_cli::{RunOptions, ServiceCommand};
 use vapor_cli::{
     commands::{
-        auth as auth_cmd, config as config_cmd, doctor as doctor_cmd, ipc as ipc_cmd,
-        run as run_cmd,
+        auth as auth_cmd, config as config_cmd, conflicts as conflicts_cmd, doctor as doctor_cmd,
+        ipc as ipc_cmd, run as run_cmd,
     },
     resolve_configuration_path,
 };
@@ -80,6 +80,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Per-intent "why stuck" diagnostics from the running daemon.
+    Diagnostics {
+        #[arg(long)]
+        json: bool,
+    },
     /// Tail the daemon log file at `<vapor_dir>/logs/vapord.logs`.
     Logs {
         #[arg(long)]
@@ -89,6 +94,44 @@ enum Command {
     Auth {
         #[command(subcommand)]
         action: AuthAction,
+    },
+    /// Export a shareable support bundle: config, logs, and (when the
+    /// daemon is running) live status / diagnostics / timeline.
+    SupportBundle {
+        /// Directory to create the bundle under (defaults to
+        /// `<vapor_dir>/support`).
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List and resolve keep-both sync conflicts.
+    Conflicts {
+        #[command(subcommand)]
+        action: ConflictsAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConflictsAction {
+    /// Scan every enabled profile's local root for unresolved
+    /// `~conflict-` copies. Works with or without a running daemon.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resolve one conflict: keep either the canonical file or the
+    /// conflict copy; the discarded version is deleted and the change
+    /// syncs like any other edit.
+    Resolve {
+        /// Path to the `…~conflict-…` copy (as printed by `list`).
+        path: std::path::PathBuf,
+        /// Which version survives under the canonical name:
+        /// 'canonical' or 'copy'.
+        #[arg(long)]
+        keep: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -102,11 +145,23 @@ enum AuthAction {
         provider: String,
         #[arg(long)]
         token: Option<String>,
+        /// Profile the credential belongs to (C8-20); defaults to the
+        /// implicit `default` profile.
+        #[arg(long, default_value = "default")]
+        profile: String,
     },
     /// Remove the stored token for `provider`.
-    Logout { provider: String },
-    /// List bound providers (never reveals the token value).
-    Status,
+    Logout {
+        provider: String,
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
+    /// List bound providers for a profile (never reveals the token
+    /// value).
+    Status {
+        #[arg(long, default_value = "default")]
+        profile: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -248,9 +303,88 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
         Command::FlushNow => dispatch_ack("flush-now", ipc_cmd::flush_now()),
         Command::Reconcile => dispatch_ack("reconcile", ipc_cmd::reconcile()),
         Command::Timeline { json } => dispatch_timeline(json),
+        Command::Diagnostics { json } => dispatch_diagnostics(json),
         Command::Logs { tail } => dispatch_logs(tail),
         Command::Auth { action } => dispatch_auth(action),
+        Command::SupportBundle { output, json } => dispatch_support_bundle(output, json),
+        Command::Conflicts { action } => dispatch_conflicts(action),
     }
+}
+
+fn dispatch_conflicts(action: ConflictsAction) -> Result<ExitCode, String> {
+    match action {
+        ConflictsAction::List { json } => {
+            let loaded = vapor_shared::config::load_from(&resolve_configuration_path());
+            if let Some(issue) = loaded.load_issue {
+                eprintln!("vapor: warning: {issue}");
+            }
+            let report = conflicts_cmd::list_conflicts(&loaded.config);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("{}", conflicts_cmd::render_list(&report));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ConflictsAction::Resolve { path, keep, json } => {
+            let keep = conflicts_cmd::KeepSide::parse(&keep)?;
+            let report = conflicts_cmd::resolve_conflict(&path, keep)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("{}", conflicts_cmd::render_resolution(&report));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn dispatch_support_bundle(
+    output: Option<std::path::PathBuf>,
+    json: bool,
+) -> Result<ExitCode, String> {
+    use vapor_cli::commands::support;
+
+    // Live captures are best-effort: an unreachable daemon still yields
+    // a useful bundle from the on-disk artifacts.
+    let live = match (
+        ipc_cmd::status(),
+        ipc_cmd::diagnostics(),
+        ipc_cmd::timeline(),
+    ) {
+        (Ok(status), Ok(diagnostics), Ok(timeline)) => Some(support::LiveCaptures {
+            status_json: serde_json::to_string_pretty(&status).map_err(|e| e.to_string())?,
+            diagnostics_json: serde_json::to_string_pretty(&diagnostics)
+                .map_err(|e| e.to_string())?,
+            timeline_json: serde_json::to_string_pretty(&timeline).map_err(|e| e.to_string())?,
+        }),
+        _ => None,
+    };
+
+    let vapor_dir = vapor_shared::runtime_paths::vapor_directory();
+    let output_root = output.unwrap_or_else(|| vapor_dir.join("support"));
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    let report = support::collect_support_bundle(&vapor_dir, &output_root, live, timestamp_ms)
+        .map_err(|e| format!("cannot collect support bundle: {e}"))?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+    } else {
+        print!("{}", support::render_report(&report));
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn dispatch_status(json: bool) -> Result<ExitCode, String> {
@@ -298,6 +432,19 @@ fn dispatch_timeline(json: bool) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn dispatch_diagnostics(json: bool) -> Result<ExitCode, String> {
+    let diagnostics = ipc_cmd::diagnostics().map_err(|e| e.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&diagnostics).map_err(|e| e.to_string())?
+        );
+    } else {
+        println!("{}", ipc_cmd::render_diagnostics(&diagnostics));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn dispatch_logs(tail: Option<usize>) -> Result<ExitCode, String> {
     let contents = ipc_cmd::tail_logs(tail).map_err(|e| e.to_string())?;
     if contents.is_empty() {
@@ -312,28 +459,45 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
     let store = auth_cmd::build_native_store();
     let persistent = store.is_persistent();
     match action {
-        AuthAction::Login { provider, token } => {
-            let token = resolve_auth_token(token)?;
-            auth_cmd::login_into(store.as_ref(), &provider, &token).map_err(|e| e.to_string())?;
+        AuthAction::Login {
+            provider,
+            token,
+            profile,
+        } => {
+            // Google Drive without an explicit --token runs the full
+            // OAuth-PKCE browser flow (C8-48); every other path keeps
+            // the explicit/stdin token behavior.
+            let token = if provider == vapor_shared::constants::provider::GDRIVE && token.is_none()
+            {
+                auth_cmd::run_gdrive_pkce_flow()?
+            } else {
+                resolve_auth_token(token)?
+            };
+            auth_cmd::login_into(store.as_ref(), &profile, &provider, &token)
+                .map_err(|e| e.to_string())?;
             if persistent {
-                println!("auth login: stored token for {provider}");
+                println!("auth login: stored token for {provider} (profile {profile})");
             } else {
                 eprintln!(
                     "vapor: warning: native secret store is not yet wired in on this OS; \
                      the token was kept in process memory only and will not survive restart \
                      (see docs/tasks/core.md C4-5 / Waves 12 / 13)."
                 );
-                println!("auth login: stored token for {provider} (process-local only)");
+                println!(
+                    "auth login: stored token for {provider} (profile {profile}, process-local only)"
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
-        AuthAction::Logout { provider } => {
-            auth_cmd::logout_from(store.as_ref(), &provider).map_err(|e| e.to_string())?;
-            println!("auth logout: removed token for {provider}");
+        AuthAction::Logout { provider, profile } => {
+            auth_cmd::logout_from(store.as_ref(), &profile, &provider)
+                .map_err(|e| e.to_string())?;
+            println!("auth logout: removed token for {provider} (profile {profile})");
             Ok(ExitCode::SUCCESS)
         }
-        AuthAction::Status => {
-            let entries = auth_cmd::status_from(store.as_ref()).map_err(|e| e.to_string())?;
+        AuthAction::Status { profile } => {
+            let entries =
+                auth_cmd::status_from(store.as_ref(), &profile).map_err(|e| e.to_string())?;
             if !persistent {
                 eprintln!(
                     "vapor: note: native secret store is not yet wired in on this OS; \
@@ -342,7 +506,7 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
             }
             for entry in entries {
                 let state = if entry.bound { "bound" } else { "not bound" };
-                println!("{}: {}", entry.provider, state);
+                println!("{} ({}): {}", entry.provider, entry.profile, state);
             }
             Ok(ExitCode::SUCCESS)
         }

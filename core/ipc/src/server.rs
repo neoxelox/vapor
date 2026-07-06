@@ -12,8 +12,8 @@ use std::io::{Read, Write};
 
 use crate::framing::{FrameError, read_frame, write_frame};
 use crate::protocol::{
-    AckResponse, ErrorBody, Hello, HelloAck, IncompatibleVersion, Method, Request, Response,
-    ResponseBody, StatusResponse, TimelineResponse, daemon_supported_versions,
+    AckResponse, DiagnosticsResponse, ErrorBody, Hello, HelloAck, IncompatibleVersion, Method,
+    Request, Response, ResponseBody, StatusResponse, TimelineResponse, daemon_supported_versions,
 };
 
 /// Implemented by the daemon to provide the data each method exposes.
@@ -38,6 +38,28 @@ pub trait Service: Send + Sync {
 
     fn reconcile(&self) -> AckResponse {
         unsupported_ack("reconcile")
+    }
+
+    fn diagnostics(&self) -> DiagnosticsResponse {
+        let (current, _) = crate::daemon_supported_versions();
+        DiagnosticsResponse {
+            schema_version: current,
+            intents: Vec::new(),
+            truncated: false,
+            dropped_incoming_events: 0,
+        }
+    }
+
+    fn set_auto_launch(&self, _enabled: bool) -> AckResponse {
+        unsupported_ack("set_auto_launch")
+    }
+
+    fn update_excludes(
+        &self,
+        _pre_ignore_rules: Option<String>,
+        _post_ignore_rules: Option<String>,
+    ) -> AckResponse {
+        unsupported_ack("update_excludes")
     }
 
     fn timeline(&self) -> TimelineResponse {
@@ -208,6 +230,16 @@ fn dispatch_method(service: &dyn Service, method: Method) -> Response {
         Method::FlushNow => Response::Ok(ResponseBody::Ack(service.flush_now())),
         Method::Reconcile => Response::Ok(ResponseBody::Ack(service.reconcile())),
         Method::Timeline => Response::Ok(ResponseBody::Timeline(service.timeline())),
+        Method::Diagnostics => Response::Ok(ResponseBody::Diagnostics(service.diagnostics())),
+        Method::SetAutoLaunch { enabled } => {
+            Response::Ok(ResponseBody::Ack(service.set_auto_launch(enabled)))
+        }
+        Method::UpdateExcludes {
+            pre_ignore_rules,
+            post_ignore_rules,
+        } => Response::Ok(ResponseBody::Ack(
+            service.update_excludes(pre_ignore_rules, post_ignore_rules),
+        )),
     }
 }
 
@@ -272,6 +304,7 @@ mod tests {
             provider_name: "Filesystem (stub)".to_string(),
             throttle_reason: "idle, plugged in, and cool".to_string(),
             daemon_id: "vapord/1".to_string(),
+            ..StatusResponse::default()
         }
     }
 

@@ -110,7 +110,8 @@ fn read_or_empty_object(path: &Path) -> Result<Value, ConfigError> {
 
 fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
     use constants::config::{
-        KEY_AUTO_LAUNCH, KEY_TIMELINE_EVENT_LIMIT, KEY_USE_GIT_IGNORE, KEY_USE_VAPOR_IGNORE,
+        KEY_AUTO_LAUNCH, KEY_PROVIDER, KEY_SYNC_MODE, KEY_TIMELINE_EVENT_LIMIT, KEY_USE_GIT_IGNORE,
+        KEY_USE_VAPOR_IGNORE,
     };
     if matches!(
         key,
@@ -130,7 +131,27 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
             .map(|value| Value::Number(value.into()))
             .map_err(|error| ConfigError::Parse(format!("expected integer for '{key}': {error}")));
     }
+    if key == KEY_PROVIDER {
+        return parse_enum_value(key, raw, constants::provider::ALL);
+    }
+    if key == KEY_SYNC_MODE {
+        return parse_enum_value(key, raw, constants::sync_mode::ALL);
+    }
     Ok(Value::String(raw.to_string()))
+}
+
+/// Enum-typed keys reject unknown values with the accepted list —
+/// especially load-bearing for `syncMode`, whose one-way values are
+/// destructive and must never be a typo away (C8-59).
+fn parse_enum_value(key: &str, raw: &str, accepted: &[&str]) -> Result<Value, ConfigError> {
+    if accepted.contains(&raw) {
+        Ok(Value::String(raw.to_string()))
+    } else {
+        Err(ConfigError::Parse(format!(
+            "expected one of [{}] for '{key}', got '{raw}'",
+            accepted.join(", ")
+        )))
+    }
 }
 
 fn format_json_scalar(value: &Value) -> String {
@@ -221,5 +242,28 @@ mod tests {
             get(&path, "timelineEventLimit").expect("get"),
             Some("2500".to_string())
         );
+    }
+
+    #[test]
+    fn provider_key_is_enum_validated() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        set(&path, "provider", "filesystem").expect("filesystem accepted");
+        set(&path, "provider", "gdrive").expect("gdrive accepted");
+        let error = set(&path, "provider", "dropbox").expect_err("unknown provider");
+        assert!(matches!(error, ConfigError::Parse(_)));
+        assert!(error.to_string().contains("filesystem"));
+    }
+
+    #[test]
+    fn sync_mode_key_is_enum_validated() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        set(&path, "syncMode", "two-way").expect("two-way accepted");
+        set(&path, "syncMode", "pull-only").expect("pull-only accepted");
+        set(&path, "syncMode", "push-only").expect("push-only accepted");
+        let error = set(&path, "syncMode", "mirror").expect_err("unknown mode");
+        assert!(matches!(error, ConfigError::Parse(_)));
+        assert!(error.to_string().contains("two-way"));
     }
 }

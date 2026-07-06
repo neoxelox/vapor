@@ -84,6 +84,17 @@ impl KeyedSupersedingScheduler {
 
     pub fn upsert_stabilized_event(&mut self, event: StabilizedEvent) -> SchedulerUpdate {
         let kind = intent_kind_for_stabilized_event(&event);
+        self.upsert_stabilized_event_as(event, kind)
+    }
+
+    /// Upserts with a caller-computed kind, so the runtime's safeguard
+    /// taps and the scheduled intent are guaranteed to agree on one
+    /// classification (the existence probe must not run twice).
+    pub(crate) fn upsert_stabilized_event_as(
+        &mut self,
+        event: StabilizedEvent,
+        kind: PendingIntentKind,
+    ) -> SchedulerUpdate {
         self.upsert_intent_with_metadata(
             event.path,
             kind,
@@ -287,10 +298,23 @@ impl KeyedSupersedingScheduler {
     }
 }
 
-fn intent_kind_for_stabilized_event(event: &StabilizedEvent) -> PendingIntentKind {
-    if event.last_event_kind == FsEventKind::Removed {
-        PendingIntentKind::Delete
-    } else if event.flags.renamed {
+/// Maps a stabilized event onto the intent that converges it. Deletion
+/// is decided by ground truth, not event order: real fs-watch backends
+/// (FSEvents especially) coalesce and split per-path flags, so the
+/// *last* event delivered for an unlinked file is frequently a
+/// write-kind — trusting it turned local deletions into upload plans
+/// that no-op'd as "vanished before upload" and never removed the
+/// remote copy. When the burst carried a removal or rename and the
+/// path is gone at stabilization time (runtime thread — never the
+/// callback), the local truth is "deleted" regardless of which
+/// fragment notify delivered last.
+pub(crate) fn intent_kind_for_stabilized_event(event: &StabilizedEvent) -> PendingIntentKind {
+    let removal_shaped =
+        event.flags.removed || event.flags.renamed || event.last_event_kind == FsEventKind::Removed;
+    if removal_shaped && std::fs::symlink_metadata(&event.path).is_err() {
+        return PendingIntentKind::Delete;
+    }
+    if event.flags.renamed {
         PendingIntentKind::Rename
     } else {
         PendingIntentKind::Upload
@@ -377,7 +401,14 @@ mod tests {
 
     #[test]
     fn rename_is_preserved_when_followed_by_modify() {
-        let path = PathBuf::from("/tmp/vapor-root/src/renamed.rs");
+        // Destination side of a rename: the file exists at
+        // stabilization, so the rename classification survives a
+        // trailing modify fragment. (A rename-flagged path that is
+        // *gone* is the source side and maps to Delete — covered by
+        // `deletion_is_decided_by_ground_truth_not_event_order`.)
+        let temp = tempfile::TempDir::new().expect("temp");
+        let path = temp.path().join("renamed.rs");
+        std::fs::write(&path, b"fn main() {}").expect("seed");
         let mut scheduler = KeyedSupersedingScheduler::default();
 
         let update = scheduler.upsert_stabilized_event(stabilized_event(
@@ -616,6 +647,51 @@ mod tests {
             "scheduler superseding took {:?}, expected < 2s",
             elapsed
         );
+    }
+
+    #[test]
+    fn deletion_is_decided_by_ground_truth_not_event_order() {
+        // The real-watcher shape that used to lose deletions: FSEvents
+        // splits/coalesces per-path flags, so an unlinked file's last
+        // delivered fragment is often a write-kind. The burst carries
+        // `removed`, the path is gone — the intent must be Delete no
+        // matter which fragment arrived last.
+        let temp = tempfile::TempDir::new().expect("temp");
+        let vanished = temp.path().join("deleted.txt");
+        let mut scheduler = KeyedSupersedingScheduler::default();
+        let update = scheduler.upsert_stabilized_event(stabilized_event(
+            vanished,
+            FsEventKind::Modified, // trailing write fragment
+            PendingEventFlags {
+                removed: true,
+                modified: true,
+                ..PendingEventFlags::default()
+            },
+            1,
+            2,
+            2,
+        ));
+        assert_eq!(update.kind, PendingIntentKind::Delete);
+
+        // The inverse race: a Removed fragment arrived last but the
+        // file exists again (delete + recreate inside one quiet
+        // window). Ground truth says upload the survivor — the old
+        // last-kind rule would have deleted the remote copy.
+        let recreated = temp.path().join("recreated.txt");
+        std::fs::write(&recreated, b"back again").expect("seed");
+        let update = scheduler.upsert_stabilized_event(stabilized_event(
+            recreated,
+            FsEventKind::Removed,
+            PendingEventFlags {
+                removed: true,
+                created: true,
+                ..PendingEventFlags::default()
+            },
+            3,
+            4,
+            2,
+        ));
+        assert_eq!(update.kind, PendingIntentKind::Upload);
     }
 
     fn stabilized_event(

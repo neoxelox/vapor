@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use vapor_providers::{Provider, default_provider};
@@ -23,8 +23,10 @@ pub mod build_info {
     include!(concat!(env!("OUT_DIR"), "/vapor_build_info.rs"));
 }
 
+pub mod auto_tune;
 pub mod bootstrap;
 pub mod clock;
+pub mod conflict;
 pub mod debounce;
 pub mod event_intents;
 pub mod executor;
@@ -33,17 +35,25 @@ pub mod ipc_server;
 pub mod ipc_service;
 pub mod logging;
 pub mod metrics;
+pub mod multi_runtime;
 pub mod path_filter;
+pub mod profiles;
 pub mod reconcile;
+pub mod reconcile_walk;
+pub mod remote_sync;
+pub mod resource_budget;
 pub mod retry;
 pub mod runtime;
 pub mod runtime_control;
+pub mod safeguards;
 pub mod scheduler;
+pub mod self_write_cache;
 pub mod singleton;
 pub mod state_db;
 pub mod storm;
 pub mod sync_directories;
 pub mod throttle;
+pub mod timeline;
 pub mod workgate;
 
 pub struct DaemonApp {
@@ -52,8 +62,16 @@ pub struct DaemonApp {
     throttle_controller: ThrottleController,
     last_throttle_decision: Option<ThrottleDecision>,
     retry_slowdown_until: Option<SystemTime>,
+    /// Effective CPU ceiling from the resource budget (C8-37). `None`
+    /// until the budget runtime publishes; caps then scale relative to
+    /// the default ceiling.
+    resource_cpu_ceiling_percent: Option<u8>,
     reconcile_controller: ReconcileController,
-    workgate: ThrottleWorkgate,
+    /// Shared behind a mutex so multiple profile runtimes gate against
+    /// ONE daemon-level cap set (`data-flow.md §Multi-profile watch
+    /// coordination`); a single-profile daemon simply owns the only
+    /// clone.
+    workgate: Arc<Mutex<ThrottleWorkgate>>,
 }
 
 impl Default for DaemonApp {
@@ -70,7 +88,6 @@ impl std::fmt::Debug for DaemonApp {
             .field("last_throttle_decision", &self.last_throttle_decision)
             .field("retry_slowdown_until", &self.retry_slowdown_until)
             .field("reconcile_controller", &self.reconcile_controller)
-            .field("workgate", &self.workgate)
             .finish()
     }
 }
@@ -81,20 +98,63 @@ impl DaemonApp {
     }
 
     pub fn new_with_clock(provider: Box<dyn Provider>, clock: SharedClock) -> Self {
-        logging::info("Initialized daemon app state", &[]);
         let snapshot = StatusSnapshot::default();
         let initial_throttle_state = snapshot.throttle_state;
         let throttle_controller = ThrottleController::with_clock(clock.clone());
         let throttle_caps = throttle_controller.caps_for(initial_throttle_state);
-        Self {
-            snapshot,
+        Self::new_with_shared_workgate(
             provider,
-            throttle_controller,
+            clock,
+            Arc::new(Mutex::new(ThrottleWorkgate::new(
+                initial_throttle_state,
+                throttle_caps,
+            ))),
+        )
+    }
+
+    /// Composes an app around a shared daemon-level workgate (the
+    /// multi-profile runtime hands every profile the same instance).
+    pub fn new_with_shared_workgate(
+        provider: Box<dyn Provider>,
+        clock: SharedClock,
+        workgate: Arc<Mutex<ThrottleWorkgate>>,
+    ) -> Self {
+        logging::info("Initialized daemon app state", &[]);
+        Self {
+            snapshot: StatusSnapshot::default(),
+            provider,
+            throttle_controller: ThrottleController::with_clock(clock.clone()),
             last_throttle_decision: None,
             retry_slowdown_until: None,
+            resource_cpu_ceiling_percent: None,
             reconcile_controller: ReconcileController::with_clock(clock),
-            workgate: ThrottleWorkgate::new(initial_throttle_state, throttle_caps),
+            workgate,
         }
+    }
+
+    /// Applies the effective CPU ceiling from the resource budget
+    /// (C8-37): concurrency caps scale proportionally to the ceiling
+    /// relative to the default `resourceLimits.cpuPercent`. Interacts
+    /// with throttle caps via MIN semantics — a `Suspended` zero cap
+    /// stays zero under any ceiling, and lowering the ceiling lowers
+    /// caps for in-flight admission immediately (running work yields at
+    /// its next slice checkpoint).
+    pub fn apply_resource_cpu_ceiling(&mut self, ceiling_percent: u8, now: SystemTime) {
+        if self.resource_cpu_ceiling_percent == Some(ceiling_percent) {
+            return;
+        }
+        self.resource_cpu_ceiling_percent = Some(ceiling_percent);
+        self.refresh_workgate_caps(now);
+    }
+
+    fn lock_workgate(&self) -> std::sync::MutexGuard<'_, ThrottleWorkgate> {
+        // Poison recovery: a panicking profile must not wedge the
+        // shared workgate for its healthy siblings (C8-24). Counts are
+        // rebuilt by the next reconfigure; a leaked permit slot is
+        // bounded and self-corrects as caps refresh.
+        self.workgate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn snapshot(&self) -> &StatusSnapshot {
@@ -103,6 +163,18 @@ impl DaemonApp {
 
     pub fn provider_name(&self) -> &'static str {
         self.provider.name()
+    }
+
+    /// The injected provider. The staged executor and the remote poller
+    /// drive uploads / downloads / deletes / change polls through this
+    /// trait boundary — engine code never names a concrete provider.
+    pub fn provider(&self) -> &dyn Provider {
+        self.provider.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_provider_for_testing(&mut self, provider: Box<dyn Provider>) {
+        self.provider = provider;
     }
 
     pub fn throttle_decision(&self) -> Option<&ThrottleDecision> {
@@ -156,16 +228,16 @@ impl DaemonApp {
     }
 
     pub fn workgate_snapshot(&self) -> WorkgateSnapshot {
-        self.workgate.snapshot()
+        self.lock_workgate().snapshot()
     }
 
     pub fn try_acquire_work(&mut self, class: WorkClass) -> Result<WorkPermit, WorkPermitDenied> {
         self.refresh_workgate_caps(SystemTime::now());
-        self.workgate.try_acquire(class)
+        self.lock_workgate().try_acquire(class)
     }
 
     pub fn release_work(&mut self, permit: WorkPermit) -> bool {
-        self.workgate.release(permit)
+        self.lock_workgate().release(permit)
     }
 
     pub fn release_ready_deferred_reconciles(
@@ -187,9 +259,13 @@ impl DaemonApp {
         scheduler: &mut KeyedSupersedingScheduler,
         now: SystemTime,
     ) -> Result<Option<std::path::PathBuf>, WorkPermitDenied> {
+        let workgate = self.workgate.clone();
+        let mut workgate = workgate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.reconcile_controller.try_start_next(
             scheduler,
-            &mut self.workgate,
+            &mut workgate,
             self.snapshot.throttle_state,
             now,
         )
@@ -200,12 +276,35 @@ impl DaemonApp {
         scheduler: &mut KeyedSupersedingScheduler,
         now: SystemTime,
     ) -> Option<ReconcilePause> {
+        let workgate = self.workgate.clone();
+        let mut workgate = workgate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.reconcile_controller.checkpoint(
             scheduler,
-            &mut self.workgate,
+            &mut workgate,
             self.snapshot.throttle_state,
             now,
         )
+    }
+
+    /// Root of the reconcile currently holding the reconcile permit.
+    pub fn running_reconcile_root(&self) -> Option<std::path::PathBuf> {
+        self.reconcile_controller.running_root().cloned()
+    }
+
+    /// Aborts the running reconcile after a comparison-walk failure.
+    pub fn abort_reconcile(
+        &mut self,
+        scheduler: &mut KeyedSupersedingScheduler,
+        now: SystemTime,
+    ) -> Option<std::path::PathBuf> {
+        let workgate = self.workgate.clone();
+        let mut workgate = workgate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.reconcile_controller
+            .abort_running(scheduler, &mut workgate, now)
     }
 
     pub fn complete_reconcile(
@@ -213,8 +312,12 @@ impl DaemonApp {
         maps: &mut BoundedEventIntentMaps,
         scheduler: &mut KeyedSupersedingScheduler,
     ) -> Option<ReconcileCompletion> {
+        let workgate = self.workgate.clone();
+        let mut workgate = workgate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.reconcile_controller
-            .complete_success(maps, scheduler, &mut self.workgate)
+            .complete_success(maps, scheduler, &mut workgate)
     }
 
     pub fn schedule_retry(
@@ -272,23 +375,36 @@ impl DaemonApp {
         allowed
     }
 
-    pub fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) {
+    /// Ensures the provider-side sync root exists (C8-8). Returns the
+    /// actionable error when it cannot; the runtime blocks regular sync
+    /// work until a later attempt succeeds (C8-50) — intents keep
+    /// accumulating durably, they are never dropped.
+    pub fn ensure_cloud_sync_directory(
+        &self,
+        cloud_sync_directory: &str,
+    ) -> Result<(), vapor_providers::ProviderError> {
         match self
             .provider
             .ensure_cloud_sync_directory(cloud_sync_directory)
         {
-            Ok(_) => logging::info(
-                "Cloud sync directory is ready",
-                &[("cloud_sync_directory", cloud_sync_directory.to_string())],
-            ),
-            Err(error) => logging::error(
-                "Failed to ensure cloud sync directory",
-                &[
-                    ("cloud_sync_directory", cloud_sync_directory.to_string()),
-                    ("failure_kind", error.failure.label().to_string()),
-                    ("error", error.message),
-                ],
-            ),
+            Ok(_) => {
+                logging::info(
+                    "Cloud sync directory is ready",
+                    &[("cloud_sync_directory", cloud_sync_directory.to_string())],
+                );
+                Ok(())
+            }
+            Err(error) => {
+                logging::error(
+                    "Failed to ensure cloud sync directory",
+                    &[
+                        ("cloud_sync_directory", cloud_sync_directory.to_string()),
+                        ("failure_kind", error.kind.label().to_string()),
+                        ("error", error.message.clone()),
+                    ],
+                );
+                Err(error)
+            }
         }
     }
 
@@ -301,6 +417,24 @@ impl DaemonApp {
         let mut caps = self.base_throttle_caps();
         if self.retry_slowdown_active(now) {
             caps.upload_concurrency = caps.upload_concurrency.min(1);
+        }
+        if let Some(ceiling) = self.resource_cpu_ceiling_percent {
+            let scale = f64::from(ceiling)
+                / f64::from(vapor_shared::constants::resource_limits::DEFAULT_CPU_PERCENT);
+            let scale_cap = |cap: usize| -> usize {
+                if cap == 0 {
+                    // A throttle-imposed zero (Suspended) is never
+                    // relaxed by a user ceiling.
+                    0
+                } else {
+                    (((cap as f64) * scale).round() as usize).max(1)
+                }
+            };
+            caps.planner_workers = scale_cap(caps.planner_workers);
+            caps.hash_workers = scale_cap(caps.hash_workers);
+            caps.read_tokens = scale_cap(caps.read_tokens);
+            caps.upload_concurrency = scale_cap(caps.upload_concurrency);
+            caps.download_concurrency = scale_cap(caps.download_concurrency);
         }
         caps
     }
@@ -328,7 +462,7 @@ impl DaemonApp {
         }
 
         let throttle_caps = self.effective_throttle_caps(now);
-        self.workgate
+        self.lock_workgate()
             .reconfigure(self.snapshot.throttle_state, throttle_caps);
     }
 }
@@ -434,7 +568,8 @@ mod tests {
     #[test]
     fn ensure_cloud_sync_directory_does_not_panic() {
         let app = DaemonApp::default();
-        app.ensure_cloud_sync_directory("/Vapor");
+        // The stub provider treats the cloud root as always present.
+        assert!(app.ensure_cloud_sync_directory("/Vapor").is_ok());
     }
 
     #[test]

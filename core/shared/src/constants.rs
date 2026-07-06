@@ -8,6 +8,11 @@ pub mod env {
     pub const VAPOR_CLOUD_SYNC_DIRECTORY: &str = "VAPOR_CLOUD_SYNC_DIRECTORY";
     pub const VAPOR_PRE_IGNORE_RULES: &str = "VAPOR_PRE_IGNORE_RULES";
     pub const VAPOR_POST_IGNORE_RULES: &str = "VAPOR_POST_IGNORE_RULES";
+    /// OAuth client credentials for the Google Drive provider
+    /// (installed-app PKCE; per-deployment, never baked into the
+    /// binary). See `docs/operations/provider-auth-operations.md`.
+    pub const VAPOR_GDRIVE_CLIENT_ID: &str = "VAPOR_GDRIVE_CLIENT_ID";
+    pub const VAPOR_GDRIVE_CLIENT_SECRET: &str = "VAPOR_GDRIVE_CLIENT_SECRET";
 }
 
 pub mod runtime {
@@ -40,6 +45,11 @@ pub mod runtime {
 
 pub mod state {
     pub const RETRY_SLOWDOWN_UNTIL_KEY: &str = "queue.retry_slowdown_until_ms";
+    /// Tombstones older than this are pruned at daemon startup: after a
+    /// month, a divergent replica reconciles through content comparison
+    /// anyway, and unbounded tombstone growth would violate the memory
+    /// and storage bounds (C8-16).
+    pub const TOMBSTONE_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
     pub const MAX_ATTEMPT_COUNT: u32 = 10_000;
     pub const MAX_DIAGNOSTIC_TEXT_LENGTH: usize = 1_024;
     pub const MAX_STATE_KEY_LENGTH: usize = 128;
@@ -60,6 +70,27 @@ pub mod config {
     pub const KEY_POST_IGNORE_RULES: &str = "postIgnoreRules";
     pub const KEY_LANGUAGE_CODE: &str = "languageCode";
     pub const KEY_TIMELINE_EVENT_LIMIT: &str = "timelineEventLimit";
+    /// Provider selection (C8-2): `filesystem` (default pre-GA) or
+    /// `gdrive`. See `provider::*` for the accepted values.
+    pub const KEY_PROVIDER: &str = "provider";
+    /// Sync direction selector (C8-59): `two-way` (default),
+    /// `pull-only`, `push-only`. See `sync_mode::*` and
+    /// `docs/architecture/sync-modes.md`.
+    pub const KEY_SYNC_MODE: &str = "syncMode";
+    /// Stable per-device identifier used by the keep-both conflict
+    /// suffix (C8-15). Derived from the hostname at first run, persisted
+    /// here, and never silently regenerated.
+    pub const KEY_DEVICE_ID: &str = "deviceId";
+    /// Profile array (C8-19). Each entry is an object with the
+    /// `profile::KEY_*` fields; absent means the single implicit
+    /// profile assembled from the top-level settings.
+    pub const KEY_PROFILES: &str = "profiles";
+    /// User resource-budget group (C8-32); object with the
+    /// `resource_limits::KEY_*` fields.
+    pub const KEY_RESOURCE_LIMITS: &str = "resourceLimits";
+    /// Idle-boost group (C8-33); object with the `idle_boost::KEY_*`
+    /// fields.
+    pub const KEY_IDLE_BOOST: &str = "idleBoost";
 
     /// Every recognized key in one slice. Kept in lockstep with the
     /// `KEY_*` constants above; the CLI uses this for `validate_key`.
@@ -73,6 +104,12 @@ pub mod config {
         KEY_POST_IGNORE_RULES,
         KEY_LANGUAGE_CODE,
         KEY_TIMELINE_EVENT_LIMIT,
+        KEY_PROVIDER,
+        KEY_SYNC_MODE,
+        KEY_DEVICE_ID,
+        KEY_PROFILES,
+        KEY_RESOURCE_LIMITS,
+        KEY_IDLE_BOOST,
     ];
 
     /// Default values for the config keys whose defaults are not already
@@ -85,6 +122,110 @@ pub mod config {
     pub const DEFAULT_USE_VAPOR_IGNORE: bool = true;
     pub const DEFAULT_LANGUAGE_CODE: &str = "en";
     pub const DEFAULT_TIMELINE_EVENT_LIMIT: i64 = 1_000;
+}
+
+pub mod provider {
+    /// Accepted `provider` config values. `filesystem` is the pre-GA
+    /// default (C8-2); when selected, `cloudSyncDirectory` is
+    /// reinterpreted as an absolute local directory that plays the role
+    /// of the cloud side. `gdrive` selects the real cloud
+    /// provider once C8-54 flips it selectable.
+    pub const FILESYSTEM: &str = "filesystem";
+    pub const GDRIVE: &str = "gdrive";
+    pub const DEFAULT: &str = FILESYSTEM;
+    pub const ALL: &[&str] = &[FILESYSTEM, GDRIVE];
+
+    /// Extended-attribute name carrying the daemon's operation id on
+    /// files the daemon itself wrote (self-write loop prevention, C8-7).
+    /// NTFS ADS stream name on Windows once Wave 12 lands.
+    pub const OP_ID_XATTR_NAME: &str = "sh.arn.vapor.op-id";
+    /// Side-file suffix used when xattr writes are unavailable
+    /// (`ENOTSUP`/`EACCES`/`EROFS`) per `data-flow.md §Loop prevention`:
+    /// the fallback for `{path}` is `{path}.vapor-meta.json`. Providers
+    /// must hide these from enumeration and changes feeds.
+    pub const OP_ID_SIDE_FILE_SUFFIX: &str = ".vapor-meta.json";
+    /// Durable state key prefix for provider changes-feed cursors; the
+    /// profile id is appended (`provider.changes_cursor.<profile_id>`).
+    pub const CHANGES_CURSOR_STATE_KEY_PREFIX: &str = "provider.changes_cursor.";
+    /// Prefix of the hidden temp files the filesystem provider (and the
+    /// engine's local apply path) write before an atomic rename. Both
+    /// enumeration and every changes feed hide these; the local ingest
+    /// path filter drops them unconditionally.
+    pub const TEMP_FILE_PREFIX: &str = ".vapor-tmp-";
+    /// Bounded in-memory ring size of the filesystem provider's changes
+    /// feed. A cursor older than the ring floor reports `CursorExpired`,
+    /// which forces a reconcile instead of silently missing changes.
+    pub const CHANGES_FEED_RING_MAX_EVENTS: usize = 8_192;
+    /// Profile id used by profile-agnostic provider selection calls.
+    pub const DEFAULT_PROFILE_FALLBACK: &str = "default";
+}
+
+pub mod profile {
+    /// Keys of each object in the top-level `profiles` array (C8-19).
+    /// A profile inherits any unset override-capable field from the
+    /// top-level configuration.
+    pub const KEY_ID: &str = "id";
+    pub const KEY_NAME: &str = "name";
+    pub const KEY_PROVIDER: &str = "provider";
+    pub const KEY_LOCAL_SYNC_DIRECTORY: &str = "localSyncDirectory";
+    pub const KEY_CLOUD_SYNC_DIRECTORY: &str = "cloudSyncDirectory";
+    pub const KEY_SYNC_MODE: &str = "syncMode";
+    pub const KEY_ENABLED: &str = "enabled";
+    /// The implicit profile id used when no `profiles` array is
+    /// configured (single-scope setups; the pre-profile behavior).
+    pub const DEFAULT_PROFILE_ID: &str = "default";
+    /// Profile ids must be short filesystem-safe slugs: they name the
+    /// per-profile durable state directory and namespace secrets.
+    pub const MAX_PROFILE_ID_LENGTH: usize = 32;
+}
+
+pub mod resource_limits {
+    /// Keys of the `resourceLimits` config group (C8-32): hard user
+    /// ceilings on the daemon's device impact, all `1..=100` percent.
+    pub const KEY_CPU_PERCENT: &str = "cpuPercent";
+    pub const KEY_MEMORY_PERCENT: &str = "memoryPercent";
+    pub const KEY_BANDWIDTH_PERCENT: &str = "bandwidthPercent";
+    pub const DEFAULT_CPU_PERCENT: u8 = 15;
+    pub const DEFAULT_MEMORY_PERCENT: u8 = 10;
+    pub const DEFAULT_BANDWIDTH_PERCENT: u8 = 25;
+    pub const MIN_PERCENT: u8 = 1;
+    pub const MAX_PERCENT: u8 = 100;
+}
+
+pub mod idle_boost {
+    /// Keys of the `idleBoost` config group (C8-33): optional dynamic
+    /// headroom expansion while the device is verifiably idle.
+    pub const KEY_ENABLED: &str = "enabled";
+    pub const KEY_MIN_IDLE_SECONDS: &str = "minIdleSeconds";
+    pub const KEY_BOOST_CPU_PERCENT: &str = "boostCpuPercent";
+    pub const KEY_BOOST_MEMORY_PERCENT: &str = "boostMemoryPercent";
+    pub const KEY_BOOST_BANDWIDTH_PERCENT: &str = "boostBandwidthPercent";
+    pub const KEY_HEADROOM_CPU_PERCENT: &str = "headroomCpuPercent";
+    pub const KEY_RAMP_UP_SECONDS: &str = "rampUpSeconds";
+    pub const KEY_RAMP_DOWN_SECONDS: &str = "rampDownSeconds";
+    pub const DEFAULT_ENABLED: bool = true;
+    pub const DEFAULT_MIN_IDLE_SECONDS: u64 = 300;
+    pub const DEFAULT_BOOST_CPU_PERCENT: u8 = 50;
+    pub const DEFAULT_BOOST_MEMORY_PERCENT: u8 = 20;
+    pub const DEFAULT_BOOST_BANDWIDTH_PERCENT: u8 = 80;
+    /// Non-Vapor utilization must stay at or below this for boost to
+    /// engage (per-resource headroom gate).
+    pub const DEFAULT_HEADROOM_CPU_PERCENT: u8 = 30;
+    pub const DEFAULT_RAMP_UP_SECONDS: u64 = 30;
+    /// Must stay <= ramp-up so activity resumption is non-invasive
+    /// (`data-flow.md §User resource budgets`).
+    pub const DEFAULT_RAMP_DOWN_SECONDS: u64 = 10;
+}
+
+pub mod sync_mode {
+    /// Accepted `syncMode` config values (C8-59). The names describe the
+    /// direction from the local device's perspective; see
+    /// `docs/architecture/sync-modes.md`.
+    pub const TWO_WAY: &str = "two-way";
+    pub const PULL_ONLY: &str = "pull-only";
+    pub const PUSH_ONLY: &str = "push-only";
+    pub const DEFAULT: &str = TWO_WAY;
+    pub const ALL: &[&str] = &[TWO_WAY, PULL_ONLY, PUSH_ONLY];
 }
 
 pub mod service {
@@ -106,7 +247,7 @@ pub mod ipc {
     /// Windows / Linux apps, the daemon). Bump on any backwards-
     /// incompatible payload shape change. Pre-GA the sliding tolerance
     /// is `|N - M| <= 1`; see `docs/architecture/ipc-contracts.md`.
-    pub const SCHEMA_VERSION_CURRENT: u32 = 1;
+    pub const SCHEMA_VERSION_CURRENT: u32 = 2;
     /// Minimum peer schema version this build can interoperate with.
     /// Together with [`SCHEMA_VERSION_CURRENT`] this defines the local
     /// support window; the handshake fails when both sides cannot find
@@ -146,6 +287,14 @@ pub mod self_write_cache {
 pub mod filtering {
     pub const GIT_IGNORE_FILE_NAME: &str = ".gitignore";
     pub const VAPOR_IGNORE_FILE_NAME: &str = ".vaporignore";
+    /// Internal artifact patterns the engine must always ignore on the
+    /// local side, independent of user-configurable ignore rules:
+    /// in-flight atomic-write temp files and op-id side-files. Loop
+    /// prevention depends on these never becoming intents, so they are
+    /// enforced in the path filter itself rather than the editable
+    /// rule set.
+    pub const INTERNAL_IGNORE_FILE_PREFIXES: &[&str] = &[".vapor-tmp-"];
+    pub const INTERNAL_IGNORE_FILE_SUFFIXES: &[&str] = &[".vapor-meta.json"];
     pub const DEFAULT_LOCAL_SYNC_DIRECTORY: &str = "~/Vapor";
     pub const DEFAULT_CLOUD_SYNC_DIRECTORY: &str = "/Vapor";
     pub const DEFAULT_PRE_IGNORE_RULES: &[&str] = &[
@@ -206,14 +355,64 @@ pub mod engine {
     pub const IDLE_DRAIN_HASH_WORKERS: usize = 4;
     pub const IDLE_DRAIN_READ_TOKENS: usize = 2;
     pub const IDLE_DRAIN_UPLOAD_CONCURRENCY: usize = 4;
+    pub const IDLE_DRAIN_DOWNLOAD_CONCURRENCY: usize = 4;
     pub const LIGHT_PLANNER_WORKERS: usize = 2;
     pub const LIGHT_HASH_WORKERS: usize = 2;
     pub const LIGHT_READ_TOKENS: usize = 1;
     pub const LIGHT_UPLOAD_CONCURRENCY: usize = 2;
+    pub const LIGHT_DOWNLOAD_CONCURRENCY: usize = 2;
     pub const THROTTLED_PLANNER_WORKERS: usize = 1;
     pub const THROTTLED_HASH_WORKERS: usize = 1;
     pub const THROTTLED_READ_TOKENS: usize = 1;
     pub const THROTTLED_UPLOAD_CONCURRENCY: usize = 1;
+    pub const THROTTLED_DOWNLOAD_CONCURRENCY: usize = 1;
+    /// Byte budget one hashing execution may consume per runtime tick.
+    /// Bounds the per-tick CPU/read cost of the hash stage while still
+    /// hashing large files at a useful rate (8 MiB * 4 Hz = 32 MiB/s).
+    pub const HASH_STAGE_STEP_BYTES: u64 = 8 * 1024 * 1024;
+    /// Byte budget one upload/download transfer session may consume per
+    /// runtime tick. The bandwidth shaper (C8-38) lowers the effective
+    /// budget further when a user bandwidth ceiling applies.
+    pub const TRANSFER_STAGE_STEP_BYTES: u64 = 8 * 1024 * 1024;
+    /// Remote changes-feed poll cadence per throttle state (C8-52 uses
+    /// the same discipline for Google Drive). Suspended never polls.
+    pub const REMOTE_POLL_IDLE_DRAIN_SECONDS: u64 = 5;
+    pub const REMOTE_POLL_LIGHT_SECONDS: u64 = 15;
+    pub const REMOTE_POLL_THROTTLED_SECONDS: u64 = 60;
+    /// Maximum remote changes consumed per poll page.
+    pub const REMOTE_CHANGES_PAGE_MAX: usize = 256;
+    /// Retry cadence for ensuring the provider-side sync root when the
+    /// initial attempt failed (C8-50). Sync work stays blocked (and
+    /// intents accumulate durably) between attempts.
+    pub const CLOUD_ROOT_ENSURE_RETRY_SECONDS: u64 = 60;
+    /// Directories the reconcile comparison walk processes per runtime
+    /// tick while a reconcile slice is active. Bounds per-tick I/O so
+    /// the slice checkpoints keep their interruptibility guarantee.
+    pub const RECONCILE_DIRS_PER_CHECKPOINT: usize = 8;
+    /// Assumed link capacity when the platform sampler reports no
+    /// measured throughput; the bandwidth ceiling applies against this
+    /// until a real measurement exists (C8-38).
+    pub const ASSUMED_LINK_CAPACITY_KBPS: u32 = 100_000;
+    /// Auto-tuning cadence (C8-42): one small change per cycle within
+    /// the documented 60-120s window.
+    pub const AUTO_TUNE_INTERVAL_SECONDS: u64 = 90;
+    /// Auto-tuned transfer step budget bounds, as multiples of
+    /// `TRANSFER_STAGE_STEP_BYTES` expressed in percent (50% .. 200%).
+    pub const AUTO_TUNE_MIN_STEP_PERCENT: u64 = 50;
+    pub const AUTO_TUNE_MAX_STEP_PERCENT: u64 = 200;
+    /// Active-coding heuristic (C8-55): this many stabilized code-file
+    /// events inside the window treat the user as actively working even
+    /// when no HID signal is available.
+    pub const ACTIVE_CODING_WINDOW_SECONDS: u64 = 60;
+    pub const ACTIVE_CODING_EVENT_THRESHOLD: usize = 5;
+    /// Mass-change guard (C8-57): local deletions above this rate pause
+    /// the daemon and raise an alert instead of propagating what may be
+    /// ransomware or an accidental recursive delete.
+    pub const MASS_DELETE_WINDOW_SECONDS: u64 = 60;
+    pub const MASS_DELETE_THRESHOLD: usize = 200;
+    /// FlushNow boost window (C8-56): after an explicit flush request
+    /// the runtime releases deferred work eagerly for this long.
+    pub const FLUSH_BOOST_SECONDS: u64 = 30;
     pub const RETRY_BASE_DELAY_MILLIS: u64 = 2_000;
     pub const RETRY_RATE_LIMIT_BASE_DELAY_MILLIS: u64 = 15_000;
     pub const RETRY_MAX_DELAY_MILLIS: u64 = 900_000;

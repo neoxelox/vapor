@@ -164,6 +164,22 @@ impl ReconcileController {
         })
     }
 
+    /// Aborts the running reconcile (comparison-walk failure): the
+    /// permit is released and the intent requeues so a later attempt
+    /// retries from scratch. Distinct from `checkpoint` pauses, which
+    /// only fire on slice/throttle conditions.
+    pub fn abort_running(
+        &mut self,
+        scheduler: &mut KeyedSupersedingScheduler,
+        workgate: &mut ThrottleWorkgate,
+        now: SystemTime,
+    ) -> Option<PathBuf> {
+        let running = self.running.take()?;
+        release_permit_or_log(workgate, running.permit, "reconcile abort");
+        requeue_claimed_reconcile(scheduler, &running.root, now);
+        Some(running.root)
+    }
+
     pub fn complete_success(
         &mut self,
         maps: &mut BoundedEventIntentMaps,

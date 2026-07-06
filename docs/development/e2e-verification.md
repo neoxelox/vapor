@@ -187,6 +187,14 @@ network egress control.
 | S7 | Restart recovery | clean SIGTERM shutdown, restart on the same state DB, post-restart writes still converge |
 | S8 | Log hygiene | a healthy run emits zero `[ERROR]` lines |
 | S9 | Socket relocation | with an over-budget `VAPOR_DIR` the IPC socket relocates deterministically under the OS temp dir; `vapor status` still reaches the daemon and `vapor doctor` explains the relocation |
+| S10 | Bidirectional sync | uploaded files land in the cloud root byte-for-byte; a cloud-born file (external write, no feed event) downloads through `vapor reconcile` with matching content |
+| S11 | Keep-both conflict | the same path diverges on both sides while the daemon is down; the restart reconcile preserves BOTH payloads (canonical + `~conflict-` copy), never overwriting |
+| S12 | Pull-only mirror | a `syncMode = pull-only` runtime materializes cloud content locally and removes a local-only file (never uploading it) |
+| S13 | Observability | `vapor diagnostics --json` answers over IPC; `vapor support-bundle` exports config + logs + live status/diagnostics/timeline with a manifest |
+| S14 | Symmetric ignore filtering | ignored names (`.DS_Store`, `*.tmp`) never sync in either direction — divergent copies on both sides survive untouched, a cloud-side ignored file never downloads, and no `~conflict-` copy is manufactured |
+| S15 | Conflict surfacing | `vapor conflicts list --json` finds the S11 keep-both copy from durable file state; `resolve --keep copy` promotes the preserved version, the resolution syncs to the cloud, and the list drains to empty |
+| S16 | Local delete propagation | a plain `rm` in the watched root removes the cloud copy — deletion classification comes from ground truth, not fs-watch fragment order |
+| S17 | Special files are inert | a FIFO in the watched root never becomes a remote object and never wedges the queue; files around it keep syncing |
 
 ## Extending the harness — discipline rules
 
@@ -212,18 +220,12 @@ network egress control.
 
 ## What Tier E2E deliberately does not cover (today)
 
-- **Byte replication to a cloud.** The pre-GA default provider is the
-  inert `FilesystemStubProvider`, so S3/S7 prove pipeline convergence
-  (capture → durable queue → executor → drained), not remote content.
-  When the Wave 8 filesystem reference provider lands (C8-1..13),
-  extend S3 to assert actual file content on the "cloud" side; the
-  same scenario then covers remote→local when bidirectional sync
-  ships.
 - **Live cloud providers.** A future, explicitly gated tier: real
   Google Drive against a dedicated test account, enabled only by an
   explicit opt-in flag, riding the release pipeline like Tier 2 —
-  never a PR gate, never run implicitly by an agent. Design it when
-  C8-48 lands.
+  never a PR gate, never run implicitly by an agent. (Byte replication
+  itself is covered: S10–S12 run the real filesystem provider and
+  assert actual content on both sides.)
 - **`vapor service install` round-trips — in the default run.**
   Installing a LaunchAgent mutates the host, so that round-trip is
   gated behind `./scripts/e2e.sh --full` and runs in CI per

@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use crate::framing::{FrameError, read_frame, write_frame};
 use crate::protocol::{
-    AckResponse, ErrorBody, Hello, IncompatibleVersion, Method, Request, Response, ResponseBody,
-    StatusResponse, TimelineResponse, daemon_supported_versions,
+    AckResponse, DiagnosticsResponse, ErrorBody, Hello, IncompatibleVersion, Method, Request,
+    Response, ResponseBody, StatusResponse, TimelineResponse, daemon_supported_versions,
 };
 use crate::transport::{StreamHandle, TransportError, connect_to_socket};
 
@@ -165,6 +165,28 @@ impl Client {
 
     pub fn reconcile(&mut self) -> Result<AckResponse, ClientError> {
         self.call_for_ack(Method::Reconcile)
+    }
+
+    pub fn diagnostics(&mut self) -> Result<DiagnosticsResponse, ClientError> {
+        match self.call(Method::Diagnostics)? {
+            ResponseBody::Diagnostics(diagnostics) => Ok(diagnostics),
+            other => Err(ClientError::UnexpectedResponse(format!("{other:?}"))),
+        }
+    }
+
+    pub fn set_auto_launch(&mut self, enabled: bool) -> Result<AckResponse, ClientError> {
+        self.call_for_ack(Method::SetAutoLaunch { enabled })
+    }
+
+    pub fn update_excludes(
+        &mut self,
+        pre_ignore_rules: Option<String>,
+        post_ignore_rules: Option<String>,
+    ) -> Result<AckResponse, ClientError> {
+        self.call_for_ack(Method::UpdateExcludes {
+            pre_ignore_rules,
+            post_ignore_rules,
+        })
     }
 
     pub fn timeline(&mut self) -> Result<TimelineResponse, ClientError> {

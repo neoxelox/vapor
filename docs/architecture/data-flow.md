@@ -12,15 +12,28 @@
 8. Planner, hash, upload, and reconcile stages acquire strict throttle-gated work permits before starting; reconcile only starts in `IdleDrain`, yields on slice expiry or throttle changes, and clears compacted subtree boundaries after successful quiet completion.
 9. A live daemon runtime loop wires watcher ingest -> incoming queue drain + symlink resolution -> debounce -> scheduler -> durable queue -> workgate -> reconcile, so the local engine runs as one composed pipeline instead of isolated primitives. The loop is event-nudged: fs-event callbacks and IPC control requests signal a tick waker, and a fully idle daemon relaxes from the 250 ms work cadence to a 1 s cadence. Exactly one daemon may serve a `vapor_dir` (an OS advisory lock on `vapord.lock` enforces it). `Pause` semantics: ingest/debounce/durable-flush keep capturing intent state and in-flight work finishes, but no new work is released or leased until `Resume`.
 10. A SQLite durable queue/state DB (WAL, `synchronous = NORMAL`) persists pending and leased intents, recovers interrupted leases on startup (resetting `attempt_count` for leases older than `LEASE_TIMEOUT_MILLIS`) and sweeps stale leases periodically in-run, coalesces scheduler flushes per `(path, kind)` against already-pending rows inside one transaction, requeues retryable failures with exponential backoff/jitter/slower rate-limit delays (with `attempt_count` incremented only by the retry path, not by leasing), durably finalizes terminal failures, and injects a whole-scope startup reconcile (bounded by `STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS` to avoid starving non-reconcile work) so volatile pre-DB intent loss is reconstructed conservatively after restart.
-11. Provider selection is injected at runtime startup, so daemon orchestration uses the provider trait boundary instead of hardcoding the Google Drive type in core engine state. Pre-GA the default is an inert `FilesystemStubProvider`; Phase 3 introduces the real `provider_filesystem` and Phase 9 enables `GoogleDriveProvider`.
-12. Non-reconcile work flows through a staged executor that leases durable intents into bounded planner, hash, and upload stages under workgate/throttle caps instead of finishing one leased intent at a time. Phase 3 adds a `Download` stage for the remote-to-local apply pipeline.
+11. Provider selection is injected at runtime startup per profile, so daemon orchestration uses the provider trait boundary instead of hardcoding any cloud type in core engine state. `provider = "filesystem"` (default) selects the real filesystem provider; `provider = "gdrive"` selects `GoogleDriveProvider`. New backends onboard through the checklist in `provider-onboarding.md`.
+12. Non-reconcile work flows through a staged executor that leases durable intents into bounded planner, hash, transfer (upload/download), and apply-delete stages under workgate/throttle caps instead of finishing one leased intent at a time. Transfers are chunked `TransferSession`s: each tick grants a bounded byte budget (shaped by the bandwidth token bucket and the auto-tuned step size), so a large file never monopolizes a tick and a `Suspended` throttle holds a transfer at its checkpoint instead of aborting it.
 
-Current caveat: the reconcile controller is now idle-biased and interruptible, and the runtime loop is composed, but real system-driven throttle sampling and real subtree walking/apply work still need to replace the current placeholders in later hardening milestones.
+Current caveat: real system-driven throttle metrics sampling (power/thermal/HID) still uses conservative placeholders on some hosts until the remaining native `MetricsSampler`/`IdleNotifier` bridges land; the pipeline itself (watch → debounce → durable queue → staged execution → reconcile walk) runs real work end to end.
+
+## Local safeguards (optional advanced protections)
+
+- **Active-coding heuristic (C8-55).** Stabilized code/config-class events feed a rolling 60s window; at or above the threshold the runtime ORs `user_active = true` into the throttle inputs, so a compile-edit loop throttles sync even on hosts without a permissioned HID-idle signal. Strictly additive — it can only raise throttle caution.
+- **Priority classes + flush boost (C8-56).** Within one durable flush batch, key-config and code paths enqueue ahead of lockfile noise (reusing the debounce classification as the priority signal). An explicit `vapor flush` activates a bounded 30s boost window: deferred reconciles release immediately (bypassing not-before times and the idle gate) and the remote feed polls on the next tick. Execution still answers to the throttle ladder, so flush accelerates scheduling, never resource impact.
+- **Mass-change / ransomware guard (C8-57).** 200+ local deletions inside 60s (post-echo-suppression, so the engine's own applied deletes never count) pause the daemon in the same tick, raise a `guard` timeline alert, and set an actionable status reason. Ingest keeps capturing intent durably while paused. `vapor resume` is the explicit human reset and re-arms the guard with an empty window.
 
 ## Remote to local (bidirectional MVP)
 
 1. Provider poll fetches remote changes on throttle-aware cadence.
-2. Changes are mapped into durable intents with operation IDs.
+2. Changes are mapped into durable intents with operation IDs. A change
+   whose local-equivalent path matches the ignore rules is dropped here
+   (counted as `ignored_changes`): ignore filtering is symmetric, so an
+   ignored name never syncs in either direction. The reconcile
+   comparison walk applies the same rules to both the local and the
+   remote side of every directory pair — an ignored name (`.DS_Store`,
+   `node_modules/`) is never descended into, never uploaded, never
+   downloaded, and can never manufacture a keep-both conflict copy.
 3. Loop prevention filters self-originated writes.
 4. Apply pipeline writes local changes and records conflict/tombstone outcomes.
 
@@ -82,6 +95,48 @@ Idle-boost and the throttle controller update asynchronously on the same 1s cade
 4. **Config reload mid-ramp.** Lowering `resourceLimits.*Percent` mid-ramp immediately clamps the current ramped value to the new (lower) base ceiling; raising it does not retroactively raise the ramp target, which remains the original `boost*Percent`. Changing `boost*Percent` or `rampUpSeconds` mid-ramp snaps the in-progress ramp to the new targets on the next tick (no restart, no glitch).
 5. **In-flight work during snap-down.** When the effective ceiling drops below current in-flight concurrency as a result of any of the above, no new work is admitted but running work proceeds to its next slice checkpoint before yielding — same discipline as §"Invariants" above.
 
+## Directory and symlink semantics
+
+**The engine is file-only by decision: directories are implicit
+containers, not synced objects.** They materialize on the other side only
+through the files inside them: uploads create the remote parent chain,
+downloads create local parent directories, and the executor no-ops a
+directory upload intent outright ("directories materialize through their
+children"). The reconcile walk descends into directories but never emits
+an intent for the directory itself. Consequences: an **empty folder does
+not sync** in either direction, and a **folder rename/move propagates as
+a recursive delete plus child-by-child re-upload** rather than one
+rename (data-safe, just not cheap). Directory *deletions* do propagate
+(both directions, including strict-mirror removals). First-class folder
+sync was evaluated and rejected (project-owner decision, 2026-07-07):
+keeping every synced object content-shaped is what keeps the conflict,
+echo-suppression, and transfer machinery simple — folders cannot
+"conflict", and parent materialization is idempotent by construction.
+The user-facing contract lives in the root `README.md` **What Syncs**
+table.
+
+**Special files (FIFOs, sockets, device nodes) are inert.** The executor
+refuses them at planning and the reconcile walk skips them — this must
+stay an *explicit* guard, not an accident of ordering: hashing a FIFO
+blocks until a writer appears, and without the guard the intent sat in
+the durable queue forever as a permanently-`WaitingForHash` row. Hard
+links are indistinguishable from regular files at the path level and
+sync as independent files (the link relationship is not preserved).
+
+**Symlinks are outside the sync contract entirely.** They are never
+followed, never uploaded, and never created locally: the reconcile walk
+and the conflict scan skip them, the executor no-ops upload intents for
+them, and the filesystem provider treats symlinks inside the cloud root
+as invisible while its scope enforcement rejects any path that resolves
+through a symlink to *outside* the configured root (classic
+path-traversal risk). Event paths are symlink-resolved per component on
+the runtime thread, and events that resolve outside the watch root are
+dropped with a logged warning. This is deliberate: following symlinks
+would let one link pull an arbitrary external tree (or a cycle) into
+sync scope, cloud providers have no faithful symlink representation, and
+Windows symlink creation requires elevated privileges — so the safe,
+portable contract is "symlinks are invisible to sync."
+
 ## Conflict handling
 
 This section describes the **`two-way`** policy. In the one-way `pull-only`
@@ -89,6 +144,10 @@ and `push-only` modes there is a declared source of truth, so divergence is
 resolved in favor of the authoritative side with no conflict copy (see
 `sync-modes.md`). Keep-both remains the default because `two-way` is the
 default mode.
+
+This section owns conflict *creation*. Everything after a copy exists —
+notification, listing, and resolution through `vapor conflicts` and the
+app surfaces — lives in `conflict-resolution.md`.
 
 When local and remote versions of the same path diverge (both sides modified, or rename collides with an existing name), the default policy is "keep both; never silent overwrite." Concrete mechanics:
 
@@ -106,6 +165,7 @@ Bidirectional sync must prevent the daemon from re-uploading changes it just app
 
 - **Record on every provider write.** On completion of any `upload`, `download`, `delete`, or `rename` issued by the daemon, record `(remote_path, op_id, content_hash, expiry_monotonic_ms)` into the cache.
 - **Match on every inbound provider event.** Provider changes-feed events are matched against the cache before becoming intents. Primary correlator is the provider's `op_id` tag (xattr on filesystems that support it; a side-file fallback at `{path}.vapor-meta.json` when xattr is unavailable or write-failed). Content-hash is the fallback correlator when `op_id` is absent (e.g., third-party tool wrote the same bytes). A hit suppresses intent creation and records the suppression in diagnostics.
+- **Local watcher echoes verify current content, never the tag alone.** The local-side twin of the cache (suppressing watcher echoes of download-applies) requires the file's *current* size and content hash to match what the daemon wrote: the op-id tag survives later writes, so a tag-only match would keep suppressing genuine user edits for the record's whole TTL after a download.
 - **Eviction and bounds.** TTL and max-entries are defined in `core/shared/src/constants.rs` as a new module `self_write_cache` with `DEFAULT_TTL_MILLIS: u64 = 30_000`, `MIN_TTL_MILLIS: u64 = 5_000`, `MAX_ENTRIES: usize = 10_000`, `MIN_ENTRIES: usize = 1_000`. Eviction policy is LRU-on-insert; TTL expiry runs on the same 1s tick as throttle sampling. Memory-pressure floor: under memory pressure the cache may shorten TTL toward `MIN_TTL_MILLIS` and trim toward `MIN_ENTRIES`, but never below those floors (loop-prevention is a safety guarantee, not an opportunistic feature).
 - **xattr vs side-file precedence.** Writes attempt xattr first; on `ENOTSUP`/`EACCES`/`EROFS` the fallback side-file is written atomically alongside the payload. Reads check xattr first, then the side-file; if both are present the xattr wins. The filesystem provider (Phase 3) is responsible for hiding side-files from enumeration so they do not surface as independent intents.
 - **Crash safety.** The cache is purely in-memory. A daemon crash followed by restart forces a conservative whole-scope reconcile (already present in the runtime loop) which re-establishes baseline state without needing the cache to persist across restarts; cached entries for in-flight writes are re-derived from durable queue recovery.
@@ -116,7 +176,7 @@ When multiple enabled profiles target overlapping local roots, the watcher must 
 
 - **One watcher per distinct canonical local root.** Profile startup computes the canonical realpath of each profile's local root. Profiles sharing a canonical root share one fs-watch watcher; non-overlapping roots each get their own watcher.
 - **Per-profile event fan-out.** On each raw fs-watch callback, the normalized event is matched against every enabled profile's sync-root prefix + ignore rules. Profiles that match each receive an independent copy of the event in their own bounded ingest queue, tagged with `profile_id`. Profiles that do not match do not see the event.
-- **Per-profile debounce, scheduler, durable queue.** Each profile has its own debounce/coalesce tick, keyed scheduler, and durable queue tables (profile-id-keyed in SQLite). No in-memory structure is shared across profiles below the raw watcher level.
+- **Per-profile debounce, scheduler, durable queue.** Each profile has its own debounce/coalesce tick, keyed scheduler, and durable queue. Implementation note: isolation is per-profile SQLite *files* (`state/profiles/<id>/vapor.sqlite`), not profile-keyed tables in one file — a corrupt or quarantined profile DB then cannot take out its siblings. The implicit `default` profile keeps the legacy `state/vapor.sqlite` path so single-scope setups upgrade in place. No in-memory structure is shared across profiles below the raw watcher level.
 - **Shared workgate, throttle, resource ceilings.** The workgate, throttle controller, bandwidth shaper, and effective resource ceilings are daemon-level (single process serving all profiles). Profile-override MIN-lowering resolves to a single effective ceiling set that gates all profiles; per-profile work still queues behind the shared workgate under the shared caps.
 - **Blast-radius containment.** A panic or error inside one profile's scheduler, reconcile, or provider execution must not kill the watcher or other profiles. Profile runtimes are spawned in tasks wrapped with a panic catcher; a caught panic marks the profile `Failed` with a durable diagnostic, suspends its queue, and leaves the watcher and other profiles running.
 - **Same-path double-write safety.** If two profiles target the same provider account and the same remote subtree, they are allowed to coexist but a write from profile A and a write from profile B to the same file are treated as simultaneous writes and resolved by the conflict-handling rules above (keep both). Provider op-ids carry the originating `profile_id` so self-write-cache matches remain correctly scoped.
