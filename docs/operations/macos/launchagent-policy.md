@@ -2,8 +2,8 @@
 
 This document defines the concrete `launchd` plist policy for the `vapord`
 per-user LaunchAgent, the expected interaction between the LaunchAgent and
-the daemon's in-process crash-loop protection, and the validation expected
-at milestone M1.
+the Rust-backed crash-loop protection in `core/lifecycle`, and the
+validation expected at milestone M1.
 
 Cross-platform lifecycle logic (including `CrashLoopGuard`) lives in
 `core/lifecycle`; this document covers only the macOS-native integration
@@ -40,10 +40,18 @@ surface produced by `core/platform/service::macos`.
   All other runtime behavior is code-defined or read from `vapor.json`
   (the daemon loads `vapor.json` at startup; `VAPOR_*` variables remain
   per-field overrides).
-- Both plist writers — the macOS app's `LaunchAgentController` and the
-  Rust `NativeServiceInstaller` driven by `vapor service install` —
-  emit this same shape, so either surface may (re)install the agent
-  without clobbering the other's configuration.
+- The plist has a single writer: the Rust `NativeServiceInstaller` in
+  `core/platform`, driven through `core/lifecycle` by `vapor service
+  install`. Every surface goes through it — the macOS app shells out
+  to the bundled `vapor` CLI instead of writing the plist itself — so
+  the definition cannot diverge between surfaces.
+- Uninstall semantics: removing the agent (`vapor service uninstall`,
+  the app's autolaunch-off toggle) boots the job out of launchd, and
+  launchd terminates the running daemon as part of bootout. This is
+  long-standing macOS behavior (the retired Swift controller did the
+  same); `--keep-running` therefore only suppresses the *explicit*
+  stop signal and is meaningful on service managers that keep a
+  disabled unit running (e.g. systemd on Linux).
 - `ProcessType`: `Background` so the daemon participates in background
   resource-management policy.
 
@@ -80,17 +88,26 @@ protection. `launchd` is intentionally passive (`KeepAlive = false`):
    raises `maxConsecutiveFailuresBeforePause`; the default never reaches
    it. Crashes age out of the sliding `failureWindow = 600s`, so a run
    that stays healthy for the window length resets the schedule.
-   Planned (M-wave, not yet implemented): a periodic app-side health
-   tick that *detects* unexpected daemon absence, and durable
-   `last_crash_at_ms` / `consecutive_crashes` counters in the state DB so
-   backoff survives app restarts — today each surface counts crashes in
-   process memory only.
+   Detection is app-side but policy-free: the macOS app runs a
+   30-second timer (`DaemonHealthMonitor`,
+   `VaporConstants.Daemon.healthTickIntervalSeconds`) whose every tick
+   invokes `vapor service check` — one supervision tick that detects an
+   unexpected daemon exit, registers the crash, and restarts or defers
+   per the schedule above. Expected stops are never counted, and the
+   `awaiting_restart` marker prevents the same exit from being counted
+   twice. Crash-loop bookkeeping (`consecutive_crashes`,
+   `last_crash_at_ms`, pause, `awaiting_restart`) persists durably in
+   `<vapor_dir>/state/lifecycle.json` (owned by `core/lifecycle`), so
+   backoff and pause survive process restarts and are shared across
+   surfaces.
 3. After 5 consecutive crashes within the `failureWindow` (default 10
-   minutes), the coordinator enters a `CrashLoopPaused` state, stops
-   attempting auto-restart, and surfaces a reasoned diagnostic to the
-   menubar ("Vapor paused: repeated crashes, click to inspect logs"). The
-   user must explicitly acknowledge (via `acknowledgeCrashLoopPause`,
-   wired through a menubar action) before restarts resume.
+   minutes), the guard enters a durable `CrashLoopPaused` state, stops
+   attempting auto-restart (`vapor service status` reports
+   `crash_loop_paused`), and the app surfaces a reasoned diagnostic to
+   the menubar ("Vapor paused: repeated crashes, click to inspect
+   logs"). The user must explicitly acknowledge (via `vapor service
+   acknowledge`, which the menubar action invokes) before restarts
+   resume.
 4. `launchd` is NEVER expected to be the source of a restart. If a
    contributor finds code or scripts that set `KeepAlive = true`, that is a
    policy violation and must be reverted.
@@ -119,3 +136,10 @@ listed below:
 
 M1-6 in `docs/tasks/macos.md` is the work item that ships these scenarios
 as automated tests.
+
+The service lifecycle path (install → start → status → crash-loop
+supervision through backoff and pause → acknowledge → stop → uninstall)
+is exercised against real `launchd` in CI by the `--full` phase of
+`./scripts/e2e.sh` (`test.yml`'s macOS job runs the e2e step with
+`--full`); that phase installs a real LaunchAgent, so it is opt-in and
+runs only on disposable CI runners.

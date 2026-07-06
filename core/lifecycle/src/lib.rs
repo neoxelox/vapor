@@ -1,23 +1,21 @@
 //! Daemon lifecycle orchestration for Vapor.
 //!
-//! Owns the cross-platform crash-loop guard and the lifecycle manager
-//! that the macOS / Windows / Linux app surfaces and the `vapor` CLI all
-//! consume. Replaces the prior Swift implementation in
-//! `apps/macos/Sources/VaporCore/DaemonLifecycle.swift` so every surface
-//! shares one truth.
+//! Owns the cross-platform crash-loop guard, the lifecycle manager, and
+//! the durable lifecycle state that the macOS / Windows / Linux app
+//! surfaces and the `vapor` CLI all consume. The prior duplicate Swift
+//! implementation retired with M2-1 / C4-7: the macOS app now drives
+//! this crate through `vapor service … --json` subprocess calls, so
+//! every surface shares one truth — including crash-loop backoff and
+//! pause, which persist in `<vapor_dir>/state/lifecycle.json` and
+//! survive process restarts (M2-6).
 //!
 //! See `docs/plans/core.md §2.3` and `docs/tasks/core.md` Phase C4.
-//!
-//! Wave 5 ships the Rust types + parity tests. Wave 6 adds the `vapor
-//! service install / start / stop / status` CLI commands that consume
-//! [`DaemonLifecycleManager`] directly. Wave 5 / M2 then has the macOS
-//! Swift app delegate to the CLI subprocess so the duplicate Swift code
-//! retires.
 
 #![forbid(unsafe_code)]
 
 mod auto_launch;
 mod crash_loop;
+mod durable;
 mod manager;
 
 pub use auto_launch::{
@@ -25,4 +23,12 @@ pub use auto_launch::{
     JsonFileError,
 };
 pub use crash_loop::{CrashLoopDecision, CrashLoopGuard, CrashLoopPolicy};
-pub use manager::{DaemonLifecycleActionResult, DaemonLifecycleError, DaemonLifecycleManager};
+pub use durable::{
+    FixedWallClock, InMemoryLifecycleStateStore, JsonFileLifecycleStateStore,
+    LIFECYCLE_STATE_SCHEMA_VERSION, LifecycleStateStore, PersistedLifecycleState, SystemWallClock,
+    WallClock,
+};
+pub use manager::{
+    CrashLoopStateSnapshot, DaemonHealthCheckOutcome, DaemonLifecycleActionResult,
+    DaemonLifecycleError, DaemonLifecycleManager,
+};

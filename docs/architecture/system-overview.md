@@ -7,13 +7,14 @@
 - `core/providers`: Rust cloud adapters behind a capability-driven trait.
 - `core/shared`: contracts and versioned schema models used across the
   workspace.
-- `core/platform` (planned): traits + per-OS native implementations for
+- `core/platform`: traits + per-OS native implementations for
   fs-watch, service install, secret store, metrics sampling, idle
   detection, filesystem capabilities, and process supervision. See
   `docs/architecture/platform-abstractions.md`.
-- `core/lifecycle` (planned): daemon lifecycle manager and crash-loop
-  guard, consumed by every app surface.
-- `core/cli` (planned): the `vapor` CLI — headless-first control plane.
+- `core/lifecycle`: daemon lifecycle manager, crash-loop guard, and
+  durable lifecycle state, consumed by every app surface (the macOS app
+  reaches it through the bundled `vapor` CLI).
+- `core/cli`: the `vapor` CLI — headless-first control plane.
 - `apps/macos`: SwiftUI app surface — UX, auth orchestration, status,
   controls. macOS-only by policy.
 - `apps/windows`, `apps/linux` (planned): thin native app surfaces over the
@@ -41,9 +42,9 @@ vapor/
   core/daemon         # Rust engine + queue/state + throttle + reconcile
   core/providers      # provider_filesystem (pre-GA reference), provider_gdrive (deferred), additional providers (future)
   core/shared         # IPC models, error taxonomy, policy models, constants source-of-truth
-  core/platform       # (planned) per-OS native impls behind portable traits
-  core/lifecycle      # (planned) daemon lifecycle + crash-loop guard
-  core/cli            # (planned) vapor CLI binary
+  core/platform       # per-OS native impls behind portable traits
+  core/lifecycle      # daemon lifecycle + crash-loop guard + durable lifecycle state
+  core/cli            # vapor CLI binary
   apps/macos          # SwiftUI shell + settings + menubar + auth UI
   apps/windows        # (planned) thin native Windows shell
   apps/linux          # (planned) thin native Linux shell

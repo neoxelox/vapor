@@ -107,6 +107,13 @@ pub fn sqlite_database_path() -> PathBuf {
     state_directory().join(constants::runtime::SQLITE_DATABASE_FILE_NAME)
 }
 
+/// Durable daemon-lifecycle side-file (crash-loop bookkeeping +
+/// supervision expectations). Lives under `vapor_dir/state/` per the
+/// runtime data directory policy (AGENTS.md §8.5).
+pub fn lifecycle_state_path() -> PathBuf {
+    state_directory().join(constants::runtime::LIFECYCLE_STATE_FILE_NAME)
+}
+
 /// Cross-platform home directory resolution.
 ///
 /// Unix honors `HOME`. Windows honors `USERPROFILE` (preferred) and falls

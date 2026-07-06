@@ -1,64 +1,83 @@
 import Foundation
 
-public enum DaemonLifecycleActionResult: Equatable {
+/// Result of a lifecycle action, decoded from the `vapor service …`
+/// JSON contract. `relaunchDeferred(.infinity)` represents the
+/// crash-loop paused state (mirrors `Duration::MAX` on the Rust side).
+public enum DaemonLifecycleActionResult: Equatable, Sendable {
   case unchanged
   case started
   case stopped
   case relaunchDeferred(TimeInterval)
 }
 
-public protocol AutoLaunchSettingStore {
-  func bool(forKey key: String) -> Bool?
-  func set(_ value: Bool, forKey key: String) throws
+/// Outcome of one `vapor service check` supervision tick.
+public enum ServiceHealthOutcome: Equatable, Sendable {
+  case running
+  case notInstalled
+  case stoppedExpected
+  case restartedAfterCrash
+  case restartDeferred(TimeInterval)
+  case crashLoopPaused
 }
 
-public final class InMemoryAutoLaunchSettingStore: AutoLaunchSettingStore {
-  private var values: [String: Bool]
+/// Decoded `vapor service status --json` report.
+public struct ServiceStatusSnapshot: Equatable, Sendable {
+  public var status: String
+  public var label: String
+  public var autoLaunchEnabled: Bool
+  public var crashLoopPaused: Bool
+  public var consecutiveCrashes: Int
 
-  public init(seed: [String: Bool] = [:]) {
-    values = seed
-  }
-
-  public func bool(forKey key: String) -> Bool? {
-    values[key]
-  }
-
-  public func set(_ value: Bool, forKey key: String) throws {
-    values[key] = value
-  }
-}
-
-public final class VaporConfigurationAutoLaunchSettingStore: AutoLaunchSettingStore {
-  private let configurationStore: VaporConfigurationStore
-
-  public init(configurationStore: VaporConfigurationStore = VaporConfigurationStore()) {
-    self.configurationStore = configurationStore
-  }
-
-  public func bool(forKey key: String) -> Bool? {
-    guard key == DaemonLifecycleManager.autoLaunchSettingKey else {
-      return nil
-    }
-
-    return configurationStore.load().autoLaunch
-  }
-
-  public func set(_ value: Bool, forKey key: String) throws {
-    guard key == DaemonLifecycleManager.autoLaunchSettingKey else {
-      return
-    }
-
-    var configuration = configurationStore.load()
-    configuration.autoLaunch = value
-    try configurationStore.save(configuration)
+  public init(
+    status: String,
+    label: String,
+    autoLaunchEnabled: Bool,
+    crashLoopPaused: Bool,
+    consecutiveCrashes: Int
+  ) {
+    self.status = status
+    self.label = label
+    self.autoLaunchEnabled = autoLaunchEnabled
+    self.crashLoopPaused = crashLoopPaused
+    self.consecutiveCrashes = consecutiveCrashes
   }
 }
 
+/// The app's seam onto daemon lifecycle operations. Since M2-1 the
+/// default implementation is `VaporCLIServiceController`, which invokes
+/// the bundled `vapor` CLI as a subprocess — all lifecycle *policy*
+/// (autolaunch persistence, crash-loop backoff and pause, supervision)
+/// lives in the Rust `core/lifecycle` crate behind that CLI. Swift only
+/// ever sees the outcomes.
 public protocol LaunchAgentControlling {
-  func installAndEnable() throws
-  func disableAndUninstall() throws
-  func startDaemon() throws
+  /// App-startup path (`vapor service bootstrap`): install + start only
+  /// when autolaunch is enabled; `.unchanged` when it is disabled.
+  @discardableResult
+  func bootstrap() throws -> DaemonLifecycleActionResult
+  /// Enable autolaunch, install the service definition, start the
+  /// daemon (`vapor service install`).
+  @discardableResult
+  func installAndEnable() throws -> DaemonLifecycleActionResult
+  /// Disable autolaunch and remove the service definition
+  /// (`vapor service uninstall [--keep-running]`). `stopDaemonNow`
+  /// only controls the explicit stop signal; on macOS the daemon exits
+  /// either way because launchd tears the job down when its service
+  /// definition is booted out.
+  @discardableResult
+  func disableAndUninstall(stopDaemonNow: Bool) throws -> DaemonLifecycleActionResult
+  /// Start the daemon, subject to the Rust-side crash-loop policy
+  /// (`vapor service start`).
+  @discardableResult
+  func startDaemon() throws -> DaemonLifecycleActionResult
+  /// Stop the daemon (`vapor service stop`).
   func stopDaemon() throws
+  /// Current service + crash-loop state (`vapor service status`).
+  func status() throws -> ServiceStatusSnapshot
+  /// One supervision tick (`vapor service check`).
+  @discardableResult
+  func checkDaemonHealth() throws -> ServiceHealthOutcome
+  /// Clear a crash-loop pause (`vapor service acknowledge`).
+  func acknowledgeCrashLoopPause() throws
 }
 
 public protocol LoginItemControlling {
@@ -77,266 +96,163 @@ public struct NoopLoginItemController: LoginItemControlling {
 public struct NoopLaunchAgentController: LaunchAgentControlling {
   public init() {}
 
-  public func installAndEnable() throws {}
+  public func bootstrap() throws -> DaemonLifecycleActionResult { .unchanged }
 
-  public func disableAndUninstall() throws {}
+  public func installAndEnable() throws -> DaemonLifecycleActionResult { .unchanged }
 
-  public func startDaemon() throws {}
+  public func disableAndUninstall(stopDaemonNow _: Bool) throws -> DaemonLifecycleActionResult {
+    .unchanged
+  }
+
+  public func startDaemon() throws -> DaemonLifecycleActionResult { .unchanged }
 
   public func stopDaemon() throws {}
+
+  public func status() throws -> ServiceStatusSnapshot {
+    ServiceStatusSnapshot(
+      status: "not_installed",
+      label: VaporConstants.Daemon.launchAgentLabel,
+      autoLaunchEnabled: VaporConstants.Defaults.autoLaunch,
+      crashLoopPaused: false,
+      consecutiveCrashes: 0
+    )
+  }
+
+  public func checkDaemonHealth() throws -> ServiceHealthOutcome { .notInstalled }
+
+  public func acknowledgeCrashLoopPause() throws {}
 }
 
-public struct CrashLoopPolicy: Equatable, Sendable {
-  public var failureWindow: TimeInterval
-  public var baseDelay: TimeInterval
-  public var maxDelay: TimeInterval
-  public var delayStartsAfterFailures: Int
-  public var maxConsecutiveFailuresBeforePause: Int
-
-  public init(
-    failureWindow: TimeInterval,
-    baseDelay: TimeInterval,
-    maxDelay: TimeInterval,
-    delayStartsAfterFailures: Int,
-    maxConsecutiveFailuresBeforePause: Int
-  ) {
-    self.failureWindow = failureWindow
-    self.baseDelay = baseDelay
-    self.maxDelay = maxDelay
-    self.delayStartsAfterFailures = max(1, delayStartsAfterFailures)
-    self.maxConsecutiveFailuresBeforePause = max(1, maxConsecutiveFailuresBeforePause)
-  }
-
-  public static let `default` = CrashLoopPolicy(
-    failureWindow: 600,
-    baseDelay: 2,
-    maxDelay: 120,
-    delayStartsAfterFailures: 1,
-    maxConsecutiveFailuresBeforePause: 5
-  )
-}
-
-public enum CrashLoopDecision: Equatable, Sendable {
-  case noDelay
-  case backoff(TimeInterval)
-  case paused
-}
-
-public struct CrashLoopGuard: Sendable {
-  private let policy: CrashLoopPolicy
-  private var failureMoments: [Date] = []
-  private var pausedUntil: Date?
-  private var pausedIndefinitely: Bool = false
-
-  public init(policy: CrashLoopPolicy = .default) {
-    self.policy = policy
-  }
-
-  public var isPausedIndefinitely: Bool {
-    pausedIndefinitely
-  }
-
-  /// Mirrors the canonical Rust `CrashLoopGuard::register_crash` in
-  /// `core/lifecycle/src/crash_loop.rs` (parity contract:
-  /// `core/lifecycle/tests/crash_loop_parity.rs`). With the default
-  /// policy the schedule is: crash 1 → restart immediately, crash 2 →
-  /// 2 s, crash 3 → 4 s, crash 4 → 8 s, crash 5 → paused.
-  /// `delayStartsAfterFailures = N` means the first N crashes within the
-  /// window are delay-free.
-  @discardableResult
-  public mutating func registerCrash(at now: Date) -> CrashLoopDecision {
-    pruneFailures(relativeTo: now)
-    failureMoments.append(now)
-
-    if failureMoments.count >= policy.maxConsecutiveFailuresBeforePause {
-      pausedIndefinitely = true
-      pausedUntil = nil
-      return .paused
-    }
-
-    let exponent = failureMoments.count - policy.delayStartsAfterFailures - 1
-    guard exponent >= 0 else {
-      return .noDelay
-    }
-
-    let delay = min(policy.maxDelay, policy.baseDelay * pow(2, Double(exponent)))
-    pausedUntil = now.addingTimeInterval(delay)
-    return .backoff(delay)
-  }
-
-  public mutating func remainingDelay(at now: Date) -> TimeInterval {
-    if pausedIndefinitely {
-      return .infinity
-    }
-
-    guard let pausedUntil else {
-      return 0
-    }
-
-    if now >= pausedUntil {
-      self.pausedUntil = nil
-      return 0
-    }
-
-    return pausedUntil.timeIntervalSince(now)
-  }
-
-  public mutating func acknowledgeAndResume() {
-    pausedIndefinitely = false
-    failureMoments.removeAll(keepingCapacity: true)
-    pausedUntil = nil
-  }
-
-  public mutating func reset() {
-    failureMoments.removeAll(keepingCapacity: true)
-    pausedUntil = nil
-    pausedIndefinitely = false
-  }
-
-  private mutating func pruneFailures(relativeTo now: Date) {
-    let oldestAllowed = now.addingTimeInterval(-policy.failureWindow)
-    failureMoments.removeAll(where: { $0 < oldestAllowed })
-  }
-}
-
+/// Thin coordinator over the `LaunchAgentControlling` seam. Owns
+/// serialization (one lifecycle operation at a time) and macOS login-item
+/// registration; every lifecycle decision is delegated to the Rust
+/// `core/lifecycle` layer through the controller (M2-1 / M2-2 / C4-7 —
+/// no runtime or lifecycle policy lives in Swift anymore).
 public final class DaemonLifecycleManager: @unchecked Sendable {
-  public static let autoLaunchSettingKey = "vapor.lifecycle.auto-launch-enabled"
-
-  private let launchAgentController: LaunchAgentControlling
+  private let launchAgentController: any LaunchAgentControlling
   private let loginItemController: (any LoginItemControlling)?
-  private let settingsStore: AutoLaunchSettingStore
-  private let settingsKey: String
   private let stateQueue = DispatchQueue(label: "sh.arn.vapor.daemon-lifecycle.state")
-  private var crashLoopGuard: CrashLoopGuard
   private let logger: StructuredLogger
 
   public init(
-    launchAgentController: LaunchAgentControlling,
-    settingsStore: AutoLaunchSettingStore,
+    launchAgentController: any LaunchAgentControlling,
     loginItemController: (any LoginItemControlling)? = nil,
-    settingsKey: String = DaemonLifecycleManager.autoLaunchSettingKey,
-    crashLoopPolicy: CrashLoopPolicy = .default,
     logger: StructuredLogger = StructuredLogger(component: "daemon-lifecycle")
   ) {
     self.launchAgentController = launchAgentController
     self.loginItemController = loginItemController
-    self.settingsStore = settingsStore
-    self.settingsKey = settingsKey
     self.logger = logger
-    crashLoopGuard = CrashLoopGuard(policy: crashLoopPolicy)
   }
 
   public static func placeholder() -> DaemonLifecycleManager {
     DaemonLifecycleManager(
       launchAgentController: NoopLaunchAgentController(),
-      settingsStore: InMemoryAutoLaunchSettingStore(),
       loginItemController: nil
     )
   }
 
+  /// Effective autolaunch preference, as reported by the Rust layer
+  /// (which defaults it to `true` and persists the default on first
+  /// read). Falls back to the shipped default when the CLI is
+  /// unreachable so UI state stays renderable.
   public var autoLaunchEnabled: Bool {
     stateQueue.sync {
-      autoLaunchEnabledLocked()
+      do {
+        return try launchAgentController.status().autoLaunchEnabled
+      } catch {
+        logger.error(
+          "Failed to read autolaunch state from the vapor CLI; assuming default",
+          metadata: ["error": String(describing: error)]
+        )
+        return VaporConstants.Defaults.autoLaunch
+      }
     }
   }
 
   @discardableResult
-  public func bootstrapIfNeeded(now: Date = .now) throws -> DaemonLifecycleActionResult {
+  public func bootstrapIfNeeded() throws -> DaemonLifecycleActionResult {
     try stateQueue.sync {
-      guard autoLaunchEnabledLocked() else {
-        logger.debug("Skipped lifecycle bootstrap because auto-launch is disabled")
-        return .unchanged
+      let result = try launchAgentController.bootstrap()
+      if result == .unchanged {
+        logger.debug("Lifecycle bootstrap was a no-op (auto-launch disabled)")
+        return result
       }
 
-      try launchAgentController.installAndEnable()
       registerLoginItemIfAvailable()
-      logger.info("Lifecycle bootstrap completed; attempting daemon start")
-      return try startDaemonIfAllowedLocked(now: now)
+      logger.info(
+        "Lifecycle bootstrap completed",
+        metadata: ["result": String(describing: result)]
+      )
+      return result
     }
   }
 
   @discardableResult
   public func setAutoLaunchEnabled(
     _ enabled: Bool,
-    stopDaemonNow: Bool = false,
-    now: Date = .now
+    stopDaemonNow: Bool = false
   ) throws -> DaemonLifecycleActionResult {
     try stateQueue.sync {
-      try settingsStore.set(enabled, forKey: settingsKey)
       logger.info(
-        "Updated auto-launch setting",
+        "Updating auto-launch setting",
         metadata: ["enabled": String(enabled), "stop_now": String(stopDaemonNow)]
       )
 
       if enabled {
-        try launchAgentController.installAndEnable()
+        let result = try launchAgentController.installAndEnable()
         registerLoginItemIfAvailable()
-        return try startDaemonIfAllowedLocked(now: now)
+        return result
       }
 
-      try launchAgentController.disableAndUninstall()
+      let result = try launchAgentController.disableAndUninstall(stopDaemonNow: stopDaemonNow)
       unregisterLoginItemIfAvailable()
-      crashLoopGuard.reset()
-      logger.warning("Disabled auto-launch and reset crash-loop guard")
-
-      if stopDaemonNow {
-        try launchAgentController.stopDaemon()
-        logger.warning("Daemon stop requested due to stop-now disable flow")
-        return .stopped
-      }
-
-      return .unchanged
-    }
-  }
-
-  @discardableResult
-  public func registerUnexpectedDaemonExit(now: Date = .now) -> CrashLoopDecision {
-    stateQueue.sync {
-      let decision = crashLoopGuard.registerCrash(at: now)
-      switch decision {
-      case .noDelay:
-        logger.warning(
-          "Registered unexpected daemon exit",
-          metadata: ["relaunch_delay_seconds": "0"]
-        )
-      case .backoff(let seconds):
-        logger.warning(
-          "Registered unexpected daemon exit",
-          metadata: ["relaunch_delay_seconds": String(seconds)]
-        )
-      case .paused:
-        logger.error(
-          "Daemon entered crash-loop paused state; auto-restart is suspended until user acknowledges",
-          metadata: [
-            "failure_window_seconds": String(
-              crashLoopGuard.isPausedIndefinitely
-                ? DaemonLifecycleManager.crashLoopPauseSurfaceValue : 0)
-          ]
-        )
-      }
-      return decision
+      logger.warning("Disabled auto-launch; crash-loop state was reset by the lifecycle core")
+      return result
     }
   }
 
   public var isInCrashLoopPause: Bool {
     stateQueue.sync {
-      crashLoopGuard.isPausedIndefinitely
+      do {
+        return try launchAgentController.status().crashLoopPaused
+      } catch {
+        logger.error(
+          "Failed to read crash-loop state from the vapor CLI",
+          metadata: ["error": String(describing: error)]
+        )
+        return false
+      }
     }
   }
 
   public func acknowledgeCrashLoopPause() {
     stateQueue.sync {
-      crashLoopGuard.acknowledgeAndResume()
-      logger.warning("Acknowledged crash-loop pause; auto-restart may proceed again")
+      do {
+        try launchAgentController.acknowledgeCrashLoopPause()
+        logger.warning("Acknowledged crash-loop pause; auto-restart may proceed again")
+      } catch {
+        logger.error(
+          "Failed to acknowledge crash-loop pause",
+          metadata: ["error": String(describing: error)]
+        )
+      }
     }
   }
 
-  fileprivate static let crashLoopPauseSurfaceValue: TimeInterval = -1
-
   @discardableResult
-  public func startDaemonIfAllowed(now: Date = .now) throws -> DaemonLifecycleActionResult {
+  public func startDaemonIfAllowed() throws -> DaemonLifecycleActionResult {
     try stateQueue.sync {
-      try startDaemonIfAllowedLocked(now: now)
+      let result = try launchAgentController.startDaemon()
+      switch result {
+      case .relaunchDeferred(let remaining):
+        logger.warning(
+          "Daemon start deferred by crash-loop policy",
+          metadata: ["remaining_seconds": String(remaining)]
+        )
+      default:
+        logger.info("Requested daemon start", metadata: ["result": String(describing: result)])
+      }
+      return result
     }
   }
 
@@ -347,45 +263,14 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
     }
   }
 
-  private func autoLaunchEnabledLocked() -> Bool {
-    if let persisted = settingsStore.bool(forKey: settingsKey) {
-      logger.debug("Read persisted auto-launch setting", metadata: ["value": String(persisted)])
-      return persisted
-    }
-
-    do {
-      try settingsStore.set(true, forKey: settingsKey)
-    } catch {
-      logger.error(
-        "Failed to persist default auto-launch setting",
-        metadata: ["error": String(describing: error)]
-      )
-    }
-    logger.info("Auto-launch setting missing; defaulting to enabled")
-    return true
-  }
-
+  /// One supervision tick, delegated to `vapor service check`
+  /// (detection, crash registration, and restart policy all run in the
+  /// Rust lifecycle core). Called periodically by `DaemonHealthMonitor`.
   @discardableResult
-  private func startDaemonIfAllowedLocked(now: Date) throws -> DaemonLifecycleActionResult {
-    if crashLoopGuard.isPausedIndefinitely {
-      logger.error(
-        "Refusing to start daemon while crash-loop pause is active; awaiting user acknowledgement"
-      )
-      return .relaunchDeferred(.infinity)
+  public func checkDaemonHealth() throws -> ServiceHealthOutcome {
+    try stateQueue.sync {
+      try launchAgentController.checkDaemonHealth()
     }
-
-    let remaining = crashLoopGuard.remainingDelay(at: now)
-    guard remaining <= 0 else {
-      logger.warning(
-        "Deferred daemon relaunch due to crash-loop policy",
-        metadata: ["remaining_seconds": String(remaining)]
-      )
-      return .relaunchDeferred(remaining)
-    }
-
-    try launchAgentController.startDaemon()
-    logger.info("Requested daemon start")
-    return .started
   }
 
   private func registerLoginItemIfAvailable() {

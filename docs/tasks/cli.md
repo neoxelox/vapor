@@ -66,6 +66,16 @@ Depends on: `docs/tasks/core.md` C1–C3.
 Depends on: `docs/tasks/core.md` C3-3 (`ServiceInstaller` + macOS impl) and
 C4 (lifecycle moves to Rust).
 
+The macOS app-shim wave (`macos.md` M2 / `core.md` C4-5) extended this
+surface: every subcommand takes `--json` (the stable contract the Swift
+shim parses), `uninstall` grew `--keep-running` (skips the explicit
+stop signal; on macOS launchd still tears the job down on bootout, so
+the flag matters on service managers that keep a disabled unit
+running), and three subcommands
+were added — `bootstrap` (install + start only when autolaunch is
+enabled), `check` (supervision tick against the durable crash-loop
+state), and `acknowledge` (clear a crash-loop pause).
+
 - [x] L2-1 `vapor service install [--user|--system]` — invokes the
       platform-appropriate `ServiceInstaller`. Default `--user`.
       *(`--system` flag deferred — only `--user` ships in Wave 6.)*
@@ -74,8 +84,12 @@ C4 (lifecycle moves to Rust).
       service.
 - [x] L2-4 `vapor service status` — reports `Running` / `Stopped` /
       `CrashLoopPaused` / `NotInstalled` with a human reason.
-- [ ] L2-5 Automated end-to-end test on macOS CI: install → start → status
-      → stop → uninstall round-trip.
+- [x] L2-5 Automated end-to-end test on macOS CI: install → start → status
+      → stop → uninstall round-trip. *(The `--full` phase of
+      `./scripts/e2e.sh`, run with `--full` by `test.yml`'s macOS job.
+      Also walks the crash-loop supervision path: `check` restart /
+      backoff deferral / pause → `acknowledge`. Host-mutating, so it is
+      opt-in and never clobbers an existing install.)*
 - [ ] L2-6 Same round-trip automated on Linux CI (systemd user unit) once
       `docs/tasks/core.md` C7-2 lands.
 - [ ] L2-7 Same round-trip automated on Windows CI (Task Scheduler) once
@@ -172,10 +186,11 @@ Policy: `AGENTS.md §9`. Full taxonomy:
       snapshot or a direct exit-code assertion test per command.
 - [ ] LT-3 Binary size stays reasonable (single-digit MB stripped +
       zstd'd). CI guard-rail, not a soft target.
-- [ ] LT-4 End-to-end flows (`install → start → status → stop →
+- [x] LT-4 End-to-end flows (`install → start → status → stop →
       uninstall`) pass on macOS CI for the primary deliverable
-      (`core.md` L2-5). Linux and Windows CI validation lands with
-      the matching optional wave (L2-6, L2-7).
+      (`cli.md` L2-5, the `./scripts/e2e.sh --full` service phase).
+      Linux and Windows CI validation lands with the matching optional
+      wave (L2-6, L2-7).
 - [ ] LT-5 IPC client correctness tested against a fake daemon that
       speaks the IPC protocol from `docs/architecture/ipc-contracts.md`.
       Covers every IPC-backed command; tests the "no daemon running"

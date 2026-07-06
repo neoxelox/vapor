@@ -76,6 +76,9 @@ public enum VaporConstants {
   public enum Daemon {
     public static let launchAgentLabel = "sh.arn.vapor.daemon"
     public static let preGADefaultProviderDisplayName = "Filesystem (stub)"
+    /// Mirrors `core/shared/src/constants.rs::service::HEALTH_TICK_INTERVAL_SECONDS`
+    /// per AGENTS.md §8.6.
+    public static let healthTickIntervalSeconds: TimeInterval = 30
   }
 
   /// Top-level keys recognized in `vapor.json`. Mirrors

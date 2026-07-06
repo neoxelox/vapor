@@ -7,9 +7,9 @@
 //! emitted as a known-good XML template (the schema is fixed, so a hand-
 //! rolled writer keeps the dep set tiny).
 //!
-//! Wave 5 (`docs/tasks/core.md` C4-3) will consume this from the new
-//! `core/lifecycle::DaemonLifecycleManager`. The macOS Swift app will
-//! then delegate via the `vapor` CLI per M2-1.
+//! Consumed by `core/lifecycle::DaemonLifecycleManager` (C4-3); the
+//! macOS Swift app delegates to it through the bundled `vapor` CLI
+//! (M2-1), so this is the single writer of the LaunchAgent definition.
 
 use std::fs;
 use std::io::Write;
@@ -161,14 +161,27 @@ impl NativeServiceInstaller {
         Ok(())
     }
 
+    /// Runs launchctl with captured stdio. Capturing matters twice
+    /// over: best-effort invocations (bootout of a not-loaded service,
+    /// kill of an already-stopped one) must not leak launchctl noise
+    /// like `Could not find service …` onto the caller's terminal, and
+    /// failed required invocations should carry launchctl's stderr in
+    /// the returned error instead of only an exit code.
     fn run_launchctl(&self, args: &[&str]) -> Result<(), ServiceInstallError> {
-        let status = Command::new("/bin/launchctl")
+        let output = Command::new("/bin/launchctl")
             .args(args)
-            .status()
+            .output()
             .map_err(|error| ServiceInstallError::Backend(Box::new(error)))?;
-        if !status.success() {
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            let detail = if stderr.is_empty() {
+                format!("launchctl {args:?} exited with {}", output.status)
+            } else {
+                format!("launchctl {args:?} exited with {}: {stderr}", output.status)
+            };
             return Err(ServiceInstallError::Backend(Box::new(
-                std::io::Error::other(format!("launchctl {args:?} exited with {status}")),
+                std::io::Error::other(detail),
             )));
         }
         Ok(())

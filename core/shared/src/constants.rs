@@ -28,6 +28,12 @@ pub mod runtime {
     /// one-daemon-per-vapor-dir invariant. Held (via OS file locking)
     /// for the lifetime of the daemon process.
     pub const DAEMON_LOCK_FILE_NAME: &str = "vapord.lock";
+    /// Durable daemon-lifecycle side-file under `vapor_dir/state/`.
+    /// Persists crash-loop bookkeeping (`consecutive_crashes`,
+    /// `last_crash_at_ms`, pause flag) plus supervision expectations so
+    /// backoff survives process restarts and is shared by every surface
+    /// that drives the lifecycle (`vapor` CLI, macOS app shim).
+    pub const LIFECYCLE_STATE_FILE_NAME: &str = "lifecycle.json";
     pub const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
     pub const PRIVATE_FILE_MODE: u32 = 0o600;
 }
@@ -88,6 +94,10 @@ pub mod service {
     /// file under `apps/macos/Sources/VaporCore/VaporConstants.swift`
     /// per AGENTS.md §8.6.
     pub const DAEMON_LABEL: &str = "sh.arn.vapor.daemon";
+    /// Cadence at which app surfaces run `vapor service check` to detect
+    /// unexpected daemon exits and route them through the crash-loop
+    /// guard. Mirrored by the Swift constants file per AGENTS.md §8.6.
+    pub const HEALTH_TICK_INTERVAL_SECONDS: u64 = 30;
 }
 
 pub mod ipc {

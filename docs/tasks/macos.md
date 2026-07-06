@@ -111,30 +111,39 @@ Exit gate (met):
 
 Depends on: `docs/tasks/core.md` C4.
 
-- [ ] M2-1 Replace the macOS Swift `LaunchAgentController` internals with a
+- [x] M2-1 Replace the macOS Swift `LaunchAgentController` internals with a
       shim that invokes `vapor service install / start / stop` as a
       subprocess (or the FFI surface from C4-5). The public
       `LaunchAgentControlling` Swift protocol stays; the default
-      implementation changes.
-- [ ] M2-2 Replace the Swift `CrashLoopGuard` with a consumer of the
+      implementation changes. *(Shipped as `VaporCLIServiceController`
+      driving `vapor service … --json`. The CLI is bundled at
+      `Contents/Helpers/vapor` — it cannot sit in `Contents/MacOS/`
+      because the default macOS filesystem is case-insensitive and
+      `vapor` would collide with the `Vapor` app binary.)*
+- [x] M2-2 Replace the Swift `CrashLoopGuard` with a consumer of the
       Rust-backed `core/lifecycle` state (read over IPC / subprocess).
       Remove the duplicate Swift policy once parity tests (C4-6) pass.
-- [ ] M2-3 Update `apps/macos/README.md` to describe the new model: Swift
+- [x] M2-3 Update `apps/macos/README.md` to describe the new model: Swift
       app delegates lifecycle to the Rust core via the `vapor` CLI.
-- [ ] M2-4 End-to-end regression test: install / uninstall / start / stop /
+- [x] M2-4 End-to-end regression test: install / uninstall / start / stop /
       crash-loop pause / acknowledge flows through the Rust-backed stack
-      with the existing Swift UI unchanged.
-- [ ] M2-5 App-side daemon health tick: periodically detect unexpected
+      with the existing Swift UI unchanged. *(Swift facade + CLI-contract
+      tests, Rust dispatch/manager tests, and the black-box
+      `./scripts/e2e.sh --full` service round-trip phase (L2-5) that
+      walks install → crash-loop supervision → pause → acknowledge →
+      stop → uninstall against real launchd on CI. Swift UI itself is
+      owner-verified per the standing test carve-out.)*
+- [x] M2-5 App-side daemon health tick: periodically detect unexpected
       daemon absence (IPC ping or pid probe) and route the crash through
-      `registerUnexpectedDaemonExit` so the crash-loop guard actually
-      fires in production — today nothing detects an unclean daemon exit
-      (see `docs/operations/macos/launchagent-policy.md` §Crash-loop
-      interaction, "Planned").
-- [ ] M2-6 Persist crash-loop state durably (`last_crash_at_ms`,
+      the crash-loop guard so it actually fires in production.
+      *(Shipped as `DaemonHealthMonitor`, a 30 s timer calling
+      `vapor service check`; detection, crash registration, and restart
+      policy all run Rust-side in `core/lifecycle`.)*
+- [x] M2-6 Persist crash-loop state durably (`last_crash_at_ms`,
       `consecutive_crashes` in the state DB or a lifecycle side-file) so
-      backoff survives app restarts and is shared across surfaces —
-      today each surface counts crashes in process memory only (same
-      policy-doc "Planned" note).
+      backoff survives app restarts and is shared across surfaces.
+      *(Shipped as `<vapor_dir>/state/lifecycle.json` owned by
+      `core/lifecycle`; every surface hydrates from and persists to it.)*
 
 Exit gate:
 

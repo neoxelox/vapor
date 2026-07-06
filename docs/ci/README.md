@@ -40,13 +40,17 @@ Testing runs in three tiers. Authoritative definition:
   invoked solely by `release.yml`). Performance SLO tests, long-running
   property cases (higher case counts), fuzz corpora, `loom`-backed
   concurrency tests. **Not a PR gate.**
-- **Tier E2E** — `./scripts/e2e.sh` as the final step of `test.yml`'s
+- **Tier E2E** — `./scripts/e2e.sh --full` at the end of `test.yml`'s
   macOS job (every PR; part of the required `test` check). Black-box
   run of the real `vapor` + `vapord` binaries in a sandbox under the
   repo-local `.vapor/e2e/` — macOS only, because it drives the native
   FSEvents watcher on the shipping surface. Also part of the local
   validation loop for runtime-affecting changes (`AGENTS.md §9.8`;
-  process in `docs/development/e2e-verification.md`).
+  process in `docs/development/e2e-verification.md`), where
+  contributors run it *without* `--full`: that flag appends the
+  host-mutating `vapor service` round-trip against real `launchd`,
+  which installs a real LaunchAgent and is therefore meant for
+  disposable CI runners only.
 
 A CI timing guard (tracked as `core.md` CT-2) fails the job if Tier 1
 exceeds the 5-minute budget on a matrix runner. The failure message

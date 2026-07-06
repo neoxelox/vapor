@@ -36,7 +36,8 @@ the durable state DB (`home/state/vapor.sqlite`).
 
 ## Safety contract (hard rules)
 
-Tier E2E must be safe to run unattended on a contributor machine or CI:
+The default run of Tier E2E must be safe to run unattended on a
+contributor machine or CI:
 
 - Everything lives under the repo-local `.vapor/e2e/` sandbox.
   `./scripts/clean.sh` removes all residue. Never touch `~/.vapor`.
@@ -50,6 +51,14 @@ Tier E2E must be safe to run unattended on a contributor machine or CI:
   the default run.
 - A failed run preserves its sandbox and prints the path; a green run
   deletes it (keep it with `--keep`).
+
+The one sanctioned exception is the opt-in `--full` flag, which appends
+the service lifecycle round-trip (see "Coverage" below): that phase
+*does* install a real LaunchAgent, so it is meant for disposable CI
+runners (`test.yml` passes `--full`), refuses outright when a
+`sh.arn.vapor.daemon` LaunchAgent already exists, and removes the
+LaunchAgent on exit. Agents and contributors run the default suite —
+never `--full` — on non-disposable machines.
 
 ## When an agent must run it
 
@@ -96,10 +105,10 @@ then exits non-zero. Use the `vapor-debug` skill (or read
 `home/logs/vapord.logs` and query `home/state/vapor.sqlite` read-only)
 to diagnose a preserved sandbox.
 
-On CI, the suite runs as the final step of `test.yml`'s macOS job on
-every PR (part of the required `test` check). macOS only — the harness
-exercises the native FSEvents watcher, and macOS is the shipping
-surface.
+On CI, the suite runs at the end of `test.yml`'s macOS job on every PR
+(part of the required `test` check), followed only by the host-mutating
+service round-trip step (see below). macOS only — the harness exercises
+the native FSEvents watcher, and macOS is the shipping surface.
 
 ## Manual sandbox — exploratory testing and debugging
 
@@ -215,9 +224,16 @@ network egress control.
   explicit opt-in flag, riding the release pipeline like Tier 2 —
   never a PR gate, never run implicitly by an agent. Design it when
   C8-48 lands.
-- **`vapor service install` round-trips.** Installing a LaunchAgent
-  mutates the host; that round-trip runs in CI per `AGENTS.md §9.7`,
-  not on contributor machines.
+- **`vapor service install` round-trips — in the default run.**
+  Installing a LaunchAgent mutates the host, so that round-trip is
+  gated behind `./scripts/e2e.sh --full` and runs in CI per
+  `AGENTS.md §9.7`, not on contributor machines. The `--full` phase
+  (scenarios R1–R9) drives install → start → status → crash-loop
+  supervision through backoff and pause → acknowledge → stop →
+  uninstall against real `launchd`. Its guard rails: it refuses when a
+  `sh.arn.vapor.daemon` plist already exists (never clobbers a real
+  install), keeps all runtime state in a repo-local sandbox via
+  `VAPOR_DIR`, and removes the LaunchAgent on exit.
 - **macOS app UI.** Owner-verified manually, per the standing test
   carve-out. Tier E2E's job there is the handoff checklist, not the
   verification.

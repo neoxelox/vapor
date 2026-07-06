@@ -320,13 +320,18 @@ value", the test is not worth writing.
   counts), fuzz corpora, and any `loom`-backed tests. Release gate
   only: `perf.yml` has no standalone triggers and is invoked solely by
   `release.yml`.
-- **Tier E2E** — `scripts/e2e.sh`, the final step of `test.yml`'s
+- **Tier E2E** — `scripts/e2e.sh`, at the end of `test.yml`'s
   macOS job (every PR; part of the required `test` check on `main`).
   Also part of the local contributor validation loop for
   runtime-affecting changes (`AGENTS.md §9.8`). Runs the shipped
   binaries sandboxed under `.vapor/e2e/`; budget ~60 s after the
   build. macOS only — it exercises the native FSEvents watcher on the
-  shipping surface.
+  shipping surface. CI invokes it with `--full`, which appends the
+  black-box `vapor service` round-trip (install → start → status →
+  crash-loop supervision → acknowledge → stop → uninstall) against
+  real `launchd`. That phase installs a real LaunchAgent —
+  host-mutating by design — so it is opt-in: contributors run the
+  default (host-safe) suite; only disposable CI runners pass `--full`.
 
 ## Per-surface scope
 
@@ -349,9 +354,10 @@ shape.
 tests, no Dock/window-state snapshot tests, no keyboard-focus tests.
 UI correctness is verified by the project owner manually.
 
-Once lifecycle moves into `core/lifecycle` (wave 5), the Swift-side
-`DaemonLifecycleManagerTests` becomes redundant with the Rust-side
-tests; retire it rather than maintain two copies of the same policy.
+Lifecycle policy lives in `core/lifecycle` and is tested there; the
+Swift-side `DaemonLifecycleManagerTests` covers only what Swift still
+owns (delegation order, outcome mapping, login-item coupling), never a
+second copy of the Rust policy.
 
 ### `core/cli` (Rust, `vapor` binary)
 

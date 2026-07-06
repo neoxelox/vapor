@@ -119,12 +119,59 @@ enum ConfigAction {
 
 #[derive(Subcommand, Debug)]
 enum ServiceAction {
-    Install,
-    Uninstall,
-    Start,
-    Stop,
-    Restart,
-    Status,
+    /// App-startup path: install + start only when autolaunch is
+    /// enabled (a disabled autolaunch is a silent no-op).
+    Bootstrap {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enable autolaunch, install the service definition, and start
+    /// the daemon.
+    Install {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Disable autolaunch and remove the service definition. Also
+    /// sends the daemon an explicit stop unless `--keep-running` is
+    /// passed.
+    Uninstall {
+        #[arg(long)]
+        json: bool,
+        /// Skip the explicit stop signal (the "disable autolaunch"
+        /// toggle path). Note: on macOS, launchd tears the job down
+        /// anyway when its service definition is booted out, so the
+        /// daemon still exits; the flag matters on service managers
+        /// that keep a disabled unit running (e.g. systemd).
+        #[arg(long)]
+        keep_running: bool,
+    },
+    Start {
+        #[arg(long)]
+        json: bool,
+    },
+    Stop {
+        #[arg(long)]
+        json: bool,
+    },
+    Restart {
+        #[arg(long)]
+        json: bool,
+    },
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// One supervision tick: detect an unexpected daemon exit, register
+    /// it with the crash-loop guard, and restart when policy allows.
+    Check {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Clear a crash-loop pause so restarts may resume.
+    Acknowledge {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -334,13 +381,18 @@ fn resolve_auth_token(token: Option<String>) -> Result<String, String> {
 }
 
 fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
-    let command = match action {
-        ServiceAction::Install => ServiceCommand::Install,
-        ServiceAction::Uninstall => ServiceCommand::Uninstall,
-        ServiceAction::Start => ServiceCommand::Start,
-        ServiceAction::Stop => ServiceCommand::Stop,
-        ServiceAction::Restart => ServiceCommand::Restart,
-        ServiceAction::Status => ServiceCommand::Status,
+    let (command, json) = match action {
+        ServiceAction::Bootstrap { json } => (ServiceCommand::Bootstrap, json),
+        ServiceAction::Install { json } => (ServiceCommand::Install, json),
+        ServiceAction::Uninstall { json, keep_running } => {
+            (ServiceCommand::Uninstall { keep_running }, json)
+        }
+        ServiceAction::Start { json } => (ServiceCommand::Start, json),
+        ServiceAction::Stop { json } => (ServiceCommand::Stop, json),
+        ServiceAction::Restart { json } => (ServiceCommand::Restart, json),
+        ServiceAction::Status { json } => (ServiceCommand::Status, json),
+        ServiceAction::Check { json } => (ServiceCommand::Check, json),
+        ServiceAction::Acknowledge { json } => (ServiceCommand::Acknowledge, json),
     };
 
     #[cfg(target_os = "macos")]
@@ -352,20 +404,21 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
         })?;
         let (manager, installer) = service_cmd::build_native_macos(config_path, daemon_binary)
             .map_err(|e| e.to_string())?;
-        let report = service_cmd::dispatch(command, &manager, installer.as_ref(), Instant::now())
+        let outcome = service_cmd::dispatch(command, &manager, installer.as_ref(), Instant::now())
             .map_err(|e| e.to_string())?;
-        if let Some(report) = report {
-            println!(
-                "service status: {:?} (label: {})",
-                report.status, report.label
-            );
+        if json {
+            let serialized = serde_json::to_string_pretty(&service_cmd::render_json(&outcome))
+                .map_err(|e| e.to_string())?;
+            println!("{serialized}");
+        } else {
+            println!("{}", service_cmd::render_text(&outcome));
         }
         Ok(ExitCode::SUCCESS)
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = command;
+        let _ = (command, json);
         Err("`vapor service` currently supports macOS only (Wave 6); Linux / Windows land in Waves 12 / 13".to_string())
     }
 }
@@ -378,6 +431,16 @@ fn locate_daemon_binary() -> Option<PathBuf> {
         let sibling = parent.join("vapord");
         if sibling.is_file() {
             return Some(sibling);
+        }
+        // Bundled layout: the CLI ships at `Vapor.app/Contents/Helpers/vapor`
+        // (it cannot sit next to the `Vapor` app binary — the default macOS
+        // filesystem is case-insensitive), while `vapord` lives at
+        // `Contents/MacOS/vapord`.
+        if let Some(contents) = parent.parent() {
+            let bundled = contents.join("MacOS").join("vapord");
+            if bundled.is_file() {
+                return Some(bundled);
+            }
         }
     }
     if let Some(path_var) = std::env::var_os("PATH") {

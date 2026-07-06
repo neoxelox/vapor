@@ -85,9 +85,11 @@ Moves from `apps/macos/Sources/VaporCore/DaemonLifecycle.swift` into Rust:
 - `AutoLaunchSettingStore` — reads/writes `vapor.json`'s `autoLaunch` field.
   Swift and Rust share the same file.
 
-The macOS Swift app becomes a thin consumer of the Rust-backed lifecycle
-manager (via FFI or by shelling out to the `vapor` CLI). Windows, Linux, and
-CLI surfaces consume the same layer directly.
+The macOS Swift app is a thin consumer of the Rust-backed lifecycle
+manager (it shells out to the bundled `vapor` CLI — `vapor service …
+--json`). Windows, Linux, and CLI surfaces consume the same layer
+directly. Crash-loop bookkeeping persists across invocations and
+surfaces in `<vapor_dir>/state/lifecycle.json`.
 
 ### 2.4 The `vapor` CLI (`core/cli`)
 
@@ -154,7 +156,7 @@ a first-class native mechanism:
 
 | OS | Mechanism |
 |---|---|
-| macOS (per-user) | `~/Library/LaunchAgents/sh.arn.vapor.daemon.plist` + `launchctl bootstrap/kickstart/bootout`; `SMAppService` registration mirrored via a small FFI helper when invoked from the Swift app. |
+| macOS (per-user) | `~/Library/LaunchAgents/sh.arn.vapor.daemon.plist` + `launchctl bootstrap/kickstart/bootout`; `SMAppService` login-item registration stays in the Swift app, layered on top of the same `vapor service` calls. |
 | Linux (per-user) | `~/.config/systemd/user/vapord.service` + `systemctl --user enable --now vapord`. Optional `loginctl enable-linger <user>` for sync while logged out. |
 | Linux (system-wide) | `/etc/systemd/system/vapord.service` + `systemctl enable --now vapord`. Opt-in via `vapor service install --system`. |
 | Windows (per-user) | Task Scheduler with an `AtLogOn` trigger and `RestartOnFailure` via `ITaskService`. No admin prompt needed, matching the macOS LaunchAgent UX. |
@@ -299,8 +301,11 @@ Command surface:
 ```
 vapor run [--foreground]                # run the daemon in-process
 vapor service install [--user|--system] # §3.2 ServiceInstaller
-vapor service uninstall
+vapor service uninstall [--keep-running]
+vapor service bootstrap                 # install+start only when autolaunch is enabled (app-startup path)
 vapor service start|stop|restart|status
+vapor service check                     # one crash-loop supervision tick
+vapor service acknowledge               # clear a crash-loop pause
 vapor config get|set <key> [value]      # edits vapor.json
 vapor auth login <provider>             # OAuth PKCE via localhost loopback
 vapor auth logout <provider>
@@ -352,7 +357,7 @@ continues to compile on those OSes.
 |---|---|---|---|---|---|
 | Invisible background daemon | ✅ | must if shipping | must if shipping | must on macOS; must on Win/Linux if shipping (`vapor run`) | `core/daemon` |
 | Autolaunch on login/boot | ✅ LaunchAgent | Task Scheduler / SCM | systemd --user / system | `vapor service install` | `core/platform/service` |
-| Crash-loop protection | ✅ Swift → moving to Rust | must if shipping | must if shipping | must | `core/lifecycle` |
+| Crash-loop protection | ✅ Rust (`core/lifecycle`, durable state) | must if shipping | must if shipping | must | `core/lifecycle` |
 | Menubar/tray status | ✅ SwiftUI | tray (WinUI/Tauri/WPF) | tray (GTK/Qt/Tauri) | — | `apps/<os>` |
 | FS watch (native-optimal) | FSEvents | ReadDirectoryChangesW + IOCP | inotify / fanotify | via host impl | `core/platform/fs_watch` |
 | Durable queue/state | ✅ SQLite | same | same | same | `core/daemon/state_db` |
@@ -396,9 +401,10 @@ trait layer but are not committed deliverables.
    place OS-specific behavior lives; if Windows/Linux native impls are
    never written, the stubs stay. macOS daemon behavior stays
    byte-for-byte identical before and after.
-4. **Move lifecycle into `core/lifecycle`** (§2.3). Swift app starts
-   consuming the Rust-backed lifecycle via FFI or via the prototype
-   `vapor` CLI. macOS behavior unchanged end-to-end.
+4. **Move lifecycle into `core/lifecycle`** (§2.3). Swift app consumes
+   the Rust-backed lifecycle by shelling out to the bundled `vapor`
+   CLI (the FFI alternative was not needed). macOS behavior unchanged
+   end-to-end.
 5. **Ship the `vapor` CLI on macOS.** Validates that `core/platform` +
    `core/lifecycle` work against real users by running the daemon with
    full autolaunch semantics on macOS. The same crate also builds on

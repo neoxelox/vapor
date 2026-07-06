@@ -81,8 +81,11 @@ swift build \
   -Xswiftc -whole-module-optimization \
   -Xswiftc -cross-module-optimization
 
-echo "[package] Building release daemon executable"
-cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --package vapor-daemon --bin vapord --release
+echo "[package] Building release daemon + CLI executables"
+cargo build --manifest-path "$ROOT_DIR/Cargo.toml" \
+  --package vapor-daemon --bin vapord \
+  --package vapor-cli --bin vapor \
+  --release
 
 binary_path="$ROOT_DIR/apps/macos/.build/release/$EXECUTABLE_NAME"
 if [[ ! -f "$binary_path" ]]; then
@@ -96,6 +99,12 @@ if [[ ! -f "$daemon_binary_path" ]]; then
   exit 1
 fi
 
+cli_binary_path="$ROOT_DIR/target/release/vapor"
+if [[ ! -f "$cli_binary_path" ]]; then
+  echo "[package] Expected CLI binary missing at $cli_binary_path"
+  exit 1
+fi
+
 resource_bundle_path="$ROOT_DIR/apps/macos/.build/release/Vapor_VaporCore.bundle"
 if [[ ! -d "$resource_bundle_path" ]]; then
   echo "[package] Expected SwiftPM resource bundle missing at $resource_bundle_path"
@@ -105,11 +114,16 @@ fi
 app_bundle="$DIST_DIR/$APP_NAME.app"
 contents_dir="$app_bundle/Contents"
 macos_dir="$contents_dir/MacOS"
+# The `vapor` CLI cannot live in Contents/MacOS: the default macOS
+# filesystem is case-insensitive, so `vapor` would collide with the
+# `Vapor` app executable. Helpers/ is the conventional home for bundled
+# helper tools; the CLI resolves vapord from ../MacOS/vapord.
+helpers_dir="$contents_dir/Helpers"
 resources_dir="$contents_dir/Resources"
 info_plist="$contents_dir/Info.plist"
 
 rm -rf "$app_bundle"
-mkdir -p "$macos_dir" "$resources_dir"
+mkdir -p "$macos_dir" "$helpers_dir" "$resources_dir"
 
 cp "$binary_path" "$macos_dir/$EXECUTABLE_NAME"
 chmod +x "$macos_dir/$EXECUTABLE_NAME"
@@ -117,8 +131,12 @@ chmod +x "$macos_dir/$EXECUTABLE_NAME"
 cp "$daemon_binary_path" "$macos_dir/vapord"
 chmod +x "$macos_dir/vapord"
 
+cp "$cli_binary_path" "$helpers_dir/vapor"
+chmod +x "$helpers_dir/vapor"
+
 assert_bundle_executable "$macos_dir/$EXECUTABLE_NAME" "app executable"
 assert_bundle_executable "$macos_dir/vapord" "daemon executable"
+assert_bundle_executable "$helpers_dir/vapor" "CLI executable"
 
 ditto "$resource_bundle_path" "$resources_dir/$(basename "$resource_bundle_path")"
 
@@ -205,8 +223,9 @@ if [[ -n "$VAPOR_ENTITLEMENTS" && ! -f "$VAPOR_ENTITLEMENTS" ]]; then
   exit 1
 fi
 
-# 1. The bundled daemon (no app entitlements; hardened runtime only).
+# 1. The bundled daemon + CLI (no app entitlements; hardened runtime only).
 codesign "${sign_args_base[@]}" "$macos_dir/vapord"
+codesign "${sign_args_base[@]}" "$helpers_dir/vapor"
 
 # 2. The app bundle, with the app entitlements when provided.
 app_sign_args=("${sign_args_base[@]}")

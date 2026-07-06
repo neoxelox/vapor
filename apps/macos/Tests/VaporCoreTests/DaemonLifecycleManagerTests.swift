@@ -3,279 +3,265 @@ import Testing
 
 @testable import VaporCore
 
-@Test
-func bootstrapDefaultsToAutoLaunchEnabledAndStartsDaemon() throws {
-  let store = InMemoryAutoLaunchSettingStore()
-  let controller = RecordingLaunchAgentController()
-  let manager = DaemonLifecycleManager(
-    launchAgentController: controller,
-    settingsStore: store,
-    crashLoopPolicy: .init(
-      failureWindow: 60,
-      baseDelay: 2,
-      maxDelay: 32,
-      delayStartsAfterFailures: 2,
-      maxConsecutiveFailuresBeforePause: 10
-    )
-  )
-
-  #expect(manager.autoLaunchEnabled)
-
-  let result = try manager.bootstrapIfNeeded(now: Date(timeIntervalSince1970: 0))
-  #expect(result == .started)
-  #expect(store.bool(forKey: DaemonLifecycleManager.autoLaunchSettingKey) == true)
-  #expect(controller.operations == ["install", "start"])
-}
+// `DaemonLifecycleManager` is a thin facade since M2-1/C4-7: lifecycle
+// *policy* (autolaunch persistence, crash-loop backoff/pause,
+// supervision) lives in the Rust `core/lifecycle` crate behind the
+// `vapor` CLI and is tested there. These tests cover what Swift still
+// owns: delegation order, outcome mapping, and login-item coupling.
 
 @Test
-func disablingAutoLaunchWithoutStopKeepsDaemonRunning() throws {
-  let store = InMemoryAutoLaunchSettingStore(
-    seed: [DaemonLifecycleManager.autoLaunchSettingKey: true]
-  )
-  let controller = RecordingLaunchAgentController()
-  let manager = DaemonLifecycleManager(launchAgentController: controller, settingsStore: store)
-
-  let result = try manager.setAutoLaunchEnabled(false, stopDaemonNow: false)
-
-  #expect(result == .unchanged)
-  #expect(manager.autoLaunchEnabled == false)
-  #expect(controller.operations == ["disable"])
-}
-
-@Test
-func disablingAutoLaunchWithStopAlsoStopsDaemon() throws {
-  let store = InMemoryAutoLaunchSettingStore(
-    seed: [DaemonLifecycleManager.autoLaunchSettingKey: true]
-  )
-  let controller = RecordingLaunchAgentController()
-  let manager = DaemonLifecycleManager(launchAgentController: controller, settingsStore: store)
-
-  let result = try manager.setAutoLaunchEnabled(false, stopDaemonNow: true)
-
-  #expect(result == .stopped)
-  #expect(controller.operations == ["disable", "stop"])
-}
-
-@Test
-func crashLoopDefersRelaunchWithExponentialBackoff() throws {
-  let store = InMemoryAutoLaunchSettingStore(
-    seed: [DaemonLifecycleManager.autoLaunchSettingKey: true]
-  )
-  let controller = RecordingLaunchAgentController()
-  let manager = DaemonLifecycleManager(
-    launchAgentController: controller,
-    settingsStore: store,
-    crashLoopPolicy: .init(
-      failureWindow: 60,
-      baseDelay: 4,
-      maxDelay: 32,
-      delayStartsAfterFailures: 2,
-      maxConsecutiveFailuresBeforePause: 10
-    )
-  )
-
-  // Canonical schedule (parity with core/lifecycle): the first
-  // `delayStartsAfterFailures` crashes are delay-free; backoff starts on
-  // the next crash at `baseDelay` and doubles from there.
-  let t0 = Date(timeIntervalSince1970: 0)
-  #expect(manager.registerUnexpectedDaemonExit(now: t0) == .noDelay)
-  #expect(manager.registerUnexpectedDaemonExit(now: t0.addingTimeInterval(1)) == .noDelay)
-  #expect(manager.registerUnexpectedDaemonExit(now: t0.addingTimeInterval(2)) == .backoff(4))
-
-  let deferred = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(3))
-  #expect(deferred == .relaunchDeferred(3))
-  #expect(controller.operations.isEmpty)
-
-  let started = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(6))
-  #expect(started == .started)
-  #expect(controller.operations == ["start"])
-}
-
-@Test
-func defaultPolicyScheduleMatchesTheRustParityContract() {
-  // Mirrors `default_policy_schedule_is_nodelay_then_doubling_backoff_then_pause`
-  // in core/lifecycle/tests/crash_loop_parity.rs. If either side's
-  // schedule drifts, exactly one of the pair fails.
-  var guardrail = CrashLoopGuard(policy: .default)
-
-  let t0 = Date(timeIntervalSince1970: 0)
-  #expect(guardrail.registerCrash(at: t0) == .noDelay)
-  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(1)) == .backoff(2))
-  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(2)) == .backoff(4))
-  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(3)) == .backoff(8))
-  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(4)) == .paused)
-}
-
-@Test
-func unexpectedDaemonExitDoesNotTriggerSpontaneousRestartFor30Seconds() throws {
-  let store = InMemoryAutoLaunchSettingStore(
-    seed: [DaemonLifecycleManager.autoLaunchSettingKey: true]
-  )
-  let controller = RecordingLaunchAgentController()
-  let manager = DaemonLifecycleManager(
-    launchAgentController: controller,
-    settingsStore: store,
-    crashLoopPolicy: .init(
-      failureWindow: 600,
-      baseDelay: 2,
-      maxDelay: 120,
-      delayStartsAfterFailures: 1,
-      maxConsecutiveFailuresBeforePause: 5
-    )
-  )
-
-  let killedAt = Date(timeIntervalSince1970: 0)
-  _ = manager.registerUnexpectedDaemonExit(now: killedAt)
-
-  // No timer-driven path inside the manager spontaneously restarts the daemon
-  // after an unclean exit; combined with launchd KeepAlive=false (audited in
-  // LaunchAgentControllerTests), nothing in the system attempts a restart for
-  // the next 30 seconds.
-  #expect(controller.operations.isEmpty)
-
-  // Once a coordinator-driven trigger fires (user reopens window, login item,
-  // explicit menubar action) after the backoff has elapsed, the manager owns
-  // the restart — not launchd.
-  let restart = try manager.startDaemonIfAllowed(now: killedAt.addingTimeInterval(30))
-  #expect(restart == .started)
-  #expect(controller.operations == ["start"])
-}
-
-@Test
-func crashHistoryExpiresOutsideFailureWindow() {
-  var guardrail = CrashLoopGuard(
-    policy: .init(
-      failureWindow: 10,
-      baseDelay: 2,
-      maxDelay: 30,
-      delayStartsAfterFailures: 2,
-      maxConsecutiveFailuresBeforePause: 10
-    )
-  )
-
-  let t0 = Date(timeIntervalSince1970: 0)
-  #expect(guardrail.registerCrash(at: t0) == .noDelay)
-  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(1)) == .noDelay)
-  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(2)) == .backoff(2))
-  // 20 seconds later every prior crash fell out of the 10 s window, so
-  // the count restarts and the crash is delay-free again.
-  #expect(guardrail.registerCrash(at: t0.addingTimeInterval(20)) == .noDelay)
-}
-
-@Test
-func crashLoopPausesAfterMaxConsecutiveFailuresAndRefusesAutoRestartUntilAcknowledged() throws {
-  let store = InMemoryAutoLaunchSettingStore(
-    seed: [DaemonLifecycleManager.autoLaunchSettingKey: true]
-  )
-  let controller = RecordingLaunchAgentController()
-  let manager = DaemonLifecycleManager(
-    launchAgentController: controller,
-    settingsStore: store,
-    crashLoopPolicy: .init(
-      failureWindow: 600,
-      baseDelay: 2,
-      maxDelay: 120,
-      delayStartsAfterFailures: 1,
-      maxConsecutiveFailuresBeforePause: 3
-    )
-  )
-
-  let t0 = Date(timeIntervalSince1970: 0)
-  _ = manager.registerUnexpectedDaemonExit(now: t0)
-  _ = manager.registerUnexpectedDaemonExit(now: t0.addingTimeInterval(1))
-  let decision = manager.registerUnexpectedDaemonExit(now: t0.addingTimeInterval(2))
-  #expect(decision == .paused)
-  #expect(manager.isInCrashLoopPause)
-
-  let result = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(3_600))
-  if case .relaunchDeferred(let remaining) = result {
-    #expect(remaining == .infinity)
-  } else {
-    Issue.record("Expected relaunchDeferred(.infinity) while paused, got \(result)")
-  }
-  #expect(controller.operations.isEmpty)
-
-  manager.acknowledgeCrashLoopPause()
-  #expect(!manager.isInCrashLoopPause)
-
-  let resumed = try manager.startDaemonIfAllowed(now: t0.addingTimeInterval(3_700))
-  #expect(resumed == .started)
-  #expect(controller.operations == ["start"])
-}
-
-@Test
-func enablingAutoLaunchRegistersOptionalLoginItem() throws {
-  let store = InMemoryAutoLaunchSettingStore(seed: [
-    DaemonLifecycleManager.autoLaunchSettingKey: false
-  ])
-  let launchAgent = RecordingLaunchAgentController()
+func bootstrapDelegatesAndRegistersLoginItemWhenDaemonStarts() throws {
+  let controller = RecordingServiceController()
   let loginItem = RecordingLoginItemController()
   let manager = DaemonLifecycleManager(
-    launchAgentController: launchAgent,
-    settingsStore: store,
+    launchAgentController: controller,
     loginItemController: loginItem
   )
 
-  _ = try manager.setAutoLaunchEnabled(true)
+  let result = try manager.bootstrapIfNeeded()
 
+  #expect(result == .started)
+  #expect(controller.operations == ["bootstrap"])
   #expect(loginItem.operations == ["register"])
 }
 
 @Test
-func disablingAutoLaunchUnregistersOptionalLoginItem() throws {
-  let store = InMemoryAutoLaunchSettingStore(seed: [
-    DaemonLifecycleManager.autoLaunchSettingKey: true
-  ])
-  let launchAgent = RecordingLaunchAgentController()
+func bootstrapNoopSkipsLoginItemWhenAutoLaunchDisabled() throws {
+  let controller = RecordingServiceController()
+  controller.bootstrapResult = .unchanged
   let loginItem = RecordingLoginItemController()
   let manager = DaemonLifecycleManager(
-    launchAgentController: launchAgent,
-    settingsStore: store,
+    launchAgentController: controller,
     loginItemController: loginItem
   )
 
-  _ = try manager.setAutoLaunchEnabled(false)
+  let result = try manager.bootstrapIfNeeded()
 
+  #expect(result == .unchanged)
+  #expect(loginItem.operations.isEmpty)
+}
+
+@Test
+func bootstrapRegistersLoginItemEvenWhenStartIsDeferredByCrashLoopPolicy() throws {
+  // A deferred start still means autolaunch is enabled and the service
+  // definition was installed — the login item must be registered.
+  let controller = RecordingServiceController()
+  controller.bootstrapResult = .relaunchDeferred(2)
+  let loginItem = RecordingLoginItemController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: controller,
+    loginItemController: loginItem
+  )
+
+  let result = try manager.bootstrapIfNeeded()
+
+  #expect(result == .relaunchDeferred(2))
+  #expect(loginItem.operations == ["register"])
+}
+
+@Test
+func enablingAutoLaunchDelegatesInstallAndRegistersLoginItem() throws {
+  let controller = RecordingServiceController()
+  let loginItem = RecordingLoginItemController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: controller,
+    loginItemController: loginItem
+  )
+
+  let result = try manager.setAutoLaunchEnabled(true)
+
+  #expect(result == .started)
+  #expect(controller.operations == ["install"])
+  #expect(loginItem.operations == ["register"])
+}
+
+@Test
+func disablingAutoLaunchWithoutStopRequestsKeepRunningUninstall() throws {
+  let controller = RecordingServiceController()
+  let loginItem = RecordingLoginItemController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: controller,
+    loginItemController: loginItem
+  )
+
+  let result = try manager.setAutoLaunchEnabled(false, stopDaemonNow: false)
+
+  #expect(result == .unchanged)
+  #expect(controller.operations == ["uninstall(keep-running)"])
   #expect(loginItem.operations == ["unregister"])
 }
 
 @Test
-func loginItemRegistrationFailureDoesNotBlockDaemonLifecycle() throws {
-  let store = InMemoryAutoLaunchSettingStore(seed: [
-    DaemonLifecycleManager.autoLaunchSettingKey: true
-  ])
-  let launchAgent = RecordingLaunchAgentController()
-  let loginItem = ThrowingLoginItemController()
-  let manager = DaemonLifecycleManager(
-    launchAgentController: launchAgent,
-    settingsStore: store,
-    loginItemController: loginItem
-  )
+func disablingAutoLaunchWithStopRequestsStoppingUninstall() throws {
+  let controller = RecordingServiceController()
+  controller.uninstallResult = .stopped
+  let manager = DaemonLifecycleManager(launchAgentController: controller)
 
-  let result = try manager.bootstrapIfNeeded(now: Date(timeIntervalSince1970: 0))
+  let result = try manager.setAutoLaunchEnabled(false, stopDaemonNow: true)
 
-  #expect(result == .started)
-  #expect(launchAgent.operations == ["install", "start"])
+  #expect(result == .stopped)
+  #expect(controller.operations == ["uninstall(stop-now)"])
 }
 
-private final class RecordingLaunchAgentController: LaunchAgentControlling {
+@Test
+func startDaemonIfAllowedSurfacesDeferredOutcomeWithoutRetrying() throws {
+  let controller = RecordingServiceController()
+  controller.startResult = .relaunchDeferred(4)
+  let manager = DaemonLifecycleManager(launchAgentController: controller)
+
+  let result = try manager.startDaemonIfAllowed()
+
+  #expect(result == .relaunchDeferred(4))
+  #expect(controller.operations == ["start"])
+}
+
+@Test
+func stopDaemonForTerminationDelegatesToStop() throws {
+  let controller = RecordingServiceController()
+  let manager = DaemonLifecycleManager(launchAgentController: controller)
+
+  try manager.stopDaemonForTermination()
+
+  #expect(controller.operations == ["stop"])
+}
+
+@Test
+func autoLaunchEnabledReflectsCLIStatusReport() {
+  let controller = RecordingServiceController()
+  controller.statusSnapshot.autoLaunchEnabled = false
+  let manager = DaemonLifecycleManager(launchAgentController: controller)
+
+  #expect(manager.autoLaunchEnabled == false)
+}
+
+@Test
+func autoLaunchEnabledFallsBackToDefaultWhenCLIIsUnreachable() {
+  let manager = DaemonLifecycleManager(launchAgentController: ThrowingServiceController())
+
+  #expect(manager.autoLaunchEnabled == VaporConstants.Defaults.autoLaunch)
+}
+
+@Test
+func crashLoopPauseStateReflectsCLIStatusReport() {
+  let controller = RecordingServiceController()
+  controller.statusSnapshot.crashLoopPaused = true
+  let manager = DaemonLifecycleManager(launchAgentController: controller)
+
+  #expect(manager.isInCrashLoopPause)
+}
+
+@Test
+func acknowledgeCrashLoopPauseDelegatesToController() {
+  let controller = RecordingServiceController()
+  let manager = DaemonLifecycleManager(launchAgentController: controller)
+
+  manager.acknowledgeCrashLoopPause()
+
+  #expect(controller.operations == ["acknowledge"])
+}
+
+@Test
+func checkDaemonHealthDelegatesToController() throws {
+  let controller = RecordingServiceController()
+  controller.healthOutcome = .restartDeferred(2)
+  let manager = DaemonLifecycleManager(launchAgentController: controller)
+
+  let outcome = try manager.checkDaemonHealth()
+
+  #expect(outcome == .restartDeferred(2))
+  #expect(controller.operations == ["check"])
+}
+
+@Test
+func loginItemRegistrationFailureDoesNotBlockDaemonLifecycle() throws {
+  let controller = RecordingServiceController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: controller,
+    loginItemController: ThrowingLoginItemController()
+  )
+
+  let result = try manager.bootstrapIfNeeded()
+
+  #expect(result == .started)
+  #expect(controller.operations == ["bootstrap"])
+}
+
+// MARK: - Fakes
+
+final class RecordingServiceController: LaunchAgentControlling {
   var operations: [String] = []
+  var bootstrapResult: DaemonLifecycleActionResult = .started
+  var installResult: DaemonLifecycleActionResult = .started
+  var uninstallResult: DaemonLifecycleActionResult = .unchanged
+  var startResult: DaemonLifecycleActionResult = .started
+  var healthOutcome: ServiceHealthOutcome = .running
+  var statusSnapshot = ServiceStatusSnapshot(
+    status: "running",
+    label: VaporConstants.Daemon.launchAgentLabel,
+    autoLaunchEnabled: true,
+    crashLoopPaused: false,
+    consecutiveCrashes: 0
+  )
 
-  func installAndEnable() {
+  func bootstrap() throws -> DaemonLifecycleActionResult {
+    operations.append("bootstrap")
+    return bootstrapResult
+  }
+
+  func installAndEnable() throws -> DaemonLifecycleActionResult {
     operations.append("install")
+    return installResult
   }
 
-  func disableAndUninstall() {
-    operations.append("disable")
+  func disableAndUninstall(stopDaemonNow: Bool) throws -> DaemonLifecycleActionResult {
+    operations.append(stopDaemonNow ? "uninstall(stop-now)" : "uninstall(keep-running)")
+    return uninstallResult
   }
 
-  func startDaemon() {
+  func startDaemon() throws -> DaemonLifecycleActionResult {
     operations.append("start")
+    return startResult
   }
 
-  func stopDaemon() {
+  func stopDaemon() throws {
     operations.append("stop")
   }
+
+  func status() throws -> ServiceStatusSnapshot {
+    statusSnapshot
+  }
+
+  func checkDaemonHealth() throws -> ServiceHealthOutcome {
+    operations.append("check")
+    return healthOutcome
+  }
+
+  func acknowledgeCrashLoopPause() throws {
+    operations.append("acknowledge")
+    statusSnapshot.crashLoopPaused = false
+  }
+}
+
+private struct ThrowingServiceController: LaunchAgentControlling {
+  struct ControllerError: Error {}
+
+  func bootstrap() throws -> DaemonLifecycleActionResult { throw ControllerError() }
+
+  func installAndEnable() throws -> DaemonLifecycleActionResult { throw ControllerError() }
+
+  func disableAndUninstall(stopDaemonNow _: Bool) throws -> DaemonLifecycleActionResult {
+    throw ControllerError()
+  }
+
+  func startDaemon() throws -> DaemonLifecycleActionResult { throw ControllerError() }
+
+  func stopDaemon() throws { throw ControllerError() }
+
+  func status() throws -> ServiceStatusSnapshot { throw ControllerError() }
+
+  func checkDaemonHealth() throws -> ServiceHealthOutcome { throw ControllerError() }
+
+  func acknowledgeCrashLoopPause() throws { throw ControllerError() }
 }
 
 private final class RecordingLoginItemController: LoginItemControlling {

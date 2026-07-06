@@ -14,15 +14,17 @@ Responsibilities:
 
 Current implementation notes:
 
-- `VaporCore` includes `DaemonLifecycleManager` for default auto-launch policy, toggle semantics, crash-loop relaunch backoff, and login-item registration.
+- Daemon lifecycle is delegated to the Rust core: the app invokes the bundled `vapor` CLI (`Contents/Helpers/vapor`), and all lifecycle policy — autolaunch persistence, crash-loop backoff and pause, supervision — lives in `core/lifecycle` behind `vapor service`.
+- `VaporCore` includes `DaemonLifecycleManager` as a thin facade over the `LaunchAgentControlling` seam: it owns only serialization (one lifecycle operation at a time) and login-item registration; zero lifecycle policy lives in Swift.
+- `VaporCore` includes `VaporCLIServiceController`, the default `LaunchAgentControlling` implementation: it runs `vapor service <cmd> --json` as a subprocess and decodes the stable JSON contract rendered by `core/cli/src/commands/service.rs`.
+- `VaporCore` includes `DaemonHealthMonitor`, a 30-second timer (`VaporConstants.Daemon.healthTickIntervalSeconds`) that runs `vapor service check` each tick so unexpected daemon exits are detected and routed through the Rust crash-loop guard.
 - `VaporCore` includes `AppLifecycleCoordinator` for app-window/menubar lifecycle actions (Dock presence, daemon stop on quit).
 - `VaporCore` includes `VaporConfigurationStore` + `VaporPaths` for runtime directory resolution and `vapor.json` persistence.
 - `VaporCore` includes `VaporLocalizationStore` for JSON-catalog UI copy lookup with device-language selection and English fallback.
 - Locale source-of-truth catalogs live in `assets/locales/*.json` and are synced by scripts into `Sources/VaporCore/Resources/locales/*.json` before Swift build/test/package.
-- `VaporCore` includes a concrete `LaunchAgentController` that writes `~/Library/LaunchAgents/<label>.plist` and manages lifecycle with `launchctl`.
-- `AppShellViewModel` uses lifecycle defaults backed by `LaunchAgentController` and `SMAppService.mainApp` integration to restore Vapor at login in menubar-only mode.
-- Settings/config surface includes `useGitIgnore`, `useVaporIgnore`, `localSyncDirectory`, `cloudSyncDirectory`, `preIgnoreRules`, and `postIgnoreRules`, persisted in `vapor.json` and exported to daemon launch env as `VAPOR_USE_GITIGNORE`, `VAPOR_USE_VAPORIGNORE`, `VAPOR_LOCAL_SYNC_DIRECTORY`, `VAPOR_CLOUD_SYNC_DIRECTORY`, `VAPOR_PRE_IGNORE_RULES`, and `VAPOR_POST_IGNORE_RULES`.
-- Ignore toggles and saved ignore rules refresh the in-memory launch configuration immediately so future daemon lifecycle actions stay aligned with the latest persisted settings.
+- The LaunchAgent plist and `launchctl` interaction are owned by the Rust `NativeServiceInstaller` (`core/platform`), reached through `vapor service`; no Swift code writes the plist.
+- `AppShellViewModel` uses lifecycle defaults backed by `VaporCLIServiceController` and `SMAppService.mainApp` integration to restore Vapor at login in menubar-only mode.
+- Settings/config surface includes `useGitIgnore`, `useVaporIgnore`, `localSyncDirectory`, `cloudSyncDirectory`, `preIgnoreRules`, and `postIgnoreRules`, persisted in `vapor.json`; the daemon reads `vapor.json` at startup (the LaunchAgent environment carries only `VAPOR_DIR` + `VAPOR_ENV` pass-through, with `VAPOR_*` variables remaining per-field overrides).
 - Daemon startup ensures the configured local sync root exists before normal sync flow; provider-side cloud root creation is planned with Google Drive auth/root initialization work.
 - Settings/config surface includes `languageCode`, which defaults UI copy to English and falls back to English again if a requested catalog is unavailable.
 - Malformed `vapor.json` is preserved in place and surfaced as an actionable app diagnostic; Vapor uses in-memory defaults until the file is fixed or replaced.
@@ -30,6 +32,7 @@ Current implementation notes:
 - Startup performs daemon lifecycle bootstrap asynchronously so app window launch stays responsive.
 - Menubar provides only real lifecycle controls: `Open Vapor` restores Dock/window surface, auto-launch toggle updates persisted state, and `Quit Vapor` requests daemon stop before app termination.
 - Distribution artifacts are produced by `apps/macos/scripts/package.sh` (source of truth for app packaging, signing, and optional notarization).
+- `Vapor.app` bundles three executables — `Contents/MacOS/Vapor` (app), `Contents/MacOS/vapord` (daemon), and `Contents/Helpers/vapor` (CLI); `package.sh` builds, copies, signs, and asserts all three. The CLI lives in `Contents/Helpers/` because the default macOS filesystem is case-insensitive, so `vapor` cannot sit next to `Vapor`; the CLI resolves `vapord` first as a sibling, then at `../MacOS/vapord`.
 - Bundle identifier baseline is `sh.arn.vapor`.
 - Icon source of truth is `assets/icon.png` (1024x1024).
 

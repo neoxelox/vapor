@@ -1,10 +1,9 @@
 //! `AutoLaunchSettingStore` — persist the user's autolaunch preference.
 //!
-//! Mirrors the Swift `AutoLaunchSettingStore` /
-//! `VaporConfigurationAutoLaunchSettingStore` types in
-//! `apps/macos/Sources/VaporCore/DaemonLifecycle.swift`. The on-disk
-//! format is the same `vapor.json` the Swift app reads / writes; both
-//! surfaces share one source of truth.
+//! The single owner of the `autoLaunch` key in `vapor.json` since the
+//! Swift `AutoLaunchSettingStore` family retired with M2-1 / C4-7: the
+//! macOS app reads and writes the preference through the `vapor
+//! service` CLI, which lands here.
 //!
 //! Closes `core.md` C4-4.
 
