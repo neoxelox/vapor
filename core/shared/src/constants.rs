@@ -202,7 +202,7 @@ pub mod ipc {
     /// Windows / Linux apps, the daemon). Bump on any backwards-
     /// incompatible payload shape change. Pre-GA the sliding tolerance
     /// is `|N - M| <= 1`; see `docs/architecture/ipc-contracts.md`.
-    pub const SCHEMA_VERSION_CURRENT: u32 = 1;
+    pub const SCHEMA_VERSION_CURRENT: u32 = 2;
     /// Minimum peer schema version this build can interoperate with.
     /// Together with [`SCHEMA_VERSION_CURRENT`] this defines the local
     /// support window; the handshake fails when both sides cannot find

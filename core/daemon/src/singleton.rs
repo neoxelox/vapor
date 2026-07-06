@@ -103,10 +103,33 @@ mod tests {
         let first = SingletonLock::acquire(&lock_path).expect("first lock");
         let second = SingletonLock::acquire(&lock_path)
             .expect_err("second lock must be rejected while first is held");
-        assert!(matches!(second, SingletonLockError::AlreadyRunning(_)));
+        assert!(
+            matches!(second, SingletonLockError::AlreadyRunning(_)),
+            "second acquire must classify as AlreadyRunning, got: {second:?}"
+        );
 
         drop(first);
-        let reacquired = SingletonLock::acquire(&lock_path).expect("reacquire after release");
+        // Dropping releases the flock immediately for THIS process, but
+        // a concurrently forked child (parallel tests spawn helper
+        // subprocesses) can briefly inherit the lock fd until its exec
+        // closes it via O_CLOEXEC. Poll with a bounded deadline: the
+        // production analogue (daemon restart) never depends on
+        // sub-millisecond same-process release, and without the fork
+        // window this succeeds on the first attempt.
+        let mut reacquired = None;
+        for _ in 0..500 {
+            match SingletonLock::acquire(&lock_path) {
+                Ok(lock) => {
+                    reacquired = Some(lock);
+                    break;
+                }
+                Err(SingletonLockError::AlreadyRunning(_)) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(other) => panic!("unexpected reacquire failure: {other:?}"),
+            }
+        }
+        let reacquired = reacquired.expect("lock must become acquirable after release");
         assert_eq!(reacquired.path(), lock_path.as_path());
     }
 

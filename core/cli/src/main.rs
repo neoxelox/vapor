@@ -80,6 +80,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Per-intent "why stuck" diagnostics from the running daemon.
+    Diagnostics {
+        #[arg(long)]
+        json: bool,
+    },
     /// Tail the daemon log file at `<vapor_dir>/logs/vapord.logs`.
     Logs {
         #[arg(long)]
@@ -260,6 +265,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
         Command::FlushNow => dispatch_ack("flush-now", ipc_cmd::flush_now()),
         Command::Reconcile => dispatch_ack("reconcile", ipc_cmd::reconcile()),
         Command::Timeline { json } => dispatch_timeline(json),
+        Command::Diagnostics { json } => dispatch_diagnostics(json),
         Command::Logs { tail } => dispatch_logs(tail),
         Command::Auth { action } => dispatch_auth(action),
     }
@@ -306,6 +312,19 @@ fn dispatch_timeline(json: bool) -> Result<ExitCode, String> {
                 entry.timestamp_ms, entry.kind, entry.message
             );
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn dispatch_diagnostics(json: bool) -> Result<ExitCode, String> {
+    let diagnostics = ipc_cmd::diagnostics().map_err(|e| e.to_string())?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&diagnostics).map_err(|e| e.to_string())?
+        );
+    } else {
+        println!("{}", ipc_cmd::render_diagnostics(&diagnostics));
     }
     Ok(ExitCode::SUCCESS)
 }

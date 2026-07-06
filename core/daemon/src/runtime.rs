@@ -197,6 +197,11 @@ pub struct DaemonRuntime {
     mirror_delete_count: u64,
     /// Cumulative keep-both conflict copies created (C8-14).
     conflict_count: u64,
+    /// Daemon-wide activity timeline (C8-30); shared across profiles.
+    timeline: Option<Arc<crate::timeline::TimelineBuffer>>,
+    /// Last states emitted to the timeline, so transitions emit once.
+    last_timeline_run_state: Option<RunState>,
+    last_timeline_throttle: Option<vapor_shared::ThrottleState>,
     /// Stable device identifier (C8-15). Resolved and persisted by the
     /// bootstrap; ephemeral (hostname-derived, unpersisted) in ad-hoc
     /// embeddings and tests.
@@ -513,6 +518,7 @@ impl DaemonRuntime {
         }
 
         report.staged_executor = self.staged_executor.snapshot();
+        self.emit_timeline_events(&report, now);
 
         if let Some(publisher) = self.status_publisher.as_ref() {
             publisher.publish(DaemonStatusSnapshot::from_app(&self.app));
@@ -754,8 +760,212 @@ impl DaemonRuntime {
             mirror_revert_count: 0,
             mirror_delete_count: 0,
             conflict_count: 0,
+            timeline: None,
+            last_timeline_run_state: None,
+            last_timeline_throttle: None,
             device_id: vapor_shared::device_id::derive_device_id(),
         })
+    }
+
+    /// Wires the shared daemon activity timeline in (C8-30).
+    pub fn attach_timeline(&mut self, timeline: Arc<crate::timeline::TimelineBuffer>) {
+        self.timeline = Some(timeline);
+    }
+
+    /// Cumulative loop-prevention suppressions across both echo caches.
+    pub fn loop_suppression_count(&self) -> u64 {
+        self.local_echoes.suppressed_count() + self.remote_echoes.suppressed_count()
+    }
+
+    /// Events dropped at the bounded ingest boundary since startup.
+    pub fn dropped_incoming_event_count(&self) -> u64 {
+        self.recorder
+            .as_ref()
+            .map(|recorder| recorder.dropped_incoming_event_count() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Per-intent "why stuck" rows (C8-29): active executor stages plus
+    /// the oldest queued/retrying durable rows, each with a
+    /// human-readable blocker.
+    pub fn intent_diagnostics(
+        &self,
+        profile_id: &str,
+        limit: usize,
+        now: SystemTime,
+    ) -> Vec<vapor_ipc::IntentDiagnostic> {
+        let mut rows = Vec::new();
+        let mut active_ids = std::collections::BTreeSet::new();
+        let workgate = self.app.workgate_snapshot();
+        let paused = self.app.snapshot().run_state == RunState::Paused;
+
+        for (intent_id, path, kind, stage, elapsed_ms) in self.staged_executor.active_stages() {
+            active_ids.insert(intent_id);
+            let blocker_reason = match stage {
+                crate::executor::ExecutionStage::WaitingForHash => format!(
+                    "hash workers {}/{} and read tokens {}/{} in use",
+                    workgate.active_hash_workers,
+                    workgate.caps.hash_workers,
+                    workgate.active_read_tokens,
+                    workgate.caps.read_tokens
+                ),
+                crate::executor::ExecutionStage::WaitingForUpload => format!(
+                    "upload concurrency {}/{} in use",
+                    workgate.active_uploads, workgate.caps.upload_concurrency
+                ),
+                crate::executor::ExecutionStage::WaitingForDownload => format!(
+                    "download concurrency {}/{} in use",
+                    workgate.active_downloads, workgate.caps.download_concurrency
+                ),
+                _ => String::new(),
+            };
+            rows.push(vapor_ipc::IntentDiagnostic {
+                intent_id,
+                profile_id: profile_id.to_string(),
+                path: path.to_string_lossy().into_owned(),
+                action: format!("{kind:?}").to_lowercase(),
+                stage: format!("{stage:?}"),
+                elapsed_in_stage_ms: elapsed_ms,
+                attempt_count: 0,
+                last_error: String::new(),
+                blocker_reason,
+            });
+            if rows.len() >= limit {
+                return rows;
+            }
+        }
+
+        let queued = match self.state_db.list_queue_intents(limit) {
+            Ok(queued) => queued,
+            Err(error) => {
+                logging::warning(
+                    "Could not list queue intents for diagnostics",
+                    &[("error", error.to_string())],
+                );
+                return rows;
+            }
+        };
+        for intent in queued {
+            if active_ids.contains(&intent.id) || rows.len() >= limit {
+                continue;
+            }
+            let retrying = intent.available_at > now;
+            let stage = if retrying { "Retrying" } else { "Queued" };
+            let blocker_reason = if paused {
+                "daemon is paused".to_string()
+            } else if !self.cloud_root_ready {
+                "cloud sync directory is unavailable".to_string()
+            } else if self.startup_reconstruction_barrier {
+                "waiting for the startup reconstruction reconcile".to_string()
+            } else if retrying {
+                format!(
+                    "retry backoff active (attempt {}), next attempt at {:?}",
+                    intent.attempt_count, intent.available_at
+                )
+            } else {
+                format!(
+                    "waiting for admission; planner workers {}/{} in use",
+                    workgate.active_planner_workers, workgate.caps.planner_workers
+                )
+            };
+            let elapsed_in_stage_ms = now
+                .duration_since(intent.enqueued_at)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0);
+            rows.push(vapor_ipc::IntentDiagnostic {
+                intent_id: intent.id,
+                profile_id: profile_id.to_string(),
+                path: intent.path.to_string_lossy().into_owned(),
+                action: format!("{:?}", intent.kind).to_lowercase(),
+                stage: stage.to_string(),
+                elapsed_in_stage_ms,
+                attempt_count: intent.attempt_count,
+                last_error: intent.last_error.unwrap_or_default(),
+                blocker_reason,
+            });
+        }
+        rows
+    }
+
+    /// Emits timeline entries for state transitions and notable tick
+    /// outcomes (C8-30). Cheap: only fires on changes and non-zero
+    /// counters.
+    fn emit_timeline_events(&mut self, report: &RuntimeTickReport, now: SystemTime) {
+        let Some(timeline) = self.timeline.clone() else {
+            return;
+        };
+        let profile_id = DEFAULT_PROFILE_ID;
+
+        let run_state = self.app.snapshot().run_state;
+        if self.last_timeline_run_state != Some(run_state) {
+            timeline.push(
+                "run_state",
+                profile_id,
+                format!("{:?}: {}", run_state, self.app.snapshot().reason),
+                now,
+            );
+            self.last_timeline_run_state = Some(run_state);
+        }
+        let throttle_state = self.app.snapshot().throttle_state;
+        if self.last_timeline_throttle != Some(throttle_state) {
+            timeline.push(
+                "throttle",
+                profile_id,
+                format!(
+                    "{:?}: {}",
+                    throttle_state,
+                    self.app
+                        .throttle_decision()
+                        .map(|decision| decision.reason.clone())
+                        .unwrap_or_default()
+                ),
+                now,
+            );
+            self.last_timeline_throttle = Some(throttle_state);
+        }
+        if report.conflicts > 0 {
+            timeline.push(
+                "conflict",
+                profile_id,
+                format!("kept both versions for {} path(s)", report.conflicts),
+                now,
+            );
+        }
+        if report.failed_intents > 0 {
+            timeline.push(
+                "intent_failed",
+                profile_id,
+                format!("{} intent(s) failed terminally", report.failed_intents),
+                now,
+            );
+        }
+        if report.mirror_reverts > 0 || report.mirror_deletes > 0 {
+            timeline.push(
+                "mirror",
+                profile_id,
+                format!(
+                    "strict mirror reverted {} and removed {} path(s)",
+                    report.mirror_reverts, report.mirror_deletes
+                ),
+                now,
+            );
+        }
+        if let Some(root) = &report.completed_reconcile_root {
+            timeline.push(
+                "reconcile",
+                profile_id,
+                format!("reconcile completed for {}", root.display()),
+                now,
+            );
+        }
+        if report.remote_poll.cursor_expired {
+            timeline.push(
+                "feed",
+                profile_id,
+                "remote changes cursor expired; whole-scope reconcile scheduled",
+                now,
+            );
+        }
     }
 
     /// Overrides the device identifier (the bootstrap passes the value

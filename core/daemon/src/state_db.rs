@@ -192,6 +192,58 @@ impl DurableStateDb {
         read_schema_version(&self.connection)?.ok_or(StateDbError::MissingSchemaVersion)
     }
 
+    /// The oldest `limit` queue rows (pending and leased) for the
+    /// per-intent diagnostics surface (C8-29).
+    pub fn list_queue_intents(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<DurableIntentRecord>, StateDbError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, path_text, kind, enqueued_at_ms, available_at_ms,
+                    leased_at_ms, attempt_count, last_error
+             FROM queue_intents
+             ORDER BY available_at_ms, id
+             LIMIT ?",
+        )?;
+        let rows =
+            statement.query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (
+                id,
+                path_text,
+                kind,
+                enqueued_at_ms,
+                available_at_ms,
+                leased_at_ms,
+                attempt_count,
+                last_error,
+            ) = row?;
+            records.push(DurableIntentRecord {
+                id,
+                path: PathBuf::from(path_text),
+                kind: intent_kind_from_label(&kind)?,
+                enqueued_at: millis_to_system_time(enqueued_at_ms)?,
+                available_at: millis_to_system_time(available_at_ms)?,
+                leased_at: leased_at_ms.map(millis_to_system_time).transpose()?,
+                attempt_count: validate_attempt_count(attempt_count)?,
+                last_error,
+            });
+        }
+        Ok(records)
+    }
+
     pub fn queue_depth(&self) -> Result<usize, StateDbError> {
         count_intents(&self.connection, None)
     }

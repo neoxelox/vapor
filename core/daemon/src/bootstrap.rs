@@ -135,10 +135,16 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
         throttle_state: vapor_shared::ThrottleState::Light,
         provider_name: config.provider.clone(),
         throttle_reason: "starting up".to_string(),
+        ..DaemonStatusSnapshot::default()
     };
     let runtime_control = Arc::new(RuntimeControl::new());
     runtime.attach_control(runtime_control.clone());
-    let ipc_service = Arc::new(DaemonIpcService::new(initial_snapshot, runtime_control));
+    runtime.set_timeline_limit(config.timeline_event_limit);
+    let ipc_service = Arc::new(DaemonIpcService::with_timeline(
+        initial_snapshot,
+        runtime_control,
+        runtime.timeline(),
+    ));
     runtime.attach_status_publisher(ipc_service.clone());
     let ipc_handle = match ipc_server::spawn(ipc_service as Arc<dyn Service>) {
         Ok(handle) => Some(handle),

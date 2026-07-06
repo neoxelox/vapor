@@ -20,7 +20,8 @@ use std::io;
 use std::path::PathBuf;
 
 use vapor_ipc::{
-    AckResponse, Client, ClientError, FrameError, StatusResponse, TimelineResponse, TransportError,
+    AckResponse, Client, ClientError, DiagnosticsResponse, FrameError, StatusResponse,
+    TimelineResponse, TransportError,
 };
 use vapor_shared::{constants, runtime_paths};
 
@@ -150,12 +151,17 @@ pub fn timeline() -> Result<TimelineResponse, IpcCliError> {
     client.timeline().map_err(IpcCliError::from)
 }
 
+pub fn diagnostics() -> Result<DiagnosticsResponse, IpcCliError> {
+    let mut client = connect()?;
+    client.diagnostics().map_err(IpcCliError::from)
+}
+
 /// Render a [`StatusResponse`] as a human-readable string. The `--json`
 /// path uses `serde_json::to_string_pretty` directly; this helper is
 /// the default for plain-text output.
 pub fn render_status(status: &StatusResponse) -> String {
-    format!(
-        "Run state: {}\nThrottle: {} ({})\nProvider: {}\nDaemon: {}\nIPC schema: {}",
+    let mut rendered = format!(
+        "Run state: {}\nThrottle: {} ({})\nProvider: {}\nDaemon: {}\nIPC schema: {}\nQueue: {} pending, {} failed\nLoop prevention: {} suppressed echoes\nConflicts kept-both: {}",
         status.run_state,
         status.throttle_state,
         if status.throttle_reason.is_empty() {
@@ -166,7 +172,77 @@ pub fn render_status(status: &StatusResponse) -> String {
         status.provider_name,
         status.daemon_id,
         status.schema_version,
-    )
+        status.queue_depth,
+        status.failed_intents,
+        status.loop_prevention_suppressions,
+        status.conflicts,
+    );
+    if status.mirror_reverts > 0 || status.mirror_deletes > 0 {
+        rendered.push_str(&format!(
+            "\nStrict mirror: {} reverts, {} deletes",
+            status.mirror_reverts, status.mirror_deletes
+        ));
+    }
+    for profile in &status.profiles {
+        rendered.push_str(&format!(
+            "\nProfile {}: {} ({}, {}) queue {} failed {}{}",
+            profile.id,
+            profile.run_state,
+            profile.provider_name,
+            profile.sync_mode,
+            profile.queue_depth,
+            profile.failed_intents,
+            profile
+                .suspended_reason
+                .as_ref()
+                .map(|reason| format!(" — SUSPENDED: {reason}"))
+                .unwrap_or_default(),
+        ));
+    }
+    rendered
+}
+
+/// Render a [`DiagnosticsResponse`] as human-readable lines.
+pub fn render_diagnostics(diagnostics: &DiagnosticsResponse) -> String {
+    if diagnostics.intents.is_empty() {
+        return format!(
+            "No pending or in-flight intents. Dropped ingest events: {}",
+            diagnostics.dropped_incoming_events
+        );
+    }
+    let mut rendered = format!(
+        "{} intent(s){}; dropped ingest events: {}",
+        diagnostics.intents.len(),
+        if diagnostics.truncated {
+            " (truncated)"
+        } else {
+            ""
+        },
+        diagnostics.dropped_incoming_events
+    );
+    for intent in &diagnostics.intents {
+        rendered.push_str(&format!(
+            "\n#{} [{}] {} {} — stage {} ({} ms), attempts {}{}{}",
+            intent.intent_id,
+            intent.profile_id,
+            intent.action,
+            intent.path,
+            intent.stage,
+            intent.elapsed_in_stage_ms,
+            intent.attempt_count,
+            if intent.blocker_reason.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", intent.blocker_reason)
+            },
+            if intent.last_error.is_empty() {
+                String::new()
+            } else {
+                format!(" — last error: {}", intent.last_error)
+            },
+        ));
+    }
+    rendered
 }
 
 /// Tail the daemon log file at `<vapor_dir>/logs/vapord.logs`.
@@ -277,19 +353,62 @@ mod tests {
     #[test]
     fn render_status_includes_every_stable_field() {
         let status = StatusResponse {
-            schema_version: 1,
+            schema_version: 2,
             run_state: "Running".to_string(),
             throttle_state: "IdleDrain".to_string(),
             provider_name: "Filesystem (stub)".to_string(),
             throttle_reason: "idle, plugged in, and cool".to_string(),
             daemon_id: "vapord/0.2.0-alpha.3".to_string(),
+            queue_depth: 3,
+            failed_intents: 1,
+            conflicts: 2,
+            mirror_reverts: 1,
+            mirror_deletes: 1,
+            profiles: vec![vapor_ipc::ProfileStatus {
+                id: "mirror".to_string(),
+                provider_name: "filesystem".to_string(),
+                sync_mode: "pull-only".to_string(),
+                run_state: "Running".to_string(),
+                queue_depth: 3,
+                failed_intents: 1,
+                ..vapor_ipc::ProfileStatus::default()
+            }],
+            ..StatusResponse::default()
         };
         let rendered = render_status(&status);
         assert!(rendered.contains("Run state: Running"));
         assert!(rendered.contains("Throttle: IdleDrain"));
         assert!(rendered.contains("Provider: Filesystem (stub)"));
         assert!(rendered.contains("Daemon: vapord/0.2.0-alpha.3"));
-        assert!(rendered.contains("IPC schema: 1"));
+        assert!(rendered.contains("IPC schema: 2"));
+        assert!(rendered.contains("Queue: 3 pending, 1 failed"));
+        assert!(rendered.contains("Strict mirror: 1 reverts, 1 deletes"));
+        assert!(rendered.contains("Profile mirror: Running (filesystem, pull-only)"));
+    }
+
+    #[test]
+    fn render_diagnostics_explains_why_intents_are_stuck() {
+        let diagnostics = DiagnosticsResponse {
+            schema_version: 2,
+            intents: vec![vapor_ipc::IntentDiagnostic {
+                intent_id: 42,
+                profile_id: "default".to_string(),
+                path: "/watch/big.bin".to_string(),
+                action: "upload".to_string(),
+                stage: "Retrying".to_string(),
+                elapsed_in_stage_ms: 12_000,
+                attempt_count: 3,
+                last_error: "transient provider failure: timeout".to_string(),
+                blocker_reason: "retry backoff active".to_string(),
+            }],
+            truncated: false,
+            dropped_incoming_events: 2,
+        };
+        let rendered = render_diagnostics(&diagnostics);
+        assert!(rendered.contains("#42 [default] upload /watch/big.bin"));
+        assert!(rendered.contains("stage Retrying"));
+        assert!(rendered.contains("retry backoff active"));
+        assert!(rendered.contains("dropped ingest events: 2"));
     }
 
     #[test]
@@ -328,23 +447,32 @@ mod tests {
     #[test]
     fn status_json_shape_is_stable() {
         let status = StatusResponse {
-            schema_version: 1,
+            schema_version: 2,
             run_state: "Running".to_string(),
             throttle_state: "IdleDrain".to_string(),
             provider_name: "Filesystem (stub)".to_string(),
             throttle_reason: "idle, plugged in, and cool".to_string(),
             daemon_id: "vapord/0.0.0-test".to_string(),
+            ..StatusResponse::default()
         };
         let rendered = serde_json::to_string_pretty(&status).expect("serialize");
         assert_eq!(
             rendered,
             r#"{
-  "schema_version": 1,
+  "schema_version": 2,
   "run_state": "Running",
   "throttle_state": "IdleDrain",
   "provider_name": "Filesystem (stub)",
   "throttle_reason": "idle, plugged in, and cool",
-  "daemon_id": "vapord/0.0.0-test"
+  "daemon_id": "vapord/0.0.0-test",
+  "queue_depth": 0,
+  "failed_intents": 0,
+  "loop_prevention_suppressions": 0,
+  "conflicts": 0,
+  "mirror_reverts": 0,
+  "mirror_deletes": 0,
+  "profiles": [],
+  "resource_budget": null
 }"#
         );
     }
@@ -352,23 +480,25 @@ mod tests {
     #[test]
     fn timeline_json_shape_is_stable() {
         let timeline = TimelineResponse {
-            schema_version: 1,
+            schema_version: 2,
             entries: vec![vapor_ipc::TimelineEntry {
                 timestamp_ms: 1_700_000_000_000,
                 kind: "throttle".to_string(),
                 message: "entered IdleDrain".to_string(),
+                profile_id: "default".to_string(),
             }],
         };
         let rendered = serde_json::to_string_pretty(&timeline).expect("serialize");
         assert_eq!(
             rendered,
             r#"{
-  "schema_version": 1,
+  "schema_version": 2,
   "entries": [
     {
       "timestamp_ms": 1700000000000,
       "kind": "throttle",
-      "message": "entered IdleDrain"
+      "message": "entered IdleDrain",
+      "profile_id": "default"
     }
   ]
 }"#

@@ -42,6 +42,7 @@ fn fixture_status() -> StatusResponse {
         provider_name: "Filesystem (stub)".to_string(),
         throttle_reason: "idle, plugged in, and cool".to_string(),
         daemon_id: "vapord/test".to_string(),
+        ..StatusResponse::default()
     }
 }
 

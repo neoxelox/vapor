@@ -100,6 +100,7 @@ pub struct MultiProfileRuntime {
     tick_waker: Arc<TickWaker>,
     external_control: Option<Arc<RuntimeControl>>,
     status_publisher: Option<Arc<dyn StatusPublisher>>,
+    timeline: Arc<crate::timeline::TimelineBuffer>,
     clock: SharedClock,
     tick_interval: Duration,
     idle_tick_interval: Duration,
@@ -128,6 +129,21 @@ impl MultiProfileRuntime {
         )
     }
 
+    /// The shared daemon activity timeline (C8-30). Every profile
+    /// runtime appends to it; the IPC service reads it.
+    pub fn timeline(&self) -> Arc<crate::timeline::TimelineBuffer> {
+        self.timeline.clone()
+    }
+
+    /// Applies the configured `timelineEventLimit` (C8-30).
+    pub fn set_timeline_limit(&self, limit: i64) {
+        if let Ok(limit) = usize::try_from(limit)
+            && limit > 0
+        {
+            self.timeline.set_max_entries(limit);
+        }
+    }
+
     /// `state_root` overrides where per-profile durable DBs live
     /// (tests use a fixture directory; production resolves under
     /// `vapor_dir/state`).
@@ -143,6 +159,9 @@ impl MultiProfileRuntime {
     ) -> Result<Self, DaemonRuntimeError> {
         let now = clock.now_system();
         let tick_waker = Arc::new(TickWaker::default());
+        let timeline = crate::timeline::TimelineBuffer::new(
+            constants::config::DEFAULT_TIMELINE_EVENT_LIMIT as usize,
+        );
         let initial_state = ThrottleState::Light;
         let shared_workgate = Arc::new(Mutex::new(ThrottleWorkgate::new(
             initial_state,
@@ -184,6 +203,7 @@ impl MultiProfileRuntime {
                 false, // watchers are deduplicated at this level
             )?;
             runtime.set_device_id(device_id);
+            runtime.attach_timeline(timeline.clone());
             runtime.schedule_startup_reconcile(now)?;
             let control = Arc::new(RuntimeControl::new());
             runtime.attach_control(control.clone());
@@ -208,6 +228,7 @@ impl MultiProfileRuntime {
             tick_waker,
             external_control: None,
             status_publisher: None,
+            timeline,
             clock,
             tick_interval: Duration::from_millis(constants::engine::DEBOUNCE_TICK_MILLIS),
             idle_tick_interval: Duration::from_millis(constants::engine::IDLE_TICK_MILLIS),
@@ -222,7 +243,7 @@ impl MultiProfileRuntime {
     }
 
     pub fn attach_status_publisher(&mut self, publisher: Arc<dyn StatusPublisher>) {
-        publisher.publish(self.aggregate_status());
+        publisher.publish(self.aggregate_status(self.clock.now_system()));
         self.status_publisher = Some(publisher);
     }
 
@@ -299,12 +320,24 @@ impl MultiProfileRuntime {
                         ],
                     );
                     if slot.consecutive_tick_errors >= MAX_CONSECUTIVE_PROFILE_TICK_ERRORS {
+                        self.timeline.push(
+                            "profile",
+                            slot.profile.id.clone(),
+                            "profile suspended after repeated tick failures",
+                            now,
+                        );
                         suspend_profile(slot, format!("repeated tick failures: {error:?}"));
                         report.failed_profiles += 1;
                     }
                 }
                 Err(panic) => {
                     let reason = panic_message(panic);
+                    self.timeline.push(
+                        "profile",
+                        slot.profile.id.clone(),
+                        format!("profile suspended after panic: {reason}"),
+                        now,
+                    );
                     suspend_profile(slot, format!("panicked: {reason}"));
                     report.failed_profiles += 1;
                 }
@@ -312,7 +345,7 @@ impl MultiProfileRuntime {
         }
 
         if let Some(publisher) = self.status_publisher.as_ref() {
-            publisher.publish(self.aggregate_status());
+            publisher.publish(self.aggregate_status(now));
         }
         report
     }
@@ -369,9 +402,15 @@ impl MultiProfileRuntime {
         }
     }
 
-    /// One status snapshot for the whole daemon: the most conservative
-    /// run state wins; the reason names the profile mix.
-    fn aggregate_status(&self) -> DaemonStatusSnapshot {
+    /// One status snapshot for the whole daemon (C8-28/C8-65): the most
+    /// conservative run state wins, totals aggregate across profiles,
+    /// and each profile contributes a status row plus a bounded slice
+    /// of per-intent diagnostics.
+    fn aggregate_status(&self, now: SystemTime) -> DaemonStatusSnapshot {
+        /// Per-response bound on diagnostics rows: recency beats
+        /// completeness in a status payload.
+        const DIAGNOSTICS_ROW_CAP: usize = 100;
+
         let mut worst: Option<&ProfileSlot> = None;
         for slot in &self.slots {
             let candidate_rank = run_state_rank(slot_effective_run_state(slot));
@@ -382,28 +421,73 @@ impl MultiProfileRuntime {
                 worst = Some(slot);
             }
         }
-        match worst {
-            Some(slot) => {
-                let mut snapshot = DaemonStatusSnapshot::from_app(slot.runtime.app());
-                snapshot.run_state = format!("{:?}", slot_effective_run_state(slot));
-                if self.slots.len() > 1 {
-                    let live = self.slots.iter().filter(|s| s.failed.is_none()).count();
-                    snapshot.throttle_reason = format!(
-                        "{} of {} profiles active; {}",
-                        live,
-                        self.slots.len(),
-                        snapshot.throttle_reason
-                    );
-                }
-                snapshot
-            }
-            None => DaemonStatusSnapshot {
+        let Some(worst) = worst else {
+            return DaemonStatusSnapshot {
                 run_state: format!("{:?}", RunState::Error),
                 throttle_state: ThrottleState::Suspended,
                 provider_name: "none".to_string(),
                 throttle_reason: "no enabled profiles".to_string(),
-            },
+                ..DaemonStatusSnapshot::default()
+            };
+        };
+
+        let mut snapshot = DaemonStatusSnapshot::from_app(worst.runtime.app());
+        snapshot.run_state = format!("{:?}", slot_effective_run_state(worst));
+        if self.slots.len() > 1 {
+            let live = self.slots.iter().filter(|s| s.failed.is_none()).count();
+            snapshot.throttle_reason = format!(
+                "{} of {} profiles active; {}",
+                live,
+                self.slots.len(),
+                snapshot.throttle_reason
+            );
         }
+
+        let per_profile_cap = (DIAGNOSTICS_ROW_CAP / self.slots.len().max(1)).max(10);
+        for slot in &self.slots {
+            let queue_depth = slot.runtime.state_db().queue_depth().unwrap_or(0) as u64;
+            let failed_intents = slot.runtime.state_db().failed_depth().unwrap_or(0) as u64;
+            let (mirror_reverts, mirror_deletes) = slot.runtime.mirror_counters();
+            let conflicts = slot.runtime.conflict_count();
+            let app_snapshot = slot.runtime.app().snapshot();
+            snapshot.profiles.push(vapor_ipc::ProfileStatus {
+                id: slot.profile.id.clone(),
+                display_name: slot.profile.display_name.clone(),
+                provider_name: slot.profile.provider_kind.clone(),
+                sync_mode: slot.profile.scope.sync_mode.as_config_value().to_string(),
+                run_state: format!("{:?}", slot_effective_run_state(slot)),
+                reason: app_snapshot.reason.clone(),
+                queue_depth,
+                failed_intents,
+                conflicts,
+                mirror_reverts,
+                mirror_deletes,
+                suspended_reason: slot.failed.clone(),
+            });
+            snapshot.queue_depth += queue_depth;
+            snapshot.failed_intents += failed_intents;
+            snapshot.conflicts += conflicts;
+            snapshot.mirror_reverts += mirror_reverts;
+            snapshot.mirror_deletes += mirror_deletes;
+            snapshot.loop_prevention_suppressions += slot.runtime.loop_suppression_count();
+            snapshot.dropped_incoming_events += slot.runtime.dropped_incoming_event_count();
+
+            if snapshot.intent_diagnostics.len() < DIAGNOSTICS_ROW_CAP {
+                let remaining = DIAGNOSTICS_ROW_CAP - snapshot.intent_diagnostics.len();
+                let rows = slot.runtime.intent_diagnostics(
+                    &slot.profile.id,
+                    per_profile_cap.min(remaining),
+                    now,
+                );
+                if rows.len() == per_profile_cap.min(remaining) && queue_depth > rows.len() as u64 {
+                    snapshot.diagnostics_truncated = true;
+                }
+                snapshot.intent_diagnostics.extend(rows);
+            } else {
+                snapshot.diagnostics_truncated = true;
+            }
+        }
+        snapshot
     }
 }
 

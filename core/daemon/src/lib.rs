@@ -50,6 +50,7 @@ pub mod state_db;
 pub mod storm;
 pub mod sync_directories;
 pub mod throttle;
+pub mod timeline;
 pub mod workgate;
 
 pub struct DaemonApp {

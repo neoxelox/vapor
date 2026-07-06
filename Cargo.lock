@@ -813,6 +813,7 @@ dependencies = [
  "globset",
  "notify",
  "rusqlite",
+ "serde_json",
  "sha2",
  "tempfile",
  "vapor-ipc",
