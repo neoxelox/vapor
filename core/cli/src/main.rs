@@ -348,7 +348,14 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
             token,
             profile,
         } => {
-            let token = resolve_auth_token(token)?;
+            // Google Drive without an explicit --token runs the full
+            // OAuth-PKCE browser flow (C8-48); every other path keeps
+            // the explicit/stdin token behavior.
+            let token = if provider == "google_drive" && token.is_none() {
+                auth_cmd::run_gdrive_pkce_flow()?
+            } else {
+                resolve_auth_token(token)?
+            };
             auth_cmd::login_into(store.as_ref(), &profile, &provider, &token)
                 .map_err(|e| e.to_string())?;
             if persistent {

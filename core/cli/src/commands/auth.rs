@@ -163,6 +163,93 @@ pub fn build_native_store() -> Box<dyn SecretStore> {
     }
 }
 
+/// Interactive OAuth-PKCE login for Google Drive (C8-48): a loopback
+/// redirect listener plus the system browser. Blocking by design — the
+/// CLI waits for the consent hop. Returns the stored-token JSON that
+/// goes into the secret store.
+pub fn run_gdrive_pkce_flow() -> Result<String, String> {
+    use std::io::{BufRead, BufReader, Write};
+    use vapor_providers::gdrive::oauth;
+
+    let client_id = std::env::var(vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "{} is not set. Create an OAuth client id (Desktop app) in the Google Cloud console and export it; see docs/operations/provider-auth-operations.md",
+                vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID
+            )
+        })?;
+    let client_secret = std::env::var(vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_SECRET)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|error| format!("cannot bind the loopback redirect listener: {error}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| format!("cannot resolve listener address: {error}"))?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{port}");
+
+    let verifier = oauth::generate_code_verifier();
+    let challenge = oauth::code_challenge(&verifier);
+    let url = oauth::authorization_url(&client_id, &redirect_uri, &challenge);
+
+    eprintln!("Open this URL in your browser to authorize Vapor:");
+    eprintln!("  {url}");
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&url).spawn();
+    }
+    eprintln!("Waiting for the authorization redirect on {redirect_uri} ...");
+
+    let (stream, _) = listener
+        .accept()
+        .map_err(|error| format!("redirect listener failed: {error}"))?;
+    let mut reader = BufReader::new(&stream);
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .map_err(|error| format!("cannot read the redirect request: {error}"))?;
+    // GET /?code=...&scope=... HTTP/1.1
+    let code = request_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|path| path.split('?').nth(1))
+        .and_then(|query| {
+            query
+                .split('&')
+                .find(|pair| pair.starts_with("code="))
+                .map(|pair| pair.trim_start_matches("code=").to_string())
+        })
+        .filter(|code| !code.is_empty())
+        .ok_or_else(|| "the redirect did not carry an authorization code".to_string())?;
+    let mut stream = stream;
+    let _ = stream.write_all(
+        b"HTTP/1.1 200 OK
+Content-Type: text/html
+
+<html><body>Vapor is authorized. You can close this tab.</body></html>",
+    );
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let tokens = oauth::exchange_code(
+        &vapor_providers::http::NativeHttpTransport,
+        &client_id,
+        client_secret.as_deref(),
+        &code,
+        &verifier,
+        &redirect_uri,
+        now_ms,
+    )
+    .map_err(|error| error.to_string())?;
+    serde_json::to_string(&tokens).map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

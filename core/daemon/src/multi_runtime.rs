@@ -194,7 +194,10 @@ impl MultiProfileRuntime {
                 None => vapor_shared::runtime_paths::profile_database_path(&profile.id),
             };
             let state_db = DurableStateDb::open_with_corruption_recovery(&database_path, now)?;
-            let provider = match vapor_providers::select_provider(&profile.provider_kind) {
+            let provider = match vapor_providers::select_provider_for_profile(
+                &profile.provider_kind,
+                &profile.id,
+            ) {
                 Ok(provider) => provider,
                 Err(error) => {
                     logging::error(

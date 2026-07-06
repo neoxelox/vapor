@@ -18,6 +18,8 @@ use vapor_shared::{ProviderErrorKind, ThrottleState};
 
 pub mod bandwidth;
 pub mod filesystem;
+pub mod gdrive;
+pub mod http;
 pub mod logging;
 mod paths;
 pub mod tags;
@@ -336,99 +338,35 @@ pub trait Provider: Send + Sync {
 
 pub use filesystem::FilesystemProvider;
 
-/// Google Drive provider (C8-48…C8-54). Compiled but inert until the
-/// real Drive integration lands: `ensure_cloud_sync_directory` fails
-/// loudly with an actionable classification instead of pretending the
-/// folder exists, which blocks regular sync work per C8-50.
-#[derive(Debug, Default)]
-pub struct GoogleDriveProvider;
-
-impl Provider for GoogleDriveProvider {
-    fn name(&self) -> &'static str {
-        "google_drive"
-    }
-
-    fn capabilities(&self) -> ProviderCapabilities {
-        ProviderCapabilities::GDRIVE_MVP
-    }
-
-    fn content_hash_algorithm(&self) -> HashAlgorithm {
-        HashAlgorithm::Md5
-    }
-
-    fn ensure_cloud_sync_directory(
-        &self,
-        _cloud_sync_directory: &str,
-    ) -> Result<(), ProviderError> {
-        Err(ProviderError::permanent(
-            "GoogleDriveProvider is not implemented yet (C8-48); \
-             set `provider` to \"filesystem\" until it ships",
-        ))
-    }
-
-    fn enumerate(&self, _directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {
-        Err(gdrive_inert_error())
-    }
-
-    fn stat(&self, _path: &RemotePath) -> Result<Option<RemoteEntry>, ProviderError> {
-        Err(gdrive_inert_error())
-    }
-
-    fn content_hash(&self, _path: &RemotePath) -> Result<String, ProviderError> {
-        Err(gdrive_inert_error())
-    }
-
-    fn begin_upload(
-        &self,
-        _request: UploadRequest,
-    ) -> Result<Box<dyn TransferSession>, ProviderError> {
-        Err(gdrive_inert_error())
-    }
-
-    fn begin_download(
-        &self,
-        _request: DownloadRequest,
-    ) -> Result<Box<dyn TransferSession>, ProviderError> {
-        Err(gdrive_inert_error())
-    }
-
-    fn delete(&self, _path: &RemotePath, _op_id: &str) -> Result<(), ProviderError> {
-        Err(gdrive_inert_error())
-    }
-
-    fn rename(
-        &self,
-        _from: &RemotePath,
-        _to: &RemotePath,
-        _op_id: &str,
-    ) -> Result<(), ProviderError> {
-        Err(gdrive_inert_error())
-    }
-
-    fn poll_changes(
-        &self,
-        _cursor: Option<&str>,
-        _max_changes: usize,
-    ) -> Result<ChangesPoll, ProviderError> {
-        Err(gdrive_inert_error())
-    }
-}
-
-fn gdrive_inert_error() -> ProviderError {
-    ProviderError::permanent("GoogleDriveProvider is not implemented yet (C8-48)")
-}
+pub use gdrive::GoogleDriveProvider;
 
 /// Resolves the configured `provider` value onto a provider instance
 /// (C8-9). Unknown values are a configuration error the caller must
 /// surface — never a silent fallback, because a wrong provider guess
 /// could sync into the wrong place.
 pub fn select_provider(kind: &str) -> Result<Box<dyn Provider>, ProviderError> {
+    select_provider_for_profile(
+        kind,
+        vapor_shared::constants::provider::DEFAULT_PROFILE_FALLBACK,
+    )
+}
+
+/// Profile-aware provider selection (C8-54): `google_drive` is now
+/// selectable, constructed against the profile's namespaced
+/// credentials. Missing credentials do not fail selection — they
+/// surface as an actionable `Authentication` error when the engine
+/// ensures the cloud root, which blocks sync until
+/// `vapor auth login google_drive` runs (C8-50).
+pub fn select_provider_for_profile(
+    kind: &str,
+    profile_id: &str,
+) -> Result<Box<dyn Provider>, ProviderError> {
     match kind.trim() {
         value if value == vapor_shared::constants::provider::FILESYSTEM => {
             Ok(Box::new(FilesystemProvider::new()))
         }
         value if value == vapor_shared::constants::provider::GOOGLE_DRIVE => {
-            Ok(Box::new(GoogleDriveProvider))
+            Ok(Box::new(GoogleDriveProvider::for_profile(profile_id)?))
         }
         other => Err(ProviderError::permanent(format!(
             "unknown provider '{other}'; accepted values: {}",

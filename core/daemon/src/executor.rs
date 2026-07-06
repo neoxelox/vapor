@@ -394,7 +394,11 @@ impl StagedExecutor {
                     execution.stage = ActiveStage::WaitingForHash { plan };
                     return Ok(Some(execution));
                 };
-                match StreamingFileHash::open(&plan.local_path) {
+                // The provider's algorithm decides how local content is
+                // hashed so local/remote comparisons agree (SHA-256 for
+                // the filesystem provider, MD5 for Google Drive).
+                let algorithm = app.provider().content_hash_algorithm();
+                match StreamingFileHash::open(&plan.local_path, algorithm) {
                     Ok(hasher) => {
                         execution.stage = ActiveStage::Hash {
                             permit,
@@ -1572,18 +1576,48 @@ fn max_in_flight_items(workgate: WorkgateSnapshot) -> usize {
         + workgate.caps.download_concurrency
 }
 
-/// Chunked SHA-256 of a local file: at most `max_bytes` read per step
-/// so one hashing execution never exceeds its per-tick budget.
+/// Chunked content hash of a local file in the provider's algorithm:
+/// at most `max_bytes` read per step so one hashing execution never
+/// exceeds its per-tick budget.
 struct StreamingFileHash {
     file: fs::File,
-    hasher: Sha256,
+    hasher: HashState,
+}
+
+enum HashState {
+    Sha256(Sha256),
+    Md5(md5::Md5),
+}
+
+impl HashState {
+    fn update(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Sha256(hasher) => hasher.update(bytes),
+            Self::Md5(hasher) => hasher.update(bytes),
+        }
+    }
+
+    fn finalize_hex(&mut self) -> String {
+        let digest: Vec<u8> = match self {
+            Self::Sha256(hasher) => std::mem::take(hasher).finalize().to_vec(),
+            Self::Md5(hasher) => std::mem::take(hasher).finalize().to_vec(),
+        };
+        let mut hex = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
 }
 
 impl StreamingFileHash {
-    fn open(path: &Path) -> std::io::Result<Self> {
+    fn open(path: &Path, algorithm: vapor_providers::HashAlgorithm) -> std::io::Result<Self> {
         Ok(Self {
             file: fs::File::open(path)?,
-            hasher: Sha256::new(),
+            hasher: match algorithm {
+                vapor_providers::HashAlgorithm::Sha256 => HashState::Sha256(Sha256::new()),
+                vapor_providers::HashAlgorithm::Md5 => HashState::Md5(md5::Md5::new()),
+            },
         })
     }
 
@@ -1595,12 +1629,7 @@ impl StreamingFileHash {
             let chunk = buffer.len().min(remaining as usize);
             let read = self.file.read(&mut buffer[..chunk])?;
             if read == 0 {
-                let digest = std::mem::take(&mut self.hasher).finalize();
-                let mut hex = String::with_capacity(digest.len() * 2);
-                for byte in digest {
-                    hex.push_str(&format!("{byte:02x}"));
-                }
-                return Ok(Some(hex));
+                return Ok(Some(self.hasher.finalize_hex()));
             }
             self.hasher.update(&buffer[..read]);
             remaining -= read as u64;

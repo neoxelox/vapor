@@ -8,6 +8,11 @@ pub mod env {
     pub const VAPOR_CLOUD_SYNC_DIRECTORY: &str = "VAPOR_CLOUD_SYNC_DIRECTORY";
     pub const VAPOR_PRE_IGNORE_RULES: &str = "VAPOR_PRE_IGNORE_RULES";
     pub const VAPOR_POST_IGNORE_RULES: &str = "VAPOR_POST_IGNORE_RULES";
+    /// OAuth client credentials for the Google Drive provider
+    /// (installed-app PKCE; per-deployment, never baked into the
+    /// binary). See `docs/operations/provider-auth-operations.md`.
+    pub const VAPOR_GDRIVE_CLIENT_ID: &str = "VAPOR_GDRIVE_CLIENT_ID";
+    pub const VAPOR_GDRIVE_CLIENT_SECRET: &str = "VAPOR_GDRIVE_CLIENT_SECRET";
 }
 
 pub mod runtime {
@@ -151,6 +156,8 @@ pub mod provider {
     /// feed. A cursor older than the ring floor reports `CursorExpired`,
     /// which forces a reconcile instead of silently missing changes.
     pub const CHANGES_FEED_RING_MAX_EVENTS: usize = 8_192;
+    /// Profile id used by profile-agnostic provider selection calls.
+    pub const DEFAULT_PROFILE_FALLBACK: &str = "default";
 }
 
 pub mod profile {
