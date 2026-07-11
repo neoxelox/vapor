@@ -664,8 +664,8 @@ outside the sync contract. The full first-class-folder workstream
 evaluated and rejected — the file-only model is what keeps the conflict,
 echo-suppression, and transfer machinery simple and robust, and the
 rename fallback (delete + re-upload through children) is data-safe.
-User-facing contract: root `README.md` **What Syncs** table. Engine
-semantics: `data-flow.md §Directory and symlink semantics`.
+Contract and engine semantics:
+`data-flow.md §Directory and symlink semantics`.
 
 ## Phase C9 - `vapor` CLI delivery
 
@@ -800,3 +800,9 @@ snapshot.
       (information architecture, step sequence, copy, UX states). When this
       starts, run a clarification pass with the project owner to define the
       onboarding structure before implementation.
+- [ ] R-1 Write the incident runbooks `AGENTS.md §12` mandates under
+      `docs/operations/`: daemon crash loops, auth/token refresh
+      failures, provider rate-limit storms, schema migration failures,
+      reconcile backlog non-convergence. Only the release incident
+      playbook exists today. Each runbook needs detection, mitigation,
+      user-visible state, and recovery verification.

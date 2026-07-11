@@ -51,21 +51,6 @@ In flight and coming next:
 
 - More cloud providers as demand surfaces (the provider system is pluggable; see `docs/architecture/provider-onboarding.md`).
 
-## What Syncs
-
-Vapor syncs file content. Everything else on a filesystem is handled deliberately:
-
-| Item | How Vapor treats it |
-| ---- | ------------------- |
-| 📄 Regular files | Fully synced, byte-for-byte, in both directions (following the configured sync direction). |
-| 📁 Folders | Containers, not synced objects: each side creates them automatically as the files inside them sync, and deleting a folder propagates. An empty folder does not appear on the other side, and renaming a folder re-syncs its contents under the new name. |
-| 🙈 Ignored files | Anything matching the ignore rules never syncs in either direction — it can't be pulled down from the cloud, and it never causes a conflict. |
-| ⚔️ Conflicting edits | When both sides change the same file, both versions are kept — the other device's version stays next to yours as a `~conflict-` copy until you resolve it. Nothing is ever silently overwritten. |
-| 🔗 Symlinks | Never followed and never synced: a link could pull content from outside your sync folder into scope, and cloud providers can't represent them faithfully. |
-| 🪢 Hard links | Synced as an ordinary independent file; the link relationship is not preserved on the other side. |
-| 🕳 Special files (pipes, sockets, devices) | Ignored entirely — they carry no transferable content and never block the files around them. |
-| 🏷 Metadata (permissions, extended attributes, timestamps) | Not synced; content only. Vapor's own bookkeeping tags stay invisible and never appear in your listings. |
-
 ## Benchmarks
 
 > TBD
@@ -83,20 +68,16 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`; Vapor reads 
 | `useVaporIgnore`     | `Bool`   | `true`                                              | Applies recursive `.vaporignore` rules during local filtering.                           |
 | `localSyncDirectory` | `String` | `"~/Vapor"`                                         | Sets the local sync root; Vapor creates it if it does not exist yet.                     |
 | `cloudSyncDirectory` | `String` | `"/Vapor"`                                          | Sets the cloud sync root; Vapor creates it if it does not exist yet.                     |
-| `provider`           | `String` | `"filesystem"`                                      | Chooses the cloud backend: `filesystem` (a local folder acting as the cloud side) or `gdrive` (requires `vapor auth login gdrive`). |
+| `provider`           | `String` | `"filesystem"`                                      | Chooses the cloud backend: `filesystem` (a local folder acting as the cloud side) or `gdrive` (requires `vapor auth login gdrive`). Google Drive client credentials are supplied per deployment through the `VAPOR_GDRIVE_CLIENT_ID` / `VAPOR_GDRIVE_CLIENT_SECRET` environment variables (see `.env.example` and `docs/operations/provider-auth-operations.md`); user tokens are stored only in the platform secret store, never in `vapor.json`. |
 | `syncMode`           | `String` | `"two-way"`                                         | Chooses the sync direction: `two-way` (bidirectional), `pull-only` (cloud → local, a read-only local mirror), or `push-only` (local → cloud, a read-only cloud backup). |
 | `preIgnoreRules`     | `String` | Embedded `.gitignore`-like low-impact default rules | Provides the baseline ignore rules that run before discovered ignore files.              |
 | `postIgnoreRules`    | `String` | Empty string                                        | Provides the final override rules that run after discovered ignore files.                |
 | `languageCode`       | `String` | `"en"`                                              | Selects the UI language catalog to load.                                                 |
-| `timelineEventLimit` | `Int`    | `1000`                                              | Caps the in-memory timeline length shown in diagnostics.                                 |
+| `timelineLimit` | `Int`    | `1000`                                              | Caps the in-memory timeline length shown in diagnostics.                                 |
 | `deviceId`           | `String` | Derived from the hostname on first run              | Stable per-device identifier used in conflict-copy names (for example `report~conflict-mac-studio-....pdf`). Written by the daemon; never regenerated silently. |
 | `profiles`           | `Array`  | Absent (single implicit profile)                    | Optional named sync profiles. Each entry (`id`, `name`, `enabled`, plus optional `provider`, `localSyncDirectory`, `cloudSyncDirectory`, `syncMode`, `resourceLimits`, `idleBoost` overrides) runs as an isolated pipeline with its own durable state; unset fields inherit the top-level values. |
 | `resourceLimits`     | `Object` | `{ cpuPercent: 15, memoryPercent: 10, bandwidthPercent: 25 }` | Sets hard ceilings on daemon CPU (share of one core), device memory, and measured bandwidth. Honored by the throttle controller and auto-tuner. Profile overrides may only lower these values. |
-| `idleBoost`          | `Object` | See below                                           | Dynamically raises effective ceilings when the device is user-idle with measured resource headroom, ramping up slowly and down quickly. Setting `enabled: false` in any enabled profile disables boost daemon-wide. |
-
-`idleBoost` defaults: `enabled: true`, `minIdleSeconds: 300`, `headroomCpuPercent: 30`, `boostCpuPercent: 50`, `boostMemoryPercent: 20`, `boostBandwidthPercent: 80`, `rampUpSeconds: 30`, `rampDownSeconds: 10`. Each `boost*Percent` must be `>=` the matching `resourceLimits.*Percent` (lower values are treated as equal to the base ceiling). Boost requires all of: throttle state `IdleDrain`, user-idle for at least `minIdleSeconds`, and non-Vapor CPU utilization at or below `headroomCpuPercent`. Ramp-down is deliberately faster than ramp-up so returning to your device is never met with a busy daemon.
-
-Google Drive credentials are supplied per deployment through the `VAPOR_GDRIVE_CLIENT_ID` / `VAPOR_GDRIVE_CLIENT_SECRET` environment variables (see `.env.example` and `docs/operations/provider-auth-operations.md`); user tokens are stored only in the platform secret store, never in `vapor.json`.
+| `idleBoost`          | `Object` | `{ enabled: true, minIdleSeconds: 300, headroomCpuPercent: 30, boostCpuPercent: 50, boostMemoryPercent: 20, boostBandwidthPercent: 80, rampUpSeconds: 30, rampDownSeconds: 10 }` | Dynamically raises effective ceilings when the device is user-idle with measured resource headroom. Boost requires all of: throttle state `IdleDrain`, user-idle for at least `minIdleSeconds`, and non-Vapor CPU utilization at or below `headroomCpuPercent`. Each `boost*Percent` must be `>=` the matching `resourceLimits.*Percent` (lower values are treated as equal to the base ceiling). Ramp-down is deliberately faster than ramp-up so returning to your device is never met with a busy daemon. Setting `enabled: false` in any enabled profile disables boost daemon-wide. |
 
 ### Ignore rules
 
@@ -158,24 +139,7 @@ Stack-specific helpers:
 
 ### Releases
 
-Version bumps with `./scripts/version.sh`:
-
-1. Commit all changes and checkout to `main` with a clean worktree.
-2. Run `./scripts/format.sh`, `./scripts/lint.sh`, and `./scripts/test.sh`, then commit any fixes they produce.
-3. Update `CHANGELOG.md` with a section that matches the target version and release date.
-4. Run the appropriate `./scripts/version.sh ...` command to update `VERSION`, sync Cargo metadata, create the release commit, and create the matching tag.
-5. Push the release commit and tag together: `git push origin "$(git branch --show-current)" --follow-tags`.
-6. Wait for `lint`, `test`, `perf`, and `release` to pass on the tag.
-7. Review the draft GitHub Release, verify `Vapor.zip` and `Checksums.txt`, then publish it.
-
-`./scripts/version.sh` usage:
-
-- Show current version: `./scripts/version.sh current`
-- Set an exact stable version: `./scripts/version.sh set 0.2.0`
-- Bump the stable base version: `./scripts/version.sh bump patch|minor|major`
-- Set an exact prerelease: `./scripts/version.sh set 0.2.0-rc.1`
-- Bump the current prerelease: `./scripts/version.sh prerelease rc|beta|alpha`
-- Convert to stable release: `./scripts/version.sh release`
+Releases are cut from a clean `main` with `./scripts/version.sh` (`set` / `bump patch|minor|major` / `prerelease` / `release`), which validates the worktree, updates `VERSION`, syncs Cargo metadata, and creates the release commit plus matching `v$(cat VERSION)` tag; pushing them together (`git push origin main --follow-tags`) runs the gated pipeline that builds, signs, and drafts the GitHub Release. Full runbook: `docs/operations/release-process.md`.
 
 ## Agents
 

@@ -4,7 +4,7 @@ This file defines the operating rules for contributors (human and AI) working on
 
 ## 1) Product intent and non-negotiables
 
-- `vapor` is an invisible-first background sync product. The first shipping surface is the macOS app; Windows, Linux, and a CLI (`vapor`) follow and consume the same portable Rust runtime.
+- `vapor` is an invisible-first background sync product. The shipping surfaces today are the macOS app and the `vapor` CLI (currently distributed inside `Vapor.app` as `Contents/Helpers/vapor`; standalone CLI artifacts are a pending roadmap wave); Windows and Linux apps follow and consume the same portable Rust runtime.
 - The Rust core (`core/*`) is the single portable runtime that powers every surface. Apps under `apps/*` and the `vapor` CLI are UI + OS-integration shims over that runtime; no business logic lives in them.
 - Platform-specific code is allowed and encouraged inside `core/platform` when it unlocks native performance; the engine consumes traits, not OS APIs directly.
 - Primary priority is user device impact, not strict real-time sync.
@@ -34,6 +34,11 @@ This file defines the operating rules for contributors (human and AI) working on
   - No provider-specific assumptions in core engine.
 - Shared contracts (`core/shared`)
   - IPC schemas, error taxonomies, settings models, version contracts.
+- IPC channel (`core/ipc`)
+  - Framed JSON-RPC transport between the daemon and every surface —
+    UDS on Unix today, named pipe on Windows when that surface ships.
+    Schemas live in `core/shared`; this crate owns framing and the
+    client/server plumbing.
 - Platform layer (`core/platform`)
   - Traits + per-OS native implementations for fs-watch, service install,
     secret store, metrics sampling, idle detection, filesystem capabilities,
@@ -129,11 +134,20 @@ concrete per-platform policy lives under `docs/operations/<platform>/`.
 
 ### 7.1) Shared principles
 
+The end-to-end release flow (validation, tagging, CI gates, publication)
+is the runbook `docs/operations/release-process.md`; start there when
+cutting a release. The principles below are the invariants that runbook
+must never violate.
+
 - Release artifacts are produced from a script-first pipeline, not an IDE
   archive flow. Every platform packaging script is CI-runnable.
-- Each platform gets an isolated GitHub Environment holding its secrets
-  (`release-macos`, `release-windows`, `release-linux`). Secrets never
-  cross-leak between platform release jobs.
+- Each shipping platform gets an isolated GitHub Environment holding
+  its release secrets (`release-macos` today; `release-windows` /
+  `release-linux` when those platforms ship), never repository-wide
+  secrets. Secrets never cross-leak between platform release jobs.
+  The `vapor` CLI has no environment of its own: CLI artifacts are
+  signed and published by each platform's release job under that
+  platform's environment (see §7.5).
 - App/daemon version compatibility rules must be maintained and tested
   per OS.
 - Product release version source-of-truth is the repository root `VERSION`
@@ -191,7 +205,10 @@ Lands with `apps/linux`. Expected controls: GPG-signed AppImage first;
 Pure Rust binaries per supported target triple, zstd-compressed, checksummed.
 Signing follows the host-OS policy (Developer ID on macOS, EV cert on
 Windows, GPG signature on Linux). Published alongside platform installers
-under the same GitHub Release tag.
+under the same GitHub Release tag. CLI release jobs run under the owning
+platform's GitHub Environment (`release-macos`, `release-windows`,
+`release-linux`); there is no separate `release-cli` environment because
+the CLI has no secrets or trust chain of its own.
 
 ## 8) Engineering standards
 
@@ -376,8 +393,8 @@ of the following:
   throttle monotonicity, retry backoff monotonicity, conflict-suffix
   determinism, durable-queue FIFO, ignore-rule precedence, IPC
   handshake skew matrix). Each property runs 64–256 cases on CI.
-- **Platform-trait contract tests** once `core/platform` lands. Every
-  trait runs a parameterized contract suite against both the in-memory
+- **Platform-trait contract tests.** Every trait in `core/platform`
+  runs a parameterized contract suite against both the in-memory
   fake and the real native impl on each shipping OS. Catches
   fake-vs-native drift.
 - **Bidirectional race tests** — simultaneous local/remote edits,
@@ -388,8 +405,10 @@ of the following:
 - **Performance guard-rails** (Tier 1) — cheap "someone accidentally
   made the callback 100× slower" checks. Distinct from the SLO perf
   suite (Tier 2).
-- **Snapshot tests** (`insta`) for every `vapor … --json` command
-  once the CLI lands.
+- **Snapshot tests** (`insta`) for every `vapor … --json` command.
+  `insta` adoption is still an open task (tracked in
+  `docs/tasks/core.md` and `docs/tasks/cli.md`); until it lands, every
+  `--json` contract must be locked by explicit assertion tests instead.
 
 ### 9.3) What must NOT be tested
 
@@ -569,6 +588,9 @@ Commit and push policy:
 - Keep commits small, cohesive, and rollback-friendly.
 - Use commit messages that explain why the change exists.
 - Do not push commits to GitHub unless the project owner explicitly asks.
+  An explicit release request from the project owner counts as asking
+  for the one push the release flow requires (the release commit + tag
+  via `git push … --follow-tags`); it does not authorize any other push.
 
 Commit message convention:
 
@@ -609,7 +631,7 @@ A change is done when:
 
 ## 12) Incident playbooks (minimum)
 
-Maintain runbooks for:
+Maintain runbooks under `docs/operations/` for:
 
 - daemon crash loops
 - auth/token refresh failures
@@ -618,3 +640,8 @@ Maintain runbooks for:
 - reconcile backlog non-convergence
 
 Each runbook must include detection, mitigation, user-visible state, and recovery verification.
+
+Current status: only the release incident playbook exists
+(`docs/operations/release-incident-playbook.md`). The five runbooks
+above are open work, tracked in `docs/tasks/core.md`; when one lands,
+remove it from that tracking entry.

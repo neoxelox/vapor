@@ -35,7 +35,7 @@ public enum VaporConstants {
     public static let cloudSyncDirectory = "/Vapor"
     public static let postIgnoreRules = ""
     public static let languageCode = VaporConstants.Localization.defaultLanguageCode
-    public static let timelineEventLimit = 1000
+    public static let timelineLimit = 1000
     /// Mirrors `constants.rs::provider::DEFAULT` / `sync_mode::DEFAULT`.
     public static let provider = "filesystem"
     public static let syncMode = "two-way"
@@ -97,7 +97,7 @@ public enum VaporConstants {
     public static let preIgnoreRules = "preIgnoreRules"
     public static let postIgnoreRules = "postIgnoreRules"
     public static let languageCode = "languageCode"
-    public static let timelineEventLimit = "timelineEventLimit"
+    public static let timelineLimit = "timelineLimit"
     public static let provider = "provider"
     public static let syncMode = "syncMode"
     public static let deviceId = "deviceId"

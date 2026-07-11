@@ -258,7 +258,7 @@ Status: pending.
 ### Wave 11 — CLI distribution (macOS)
 
 Status: pending. Depends on Wave 10 (the macOS signing identity and
-`release-macos` GitHub Environment are shared).
+the `release-macos` GitHub Environment are shared).
 
 - `cli.md` L5-1 … L5-3 — headless / server ergonomics
   (`--user-activity`, Docker recipe, deployment recipes). Docker +

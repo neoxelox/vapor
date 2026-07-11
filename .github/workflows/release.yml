@@ -93,7 +93,7 @@ jobs:
     needs: [preflight, lint, test, perf]
     runs-on: macos-26
     timeout-minutes: 60
-    environment: release
+    environment: release-macos
     permissions:
       contents: write
     env:

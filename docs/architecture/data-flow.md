@@ -97,6 +97,22 @@ Idle-boost and the throttle controller update asynchronously on the same 1s cade
 
 ## Directory and symlink semantics
 
+This section owns the "what syncs" contract: Vapor syncs file content,
+and everything else on a filesystem is handled deliberately. The table
+summarizes the contract; the prose below carries the engine-level
+mechanics and the "why":
+
+| Item | How Vapor treats it |
+| ---- | ------------------- |
+| Regular files | Fully synced, byte-for-byte, in both directions (following the configured sync direction). |
+| Folders | Containers, not synced objects: each side creates them automatically as the files inside them sync, and deleting a folder propagates. An empty folder does not appear on the other side, and renaming a folder re-syncs its contents under the new name. |
+| Ignored files | Anything matching the ignore rules never syncs in either direction — it can't be pulled down from the cloud, and it never causes a conflict. |
+| Conflicting edits | When both sides change the same file, both versions are kept — the other device's version stays next to the local one as a `~conflict-` copy until resolved. Nothing is ever silently overwritten. |
+| Symlinks | Never followed and never synced: a link could pull content from outside the sync root into scope, and cloud providers can't represent them faithfully. |
+| Hard links | Synced as an ordinary independent file; the link relationship is not preserved on the other side. |
+| Special files (pipes, sockets, devices) | Ignored entirely — they carry no transferable content and never block the files around them. |
+| Metadata (permissions, extended attributes, timestamps) | Not synced; content only. Vapor's own bookkeeping tags (op-id xattrs / side-files) stay invisible and never appear in listings. |
+
 **The engine is file-only by decision: directories are implicit
 containers, not synced objects.** They materialize on the other side only
 through the files inside them: uploads create the remote parent chain,
@@ -112,8 +128,6 @@ sync was evaluated and rejected (project-owner decision, 2026-07-07):
 keeping every synced object content-shaped is what keeps the conflict,
 echo-suppression, and transfer machinery simple — folders cannot
 "conflict", and parent materialization is idempotent by construction.
-The user-facing contract lives in the root `README.md` **What Syncs**
-table.
 
 **Special files (FIFOs, sockets, device nodes) are inert.** The executor
 refuses them at planning and the reconcile walk skips them — this must

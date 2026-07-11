@@ -33,6 +33,6 @@ GitHub Actions workflows are defined in `.github/workflows/`:
 
 `perf.yml` has no standalone triggers; `release.yml` calls it for versioned release runs.
 
-`release.yml` runs on pushed tags matching `v*`, validates that the tag exactly matches `VERSION` and that the tagged commit is on `main`, invokes `lint.yml`, `test.yml`, and `perf.yml` in parallel, and then runs the `release` job only after all three succeed. The publish job targets the GitHub `release` environment, and packaging still uses `./scripts/build.sh package` as the source of truth.
+`release.yml` runs on pushed tags matching `v*`, validates that the tag exactly matches `VERSION` and that the tagged commit is on `main`, invokes `lint.yml`, `test.yml`, and `perf.yml` in parallel, and then runs the `release` job only after all three succeed. The publish job targets the GitHub `release-macos` environment, and packaging still uses `./scripts/build.sh package` as the source of truth.
 
 For branch protection and required status-check guidance, see `docs/ci/required-checks.md`.

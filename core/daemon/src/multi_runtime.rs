@@ -140,7 +140,7 @@ impl MultiProfileRuntime {
         self.timeline.clone()
     }
 
-    /// Applies the configured `timelineEventLimit`.
+    /// Applies the configured `timelineLimit`.
     pub fn set_timeline_limit(&self, limit: i64) {
         if let Ok(limit) = usize::try_from(limit)
             && limit > 0
@@ -166,7 +166,7 @@ impl MultiProfileRuntime {
         let now = clock.now_system();
         let tick_waker = Arc::new(TickWaker::default());
         let timeline = crate::timeline::TimelineBuffer::new(
-            constants::config::DEFAULT_TIMELINE_EVENT_LIMIT as usize,
+            constants::config::DEFAULT_TIMELINE_LIMIT as usize,
         );
         let initial_state = ThrottleState::Light;
         let shared_workgate = Arc::new(Mutex::new(ThrottleWorkgate::new(

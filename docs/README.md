@@ -44,6 +44,14 @@ to use them.
 - **Tasks** — per-surface task lists and the cross-surface roadmap:
   `docs/tasks/README.md`.
 
+One standalone file lives at this level:
+
+- `REVIEW.md` — point-in-time full-repository review report
+  (severity-ranked, file/line-referenced findings, adversarially
+  verified). A snapshot, not living documentation: use it to pick up
+  hardening work, but expect line references and names to drift as
+  fixes land.
+
 ## Quick intent mapping
 
 - "What is Vapor and where is it going?" → `docs/product/README.md`

@@ -24,7 +24,7 @@ func loadCreatesDefaultConfigurationAndRuntimeDirectories() throws {
   #expect(configuration.preIgnoreRules == VaporConfiguration.defaultPreIgnoreRules)
   #expect(configuration.postIgnoreRules == VaporConfiguration.defaultPostIgnoreRules)
   #expect(configuration.languageCode == VaporConfiguration.defaultLanguageCode)
-  #expect(configuration.timelineEventLimit == 1000)
+  #expect(configuration.timelineLimit == 1000)
   #expect(
     fileManager.fileExists(atPath: VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL).path)
   )
@@ -56,7 +56,7 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
     preIgnoreRules: "",
     postIgnoreRules: "*.bak",
     languageCode: "en",
-    timelineEventLimit: 1500
+    timelineLimit: 1500
   )
 
   try store.save(configuration)
@@ -70,7 +70,7 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
   #expect(loaded.preIgnoreRules.isEmpty)
   #expect(loaded.postIgnoreRules == "*.bak")
   #expect(loaded.languageCode == "en")
-  #expect(loaded.timelineEventLimit == 1500)
+  #expect(loaded.timelineLimit == 1500)
 
   try fileManager.removeItem(at: rootURL)
 }
@@ -97,7 +97,7 @@ func loadDefaultsMissingKeysWithoutDroppingOtherSavedValues() throws {
       "useGitIgnore": false,
       "localSyncDirectory": "~/Projects/Vapor",
       "postIgnoreRules": "*.bak",
-      "timelineEventLimit": 42,
+      "timelineLimit": 42,
     ],
     options: [.sortedKeys]
   )
@@ -110,7 +110,7 @@ func loadDefaultsMissingKeysWithoutDroppingOtherSavedValues() throws {
   #expect(configuration.localSyncDirectory == "~/Projects/Vapor")
   #expect(configuration.postIgnoreRules == "*.bak")
   #expect(configuration.languageCode == "en")
-  #expect(configuration.timelineEventLimit == 42)
+  #expect(configuration.timelineLimit == 42)
 
   try fileManager.removeItem(at: rootURL)
 }

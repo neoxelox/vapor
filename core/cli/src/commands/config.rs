@@ -110,7 +110,7 @@ fn read_or_empty_object(path: &Path) -> Result<Value, ConfigError> {
 
 fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
     use constants::config::{
-        KEY_AUTO_LAUNCH, KEY_PROVIDER, KEY_SYNC_MODE, KEY_TIMELINE_EVENT_LIMIT, KEY_USE_GIT_IGNORE,
+        KEY_AUTO_LAUNCH, KEY_PROVIDER, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT, KEY_USE_GIT_IGNORE,
         KEY_USE_VAPOR_IGNORE,
     };
     if matches!(
@@ -125,7 +125,7 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
             ))),
         };
     }
-    if key == KEY_TIMELINE_EVENT_LIMIT {
+    if key == KEY_TIMELINE_LIMIT {
         return raw
             .parse::<i64>()
             .map(|value| Value::Number(value.into()))
@@ -237,9 +237,9 @@ mod tests {
     fn set_parses_integer_keys() {
         let temp = TempDir::new().expect("temp");
         let path = config_path(&temp);
-        set(&path, "timelineEventLimit", "2500").expect("set");
+        set(&path, "timelineLimit", "2500").expect("set");
         assert_eq!(
-            get(&path, "timelineEventLimit").expect("get"),
+            get(&path, "timelineLimit").expect("get"),
             Some("2500".to_string())
         );
     }
