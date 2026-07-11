@@ -165,7 +165,7 @@ pub fn build_native_store() -> Box<dyn SecretStore> {
 /// CLI waits for the consent hop. Returns the stored-token JSON that
 /// goes into the secret store.
 pub fn run_gdrive_pkce_flow() -> Result<String, String> {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader};
     use vapor_providers::gdrive::oauth;
 
     let client_id = std::env::var(vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID)
@@ -191,7 +191,8 @@ pub fn run_gdrive_pkce_flow() -> Result<String, String> {
 
     let verifier = oauth::generate_code_verifier();
     let challenge = oauth::code_challenge(&verifier);
-    let url = oauth::authorization_url(&client_id, &redirect_uri, &challenge);
+    let state = oauth::generate_state();
+    let url = oauth::authorization_url(&client_id, &redirect_uri, &challenge, &state);
 
     eprintln!("Open this URL in your browser to authorize Vapor:");
     eprintln!("  {url}");
@@ -201,34 +202,67 @@ pub fn run_gdrive_pkce_flow() -> Result<String, String> {
     }
     eprintln!("Waiting for the authorization redirect on {redirect_uri} ...");
 
-    let (stream, _) = listener
-        .accept()
-        .map_err(|error| format!("redirect listener failed: {error}"))?;
-    let mut reader = BufReader::new(&stream);
-    let mut request_line = String::new();
-    reader
-        .read_line(&mut request_line)
-        .map_err(|error| format!("cannot read the redirect request: {error}"))?;
-    // GET /?code=...&scope=... HTTP/1.1
-    let code = request_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|path| path.split('?').nth(1))
-        .and_then(|query| {
-            query
-                .split('&')
-                .find(|pair| pair.starts_with("code="))
-                .map(|pair| pair.trim_start_matches("code=").to_string())
-        })
-        .filter(|code| !code.is_empty())
-        .ok_or_else(|| "the redirect did not carry an authorization code".to_string())?;
-    let mut stream = stream;
-    let _ = stream.write_all(
-        b"HTTP/1.1 200 OK
-Content-Type: text/html
-
-<html><body>Vapor is authorized. You can close this tab.</body></html>",
-    );
+    // Loop on accept with a per-connection read timeout and an overall
+    // deadline: a stray/speculative connection (browser preconnect, a
+    // local probe) must not consume the one accept and kill the login, and
+    // a request whose `state` does not match ours is ignored. Only a
+    // request carrying our state and a code completes the flow.
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("cannot configure the redirect listener: {error}"))?;
+    let overall_deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let code = loop {
+        if std::time::Instant::now() >= overall_deadline {
+            return Err(
+                "timed out waiting for the authorization redirect; rerun `vapor auth login gdrive`"
+                    .to_string(),
+            );
+        }
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
+            }
+            Err(error) => return Err(format!("redirect listener failed: {error}")),
+        };
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let mut reader = BufReader::new(&stream);
+        let mut request_line = String::new();
+        // A connection that sends nothing (or times out) is a stray probe;
+        // discard it and keep waiting for the real redirect.
+        if reader.read_line(&mut request_line).is_err() || request_line.trim().is_empty() {
+            continue;
+        }
+        // GET /?code=...&state=... HTTP/1.1
+        let query = request_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|path| path.split('?').nth(1))
+            .unwrap_or("");
+        // Reject any request whose state does not match ours.
+        if query_param(query, "state").as_deref() != Some(state.as_str()) {
+            let mut stream = stream;
+            let _ = write_redirect_response(&mut stream, "This request was not recognized.");
+            continue;
+        }
+        if let Some(error) = query_param(query, "error") {
+            let mut stream = stream;
+            let _ = write_redirect_response(&mut stream, "Authorization was denied.");
+            return Err(format!("authorization was denied by the user: {error}"));
+        }
+        // Google authorization codes contain '/' ("4/0A..."), which arrives
+        // percent-encoded; decode before exchange (re-encoding a still-
+        // encoded value yields invalid_grant).
+        if let Some(code) = query_param(query, "code").filter(|code| !code.is_empty()) {
+            let mut stream = stream;
+            let _ = write_redirect_response(
+                &mut stream,
+                "Vapor is authorized. You can close this tab.",
+            );
+            break code;
+        }
+    };
 
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -247,9 +281,72 @@ Content-Type: text/html
     serde_json::to_string(&tokens).map_err(|error| error.to_string())
 }
 
+/// Returns the percent-decoded value of `key` from a URL query string.
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(name, _)| *name == key)
+        .map(|(_, value)| percent_decode(value))
+}
+
+/// Writes a minimal HTML response body to the redirect connection.
+fn write_redirect_response(stream: &mut std::net::TcpStream, message: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let body = format!("<html><body>{message}</body></html>");
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
+/// Decodes `application/x-www-form-urlencoded` query values (`%XX` and
+/// `+`). An incomplete/invalid escape is passed through literally.
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hi = (bytes[index + 1] as char).to_digit(16);
+                let lo = (bytes[index + 2] as char).to_digit(16);
+                if let (Some(hi), Some(lo)) = (hi, lo) {
+                    out.push((hi * 16 + lo) as u8);
+                    index += 3;
+                    continue;
+                }
+                out.push(b'%');
+                index += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_decode_restores_reserved_characters_in_auth_codes() {
+        // A Google authorization code arrives percent-encoded.
+        assert_eq!(percent_decode("4%2F0Axyz"), "4/0Axyz");
+        assert_eq!(percent_decode("a+b%20c"), "a b c");
+        // Malformed escapes pass through literally.
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
 
     #[test]
     fn login_then_status_reports_provider_as_bound() {

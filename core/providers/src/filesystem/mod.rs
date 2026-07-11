@@ -470,9 +470,15 @@ impl Provider for FilesystemProvider {
                 format!("remote file {path} was already gone"),
             )),
             Err(error) if resolved.is_dir() => {
-                // Directories vanish when their last child is removed on
-                // the engine side; explicit removal keeps mirrors exact.
-                fs::remove_dir_all(&resolved).map_err(|dir_error| {
+                // Non-recursive on purpose: `remove_dir` fails on a
+                // non-empty directory. A recursive `remove_dir_all` here
+                // would destroy children the engine never observed (a
+                // delete intent is planned with no remote stat), violating
+                // the never-silent-overwrite guarantee. When the directory
+                // still holds content, the transient error retries and the
+                // walk converges once the changes feed surfaces and removes
+                // the children, emptying the directory.
+                fs::remove_dir(&resolved).map_err(|dir_error| {
                     ProviderError::transient(format!(
                         "cannot delete remote directory {path}: {dir_error} (file path error: {error})"
                     ))

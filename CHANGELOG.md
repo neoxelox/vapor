@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed (providers & auth)
+
+- Provider & OAuth fixes (full-repo review):
+  - `vapor auth login gdrive` now percent-decodes the authorization code before the token exchange, so real Google logins no longer fail with `invalid_grant`; the loopback listener validates a CSPRNG `state`, loops on accept with per-connection read timeouts and an overall deadline (a stray/speculative socket can no longer kill the login), and renders a proper page on denied consent.
+  - The native HTTP transport uses explicit connect/read/write timeouts (a black-holed connection can no longer wedge the synchronous provider stack forever) and errors instead of silently truncating a response body past the size cap.
+  - The filesystem reference provider deletes a directory with `remove_dir` (fails on non-empty) instead of `remove_dir_all`, so a delete intent can never recursively destroy remote children the engine never observed.
+  - Google Drive provider: Google-native objects (Docs/Sheets/shortcuts) are excluded from enumerate/stat/changes (no more phantom 0-byte files); multipart uploads use a random collision-checked boundary; resumable uploads honor the 308 `Range` committed offset; downloads verify the full body arrived on a 200; and 403 `dailyLimitExceeded`/rate-limit reasons back off instead of dropping the intent (`storageQuotaExceeded` surfaces distinctly).
+  - PKCE code verifiers and the OAuth `state` are generated from the OS CSPRNG; `HttpRequest` and `StoredTokens` `Debug` impls redact tokens.
+
 ### Performance
 
 - Sync-pipeline latency & device-impact improvements (full-repo review):

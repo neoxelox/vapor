@@ -165,6 +165,18 @@ pub mod provider {
     pub const CHANGES_FEED_RING_MAX_EVENTS: usize = 8_192;
     /// Profile id used by profile-agnostic provider selection calls.
     pub const DEFAULT_PROFILE_FALLBACK: &str = "default";
+    /// Per-socket read/write timeout for the native HTTP transport. A
+    /// black-holed connection (Wi-Fi switch, dropped NAT flow) must not
+    /// wedge the synchronous provider stack — and therefore the tick loop
+    /// — forever; a stalled read surfaces as a transient error the retry
+    /// machinery handles.
+    pub const HTTP_SOCKET_TIMEOUT_SECONDS: u64 = 120;
+    /// Connect timeout for the native HTTP transport.
+    pub const HTTP_CONNECT_TIMEOUT_SECONDS: u64 = 30;
+    /// Hard cap on a single HTTP response body. Reading one extra byte
+    /// past this and erroring (rather than silently truncating) keeps a
+    /// mis-ranged full-file download from completing as a corrupt file.
+    pub const MAX_HTTP_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 }
 
 pub mod profile {

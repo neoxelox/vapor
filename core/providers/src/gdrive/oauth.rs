@@ -18,9 +18,10 @@ pub const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 /// may also write, which the per-app `drive.file` scope cannot see.
 pub const DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive";
 
-/// Stored token set (JSON in the secret store; the value never reaches
-/// logs — see the logging redaction markers for defense in depth).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// Stored token set (JSON in the secret store). The manual `Debug` below
+/// redacts the token fields so a stray `{:?}` cannot bypass the logging
+/// redaction layer and print live credentials.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredTokens {
     #[serde(rename = "accessToken")]
     pub access_token: String,
@@ -32,20 +33,41 @@ pub struct StoredTokens {
     pub expires_at_ms: u64,
 }
 
-/// RFC 7636 code verifier: 64 chars from the unreserved alphabet,
-/// sourced from the standard library's randomly-seeded hasher (no
-/// crypto-RNG dependency; the verifier is a CSRF-style secret with a
-/// seconds-long lifetime, not a long-term key).
-pub fn generate_code_verifier() -> String {
-    use std::hash::{BuildHasher, Hasher};
-    let mut verifier = String::with_capacity(64);
-    for _ in 0..4 {
-        let word = std::collections::hash_map::RandomState::new()
-            .build_hasher()
-            .finish();
-        verifier.push_str(&format!("{word:016x}"));
+impl std::fmt::Debug for StoredTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredTokens")
+            .field("access_token", &"[REDACTED]")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish()
     }
-    verifier
+}
+
+/// Fills `dest` with cryptographically-secure random bytes from the OS
+/// CSPRNG. Panics only if the OS entropy source is unavailable, which is
+/// unrecoverable for a security-sensitive flow.
+fn random_bytes(dest: &mut [u8]) {
+    getrandom::fill(dest).expect("OS CSPRNG unavailable");
+}
+
+/// RFC 7636 code verifier: 32 CSPRNG octets encoded as 43 chars from the
+/// unreserved base64url alphabet (RFC 7636 §4.1 requires a
+/// cryptographically random verifier).
+pub fn generate_code_verifier() -> String {
+    let mut octets = [0_u8; 32];
+    random_bytes(&mut octets);
+    base64_url_no_pad(&octets)
+}
+
+/// CSPRNG `state` value for the authorization request (CSRF / flow-fixation
+/// defense per OAuth Security BCP).
+pub fn generate_state() -> String {
+    let mut octets = [0_u8; 16];
+    random_bytes(&mut octets);
+    base64_url_no_pad(&octets)
 }
 
 /// `S256` code challenge: BASE64URL-no-pad(SHA256(verifier)).
@@ -54,14 +76,22 @@ pub fn code_challenge(verifier: &str) -> String {
     base64_url_no_pad(&digest)
 }
 
-/// The browser URL for the consent hop.
-pub fn authorization_url(client_id: &str, redirect_uri: &str, challenge: &str) -> String {
+/// The browser URL for the consent hop. `state` is echoed back on the
+/// redirect and the loopback listener must reject any request whose state
+/// does not match.
+pub fn authorization_url(
+    client_id: &str,
+    redirect_uri: &str,
+    challenge: &str,
+    state: &str,
+) -> String {
     format!(
-        "{AUTH_URL}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&access_type=offline&prompt=consent",
+        "{AUTH_URL}?response_type=code&client_id={}&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
         url_encode(client_id),
         url_encode(redirect_uri),
         url_encode(DRIVE_SCOPE),
         url_encode(challenge),
+        url_encode(state),
     )
 }
 
@@ -234,18 +264,30 @@ mod tests {
     #[test]
     fn verifier_shape_satisfies_pkce_requirements() {
         let verifier = generate_code_verifier();
-        assert_eq!(verifier.len(), 64);
-        assert!(verifier.chars().all(|c| c.is_ascii_hexdigit()));
+        // 32 octets base64url-no-pad == 43 chars from the unreserved
+        // alphabet (RFC 7636 §4.1).
+        assert_eq!(verifier.len(), 43);
+        assert!(
+            verifier
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
         assert_ne!(verifier, generate_code_verifier());
     }
 
     #[test]
     fn authorization_url_carries_the_pkce_parameters() {
-        let url = authorization_url("client-123", "http://127.0.0.1:9999", "challenge-abc");
+        let url = authorization_url(
+            "client-123",
+            "http://127.0.0.1:9999",
+            "challenge-abc",
+            "state-xyz",
+        );
         assert!(url.starts_with(AUTH_URL));
         assert!(url.contains("code_challenge=challenge-abc"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("client_id=client-123"));
+        assert!(url.contains("state=state-xyz"));
         assert!(url.contains("access_type=offline"));
     }
 

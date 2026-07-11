@@ -668,7 +668,7 @@ process), `core/lifecycle` (crash-loop guard, manager, durable store, auto-launc
 | low | improvement | `core/providers/src/http.rs:12` | HttpRequest derives Debug/Clone with raw Authorization headers, making bearer-token leaks one {:?} away |
 | low | bug | `core/providers/src/tags.rs:131` | Side-file temp `.vapor-meta.json.tmp` is not recognized as internal and leaks into the sync scope on crash |
 
-### [high] Authorization code is never percent-decoded, so real Google logins fail with invalid_grant
+### [high] Authorization code is never percent-decoded, so real Google logins fail with invalid_grant  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/commands/auth.rs:224` · **Review group**: gdrive-oauth
 
@@ -676,7 +676,7 @@ run_gdrive_pkce_flow() extracts the code from the raw redirect request line and 
 
 **Suggested fix**: Percent-decode the extracted code (and any other query values) before passing it to exchange_code. Add a test that feeds a redirect line containing 'code=4%2F0Axyz' and asserts the exchange form body carries 'code=4%2F0Axyz' exactly once-encoded.
 
-### [high] delete() falls back to remove_dir_all, destroying an entire remote directory tree the engine never saw
+### [high] delete() falls back to remove_dir_all, destroying an entire remote directory tree the engine never saw  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/filesystem/mod.rs:451` · **Review group**: provider-fs
 
@@ -708,7 +708,7 @@ For a changed file id, path_for_changed_file (core/providers/src/gdrive/mod.rs:5
 
 **Suggested fix**: Do not trust the cached path for the changed file itself. Recompute the leaf from file.name + file.parents (the cached path of the parent id is fine as a short-circuit), compare with any cached path for the id, and when they differ emit Removed(old_path) + CreatedOrModified(new_path) and update both cache maps.
 
-### [high] Google-native files (Docs/Sheets/shortcuts) are enumerated as 0-byte regular files and 'download' instantly as empty local files
+### [high] Google-native files (Docs/Sheets/shortcuts) are enumerated as 0-byte regular files and 'download' instantly as empty local files  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:659` · **Review group**: gdrive
 
@@ -724,7 +724,7 @@ RemotePrecondition::HashEquals/Absent are verified once in GoogleDriveProvider::
 
 **Suggested fix**: Re-stat the target immediately before the committing request (final resumable chunk / the multipart call) and fail with PreconditionFailed if md5Checksum or modifiedTime moved since begin_upload; even better, for updates capture modifiedTime at begin_upload and compare. This shrinks the race window from the whole transfer to one round-trip, which the engine's deterministic re-plan can then handle.
 
-### [high] NativeHttpTransport has no read/overall timeout: a stalled connection hangs the daemon forever
+### [high] NativeHttpTransport has no read/overall timeout: a stalled connection hangs the daemon forever  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/http.rs:55` · **Review group**: provider-core
 
@@ -732,7 +732,7 @@ NativeHttpTransport::execute uses `ureq::request(...)` on the default agent. In 
 
 **Suggested fix**: Build a shared `ureq::Agent` via `AgentBuilder` with an explicit `timeout_read`/`timeout_write` (or an overall per-request `timeout`) sized to the chunk budget (e.g. 30-120s), and surface the timeout as a transient HttpTransportError so the existing retry/backoff machinery handles it.
 
-### [medium] Loopback listener accepts exactly one connection; browser preconnect/speculative sockets or any stray probe kill or hang the login
+### [medium] Loopback listener accepts exactly one connection; browser preconnect/speculative sockets or any stray probe kill or hang the login  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/commands/auth.rs:208` · **Review group**: gdrive-oauth
 
@@ -804,7 +804,7 @@ ProviderHandle::execute_authed (core/providers/src/gdrive/mod.rs:959) constructs
 
 **Suggested fix**: Give ProviderHandle a persistent Arc<TokenManager> shared with the provider (TokenManager already has interior mutability and owns Arc'd secrets/transport), and mirror the one-shot 401 invalidate+refresh retry there.
 
-### [medium] Fixed multipart boundary makes files containing the boundary bytes permanently unsyncable or corrupted
+### [medium] Fixed multipart boundary makes files containing the boundary bytes permanently unsyncable or corrupted  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:1019` · **Review group**: gdrive
 
@@ -812,7 +812,7 @@ simple_multipart (core/providers/src/gdrive/mod.rs:1019) uses the fixed boundary
 
 **Suggested fix**: Generate a random per-request boundary (long random hex string) and, defensively, verify it does not occur in the payload before use (regenerate if it does).
 
-### [medium] Resumable upload ignores the 308 Range response header — partial chunk persistence corrupts the offset math
+### [medium] Resumable upload ignores the 308 Range response header — partial chunk persistence corrupts the offset math  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:1161` · **Review group**: gdrive
 
@@ -820,7 +820,7 @@ On a 308 the resumable upload session unconditionally does sent_bytes += chunk_l
 
 **Suggested fix**: Parse the Range header from every 308 response and set sent_bytes = last_acked_byte + 1 (0 if absent). If it is behind the local counter, re-seek and resend from the acknowledged offset instead of failing. Consider also issuing a 'Content-Range: bytes */total' status probe when a chunk PUT fails transiently, instead of abandoning the session URL.
 
-### [medium] Download session trusts status 200 + transport's silent 64 MiB body cap, allowing a truncated file to complete 'successfully'
+### [medium] Download session trusts status 200 + transport's silent 64 MiB body cap, allowing a truncated file to complete 'successfully'  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:1246` · **Review group**: gdrive
 
@@ -828,7 +828,7 @@ NativeHttpTransport (core/providers/src/http.rs:90) silently caps every response
 
 **Suggested fix**: On status 200, verify received_bytes == total_bytes (when total is known) before finishing, and return a Transient error on mismatch. Separately, make the transport signal truncation (error when the 64 MiB cap is hit) instead of silently clamping.
 
-### [medium] 403 dailyLimitExceeded quota errors classified as Permanent, dropping sync intents instead of backing off
+### [medium] 403 dailyLimitExceeded quota errors classified as Permanent, dropping sync intents instead of backing off  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:1295` · **Review group**: gdrive
 
@@ -836,7 +836,7 @@ classify_api_failure (core/providers/src/gdrive/mod.rs:1295) detects 403 quota/r
 
 **Suggested fix**: Classify 403 bodies by the structured error reason (parse errors[0].reason from the JSON body) instead of substring sniffing; map dailyLimitExceeded / userRateLimitExceeded / rateLimitExceeded / sharingRateLimitExceeded to RateLimited, and keep storageQuotaExceeded as a distinct actionable (but retry-eventually) state rather than generic Permanent.
 
-### [medium] PKCE code verifier is generated from std's hash RandomState, not a CSPRNG
+### [medium] PKCE code verifier is generated from std's hash RandomState, not a CSPRNG  ✅ DONE
 
 **Category**: security · **Where**: `core/providers/src/gdrive/oauth.rs:43` · **Review group**: gdrive-oauth
 
@@ -844,7 +844,7 @@ generate_code_verifier() (core/providers/src/gdrive/oauth.rs:39-49) builds the R
 
 **Suggested fix**: Generate 32 octets from a CSPRNG (getrandom crate, or /dev/urandom via getrandom::getrandom) and encode with the existing base64_url_no_pad(), yielding a 43-char verifier per the RFC. Update verifier_shape_satisfies_pkce_requirements to assert the unreserved alphabet instead of hex.
 
-### [medium] No OAuth state parameter and no request validation on the loopback redirect endpoint
+### [medium] No OAuth state parameter and no request validation on the loopback redirect endpoint  ✅ DONE
 
 **Category**: security · **Where**: `core/providers/src/gdrive/oauth.rs:60` · **Review group**: gdrive-oauth
 
@@ -852,7 +852,7 @@ authorization_url() (core/providers/src/gdrive/oauth.rs:58) emits no state param
 
 **Suggested fix**: Generate a CSPRNG state value alongside the verifier, append '&state=...' in authorization_url (make it a parameter), and have the listener ignore any request whose state does not match instead of consuming it.
 
-### [medium] HTTP responses larger than 64 MiB are silently truncated instead of erroring
+### [medium] HTTP responses larger than 64 MiB are silently truncated instead of erroring  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/http.rs:90` · **Review group**: provider-core
 
@@ -948,7 +948,7 @@ next_cursor falls back to cursor.to_string() when both tokens are absent. If Dri
 
 **Suggested fix**: Treat the absence of both tokens as a protocol violation: return ProviderError::transient (retry) instead of echoing the input cursor, so the engine backs off rather than looping on identical state.
 
-### [low] HttpRequest derives Debug/Clone with raw Authorization headers, making bearer-token leaks one {:?} away
+### [low] HttpRequest derives Debug/Clone with raw Authorization headers, making bearer-token leaks one {:?} away  ✅ DONE
 
 **Category**: improvement · **Where**: `core/providers/src/http.rs:12` · **Review group**: provider-core
 
@@ -1016,7 +1016,7 @@ stop_daemon() ignores the result of `launchctl kill TERM` entirely and returns O
 **Suggested fix**: Distinguish 'service not found' (treat as already-stopped) from other launchctl failures (return Backend error), and optionally poll status() briefly until the pid disappears (bounded, e.g. a few hundred ms) so stop reports the actual terminal state. Mirror whatever contract is chosen in the fake.
 
 
-### [low] `StoredTokens` derives `Debug` with plaintext token fields, bypassing the redaction the module relies on
+### [low] `StoredTokens` derives `Debug` with plaintext token fields, bypassing the redaction the module relies on  ✅ DONE
 
 **Category**: security · **Where**: `core/providers/src/gdrive/oauth.rs:23`
 
@@ -1118,7 +1118,7 @@ save() (apps/macos/Sources/VaporCore/VaporConfiguration.swift:252) atomically re
 
 **Suggested fix**: In save(), re-load the on-disk file, re-capture unknown/daemon-owned keys (deviceId, profiles, syncMode, provider, resourceLimits, idleBoost) from the fresh read, overlay only the app-modeled fields being changed, and write under an advisory lock (or route config writes through the vapor CLI so the Rust side owns the read-modify-write).
 
-### [high] OAuth authorization code is never percent-decoded, then re-encoded on exchange — real Google logins fail with invalid_grant
+### [high] OAuth authorization code is never percent-decoded, then re-encoded on exchange — real Google logins fail with invalid_grant  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/commands/auth.rs:216` · **Review group**: cli-commands
 
@@ -1214,7 +1214,7 @@ run() calls process.waitUntilExit() before draining outputPipe/errorPipe. If the
 
 **Suggested fix**: Read both pipes concurrently (readabilityHandler or background readDataToEndOfFile on each pipe) BEFORE waitUntilExit, and add a bounded timeout that terminates the child and throws (e.g. process.terminate() after N seconds) so a hung CLI can never wedge the lifecycle queue.
 
-### [medium] PKCE loopback listener accepts exactly one connection with no state parameter, no read timeout, and no request filtering
+### [medium] PKCE loopback listener accepts exactly one connection with no state parameter, no read timeout, and no request filtering  ✅ DONE
 
 **Category**: security · **Where**: `core/cli/src/commands/auth.rs:207` · **Review group**: cli-commands
 

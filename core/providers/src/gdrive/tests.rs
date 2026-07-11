@@ -441,3 +441,60 @@ fn rfc3339_parser_round_trips_drive_timestamps() {
     assert!(parse_rfc3339_millis("not a timestamp").is_none());
     assert!(parse_rfc3339_millis("2026-07-06T12:30:00Z").is_some());
 }
+
+#[test]
+fn classifies_daily_and_storage_quota_403s_distinctly() {
+    let daily = HttpResponse {
+        status: 403,
+        headers: Vec::new(),
+        body: br#"{"error":{"errors":[{"reason":"dailyLimitExceeded"}]}}"#.to_vec(),
+    };
+    assert!(matches!(
+        classify_api_failure(&daily).kind,
+        ProviderErrorKind::RateLimited { .. }
+    ));
+
+    let storage = HttpResponse {
+        status: 403,
+        headers: Vec::new(),
+        body: br#"{"error":{"errors":[{"reason":"storageQuotaExceeded"}]}}"#.to_vec(),
+    };
+    // Storage-full is surfaced (permanent), not misclassified as a rate
+    // limit that would retry forever.
+    assert!(matches!(
+        classify_api_failure(&storage).kind,
+        ProviderErrorKind::Permanent
+    ));
+}
+
+#[test]
+fn resumable_range_header_parses_committed_offset() {
+    assert_eq!(parse_resumable_range_end("bytes=0-262143"), Some(262_143));
+    assert_eq!(parse_resumable_range_end("bytes=0-0"), Some(0));
+    assert_eq!(parse_resumable_range_end("garbage"), None);
+}
+
+#[test]
+fn multipart_boundary_never_collides_with_payload() {
+    // Even a payload containing a plausible boundary line gets a boundary
+    // that is not a subslice of it.
+    let payload = b"--vapor-deadbeef\r\nContent".to_vec();
+    let boundary = multipart_boundary_absent_in(&payload);
+    assert!(!contains_subslice(
+        &payload,
+        format!("--{boundary}").as_bytes()
+    ));
+}
+
+#[test]
+fn google_native_types_are_excluded_but_folders_and_files_are_not() {
+    assert!(is_google_native_non_folder(
+        "application/vnd.google-apps.document"
+    ));
+    assert!(is_google_native_non_folder(
+        "application/vnd.google-apps.shortcut"
+    ));
+    assert!(!is_google_native_non_folder(FOLDER_MIME));
+    assert!(!is_google_native_non_folder("application/pdf"));
+    assert!(!is_google_native_non_folder("text/plain"));
+}

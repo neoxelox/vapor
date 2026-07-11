@@ -46,7 +46,17 @@ use oauth::StoredTokens;
 const API_BASE: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_BASE: &str = "https://www.googleapis.com/upload/drive/v3";
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
+const GOOGLE_APPS_MIME_PREFIX: &str = "application/vnd.google-apps.";
 const OP_ID_PROPERTY: &str = "vaporOpId";
+
+/// Google-native objects (Docs, Sheets, Slides, shortcuts, …) other than
+/// folders. They have no byte content or md5, so they cannot sync as
+/// files: enumeration/stat/the changes feed must exclude them, otherwise
+/// each one materializes as a phantom 0-byte local file (and deleting
+/// that phantom would trash the real Doc).
+fn is_google_native_non_folder(mime_type: &str) -> bool {
+    mime_type.starts_with(GOOGLE_APPS_MIME_PREFIX) && mime_type != FOLDER_MIME
+}
 /// Payloads at or under this size upload in one multipart request.
 const SIMPLE_UPLOAD_MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// Resumable chunks must be multiples of 256 KiB per the API contract.
@@ -657,6 +667,9 @@ impl Provider for GoogleDriveProvider {
             }
             let list: GdFileList = self.api_json("GET", url, None)?;
             for file in list.files {
+                if is_google_native_non_folder(&file.mime_type) {
+                    continue;
+                }
                 let Ok(child) = directory.join(&file.name) else {
                     continue;
                 };
@@ -672,9 +685,15 @@ impl Provider for GoogleDriveProvider {
     }
 
     fn stat(&self, path: &RemotePath) -> Result<Option<RemoteEntry>, ProviderError> {
-        Ok(self
-            .resolve(path)?
-            .map(|file| self.entry_from_file(path, &file)))
+        Ok(self.resolve(path)?.and_then(|file| {
+            // A Google-native object cannot sync as a file; report it as
+            // absent so the engine never plans a transfer for it.
+            if is_google_native_non_folder(&file.mime_type) {
+                None
+            } else {
+                Some(self.entry_from_file(path, &file))
+            }
+        }))
     }
 
     fn content_hash(&self, path: &RemotePath) -> Result<String, ProviderError> {
@@ -906,7 +925,7 @@ impl Provider for GoogleDriveProvider {
                 continue;
             }
             let Some(file) = &change.file else { continue };
-            if file.mime_type == FOLDER_MIME {
+            if file.mime_type == FOLDER_MIME || is_google_native_non_folder(&file.mime_type) {
                 continue;
             }
             let Some(path) = self.path_for_changed_file(file) else {
@@ -1016,7 +1035,11 @@ impl GdriveUploadSession {
         self.source.read_to_end(&mut content).map_err(|error| {
             ProviderError::transient(format!("cannot read upload source: {error}"))
         })?;
-        let boundary = "vapor-multipart-boundary";
+        // A fixed boundary corrupts (or bounces with 400) any file whose
+        // bytes contain the delimiter line. Generate a random per-request
+        // boundary and, defensively, regenerate until it does not occur in
+        // the payload — so no file content can ever collide with it.
+        let boundary = multipart_boundary_absent_in(&content);
         let mut body = Vec::new();
         body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         body.extend_from_slice(b"Content-Type: application/json; charset=UTF-8\r\n\r\n");
@@ -1157,13 +1180,23 @@ impl TransferSession for GdriveUploadSession {
                     chunk,
                 )?;
                 match response.status {
-                    // 308: chunk accepted, upload incomplete.
+                    // 308: chunk accepted, upload incomplete. Trust the
+                    // server's `Range: bytes=0-N` header (the authoritative
+                    // committed offset) over the local counter: if the
+                    // server acknowledged fewer bytes than we sent, resume
+                    // from there instead of leaving a gap that the next PUT
+                    // would reject.
                     308 => {
-                        self.sent_bytes += chunk_len;
+                        let acked = response
+                            .header("Range")
+                            .and_then(parse_resumable_range_end)
+                            .map(|last| last + 1)
+                            .unwrap_or(self.sent_bytes + chunk_len);
+                        let advanced = acked.min(self.total_bytes);
+                        let bytes_transferred = advanced.saturating_sub(self.sent_bytes);
+                        self.sent_bytes = advanced;
                         self.grow_chunk_hint();
-                        Ok(TransferStep::Progressed {
-                            bytes_transferred: chunk_len,
-                        })
+                        Ok(TransferStep::Progressed { bytes_transferred })
                     }
                     200 | 201 => {
                         self.sent_bytes += chunk_len;
@@ -1242,8 +1275,21 @@ impl TransferSession for GdriveDownloadSession {
         })?;
         self.hasher.update(&response.body);
         self.received_bytes += response.body.len() as u64;
-        // A 200 (full body) or a short remainder completes the payload.
-        if response.status == 200 || self.received_bytes >= self.total_bytes {
+        // A 200 means the server ignored the Range and returned the full
+        // body. Verify it actually delivered the whole file before
+        // finishing — otherwise a truncated/transcoded body (or the
+        // transport's size cap) would complete as a self-consistent but
+        // corrupt local file.
+        if response.status == 200 {
+            if self.received_bytes != self.total_bytes {
+                return Err(ProviderError::transient(format!(
+                    "download returned {} bytes for a {}-byte file (Range ignored or truncated)",
+                    self.received_bytes, self.total_bytes
+                )));
+            }
+            return self.finish();
+        }
+        if self.received_bytes >= self.total_bytes {
             return self.finish();
         }
         Ok(TransferStep::Progressed {
@@ -1292,13 +1338,33 @@ fn classify_api_failure(response: &HttpResponse) -> ProviderError {
         401 => ProviderError::authentication(
             "Google Drive rejected the credentials; run `vapor auth login gdrive`",
         ),
-        403 if body_text.contains("ateLimitExceeded") || body_text.contains("quotaExceeded") => {
-            ProviderError::rate_limited(retry_after, "Drive rate limit exceeded")
-        }
-        403 => ProviderError::permanent(format!(
-            "Drive denied the operation (403): {}",
-            truncate(&body_text, 200)
-        )),
+        403 => match extract_403_reason(&body_text).as_deref() {
+            // Rate/quota limits are transient: back off, do not drop the
+            // intent. `dailyLimitExceeded` and `storageQuotaExceeded` (note
+            // the capital Q) were previously misclassified as permanent.
+            Some(
+                "rateLimitExceeded"
+                | "userRateLimitExceeded"
+                | "sharingRateLimitExceeded"
+                | "dailyLimitExceeded"
+                | "quotaExceeded",
+            ) => ProviderError::rate_limited(retry_after, "Drive rate/quota limit exceeded"),
+            Some("storageQuotaExceeded") => ProviderError::permanent(
+                "Google Drive storage is full; free space or upgrade the account, then sync resumes",
+            ),
+            // Fall back to substring sniffing for bodies that don't parse
+            // to a structured reason.
+            _ if body_text.contains("ateLimitExceeded")
+                || (body_text.contains("quotaExceeded")
+                    && !body_text.contains("storageQuotaExceeded")) =>
+            {
+                ProviderError::rate_limited(retry_after, "Drive rate limit exceeded")
+            }
+            _ => ProviderError::permanent(format!(
+                "Drive denied the operation (403): {}",
+                truncate(&body_text, 200)
+            )),
+        },
         404 => ProviderError::not_found("Drive object not found"),
         410 => ProviderError::precondition_failed("Drive resource is gone (410)"),
         412 => ProviderError::precondition_failed("Drive precondition failed (412)"),
@@ -1311,6 +1377,50 @@ fn classify_api_failure(response: &HttpResponse) -> ProviderError {
             truncate(&body_text, 200)
         )),
     }
+}
+
+/// A random multipart boundary guaranteed not to appear in `payload`.
+fn multipart_boundary_absent_in(payload: &[u8]) -> String {
+    loop {
+        let mut octets = [0_u8; 16];
+        getrandom::fill(&mut octets).expect("OS CSPRNG unavailable");
+        let boundary = format!("vapor-{}", hex_encode(&octets));
+        // The delimiter that could collide is "--<boundary>".
+        if !contains_subslice(payload, format!("--{boundary}").as_bytes()) {
+            return boundary;
+        }
+    }
+}
+
+/// Parses the last committed byte from a resumable-upload `Range` header
+/// of the form `bytes=0-N`. Returns `None` when absent/unparsable.
+fn parse_resumable_range_end(range: &str) -> Option<u64> {
+    range
+        .trim()
+        .strip_prefix("bytes=")
+        .and_then(|value| value.rsplit('-').next())
+        .and_then(|end| end.trim().parse::<u64>().ok())
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// Extracts `error.errors[0].reason` from a Drive JSON error body.
+fn extract_403_reason(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    value
+        .get("error")?
+        .get("errors")?
+        .get(0)?
+        .get("reason")?
+        .as_str()
+        .map(ToString::to_string)
 }
 
 fn escape_query(raw: &str) -> String {
