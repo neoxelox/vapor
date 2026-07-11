@@ -198,8 +198,9 @@ pub fn intent_priority_rank(class: DebounceClass) -> u8 {
     match class {
         DebounceClass::KeyConfig => 0,
         DebounceClass::CodeText => 1,
-        DebounceClass::Other => 2,
-        DebounceClass::Lockfile => 3,
+        DebounceClass::Document => 2,
+        DebounceClass::Other => 3,
+        DebounceClass::Lockfile => 4,
     }
 }
 

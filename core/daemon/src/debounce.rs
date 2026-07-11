@@ -14,6 +14,7 @@ use crate::fs_events::FsEventKind;
 pub enum DebounceClass {
     KeyConfig,
     CodeText,
+    Document,
     Lockfile,
     Other,
 }
@@ -24,6 +25,7 @@ pub struct DebounceWindows {
     maximum: Duration,
     key_config: Duration,
     code_text: Duration,
+    document: Duration,
     lockfile: Duration,
     other: Duration,
 }
@@ -35,6 +37,7 @@ impl Default for DebounceWindows {
             constants::engine::MAX_DEBOUNCE_WINDOW_MILLIS,
             constants::engine::KEY_CONFIG_DEBOUNCE_WINDOW_MILLIS,
             constants::engine::CODE_TEXT_DEBOUNCE_WINDOW_MILLIS,
+            constants::engine::DOCUMENT_DEBOUNCE_WINDOW_MILLIS,
             constants::engine::LOCKFILE_DEBOUNCE_WINDOW_MILLIS,
             constants::engine::DEFAULT_DEBOUNCE_WINDOW_MILLIS,
         )
@@ -42,11 +45,13 @@ impl Default for DebounceWindows {
 }
 
 impl DebounceWindows {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_millis(
         minimum_millis: u64,
         maximum_millis: u64,
         key_config_millis: u64,
         code_text_millis: u64,
+        document_millis: u64,
         lockfile_millis: u64,
         other_millis: u64,
     ) -> Self {
@@ -63,6 +68,7 @@ impl DebounceWindows {
             maximum,
             key_config: clamp_duration(Duration::from_millis(key_config_millis), minimum, maximum),
             code_text: clamp_duration(Duration::from_millis(code_text_millis), minimum, maximum),
+            document: clamp_duration(Duration::from_millis(document_millis), minimum, maximum),
             lockfile: clamp_duration(Duration::from_millis(lockfile_millis), minimum, maximum),
             other: clamp_duration(Duration::from_millis(other_millis), minimum, maximum),
         }
@@ -79,6 +85,10 @@ impl DebounceWindows {
 
         if is_code_or_text_path(path) {
             return (DebounceClass::CodeText, self.code_text);
+        }
+
+        if is_document_path(path) {
+            return (DebounceClass::Document, self.document);
         }
 
         (DebounceClass::Other, self.other)
@@ -314,6 +324,18 @@ fn is_code_or_text_path(path: &Path) -> bool {
     )
 }
 
+fn is_document_path(path: &Path) -> bool {
+    extension_matches(
+        path,
+        &[
+            // Office / documents
+            "doc", "docx", "key", "numbers", "odp", "ods", "odt", "pages", "pdf", "ppt", "pptx",
+            "rtf", "xls", "xlsx", // Images
+            "bmp", "gif", "heic", "heif", "jpeg", "jpg", "png", "tif", "tiff", "webp",
+        ],
+    )
+}
+
 fn file_name_str(path: &Path) -> Option<&str> {
     path.file_name().and_then(|value| value.to_str())
 }
@@ -363,7 +385,7 @@ mod tests {
 
     #[test]
     fn debounce_windows_clamp_to_safe_bounds() {
-        let windows = DebounceWindows::from_millis(8_000, 500, 100, 900, 12_000, 50);
+        let windows = DebounceWindows::from_millis(8_000, 500, 100, 900, 700, 12_000, 50);
 
         assert_eq!(
             windows.classify_path(Path::new("/tmp/config.json")),
@@ -380,6 +402,31 @@ mod tests {
         assert_eq!(
             windows.classify_path(Path::new("/tmp/video.mov")),
             (DebounceClass::Other, Duration::from_millis(500))
+        );
+    }
+
+    #[test]
+    fn documents_and_images_get_the_shorter_document_window() {
+        let windows = DebounceWindows::default();
+        let document_window =
+            Duration::from_millis(constants::engine::DOCUMENT_DEBOUNCE_WINDOW_MILLIS);
+        for name in [
+            "report.docx",
+            "sheet.xlsx",
+            "slides.pptx",
+            "scan.pdf",
+            "photo.jpg",
+        ] {
+            assert_eq!(
+                windows.classify_path(Path::new(&format!("/tmp/{name}"))),
+                (DebounceClass::Document, document_window),
+                "{name} should classify as a document"
+            );
+        }
+        // A genuinely-other binary keeps the conservative default window.
+        assert_eq!(
+            windows.classify_path(Path::new("/tmp/movie.mov")).0,
+            DebounceClass::Other
         );
     }
 

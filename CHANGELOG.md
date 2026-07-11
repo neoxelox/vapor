@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Performance
+
+- Sync-pipeline latency & device-impact improvements (full-repo review):
+  - The remote poller keeps draining while a page is full instead of waiting a full cadence between pages, so a large remote burst (thousands of files) enqueues in seconds rather than minutes.
+  - The reconcile walk scales its per-tick directory budget up under IdleDrain and is bounded by a wall-clock slice deadline checked between directories, so a large tree converges fast on the filesystem provider while a slow network provider's `enumerate` can no longer hold the tick thread for a whole chunk.
+  - Echo-suppression no longer hashes an entire large file inline on the tick thread (which also bypassed the Suspended-stops-hashing invariant): files above the hash-step size correlate by op-id tag instead.
+  - Ignore-file events inside excluded directories no longer trigger wasted full-tree filter rebuilds.
+  - Office documents, PDFs, and images get a ~1.5s debounce window (a new document class) instead of the 4s `Other` window, so the files users care about most reach the cloud ~2.5s sooner.
+
 ### Fixed
 
 - More bidirectional-sync data-loss fixes (full-repo review):

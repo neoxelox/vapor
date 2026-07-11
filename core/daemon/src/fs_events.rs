@@ -313,10 +313,16 @@ fn record_callback_result(
             for (index, path) in event.paths.iter().enumerate() {
                 let kind = per_path_kinds(index);
                 if let Some(path) = normalize_event_path(watch_root, path) {
-                    path_filter.note_observed_path(&path);
                     if path_filter.should_ignore(&path) {
                         continue;
                     }
+                    // Note the observed path (ignore-file reload trigger)
+                    // only for non-ignored paths: an ignore file inside an
+                    // excluded directory is never read during a rebuild, so
+                    // requesting one would be pure waste (and a package
+                    // install writing many such files would rebuild the
+                    // whole filter on nearly every tick).
+                    path_filter.note_observed_path(&path);
 
                     recorder.record_event(FsEventRecord {
                         path,

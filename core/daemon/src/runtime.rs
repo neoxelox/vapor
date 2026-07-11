@@ -1538,7 +1538,13 @@ impl DaemonRuntime {
                 );
                 continue;
             }
-            if is_local_self_write_echo(&mut self.local_echoes, &event, hash_algorithm, now) {
+            if is_local_self_write_echo(
+                &mut self.local_echoes,
+                &self.tags,
+                &event,
+                hash_algorithm,
+                now,
+            ) {
                 suppressed += 1;
                 logging::debug(
                     "Suppressed stabilized event as a self-write echo",
@@ -1802,6 +1808,14 @@ impl DaemonRuntime {
                 self.path_filter.clone(),
             ));
         }
+        // Bound the chunk by a wall-clock slice so a slow provider's
+        // enumerate cannot hold the tick thread for the whole directory
+        // budget; the high directory budget lets a fast provider converge
+        // a large tree quickly under IdleDrain.
+        let clock = self.clock.clone();
+        let deadline =
+            clock.now() + Duration::from_millis(constants::engine::RECONCILE_SLICE_MILLIS);
+        let should_continue = move || clock.now() < deadline;
         let walker = self
             .reconcile_walker
             .as_mut()
@@ -1810,8 +1824,9 @@ impl DaemonRuntime {
             self.app.provider(),
             self.sync_scope.sync_mode,
             &mut self.state_db,
-            constants::engine::RECONCILE_DIRS_PER_CHECKPOINT,
+            constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN,
             now,
+            &should_continue,
         )
     }
 
@@ -1888,6 +1903,7 @@ fn blocked_intent_requeue_delay() -> Duration {
 /// so the fallback never hashes a file that obviously diverged.
 fn is_local_self_write_echo(
     local_echoes: &mut SelfWriteCache,
+    tags: &OpIdTagStore,
     event: &crate::debounce::StabilizedEvent,
     algorithm: vapor_providers::HashAlgorithm,
     now: SystemTime,
@@ -1917,6 +1933,16 @@ fn is_local_self_write_echo(
         && expected_size != metadata.len()
     {
         return false;
+    }
+    // Large files: correlate by the op-id tag rather than a full-file
+    // hash. Hashing a multi-GB downloaded file inline here would stall
+    // debounce release, remote polling, and executor advancement — and
+    // would run even under Suspended (stabilization precedes the throttle
+    // gate), violating "under Suspended, hashing stops". The size gate
+    // above already rejects the common divergent-edit case.
+    if metadata.len() > constants::engine::HASH_STAGE_STEP_BYTES {
+        let op_id = tags.read_op_id(&event.path);
+        return local_echoes.matches_write(&key, op_id.as_deref(), None, now);
     }
     let Ok(content_hash) = hash_hex_of_file_with(&event.path, algorithm) else {
         return false;
@@ -3445,10 +3471,10 @@ mod tests {
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let subtree_root = watch_root.join("project");
         // Enough matched directories on BOTH sides that one walk chunk
-        // (RECONCILE_DIRS_PER_CHECKPOINT) cannot finish the comparison:
-        // a finished walk completes instead of pausing, so observing
-        // pause cycles requires a genuinely in-progress walk.
-        for index in 0..(constants::engine::RECONCILE_DIRS_PER_CHECKPOINT * 4) {
+        // (RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN) cannot finish the
+        // comparison: a finished walk completes instead of pausing, so
+        // observing pause cycles requires a genuinely in-progress walk.
+        for index in 0..(constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN * 2) {
             std::fs::create_dir_all(subtree_root.join(format!("dir-{index}")))
                 .expect("create local walk fodder");
             std::fs::create_dir_all(cloud_root.join(format!("project/dir-{index}")))

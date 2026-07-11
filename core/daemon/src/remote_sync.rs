@@ -172,6 +172,12 @@ impl RemotePoller {
             }
             ChangesPoll::Page(page) => {
                 report.observed_changes = page.changes.len();
+                // A full page means more changes are pending right now.
+                // Keep draining on the next tick (one page per tick stays
+                // interruptible) instead of waiting out the whole cadence,
+                // so a large remote burst enqueues in seconds, not minutes.
+                let page_was_full =
+                    page.changes.len() >= constants::engine::REMOTE_CHANGES_PAGE_MAX;
                 let mut batch = Vec::new();
                 for change in &page.changes {
                     let local_target = change.path.to_local(local_root);
@@ -271,6 +277,11 @@ impl RemotePoller {
                 if self.cursor.as_deref() != Some(page.next_cursor.as_str()) {
                     state_db.set_state(&self.cursor_state_key, &page.next_cursor, now)?;
                     self.cursor = Some(page.next_cursor);
+                }
+                if page_was_full {
+                    // Re-poll immediately on the next tick to continue
+                    // draining the known backlog.
+                    self.last_poll_inst = None;
                 }
             }
         }

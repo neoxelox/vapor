@@ -186,7 +186,7 @@ All provider I/O — session.step (up to 8 MiB per blocking ureq HTTP call in th
 
 **Suggested fix**: Move transfer sessions (and planner remote stats) onto worker threads or async tasks, keeping the workgate permits as the concurrency limiter and the tick loop as the orchestrator that harvests completions. At minimum, keep provider network calls off the same thread that drains fs events and runs debounce.
 
-### [medium] Ignore-file events inside ignored directories trigger repeated full-tree filter rebuilds
+### [medium] Ignore-file events inside ignored directories trigger repeated full-tree filter rebuilds  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/fs_events.rs:294` · **Review group**: ingest
 
@@ -218,7 +218,7 @@ collect_ignore_files walks the whole tree skipping only the hardcoded SKIP_DIRS 
 
 **Suggested fix**: During the discovery walk, apply the already-compiled preceding rules (pre-user rules and parent ignore files) to prune ignored directories, mirroring git's behavior of never reading ignore files under excluded paths. This fixes both the negation leak and the walk cost.
 
-### [medium] Remote poller drains one 256-change page per cadence: large remote bursts take minutes to enqueue
+### [medium] Remote poller drains one 256-change page per cadence: large remote bursts take minutes to enqueue  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/remote_sync.rs:139` · **Review group**: sync-pipeline-e2e
 
@@ -250,7 +250,7 @@ In process_ready_queue (runtime.rs:1659-1668), when try_start_staged_intent retu
 
 **Suggested fix**: Distinguish the per-path-busy case from permit/capacity exhaustion (e.g., have try_start return an enum, or check active_paths in the runtime before calling) and `continue` instead of `break` when only that one path is blocked. Optionally skip leasing rows whose path is currently active.
 
-### [medium] Reconcile walk fixed at 8 directories per tick (~32 dirs/s) regardless of throttle state
+### [medium] Reconcile walk fixed at 8 directories per tick (~32 dirs/s) regardless of throttle state  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/runtime.rs:1723` · **Review group**: sync-pipeline-e2e
 
@@ -258,7 +258,7 @@ process_reconcile_walk (runtime.rs:1723) always passes the fixed RECONCILE_DIRS_
 
 **Suggested fix**: Scale the per-tick directory budget with the throttle state (e.g., 32-64 dirs under IdleDrain, 8 under Light, 1-2 under Throttled), or make the walk time-budgeted per slice (RECONCILE_SLICE_MILLIS already exists) instead of a fixed directory count.
 
-### [medium] Echo suppression hashes entire files unchunked on the tick thread
+### [medium] Echo suppression hashes entire files unchunked on the tick thread  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/runtime.rs:1810` · **Review group**: sync-pipeline-e2e
 
@@ -386,7 +386,7 @@ observe_event builds a Vec<PathBuf> of all ancestors per event (directory_roots_
 
 **Suggested fix**: Store interned path IDs or relative-suffix hashes in path_last_seen instead of full PathBufs, reuse a scratch buffer for ancestor iteration (iterate Path::ancestors directly rather than collecting a Vec), and consider only tracking unique-path counts at the immediate parent while deriving ancestor rollups from child window aggregates.
 
-### [low] 4 s default debounce window applies to the most common user documents
+### [low] 4 s default debounce window applies to the most common user documents  ✅ DONE
 
 **Category**: perf · **Where**: `core/shared/src/constants.rs:340` · **Review group**: sync-pipeline-e2e
 
@@ -543,7 +543,7 @@ resource_budget.rs's module contract (lines 20-21) states 'Ceilings are hard cap
 
 **Suggested fix**: Only allow the scale factor to exceed 1.0 while the throttle state is IdleDrain (i.e., where boost is defined), or clamp scaled caps at the tier's compiled values for Light/Throttled: `scale_cap(cap).min(cap)` outside IdleDrain. Update the resource_budget doc if raising non-idle caps is actually intended.
 
-### [medium] Reconcile walk performs up to 8 synchronous provider enumerations per chunk with no intra-chunk slice/throttle check, blocking the daemon tick loop
+### [medium] Reconcile walk performs up to 8 synchronous provider enumerations per chunk with no intra-chunk slice/throttle check, blocking the daemon tick loop  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/reconcile_walk.rs:142`
 

@@ -131,6 +131,14 @@ impl ReconcileWalker {
     /// Compares up to `max_directories` directories and durably
     /// enqueues the resulting convergence intents. Returns `Ok(true)`
     /// when the walk has no work left.
+    ///
+    /// `should_continue` is consulted after each directory so the caller
+    /// can bound the chunk by a wall-clock slice: a provider whose
+    /// `enumerate` is a slow network call must not hold the tick thread
+    /// for the full directory budget (throttle transitions, status
+    /// publishing, and other intents would all stall). The directory
+    /// budget can therefore be set high for fast (filesystem) providers
+    /// while the deadline caps the cost for slow ones.
     pub fn process(
         &mut self,
         provider: &dyn Provider,
@@ -138,6 +146,7 @@ impl ReconcileWalker {
         state_db: &mut DurableStateDb,
         max_directories: usize,
         now: SystemTime,
+        should_continue: &dyn Fn() -> bool,
     ) -> Result<bool, WalkError> {
         for _ in 0..max_directories {
             let Some(directory) = self.pending_dirs.pop_front() else {
@@ -145,6 +154,9 @@ impl ReconcileWalker {
             };
             self.compare_directory(provider, sync_mode, state_db, &directory, now)?;
             self.stats.directories_compared += 1;
+            if !should_continue() {
+                break;
+            }
         }
         Ok(self.pending_dirs.is_empty())
     }
@@ -481,7 +493,7 @@ mod tests {
             let mut walker = ReconcileWalker::new(&self.local_root, &self.local_root, None);
             for _ in 0..64 {
                 let done = walker
-                    .process(&self.provider, mode, &mut self.state_db, 8, ts(0))
+                    .process(&self.provider, mode, &mut self.state_db, 8, ts(0), &|| true)
                     .expect("walk step");
                 if done {
                     break;
@@ -747,6 +759,7 @@ mod tests {
                     &mut fixture.state_db,
                     8,
                     ts(0),
+                    &|| true,
                 )
                 .expect("walk step");
             if done {
@@ -784,6 +797,7 @@ mod tests {
                 &mut fixture.state_db,
                 2,
                 ts(0),
+                &|| true,
             )
             .expect("walk step");
         assert!(!first_done, "five child dirs cannot finish in one call");
@@ -797,6 +811,7 @@ mod tests {
                     &mut fixture.state_db,
                     2,
                     ts(0),
+                    &|| true,
                 )
                 .expect("walk step");
             if done {

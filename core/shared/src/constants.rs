@@ -344,6 +344,11 @@ pub mod engine {
     pub const KEY_CONFIG_DEBOUNCE_WINDOW_MILLIS: u64 = 900;
     pub const CODE_TEXT_DEBOUNCE_WINDOW_MILLIS: u64 = 1_200;
     pub const LOCKFILE_DEBOUNCE_WINDOW_MILLIS: u64 = 2_500;
+    /// Office documents, PDFs, and images — the files ordinary users care
+    /// about most. Their atomic-save patterns settle within 1–2s, and the
+    /// per-path coalescing map absorbs multi-event bursts, so they need
+    /// nowhere near the conservative `Other` window.
+    pub const DOCUMENT_DEBOUNCE_WINDOW_MILLIS: u64 = 1_500;
     pub const DEFAULT_DEBOUNCE_WINDOW_MILLIS: u64 = 4_000;
     pub const THROTTLE_SAMPLE_INTERVAL_MILLIS: u64 = 1_000;
     pub const STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS: u64 = 60_000;
@@ -396,6 +401,12 @@ pub mod engine {
     /// tick while a reconcile slice is active. Bounds per-tick I/O so
     /// the slice checkpoints keep their interruptibility guarantee.
     pub const RECONCILE_DIRS_PER_CHECKPOINT: usize = 8;
+    /// Per-tick directory budget for the reconcile walk (runs only under
+    /// IdleDrain). Higher than the checkpoint granularity so a large tree
+    /// converges quickly on a fast (filesystem) provider; the per-slice
+    /// wall-clock deadline caps the cost when the provider's enumerate is
+    /// a slow network call.
+    pub const RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN: usize = 64;
     /// Assumed link capacity when the platform sampler reports no
     /// measured throughput; the bandwidth ceiling applies against this
     /// until a real measurement exists.
