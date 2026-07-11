@@ -50,17 +50,41 @@ pub fn hash_hex_of_bytes(bytes: &[u8]) -> String {
 
 /// Streaming SHA-256 of a file's current content.
 pub fn hash_hex_of_file(path: &Path) -> io::Result<String> {
+    hash_hex_of_file_with(path, HashAlgorithm::Sha256)
+}
+
+/// Streaming hash of a file's current content in the given algorithm.
+/// The single algorithm-aware file hasher: any local hash compared
+/// against a provider-produced hash (sync index, transfer outcome, echo
+/// record) must go through here so SHA-256 and MD5 providers compare
+/// like against like.
+pub fn hash_hex_of_file_with(path: &Path, algorithm: HashAlgorithm) -> io::Result<String> {
     let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
+    match algorithm {
+        HashAlgorithm::Sha256 => {
+            let mut hasher = Sha256::new();
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(hex_encode(&hasher.finalize()))
         }
-        hasher.update(&buffer[..read]);
+        HashAlgorithm::Md5 => {
+            let mut hasher = md5::Md5::new();
+            loop {
+                let read = file.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Ok(hex_encode(&hasher.finalize()))
+        }
     }
-    Ok(hex_encode(&hasher.finalize()))
 }
 
 fn hex_encode(digest: &[u8]) -> String {

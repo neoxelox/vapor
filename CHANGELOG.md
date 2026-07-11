@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Bidirectional-sync data-loss and correctness fixes in the staged executor (full-repo review):
+  - A local delete no longer destroys a concurrent remote modification: in two-way mode a delete only propagates when the remote still matches the last sync (op-id or content hash); a diverged remote is preserved and pulled back via a Download instead of deleted.
+  - A remote directory deletion no longer wipes unsynced local files: two-way `ApplyRemoteDelete` on a directory now walks the subtree, removing only synced-and-unchanged files and preserving (and re-uploading) everything else, deleting the directory only once it is empty.
+  - Divergence, deletion, and echo-suppression checks now hash local files in the *provider's* algorithm (MD5 for Google Drive) instead of a hard-coded SHA-256, so MD5 providers no longer manufacture endless spurious keep-both copies or refuse every remote deletion.
+  - Applying a remote change can no longer escape the local sync root through a symlinked parent directory: download-apply and remote-delete-apply verify sync-root containment non-lexically and refuse a target whose parent resolves outside the root.
+  - Download-apply keep-both no longer has a check-then-act window: the existing local file is renamed aside first and the divergence decision runs on the exact displaced bytes, so a local edit that lands during a download is never silently overwritten.
+  - A crash between a completed upload and the durable index write no longer replays as a phantom keep-both conflict on both replicas: the op-id-mismatch path defers to the upload gate, which converges byte-identical content silently.
+  - Conflict follow-ups are enqueued crash-safely (the canonical-restore Download before the local rename), the redundant re-Download on download-side conflicts is gone, and a mid-transfer local edit no longer pairs a post-edit mtime with the as-uploaded hash (the mtime fast-path is disabled when the file changed during transfer).
 - The `vapor` CLI no longer panics with "failed printing to stdout: Broken pipe" when a downstream pipe reader exits early (`vapor logs | head -1`, `vapor status --json | grep -q ...`): default SIGPIPE handling is restored on Unix so the CLI behaves like standard tools in pipelines. The Tier E2E harness also stopped closing pipes on the CLI mid-write (capture-then-match), removing a timing-dependent CI failure.
 
 ### Changed

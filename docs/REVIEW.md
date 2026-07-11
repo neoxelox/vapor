@@ -74,7 +74,7 @@ specialists (end-to-end sync-latency trace, bidirectional data-loss hunt).
 | low | perf | `core/daemon/src/storm.rs:96` | Storm detector clones the full event path into every ancestor directory's window on each event |
 | low | perf | `core/shared/src/constants.rs:340` | 4 s default debounce window applies to the most common user documents |
 
-### [critical] Local delete propagates to the remote with no precondition, silently destroying a concurrent remote modification fleet-wide
+### [critical] Local delete propagates to the remote with no precondition, silently destroying a concurrent remote modification fleet-wide  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:1065` · **Review group**: executor
 
@@ -98,7 +98,7 @@ open_with_corruption_recovery treats every StateDbError::Sql as corruption. rusq
 
 **Suggested fix**: Only quarantine when error.sqlite_error_code() is one of SQLITE_NOTADB / SQLITE_CORRUPT (and optionally after a failed 'PRAGMA integrity_check'). Propagate all other SQLite errors (BUSY, FULL, IOERR, PERM) as ordinary startup failures so the crash-loop guard retries instead of destroying state.
 
-### [high] Divergence/conflict checks hash local files with hard-coded SHA-256 but compare against provider-algorithm hashes, breaking for MD5 providers (Google Drive MVP)
+### [high] Divergence/conflict checks hash local files with hard-coded SHA-256 but compare against provider-algorithm hashes, breaking for MD5 providers (Google Drive MVP)  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:1390` · **Review group**: executor
 
@@ -106,7 +106,7 @@ hash_hex_of_file_or_err delegates to vapor_providers::filesystem::hash_hex_of_fi
 
 **Suggested fix**: Thread the provider's HashAlgorithm through these helpers (reuse StreamingFileHash or add hash_hex_of_file_with(path, algorithm)) so every local hash compared against index/outcome/echo hashes uses the provider's algorithm. Add a contract test that runs the conflict/deletion guards against an MD5-algorithm fake provider.
 
-### [high] Applying remote changes locally follows symlinked parent directories, allowing writes/deletes outside the local sync root
+### [high] Applying remote changes locally follows symlinked parent directories, allowing writes/deletes outside the local sync root  ✅ DONE
 
 **Category**: security · **Where**: `core/daemon/src/executor.rs:1544` · **Review group**: executor
 
@@ -423,7 +423,7 @@ DEFAULT_DEBOUNCE_WINDOW_MILLIS=4000 (constants.rs:340) is the quiet window for e
 | low | improvement | `core/daemon/src/resource_budget.rs:257` | A single 1-second headroom blip cancels Active idle boost into a full down-ramp plus a fresh 30s up-ramp; RampingDown never re-checks the gates |
 | low | bug | `core/daemon/src/safeguards.rs:73` | Rolling-window prune keeps future-dated events after a wall-clock rewind, so MassChangeGuard can spuriously pause sync and ActiveCodingHeuristic can pin Throttled — contrary to its documented fail-safe claim |
 
-### [critical] Two-way remote directory deletion applies remove_dir_all without checking children, wiping unsynced local files
+### [critical] Two-way remote directory deletion applies remove_dir_all without checking children, wiping unsynced local files  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:1357`
 
@@ -431,7 +431,7 @@ deletion_loses_to_local_state returns Ok(None) for anything that is not a regula
 
 **Suggested fix**: When the ApplyRemoteDelete target is a directory in two-way mode, walk the subtree and run the per-file preservation check (sync-index provenance + divergence) on each child; delete only children that pass, preserve (and re-upload) the rest, and remove the directory only if it ends up empty. Alternatively, refuse directory tombstones and expand them into per-file ApplyRemoteDelete intents at plan time.
 
-### [high] Download apply TOCTOU: a local write landing between the divergence check and the staging rename is silently overwritten and its watcher echo is then suppressed
+### [high] Download apply TOCTOU: a local write landing between the divergence check and the staging rename is silently overwritten and its watcher echo is then suppressed  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:841`
 
@@ -487,7 +487,7 @@ emit_git_rerun_markers resolves HEAD's ref with git_dir.join(reference) and only
 
 **Suggested fix**: In resolve_git_dir/emit_git_rerun_markers, read the gitdir's `commondir` file when present and resolve refs relative to it; additionally emit cargo:rerun-if-changed for `<commondir>/packed-refs`, and emit the ref path even when it does not yet exist (cargo re-runs when a watched missing path appears).
 
-### [medium] Crash/power loss between a completed provider upload and the durable index/completion write replays as a manufactured keep-both conflict duplicate on both replicas
+### [medium] Crash/power loss between a completed provider upload and the durable index/completion write replays as a manufactured keep-both conflict duplicate on both replicas  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:1209`
 
@@ -495,7 +495,7 @@ After an upload completes at the provider, record_upload_index + complete_leased
 
 **Suggested fix**: In the op-id-mismatch branch, when remote_hash != index.content_hash do not conflict immediately; set plan.verify_remote_before_upload = true and defer to the upload gate, which compares the remote hash against the *local* content hash — identical content (the crash-replay case) then converges silently, and genuine divergence still resolves as keep-both.
 
-### [medium] resolve_upload_conflict renames the local file before durably enqueuing the follow-up intents; a failure between the two strands the conflict copy and leaves the canonical path missing
+### [medium] resolve_upload_conflict renames the local file before durably enqueuing the follow-up intents; a failure between the two strands the conflict copy and leaves the canonical path missing  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:1276`
 
@@ -503,7 +503,7 @@ resolve_upload_conflict renames the local file to its conflict-copy path before 
 
 **Suggested fix**: Reorder for crash-safety: durably enqueue the Download(original) follow-up before performing the rename, and enqueue the Upload(conflict_copy) immediately after the rename (or perform rename + enqueue such that a retried original intent detects the half-finished state — e.g. by finding the conflict-copy marker for its own enqueued_at timestamp — and completes the enqueue instead of no-opping).
 
-### [medium] record_upload_index captures the local mtime after the upload finishes, pairing a post-edit mtime with the as-uploaded hash and enabling silent overwrite of a mid-upload edit
+### [medium] record_upload_index captures the local mtime after the upload finishes, pairing a post-edit mtime with the as-uploaded hash and enabling silent overwrite of a mid-upload edit  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:1404`
 
@@ -567,7 +567,7 @@ The auto-tuner's regression check (auto_tune.rs:105) compares absolute durable q
 
 **Suggested fix**: Judge regressions on drain rate instead of depth: track completed intents (or bytes transferred) per cycle, or compare depth delta against the ingest counter, and roll back only when throughput fell after the increase.
 
-### [low] Download-side conflict resolution enqueues a redundant Download for a payload that is already fully staged
+### [low] Download-side conflict resolution enqueues a redundant Download for a payload that is already fully staged  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/executor.rs:1274`
 

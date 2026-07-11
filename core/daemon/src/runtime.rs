@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use vapor_platform::fs_caps::NativeFilesystemCapabilities;
 use vapor_providers::Provider;
-use vapor_providers::filesystem::hash_hex_of_file;
+use vapor_providers::filesystem::hash_hex_of_file_with;
 use vapor_providers::tags::OpIdTagStore;
 use vapor_shared::{RunState, constants};
 
@@ -470,6 +470,7 @@ impl DaemonRuntime {
                 local_root: self.sync_scope.local_sync_directory.as_deref(),
                 sync_mode: self.sync_scope.sync_mode,
                 device_id: &self.device_id,
+                hash_algorithm: self.app.provider().content_hash_algorithm(),
                 transfer_step_bytes: self
                     .transfer_step_bytes
                     .load(std::sync::atomic::Ordering::Relaxed),
@@ -1434,6 +1435,7 @@ impl DaemonRuntime {
         };
 
         let stabilized = self.debounce.run_tick_for_recorder(recorder, now);
+        let hash_algorithm = self.app.provider().content_hash_algorithm();
         let mut accepted = 0;
         let mut suppressed = 0;
         let mut mirror_reverts = 0;
@@ -1448,7 +1450,7 @@ impl DaemonRuntime {
                 );
                 continue;
             }
-            if is_local_self_write_echo(&mut self.local_echoes, &event, now) {
+            if is_local_self_write_echo(&mut self.local_echoes, &event, hash_algorithm, now) {
                 suppressed += 1;
                 logging::debug(
                     "Suppressed stabilized event as a self-write echo",
@@ -1779,6 +1781,7 @@ fn blocked_intent_requeue_delay() -> Duration {
 fn is_local_self_write_echo(
     local_echoes: &mut SelfWriteCache,
     event: &crate::debounce::StabilizedEvent,
+    algorithm: vapor_providers::HashAlgorithm,
     now: SystemTime,
 ) -> bool {
     let key = event.path.to_string_lossy();
@@ -1807,7 +1810,7 @@ fn is_local_self_write_echo(
     {
         return false;
     }
-    let Ok(content_hash) = hash_hex_of_file(&event.path) else {
+    let Ok(content_hash) = hash_hex_of_file_with(&event.path, algorithm) else {
         return false;
     };
     local_echoes.matches_write(&key, None, Some(&content_hash), now)
