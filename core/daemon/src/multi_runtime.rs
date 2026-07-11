@@ -279,6 +279,7 @@ impl MultiProfileRuntime {
                 }
             }
             runtime.set_device_id(device_id);
+            runtime.set_profile_id(profile.id.clone());
             runtime.attach_timeline(timeline.clone());
             runtime.attach_resource_management(
                 shared_budget.clone(),

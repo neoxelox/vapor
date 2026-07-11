@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Daemon run-state & pause correctness (full-repo review):
+  - Recovering an unavailable cloud root no longer silently clears an active pause (an explicit `vapor pause` or the mass-deletion guard): it only clears the cloud-root `Error` state, so queued mass deletions cannot replicate without the human review the pause exists to force.
+  - A paused daemon no longer polls the remote changes feed (matching the documented pause semantics — no more provider API traffic while the user believes sync is fully paused).
+  - `vapor resume` while the cloud root is unavailable now reports the blocking `Error` state (with the real reason) instead of a misleading `Running`.
+  - Timeline events are attributed to the real profile id in multi-profile daemons instead of always `default`.
+  - The activity timeline capacity is restored to its configured value after a transient memory-pressure squeeze instead of staying shrunk until restart.
 - Ignore-rule filtering (full-repo review):
   - A bare directory pattern (`target`, `/build`) now excludes the directory's whole subtree, matching git semantics — a Rust repo's `target` entry no longer left every build artifact watched, hashed, and uploaded.
   - `should_ignore` now matches through a single compiled glob-set automaton instead of a per-event linear scan of every rule, so a monorepo with thousands of ignore lines no longer runs millions of regex evaluations per event burst on the fs-watch callback thread.

@@ -146,7 +146,7 @@ decide() (core/daemon/src/retry.rs:68) uses std::cmp::max(exponential_delay, ret
 
 **Suggested fix**: Clamp retry_after (and the derived slowdown_until) to a sane documented ceiling (e.g. max(RETRY_MAX_DELAY, 1h)) in RetryPolicy::decide, and use checked/saturating arithmetic for now + delay.
 
-### [high] Cloud-root recovery silently overrides a user pause and the mass-deletion (ransomware) guard pause
+### [high] Cloud-root recovery silently overrides a user pause and the mass-deletion (ransomware) guard pause  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/runtime.rs:1156` · **Review group**: runtime
 
@@ -226,7 +226,7 @@ poll_if_due issues exactly one poll_changes call (REMOTE_CHANGES_PAGE_MAX=256) p
 
 **Suggested fix**: Loop while the returned page is full (bounded, e.g., a few pages per tick to preserve interruptibility), or call request_immediate_poll()-equivalent when page.changes.len() == REMOTE_CHANGES_PAGE_MAX so the next tick continues draining instead of waiting the full cadence.
 
-### [medium] Paused daemon keeps polling the remote changes feed, contradicting the pause semantics documented in the same block
+### [medium] Paused daemon keeps polling the remote changes feed, contradicting the pause semantics documented in the same block  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/runtime.rs:451` · **Review group**: runtime
 
@@ -338,7 +338,7 @@ Every tick_all (250 ms busy / 1 s idle cadence, forever) runs auto-tune queue_de
 
 **Suggested fix**: Publish only when state changed (dirty flag set by tick reports / control requests / throttle transitions) or at a lower fixed cadence when idle; reuse the queue_depth values computed for auto-tune inside aggregate_status instead of re-querying; skip suspended slots in the auto-tune aggregation.
 
-### [low] Timeline events hardcode DEFAULT_PROFILE_ID, misattributing all activity to 'default' in multi-profile daemons
+### [low] Timeline events hardcode DEFAULT_PROFILE_ID, misattributing all activity to 'default' in multi-profile daemons  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/runtime.rs:1040` · **Review group**: runtime
 
@@ -346,7 +346,7 @@ emit_timeline_events (runtime.rs:1040) and the flush-boost (line 1221) and mass-
 
 **Suggested fix**: Store the resolved profile id on DaemonRuntime (it already carries device_id via a setter; multi_runtime already knows profile.id and passes it to RemotePoller-style consumers) and use it for every timeline push instead of DEFAULT_PROFILE_ID.
 
-### [low] `vapor resume` while the cloud root is unavailable reports RunState::Running, masking the blocking Error condition
+### [low] `vapor resume` while the cloud root is unavailable reports RunState::Running, masking the blocking Error condition  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/runtime.rs:1202` · **Review group**: runtime
 
@@ -354,7 +354,7 @@ apply_pending_control_requests handles a resume by unconditionally setting RunSt
 
 **Suggested fix**: On resume, re-derive the run state: if !cloud_root_ready, restore the Error state/reason (cloud directory unavailable) instead of Running; only report Running when work can actually be admitted.
 
-### [low] apply_memory_ceiling squeezes the timeline capacity but never restores it after memory pressure clears
+### [low] apply_memory_ceiling squeezes the timeline capacity but never restores it after memory pressure clears  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/runtime.rs:1318` · **Review group**: runtime
 

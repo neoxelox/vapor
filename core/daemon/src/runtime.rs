@@ -226,6 +226,13 @@ pub struct DaemonRuntime {
     /// bootstrap; ephemeral (hostname-derived, unpersisted) in ad-hoc
     /// embeddings and tests.
     device_id: String,
+    /// The resolved profile id this runtime serves. Used to attribute
+    /// activity on the shared multi-profile timeline; defaults to the
+    /// implicit `default` profile.
+    profile_id: String,
+    /// Timeline capacity captured before the first memory-pressure
+    /// squeeze, so the configured limit is restored once pressure clears.
+    timeline_default_entries: Option<usize>,
     /// Heuristic active-coding signal; ORs `user_active` into
     /// the throttle inputs when code-class files churn rapidly.
     active_coding: crate::safeguards::ActiveCodingHeuristic,
@@ -448,7 +455,7 @@ impl DaemonRuntime {
         // Requires an ensured cloud root; a paused daemon also skips
         // polling (nothing would be leased anyway) but keeps every
         // already-enqueued intent durable.
-        if self.cloud_root_ready {
+        if self.cloud_root_ready && !paused {
             report.remote_poll = self.remote_poller.poll_if_due(
                 &mut self.app,
                 &mut self.state_db,
@@ -861,6 +868,8 @@ impl DaemonRuntime {
             local_echoes: SelfWriteCache::new(),
             remote_echoes: SelfWriteCache::new(),
             remote_poller: RemotePoller::new(DEFAULT_PROFILE_ID),
+            profile_id: DEFAULT_PROFILE_ID.to_string(),
+            timeline_default_entries: None,
             cloud_root_ready,
             last_cloud_root_attempt_inst: None,
             reconcile_walker: None,
@@ -1057,7 +1066,7 @@ impl DaemonRuntime {
         let Some(timeline) = self.timeline.clone() else {
             return;
         };
-        let profile_id = DEFAULT_PROFILE_ID;
+        let profile_id = self.profile_id.as_str();
 
         let run_state = self.app.snapshot().run_state;
         if self.last_timeline_run_state != Some(run_state) {
@@ -1137,6 +1146,15 @@ impl DaemonRuntime {
         self.device_id = device_id.into();
     }
 
+    /// Sets the resolved profile id (multi-profile shell). Rebuilds the
+    /// remote poller so its durable cursor key is namespaced per profile,
+    /// and re-attributes timeline events to this profile.
+    pub fn set_profile_id(&mut self, profile_id: impl Into<String>) {
+        let profile_id = profile_id.into();
+        self.remote_poller = RemotePoller::new(&profile_id);
+        self.profile_id = profile_id;
+    }
+
     /// Cumulative keep-both conflict copies created since daemon start.
     pub fn conflict_count(&self) -> u64 {
         self.conflict_count
@@ -1172,6 +1190,15 @@ impl DaemonRuntime {
             .is_ok()
         {
             self.cloud_root_ready = true;
+            // Recovering the cloud root must only clear the cloud-root
+            // Error state. If the daemon is Paused — an explicit
+            // `vapor pause`, or the mass-deletion (ransomware) guard — leave
+            // the pause and its reason intact so recovery cannot silently
+            // resume sync (and replicate queued mass deletions) without the
+            // human review the pause exists to force.
+            if self.app.snapshot().run_state == RunState::Paused {
+                return;
+            }
             match self.sync_scope.local_sync_directory.as_ref() {
                 Some(path) => self.app.set_run_state(
                     RunState::Running,
@@ -1213,17 +1240,31 @@ impl DaemonRuntime {
                 self.app
                     .set_run_state(RunState::Paused, "user paused via vapor pause");
             } else {
-                let reason = match self.sync_scope.local_sync_directory.as_ref() {
-                    Some(path) => {
-                        format!("user resumed via vapor resume; watching {}", path.display())
-                    }
-                    None => "user resumed via vapor resume".to_string(),
-                };
-                self.app.set_run_state(RunState::Running, reason);
                 // An explicit resume is the human-in-the-loop reset for
                 // the mass-deletion guard: the operator looked
                 // at the alert and decided the changes are legitimate.
                 self.mass_change_guard.reset();
+                // Re-derive the run state from what can actually admit
+                // work: resuming while the cloud root is unavailable must
+                // not report Running (which would mask the real blocker),
+                // since the tick loop still leases nothing.
+                if !self.cloud_root_ready {
+                    self.app.set_run_state(
+                        RunState::Error,
+                        format!(
+                            "cloud sync directory {} is unavailable; sync work is blocked until it can be ensured",
+                            self.sync_scope.cloud_sync_directory
+                        ),
+                    );
+                } else {
+                    let reason = match self.sync_scope.local_sync_directory.as_ref() {
+                        Some(path) => {
+                            format!("user resumed via vapor resume; watching {}", path.display())
+                        }
+                        None => "user resumed via vapor resume".to_string(),
+                    };
+                    self.app.set_run_state(RunState::Running, reason);
+                }
             }
         }
         if flush_request {
@@ -1238,7 +1279,7 @@ impl DaemonRuntime {
             if let Some(timeline) = &self.timeline {
                 timeline.push(
                     "flush",
-                    DEFAULT_PROFILE_ID,
+                    self.profile_id.as_str(),
                     format!(
                         "flush requested: deferred work released for {}s",
                         constants::engine::FLUSH_BOOST_SECONDS
@@ -1336,6 +1377,11 @@ impl DaemonRuntime {
             self.remote_echoes
                 .set_bounds(squeezed_ttl, squeezed_entries);
             if let Some(timeline) = &self.timeline {
+                // Capture the configured capacity once so it can be
+                // restored when pressure clears (without it, a single
+                // transient squeeze permanently shrank the timeline).
+                self.timeline_default_entries
+                    .get_or_insert(timeline.max_entries());
                 timeline.set_max_entries(budget_entries / 4);
             }
         } else if usage < budget_entries / 2 {
@@ -1345,6 +1391,11 @@ impl DaemonRuntime {
             let default_entries = vapor_shared::constants::self_write_cache::MAX_ENTRIES;
             self.local_echoes.set_bounds(default_ttl, default_entries);
             self.remote_echoes.set_bounds(default_ttl, default_entries);
+            if let (Some(timeline), Some(default)) =
+                (&self.timeline, self.timeline_default_entries.take())
+            {
+                timeline.set_max_entries(default);
+            }
         }
     }
 
@@ -1499,7 +1550,7 @@ impl DaemonRuntime {
                 );
                 self.app.set_run_state(RunState::Paused, reason.clone());
                 if let Some(timeline) = &self.timeline {
-                    timeline.push("guard", DEFAULT_PROFILE_ID, reason.clone(), now);
+                    timeline.push("guard", self.profile_id.as_str(), reason.clone(), now);
                 }
                 logging::warning(
                     "Mass-deletion guard tripped; pausing sync",
@@ -3869,6 +3920,71 @@ mod tests {
             fixture.runtime.app.snapshot().run_state,
             RunState::Running,
             "one delete after resume is normal use, not a storm"
+        );
+    }
+
+    #[test]
+    fn cloud_root_recovery_does_not_override_an_active_pause() {
+        let mut fixture = BidirectionalFixture::new();
+        // Boot state: cloud root was unavailable and a pause (user or the
+        // mass-deletion guard) is active.
+        fixture.runtime.cloud_root_ready = false;
+        fixture.runtime.app.set_run_state(
+            RunState::Paused,
+            "mass-deletion guard: review the changes, then run `vapor resume`",
+        );
+
+        // The cloud root becomes reachable and the retry recovers it.
+        fixture.tick(70_000);
+
+        assert!(
+            fixture.runtime.cloud_root_ready,
+            "the retry must recover the cloud root"
+        );
+        // The key guarantee: recovery does not flip Paused -> Running.
+        // (The human-facing `reason` string is shared with throttle-state
+        // updates and is refreshed every tick, so it is not asserted here.)
+        assert_eq!(
+            fixture.runtime.app.snapshot().run_state,
+            RunState::Paused,
+            "recovery must not silently clear an active pause"
+        );
+    }
+
+    #[test]
+    fn resume_while_cloud_root_unavailable_reports_error_not_running() {
+        let mut fixture = BidirectionalFixture::new();
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+        // Cloud root unavailable → build's Error state, then a user pause.
+        fixture.runtime.cloud_root_ready = false;
+        fixture.runtime.app.set_run_state(
+            RunState::Error,
+            "cloud sync directory /nope is unavailable; sync work is blocked until it can be ensured",
+        );
+
+        // Resume while still unavailable: applied in isolation (retry would
+        // otherwise recover the fixture's real cloud dir) it must re-derive
+        // Error, not report Running.
+        control.request_resume();
+        fixture
+            .runtime
+            .apply_pending_control_requests(timestamp_ms(1_000))
+            .expect("apply control");
+
+        assert_eq!(
+            fixture.runtime.app.snapshot().run_state,
+            RunState::Error,
+            "resume must not report Running while the cloud root is unavailable"
+        );
+        assert!(
+            fixture
+                .runtime
+                .app
+                .snapshot()
+                .reason
+                .contains("cloud sync directory"),
+            "the real blocker must remain visible in the reason"
         );
     }
 
