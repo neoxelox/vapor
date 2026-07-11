@@ -1199,6 +1199,15 @@ fn plan_intent(
             // upload restores it remotely. One-way pull mirrors delete
             // unconditionally — that is their contract.
             if env.sync_mode == vapor_shared::SyncMode::TwoWay {
+                // The Removed event may be stale: another device (or our own
+                // re-upload) could have recreated the remote object after
+                // the deletion was observed. If the remote exists again,
+                // this delete is obsolete — completing it would remove a
+                // file that is present remotely. Complete as a no-op.
+                if let Ok(Some(_)) = app.provider().stat(&remote_path) {
+                    return PlanOutcome::Noop("remote object exists again; deletion is stale")
+                        .tap_provider(app);
+                }
                 match deletion_loses_to_local_state(state_db, intent, env.hash_algorithm) {
                     Ok(Some(reason)) => return PlanOutcome::Noop(reason).tap_provider(app),
                     Ok(None) => {}

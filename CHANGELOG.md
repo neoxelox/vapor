@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- More bidirectional-sync data-loss fixes (full-repo review):
+  - A process-wide `VAPOR_LOCAL/CLOUD_SYNC_DIRECTORY` env var no longer silently overrides a profile's explicit per-profile directory (which collapsed every profile onto one root — catastrophic for a one-way mirror profile). The env layer now applies only to fields a profile did not set, with a loud warning when overridden.
+  - A local `read_dir`/`stat` failure during reconcile (EPERM/EACCES/EMFILE/EIO) no longer reads as "no local entries": the directory is deferred instead of driving strict-mirror remote deletes of content that still exists locally.
+  - The daemon's own upload echoes are suppressed by a durable second-line correlator (persisted sync-index op-id / content hash), so they are no longer re-downloaded (or turned into phantom conflicts) once the ~30s live echo record expires under the 60s Throttled poll cadence or a Suspended pause.
+  - Remote-sourced intents are enqueued with the change's observed time (not the poll time), and a two-way `ApplyRemoteDelete` re-stats the remote first — so a stale `Removed` from a lagging feed can no longer delete a freshly re-uploaded/edited local file.
 - Daemon run-state & pause correctness (full-repo review):
   - Recovering an unavailable cloud root no longer silently clears an active pause (an explicit `vapor pause` or the mass-deletion guard): it only clears the cloud-root `Error` state, so queued mass deletions cannot replicate without the human review the pause exists to force.
   - A paused daemon no longer polls the remote changes feed (matching the documented pause semantics — no more provider API traffic while the user believes sync is fully paused).

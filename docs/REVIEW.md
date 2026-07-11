@@ -439,7 +439,7 @@ On TransferStep::Completed in two-way mode the executor runs preserve_diverged_l
 
 **Suggested fix**: Close the window: always rename the existing local file aside (to a temp name) first, then rename the staging file in, then compare the set-aside file against the index/incoming hash and either delete it (unchanged) or promote it to the conflict-copy path (diverged). That makes the divergence decision operate on the exact bytes that were displaced instead of on a racy pre-check.
 
-### [high] VAPOR_LOCAL/CLOUD_SYNC_DIRECTORY env vars silently override every profile's per-profile directories, collapsing all profiles onto one root
+### [high] VAPOR_LOCAL/CLOUD_SYNC_DIRECTORY env vars silently override every profile's per-profile directories, collapsing all profiles onto one root  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/profiles.rs:111`
 
@@ -447,7 +447,7 @@ resolve_profiles builds an effective per-profile config and then calls sync_dire
 
 **Suggested fix**: Apply the env-var layer only to the top-level/implicit-default resolution (or only when the profile does not set the field). When profiles are configured and the env var is set, either ignore it with a loud warning or refuse to start; never let a process-wide env value replace an explicit per-profile root, especially for one-way profiles.
 
-### [high] Local read_dir/stat failure is treated as 'no local entries', so push-only reconcile enqueues remote Deletes for content that still exists locally
+### [high] Local read_dir/stat failure is treated as 'no local entries', so push-only reconcile enqueues remote Deletes for content that still exists locally  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/reconcile_walk.rs:208`
 
@@ -455,7 +455,7 @@ In compare_directory, a non-NotFound fs::read_dir error (lines 208-216) only log
 
 **Suggested fix**: On any non-NotFound read_dir error, skip the directory entirely (return Ok(()) without comparing), and on a symlink_metadata error skip the whole directory or at least never let that entry classify as locally-absent. A strict-mirror delete must only be derived from a positively-observed absence, never from a failed local read.
 
-### [high] Self-write-cache TTL (30s) is shorter than the Throttled poll cadence (60s) and the Suspended pause, so the daemon's own upload echoes replay as remote changes
+### [high] Self-write-cache TTL (30s) is shorter than the Throttled poll cadence (60s) and the Suspended pause, so the daemon's own upload echoes replay as remote changes  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/remote_sync.rs:80`
 
@@ -463,7 +463,7 @@ remote_echoes records an upload at completion with DEFAULT_TTL_MILLIS = 30_000, 
 
 **Suggested fix**: Make echo suppression not depend on a TTL shorter than the worst-case observation delay: either bound the TTL below by the active poll cadence (extend records while polling is deferred/suspended), or add a durable second-line correlator — e.g. suppress a CreatedOrModified whose op_id equals sync_index.last_op_id (and hash equals index.content_hash) for that path, which is already persisted.
 
-### [high] Remote poller enqueues intents with poll time instead of change.observed_at, so a stale remote Removed deletes a freshly re-uploaded/edited local file
+### [high] Remote poller enqueues intents with poll time instead of change.observed_at, so a stale remote Removed deletes a freshly re-uploaded/edited local file  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/remote_sync.rs:228`
 

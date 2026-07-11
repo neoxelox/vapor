@@ -186,8 +186,24 @@ impl ReconcileWalker {
                     if self.ignores(&entry.path()) {
                         continue;
                     }
-                    let Ok(metadata) = entry.path().symlink_metadata() else {
-                        continue;
+                    let metadata = match entry.path().symlink_metadata() {
+                        Ok(metadata) => metadata,
+                        // The entry was just listed, so it exists — a stat
+                        // failure is transient (permission, EIO). Never let
+                        // it read as "locally absent": that would drive a
+                        // strict-mirror remote delete of content that is
+                        // still present. Abandon this directory; a later
+                        // reconcile retries it.
+                        Err(error) => {
+                            crate::logging::warning(
+                                "Reconcile walk cannot stat a local entry; deferring the directory",
+                                &[
+                                    ("path", entry.path().display().to_string()),
+                                    ("error", error.to_string()),
+                                ],
+                            );
+                            return Ok(());
+                        }
                     };
                     // Regular files and directories only: symlinks,
                     // FIFOs, sockets, and device nodes are outside the
@@ -205,14 +221,21 @@ impl ReconcileWalker {
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            // A non-NotFound read failure (EPERM/EACCES/EMFILE/EIO) is NOT a
+            // positively-observed empty directory. Falling through with an
+            // empty local view would classify every remote entry as
+            // local-only and strict-mirror-delete the cloud tree (or churn
+            // spurious downloads in two-way). Skip the directory entirely
+            // and let a later reconcile pass retry once the error clears.
             Err(error) => {
                 crate::logging::warning(
-                    "Reconcile walk cannot read a local directory; skipping it",
+                    "Reconcile walk cannot read a local directory; deferring it",
                     &[
                         ("directory", directory.display().to_string()),
                         ("error", error.to_string()),
                     ],
                 );
+                return Ok(());
             }
         }
 
