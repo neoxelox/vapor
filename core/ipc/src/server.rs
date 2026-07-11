@@ -145,8 +145,21 @@ where
         // The client connected and left without speaking — clean close.
         return Ok(());
     };
-    let request: Request = serde_json::from_slice(&first_frame)
-        .map_err(|error| ServeError::Parse(error.to_string()))?;
+    let request: Request = match serde_json::from_slice(&first_frame) {
+        Ok(request) => request,
+        Err(error) => {
+            // Send a typed courtesy reply before closing (matching the
+            // other error paths) so a skewed/buggy client sees a real
+            // handshake error instead of a bare connection drop.
+            let _ = send_response(
+                writer,
+                Response::Err(ErrorBody::HandshakeRequired(format!(
+                    "unparsable handshake frame: {error}"
+                ))),
+            );
+            return Err(ServeError::Parse(error.to_string()));
+        }
+    };
     let Request::Hello(hello) = request else {
         let _ = send_response(
             writer,
@@ -167,7 +180,10 @@ where
     let ack = HelloAck {
         schema_version: current,
         supported_min_version: min,
-        server_id: format!("vapord/{current}"),
+        // Product version (workspace version, synced from the root VERSION
+        // file), not the schema version — the dedicated schema_version
+        // field already carries that.
+        server_id: format!("vapord/{}", env!("CARGO_PKG_VERSION")),
     };
     send_response(writer, Response::Ok(ResponseBody::HelloAck(ack)))?;
 
@@ -180,8 +196,18 @@ where
         let request: Request = match serde_json::from_slice(&next) {
             Ok(value) => value,
             Err(error) => {
-                let response =
-                    Response::Err(ErrorBody::Backend(format!("invalid request: {error}")));
+                // An unknown Method variant from a newer (in-window) peer
+                // fails the whole-envelope parse. Answer the documented
+                // MethodNotFound (so the client can tell "daemon too old
+                // for this command" from a genuine fault), reserving
+                // Backend for genuinely malformed frames.
+                let response = if error.to_string().contains("unknown variant") {
+                    let name =
+                        unknown_method_name(&next).unwrap_or_else(|| "<unknown>".to_string());
+                    Response::Err(ErrorBody::MethodNotFound(name))
+                } else {
+                    Response::Err(ErrorBody::Backend(format!("invalid request: {error}")))
+                };
                 send_response(writer, response)?;
                 continue;
             }
@@ -245,6 +271,23 @@ fn dispatch_method(service: &dyn Service, method: Method) -> Response {
 fn send_response<W: Write>(writer: &mut W, response: Response) -> Result<(), FrameError> {
     let bytes = serde_json::to_vec(&response).expect("Response always serializes");
     write_frame(writer, &bytes)
+}
+
+/// Recovers the method name from a `Call` frame whose `Method` variant did
+/// not deserialize (a newer peer's unknown method). Returns `None` for a
+/// non-`Call` frame or an unrecognizable shape.
+fn unknown_method_name(frame: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(frame).ok()?;
+    if value.get("kind")?.as_str()? != "Call" {
+        return None;
+    }
+    match value.get("payload")?.get("method")? {
+        // Unit variants serialize as a bare string; struct variants as a
+        // single-key object.
+        serde_json::Value::String(name) => Some(name.clone()),
+        serde_json::Value::Object(map) => map.keys().next().cloned(),
+        _ => None,
+    }
 }
 
 /// Returns `Some(violation)` if the peer's announced version is
@@ -401,6 +444,37 @@ mod tests {
                 assert_eq!(value.run_state, "Running");
             }
             other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_method_from_newer_peer_answers_method_not_found() {
+        let service = StaticService {
+            status: fixture_status(),
+        };
+        let mut request_buf = Vec::new();
+        write_request_frame(
+            &mut request_buf,
+            &Request::Hello(Hello {
+                schema_version: 1,
+                supported_min_version: 1,
+                client_id: "vapor-cli/test".to_string(),
+            }),
+        );
+        // A method the daemon does not know (a newer peer): hand-craft the
+        // frame since Method is a closed enum here.
+        let raw = br#"{"kind":"Call","payload":{"method":"FutureMethod"}}"#;
+        write_frame(&mut request_buf, raw).expect("write raw frame");
+
+        let mut reader = Cursor::new(request_buf);
+        let mut response_buf = Vec::new();
+        serve_connection(&mut reader, &mut response_buf, &service).expect("serve");
+
+        let mut response_reader = Cursor::new(response_buf);
+        let _ack = read_response_frame(&mut response_reader);
+        match read_response_frame(&mut response_reader) {
+            Response::Err(ErrorBody::MethodNotFound(name)) => assert_eq!(name, "FutureMethod"),
+            other => panic!("expected MethodNotFound, got {other:?}"),
         }
     }
 

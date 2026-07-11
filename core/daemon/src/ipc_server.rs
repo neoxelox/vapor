@@ -106,9 +106,29 @@ pub fn spawn(service: Arc<dyn Service>) -> std::io::Result<IpcServerHandle> {
     let join = thread::Builder::new()
         .name("vapor-ipc".to_string())
         .spawn(move || {
+            let mut consecutive_accept_errors: u32 = 0;
             for stream in listener_clone.incoming() {
-                let Ok(stream) = stream else {
-                    continue;
+                let stream = match stream {
+                    Ok(stream) => {
+                        consecutive_accept_errors = 0;
+                        stream
+                    }
+                    Err(error) => {
+                        // A persistent accept error (EMFILE/ENFILE under fd
+                        // pressure) would otherwise busy-loop this thread at
+                        // ~100% CPU with no diagnostic. Back off (10ms → 1s)
+                        // and log the first few occurrences.
+                        if consecutive_accept_errors < 3 {
+                            crate::logging::warning(
+                                "IPC accept failed; backing off before retrying",
+                                &[("error", error.to_string())],
+                            );
+                        }
+                        let backoff_ms = (10_u64 << consecutive_accept_errors.min(7)).min(1_000);
+                        consecutive_accept_errors = consecutive_accept_errors.saturating_add(1);
+                        thread::sleep(Duration::from_millis(backoff_ms));
+                        continue;
+                    }
                 };
                 if active_connections.load(Ordering::Acquire)
                     >= constants::ipc::MAX_CONCURRENT_CONNECTIONS
@@ -123,6 +143,11 @@ pub fn spawn(service: Arc<dyn Service>) -> std::io::Result<IpcServerHandle> {
                     continue;
                 }
                 let _ = stream.set_read_timeout(Some(idle_timeout));
+                // A write timeout too: without it a client that completes
+                // the handshake and then stops reading parks a handler
+                // thread forever in write_all, permanently consuming one of
+                // the bounded connection slots.
+                let _ = stream.set_write_timeout(Some(idle_timeout));
                 let service = service.clone();
                 let connection_counter = active_connections.clone();
                 connection_counter.fetch_add(1, Ordering::AcqRel);

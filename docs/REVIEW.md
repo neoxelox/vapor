@@ -740,7 +740,7 @@ The loopback OAuth flow in run_gdrive_pkce_flow (core/cli/src/commands/auth.rs:2
 
 **Suggested fix**: Loop on listener.accept() with a read timeout per connection, discard connections that produce no parseable GET with a code (or that fail state validation, see the state finding), and only stop once a valid code is received or an overall deadline expires.
 
-### [medium] Accept-loop error path spins hot with no backoff (e.g. EMFILE) — sustained 100% CPU on a low-impact-first daemon
+### [medium] Accept-loop error path spins hot with no backoff (e.g. EMFILE) — sustained 100% CPU on a low-impact-first daemon  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/ipc_server.rs:111` · **Review group**: ipc
 
@@ -748,7 +748,7 @@ The IPC accept loop in core/daemon/src/ipc_server.rs (lines 110-113) treats ever
 
 **Suggested fix**: On `Err` from accept, log once (rate-limited) and sleep with backoff (e.g. 10 ms → 1 s capped) before continuing; optionally treat repeated identical errors as a reason to surface a degraded-IPC status.
 
-### [medium] Server connections have no write timeout: a client that stops reading blocks a handler thread forever and permanently exhausts the 32-connection cap
+### [medium] Server connections have no write timeout: a client that stops reading blocks a handler thread forever and permanently exhausts the 32-connection cap  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/ipc_server.rs:126` · **Review group**: ipc
 
@@ -756,7 +756,7 @@ The daemon IPC accept loop (core/daemon/src/ipc_server.rs:126) sets only set_rea
 
 **Suggested fix**: Set a write timeout on the accepted stream alongside the read timeout (e.g. `stream.set_write_timeout(Some(idle_timeout))`), so a blocked `write_all` returns `WouldBlock`, `serve_connection` errors out, and the slot is released. Optionally add a total per-session deadline as defense in depth.
 
-### [medium] Unknown Method variants from a newer (in-window) peer are answered with Backend parse errors instead of the documented MethodNotFound
+### [medium] Unknown Method variants from a newer (in-window) peer are answered with Backend parse errors instead of the documented MethodNotFound  ✅ DONE
 
 **Category**: bug · **Where**: `core/ipc/src/server.rs:184` · **Review group**: ipc
 
@@ -892,7 +892,7 @@ DEFAULT_CALL_TIMEOUT (core/ipc/src/client.rs:31) is applied as SO_RCVTIMEO/SO_SN
 
 **Suggested fix**: Perform a non-blocking connect with a poll/select deadline (or connect on a helper thread joined with the timeout) so the connect phase is bounded by the same deadline as reads/writes.
 
-### [low] Malformed JSON in the handshake frame closes the connection silently instead of returning a typed error
+### [low] Malformed JSON in the handshake frame closes the connection silently instead of returning a typed error  ✅ DONE
 
 **Category**: improvement · **Where**: `core/ipc/src/server.rs:150` · **Review group**: ipc
 
@@ -900,7 +900,7 @@ In serve_connection (core/ipc/src/server.rs:149-150), a first frame that passes 
 
 **Suggested fix**: Before returning `ServeError::Parse` on the handshake frame, best-effort send `Response::Err(ErrorBody::HandshakeRequired(..))` (or a dedicated parse-error body), matching the courtesy reply the other error paths already give.
 
-### [low] HelloAck server_id reports the IPC schema version where its own contract documents the product version
+### [low] HelloAck server_id reports the IPC schema version where its own contract documents the product version  ✅ DONE
 
 **Category**: improvement · **Where**: `core/ipc/src/server.rs:171` · **Review group**: ipc
 
