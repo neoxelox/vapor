@@ -14,6 +14,14 @@ SOURCE_SCRIPT="$ROOT_DIR/scripts/version.sh"
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
   GIT_COMMON_DIR GIT_NAMESPACE GIT_PREFIX
 
+# Isolate config-driven git behavior too: a contributor's global
+# `commit.gpgsign = true` (without a usable key) or a `core.hooksPath`
+# that rejects these commits would fail every fixture commit — and thus
+# the required `./scripts/test.sh` gate — for reasons unrelated to the
+# code under test. (git >= 2.32 honors these overrides.)
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_SYSTEM=/dev/null
+
 export GIT_AUTHOR_NAME="Vapor Test"
 export GIT_AUTHOR_EMAIL="vapor-tests@example.com"
 export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"

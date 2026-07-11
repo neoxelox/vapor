@@ -1278,7 +1278,7 @@ open_log_file (core/shared/src/logging.rs:173-176) opens vapor.logs/vapord.logs 
 
 **Suggested fix**: Add size-based rotation in StructuredLogger (e.g. rename to vapord.logs.1 and reopen past an N-MiB cap defined in constants.rs, keeping K generations), and have the daemon trim the stdout/stderr redirect files at startup.
 
-### [medium] S9 runs rm -rf on a directory derived from an unvalidated log-parsed path
+### [medium] S9 runs rm -rf on a directory derived from an unvalidated log-parsed path  ✅ DONE
 
 **Category**: bug · **Where**: `scripts/e2e.sh:402` · **Review group**: scripts
 
@@ -1294,7 +1294,7 @@ The pre-commit hook installed by scripts/hooks.sh (line 63 of the emitted hook) 
 
 **Suggested fix**: Remove the clean.sh step from the hook (lint/test/build are already deterministic through the wrapper scripts); if a from-scratch guarantee is wanted, keep it in CI only. At minimum stop deleting `.vapor` and `target` in the commit path.
 
-### [medium] sync_cargo_lock swallows all cargo output, so release prep dies silently after already mutating VERSION/Cargo.toml on main
+### [medium] sync_cargo_lock swallows all cargo output, so release prep dies silently after already mutating VERSION/Cargo.toml on main  ✅ DONE
 
 **Category**: bug · **Where**: `scripts/version.sh:152` · **Review group**: scripts
 
@@ -1494,7 +1494,7 @@ normalize_absolute_path pops ParentDir components lexically. If a component is a
 
 **Suggested fix**: After lexical normalization, attempt fs::canonicalize on the deepest existing ancestor (falling back to the lexical result) so equivalent spellings converge before the socket-path hash is computed; at minimum document that VAPOR_DIR must use one consistent spelling across surfaces.
 
-### [low] cleanup uses pkill -f with the repo path as an unescaped regex
+### [low] cleanup uses pkill -f with the repo path as an unescaped regex  ✅ DONE
 
 **Category**: improvement · **Where**: `scripts/e2e.sh:175` · **Review group**: scripts
 
@@ -1502,7 +1502,7 @@ normalize_absolute_path pops ParentDir components lexically. If a component is a
 
 **Suggested fix**: Match the literal executable path instead: iterate `pgrep -x vapord` and compare each process's executable path, or escape the pattern (`printf '%s' "$ROOT_DIR/target/debug/vapord" | sed 's/[][(){}.*+?^$|\\]/\\&/g'`) before passing it to pkill -f.
 
-### [low] S5 hangs forever (no timeout) if the singleton lock regresses
+### [low] S5 hangs forever (no timeout) if the singleton lock regresses  ✅ DONE
 
 **Category**: bug · **Where**: `scripts/e2e.sh:348` · **Review group**: scripts
 
@@ -1510,7 +1510,7 @@ S5 (scripts/e2e.sh:348) captures the second daemon via an unbounded command subs
 
 **Suggested fix**: Bound the wait, e.g. run the second daemon in the background and `wait_until 15` for it to exit, or use `timeout 15 "$VAPOR_BIN" run --foreground` (with a perl/python fallback since macOS lacks coreutils timeout by default), then assert the non-zero exit and refusal message.
 
-### [low] e2e harness silently aborts and deletes the failure sandbox when a glob/grep assignment matches nothing
+### [low] e2e harness silently aborts and deletes the failure sandbox when a glob/grep assignment matches nothing  ✅ DONE
 
 **Category**: bug · **Where**: `scripts/e2e.sh:529` · **Review group**: scripts
 
@@ -1518,7 +1518,7 @@ Under `set -euo pipefail`, the assignments `S15_COPY="$(compgen -G ... | head -n
 
 **Suggested fix**: Make these assignments failure-tolerant so the existing checks fire, e.g. `S15_COPY="$(compgen -G ... | head -n 1 || true)"` and `deep_socket="$(grep ... | tail -n 1 | sed ... || true)"`, mirroring the `|| true` already used for warning_count on line 375.
 
-### [low] lint.sh runs the identical Swift lint command twice per invocation
+### [low] lint.sh runs the identical Swift lint command twice per invocation  ✅ DONE
 
 **Category**: perf · **Where**: `scripts/lint.sh:18` · **Review group**: scripts
 
@@ -1526,7 +1526,7 @@ On macOS, scripts/lint.sh runs the identical Swift lint twice: line 13 runs scri
 
 **Suggested fix**: Either drop the trailing `format.sh check` from lint.sh in favor of `rust/format.sh check` only, or make swift/lint.sh delegate to swift/format.sh check so the pass runs once.
 
-### [low] version.sh fixture tests inherit the developer's global git config and fail on gpgsign/hooksPath machines
+### [low] version.sh fixture tests inherit the developer's global git config and fail on gpgsign/hooksPath machines  ✅ DONE
 
 **Category**: bug · **Where**: `scripts/tests/version.sh:90` · **Review group**: scripts
 
