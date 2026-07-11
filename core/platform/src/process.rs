@@ -110,9 +110,9 @@ pub use unix_impl::NativeProcessSupervisor;
 mod windows_impl {
     use super::{ProcessSupervisor, ProcessSupervisorError};
 
-    /// Windows-native supervisor stub. The real `SetConsoleCtrlHandler`
-    /// + `SERVICE_STOP` + `WM_ENDSESSION` integration lands when Windows
-    /// becomes a shipping surface.
+    /// Windows-native supervisor stub. The real `SetConsoleCtrlHandler`,
+    /// `SERVICE_STOP`, and `WM_ENDSESSION` integration lands when
+    /// Windows becomes a shipping surface.
     #[derive(Debug, Default)]
     pub struct NativeProcessSupervisor;
 
