@@ -139,24 +139,7 @@ Stack-specific helpers:
 
 ### Releases
 
-Version bumps with `./scripts/version.sh`:
-
-1. Commit all changes and checkout to `main` with a clean worktree.
-2. Run `./scripts/format.sh`, `./scripts/lint.sh`, and `./scripts/test.sh`, then commit any fixes they produce.
-3. Update `CHANGELOG.md` with a section that matches the target version and release date.
-4. Run the appropriate `./scripts/version.sh ...` command to update `VERSION`, sync Cargo metadata, create the release commit, and create the matching tag.
-5. Push the release commit and tag together: `git push origin "$(git branch --show-current)" --follow-tags`.
-6. Wait for `lint`, `test`, `perf`, and `release` to pass on the tag.
-7. Review the draft GitHub Release, verify `Vapor.zip` and `Checksums.txt`, then publish it.
-
-`./scripts/version.sh` usage:
-
-- Show current version: `./scripts/version.sh current`
-- Set an exact stable version: `./scripts/version.sh set 0.2.0`
-- Bump the stable base version: `./scripts/version.sh bump patch|minor|major`
-- Set an exact prerelease: `./scripts/version.sh set 0.2.0-rc.1`
-- Bump the current prerelease: `./scripts/version.sh prerelease rc|beta|alpha`
-- Convert to stable release: `./scripts/version.sh release`
+Releases are cut from a clean `main` with `./scripts/version.sh` (`set` / `bump patch|minor|major` / `prerelease` / `release`), which validates the worktree, updates `VERSION`, syncs Cargo metadata, and creates the release commit plus matching `v$(cat VERSION)` tag; pushing them together (`git push origin main --follow-tags`) runs the gated pipeline that builds, signs, and drafts the GitHub Release. Full runbook: `docs/operations/release-process.md`.
 
 ## Agents
 

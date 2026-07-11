@@ -87,9 +87,12 @@ Release invariants:
 1. Prepare release changes
    - Commit all non-release changes on `main`.
    - Set the target version with `./scripts/version.sh`:
-     - Stable example: `./scripts/version.sh set 0.2.0`
-     - Prerelease example: `./scripts/version.sh set 0.2.0-rc.1`
-     - Increment current prerelease example: `./scripts/version.sh prerelease rc`
+     - Show current version: `./scripts/version.sh current`
+     - Set an exact stable version: `./scripts/version.sh set 0.2.0`
+     - Bump the stable base version: `./scripts/version.sh bump patch|minor|major`
+     - Set an exact prerelease: `./scripts/version.sh set 0.2.0-rc.1`
+     - Bump the current prerelease: `./scripts/version.sh prerelease rc|beta|alpha`
+     - Convert the current prerelease to its stable release: `./scripts/version.sh release`
     - Update `CHANGELOG.md`:
       - Move items from `Unreleased` into a new `## [<VERSION>] - YYYY-MM-DD` section.
       - Keep sections concise and user-impact focused.

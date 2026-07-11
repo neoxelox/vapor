@@ -800,3 +800,9 @@ snapshot.
       (information architecture, step sequence, copy, UX states). When this
       starts, run a clarification pass with the project owner to define the
       onboarding structure before implementation.
+- [ ] R-1 Write the incident runbooks `AGENTS.md §12` mandates under
+      `docs/operations/`: daemon crash loops, auth/token refresh
+      failures, provider rate-limit storms, schema migration failures,
+      reconcile backlog non-convergence. Only the release incident
+      playbook exists today. Each runbook needs detection, mitigation,
+      user-visible state, and recovery verification.
