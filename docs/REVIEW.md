@@ -975,7 +975,7 @@ write_side_file (core/providers/src/tags.rs:131) stages the op-id side-file thro
 | medium | perf | `core/platform/src/metrics.rs:77` | NativePlatformMetricsSampler returns constant fabricated ThrottleInputs on macOS, so battery/thermal/CPU pressure never throttles the daemon |
 | low | improvement | `core/platform/src/service/macos.rs:230` | stop_daemon swallows all launchctl failures and returns success before the daemon has exited |
 
-### [high] bootstrap/install launches the daemon via RunAtLoad before the crash-loop guard is consulted, bypassing pause and backoff
+### [high] bootstrap/install launches the daemon via RunAtLoad before the crash-loop guard is consulted, bypassing pause and backoff  ✅ DONE
 
 **Category**: bug · **Where**: `core/lifecycle/src/manager.rs:236`
 

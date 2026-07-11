@@ -231,8 +231,30 @@ impl DaemonLifecycleManager {
         if !self.auto_launch_enabled()? {
             return Ok(DaemonLifecycleActionResult::Unchanged);
         }
+        // Consult the crash-loop guard BEFORE install_and_enable: on macOS
+        // install writes a RunAtLoad=true LaunchAgent and launchd starts
+        // the daemon immediately, which would bypass a durable crash-loop
+        // pause/backoff on every app launch (the UI shows "paused" while
+        // the daemon is actually relaunched).
+        let relaunch_delay = self.current_relaunch_delay(now);
+        if relaunch_delay > Duration::ZERO {
+            return Ok(DaemonLifecycleActionResult::RelaunchDeferred(relaunch_delay));
+        }
         self.installer.install_and_enable()?;
         self.start_daemon_if_allowed_inner(now)
+    }
+
+    /// The relaunch delay the crash-loop guard currently imposes
+    /// (`Duration::MAX` when paused indefinitely, zero when a relaunch is
+    /// allowed). Consulted before any install path that would auto-start.
+    fn current_relaunch_delay(&self, now: Instant) -> Duration {
+        self.with_inner(|inner| {
+            if inner.crash_loop_guard.is_paused_indefinitely() {
+                Duration::MAX
+            } else {
+                inner.crash_loop_guard.remaining_delay(now)
+            }
+        })
     }
 
     /// Mirrors `setAutoLaunchEnabled(_:stopDaemonNow:now:)`.
@@ -244,6 +266,13 @@ impl DaemonLifecycleManager {
     ) -> Result<DaemonLifecycleActionResult, DaemonLifecycleError> {
         self.settings.write(enabled)?;
         if enabled {
+            // Same guard-before-install ordering as bootstrap_if_needed:
+            // enabling autolaunch must not relaunch a crash-loop-paused
+            // daemon via RunAtLoad.
+            let relaunch_delay = self.current_relaunch_delay(now);
+            if relaunch_delay > Duration::ZERO {
+                return Ok(DaemonLifecycleActionResult::RelaunchDeferred(relaunch_delay));
+            }
             self.installer.install_and_enable()?;
             return self.start_daemon_if_allowed_inner(now);
         }
@@ -520,6 +549,32 @@ mod tests {
         assert_eq!(result, DaemonLifecycleActionResult::Started);
         assert_eq!(settings.read().expect("read"), Some(true));
         assert_eq!(installer.operations(), vec!["install", "start"]);
+    }
+
+    #[test]
+    fn bootstrap_defers_without_installing_while_a_crash_loop_backoff_is_pending() {
+        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
+        let manager = manager_with(installer.clone(), settings);
+        let t0 = Instant::now();
+
+        // Two free crashes, then one more → a backoff is pending.
+        manager.register_unexpected_daemon_exit(t0).expect("c1");
+        manager.register_unexpected_daemon_exit(t0).expect("c2");
+        manager.register_unexpected_daemon_exit(t0).expect("c3");
+
+        let result = manager.bootstrap_if_needed(t0).expect("bootstrap");
+        assert!(matches!(
+            result,
+            DaemonLifecycleActionResult::RelaunchDeferred(_)
+        ));
+        // Crucially, no install/start ran: a RunAtLoad install would have
+        // relaunched the crash-looping daemon behind the deferral.
+        assert!(
+            installer.operations().is_empty(),
+            "ops should be empty, got {:?}",
+            installer.operations()
+        );
     }
 
     #[test]
