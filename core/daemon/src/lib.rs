@@ -432,7 +432,11 @@ impl DaemonApp {
                 // lift the Light/Throttled tiers above their compiled
                 // values (that would defeat the throttle ladder in exactly
                 // the states where it matters most).
-                if is_idle_drain { scaled } else { scaled.min(cap) }
+                if is_idle_drain {
+                    scaled
+                } else {
+                    scaled.min(cap)
+                }
             };
             caps.planner_workers = scale_cap(caps.planner_workers);
             caps.hash_workers = scale_cap(caps.hash_workers);
@@ -652,7 +656,10 @@ mod tests {
         state_db
             .enqueue_intent(&path, crate::event_intents::PendingIntentKind::Upload, now)
             .expect("enqueue");
-        let leased = state_db.lease_next_ready(now).expect("lease").expect("leased");
+        let leased = state_db
+            .lease_next_ready(now)
+            .expect("lease")
+            .expect("leased");
         app.schedule_retry(
             &mut state_db,
             leased.id,

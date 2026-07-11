@@ -238,7 +238,9 @@ impl DaemonLifecycleManager {
         // the daemon is actually relaunched).
         let relaunch_delay = self.current_relaunch_delay(now);
         if relaunch_delay > Duration::ZERO {
-            return Ok(DaemonLifecycleActionResult::RelaunchDeferred(relaunch_delay));
+            return Ok(DaemonLifecycleActionResult::RelaunchDeferred(
+                relaunch_delay,
+            ));
         }
         self.installer.install_and_enable()?;
         self.start_daemon_if_allowed_inner(now)
@@ -271,7 +273,9 @@ impl DaemonLifecycleManager {
             // daemon via RunAtLoad.
             let relaunch_delay = self.current_relaunch_delay(now);
             if relaunch_delay > Duration::ZERO {
-                return Ok(DaemonLifecycleActionResult::RelaunchDeferred(relaunch_delay));
+                return Ok(DaemonLifecycleActionResult::RelaunchDeferred(
+                    relaunch_delay,
+                ));
             }
             self.installer.install_and_enable()?;
             return self.start_daemon_if_allowed_inner(now);

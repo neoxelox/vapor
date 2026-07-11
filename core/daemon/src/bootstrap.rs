@@ -114,6 +114,14 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // currently reports static idle inputs) — wired here so the seam is
     // exercised in production, not just in tests.
     let metrics_sampler = Arc::new(NativePlatformMetricsSampler::for_current_host());
+    if !NativePlatformMetricsSampler::has_native_sampling() {
+        logging::warning(
+            "Throttle inputs are static placeholders (no native metrics bridge yet): \
+             battery/thermal/CPU pressure will not throttle the daemon, and idle-boost \
+             stays off. Real per-OS sampling lands with the platform metrics bridge.",
+            &[],
+        );
+    }
 
     let budget_config = crate::resource_budget::EffectiveBudgetConfig::resolve(&config);
     let mut runtime = MultiProfileRuntime::start(

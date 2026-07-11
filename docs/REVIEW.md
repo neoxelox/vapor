@@ -154,7 +154,7 @@ retry_cloud_root_if_needed() runs on every tick while cloud_root_ready is false,
 
 **Suggested fix**: Only transition to Running when the previous run_state was the cloud-root Error state (or track 'blocked by cloud root' separately from run_state). If run_state == Paused, set cloud_root_ready = true but leave the run state and pause reason untouched.
 
-### [high] Shipping daemon caps ALL transfers at ~312 KB/s: placeholder 10 Mbps 'measured' throughput feeds the bandwidth shaper
+### [high] Shipping daemon caps ALL transfers at ~312 KB/s: placeholder 10 Mbps 'measured' throughput feeds the bandwidth shaper  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/runtime.rs:1281` · **Review group**: sync-pipeline-e2e
 
@@ -991,7 +991,7 @@ JsonFileAutoLaunchSettingStore::write does read-document → insert autoLaunch �
 
 **Suggested fix**: Share the same advisory file-lock discipline proposed for lifecycle.json for all vapor.json writers, and use a unique temp filename per writer so concurrent renames cannot fail with ENOENT or publish another writer's payload.
 
-### [medium] NativeIdleNotifier reports the user as always idle on macOS, defeating idle-gated throttling on the shipping OS
+### [medium] NativeIdleNotifier reports the user as always idle on macOS, defeating idle-gated throttling on the shipping OS  ✅ DONE
 
 **Category**: perf · **Where**: `core/platform/src/idle.rs:88`
 
@@ -999,7 +999,7 @@ NativeIdleNotifier (core/platform/src/idle.rs:88) is a stub that always reports 
 
 **Suggested fix**: Implement the macOS bridge via CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateHIDSystemState, kCGAnyInputEventType) (or IOHIDSystem HIDIdleTime); until it lands, make NativeIdleNotifier on macOS return Duration::ZERO (user treated as Active → work deferred) so the stub fails safe for device impact.
 
-### [medium] NativePlatformMetricsSampler returns constant fabricated ThrottleInputs on macOS, so battery/thermal/CPU pressure never throttles the daemon
+### [medium] NativePlatformMetricsSampler returns constant fabricated ThrottleInputs on macOS, so battery/thermal/CPU pressure never throttles the daemon  ✅ DONE
 
 **Category**: perf · **Where**: `core/platform/src/metrics.rs:77`
 
@@ -1446,7 +1446,7 @@ The `vapor timeline` subcommand help (core/cli/src/main.rs:77-78) and its empty-
 
 **Suggested fix**: Update the Timeline subcommand doc comment and change the empty-state message to something like "(no timeline events recorded yet)".
 
-### [low] println!-based output panics on closed stdout (broken pipe) — vapor logs | head exits 101 with a panic message ✅ FIXED in this PR
+### [low] println!-based output panics on closed stdout (broken pipe) — vapor logs | head exits 101 with a panic message ✅ FIXED in this PR  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/main.rs:453` · **Review group**: cli-core
 
