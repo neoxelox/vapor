@@ -244,6 +244,14 @@ impl StagedExecutor {
         snapshot
     }
 
+    /// Intent ids of every execution currently held in-process. The
+    /// runtime renews their leases before the stale-lease sweep so a long
+    /// transfer (or a Suspended stall past the lease timeout) is not
+    /// reclaimed out from under a live execution.
+    pub fn active_intent_ids(&self) -> Vec<i64> {
+        self.active.keys().copied().collect()
+    }
+
     /// Diagnostic view of every active execution: (intent id, path,
     /// kind, stage, elapsed-in-stage). Consumed by the IPC diagnostics
     /// surface.
@@ -956,6 +964,33 @@ impl StagedExecutor {
         report: &mut StagedExecutorReport,
     ) -> Result<(), StateDbError> {
         match failure {
+            // Retry budget exhausted: finalize as a permanent failure
+            // rather than calling schedule_retry (which refuses past the
+            // cap) and letting the stale-lease sweep re-pend it forever.
+            RetryFailureKind::Transient | RetryFailureKind::RateLimited { .. }
+                if intent.attempt_count >= constants::state::MAX_ATTEMPT_COUNT =>
+            {
+                let message = format!(
+                    "{message} (retry budget exhausted after {} attempts)",
+                    intent.attempt_count
+                );
+                app.finalize_failure(
+                    state_db,
+                    intent.id,
+                    RetryFailureKind::Permanent,
+                    &message,
+                    now,
+                )?;
+                report.failed += 1;
+                crate::logging::error(
+                    "Intent failed terminally after exhausting its retry budget",
+                    &[
+                        ("intent_id", intent.id.to_string()),
+                        ("path", intent.path.display().to_string()),
+                        ("attempts", intent.attempt_count.to_string()),
+                    ],
+                );
+            }
             RetryFailureKind::Transient | RetryFailureKind::RateLimited { .. } => {
                 app.schedule_retry(state_db, intent.id, failure, message, now)?;
                 report.retried += 1;

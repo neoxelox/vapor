@@ -50,6 +50,14 @@ pub mod state {
     /// anyway, and unbounded tombstone growth would violate the memory
     /// and storage bounds.
     pub const TOMBSTONE_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
+    /// Terminally-failed intent records older than this are pruned at
+    /// daemon startup: a single auth outage can finalize thousands of
+    /// rows, and the diagnostics surface only needs recent failures.
+    /// Unbounded growth would violate the low-device-impact storage bound.
+    pub const FAILED_INTENT_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
+    /// Hard cap on retained terminally-failed rows regardless of age, so a
+    /// single massive incident cannot bloat the durable DB.
+    pub const MAX_FAILED_INTENTS_RETAINED: usize = 10_000;
     pub const MAX_ATTEMPT_COUNT: u32 = 10_000;
     pub const MAX_DIAGNOSTIC_TEXT_LENGTH: usize = 1_024;
     pub const MAX_STATE_KEY_LENGTH: usize = 128;
@@ -415,6 +423,12 @@ pub mod engine {
     pub const RETRY_BASE_DELAY_MILLIS: u64 = 2_000;
     pub const RETRY_RATE_LIMIT_BASE_DELAY_MILLIS: u64 = 15_000;
     pub const RETRY_MAX_DELAY_MILLIS: u64 = 900_000;
+    /// Ceiling for a server-supplied `Retry-After`: a bogus or absurd
+    /// header (garbage seconds, a mistaken epoch timestamp) is clamped to
+    /// this so it cannot overflow time arithmetic or park an intent — and
+    /// the persisted global rate-limit slowdown — for months. One hour is
+    /// well past any legitimate provider backoff.
+    pub const RETRY_AFTER_CEILING_MILLIS: u64 = 3_600_000;
     pub const RETRY_JITTER_PERCENT: u8 = 20;
     pub const STORM_WINDOW_MILLIS: u64 = 2_000;
     pub const STORM_DIRECTORY_UNIQUE_PATHS_THRESHOLD: usize = 200;

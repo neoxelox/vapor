@@ -90,7 +90,7 @@ In start_with_state_root, a profile whose provider_kind fails select_provider_fo
 
 **Suggested fix**: Do not substitute a functioning provider. Mark the profile as failed/suspended at composition time (set slot.failed = Some(reason), RunState::Error, skip schedule_startup_reconcile and watchers for it) so it surfaces in status but performs zero sync work until the configuration is fixed. At minimum, never allow the stub fallback for profiles whose sync_mode is not TwoWay.
 
-### [critical] Corruption recovery quarantines the durable DB on ANY SQLite error, destroying all intent state on transient I/O failures
+### [critical] Corruption recovery quarantines the durable DB on ANY SQLite error, destroying all intent state on transient I/O failures  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/state_db.rs:151` · **Review group**: state-db
 
@@ -138,7 +138,7 @@ expand_glob_patterns appends the `{resolved}/**` descendant pattern only when th
 
 **Suggested fix**: Treat every non-negated pattern as potentially matching a directory: emit `{resolved}/**` for all expanded stems (not only directory_only ones), or track directory matches separately by also testing each ancestor of the relative path against the rule list. Alternatively adopt the `ignore` crate's Gitignore matcher, which implements git's directory-exclusion semantics exactly.
 
-### [high] Server-supplied Retry-After is used uncapped: a bogus header can panic the daemon or persist a multi-year global retry slowdown
+### [high] Server-supplied Retry-After is used uncapped: a bogus header can panic the daemon or persist a multi-year global retry slowdown  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/retry.rs:68` · **Review group**: state-db
 
@@ -162,7 +162,7 @@ sample_throttle_inputs always sets the shaper to Some(rate) where rate = capacit
 
 **Suggested fix**: Make the static/native fallback report network_throughput_kbps: None until a real per-OS measurement exists (then ASSUMED_LINK_CAPACITY_KBPS applies, giving ~3.1 MB/s at 25%), or leave the shaper unlimited when no measurement exists. Also consider whether a placeholder Some(10_000) belongs in ThrottleInputs::default() at all — it silently masquerades as a measurement everywhere inputs are defaulted.
 
-### [high] Stale-lease sweep reclaims leases still held by live executions (no lease renewal), causing duplicate concurrent work and dropped completions
+### [high] Stale-lease sweep reclaims leases still held by live executions (no lease renewal), causing duplicate concurrent work and dropped completions  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/state_db.rs:604` · **Review group**: state-db
 
@@ -266,7 +266,7 @@ is_local_self_write_echo (core/daemon/src/runtime.rs:1810) calls hash_hex_of_fil
 
 **Suggested fix**: Route the echo-confirmation hash through the budgeted streaming hash machinery (or a bounded-size fast path: hash inline only below a few MB, otherwise defer the decision to a chunked check across ticks). Alternatively correlate large-file echoes via the op-id tag + size + mtime instead of a full content hash.
 
-### [medium] list_queue_intents ORDER BY cannot use the ready index — full scan and sort per diagnostics query
+### [medium] list_queue_intents ORDER BY cannot use the ready index — full scan and sort per diagnostics query  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/state_db.rs:201` · **Review group**: state-db
 
@@ -274,7 +274,7 @@ list_queue_intents (core/daemon/src/state_db.rs:201) orders by (available_at_ms,
 
 **Suggested fix**: Add an index on (available_at_ms, id), or query the two states separately through the existing index and merge the top rows in memory.
 
-### [medium] Coalesced enqueue dedup lookup has no supporting index — full table scan per intent on the ingest flush path
+### [medium] Coalesced enqueue dedup lookup has no supporting index — full table scan per intent on the ingest flush path  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/state_db.rs:752` · **Review group**: state-db
 
@@ -282,7 +282,7 @@ enqueue_intents_coalesced (state_db.rs:748-764) runs 'SELECT id FROM queue_inten
 
 **Suggested fix**: Add CREATE INDEX idx_queue_intents_path ON queue_intents(path_text, kind, state) (bump schema/migration accordingly); optionally fold the check into a single INSERT ... WHERE NOT EXISTS per row.
 
-### [medium] failed_intents table grows without bound — no retention, pruning, or clearing path anywhere in the codebase
+### [medium] failed_intents table grows without bound — no retention, pruning, or clearing path anywhere in the codebase  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/state_db.rs:1059` · **Review group**: state-db
 
@@ -290,7 +290,7 @@ Tombstones get prune_tombstones (30-day retention, called from the runtime) and 
 
 **Suggested fix**: Add a retention sweep symmetrical to prune_tombstones (e.g. FAILED_INTENT_RETENTION_MILLIS, pruned at startup/periodically) and/or a bounded row cap keeping only the newest N failures; expose a CLI clear/retry path for the surfaced failures.
 
-### [medium] v3->v4 migration resets the queue AUTOINCREMENT sequence when the queue is empty, allowing reused ids to collide with failed_intents primary keys
+### [medium] v3->v4 migration resets the queue AUTOINCREMENT sequence when the queue is empty, allowing reused ids to collide with failed_intents primary keys  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/state_db.rs:1120` · **Review group**: state-db
 
@@ -362,7 +362,7 @@ apply_memory_ceiling (core/daemon/src/runtime.rs:1300-1329) squeezes the shared 
 
 **Suggested fix**: In the restore branch, reset the timeline to its configured default capacity (mirror the echo-cache restore), e.g. timeline.set_max_entries(default_timeline_entries).
 
-### [low] schedule_retry spans five separate implicit transactions; a crash mid-sequence loses the durable rate-limit slowdown marker
+### [low] schedule_retry spans five separate implicit transactions; a crash mid-sequence loses the durable rate-limit slowdown marker  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/state_db.rs:467` · **Review group**: state-db
 
@@ -370,7 +370,7 @@ schedule_retry performs intent_record (SELECT), requeue_leased_with_attempt_bump
 
 **Suggested fix**: Wrap the whole operation in one TransactionBehavior::Immediate transaction (like finalize_leased_failure does) and build the returned record from the already-fetched row plus the known updates instead of re-reading.
 
-### [low] MAX_ATTEMPT_COUNT terminal-failure contract has no implementer, so the attempt cap wedges intents instead of finalizing them
+### [low] MAX_ATTEMPT_COUNT terminal-failure contract has no implementer, so the attempt cap wedges intents instead of finalizing them  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/state_db.rs:477` · **Review group**: state-db
 

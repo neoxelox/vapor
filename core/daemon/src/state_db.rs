@@ -148,7 +148,14 @@ impl DurableStateDb {
         let path = path.as_ref().to_path_buf();
         match Self::open(&path) {
             Ok(database) => Ok(database),
-            Err(StateDbError::Sql(error)) => {
+            // Only genuine corruption (unreadable-as-SQLite / structural
+            // corruption) may quarantine the file. Transient failures —
+            // disk full (SQLITE_FULL), I/O errors (SQLITE_IOERR), busy
+            // locks (SQLITE_BUSY), permission problems (SQLITE_PERM) — must
+            // NOT destroy a healthy database full of pending intent state;
+            // they surface as ordinary startup failures so the crash-loop
+            // guard retries instead.
+            Err(StateDbError::Sql(error)) if is_corruption_error(&error) => {
                 let now_ms = system_time_to_millis(now).unwrap_or(0);
                 let quarantine = path.with_extension(format!("sqlite.corrupt-{now_ms}"));
                 crate::logging::error(
@@ -438,32 +445,6 @@ impl DurableStateDb {
         Ok(changed > 0)
     }
 
-    fn requeue_leased_with_attempt_bump(
-        &mut self,
-        id: i64,
-        available_at: SystemTime,
-        last_error: Option<&str>,
-    ) -> Result<bool, StateDbError> {
-        let available_at_ms = system_time_to_millis(available_at)?;
-        let changed = self.connection.execute(
-            "UPDATE queue_intents
-             SET state = ?,
-                 available_at_ms = ?,
-                 leased_at_ms = NULL,
-                 last_error = ?,
-                 attempt_count = attempt_count + 1
-             WHERE id = ? AND state = ?",
-            params![
-                STATE_PENDING,
-                available_at_ms,
-                last_error.map(sanitize_persisted_error),
-                id,
-                STATE_LEASED
-            ],
-        )?;
-        Ok(changed > 0)
-    }
-
     pub fn schedule_retry(
         &mut self,
         id: i64,
@@ -495,22 +476,60 @@ impl DurableStateDb {
             .ok_or(StateDbError::InvalidIntentState(
                 "retryable decision missing available_at".to_string(),
             ))?;
-        if !self.requeue_leased_with_attempt_bump(id, available_at, Some(last_error))? {
+        let available_at_ms = system_time_to_millis(available_at)?;
+
+        // One atomic transaction over the requeue and the slowdown marker:
+        // a crash between the two must never persist the retried intent
+        // while dropping the durable rate-limit slowdown (which would let
+        // other work resume at full speed against a provider that just
+        // rate-limited us).
+        let slowdown_value = if let Some(slowdown_until) = decision.slowdown_until {
+            let persisted = self
+                .retry_slowdown_until()?
+                .map(|existing| existing.max(slowdown_until))
+                .unwrap_or(slowdown_until);
+            Some(system_time_to_millis(persisted)?)
+        } else {
+            None
+        };
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE queue_intents
+             SET state = ?,
+                 available_at_ms = ?,
+                 leased_at_ms = NULL,
+                 last_error = ?,
+                 attempt_count = attempt_count + 1
+             WHERE id = ? AND state = ?",
+            params![
+                STATE_PENDING,
+                available_at_ms,
+                Some(sanitize_persisted_error(last_error)),
+                id,
+                STATE_LEASED
+            ],
+        )?;
+        if changed == 0 {
             return Err(StateDbError::InvalidIntentState(format!(
                 "intent {id} is not currently leased"
             )));
         }
-        if let Some(slowdown_until) = decision.slowdown_until {
-            let persisted_slowdown_until = self
-                .retry_slowdown_until()?
-                .map(|existing| existing.max(slowdown_until))
-                .unwrap_or(slowdown_until);
-            self.set_state(
-                constants::state::RETRY_SLOWDOWN_UNTIL_KEY,
-                &system_time_to_millis(persisted_slowdown_until)?.to_string(),
-                now,
+        if let Some(slowdown_ms) = slowdown_value {
+            let key = constants::state::RETRY_SLOWDOWN_UNTIL_KEY;
+            validate_state_key(key)?;
+            let value = slowdown_ms.to_string();
+            validate_state_value(&value)?;
+            transaction.execute(
+                "INSERT INTO state_entries (key, value, updated_at_ms)
+                 VALUES (?, ?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms",
+                params![key, value, system_time_to_millis(now)?],
             )?;
         }
+        transaction.commit()?;
 
         let intent = self
             .intent_record(id)?
@@ -586,7 +605,9 @@ impl DurableStateDb {
     /// `attempt_count` — documented in `data-flow.md` §Local to remote —
     /// while fresh leases keep their retry history.
     pub fn recover_leased(&mut self, now: SystemTime) -> Result<usize, StateDbError> {
-        let stale_leases_count = self.recover_stale_leases(now)?;
+        // Startup: stale leases reset their retry history (a lost process
+        // owned them long enough that the backoff should restart).
+        let stale_leases_count = self.recover_stale_leases_inner(now, true)?;
         let now_ms = system_time_to_millis(now)?;
         let fresh_leases_count = self.connection.execute(
             "UPDATE queue_intents
@@ -597,24 +618,41 @@ impl DurableStateDb {
         Ok(stale_leases_count + fresh_leases_count)
     }
 
-    /// In-run recovery sweep: returns only leases older than the lease
-    /// timeout to `pending`. Safe to call while the daemon is live —
-    /// legitimately in-flight leases are far younger than the 15-minute
-    /// timeout, so only orphaned leases (a lost execution) are replayed.
+    /// In-run recovery sweep: returns leases older than the lease timeout
+    /// to `pending`. Only genuinely orphaned leases (a lost execution)
+    /// should reach this — the executor renews the lease of every intent
+    /// it still holds via [`renew_leases`], so a long transfer or a
+    /// Suspended stall no longer trips the sweep. Retry history is kept
+    /// (an in-run recovery is not a fresh start).
     pub fn recover_stale_leases(&mut self, now: SystemTime) -> Result<usize, StateDbError> {
+        self.recover_stale_leases_inner(now, false)
+    }
+
+    fn recover_stale_leases_inner(
+        &mut self,
+        now: SystemTime,
+        reset_attempt_count: bool,
+    ) -> Result<usize, StateDbError> {
         let now_ms = system_time_to_millis(now)?;
         let stale_lease_cutoff_ms = now_ms
             .saturating_sub(i64::try_from(constants::engine::LEASE_TIMEOUT_MILLIS).unwrap_or(0));
+        let attempt_clause = if reset_attempt_count {
+            "attempt_count = 0,"
+        } else {
+            ""
+        };
         let stale_leases_count = self.connection.execute(
-            "UPDATE queue_intents
-             SET state = ?,
-                 available_at_ms = ?,
-                 leased_at_ms = NULL,
-                 last_error = ?,
-                 attempt_count = 0
-             WHERE state = ?
-               AND leased_at_ms IS NOT NULL
-               AND leased_at_ms <= ?",
+            &format!(
+                "UPDATE queue_intents
+                 SET state = ?,
+                     available_at_ms = ?,
+                     leased_at_ms = NULL,
+                     {attempt_clause}
+                     last_error = ?
+                 WHERE state = ?
+                   AND leased_at_ms IS NOT NULL
+                   AND leased_at_ms <= ?"
+            ),
             params![
                 STATE_PENDING,
                 now_ms,
@@ -624,6 +662,34 @@ impl DurableStateDb {
             ],
         )?;
         Ok(stale_leases_count)
+    }
+
+    /// Renews the lease timestamp of the given leased intents so the
+    /// in-run stale-lease sweep does not reclaim work still executing.
+    /// No-op for ids that are no longer leased.
+    pub fn renew_leases(&mut self, ids: &[i64], now: SystemTime) -> Result<(), StateDbError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let now_ms = system_time_to_millis(now)?;
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut sql_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::with_capacity(ids.len() + 2);
+        sql_params.push(Box::new(now_ms));
+        sql_params.push(Box::new(STATE_LEASED));
+        for id in ids {
+            sql_params.push(Box::new(*id));
+        }
+        let param_refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(AsRef::as_ref).collect();
+        self.connection.execute(
+            &format!(
+                "UPDATE queue_intents SET leased_at_ms = ?
+                 WHERE state = ? AND id IN ({placeholders})"
+            ),
+            param_refs.as_slice(),
+        )?;
+        Ok(())
     }
 
     pub fn take_active_retry_slowdown_until(
@@ -959,6 +1025,33 @@ impl DurableStateDb {
         )?;
         Ok(pruned)
     }
+
+    /// Prunes terminally-failed intent records: those older than the
+    /// retention window, plus any beyond the newest-N cap. Keeps the
+    /// durable DB bounded after a large failure burst (e.g. a revoked
+    /// OAuth token finalizing an entire backlog). Returns rows removed.
+    pub fn prune_failed_intents(&mut self, now: SystemTime) -> Result<usize, StateDbError> {
+        let now_ms = system_time_to_millis(now)?;
+        let cutoff = now_ms.saturating_sub(
+            i64::try_from(constants::state::FAILED_INTENT_RETENTION_MILLIS).unwrap_or(i64::MAX),
+        );
+        let mut pruned = self.connection.execute(
+            "DELETE FROM failed_intents WHERE failed_at_ms < ?",
+            params![cutoff],
+        )?;
+        // Bounded row cap: keep only the newest N by (failed_at_ms, id).
+        let cap = i64::try_from(constants::state::MAX_FAILED_INTENTS_RETAINED).unwrap_or(i64::MAX);
+        pruned += self.connection.execute(
+            "DELETE FROM failed_intents
+             WHERE id NOT IN (
+                 SELECT id FROM failed_intents
+                 ORDER BY failed_at_ms DESC, id DESC
+                 LIMIT ?
+             )",
+            params![cap],
+        )?;
+        Ok(pruned)
+    }
 }
 
 fn insert_intent(
@@ -990,6 +1083,17 @@ fn insert_intent(
         ],
     )?;
     Ok(connection.last_insert_rowid())
+}
+
+/// Whether a SQLite error means the file is genuinely not a usable
+/// database (structural corruption or "not a database"), as opposed to a
+/// transient/environmental failure (disk full, I/O error, busy lock,
+/// permission). Only the former justifies quarantining the durable state.
+fn is_corruption_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseCorrupt) | Some(rusqlite::ErrorCode::NotADatabase)
+    )
 }
 
 fn configure_connection(connection: &Connection) -> Result<(), StateDbError> {
@@ -1056,6 +1160,15 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
          );
          CREATE INDEX IF NOT EXISTS idx_queue_intents_ready
              ON queue_intents(state, available_at_ms, id);
+         -- Supports the coalesced-enqueue dedup lookup (path_text + kind +
+         -- state) so a large pending queue does not turn every ingest
+         -- flush into a full table scan.
+         CREATE INDEX IF NOT EXISTS idx_queue_intents_path
+             ON queue_intents(path_text, kind, state);
+         -- Supports the diagnostics list ordering (available_at_ms, id)
+         -- without a full scan + temp b-tree sort on a deep queue.
+         CREATE INDEX IF NOT EXISTS idx_queue_intents_order
+             ON queue_intents(available_at_ms, id);
          CREATE TABLE IF NOT EXISTS failed_intents (
              id INTEGER PRIMARY KEY,
              path_text TEXT NOT NULL,
@@ -1141,6 +1254,16 @@ fn migrate_v3_to_v4(transaction: &rusqlite::Transaction<'_>) -> Result<(), State
              FROM failed_intents;
          DROP TABLE failed_intents;
          ALTER TABLE failed_intents_v4 RENAME TO failed_intents;
+         -- Restore the AUTOINCREMENT high-water mark. Queue ids double as
+         -- failed_intents primary keys, so a rebuilt sequence derived only
+         -- from the (possibly empty) copied queue rows could hand out an id
+         -- that already lives in failed_intents, colliding on the next
+         -- terminal failure. Seed the sequence above both tables' max ids.
+         DELETE FROM sqlite_sequence WHERE name = 'queue_intents';
+         INSERT INTO sqlite_sequence (name, seq)
+             VALUES ('queue_intents',
+                     MAX(COALESCE((SELECT MAX(id) FROM queue_intents), 0),
+                         COALESCE((SELECT MAX(id) FROM failed_intents), 0)));
          UPDATE schema_meta SET schema_version = 4 WHERE singleton = 1;",
     )?;
     crate::logging::info(
@@ -2297,6 +2420,146 @@ mod tests {
                 timestamp_ms(200),
             )
             .expect("v4 kinds must be storable after migration");
+    }
+
+    #[test]
+    fn migration_from_empty_queue_does_not_reuse_ids_colliding_with_failed_intents() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        fs::create_dir_all(database_path.parent().unwrap()).expect("parent");
+
+        // A v3 DB whose queue has fully drained but whose failed_intents
+        // still holds id 7: after migration, a reused id 7 would collide on
+        // the next terminal failure.
+        let connection = Connection::open(&database_path).expect("open sqlite connection");
+        configure_connection(&connection).expect("configure connection");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_meta (
+                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                     schema_version INTEGER NOT NULL CHECK(schema_version > 0)
+                 );
+                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 3);
+                 CREATE TABLE queue_intents (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     path_text TEXT NOT NULL,
+                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
+                     state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
+                     enqueued_at_ms INTEGER NOT NULL,
+                     available_at_ms INTEGER NOT NULL,
+                     leased_at_ms INTEGER,
+                     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                     last_error TEXT
+                 );
+                 INSERT INTO sqlite_sequence (name, seq) VALUES ('queue_intents', 7);
+                 CREATE TABLE failed_intents (
+                     id INTEGER PRIMARY KEY,
+                     path_text TEXT NOT NULL,
+                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
+                     failure_kind TEXT NOT NULL CHECK(failure_kind IN ('authentication', 'permanent')),
+                     enqueued_at_ms INTEGER NOT NULL,
+                     failed_at_ms INTEGER NOT NULL,
+                     attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),
+                     last_error TEXT NOT NULL
+                 );
+                 INSERT INTO failed_intents
+                     (id, path_text, kind, failure_kind, enqueued_at_ms, failed_at_ms, attempt_count, last_error)
+                     VALUES (7, '/tmp/vapor-root/gone.txt', 'upload', 'permanent', 10, 20, 1, 'boom');
+                 CREATE TABLE state_entries (
+                     key TEXT PRIMARY KEY,
+                     value TEXT NOT NULL,
+                     updated_at_ms INTEGER NOT NULL
+                 );",
+            )
+            .expect("seed v3 schema with a drained queue and a failed id 7");
+        drop(connection);
+
+        let mut migrated = DurableStateDb::open(&database_path).expect("migrate v3->v4");
+        // The next enqueued intent must get an id past the failed row so a
+        // later terminal failure cannot collide on the failed_intents PK.
+        let enqueued = migrated
+            .enqueue_intent(
+                &PathBuf::from("/tmp/vapor-root/new.txt"),
+                PendingIntentKind::Upload,
+                timestamp_ms(100),
+            )
+            .expect("enqueue after migration");
+        assert!(
+            enqueued.id > 7,
+            "reused id {} collides with failed_intents",
+            enqueued.id
+        );
+    }
+
+    #[test]
+    fn renew_leases_prevents_the_stale_sweep_from_reclaiming_live_work() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let path = PathBuf::from("/tmp/vapor-root/big.bin");
+        database
+            .enqueue_intent(&path, PendingIntentKind::Upload, timestamp_ms(0))
+            .expect("enqueue");
+        let leased = database
+            .lease_next_ready(timestamp_ms(0))
+            .expect("lease")
+            .expect("leased record");
+
+        let lease_timeout = constants::engine::LEASE_TIMEOUT_MILLIS;
+        // Renew the lease just before the timeout would elapse.
+        database
+            .renew_leases(&[leased.id], timestamp_ms(lease_timeout))
+            .expect("renew");
+        // A sweep at timeout + 2s must NOT reclaim it: renewed_at + timeout
+        // is still in the future.
+        let recovered = database
+            .recover_stale_leases(timestamp_ms(lease_timeout + 2_000))
+            .expect("sweep");
+        assert_eq!(recovered, 0, "renewed lease must not be reclaimed");
+
+        // A much later sweep with no further renewal does reclaim it, and
+        // keeps the retry history (attempt_count unchanged).
+        let recovered = database
+            .recover_stale_leases(timestamp_ms(lease_timeout * 3))
+            .expect("late sweep");
+        assert_eq!(recovered, 1);
+        let requeued = database
+            .intent_record(leased.id)
+            .expect("record")
+            .expect("still present");
+        assert_eq!(requeued.attempt_count, leased.attempt_count);
+    }
+
+    #[test]
+    fn prune_failed_intents_drops_rows_past_the_retention_window() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+
+        let path = PathBuf::from("/tmp/vapor-root/old.txt");
+        database
+            .enqueue_intent(&path, PendingIntentKind::Upload, timestamp_ms(0))
+            .expect("enqueue");
+        let leased = database
+            .lease_next_ready(timestamp_ms(0))
+            .expect("lease")
+            .expect("leased");
+        database
+            .finalize_leased_failure(
+                leased.id,
+                RetryFailureKind::Permanent,
+                "boom",
+                timestamp_ms(0),
+            )
+            .expect("finalize");
+        assert_eq!(database.failed_depth().expect("failed depth"), 1);
+
+        let retention = constants::state::FAILED_INTENT_RETENTION_MILLIS;
+        let pruned = database
+            .prune_failed_intents(timestamp_ms(retention + 1))
+            .expect("prune");
+        assert_eq!(pruned, 1);
+        assert_eq!(database.failed_depth().expect("failed depth"), 0);
     }
 
     #[test]

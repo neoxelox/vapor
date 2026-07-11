@@ -608,6 +608,14 @@ impl DaemonRuntime {
         }
 
         self.last_stale_lease_sweep_inst = Some(now_inst);
+        // Renew the leases the executor still holds so an in-flight large
+        // transfer (or a Suspended stall longer than the lease timeout) is
+        // not reclaimed as "orphaned" and duplicated.
+        let mut live_ids = self.staged_executor.active_intent_ids();
+        if let Some(reconcile_id) = self.running_reconcile_intent_id {
+            live_ids.push(reconcile_id);
+        }
+        self.state_db.renew_leases(&live_ids, now)?;
         let recovered = self.state_db.recover_stale_leases(now)?;
         if recovered > 0 {
             logging::warning(
@@ -727,6 +735,17 @@ impl DaemonRuntime {
             Ok(_) => {}
             Err(error) => logging::warning(
                 "Tombstone pruning failed; continuing",
+                &[("error", error.to_string())],
+            ),
+        }
+        match state_db.prune_failed_intents(now) {
+            Ok(pruned) if pruned > 0 => logging::info(
+                "Pruned terminally-failed intents past the retention window / cap",
+                &[("pruned", pruned.to_string())],
+            ),
+            Ok(_) => {}
+            Err(error) => logging::warning(
+                "Failed-intent pruning failed; continuing",
                 &[("error", error.to_string())],
             ),
         }

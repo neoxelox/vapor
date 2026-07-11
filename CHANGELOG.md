@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Durable state DB robustness (full-repo review):
+  - Corruption recovery now quarantines the DB only on genuine corruption (`SQLITE_CORRUPT` / `SQLITE_NOTADB`); transient failures (disk full, I/O error, busy lock, permission) surface as ordinary startup errors instead of destroying every pending intent, tombstone, and sync-index baseline.
+  - The in-run stale-lease sweep no longer reclaims work a live execution still holds: the runtime renews the leases of in-flight transfers (and a running reconcile) before each sweep, so a large upload or a Suspended stall past the 15-minute lease timeout is not duplicated; recovered leases also keep their retry history.
+  - A server `Retry-After` is clamped to a one-hour ceiling with checked time arithmetic, so a bogus/absurd header can no longer overflow (panic) the daemon or persist a multi-year global rate-limit slowdown.
+  - New indexes back the coalesced-enqueue dedup lookup and the diagnostics list ordering (no more full table scans on a deep queue every ingest flush / status publish).
+  - `failed_intents` now has a retention sweep (age window + newest-N cap) at startup, so a single auth outage that finalizes thousands of rows can no longer grow the DB without bound.
+  - The v3→v4 migration restores the AUTOINCREMENT high-water mark, so a migrated-with-empty-queue database can no longer hand out an id that collides with an existing `failed_intents` primary key (which previously wedged the intent in a recurring tick-error loop).
+  - `schedule_retry` now writes the requeue and the durable rate-limit slowdown marker in one transaction (a crash between them no longer drops the slowdown), and the retry-budget cap is enforced (an exhausted transient intent finalizes as permanent instead of looping through the stale sweep forever).
 - Bidirectional-sync data-loss and correctness fixes in the staged executor (full-repo review):
   - A local delete no longer destroys a concurrent remote modification: in two-way mode a delete only propagates when the remote still matches the last sync (op-id or content hash); a diverged remote is preserved and pulled back via a Download instead of deleted.
   - A remote directory deletion no longer wipes unsynced local files: two-way `ApplyRemoteDelete` on a directory now walks the subtree, removing only synced-and-unchanged files and preserving (and re-uploading) everything else, deleting the directory only once it is empty.
