@@ -146,6 +146,130 @@ fn small_upload_goes_multipart_and_reports_the_drive_md5() {
 }
 
 #[test]
+fn multipart_upload_reverifies_hash_precondition_and_aborts_on_drift() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    // resolve the target: it exists with the hash we planned against.
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"victim","name":"doc.txt","mimeType":"text/plain","md5Checksum":"orig-md5","size":"5"}]}"#,
+    );
+    // The pre-commit re-stat sees a different hash: the remote moved under us
+    // between planning and the (possibly long-deferred) commit.
+    transport.push_response(
+        200,
+        r#"{"id":"victim","name":"doc.txt","mimeType":"text/plain","md5Checksum":"raced-md5","size":"7"}"#,
+    );
+
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let source = scratch.path().join("doc.txt");
+    std::fs::write(&source, b"local").expect("seed");
+
+    let mut session = provider
+        .begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("doc.txt").expect("path"),
+            op_id: "dev-op-race".to_string(),
+            precondition: RemotePrecondition::HashEquals("orig-md5".to_string()),
+        })
+        .expect("session opens: planning-time hash still matched");
+
+    let error = session.step(u64::MAX).expect_err("commit must be refused");
+    assert_eq!(error.kind, ProviderErrorKind::PreconditionFailed);
+
+    // The committing multipart request must never have gone out: the last
+    // wire call is the read-only re-stat, not a PATCH.
+    let requests = transport.recorded_requests();
+    let last = requests.last().expect("at least the re-stat ran");
+    assert!(
+        last.url.contains("files/victim") && !last.url.contains("uploadType=multipart"),
+        "expected the re-stat GET to be the final call, got {}",
+        last.url
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|r| r.url.contains("uploadType=multipart")),
+        "no multipart commit may be issued once the precondition drifts"
+    );
+}
+
+#[test]
+fn resumable_upload_reverifies_hash_precondition_before_the_final_chunk() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    // resolve the target: exists with the planned hash.
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"big-victim","name":"big.bin","mimeType":"application/octet-stream","md5Checksum":"orig-md5","size":"5"}]}"#,
+    );
+    // initiate resumable session.
+    transport.push_response_with_headers(
+        200,
+        "",
+        vec![(
+            "Location".to_string(),
+            "https://upload.example/session-race".to_string(),
+        )],
+    );
+    transport.push_response(308, ""); // first chunk accepted
+    // Re-stat right before the final chunk observes a drifted hash.
+    transport.push_response(
+        200,
+        r#"{"id":"big-victim","name":"big.bin","mimeType":"application/octet-stream","md5Checksum":"raced-md5","size":"9"}"#,
+    );
+
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let source = scratch.path().join("big.bin");
+    std::fs::write(
+        &source,
+        vec![7_u8; (SIMPLE_UPLOAD_MAX_BYTES + CHUNK_GRANULARITY) as usize],
+    )
+    .expect("seed");
+
+    let mut session = provider
+        .begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("big.bin").expect("path"),
+            op_id: "dev-op-race2".to_string(),
+            precondition: RemotePrecondition::HashEquals("orig-md5".to_string()),
+        })
+        .expect("session opens");
+
+    // Initiation + first chunk proceed; only the final chunk trips the guard.
+    assert!(matches!(
+        session.step(SIMPLE_UPLOAD_MAX_BYTES).expect("initiate"),
+        TransferStep::Progressed { .. }
+    ));
+    assert!(matches!(
+        session.step(SIMPLE_UPLOAD_MAX_BYTES).expect("chunk 1"),
+        TransferStep::Progressed { .. }
+    ));
+    let error = session
+        .step(u64::MAX)
+        .expect_err("final chunk must be refused");
+    assert_eq!(error.kind, ProviderErrorKind::PreconditionFailed);
+
+    // The terminating chunk (whose Content-Range ends at total-1) must never
+    // have gone out: the last wire call is the read-only re-stat GET.
+    let requests = transport.recorded_requests();
+    let terminating_range = format!("-{}/", SIMPLE_UPLOAD_MAX_BYTES + CHUNK_GRANULARITY - 1);
+    assert!(
+        !requests.iter().any(|r| r
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Content-Range" && value.contains(&terminating_range))),
+        "the final committing chunk must not be sent after the precondition drifts"
+    );
+    let last = requests.last().expect("at least the re-stat ran");
+    assert!(
+        last.url.contains("files/big-victim"),
+        "expected the re-stat GET to be the final call, got {}",
+        last.url
+    );
+}
+
+#[test]
 fn large_upload_is_resumable_with_content_range_chunks() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = ensured_provider(transport.clone());

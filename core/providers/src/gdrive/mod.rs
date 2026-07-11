@@ -49,6 +49,13 @@ const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 const GOOGLE_APPS_MIME_PREFIX: &str = "application/vnd.google-apps.";
 const OP_ID_PROPERTY: &str = "vaporOpId";
 
+/// A changed file's freshly-resolved path, plus the stale cached path it
+/// moved from (a rename/move) when that differs.
+struct ResolvedChangePath {
+    new_path: String,
+    old_path: Option<String>,
+}
+
 /// Google-native objects (Docs, Sheets, Slides, shortcuts, …) other than
 /// folders. They have no byte content or md5, so they cannot sync as
 /// files: enumeration/stat/the changes feed must exclude them, otherwise
@@ -422,7 +429,40 @@ impl GoogleDriveProvider {
             oauth::url_encode(&query)
         );
         let list: GdFileList = self.api_json("GET", url, None)?;
-        Ok(list.files.into_iter().next())
+        // Drive allows multiple children with the same name in one folder.
+        // Pick the smallest id deterministically so the binding cannot flip
+        // across calls/restarts — an unstable binding manufactures endless
+        // keep-both conflicts (two-way) and a never-converging mirror
+        // (push-only).
+        Ok(list
+            .files
+            .into_iter()
+            .min_by(|left, right| left.id.cmp(&right.id)))
+    }
+
+    /// Whether a cache-hit file still names `path`: identical leaf name and
+    /// parent folder. An external rename or move leaves the cached id
+    /// valid but pointing at a different name/parent, so a stale hit would
+    /// otherwise upload local edits onto the wrong file (or one moved
+    /// outside the sync root) and never recreate the original.
+    fn cached_hit_still_matches(
+        &self,
+        path: &RemotePath,
+        file: &GdFile,
+        root_id: &str,
+    ) -> Result<bool, ProviderError> {
+        let leaf = path.as_str().rsplit('/').next().unwrap_or("");
+        if file.name != leaf {
+            return Ok(false);
+        }
+        let expected_parent = match path.parent() {
+            Some(parent) if !parent.is_root() => match self.resolve(&parent)? {
+                Some(parent_file) => parent_file.id,
+                None => return Ok(false),
+            },
+            _ => root_id.to_string(),
+        };
+        Ok(file.parents.iter().any(|parent| parent == &expected_parent))
     }
 
     /// Resolves a remote path to a Drive file, walking (and caching)
@@ -436,26 +476,27 @@ impl GoogleDriveProvider {
                 ..GdFile::default()
             }));
         }
-        if let Some(id) = self
+        let cached_id = self
             .id_by_path
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(path.as_str())
-            .cloned()
-        {
-            // Cached ids may be stale after external deletes; the
-            // caller-facing operations verify via the API where it
-            // matters (stat re-fetches, deletes surface 404s).
+            .cloned();
+        if let Some(id) = cached_id {
             let url = format!("{API_BASE}/files/{id}?fields={FILE_FIELDS}");
             match self.api_json::<GdFile>("GET", url, None) {
-                Ok(file) if !file.trashed => return Ok(Some(file)),
-                Ok(_) => {
-                    self.evict_path(path.as_str());
-                    return Ok(None);
+                Ok(file)
+                    if !file.trashed && self.cached_hit_still_matches(path, &file, &root_id)? =>
+                {
+                    return Ok(Some(file));
                 }
+                // Trashed, renamed/moved away, or 404: the cached mapping is
+                // stale. Evict and fall through to the fresh segment walk so
+                // we never write into (or read) whatever file the id now
+                // names.
+                Ok(_) => self.evict_path(path.as_str()),
                 Err(error) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
                     self.evict_path(path.as_str());
-                    return Ok(None);
                 }
                 Err(error) => return Err(error),
             }
@@ -550,16 +591,18 @@ impl GoogleDriveProvider {
 
     /// Best-effort path for a changed file id: cache first, then a
     /// parent-chain walk toward the ensured root.
-    fn path_for_changed_file(&self, file: &GdFile) -> Option<String> {
-        if let Some(path) = self
+    fn path_for_changed_file(&self, file: &GdFile) -> Option<ResolvedChangePath> {
+        // Any previously-cached path for this id is the OLD path — it must
+        // NOT be trusted as the current one: a remote rename/move keeps the
+        // id but changes the name/parent. Recompute the fresh path from the
+        // change's own name + parents; the parent short-circuit against
+        // cached parent paths is still fine (parents rarely move).
+        let cached = self
             .path_by_id
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&file.id)
-            .cloned()
-        {
-            return Some(path);
-        }
+            .cloned();
         let root_id = self
             .root_id
             .lock()
@@ -568,12 +611,12 @@ impl GoogleDriveProvider {
         // Walk up through parents until the root (bounded depth).
         let mut segments = vec![file.name.clone()];
         let mut current_parent = file.parents.first().cloned()?;
+        let mut new_path = None;
         for _ in 0..64 {
             if current_parent == root_id {
                 segments.reverse();
-                let path = segments.join("/");
-                self.cache_mapping(&path, &file.id);
-                return Some(path);
+                new_path = Some(segments.join("/"));
+                break;
             }
             // Known parent path short-circuits the walk.
             if let Some(parent_path) = self
@@ -584,16 +627,25 @@ impl GoogleDriveProvider {
                 .cloned()
             {
                 segments.reverse();
-                let path = format!("{parent_path}/{}", segments.join("/"));
-                self.cache_mapping(&path, &file.id);
-                return Some(path);
+                new_path = Some(format!("{parent_path}/{}", segments.join("/")));
+                break;
             }
             let url = format!("{API_BASE}/files/{current_parent}?fields={FILE_FIELDS}");
             let parent: GdFile = self.api_json("GET", url, None).ok()?;
             segments.push(parent.name.clone());
             current_parent = parent.parents.first().cloned()?;
         }
-        None
+        let new_path = new_path?;
+        // Reconcile caches to the fresh path; a stale mapping at a
+        // different path is a rename/move the caller must surface as a
+        // Removed(old) + CreatedOrModified(new) pair so the local side
+        // converges (the old file is removed, the new one downloaded).
+        let old_path = cached.filter(|cached_path| cached_path != &new_path);
+        if let Some(old) = &old_path {
+            self.evict_path(old);
+        }
+        self.cache_mapping(&new_path, &file.id);
+        Some(ResolvedChangePath { new_path, old_path })
     }
 }
 
@@ -770,6 +822,7 @@ impl Provider for GoogleDriveProvider {
             total_bytes,
             sent_bytes: 0,
             chunk_hint: self.chunk_hint.clone(),
+            precondition: request.precondition.clone(),
         }))
     }
 
@@ -928,11 +981,26 @@ impl Provider for GoogleDriveProvider {
             if file.mime_type == FOLDER_MIME || is_google_native_non_folder(&file.mime_type) {
                 continue;
             }
-            let Some(path) = self.path_for_changed_file(file) else {
+            let Some(resolved) = self.path_for_changed_file(file) else {
                 // Outside the sync root (or unmappable): not ours.
                 continue;
             };
-            let Ok(remote_path) = RemotePath::new(path) else {
+            // A rename/move surfaces as Removed(old) + CreatedOrModified(new)
+            // so the local side deletes the old path and downloads the new
+            // one (previously the change was reported at the stale cached
+            // path and never converged).
+            if let Some(old_path) = resolved.old_path
+                && let Ok(old_remote) = RemotePath::new(old_path)
+            {
+                changes.push(RemoteChange {
+                    path: old_remote,
+                    kind: RemoteChangeKind::Removed,
+                    observed_at: now,
+                    op_id: None,
+                    content_hash: None,
+                });
+            }
+            let Ok(remote_path) = RemotePath::new(resolved.new_path) else {
                 continue;
             };
             changes.push(RemoteChange {
@@ -1019,6 +1087,10 @@ struct GdriveUploadSession {
     total_bytes: u64,
     sent_bytes: u64,
     chunk_hint: Arc<Mutex<u64>>,
+    /// The precondition, retained so it can be re-verified immediately
+    /// before the committing request — begin_upload's one-time check is a
+    /// check-then-act across the whole (possibly long) transfer.
+    precondition: RemotePrecondition,
 }
 
 impl GdriveUploadSession {
@@ -1028,6 +1100,43 @@ impl GdriveUploadSession {
             config: self.token_manager_config.clone(),
             secrets: self.secrets.clone(),
         }
+    }
+
+    /// Re-verifies a `HashEquals` precondition immediately before the
+    /// committing request, shrinking the check-then-act window from the
+    /// whole (possibly hours-long, throttle-paused) transfer to one
+    /// round-trip. A divergence surfaces as PreconditionFailed, which the
+    /// engine resolves as keep-both instead of a silent overwrite.
+    fn reverify_precondition_before_commit(&self) -> Result<(), ProviderError> {
+        let RemotePrecondition::HashEquals(expected) = &self.precondition else {
+            return Ok(());
+        };
+        let Some(file_id) = &self.file_id else {
+            return Ok(());
+        };
+        let url = format!("{API_BASE}/files/{file_id}?fields={FILE_FIELDS}");
+        let response = self
+            .handle()
+            .execute_authed("GET", url, Vec::new(), Vec::new())?;
+        if response.status == 404 {
+            // The file we meant to overwrite vanished mid-transfer. Surface a
+            // conflict rather than resurrecting it with our bytes.
+            return Err(ProviderError::precondition_failed(
+                "upload target was deleted during the transfer; keeping both",
+            ));
+        }
+        if response.status >= 300 {
+            return Err(classify_api_failure(&response));
+        }
+        let current: GdFile = serde_json::from_slice(&response.body).map_err(|error| {
+            ProviderError::transient(format!("unparsable Drive API response: {error}"))
+        })?;
+        if current.trashed || current.md5_checksum.as_ref() != Some(expected) {
+            return Err(ProviderError::precondition_failed(
+                "upload target changed during the transfer; keeping both",
+            ));
+        }
+        Ok(())
     }
 
     fn simple_multipart(&mut self) -> Result<TransferOutcome, ProviderError> {
@@ -1059,6 +1168,7 @@ impl GdriveUploadSession {
                 format!("{UPLOAD_BASE}/files?uploadType=multipart&fields={FILE_FIELDS}"),
             ),
         };
+        self.reverify_precondition_before_commit()?;
         let response = self.handle().execute_authed(
             method,
             url,
@@ -1167,6 +1277,12 @@ impl TransferSession for GdriveUploadSession {
                     })?;
 
                 let range_end = self.sent_bytes + chunk_len - 1;
+                // The resumable update only materializes when the final chunk
+                // commits, so re-verify the precondition immediately before it
+                // — begin_upload's check could be arbitrarily stale by now.
+                if range_end + 1 == self.total_bytes {
+                    self.reverify_precondition_before_commit()?;
+                }
                 let response = self.handle().execute_authed(
                     "PUT",
                     session_url,

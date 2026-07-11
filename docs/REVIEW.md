@@ -684,7 +684,7 @@ FilesystemProvider::delete (core/providers/src/filesystem/mod.rs:451) falls back
 
 **Suggested fix**: Use `fs::remove_dir` (fails on non-empty) for the directory fallback, or return `precondition_failed` on a file-vs-directory kind mismatch so the engine re-plans against fresh remote state instead of recursively deleting.
 
-### [high] Duplicate file names in a Drive folder are silently resolved to an arbitrary match
+### [high] Duplicate file names in a Drive folder are silently resolved to an arbitrary match  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:415` · **Review group**: gdrive
 
@@ -692,7 +692,7 @@ Google Drive allows multiple children with the same name in one folder. find_chi
 
 **Suggested fix**: In find_child, detect files.len() > 1 and surface a deterministic outcome (e.g., pick by stable key such as smallest id — consistently everywhere — or return a Permanent 'ambiguous remote name' error the engine can surface as a conflict). In enumerate, de-duplicate same-name children deterministically instead of emitting colliding paths.
 
-### [high] Stale path->id cache hit validates only existence, so uploads write into a file that was renamed/moved away
+### [high] Stale path->id cache hit validates only existence, so uploads write into a file that was renamed/moved away  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:440` · **Review group**: gdrive
 
@@ -700,7 +700,7 @@ On a path->id cache hit, GoogleDriveProvider::resolve() (core/providers/src/gdri
 
 **Suggested fix**: On cache hit, verify the fetched GdFile still matches the cached path: compare file.name against the path's final segment and file.parents against the cached parent id (resolving the parent path the same way). On mismatch, evict and fall through to the segment walk. Also evict all cache entries under a directory prefix when a folder mapping is invalidated.
 
-### [high] path_for_changed_file prefers the stale cached path, so remote renames/moves are reported at the old path and never converge
+### [high] path_for_changed_file prefers the stale cached path, so remote renames/moves are reported at the old path and never converge  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:544` · **Review group**: gdrive
 
@@ -716,7 +716,7 @@ poll_changes filters out folders (gdrive/mod.rs:909) but nothing anywhere filter
 
 **Suggested fix**: Filter application/vnd.google-apps.* (except folder) out of enumerate, stat, and poll_changes results — or surface them as an explicit unsupported-entry kind — so the engine never plans transfers for them. Shortcuts (vnd.google-apps.shortcut) need the same treatment.
 
-### [high] Upload precondition is check-then-act across the whole (potentially long) transfer, allowing silent last-write-wins overwrite
+### [high] Upload precondition is check-then-act across the whole (potentially long) transfer, allowing silent last-write-wins overwrite  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:706` · **Review group**: gdrive
 
