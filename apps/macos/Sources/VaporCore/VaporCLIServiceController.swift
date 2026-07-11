@@ -66,7 +66,7 @@ public struct ProcessVaporCLIRunner: VaporCLIRunning {
   }
 }
 
-/// Default `LaunchAgentControlling` implementation since M2-1: every
+/// Default `LaunchAgentControlling` implementation: every
 /// operation shells out to `vapor service … --json` and decodes the
 /// stable JSON contract rendered by `core/cli/src/commands/service.rs`.
 /// The Rust lifecycle core owns the LaunchAgent plist, launchctl

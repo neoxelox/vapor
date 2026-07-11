@@ -31,7 +31,7 @@ use crate::throttle::ThrottleInputs;
 use crate::{DaemonApp, event_intents::PendingIntentKind};
 
 /// The single implicit profile id used until the multi-profile model
-/// (C8-19) fans the runtime out per profile.
+/// fans the runtime out per profile.
 pub const DEFAULT_PROFILE_ID: &str = "default";
 
 /// Consecutive tick failures tolerated before the runtime loop gives up.
@@ -126,7 +126,7 @@ pub struct RuntimeTickReport {
     pub drained_pending_intents: usize,
     pub stabilized_events: usize,
     /// Stabilized local events suppressed as echoes of the daemon's own
-    /// local applies (loop prevention, C8-7).
+    /// local applies (loop prevention).
     pub suppressed_local_echoes: usize,
     pub durable_enqueues: usize,
     pub leased_intents: usize,
@@ -135,16 +135,16 @@ pub struct RuntimeTickReport {
     pub requeued_intents: usize,
     /// Intents finalized as terminal failures this tick.
     pub failed_intents: usize,
-    /// Strict-mirror reverts observed this tick (one-way modes; C8-65).
+    /// Strict-mirror reverts observed this tick (one-way modes).
     pub mirror_reverts: usize,
-    /// Strict-mirror deletions performed this tick (one-way modes; C8-65).
+    /// Strict-mirror deletions performed this tick (one-way modes).
     pub mirror_deletes: usize,
-    /// Keep-both conflict copies created this tick (C8-14).
+    /// Keep-both conflict copies created this tick.
     pub conflicts: usize,
     pub started_reconcile_root: Option<PathBuf>,
     pub completed_reconcile_root: Option<PathBuf>,
     pub staged_executor: StagedExecutorSnapshot,
-    /// Remote changes-feed poll outcome (C8-6).
+    /// Remote changes-feed poll outcome.
     pub remote_poll: RemotePollReport,
 }
 
@@ -190,49 +190,49 @@ pub struct DaemonRuntime {
     remote_poller: RemotePoller,
     /// Whether the provider-side sync root has been ensured. While
     /// `false`, no work is leased and the remote feed is not polled;
-    /// ingest keeps capturing intent state durably (C8-50).
+    /// ingest keeps capturing intent state durably.
     cloud_root_ready: bool,
     last_cloud_root_attempt_inst: Option<Instant>,
     /// Incremental comparison walk of the currently-running reconcile.
     /// Survives slice pauses so a large tree converges across slices
-    /// instead of restarting from scratch (C8-60/C8-62 strict mirror).
+    /// instead of restarting from scratch (strict mirror).
     reconcile_walker: Option<crate::reconcile_walk::ReconcileWalker>,
-    /// Cumulative strict-mirror observability counters (C8-63/C8-65):
+    /// Cumulative strict-mirror observability counters:
     /// one-way modes must never be silent about the data they rewrite.
     mirror_revert_count: u64,
     mirror_delete_count: u64,
-    /// Cumulative keep-both conflict copies created (C8-14).
+    /// Cumulative keep-both conflict copies created.
     conflict_count: u64,
-    /// Daemon-wide activity timeline (C8-30); shared across profiles.
+    /// Daemon-wide activity timeline; shared across profiles.
     timeline: Option<Arc<crate::timeline::TimelineBuffer>>,
-    /// Daemon-wide resource budget (C8-36); shared across profiles.
+    /// Daemon-wide resource budget; shared across profiles.
     resource_budget: Arc<Mutex<crate::resource_budget::ResourceBudget>>,
-    /// Daemon-wide bandwidth shaper (C8-38); shared across profiles.
+    /// Daemon-wide bandwidth shaper; shared across profiles.
     bandwidth_shaper: Arc<Mutex<vapor_providers::BandwidthShaper>>,
     /// User-idle signal for the idle-boost gates. The native HID bridge
     /// is a platform follow-up; headless semantics (always idle) apply
     /// until it lands.
     idle_notifier: Arc<dyn vapor_platform::IdleNotifier>,
-    /// Auto-tuned per-tick transfer step budget (C8-42), shared across
+    /// Auto-tuned per-tick transfer step budget, shared across
     /// profiles.
     transfer_step_bytes: Arc<std::sync::atomic::AtomicU64>,
-    /// Latest published ceilings + last sampled inputs (C8-40).
+    /// Latest published ceilings + last sampled inputs.
     latest_ceilings: Option<crate::resource_budget::EffectiveCeilings>,
     last_sampled_inputs: Option<ThrottleInputs>,
     /// Last states emitted to the timeline, so transitions emit once.
     last_timeline_run_state: Option<RunState>,
     last_timeline_throttle: Option<vapor_shared::ThrottleState>,
-    /// Stable device identifier (C8-15). Resolved and persisted by the
+    /// Stable device identifier. Resolved and persisted by the
     /// bootstrap; ephemeral (hostname-derived, unpersisted) in ad-hoc
     /// embeddings and tests.
     device_id: String,
-    /// C8-55 — heuristic active-coding signal; ORs `user_active` into
+    /// Heuristic active-coding signal; ORs `user_active` into
     /// the throttle inputs when code-class files churn rapidly.
     active_coding: crate::safeguards::ActiveCodingHeuristic,
-    /// C8-57 — mass-deletion guard; pauses the daemon and raises a
+    /// Mass-deletion guard; pauses the daemon and raises a
     /// timeline alert on a local deletion storm.
     mass_change_guard: crate::safeguards::MassChangeGuard,
-    /// C8-56 — flush boost deadline (monotonic). While set and in the
+    /// Flush boost deadline (monotonic). While set and in the
     /// future, deferred reconciles release immediately regardless of
     /// the idle gate.
     flush_boost_until_inst: Option<Instant>,
@@ -384,7 +384,7 @@ impl DaemonRuntime {
     }
 
     /// Attach a `RuntimeControl` so the runtime tick observes IPC-driven
-    /// control requests (pause / resume / flush / reconcile). Wave 7
+    /// control requests (pause / resume / flush / reconcile). The
     /// `vapor` CLI commands write into this control through the IPC
     /// service. The control also gets the tick waker so an IPC request
     /// wakes the loop immediately instead of waiting out the sleep.
@@ -424,8 +424,8 @@ impl DaemonRuntime {
         // and the durable flush keep running so intent state is never
         // lost, and work already in flight runs to completion — but no
         // new work is released or leased while paused. An unavailable
-        // cloud root blocks the same way (C8-50). Evaluated *after*
-        // stabilization so a mass-deletion guard trip (C8-57) stops
+        // cloud root blocks the same way. Evaluated *after*
+        // stabilization so a mass-deletion guard trip stops
         // admission in the same tick that detected the storm.
         let paused = self.app.snapshot().run_state == RunState::Paused || !self.cloud_root_ready;
         self.mirror_revert_count += stabilize_mirror_reverts as u64;
@@ -635,7 +635,7 @@ impl DaemonRuntime {
 
     /// The bounded event recorder this runtime ingests from. The
     /// multi-profile runtime fans deduplicated watcher callbacks into
-    /// these per-profile recorders (C8-23).
+    /// these per-profile recorders.
     pub(crate) fn event_recorder(&self) -> Option<Arc<BoundedFsEventRecorder>> {
         self.recorder.clone()
     }
@@ -869,12 +869,12 @@ impl DaemonRuntime {
         })
     }
 
-    /// Wires the shared daemon activity timeline in (C8-30).
+    /// Wires the shared daemon activity timeline in.
     pub fn attach_timeline(&mut self, timeline: Arc<crate::timeline::TimelineBuffer>) {
         self.timeline = Some(timeline);
     }
 
-    /// Wires the daemon-wide resource management set in (C8-36..C8-42):
+    /// Wires the daemon-wide resource management set in:
     /// the budget, the bandwidth shaper, the shared transfer step knob,
     /// and the idle signal. The multi-profile runtime shares one of
     /// each across every profile.
@@ -892,7 +892,7 @@ impl DaemonRuntime {
     }
 
     /// Latest effective ceilings + utilization for the IPC surface
-    /// (C8-40). `None` until the first 1s sample.
+    ///. `None` until the first 1s sample.
     pub fn resource_budget_status(&self) -> Option<vapor_ipc::ResourceBudgetStatus> {
         let ceilings = self.latest_ceilings.as_ref()?;
         let inputs = self.last_sampled_inputs.as_ref();
@@ -928,7 +928,7 @@ impl DaemonRuntime {
             .unwrap_or(0)
     }
 
-    /// Per-intent "why stuck" rows (C8-29): active executor stages plus
+    /// Per-intent "why stuck" rows: active executor stages plus
     /// the oldest queued/retrying durable rows, each with a
     /// human-readable blocker.
     pub fn intent_diagnostics(
@@ -1031,7 +1031,7 @@ impl DaemonRuntime {
     }
 
     /// Emits timeline entries for state transitions and notable tick
-    /// outcomes (C8-30). Cheap: only fires on changes and non-zero
+    /// outcomes. Cheap: only fires on changes and non-zero
     /// counters.
     fn emit_timeline_events(&mut self, report: &RuntimeTickReport, now: SystemTime) {
         let Some(timeline) = self.timeline.clone() else {
@@ -1112,7 +1112,7 @@ impl DaemonRuntime {
     }
 
     /// Overrides the device identifier (the bootstrap passes the value
-    /// persisted in `vapor.json`; C8-15 forbids silent regeneration).
+    /// persisted in `vapor.json`; a later task forbids silent regeneration).
     pub fn set_device_id(&mut self, device_id: impl Into<String>) {
         self.device_id = device_id.into();
     }
@@ -1123,13 +1123,13 @@ impl DaemonRuntime {
     }
 
     /// Cumulative count of strict-mirror reverts / deletions performed
-    /// by the one-way modes since daemon start (C8-65 diagnostics).
+    /// by the one-way modes since daemon start (diagnostics).
     pub fn mirror_counters(&self) -> (u64, u64) {
         (self.mirror_revert_count, self.mirror_delete_count)
     }
 
     /// Retries ensuring the provider-side sync root while it is
-    /// unavailable (C8-50). Between attempts, sync work stays blocked
+    /// unavailable. Between attempts, sync work stays blocked
     /// and intents accumulate durably — never dropped.
     fn retry_cloud_root_if_needed(&mut self) {
         if self.cloud_root_ready {
@@ -1169,7 +1169,7 @@ impl DaemonRuntime {
 
     /// Drains any pause / resume / flush / reconcile requests recorded
     /// on the attached `RuntimeControl` and applies them. Called at
-    /// the top of every tick. Wave 7 / `cli.md` L3.
+    /// the top of every tick.
     fn apply_pending_control_requests(
         &mut self,
         now: SystemTime,
@@ -1201,13 +1201,13 @@ impl DaemonRuntime {
                 };
                 self.app.set_run_state(RunState::Running, reason);
                 // An explicit resume is the human-in-the-loop reset for
-                // the mass-deletion guard (C8-57): the operator looked
+                // the mass-deletion guard: the operator looked
                 // at the alert and decided the changes are legitimate.
                 self.mass_change_guard.reset();
             }
         }
         if flush_request {
-            // Flush boost (C8-56): pull deferred work forward for a
+            // Flush boost: pull deferred work forward for a
             // bounded window. Deferred reconciles release immediately
             // (bypassing the idle gate) and the remote feed polls on
             // the next tick; execution still answers to the normal
@@ -1241,7 +1241,7 @@ impl DaemonRuntime {
     }
 
     fn sample_throttle_inputs(&mut self, now: SystemTime, inputs: ThrottleInputs) {
-        // Active-coding heuristic (C8-55): rapid code-class churn means
+        // Active-coding heuristic: rapid code-class churn means
         // the user is working even when no permissioned HID signal is
         // available. Strictly additive — it can only raise caution.
         let mut inputs = inputs;
@@ -1250,7 +1250,7 @@ impl DaemonRuntime {
         }
         // Sampling cadence uses the monotonic clock so wall-clock rewinds
         // cannot force an extra sample (or skip one). The injected clock
-        // makes that property test-checkable. C2-3.
+        // makes that property test-checkable.
         let now_inst = self.clock.now();
         let should_sample = self
             .last_throttle_sample_inst
@@ -1264,7 +1264,7 @@ impl DaemonRuntime {
             self.local_echoes.purge_expired(now);
             self.remote_echoes.purge_expired(now);
 
-            // Resource budget evaluation (C8-36..C8-40) on the same
+            // Resource budget evaluation on the same
             // cadence: resolve ceilings, scale workgate caps, retarget
             // the bandwidth shaper, and react to the memory ceiling.
             let idle_for = self.idle_notifier.idle_for();
@@ -1291,7 +1291,7 @@ impl DaemonRuntime {
         }
     }
 
-    /// Memory-ceiling reactions (C8-39): bounded caches trim toward
+    /// Memory-ceiling reactions: bounded caches trim toward
     /// their documented floors when the entry population outgrows the
     /// ceiling-derived budget, and restore when clearly under it
     /// (hysteresis at half the budget). Floors are enforced by the
@@ -1340,7 +1340,7 @@ impl DaemonRuntime {
             .enqueue_startup_reconcile_intent(local_sync_directory, now)?;
         self.startup_reconstruction_barrier = true;
         // Monotonic deadline: a wall-clock rewind must not extend the
-        // barrier (C2-3 discipline, same as every other elapsed check).
+        // barrier (discipline, same as every other elapsed check).
         self.startup_barrier_expires_inst = Some(self.clock.now() + self.startup_barrier_deadline);
         logging::info(
             "Queued startup whole-scope reconcile for volatile-state reconstruction",
@@ -1384,7 +1384,7 @@ impl DaemonRuntime {
             return 0;
         };
 
-        // Flush boost (C8-56): while boosted, deferred reconciles
+        // Flush boost: while boosted, deferred reconciles
         // release immediately, bypassing both their not-before times
         // and the IdleDrain gate. Execution still answers to the
         // throttle ladder — this only moves work from "deferred" to
@@ -1466,7 +1466,7 @@ impl DaemonRuntime {
             let intent_kind = crate::scheduler::intent_kind_for_stabilized_event(&event);
             if intent_kind == PendingIntentKind::Delete && self.mass_change_guard.record_delete(now)
             {
-                // Mass-change / ransomware guard (C8-57): stop admitting
+                // Mass-change / ransomware guard: stop admitting
                 // work before the deletion storm replicates to the cloud.
                 // Ingest keeps capturing intent state durably; an explicit
                 // `vapor resume` is the human-in-the-loop reset.
@@ -1495,7 +1495,7 @@ impl DaemonRuntime {
                 );
             }
             if self.sync_scope.sync_mode == vapor_shared::SyncMode::PullOnly {
-                // Pull-only (C8-60): local events never produce
+                // Pull-only: local events never produce
                 // local-to-remote intents. A local change is divergence
                 // from the cloud source of truth, so it schedules a
                 // restore-from-cloud for that path instead: the download
@@ -1531,7 +1531,7 @@ impl DaemonRuntime {
             return Ok(0);
         }
 
-        // Priority classes (C8-56): within one flush batch, key config
+        // Priority classes: within one flush batch, key config
         // and code paths enqueue before lockfile noise, so they get the
         // lower durable ids that break lease-order ties. Stable sort
         // preserves arrival order inside each class.
@@ -1768,7 +1768,7 @@ fn blocked_intent_requeue_delay() -> Duration {
     Duration::from_millis(constants::engine::BLOCKED_INTENT_REQUEUE_DELAY_MILLIS)
 }
 
-/// Loop prevention on the local ingest path (C8-7): decides whether a
+/// Loop prevention on the local ingest path: decides whether a
 /// stabilized local event is an echo of a write/delete the daemon itself
 /// performed while applying remote changes.
 ///
@@ -1972,7 +1972,7 @@ mod tests {
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let clock = Arc::new(crate::clock::ManualClock::at_now());
         // A real filesystem provider rooted in the sandbox: the scope's
-        // cloud directory names the provider-side root (C8-2).
+        // cloud directory names the provider-side root.
         let sync_scope = SyncScope {
             local_sync_directory: Some(watch_root.clone()),
             cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
@@ -1994,7 +1994,7 @@ mod tests {
             .clone()
             .expect("runtime watch root");
         // Real payload on disk: the pipeline hashes and uploads actual
-        // bytes — no simulator (C8-13).
+        // bytes — no simulator.
         let local_file = runtime_watch_root.join("src/main.rs");
         std::fs::create_dir_all(local_file.parent().unwrap()).expect("dirs");
         std::fs::write(&local_file, b"fn main() {}\n").expect("seed local file");
@@ -2198,7 +2198,7 @@ mod tests {
         // Advance past the throttle dwell window for `Throttled`
         // (MIN_DWELL_THROTTLED_SECONDS = 5 s) before the second
         // evaluation so the controller is allowed to transition back to
-        // IdleDrain. C2-4.
+        // IdleDrain.
         clock.advance(Duration::from_secs(6));
         let started = runtime
             .tick_with_inputs(timestamp_ms(32_000), ThrottleInputs::default())
@@ -2223,7 +2223,7 @@ mod tests {
         }
     }
 
-    /// Bidirectional tick-harness fixture (C8-10): a real filesystem
+    /// Bidirectional tick-harness fixture: a real filesystem
     /// provider with a manually-driven changes feed, composed into a
     /// full `DaemonRuntime`. Tests drive local events through the
     /// recorder and remote events through the feed handle, then tick
@@ -2366,7 +2366,7 @@ mod tests {
 
         // Sync the file for real first (download establishes the sync
         // index); only a synced, unmodified file may be deleted by a
-        // remote deletion (C8-17 preservation guard).
+        // remote deletion (preservation guard).
         std::fs::write(fixture.cloud_root.join("stale.txt"), b"stale").expect("seed remote");
         fixture.feed.emit_created(
             fixture.cloud_root.join("stale.txt"),
@@ -2478,7 +2478,7 @@ mod tests {
 
     #[test]
     fn pull_only_reverts_local_edits_and_removes_local_only_files_without_uploading() {
-        // C8-60 / C8-66: cloud is authoritative. A local edit converges
+        // Cloud is authoritative. A local edit converges
         // back to the cloud canonical, local-only content is removed,
         // and nothing is ever uploaded.
         let mut fixture = BidirectionalFixture::new_with_mode(vapor_shared::SyncMode::PullOnly);
@@ -2547,7 +2547,7 @@ mod tests {
 
     #[test]
     fn push_only_overwrites_remote_divergence_and_removes_cloud_only_files_without_downloading() {
-        // C8-62 / C8-66: local is authoritative. Remote edits are
+        // Local is authoritative. Remote edits are
         // overwritten with the local canonical, cloud-only content is
         // removed, and nothing is ever downloaded or deleted locally.
         let mut fixture = BidirectionalFixture::new_with_mode(vapor_shared::SyncMode::PushOnly);
@@ -2614,7 +2614,7 @@ mod tests {
 
     #[test]
     fn two_way_mode_keeps_the_one_way_gates_inert() {
-        // C8-61: the default mode still moves both directions and never
+        // The default mode still moves both directions and never
         // records a mirror revert/delete.
         let mut fixture = BidirectionalFixture::new();
         fixture.tick(6_000); // baseline
@@ -2643,7 +2643,7 @@ mod tests {
 
     #[test]
     fn mode_change_mid_run_converges_by_dropping_stale_direction_intents() {
-        // C8-66: intents durably enqueued under the previous mode must
+        // Intents durably enqueued under the previous mode must
         // not fire after a mode change (restart with new config). Stale
         // Upload intents complete as gated no-ops in pull-only.
         let temp = TempDir::new().expect("temp dir");
@@ -2731,7 +2731,7 @@ mod tests {
 
     #[test]
     fn concurrent_edit_conflict_keeps_both_versions_on_both_sides() {
-        // C8-14: simultaneous local + foreign remote edits of a synced
+        // Simultaneous local + foreign remote edits of a synced
         // file resolve as keep-both — the remote canonical lands at the
         // original path, the local edit survives as a conflict copy, and
         // the copy propagates to the cloud.
@@ -2753,7 +2753,7 @@ mod tests {
         fixture.converge(24);
 
         // Local side: canonical carries the remote version; the local
-        // edit survives in a conflict copy named per the C8-14 template.
+        // edit survives in a conflict copy named per the conflict-suffix template.
         assert_eq!(
             std::fs::read(&local_file).expect("canonical"),
             b"v2 from another device"
@@ -2786,7 +2786,7 @@ mod tests {
 
     #[test]
     fn delete_modify_race_resolves_for_the_modification() {
-        // C8-17: a remote deletion racing a local modification loses —
+        // A remote deletion racing a local modification loses —
         // data preservation wins over deletion, deterministically, in
         // both intent orderings.
         let mut fixture = BidirectionalFixture::new();
@@ -2823,7 +2823,7 @@ mod tests {
 
     #[test]
     fn concurrent_write_race_smoke_converges_across_runs() {
-        // C8-12 happy-path race smoke: five runs alternating which side
+        // Happy-path race smoke: five runs alternating which side
         // wins the enqueue race; every run converges with no version
         // lost (canonical matches on both sides; the other version, when
         // divergent, survives as a conflict copy).
@@ -2889,7 +2889,7 @@ mod tests {
 
     #[test]
     fn loop_prevention_survives_a_provider_without_xattr_support() {
-        // C8-45 constraint compatibility: on filesystems without xattr
+        // Constraint compatibility: on filesystems without xattr
         // (FAT, network mounts), op-id tags fall back to side-files.
         // The full echo-suppression flow must still hold.
         let temp = TempDir::new().expect("temp dir");
@@ -2988,7 +2988,7 @@ mod tests {
 
     #[test]
     fn burst_of_real_uploads_drains_without_admission_serialization() {
-        // C8-11 guard-rail: a burst of provider-backed uploads must
+        // Guard-rail: a burst of provider-backed uploads must
         // drain with parallel admission (planner cap 4 in IdleDrain),
         // not one-intent-per-tick serialization. 40 files with 4-wide
         // stages should finish comfortably under 60 ticks; a regression
@@ -3031,7 +3031,7 @@ mod tests {
 
     #[test]
     fn bandwidth_ceiling_holds_transfers_until_tokens_refill() {
-        // C8-38/C8-41: with a tiny measured link capacity the shaper
+        // With a tiny measured link capacity the shaper
         // grants almost nothing per second, so an upload holds at its
         // checkpoint; restoring capacity lets it complete.
         let mut fixture = BidirectionalFixture::new();
@@ -3096,7 +3096,7 @@ mod tests {
 
     #[test]
     fn idle_boost_scales_workgate_caps_and_snaps_back_on_throttle_exit() {
-        // C8-37/C8-41: the AlwaysIdle notifier + IdleDrain inputs engage
+        // The AlwaysIdle notifier + IdleDrain inputs engage
         // boost; after the ramp the workgate caps exceed their base, and
         // a throttle exit snaps them back in the same sample.
         let mut fixture = BidirectionalFixture::new();
@@ -3419,7 +3419,7 @@ mod tests {
 
     #[test]
     fn tick_consults_metrics_sampler_and_propagates_decision_to_workgate() {
-        // C2-1 invariant: the runtime's public `tick(now)` path must obtain
+        // Invariant: the runtime's public `tick(now)` path must obtain
         // its ThrottleInputs from the injected `MetricsSampler` and feed
         // them through to the throttle controller / workgate. We inject a
         // sampler that reports user-active + warm thermal state; the
@@ -3461,7 +3461,7 @@ mod tests {
     fn tick_with_default_static_sampler_picks_idle_drain() {
         // Sanity check: with no overrides, the default static sampler
         // mirrors `ThrottleInputs::default()` so the engine starts in
-        // IdleDrain — the existing behavior the C2-1 plumbing must preserve.
+        // IdleDrain — the existing behavior the clock plumbing must preserve.
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
@@ -3486,7 +3486,7 @@ mod tests {
 
     #[test]
     fn attached_status_publisher_receives_fresh_snapshot_each_tick() {
-        // Regression test for the Wave 7 status-stuck bug: without the
+        // Regression test for the status-stuck bug: without the
         // publisher hook, `vapor status` would always return the boot
         // snapshot. We attach a recording publisher and assert the run
         // state actually flips through it after a pause request.
@@ -3770,7 +3770,7 @@ mod tests {
         }
     }
 
-    // ---- Optional advanced safeguards (C8-55..C8-57) ----
+    // ---- Optional advanced safeguards ----
 
     #[test]
     fn mass_deletion_storm_pauses_daemon_raises_alert_and_resume_rearms() {

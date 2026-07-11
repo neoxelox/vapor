@@ -4,7 +4,7 @@
 //! root, forward-slash separated, and free of traversal components.
 //! Validation happens once at construction so provider implementations
 //! can trust the invariant instead of re-checking at every call site
-//! (strict scope enforcement, C8-3).
+//! (strict scope enforcement).
 
 use std::error::Error;
 use std::fmt::{self, Display};

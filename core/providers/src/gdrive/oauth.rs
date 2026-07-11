@@ -1,4 +1,4 @@
-//! OAuth 2.0 PKCE helpers for the Google Drive provider (C8-48).
+//! OAuth 2.0 PKCE helpers for the Google Drive provider.
 //!
 //! Pure helpers plus a transport-injected code exchange, so everything
 //! short of the interactive browser hop is unit-testable offline. The
@@ -102,7 +102,7 @@ pub fn exchange_code(
     token_request(transport, form, now_ms)
 }
 
-/// Refreshes an access token (C8-48 refresh handling). `invalid_grant`
+/// Refreshes an access token (refresh handling). `invalid_grant`
 /// classifies as `Authentication` (user action required); transport and
 /// 5xx failures classify as `Transient`.
 pub fn refresh_tokens(

@@ -7,8 +7,7 @@
 //! the runtime: IPC never holds the runtime mutex, the runtime never
 //! blocks on a channel.
 //!
-//! Wave 7 (`docs/tasks/cli.md` L3) adds the first batch of control
-//! requests:
+//! The first batch of control requests:
 //!
 //! - `pause` / `resume` — flip the run-state.
 //! - `flush_now` — informational nudge; the runtime drains

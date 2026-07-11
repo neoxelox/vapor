@@ -3,7 +3,7 @@ import Testing
 
 @testable import VaporCore
 
-// M2-5: the monitor owns only the timer; each tick delegates to the
+// The monitor owns only the timer; each tick delegates to the
 // Rust core via the manager. Tests drive `performHealthCheck()`
 // directly — no timing assertions, per the testing strategy.
 

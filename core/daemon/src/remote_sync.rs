@@ -1,7 +1,7 @@
-//! Remote changes poll + apply mapping (C8-6).
+//! Remote changes poll + apply mapping.
 //!
 //! On a throttle-aware cadence the poller pulls the provider's changes
-//! feed, filters self-write echoes (C8-7), maps surviving changes onto
+//! feed, filters self-write echoes, maps surviving changes onto
 //! durable remote-sourced intents (`Download` / `ApplyRemoteDelete`),
 //! and persists the feed cursor. Cursor discipline: the cursor advances
 //! durably only after the page's intents are durably enqueued, so a
@@ -39,10 +39,10 @@ pub struct RemotePollReport {
     pub enqueued_intents: usize,
     pub cursor_expired: bool,
     /// Push-only strict-mirror restores scheduled this poll (remote
-    /// divergence overwritten with the local canonical; C8-62 / C8-65).
+    /// divergence overwritten with the local canonical).
     pub mirror_reverts: usize,
     /// Push-only strict-mirror removals scheduled this poll (cloud-only
-    /// content deleted; C8-62 / C8-65).
+    /// content deleted).
     pub mirror_deletes: usize,
 }
 
@@ -84,7 +84,7 @@ impl RemotePoller {
     }
 
     /// Clears the poll cadence so the next tick polls immediately.
-    /// Used by the flush boost (C8-56): `vapor flush` should surface
+    /// Used by the flush boost: `vapor flush` should surface
     /// pending remote changes now, not at the next scheduled poll.
     pub fn request_immediate_poll(&mut self) {
         self.last_poll_inst = None;
@@ -194,7 +194,7 @@ impl RemotePoller {
                                 continue;
                             }
                             if sync_mode == SyncMode::PushOnly {
-                                // Push-only (C8-62): remote changes never
+                                // Push-only: remote changes never
                                 // produce remote-to-local intents. Remote
                                 // divergence is driven back to the local
                                 // canonical: overwrite when a local

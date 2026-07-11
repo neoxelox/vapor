@@ -194,7 +194,6 @@ impl ThrottleWorkgate {
     /// `u64::MAX` saturation without locking up on a single id (the previous
     /// `saturating_add` impl would have re-issued `u64::MAX` for every
     /// subsequent allocation, breaking the active-permits map invariants).
-    /// Per `docs/tasks/core.md` C2-2.
     fn allocate_permit_id(&mut self) -> u64 {
         // Active permits are bounded by the workgate caps (single digits),
         // so the worst-case loop length is bounded by `caps.planner_workers
@@ -567,7 +566,7 @@ mod tests {
 
     #[test]
     fn permit_id_wraps_past_u64_max_and_skips_already_active_ids() {
-        // Per docs/tasks/core.md C2-2, the workgate must keep allocating
+        // the workgate must keep allocating
         // unique permit ids even after the counter saturates. We seed the
         // allocator one shy of u64::MAX, then walk it past the boundary
         // while holding a permit at id 0 to force the wrap-around branch

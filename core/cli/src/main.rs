@@ -74,8 +74,7 @@ enum Command {
     FlushNow,
     /// Request a fresh whole-scope reconcile.
     Reconcile,
-    /// Print the diagnostics timeline (Wave 7 returns an empty list
-    /// until the C8-30 in-memory buffer ships).
+    /// Print the diagnostics timeline.
     Timeline {
         #[arg(long)]
         json: bool,
@@ -137,15 +136,16 @@ enum ConflictsAction {
 
 #[derive(Subcommand, Debug)]
 enum AuthAction {
-    /// Store a token for `provider`. Pre-Wave-8 the token is supplied
-    /// verbatim; the OAuth-PKCE flow lands later. Omit `--token` (or
-    /// pass `--token -`) to read the token from stdin, which keeps the
-    /// secret out of shell history and process listings.
+    /// Store a token for `provider`. Omit `--token` (or pass
+    /// `--token -`) to read the token from stdin — except for `gdrive`,
+    /// where omitting `--token` starts the OAuth-PKCE browser flow
+    /// instead. Reading from stdin keeps the secret out of shell
+    /// history and process listings.
     Login {
         provider: String,
         #[arg(long)]
         token: Option<String>,
-        /// Profile the credential belongs to (C8-20); defaults to the
+        /// Profile the credential belongs to; defaults to the
         /// implicit `default` profile.
         #[arg(long, default_value = "default")]
         profile: String,
@@ -465,7 +465,7 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
             profile,
         } => {
             // Google Drive without an explicit --token runs the full
-            // OAuth-PKCE browser flow (C8-48); every other path keeps
+            // OAuth-PKCE browser flow; every other path keeps
             // the explicit/stdin token behavior.
             let token = if provider == vapor_shared::constants::provider::GDRIVE && token.is_none()
             {

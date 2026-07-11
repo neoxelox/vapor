@@ -17,7 +17,7 @@
 //! tick-driven events, so the window is negligible and never corrupts
 //! the file.
 //!
-//! Closes `macos.md` M2-6 (tracked there because the gap was observed
+//!(tracked there because the gap was observed
 //! on the macOS surface; the implementation is portable).
 
 use std::fs;
@@ -179,8 +179,8 @@ impl LifecycleStateStore for JsonFileLifecycleStateStore {
     }
 }
 
-/// Wall-clock seam. The crash-loop guard runs on `Instant` (monotonic,
-/// per C2-3), but durable timestamps need a clock that survives process
+/// Wall-clock seam. The crash-loop guard runs on `Instant` (monotonic),
+/// but durable timestamps need a clock that survives process
 /// restarts.
 pub trait WallClock: Send + Sync {
     /// Milliseconds since the Unix epoch.

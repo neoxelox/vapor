@@ -1,4 +1,4 @@
-//! Loop-prevention self-write cache (C8-7).
+//! Loop-prevention self-write cache.
 //!
 //! Bidirectional sync must not react to its own writes: an upload echoes
 //! back through the remote changes feed, and a downloaded file echoes
@@ -13,7 +13,7 @@
 //! diverged). Eviction is LRU-on-insert; TTL expiry runs on the same 1s
 //! cadence as throttle sampling. Bounds come from
 //! `constants::self_write_cache` and may be tightened under memory
-//! pressure (C8-39) but never below the documented floors —
+//! pressure but never below the documented floors —
 //! loop-prevention is a safety guarantee, not an opportunistic feature.
 
 use std::collections::BTreeMap;
@@ -67,7 +67,7 @@ impl SelfWriteCache {
         }
     }
 
-    /// Adjusts TTL and capacity (memory-pressure reaction, C8-39).
+    /// Adjusts TTL and capacity (memory-pressure reaction).
     /// Values are clamped to the documented floors so loop prevention
     /// never degrades below its safety guarantee.
     pub fn set_bounds(&mut self, ttl: Duration, max_entries: usize) {

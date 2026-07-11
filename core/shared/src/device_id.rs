@@ -1,4 +1,4 @@
-//! Stable per-device identifier (C8-15).
+//! Stable per-device identifier.
 //!
 //! Used by the keep-both conflict suffix
 //! (`{stem}~conflict-{device_id}-{timestamp_ms}{ext}`) and by provider

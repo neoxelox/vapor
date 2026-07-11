@@ -106,7 +106,7 @@ public enum VaporConstants {
     public static let idleBoost = "idleBoost"
   }
 
-  /// Accepted `syncMode` values (C8-59). Mirrors
+  /// Accepted `syncMode` values. Mirrors
   /// `core/shared/src/constants.rs::sync_mode::*` per AGENTS.md §8.6.
   public enum SyncModes {
     public static let twoWay = "two-way"
@@ -115,7 +115,7 @@ public enum VaporConstants {
     public static let all = [twoWay, pullOnly, pushOnly]
   }
 
-  /// Accepted `provider` values (C8-2 / C8-54). Mirrors
+  /// Accepted `provider` values. Mirrors
   /// `core/shared/src/constants.rs::provider::*` per AGENTS.md §8.6.
   public enum Providers {
     public static let filesystem = "filesystem"

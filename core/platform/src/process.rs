@@ -4,10 +4,7 @@
 //! On Unix the native impl uses `signal-hook` to translate `SIGTERM`
 //! and `SIGINT` into the existing `SHUTDOWN_REQUESTED` flag-flip
 //! pattern. The Windows impl is intentionally `unimplemented!()` until
-//! Wave 12 (`core.md` C6-7).
-//!
-//! Closes C3-7 — once this module is consumed by `core/daemon::main` it
-//! also unblocks C1-5 (`libc` dep moves to `[target.'cfg(unix)']`).
+//! Windows becomes a shipping surface.
 
 use std::error::Error;
 use std::fmt::{self, Display};
@@ -113,9 +110,9 @@ pub use unix_impl::NativeProcessSupervisor;
 mod windows_impl {
     use super::{ProcessSupervisor, ProcessSupervisorError};
 
-    /// Windows-native supervisor stub. Wave 12 (`core.md` C6-7) lands
-    /// the real `SetConsoleCtrlHandler` + `SERVICE_STOP` +
-    /// `WM_ENDSESSION` integration.
+    /// Windows-native supervisor stub. The real `SetConsoleCtrlHandler`
+    /// + `SERVICE_STOP` + `WM_ENDSESSION` integration lands when Windows
+    /// becomes a shipping surface.
     #[derive(Debug, Default)]
     pub struct NativeProcessSupervisor;
 
@@ -131,7 +128,7 @@ mod windows_impl {
             F: Fn() + Send + Sync + 'static,
         {
             Err(ProcessSupervisorError::Unsupported(
-                "Windows ProcessSupervisor is not implemented yet (Wave 12 / C6-7)",
+                "Windows ProcessSupervisor is not implemented yet",
             ))
         }
     }

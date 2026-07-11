@@ -10,7 +10,7 @@ use crate::logging;
 pub struct SyncScope {
     pub local_sync_directory: Option<PathBuf>,
     pub cloud_sync_directory: String,
-    /// Sync direction for this scope (C8-59). Carried on the scope so
+    /// Sync direction for this scope. Carried on the scope so
     /// every pipeline gate (ingest, remote apply, reconcile, executor)
     /// consults the same value — no operation can bypass it.
     pub sync_mode: SyncMode,
@@ -78,7 +78,7 @@ fn resolve_scope(
 /// to the safe default (`two-way` never deletes or overwrites to
 /// converge) with a loud warning — a typo must not silently activate a
 /// destructive strict-mirror mode, and equally must not activate any
-/// mode the user did not spell exactly (C8-63: one-way is explicit
+/// mode the user did not spell exactly (one-way is explicit
 /// opt-in, never inferred).
 fn resolve_sync_mode(raw: &str) -> SyncMode {
     match SyncMode::from_config_value(raw) {
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn sync_mode_defaults_to_two_way_and_requires_explicit_opt_in() {
-        // C8-63 / C8-66: one-way modes are never inferred. Only the
+        // One-way modes are never inferred. Only the
         // exact configured value activates them; anything else lands on
         // the safe two-way default.
         let scope = resolve_scope(None, None, &default_config(), Path::new("/tmp"), None);

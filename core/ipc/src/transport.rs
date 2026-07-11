@@ -1,8 +1,8 @@
 //! Per-OS transport implementations.
 //!
 //! Unix uses `std::os::unix::net::{UnixListener, UnixStream}` against a
-//! socket file at `<vapor_dir>/vapord.sock`. Windows is stubbed for
-//! Wave 12; calling `bind_listener` / `connect_to_socket` returns
+//! socket file at `<vapor_dir>/vapord.sock`. Windows is stubbed:
+//! calling `bind_listener` / `connect_to_socket` returns
 //! [`TransportError::Unsupported`] until the named-pipe transport
 //! ships.
 
@@ -126,7 +126,7 @@ mod unix_impl {
 mod windows_impl {
     use super::{Path, PathBuf, TransportError};
 
-    /// Stub. Wave 12 (`core.md` C6` named-pipe transport) replaces this
+    /// Stub. The named-pipe transport replaces this
     /// with a real `\\.\pipe\vapord-<user-sid>` listener.
     #[derive(Debug)]
     pub struct ListenerHandle {

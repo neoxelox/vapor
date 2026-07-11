@@ -1,26 +1,26 @@
-//! Optional advanced safeguards (C8-55..C8-57).
+//! Optional advanced safeguards.
 //!
 //! Three small, self-contained protections the runtime consults on its
 //! normal tick cadence:
 //!
-//! - [`ActiveCodingHeuristic`] (C8-55) — treats the user as actively
+//! - [`ActiveCodingHeuristic`] — treats the user as actively
 //!   working when code-class files churn rapidly, even on hosts where
 //!   no permissioned HID-idle signal is available. The permissioned
 //!   native signal stays the primary source (`MetricsSampler`
 //!   `user_active`); this heuristic can only *add* activity, never
 //!   clear it, so it strictly increases throttle caution.
-//! - [`MassChangeGuard`] (C8-57) — a burst of local deletions above
+//! - [`MassChangeGuard`] — a burst of local deletions above
 //!   the configured rate looks like ransomware or an accidental
 //!   recursive delete. Propagating it would faithfully replicate the
 //!   damage to the cloud, so the guard pauses the daemon and raises a
 //!   timeline alert instead; `vapor resume` is the explicit
 //!   human-in-the-loop reset.
-//! - [`intent_priority_rank`] (C8-56) — folder/path priority classes
+//! - [`intent_priority_rank`] — folder/path priority classes
 //!   reuse the debounce classification so key config files and code
 //!   flush ahead of lockfile noise when a single tick drains a mixed
 //!   batch to the durable queue.
 //!
-//! The flush boost half of C8-56 lives on `DaemonRuntime` (it touches
+//! The flush-boost half lives on `DaemonRuntime` (it touches
 //! deferred-reconcile release and remote-poll cadence); the window
 //! constant is shared from `constants::engine::FLUSH_BOOST_SECONDS`.
 
@@ -83,7 +83,7 @@ impl RollingWindowCounter {
     }
 }
 
-/// C8-55 — heuristic active-coding detection.
+/// Heuristic active-coding detection.
 ///
 /// Counts stabilized code/config-class events; at or above the
 /// threshold inside the window the user is presumed to be actively
@@ -128,7 +128,7 @@ impl ActiveCodingHeuristic {
     }
 }
 
-/// C8-57 — mass-change / ransomware guard.
+/// Mass-change / ransomware guard.
 ///
 /// Latches once tripped: the daemon stays paused (and the guard stays
 /// reported) until an explicit `vapor resume`, which calls
@@ -187,7 +187,7 @@ impl MassChangeGuard {
     }
 }
 
-/// C8-56 — folder/path priority classes for durable-queue flush order.
+/// Folder/path priority classes for durable-queue flush order.
 ///
 /// Lower rank flushes first. Reuses the debounce classification (the
 /// same signal that already encodes "how urgent is a change to this

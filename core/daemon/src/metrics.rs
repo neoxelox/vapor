@@ -10,7 +10,6 @@
 //! [`StaticMetricsSampler`] for fixed inputs or [`ScriptedMetricsSampler`]
 //! to walk a deterministic sequence.
 //!
-//! See `docs/tasks/core.md` C2-1.
 
 use std::sync::Mutex;
 

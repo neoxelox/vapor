@@ -8,10 +8,9 @@
 //! that cross processes (queue rows, retry slowdown markers).
 //!
 //! [`Clock`] exposes both views so a single injection seam serves every
-//! consumer. Pre-Wave-4 production code uses [`SystemClock`]; tests use
+//! consumer. Production code uses [`SystemClock`]; tests use
 //! [`ManualClock`] to advance time deterministically without sleeping.
 //!
-//! See `docs/tasks/core.md` C2-3.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -158,7 +157,7 @@ mod tests {
 
     #[test]
     fn manual_clock_supports_wall_clock_rewind_without_touching_monotonic_axis() {
-        // Critical C2-3 invariant: a wall-clock rewind must not affect
+        // Critical invariant: a wall-clock rewind must not affect
         // monotonic readings. Code that gates on `clock.now()` for
         // elapsed-time checks therefore stays stable under DST / NTP
         // corrections / `date -s` style time travel.

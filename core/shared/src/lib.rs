@@ -124,7 +124,7 @@ impl RetryFailureKind {
     }
 }
 
-/// Provider-neutral error taxonomy (C8-1). Every provider classifies its
+/// Provider-neutral error taxonomy. Every provider classifies its
 /// failures with this enum; the engine maps it onto [`RetryFailureKind`]
 /// for retry scheduling and keeps the richer classification for
 /// diagnostics and race resolution (`NotFound` and `PreconditionFailed`
@@ -177,7 +177,7 @@ impl ProviderErrorKind {
     }
 }
 
-/// Direction selector for a sync scope (C8-59). `TwoWay` is the default
+/// Direction selector for a sync scope. `TwoWay` is the default
 /// and the historical behavior; the one-way modes are strict mirrors and
 /// opt-in per profile. Full design: `docs/architecture/sync-modes.md`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

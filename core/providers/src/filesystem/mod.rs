@@ -1,11 +1,11 @@
-//! Filesystem reference provider (C8-3, C8-4, C8-8).
+//! Filesystem reference provider.
 //!
 //! A full [`Provider`] implementation backed by a local directory that
 //! plays the role of the cloud side. When `provider = "filesystem"`,
-//! `cloudSyncDirectory` is reinterpreted as an absolute local path (C8-2).
+//! `cloudSyncDirectory` is reinterpreted as an absolute local path.
 //! The provider is the reference implementation the engine's
 //! bidirectional pipeline is validated against before any real cloud
-//! backend (Google Drive, C8-48+) goes live, and the backend the
+//! backend (Google Drive) goes live, and the backend the
 //! provider contract suite runs on.
 //!
 //! Safety properties:
@@ -147,7 +147,7 @@ impl FilesystemProvider {
 
     /// Resolves a remote path under the canonical root and enforces
     /// scope: the deepest existing ancestor must canonicalize inside
-    /// the root and live on the same device (C8-3).
+    /// the root and live on the same device.
     fn resolve_in_scope(&self, remote: &RemotePath) -> Result<PathBuf, ProviderError> {
         let root = self.canonical_root()?;
         let resolved = remote.resolve_under(&root);
@@ -240,7 +240,7 @@ impl Provider for FilesystemProvider {
 
     fn capabilities(&self) -> ProviderCapabilities {
         let mut capabilities = ProviderCapabilities::FILESYSTEM;
-        // Capability honesty (C8-43): the native changes feed rides the
+        // Capability honesty: the native changes feed rides the
         // platform fs-watcher; on hosts where that is still a stub the
         // feed is unadvertised and the engine falls back to reconcile
         // enumeration. Manual feeds (tests) are host-independent.
@@ -515,7 +515,7 @@ fn temp_file_name(op_id: &str) -> String {
 }
 
 /// Expands and validates the configured cloud directory for the
-/// filesystem provider (C8-2 reinterpretation): `~`-prefixed values
+/// filesystem provider (reinterpretation): `~`-prefixed values
 /// expand against the home directory; everything else must already be
 /// absolute.
 fn expand_cloud_directory(raw: &str) -> Result<PathBuf, ProviderError> {

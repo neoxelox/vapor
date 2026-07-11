@@ -7,9 +7,9 @@
 //! emitted as a known-good XML template (the schema is fixed, so a hand-
 //! rolled writer keeps the dep set tiny).
 //!
-//! Consumed by `core/lifecycle::DaemonLifecycleManager` (C4-3); the
+//! Consumed by `core/lifecycle::DaemonLifecycleManager`; the
 //! macOS Swift app delegates to it through the bundled `vapor` CLI
-//! (M2-1), so this is the single writer of the LaunchAgent definition.
+//!, so this is the single writer of the LaunchAgent definition.
 
 use std::fs;
 use std::io::Write;

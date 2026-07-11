@@ -1,4 +1,4 @@
-//! Provider-neutral bandwidth shaper (C8-38).
+//! Provider-neutral bandwidth shaper.
 //!
 //! A bytes-per-second token bucket shared across every upload and
 //! download session in the daemon. The engine sets the rate each tick

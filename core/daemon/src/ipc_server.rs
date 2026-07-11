@@ -8,7 +8,6 @@
 //! keeps a [`IpcServerHandle`] so the listener (and its socket file)
 //! drop on shutdown.
 //!
-//! Closes `core.md` C5-2.
 
 use std::path::PathBuf;
 use std::sync::Arc;

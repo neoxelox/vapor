@@ -1,8 +1,8 @@
 //! User-idle notifier trait + per-OS native implementation.
 //!
 //! See `docs/architecture/platform-abstractions.md` §`IdleNotifier`. The
-//! macOS bridge (`CGEventSourceSecondsSinceLastEventType`) lives behind
-//! Wave 4 follow-up work; until then `NativeIdleNotifier` forwards to
+//! macOS bridge (`CGEventSourceSecondsSinceLastEventType`) is not
+//! wired up yet; until then `NativeIdleNotifier` forwards to
 //! [`AlwaysIdleNotifier`], which is also what the headless CLI uses.
 
 use std::sync::Mutex;
@@ -71,8 +71,8 @@ impl IdleNotifier for ManualIdleNotifier {
 }
 
 /// Native idle notifier. Forwards to [`AlwaysIdleNotifier`] until the
-/// per-OS HID bridges land. The trait surface is what Wave 4 commits
-/// to; the native back-ends arrive incrementally.
+/// per-OS HID bridges land; the trait surface is stable and the
+/// native back-ends arrive incrementally.
 #[derive(Debug, Default)]
 pub struct NativeIdleNotifier {
     fallback: AlwaysIdleNotifier,

@@ -10,7 +10,7 @@
 //!
 //! Divergence handling per mode (`docs/architecture/sync-modes.md`):
 //! - `two-way`: local-only → upload; remote-only → download; content
-//!   divergence routes through the conflict machinery (C8-14) via an
+//!   divergence routes through the conflict machinery via an
 //!   upload whose planner consults the conflict policy.
 //! - `pull-only` (strict mirror, cloud authoritative): remote-only and
 //!   divergent entries → download; local-only entries → local removal.
@@ -52,9 +52,9 @@ impl From<StateDbError> for WalkError {
 pub struct WalkStats {
     pub directories_compared: usize,
     pub intents_enqueued: usize,
-    /// Strict-mirror removals scheduled by this walk (C8-65).
+    /// Strict-mirror removals scheduled by this walk.
     pub mirror_deletes: usize,
-    /// Strict-mirror overwrites scheduled by this walk (C8-65).
+    /// Strict-mirror overwrites scheduled by this walk.
     pub mirror_reverts: usize,
 }
 
@@ -249,7 +249,7 @@ impl ReconcileWalker {
                                 SyncMode::TwoWay => {
                                     // Divergence in two-way routes through
                                     // the upload planner, where the
-                                    // conflict policy decides (C8-14).
+                                    // conflict policy decides.
                                     batch.push((local_path, PendingIntentKind::Upload, now));
                                 }
                                 SyncMode::PullOnly => {
@@ -314,7 +314,7 @@ impl ReconcileWalker {
                         } else if sync_mode == SyncMode::TwoWay
                             && remote_deletion_wins(state_db, &local_path, local.modified_at)
                         {
-                            // Restart-safe deletion replay (C8-16): the
+                            // Restart-safe deletion replay: the
                             // remote deleted this path and the local copy
                             // has not been modified since — finish the
                             // apply instead of resurrecting the file.
@@ -342,7 +342,7 @@ impl ReconcileWalker {
                             if sync_mode == SyncMode::TwoWay
                                 && local_deletion_wins(state_db, &local_path, remote.modified_at)
                             {
-                                // Restart-safe deletion replay (C8-16):
+                                // Restart-safe deletion replay:
                                 // we deleted this path locally and the
                                 // remote copy has not changed since —
                                 // finish propagating the delete instead
@@ -375,7 +375,7 @@ impl ReconcileWalker {
 /// Whether a remote-origin tombstone should win over a surviving local
 /// file: the deletion wins only when the local copy was not modified
 /// after the deletion ("data preservation wins over deletion" — a newer
-/// local edit uploads instead; C8-17).
+/// local edit uploads instead).
 fn remote_deletion_wins(
     state_db: &DurableStateDb,
     local_path: &Path,
@@ -566,7 +566,7 @@ mod tests {
 
     #[test]
     fn local_tombstone_replays_the_deletion_when_remote_is_unchanged() {
-        // C8-16 restart-safe replay: we deleted locally, the propagation
+        // Restart-safe replay: we deleted locally, the propagation
         // was lost, and the remote copy has not changed since — the
         // reconcile finishes the deletion instead of resurrecting it.
         let mut fixture = Fixture::new();

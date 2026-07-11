@@ -3,7 +3,7 @@
 //! Reads / writes user-facing keys in `<vapor_dir>/vapor.json`. The
 //! shape matches the macOS Swift `VaporConfigurationStore` so both
 //! surfaces share one file. Unknown keys are preserved on every write
-//! per `cli.md` L1-2 — the CLI only touches the key it was asked to
+//! — the CLI only touches the key it was asked to
 //! touch.
 
 use std::error::Error;
@@ -142,7 +142,7 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
 
 /// Enum-typed keys reject unknown values with the accepted list —
 /// especially load-bearing for `syncMode`, whose one-way values are
-/// destructive and must never be a typo away (C8-59).
+/// destructive and must never be a typo away.
 fn parse_enum_value(key: &str, raw: &str, accepted: &[&str]) -> Result<Value, ConfigError> {
     if accepted.contains(&raw) {
         Ok(Value::String(raw.to_string()))

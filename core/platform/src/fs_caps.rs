@@ -1,8 +1,8 @@
 //! Filesystem capabilities trait + per-OS native implementation.
 //!
 //! See `docs/architecture/platform-abstractions.md` §`FilesystemCapabilities`.
-//! Wave 4 shipped the trait + an in-memory fake; the C8 wave adds the
-//! metadata-tag API (xattr on macOS/Linux, ADS on Windows once Wave 12
+//! The trait ships with an in-memory fake plus the metadata-tag API
+//! (xattr on macOS/Linux; ADS on Windows once its native support
 //! lands) that op-id tagging and the self-write cache consume.
 
 use std::collections::BTreeMap;
@@ -141,8 +141,8 @@ fn unsupported_tag_error() -> io::Error {
 }
 
 /// Native `FilesystemCapabilities`. Compile-time default for the
-/// current host, with the Unix xattr bridge live since C8; the Windows
-/// ADS bridge lands with Wave 12 (C6-6) — until then Windows reports no
+/// current host, with the Unix xattr bridge live; the Windows ADS
+/// bridge is not implemented yet — until then Windows reports no
 /// xattr support and every tag call returns `Unsupported`, which routes
 /// callers onto the side-file fallback.
 ///

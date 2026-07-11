@@ -1,11 +1,11 @@
-//! User resource budgets + idle-boost state machine (C8-32…C8-42).
+//! User resource budgets + idle-boost state machine.
 //!
 //! Resolves the effective ceilings each tick per
 //! `docs/architecture/data-flow.md §User resource budgets`:
 //!
 //! 1. MIN-lowering across the global `resourceLimits` and every enabled
 //!    profile's override; any enabled profile with `idleBoost.enabled =
-//!    false` disables boost daemon-wide (C8-34).
+//!    false` disables boost daemon-wide.
 //! 2. Idle-boost engages only in `IdleDrain`, after `minIdleSeconds` of
 //!    user idleness, with non-Vapor CPU at or below the headroom gate.
 //!    Ceilings ramp linearly toward `boost*Percent` over
@@ -44,8 +44,8 @@ pub struct EffectiveBudgetConfig {
 }
 
 impl EffectiveBudgetConfig {
-    /// Resolves the daemon-wide budget from the configuration (C8-32,
-    /// C8-33, C8-34): clamp every percent into `1..=100` with a
+    /// Resolves the daemon-wide budget from the configuration: clamp
+    /// every percent into `1..=100` with a
     /// classified warning, MIN-lower profile overrides, clamp boost
     /// ceilings up to at least their base ceiling, and bound the
     /// down-ramp by the up-ramp.
@@ -80,7 +80,7 @@ impl EffectiveBudgetConfig {
         }
 
         // Boost ceilings below their base ceiling are contradictions:
-        // clamp up with a warning (C8-33's load-time requirement).
+        // clamp up with a warning at load time.
         let boost_cpu = ensure_boost_at_least(boost.boost_cpu_percent, limits.cpu_percent, "cpu");
         let boost_memory =
             ensure_boost_at_least(boost.boost_memory_percent, limits.memory_percent, "memory");
@@ -166,7 +166,7 @@ enum BoostState {
     RampingDown { started: Instant, from_cpu: u8 },
 }
 
-/// Effective ceilings published each tick (C8-36).
+/// Effective ceilings published each tick.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectiveCeilings {
     pub cpu_percent: u8,
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn profile_overrides_min_lower_and_boost_disable_wins_daemon_wide() {
-        // C8-34: overrides can only tighten; one enabled profile with
+        // Overrides can only tighten; one enabled profile with
         // boost off disables boost for everyone.
         let mut config = VaporConfig::default();
         config.profiles = vec![

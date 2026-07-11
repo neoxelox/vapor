@@ -15,10 +15,9 @@
 //! 3. Stay byte-for-byte semantically identical across native impls
 //!    (parity tests guarantee this once they land).
 //!
-//! Wave 4 (`docs/tasks/core.md` C3) introduces every trait listed below
-//! plus the macOS-native implementation seam. Windows / Linux native
-//! impls are intentionally `unimplemented!()` until the optional Wave
-//! 12 / Wave 13 work lands.
+//! Every trait below ships with a macOS-native implementation seam.
+//! Windows / Linux native impls are intentionally `unimplemented!()`
+//! until those platforms become shipping surfaces.
 // Allow tightly-scoped `unsafe` for OS FFI calls (e.g. `libc::getuid()`).
 // Each `unsafe` block must explain why it is sound. Engine code in
 // `core/daemon`, `core/shared`, etc. continues to `forbid(unsafe_code)`.

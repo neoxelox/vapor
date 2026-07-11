@@ -143,7 +143,7 @@ impl ReconcileController {
 
         // Slice elapsed uses the monotonic Instant pair so wall-clock
         // rewinds cannot trick the controller into pausing for budget
-        // expiry that didn't actually happen on the monotonic axis. C2-3.
+        // expiry that didn't actually happen on the monotonic axis.
         let slice_elapsed = now_inst.saturating_duration_since(running.slice_started_inst);
         let reason = if throttle_state != ThrottleState::IdleDrain {
             Some(ReconcilePauseReason::ThrottleNoLongerIdle)
@@ -349,9 +349,9 @@ mod tests {
 
     #[test]
     fn checkpoint_slice_budget_uses_monotonic_clock_under_wall_clock_rewind() {
-        // C2-3 invariant: slice budget elapses on the monotonic axis. A
+        // Invariant: slice budget elapses on the monotonic axis. A
         // wall-clock rewind alone must not make `checkpoint` pause —
-        // that would have been a false positive under the pre-Wave-3
+        // that would have been a false positive under the old
         // SystemTime path. Advancing the monotonic clock past the slice
         // budget is the only thing that should trigger pause.
         let root = PathBuf::from("/tmp/vapor-root/project");

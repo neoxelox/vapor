@@ -63,8 +63,8 @@ pub enum ServiceInstallError {
     /// The OS-native installer call returned a non-zero exit code or
     /// otherwise failed.
     Backend(Box<dyn Error + Send + Sync>),
-    /// Operation is not supported on the current OS yet (e.g. Wave 12 /
-    /// Wave 13 work has not landed).
+    /// Operation is not supported on the current OS yet (the native
+    /// implementation has not landed).
     Unsupported(&'static str),
 }
 

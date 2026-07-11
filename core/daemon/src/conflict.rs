@@ -1,4 +1,4 @@
-//! Keep-both conflict-copy path derivation (C8-14).
+//! Keep-both conflict-copy path derivation.
 //!
 //! Template per `docs/architecture/data-flow.md §Conflict handling`:
 //! `{stem}~conflict-{device_id}-{timestamp_ms}{ext}`, where the split

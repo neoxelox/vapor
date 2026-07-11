@@ -58,7 +58,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   public var postIgnoreRules: String
   public var languageCode: String
   public var timelineEventLimit: Int
-  /// Stable per-device identifier (C8-15). Generated and persisted by
+  /// Stable per-device identifier. Generated and persisted by
   /// the daemon; the app only preserves and displays it, so `nil`
   /// simply means the daemon has not run yet.
   public var deviceId: String?

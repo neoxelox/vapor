@@ -1,9 +1,9 @@
 //! Daemon-side `vapor_ipc::Service` implementation.
 //!
 //! Adapts the runtime's published snapshots into the schema-v2 wire
-//! shapes: aggregate + per-profile status (C8-28/C8-65), per-intent
-//! "why stuck" diagnostics (C8-29), the bounded activity timeline
-//! (C8-30), and the control endpoints (C8-27). The runtime publishes a
+//! shapes: aggregate + per-profile status, per-intent
+//! "why stuck" diagnostics, the bounded activity timeline
+//!, and the control endpoints. The runtime publishes a
 //! fresh snapshot every tick; IPC handler threads never reach into the
 //! runtime itself.
 

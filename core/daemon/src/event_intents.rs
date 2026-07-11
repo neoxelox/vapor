@@ -74,9 +74,9 @@ pub enum PendingIntentKind {
     /// renames split into delete + create at ingest).
     Rename,
     /// Remote create/modify → download and apply locally (the
-    /// remote→local pipeline, C8-6).
+    /// remote→local pipeline).
     Download,
-    /// Remote delete → remove the local replica (C8-6).
+    /// Remote delete → remove the local replica.
     ApplyRemoteDelete,
     ReconcileSubtree,
 }
@@ -295,7 +295,7 @@ impl BoundedEventIntentMaps {
     }
 
     /// Releases every deferred reconcile regardless of its not-before
-    /// time. Flush boost (C8-56): an explicit `vapor flush` pulls
+    /// time. Flush boost: an explicit `vapor flush` pulls
     /// deferred work forward instead of waiting out the defer window.
     pub fn take_all_deferred_reconcile_intents(&mut self) -> Vec<PendingIntentRecord> {
         let roots: Vec<PathBuf> = self.deferred_reconciles.keys().cloned().collect();
@@ -1204,7 +1204,7 @@ mod tests {
         ));
         assert_eq!(maps.deferred_reconcile_count(), 1);
 
-        // Flush boost (C8-56): released well before the 30s not-before.
+        // Flush boost: released well before the 30s not-before.
         let released = maps.take_all_deferred_reconcile_intents();
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].path, subtree_root);

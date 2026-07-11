@@ -1,4 +1,4 @@
-//! Multi-profile daemon composition (C8-22, C8-23, C8-24).
+//! Multi-profile daemon composition.
 //!
 //! One daemon process serves every enabled profile:
 //!
@@ -6,7 +6,7 @@
 //!   (debounce, scheduler, executor, echo caches) and its own durable
 //!   state DB (`state/profiles/<id>/vapor.sqlite`; the implicit
 //!   `default` profile keeps the legacy path).
-//! - **Deduplicated watches** (C8-23): one fs watcher per distinct
+//! - **Deduplicated watches**: one fs watcher per distinct
 //!   canonical local root; the raw callback fans events out into each
 //!   matching profile's bounded ingest recorder, tagged implicitly by
 //!   the recorder it lands in.
@@ -14,7 +14,7 @@
 //!   coordination`): every profile's `DaemonApp` gates work against one
 //!   daemon-level `ThrottleWorkgate`, so per-profile queues cannot
 //!   multiply the daemon's device impact.
-//! - **Blast-radius containment** (C8-24): each profile ticks under a
+//! - **Blast-radius containment**: each profile ticks under a
 //!   panic catcher and its own consecutive-error budget; a failed
 //!   profile suspends only its own queue. (With the release profile's
 //!   `panic = "abort"` a panic still ends the process — there the
@@ -53,7 +53,7 @@ const MAX_CONSECUTIVE_PROFILE_TICK_ERRORS: u32 = 5;
 
 /// Fan-out recorder handed to each deduplicated watcher: every callback
 /// is forwarded to the profiles whose canonical root contains the event
-/// path, then the shared tick waker fires (C8-23).
+/// path, then the shared tick waker fires.
 struct FanOutRecorder {
     targets: Vec<(PathBuf, Arc<crate::event_intents::BoundedFsEventRecorder>)>,
     waker: Arc<TickWaker>,
@@ -134,13 +134,13 @@ impl MultiProfileRuntime {
         )
     }
 
-    /// The shared daemon activity timeline (C8-30). Every profile
+    /// The shared daemon activity timeline. Every profile
     /// runtime appends to it; the IPC service reads it.
     pub fn timeline(&self) -> Arc<crate::timeline::TimelineBuffer> {
         self.timeline.clone()
     }
 
-    /// Applies the configured `timelineEventLimit` (C8-30).
+    /// Applies the configured `timelineEventLimit`.
     pub fn set_timeline_limit(&self, limit: i64) {
         if let Ok(limit) = usize::try_from(limit)
             && limit > 0
@@ -173,7 +173,7 @@ impl MultiProfileRuntime {
             initial_state,
             initial_caps(initial_state),
         )));
-        // Daemon-wide resource management (C8-36..C8-42): one budget,
+        // Daemon-wide resource management: one budget,
         // one bandwidth shaper, one tuned step knob for every profile.
         let shared_budget = Arc::new(Mutex::new(crate::resource_budget::ResourceBudget::new(
             budget_config,
@@ -301,7 +301,7 @@ impl MultiProfileRuntime {
             .count()
     }
 
-    /// Per-profile view for diagnostics (C8-64/C8-65): id, display
+    /// Per-profile view for diagnostics: id, display
     /// name, sync mode, run state, mirror counters, conflicts.
     pub fn profile_summaries(&self) -> Vec<ProfileSummary> {
         self.slots
@@ -387,7 +387,7 @@ impl MultiProfileRuntime {
             }
         }
 
-        // Auto-tuning (C8-42): one small change per cycle, driven by
+        // Auto-tuning: one small change per cycle, driven by
         // aggregate rate-limit + queue-depth signals, bounded by the
         // ceilings via the bandwidth shaper.
         let rate_limited = self
@@ -410,7 +410,7 @@ impl MultiProfileRuntime {
 
     /// Runs the multi-profile tick loop until shutdown. Exits with an
     /// error only when EVERY profile has failed — a single broken
-    /// profile never takes the daemon down (C8-24).
+    /// profile never takes the daemon down.
     pub fn run_forever(&mut self) -> Result<(), DaemonRuntimeError> {
         while !is_shutdown_requested() {
             let report = self.tick_all(self.clock.now_system());
@@ -460,7 +460,7 @@ impl MultiProfileRuntime {
         }
     }
 
-    /// One status snapshot for the whole daemon (C8-28/C8-65): the most
+    /// One status snapshot for the whole daemon: the most
     /// conservative run state wins, totals aggregate across profiles,
     /// and each profile contributes a status row plus a bounded slice
     /// of per-intent diagnostics.
@@ -596,7 +596,7 @@ fn initial_caps(state: ThrottleState) -> ThrottleCaps {
 }
 
 /// One watcher per distinct canonical local root, fanning out to every
-/// profile that watches that root (C8-23). Each watcher adopts the
+/// profile that watches that root. Each watcher adopts the
 /// per-root shared filter its profile runtimes already hold, so the
 /// callback path and the runtimes' reconcile/remote filtering stay one
 /// instance (and reload together).
@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn profiles_sync_concurrently_with_isolated_state() {
-        // C8-22: two profiles with different roots sync in parallel and
+        // Two profiles with different roots sync in parallel and
         // never cross-pollinate.
         let mut fixture = MultiFixture::new(&[
             ("alpha", SyncMode::TwoWay, false),
@@ -835,7 +835,7 @@ mod tests {
 
     #[test]
     fn shared_local_root_fans_out_to_every_matching_profile() {
-        // C8-22/C8-23: two profiles over the same local root, different
+        // Two profiles over the same local root, different
         // clouds: one local change reaches both clouds.
         let mut fixture = MultiFixture::new(&[
             ("primary", SyncMode::TwoWay, true),
@@ -869,7 +869,7 @@ mod tests {
 
     #[test]
     fn mixed_sync_modes_stay_isolated_per_profile() {
-        // C8-64: a pull-only mirror beside a two-way profile on one
+        // A pull-only mirror beside a two-way profile on one
         // daemon; each applies its own mode.
         let mut fixture = MultiFixture::new(&[
             ("normal", SyncMode::TwoWay, false),
@@ -925,7 +925,7 @@ mod tests {
         assert_eq!(normal.mirror_reverts, 0);
     }
 
-    /// Provider whose changes-feed poll panics: the C8-24 inducement
+    /// Provider whose changes-feed poll panics: the inducement
     /// (a bug inside one profile's provider execution).
     struct PanickingProvider;
 
@@ -1000,7 +1000,7 @@ mod tests {
 
     #[test]
     fn a_failing_profile_suspends_alone_and_the_rest_keep_running() {
-        // C8-24 blast radius: one profile's provider panicking must not
+        // Blast radius: one profile's provider panicking must not
         // stop the healthy profile (or poison the shared workgate).
         let mut fixture = MultiFixture::new(&[
             ("healthy", SyncMode::TwoWay, false),
@@ -1041,7 +1041,7 @@ mod tests {
 
     #[test]
     fn shared_workgate_caps_bound_total_in_flight_work_across_profiles() {
-        // C8-26 budget isolation: two busy profiles share ONE daemon-
+        // Budget isolation: two busy profiles share ONE daemon-
         // level workgate — combined admissions never exceed the caps a
         // single profile would get.
         let mut fixture = MultiFixture::new(&[
@@ -1123,7 +1123,7 @@ mod tests {
 
     #[test]
     fn remote_changes_flow_per_profile_through_their_own_feeds() {
-        // C8-22 multi-provider fan-out: remote changes in one profile's
+        // Multi-provider fan-out: remote changes in one profile's
         // cloud only land in that profile's local root.
         let mut fixture = MultiFixture::new(&[
             ("left", SyncMode::TwoWay, false),
@@ -1155,7 +1155,7 @@ mod tests {
     }
 }
 
-/// Per-profile diagnostics row (consumed by the IPC surface, C8-65).
+/// Per-profile diagnostics row (consumed by the IPC surface).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProfileSummary {
     pub id: String,

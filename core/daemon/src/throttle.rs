@@ -87,7 +87,7 @@ impl ThrottleController {
     }
 
     /// Returns the minimum dwell time the controller will hold the given
-    /// state before allowing a transition. C2-4.
+    /// state before allowing a transition.
     pub fn min_dwell_for(state: ThrottleState) -> Duration {
         match state {
             ThrottleState::IdleDrain => Duration::ZERO,
@@ -122,16 +122,16 @@ impl ThrottleController {
         // its dwell window, hold the existing state and reuse the cause we
         // recorded on entry. This stops oscillating CPU / network samples
         // from flipping the throttle state more than once per dwell window.
-        // C2-4. Two deliberate carve-outs:
+        // Two deliberate carve-outs:
         //
         // - The first transition (no prior state) is always honored so
-        //   boot still settles to the right tier immediately.
+        // boot still settles to the right tier immediately.
         // - Escalations (a candidate *more* conservative than the held
-        //   state) bypass the dwell entirely. Dwell exists to stop
-        //   oscillating samples from relaxing caps too eagerly; making a
-        //   thermally-critical or low-power machine wait out a dwell
-        //   window at full caps would invert the "defer under pressure"
-        //   invariant.
+        // state) bypass the dwell entirely. Dwell exists to stop
+        // oscillating samples from relaxing caps too eagerly; making a
+        // thermally-critical or low-power machine wait out a dwell
+        // window at full caps would invert the "defer under pressure"
+        // invariant.
         let now_inst = self.clock.now();
         let next_state = if let (Some(prev_state), Some(changed_at)) =
             (self.last_state, self.last_state_change_inst)
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn oscillating_cpu_samples_do_not_flip_state_more_than_once_per_min_dwell() {
-        // C2-4 invariant: CPU samples that oscillate just above and below
+        // Invariant: CPU samples that oscillate just above and below
         // the Light/Throttled thresholds must not flip the throttle
         // state on every sample. We drive the controller through 6 quick
         // samples (well under the 5 s dwell window for `Throttled`) that

@@ -1,4 +1,4 @@
-//! Linux `ServiceInstaller` stub. Wave 13 / `core.md` C7-2.
+//! Linux `ServiceInstaller` stub.
 
 use super::{ServiceDescriptor, ServiceInstallError, ServiceInstaller, ServiceStatus};
 
@@ -20,22 +20,22 @@ impl NativeServiceInstaller {
 impl ServiceInstaller for NativeServiceInstaller {
     fn install_and_enable(&self) -> Result<(), ServiceInstallError> {
         Err(ServiceInstallError::Unsupported(
-            "Linux ServiceInstaller is not implemented yet (Wave 13 / C7-2)",
+            "Linux ServiceInstaller is not implemented yet",
         ))
     }
     fn disable_and_uninstall(&self) -> Result<(), ServiceInstallError> {
         Err(ServiceInstallError::Unsupported(
-            "Linux ServiceInstaller is not implemented yet (Wave 13 / C7-2)",
+            "Linux ServiceInstaller is not implemented yet",
         ))
     }
     fn start_daemon(&self) -> Result<(), ServiceInstallError> {
         Err(ServiceInstallError::Unsupported(
-            "Linux ServiceInstaller is not implemented yet (Wave 13 / C7-2)",
+            "Linux ServiceInstaller is not implemented yet",
         ))
     }
     fn stop_daemon(&self) -> Result<(), ServiceInstallError> {
         Err(ServiceInstallError::Unsupported(
-            "Linux ServiceInstaller is not implemented yet (Wave 13 / C7-2)",
+            "Linux ServiceInstaller is not implemented yet",
         ))
     }
     fn status(&self) -> Result<ServiceStatus, ServiceInstallError> {

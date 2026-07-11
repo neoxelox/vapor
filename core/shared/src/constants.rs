@@ -48,7 +48,7 @@ pub mod state {
     /// Tombstones older than this are pruned at daemon startup: after a
     /// month, a divergent replica reconciles through content comparison
     /// anyway, and unbounded tombstone growth would violate the memory
-    /// and storage bounds (C8-16).
+    /// and storage bounds.
     pub const TOMBSTONE_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
     pub const MAX_ATTEMPT_COUNT: u32 = 10_000;
     pub const MAX_DIAGNOSTIC_TEXT_LENGTH: usize = 1_024;
@@ -70,25 +70,25 @@ pub mod config {
     pub const KEY_POST_IGNORE_RULES: &str = "postIgnoreRules";
     pub const KEY_LANGUAGE_CODE: &str = "languageCode";
     pub const KEY_TIMELINE_EVENT_LIMIT: &str = "timelineEventLimit";
-    /// Provider selection (C8-2): `filesystem` (default pre-GA) or
+    /// Provider selection: `filesystem` (default pre-GA) or
     /// `gdrive`. See `provider::*` for the accepted values.
     pub const KEY_PROVIDER: &str = "provider";
-    /// Sync direction selector (C8-59): `two-way` (default),
+    /// Sync direction selector: `two-way` (default),
     /// `pull-only`, `push-only`. See `sync_mode::*` and
     /// `docs/architecture/sync-modes.md`.
     pub const KEY_SYNC_MODE: &str = "syncMode";
     /// Stable per-device identifier used by the keep-both conflict
-    /// suffix (C8-15). Derived from the hostname at first run, persisted
+    /// suffix. Derived from the hostname at first run, persisted
     /// here, and never silently regenerated.
     pub const KEY_DEVICE_ID: &str = "deviceId";
-    /// Profile array (C8-19). Each entry is an object with the
+    /// Profile array. Each entry is an object with the
     /// `profile::KEY_*` fields; absent means the single implicit
     /// profile assembled from the top-level settings.
     pub const KEY_PROFILES: &str = "profiles";
-    /// User resource-budget group (C8-32); object with the
+    /// User resource-budget group; object with the
     /// `resource_limits::KEY_*` fields.
     pub const KEY_RESOURCE_LIMITS: &str = "resourceLimits";
-    /// Idle-boost group (C8-33); object with the `idle_boost::KEY_*`
+    /// Idle-boost group; object with the `idle_boost::KEY_*`
     /// fields.
     pub const KEY_IDLE_BOOST: &str = "idleBoost";
 
@@ -126,18 +126,17 @@ pub mod config {
 
 pub mod provider {
     /// Accepted `provider` config values. `filesystem` is the pre-GA
-    /// default (C8-2); when selected, `cloudSyncDirectory` is
+    /// default; when selected, `cloudSyncDirectory` is
     /// reinterpreted as an absolute local directory that plays the role
-    /// of the cloud side. `gdrive` selects the real cloud
-    /// provider once C8-54 flips it selectable.
+    /// of the cloud side. `gdrive` selects the real cloud provider.
     pub const FILESYSTEM: &str = "filesystem";
     pub const GDRIVE: &str = "gdrive";
     pub const DEFAULT: &str = FILESYSTEM;
     pub const ALL: &[&str] = &[FILESYSTEM, GDRIVE];
 
     /// Extended-attribute name carrying the daemon's operation id on
-    /// files the daemon itself wrote (self-write loop prevention, C8-7).
-    /// NTFS ADS stream name on Windows once Wave 12 lands.
+    /// files the daemon itself wrote (self-write loop prevention).
+    /// Doubles as the NTFS ADS stream name once Windows support lands.
     pub const OP_ID_XATTR_NAME: &str = "sh.arn.vapor.op-id";
     /// Side-file suffix used when xattr writes are unavailable
     /// (`ENOTSUP`/`EACCES`/`EROFS`) per `data-flow.md §Loop prevention`:
@@ -161,7 +160,7 @@ pub mod provider {
 }
 
 pub mod profile {
-    /// Keys of each object in the top-level `profiles` array (C8-19).
+    /// Keys of each object in the top-level `profiles` array.
     /// A profile inherits any unset override-capable field from the
     /// top-level configuration.
     pub const KEY_ID: &str = "id";
@@ -180,7 +179,7 @@ pub mod profile {
 }
 
 pub mod resource_limits {
-    /// Keys of the `resourceLimits` config group (C8-32): hard user
+    /// Keys of the `resourceLimits` config group: hard user
     /// ceilings on the daemon's device impact, all `1..=100` percent.
     pub const KEY_CPU_PERCENT: &str = "cpuPercent";
     pub const KEY_MEMORY_PERCENT: &str = "memoryPercent";
@@ -193,7 +192,7 @@ pub mod resource_limits {
 }
 
 pub mod idle_boost {
-    /// Keys of the `idleBoost` config group (C8-33): optional dynamic
+    /// Keys of the `idleBoost` config group: optional dynamic
     /// headroom expansion while the device is verifiably idle.
     pub const KEY_ENABLED: &str = "enabled";
     pub const KEY_MIN_IDLE_SECONDS: &str = "minIdleSeconds";
@@ -218,7 +217,7 @@ pub mod idle_boost {
 }
 
 pub mod sync_mode {
-    /// Accepted `syncMode` config values (C8-59). The names describe the
+    /// Accepted `syncMode` config values. The names describe the
     /// direction from the local device's perspective; see
     /// `docs/architecture/sync-modes.md`.
     pub const TWO_WAY: &str = "two-way";
@@ -371,18 +370,18 @@ pub mod engine {
     /// hashing large files at a useful rate (8 MiB * 4 Hz = 32 MiB/s).
     pub const HASH_STAGE_STEP_BYTES: u64 = 8 * 1024 * 1024;
     /// Byte budget one upload/download transfer session may consume per
-    /// runtime tick. The bandwidth shaper (C8-38) lowers the effective
+    /// runtime tick. The bandwidth shaper lowers the effective
     /// budget further when a user bandwidth ceiling applies.
     pub const TRANSFER_STAGE_STEP_BYTES: u64 = 8 * 1024 * 1024;
-    /// Remote changes-feed poll cadence per throttle state (C8-52 uses
-    /// the same discipline for Google Drive). Suspended never polls.
+    /// Remote changes-feed poll cadence per throttle state; Google
+    /// Drive follows the same discipline. Suspended never polls.
     pub const REMOTE_POLL_IDLE_DRAIN_SECONDS: u64 = 5;
     pub const REMOTE_POLL_LIGHT_SECONDS: u64 = 15;
     pub const REMOTE_POLL_THROTTLED_SECONDS: u64 = 60;
     /// Maximum remote changes consumed per poll page.
     pub const REMOTE_CHANGES_PAGE_MAX: usize = 256;
     /// Retry cadence for ensuring the provider-side sync root when the
-    /// initial attempt failed (C8-50). Sync work stays blocked (and
+    /// initial attempt failed. Sync work stays blocked (and
     /// intents accumulate durably) between attempts.
     pub const CLOUD_ROOT_ENSURE_RETRY_SECONDS: u64 = 60;
     /// Directories the reconcile comparison walk processes per runtime
@@ -391,26 +390,26 @@ pub mod engine {
     pub const RECONCILE_DIRS_PER_CHECKPOINT: usize = 8;
     /// Assumed link capacity when the platform sampler reports no
     /// measured throughput; the bandwidth ceiling applies against this
-    /// until a real measurement exists (C8-38).
+    /// until a real measurement exists.
     pub const ASSUMED_LINK_CAPACITY_KBPS: u32 = 100_000;
-    /// Auto-tuning cadence (C8-42): one small change per cycle within
+    /// Auto-tuning cadence: one small change per cycle within
     /// the documented 60-120s window.
     pub const AUTO_TUNE_INTERVAL_SECONDS: u64 = 90;
     /// Auto-tuned transfer step budget bounds, as multiples of
     /// `TRANSFER_STAGE_STEP_BYTES` expressed in percent (50% .. 200%).
     pub const AUTO_TUNE_MIN_STEP_PERCENT: u64 = 50;
     pub const AUTO_TUNE_MAX_STEP_PERCENT: u64 = 200;
-    /// Active-coding heuristic (C8-55): this many stabilized code-file
+    /// Active-coding heuristic: this many stabilized code-file
     /// events inside the window treat the user as actively working even
     /// when no HID signal is available.
     pub const ACTIVE_CODING_WINDOW_SECONDS: u64 = 60;
     pub const ACTIVE_CODING_EVENT_THRESHOLD: usize = 5;
-    /// Mass-change guard (C8-57): local deletions above this rate pause
+    /// Mass-change guard: local deletions above this rate pause
     /// the daemon and raise an alert instead of propagating what may be
     /// ransomware or an accidental recursive delete.
     pub const MASS_DELETE_WINDOW_SECONDS: u64 = 60;
     pub const MASS_DELETE_THRESHOLD: usize = 200;
-    /// FlushNow boost window (C8-56): after an explicit flush request
+    /// FlushNow boost window: after an explicit flush request
     /// the runtime releases deferred work eagerly for this long.
     pub const FLUSH_BOOST_SECONDS: u64 = 30;
     pub const RETRY_BASE_DELAY_MILLIS: u64 = 2_000;
@@ -446,7 +445,7 @@ pub mod engine {
     pub const RECONCILE_SLICE_MILLIS: u64 = 500;
     /// Minimum dwell time before the throttle controller may down-shift to
     /// or out of `Light`. Pairs with `MIN_DWELL_THROTTLED_SECONDS` to keep
-    /// state stable under oscillating CPU / network samples (C2-4).
+    /// state stable under oscillating CPU / network samples.
     pub const MIN_DWELL_LIGHT_SECONDS: u64 = 5;
     /// Minimum dwell time before the throttle controller may down-shift to
     /// or out of `Throttled`. See `MIN_DWELL_LIGHT_SECONDS`.

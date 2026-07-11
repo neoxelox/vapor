@@ -107,7 +107,7 @@ pub fn sqlite_database_path() -> PathBuf {
     state_directory().join(constants::runtime::SQLITE_DATABASE_FILE_NAME)
 }
 
-/// Durable state DB for a named profile (C8-19/C8-22). The implicit
+/// Durable state DB for a named profile. The implicit
 /// `default` profile keeps the legacy single-scope path so existing
 /// state carries forward without migration; every other profile gets an
 /// isolated database under `state/profiles/<id>/`.

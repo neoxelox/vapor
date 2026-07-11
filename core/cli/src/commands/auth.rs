@@ -1,8 +1,7 @@
 //! `vapor auth login|logout|status`.
 //!
-//! Wave 7 ships the SecretStore-backed plumbing per `cli.md`
-//! L4-1..L4-3. Real OAuth-PKCE flows are deferred to the C8 wave when
-//! provider integrations land (Google Drive in C8-48); for now `login`
+//! SecretStore-backed auth plumbing. For Google Drive, `login` runs an
+//! OAuth-PKCE browser flow when `--token` is omitted; otherwise `login`
 //! takes an explicit `--token` argument so headless / CI flows can
 //! preload tokens, and the CLI surface is wire-compatible with the
 //! browser-based flow that arrives later.
@@ -16,11 +15,10 @@ use vapor_platform::{InMemorySecretStore, NativeSecretStore, SecretStore, Secret
 pub enum AuthCommand {
     Login {
         provider: String,
-        /// Pre-Wave-8 the CLI accepts a raw token via `--token`.
-        /// When the OAuth-PKCE flow lands the token argument becomes
-        /// optional and the CLI defaults to launching the browser.
+        /// The resolved token value (from `--token`, stdin, or the
+        /// OAuth-PKCE flow for `gdrive`).
         token: String,
-        /// Credentials are namespaced per profile (C8-20); omitting
+        /// Credentials are namespaced per profile; omitting
         /// `--profile` targets the implicit `default` profile.
         profile: String,
     },
@@ -35,7 +33,7 @@ pub enum AuthCommand {
 
 #[derive(Debug)]
 pub enum AuthError {
-    /// Pre-Wave-8 the supported provider names are documented inline.
+    /// The supported provider names are documented inline.
     /// Unknown provider strings fail fast so users don't accidentally
     /// store a token under a typoed key.
     UnknownProvider(String),
@@ -108,7 +106,7 @@ pub struct AuthStatusEntry {
     pub profile: String,
     pub provider: String,
     /// `true` when a token is present in the secret store; we never
-    /// expose the token value itself per `cli.md` L4-3.
+    /// expose the token value itself.
     pub bound: bool,
 }
 
@@ -152,10 +150,9 @@ pub fn status_from(
     Ok(entries)
 }
 
-/// Production constructor for the native secret store. Wave 7 falls
-/// back to the in-process [`InMemorySecretStore`] until the per-OS
-/// Keychain / Credential Manager / libsecret bridges land in their
-/// respective C4-5 / Wave 12 / Wave 13 work.
+/// Production constructor for the native secret store. Falls back to
+/// the in-process [`InMemorySecretStore`] until the per-OS Keychain /
+/// Credential Manager / libsecret bridges land.
 pub fn build_native_store() -> Box<dyn SecretStore> {
     match NativeSecretStore::for_current_user() {
         Ok(store) => Box::new(store),
@@ -163,7 +160,7 @@ pub fn build_native_store() -> Box<dyn SecretStore> {
     }
 }
 
-/// Interactive OAuth-PKCE login for Google Drive (C8-48): a loopback
+/// Interactive OAuth-PKCE login for Google Drive: a loopback
 /// redirect listener plus the system browser. Blocking by design — the
 /// CLI waits for the consent hop. Returns the stored-token JSON that
 /// goes into the secret store.
@@ -273,7 +270,7 @@ mod tests {
 
     #[test]
     fn credentials_are_namespaced_per_profile() {
-        // C8-20: a token bound to one profile must be invisible to
+        // A token bound to one profile must be invisible to
         // every other profile.
         let store = InMemorySecretStore::new();
         login_into(&store, "work", "gdrive", "ya29.work").expect("login");
@@ -317,7 +314,7 @@ mod tests {
 
     #[test]
     fn status_never_returns_the_token_value_itself() {
-        // L4-3 invariant: `vapor auth status` lists bound providers,
+        // Invariant: `vapor auth status` lists bound providers,
         // never the secret. We assert structurally — `AuthStatusEntry`
         // intentionally has no token field.
         let entry = AuthStatusEntry {
