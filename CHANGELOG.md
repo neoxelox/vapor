@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Multi-profile daemon blast-radius containment (full-repo review):
+  - A profile with an invalid/misspelled provider is now suspended at composition (surfaced in status as `Error`) instead of falling back to a live no-op stub — which, for a pull-only profile, would have let the startup reconcile classify the whole local root as local-only and strict-mirror-delete it.
+  - A suspended or panicking profile now reclaims the shared-workgate permits its in-flight transfers and running reconcile held, so healthy profiles are no longer starved of upload/hash/reconcile concurrency for the process lifetime.
+  - The daemon no longer exits when a suspended profile coexists with a healthy profile that hits a single transient tick error: the "all profiles failed" exit is now based on durable per-slot state, not a per-tick report.
+  - A per-profile startup failure (DB open, watcher/root, reconcile scheduling) degrades to skipping/suspending that profile instead of aborting the whole daemon; the auto-tuner also skips suspended slots (better tuning signal, no reads of a half-mutated post-panic runtime).
 - Durable state DB robustness (full-repo review):
   - Corruption recovery now quarantines the DB only on genuine corruption (`SQLITE_CORRUPT` / `SQLITE_NOTADB`); transient failures (disk full, I/O error, busy lock, permission) surface as ordinary startup errors instead of destroying every pending intent, tombstone, and sync-index baseline.
   - The in-run stale-lease sweep no longer reclaims work a live execution still holds: the runtime renews the leases of in-flight transfers (and a running reconcile) before each sweep, so a large upload or a Suspended stall past the 15-minute lease timeout is not duplicated; recovered leases also keep their retry history.

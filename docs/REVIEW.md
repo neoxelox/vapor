@@ -82,7 +82,7 @@ The Delete route builds its plan with RemotePrecondition::None and never consult
 
 **Suggested fix**: Guard remote deletes the same way uploads are guarded: at plan time stat the remote and compare op-id/content-hash against the sync-index entry; if the remote diverged from what was last synced, skip the delete and enqueue a Download instead (modification wins over deletion). Ideally extend the provider delete API with a precondition (hash/revision) so the check-then-delete window is closed, mirroring RemotePrecondition on uploads.
 
-### [critical] Invalid provider kind falls back to a live no-op stub provider, which can mass-delete a pull-only profile's local data
+### [critical] Invalid provider kind falls back to a live no-op stub provider, which can mass-delete a pull-only profile's local data  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/multi_runtime.rs:213` · **Review group**: runtime-shell
 
@@ -114,7 +114,7 @@ RemotePath validation is purely lexical (no '..' segments), and paths.rs explici
 
 **Suggested fix**: Before applying any remote-sourced intent locally (download apply, remote-delete apply, staging-file creation), verify containment non-lexically: open/canonicalize the parent directory (or walk components with symlink_metadata refusing any symlink component) and confirm the resolved parent is still inside the canonical local root; fail the intent as Permanent otherwise. On Unix, O_NOFOLLOW/openat-style traversal of each component is the robust fix.
 
-### [high] A panicking or suspended profile permanently leaks shared-workgate permits, starving all other profiles' uploads/reconciles
+### [high] A panicking or suspended profile permanently leaks shared-workgate permits, starving all other profiles' uploads/reconciles  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/multi_runtime.rs:345` · **Review group**: runtime-shell
 
@@ -122,7 +122,7 @@ WorkPermit has no Drop guard — release is manual (executor.rs releases at exit
 
 **Suggested fix**: On suspend_profile, reclaim the slot's outstanding permits: give DaemonRuntime an abort/drain method that releases staged-executor session permits and aborts a running reconcile (reconcile.rs already has abort_running), and call it from the suspension paths (both the panic arm — best-effort under catch_unwind — and the repeated-error arm). Longer term, make WorkPermit an RAII guard over the shared workgate. Also fix the misleading poison-recovery comment in lib.rs::lock_workgate.
 
-### [high] run_forever exits the whole daemon when a suspended profile coexists with a healthy profile that hits a single transient tick error
+### [high] run_forever exits the whole daemon when a suspended profile coexists with a healthy profile that hits a single transient tick error  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/multi_runtime.rs:417` · **Review group**: runtime-shell
 
@@ -194,7 +194,7 @@ record_callback_result (fs_events.rs:294) calls note_observed_path before the sh
 
 **Suggested fix**: Only request a reload when the observed ignore file would actually contribute rules: check should_ignore(path) (and the heavy-skip-dir list) before calling note_observed_path, or debounce/rate-limit rebuilds (e.g. rebuild at most once per N seconds of ignore-file quiet) so bursts coalesce into one walk.
 
-### [medium] One profile's watcher/root failure at startup aborts the entire multi-profile daemon
+### [medium] One profile's watcher/root failure at startup aborts the entire multi-profile daemon  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/multi_runtime.rs:619` · **Review group**: runtime-shell
 
@@ -322,7 +322,7 @@ start_with_shared_filter canonicalizes its own watch root but only debug_asserts
 
 **Suggested fix**: Return a real FsEventsWatcherError (e.g. FilterRootMismatch) when path_filter.watch_root() != normalized watch_root instead of debug_assert_eq!, so misuse fails loudly on every build profile.
 
-### [low] After a caught panic, the suspended slot's runtime keeps being read every tick despite AssertUnwindSafe, outside any panic catcher
+### [low] After a caught panic, the suspended slot's runtime keeps being read every tick despite AssertUnwindSafe, outside any panic catcher  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/multi_runtime.rs:397` · **Review group**: runtime-shell
 

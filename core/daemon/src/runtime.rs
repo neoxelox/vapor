@@ -1746,6 +1746,26 @@ impl DaemonRuntime {
         )
     }
 
+    /// Forces this runtime into the blocking `Error` run state with a
+    /// reason (used by the multi-profile shell to surface a profile that
+    /// cannot run — e.g. an invalid provider — without performing any sync
+    /// work for it).
+    pub fn set_error_state(&mut self, reason: impl Into<String>) {
+        self.app.set_run_state(RunState::Error, reason.into());
+    }
+
+    /// Reclaims every shared-workgate permit this runtime holds when it is
+    /// being suspended (panic or repeated tick failures): the staged
+    /// executor's in-flight sessions and a running reconcile would
+    /// otherwise leak their permits for the process lifetime, starving all
+    /// other profiles' uploads/hashing/reconciles on the shared workgate.
+    pub fn abort_and_release(&mut self, now: SystemTime) {
+        self.staged_executor.abort_all(&mut self.app);
+        if self.running_reconcile_intent_id.take().is_some() {
+            self.app.abort_reconcile(&mut self.scheduler, now);
+        }
+    }
+
     fn complete_running_reconcile(&mut self) -> Result<Option<PathBuf>, DaemonRuntimeError> {
         let Some(recorder) = &self.recorder else {
             return Ok(None);

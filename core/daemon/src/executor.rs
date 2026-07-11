@@ -1015,6 +1015,49 @@ impl StagedExecutor {
     pub fn admission_capacity(&self, workgate: WorkgateSnapshot) -> usize {
         max_in_flight_items(workgate).saturating_sub(self.active.len())
     }
+
+    /// Drops every in-flight execution, releasing its shared-workgate
+    /// permit and aborting any transfer session. The leased durable rows
+    /// stay leased and are recovered by the stale-lease sweep; this only
+    /// reclaims the in-memory permits so a suspended/aborted profile does
+    /// not leak daemon-wide concurrency slots to healthy profiles.
+    pub fn abort_all(&mut self, app: &mut DaemonApp) {
+        let active = std::mem::take(&mut self.active);
+        self.active_paths.clear();
+        for (_id, execution) in active {
+            match execution.stage {
+                ActiveStage::Planner { permit }
+                | ActiveStage::Hash { permit, .. }
+                | ActiveStage::Upload {
+                    permit,
+                    work: UploadWork::RemoteDelete,
+                    ..
+                } => {
+                    app.release_work(permit);
+                }
+                ActiveStage::Upload {
+                    permit,
+                    work: UploadWork::Session(mut session),
+                    ..
+                } => {
+                    session.abort();
+                    app.release_work(permit);
+                }
+                ActiveStage::Download {
+                    permit,
+                    mut session,
+                    ..
+                } => {
+                    session.abort();
+                    app.release_work(permit);
+                }
+                // Waiting stages hold a plan but no permit.
+                ActiveStage::WaitingForHash { .. }
+                | ActiveStage::WaitingForUpload { .. }
+                | ActiveStage::WaitingForDownload { .. } => {}
+            }
+        }
+    }
 }
 
 impl Default for StagedExecutor {
