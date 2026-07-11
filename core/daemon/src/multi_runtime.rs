@@ -477,6 +477,10 @@ impl MultiProfileRuntime {
     /// error only when EVERY profile has failed — a single broken
     /// profile never takes the daemon down.
     pub fn run_forever(&mut self) -> Result<(), DaemonRuntimeError> {
+        // Let a shutdown signal wake the loop out of its idle sleep so
+        // `vapor stop` / SIGTERM exits promptly instead of waiting out a
+        // full idle interval.
+        crate::runtime::register_shutdown_waker(self.tick_waker.clone());
         while !is_shutdown_requested() {
             let report = self.tick_all(self.clock.now_system());
             // Exit only when EVERY profile is durably suspended — not on a

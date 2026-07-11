@@ -52,9 +52,27 @@ impl From<FsEventsWatcherError> for DaemonRuntimeError {
 }
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Tick waker the shutdown path pings so the loop exits immediately
+/// instead of sleeping out a full idle interval. Set by the running
+/// multi-profile runtime. The shutdown handler runs on a dedicated
+/// thread (not a raw signal context), so taking this lock is safe.
+static SHUTDOWN_WAKER: Mutex<Option<Arc<TickWaker>>> = Mutex::new(None);
+
+pub fn register_shutdown_waker(waker: Arc<TickWaker>) {
+    *SHUTDOWN_WAKER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(waker);
+}
 
 pub fn request_shutdown() {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    if let Some(waker) = SHUTDOWN_WAKER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+    {
+        waker.notify();
+    }
 }
 
 pub fn is_shutdown_requested() -> bool {

@@ -298,7 +298,7 @@ migrate_v3_to_v4 rebuilds queue_intents via CREATE TABLE + INSERT...SELECT + DRO
 
 **Suggested fix**: After the copy, restore the sequence explicitly (INSERT/UPDATE sqlite_sequence for queue_intents to MAX(old sequence, MAX(failed_intents.id))), or stop reusing queue ids as failed_intents PKs (give failed_intents its own rowid and store source_intent_id as a plain column).
 
-### [low] Shutdown signal does not wake the tick loop, delaying clean exit by up to a full idle sleep
+### [low] Shutdown signal does not wake the tick loop, delaying clean exit by up to a full idle sleep  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/bootstrap.rs:184` · **Review group**: runtime-shell
 
@@ -306,7 +306,7 @@ install_shutdown_signal_handlers registers runtime::request_shutdown, which only
 
 **Suggested fix**: Have the shutdown path notify the waker: e.g. register a handler closure that calls request_shutdown() and then notifies the multi runtime's TickWaker (a process-global shutdown waker registration alongside SHUTDOWN_REQUESTED keeps the signal-safe flag-flip pattern).
 
-### [low] Recorder drain-then-apply is not atomic, so concurrent state readers can apply event batches out of order
+### [low] Recorder drain-then-apply is not atomic, so concurrent state readers can apply event batches out of order  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/event_intents.rs:849` · **Review group**: ingest
 
@@ -314,7 +314,7 @@ drain_incoming_into_maps takes the incoming batch under the incoming_events mute
 
 **Suggested fix**: Acquire the maps lock before taking the incoming batch (hold it across take + apply), or funnel all drains through a single &mut entry point so the compiler enforces single-threaded draining.
 
-### [low] Watch-root/filter-root mismatch is only a debug_assert; in release it silently disables all ignore rules
+### [low] Watch-root/filter-root mismatch is only a debug_assert; in release it silently disables all ignore rules  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/fs_events.rs:225` · **Review group**: ingest
 
@@ -479,7 +479,7 @@ vapor-daemon keeps its own notify = "=8.2.0" dependency and fs_events.rs:230 con
 
 **Suggested fix**: Route the daemon's local watcher through vapor_platform::fs_watch (keeping the callback-discipline half in fs_events), drop the direct notify dependency from vapor-daemon, and let the trait contract suite cover the shared translation logic; if the split is intentional, document it in AGENTS.md as an explicit exception.
 
-### [medium] build.rs emits no rerun marker for git worktrees or packed refs, embedding stale commit SHAs
+### [medium] build.rs emits no rerun marker for git worktrees or packed refs, embedding stale commit SHAs  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/build.rs:52`
 
@@ -551,7 +551,7 @@ ReconcileWalker::process loops max_directories (RECONCILE_DIRS_PER_CHECKPOINT = 
 
 **Suggested fix**: Check elapsed slice time (and ideally the current throttle state) between each directory inside process() — e.g., pass a deadline/should-yield callback from the controller — or lower the per-chunk directory budget to 1 for network providers so the 500ms slice discipline applies to real network latency.
 
-### [medium] Push-only strict mirror never restores a remotely-deleted directory because local_file_exists rejects directories
+### [medium] Push-only strict mirror never restores a remotely-deleted directory because local_file_exists rejects directories  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/remote_sync.rs:222`
 
@@ -583,7 +583,7 @@ After a download, sync_index.last_op_id is set to plan.op_id — the op-id this 
 
 **Suggested fix**: When recording the post-download index entry, store the remote change's op-id (available from the feed change / a post-download stat) as last_op_id instead of the local download intent's op-id, so the op-id equality fast path works in both directions.
 
-### [low] Type-mismatch re-materialization intents do not share the clearing intent's path, so the claimed executor ordering does not hold for remote directories
+### [low] Type-mismatch re-materialization intents do not share the clearing intent's path, so the claimed executor ordering does not hold for remote directories  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/reconcile_walk.rs:272`
 
@@ -599,7 +599,7 @@ gates_pass() gates the Active idle-boost state on the instantaneous 1s non-Vapor
 
 **Suggested fix**: Require the headroom gate to fail for N consecutive samples (small debounce) before leaving Active, and/or let RampingDown reverse into RampingUp from the current ceiling when gates pass again mid-ramp.
 
-### [low] Rolling-window prune keeps future-dated events after a wall-clock rewind, so MassChangeGuard can spuriously pause sync and ActiveCodingHeuristic can pin Throttled — contrary to its documented fail-safe claim
+### [low] Rolling-window prune keeps future-dated events after a wall-clock rewind, so MassChangeGuard can spuriously pause sync and ActiveCodingHeuristic can pin Throttled — contrary to its documented fail-safe claim  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/safeguards.rs:73`
 

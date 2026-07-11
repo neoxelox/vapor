@@ -847,6 +847,13 @@ impl BoundedFsEventRecorder {
     }
 
     fn drain_incoming_into_maps(&self) {
+        // Hold the maps lock across the whole drain. The recorder is
+        // Send+Sync and `with_state`/`with_mut_state` are `&self`, so a
+        // future off-thread caller could drain concurrently; taking the
+        // maps lock first serializes drains so one cannot take a newer
+        // batch and apply it before an older batch already taken by
+        // another thread (which would reorder a path's events).
+        let mut maps = self.maps.lock().expect("event intent mutex poisoned");
         let batch: Vec<FsEventRecord> = {
             let mut guard = self
                 .incoming_events
@@ -876,7 +883,6 @@ impl BoundedFsEventRecorder {
         if batch.is_empty() && unrepaired_dropped == 0 {
             return;
         }
-        let mut maps = self.maps.lock().expect("event intent mutex poisoned");
         for event in batch {
             maps.record_event(event);
         }

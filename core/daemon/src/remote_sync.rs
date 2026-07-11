@@ -241,6 +241,18 @@ impl RemotePoller {
                                         event_time,
                                     ));
                                     report.mirror_reverts += 1;
+                                } else if local_dir_exists(&local_target) {
+                                    // A trashed remote folder arrives as a
+                                    // single Removed (no per-descendant
+                                    // events). Reconcile the local subtree so
+                                    // push-only re-uploads every file under
+                                    // it, restoring the mirror.
+                                    batch.push((
+                                        local_target,
+                                        PendingIntentKind::ReconcileSubtree,
+                                        event_time,
+                                    ));
+                                    report.mirror_reverts += 1;
                                 }
                                 continue;
                             }
@@ -308,6 +320,14 @@ impl RemotePoller {
 fn local_file_exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+}
+
+/// Whether a real directory exists at `path` (used to restore a
+/// remotely-trashed folder in push-only mirror mode).
+fn local_dir_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.is_dir())
         .unwrap_or(false)
 }
 

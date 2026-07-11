@@ -287,11 +287,17 @@ impl ReconcileWalker {
                         }
                     }
                     // Type mismatch (file vs directory): resolve in favor
-                    // of the mode's source of truth. The clearing intent
-                    // and the re-materializing intents share a path, so
-                    // the executor's per-path serialization (and retry
-                    // backoff for parents that are still blocked) orders
-                    // them safely.
+                    // of the mode's source of truth. For the file/file and
+                    // dir/dir replacements the clearing intent and the
+                    // re-materializing intent share a path, so the
+                    // executor's per-path serialization orders them. For a
+                    // local-file-vs-remote-directory clear the children are
+                    // enqueued at *different* paths (local_path/child), so
+                    // ordering is NOT guaranteed: a child transfer whose
+                    // parent has not yet been cleared fails transiently and
+                    // converges via retry backoff (never a lost update). Do
+                    // not add code here that relies on the parent clearing
+                    // before its children.
                     (local_is_dir, remote_kind) => match sync_mode {
                         SyncMode::PullOnly => {
                             batch.push((
