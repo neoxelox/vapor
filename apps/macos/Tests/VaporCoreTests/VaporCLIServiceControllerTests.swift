@@ -4,7 +4,7 @@ import Testing
 @testable import VaporCore
 
 // Contract tests for the `vapor service … --json` subprocess bridge
-// (M2-1). The JSON fixtures mirror the Rust renderer in
+//. The JSON fixtures mirror the Rust renderer in
 // `core/cli/src/commands/service.rs`
 // (`json_contract_*` tests lock the same shapes on that side).
 

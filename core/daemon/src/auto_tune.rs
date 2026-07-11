@@ -1,4 +1,4 @@
-//! Auto-tuning loop (C8-42).
+//! Auto-tuning loop.
 //!
 //! Every `AUTO_TUNE_INTERVAL_SECONDS` (inside the documented 60-120s
 //! window) the tuner makes at most ONE small change to its single

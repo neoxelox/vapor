@@ -3,7 +3,7 @@
 //! Prints the same shape as `vapord --version`:
 //! `vapor <semver> (<git-commit-short>)`. The build-info constants come
 //! from the daemon crate's `build.rs` so every binary in the workspace
-//! agrees on the published version. Closes `cli.md` L0-4 / L1-3.
+//! agrees on the published version.
 
 pub fn version_string() -> String {
     format!(

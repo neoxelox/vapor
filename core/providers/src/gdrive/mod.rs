@@ -1,20 +1,20 @@
-//! Google Drive provider (C8-48…C8-54).
+//! Google Drive provider.
 //!
 //! Implements the full [`Provider`] contract against the Drive v3 API
 //! through the injectable HTTP transport (`crate::http`), so every flow
 //! is testable offline. Highlights:
 //!
-//! - **Auth** (C8-48): profile-scoped tokens from the `SecretStore`
+//! - **Auth**: profile-scoped tokens from the `SecretStore`
 //!   (`auth.{profile}.gdrive.token`), proactive refresh 60s
 //!   before expiry, `invalid_grant` → `Authentication` (user
 //!   re-consent), one forced-refresh retry on a 401.
-//! - **Root handling** (C8-49/C8-50): `ensure_cloud_sync_directory`
+//! - **Root handling**: `ensure_cloud_sync_directory`
 //!   resolves or creates the configured folder chain; failures surface
 //!   as actionable errors and the engine blocks sync until it works.
-//! - **Uploads** (C8-51): multipart for small payloads, resumable
+//! - **Uploads**: multipart for small payloads, resumable
 //!   chunked sessions for large ones, chunk size auto-tuned across
-//!   sessions (C8-53), rate-limit aware classification throughout.
-//! - **Changes** (C8-52): `changes.list` with a persisted page token;
+//!   sessions, rate-limit aware classification throughout.
+//! - **Changes**: `changes.list` with a persisted page token;
 //!   a 410 maps to `ChangesPoll::CursorExpired`, which the engine
 //!   answers with a whole-scope reconcile + re-baseline.
 //! - **Deletes** move files to the Drive trash (recoverable) rather
@@ -65,8 +65,8 @@ pub struct GdriveConfig {
 }
 
 impl GdriveConfig {
-    /// The secret-store entry holding this profile's tokens (C8-20
-    /// namespacing).
+    /// The secret-store entry holding this profile's tokens
+    /// (profile-scoped namespacing).
     pub fn token_secret_name(&self) -> String {
         format!("auth.{}.gdrive.token", self.profile_id)
     }
@@ -240,11 +240,11 @@ pub struct GoogleDriveProvider {
     transport: Arc<dyn HttpTransport>,
     /// Resolved id of the configured cloud root folder.
     root_id: Mutex<Option<String>>,
-    /// Path → file-id cache (C8-53); pruned on deletes/renames.
+    /// Path → file-id cache; pruned on deletes/renames.
     id_by_path: Mutex<BTreeMap<String, String>>,
     /// File-id → path cache for changes mapping.
     path_by_id: Mutex<BTreeMap<String, String>>,
-    /// Learned resumable chunk size, shared across sessions (C8-53).
+    /// Learned resumable chunk size, shared across sessions.
     chunk_hint: Arc<Mutex<u64>>,
 }
 
@@ -857,7 +857,7 @@ impl Provider for GoogleDriveProvider {
         let response = self.execute_authed("GET", url, Vec::new(), Vec::new())?;
         if response.status == 410 {
             // The page token expired server-side: the engine reconciles
-            // and re-baselines (C8-52).
+            // and re-baselines.
             return Ok(ChangesPoll::CursorExpired);
         }
         if response.status >= 300 {
@@ -1182,7 +1182,7 @@ impl TransferSession for GdriveUploadSession {
                             vapor_shared::ProviderErrorKind::Transient
                                 | vapor_shared::ProviderErrorKind::RateLimited { .. }
                         ) {
-                            // Adaptive sizing (C8-53): back off the
+                            // Adaptive sizing: back off the
                             // learned chunk before the retry re-plans.
                             self.shrink_chunk_hint();
                         }
@@ -1281,7 +1281,7 @@ impl GdriveDownloadSession {
 // ---------------------------------------------------------------------
 
 /// Maps a Drive API failure response onto the provider taxonomy
-/// (rate-limit-aware, C8-51/C8-52).
+/// (rate-limit-aware).
 fn classify_api_failure(response: &HttpResponse) -> ProviderError {
     let body_text = String::from_utf8_lossy(&response.body);
     let retry_after = response

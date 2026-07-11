@@ -4,10 +4,9 @@
 //!
 //! The native impls land progressively: macOS uses Keychain Services,
 //! Linux uses libsecret (desktop) / age-encrypted file (headless),
-//! Windows uses Credential Manager. Wave 4 ships the trait + an in-
-//! memory fake usable from every host; the real Keychain bridge lives
-//! behind Wave 5 (`core.md` C4-5) when the `vapor` CLI's auth surface
-//! consumes it directly.
+//! Windows uses Credential Manager. The trait ships with an in-memory
+//! fake usable from every host; the real Keychain bridge is not wired
+//! up yet.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -54,19 +53,19 @@ pub trait SecretStore: Send + Sync {
     /// local fakes (the in-memory store, the pre-bridge `NativeSecretStore`
     /// today on every OS) return `false`; the real Keychain / libsecret /
     /// Credential Manager backends will return `true` once their
-    /// respective Wave-5 / Wave-12 / Wave-13 work lands. Surfaces of
+    /// native bridges land. Surfaces of
     /// the trait that store user-visible secrets must propagate this
     /// flag so users aren't told "stored" when the value is going to
     /// disappear at process exit (`vapor auth login` would otherwise
-    /// silently lose every token pre-Wave-5).
+    /// silently lose every token otherwise).
     fn is_persistent(&self) -> bool {
         false
     }
 }
 
 /// Process-local in-memory secret store. Default for tests, the
-/// headless test fixture, and the pre-Wave-5 placeholder while the
-/// Keychain bridge is being written.
+/// headless test fixture, and the placeholder while the Keychain
+/// bridge is being written.
 #[derive(Debug, Default)]
 pub struct InMemorySecretStore {
     inner: Mutex<BTreeMap<String, String>>,
@@ -120,7 +119,7 @@ impl SecretStore for InMemorySecretStore {
 }
 
 /// Native secret store. Until the per-OS Keychain / libsecret /
-/// Credential Manager bridges land in their respective waves, this
+/// Credential Manager bridges land, this
 /// type aliases to [`InMemorySecretStore`] so the engine can already
 /// thread the trait through. Construction returns
 /// [`SecretStoreError::Unsupported`] on platforms whose real bridge
@@ -132,8 +131,8 @@ pub struct NativeSecretStore {
 
 impl NativeSecretStore {
     pub fn for_current_user() -> Result<Self, SecretStoreError> {
-        // Wave 5 (`core.md` C4-5) replaces the in-memory backing with a
-        // real Keychain Services bridge. Until then this is a strict
+        // A real Keychain Services bridge will replace the in-memory
+        // backing. Until then this is a strict
         // process-local store — sufficient for `vapor doctor`-style
         // checks that the trait surface is wired correctly.
         Ok(Self::default())
@@ -154,9 +153,9 @@ impl SecretStore for NativeSecretStore {
         self.inner.list()
     }
     fn is_persistent(&self) -> bool {
-        // Wave 5 / C4-5 flips this to `true` once the macOS Keychain
-        // bridge is wired in and the Linux / Windows native bridges
-        // land in the matching deferred waves. Until then this is a
+        // Flips to `true` once the macOS Keychain bridge is wired in
+        // and the Linux / Windows native bridges land. Until then this
+        // is a
         // strict process-local store.
         false
     }

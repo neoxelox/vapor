@@ -1,4 +1,4 @@
-//! `vapor support-bundle` (C8-58): diagnostics history + support
+//! `vapor support-bundle`: diagnostics history + support
 //! export.
 //!
 //! Collects everything a maintainer needs to triage a report into one

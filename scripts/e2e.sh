@@ -9,7 +9,7 @@
 # residue.
 #
 # `--full` additionally runs the service lifecycle round-trip
-# (`cli.md` L2-5 / `macos.md` M2-4) against the REAL macOS service
+# against the REAL macOS service
 # manager: install → start → status → crash-loop supervision
 # (`vapor service check`) through backoff and pause → acknowledge →
 # stop → uninstall. That phase is the one part of Tier E2E that
@@ -104,7 +104,7 @@ dump_diagnostics() {
   echo "[e2e] sandbox: $E2E_ROOT"
   if [[ -n "$DAEMON_PID" ]] && kill -0 "$DAEMON_PID" 2>/dev/null; then
     "$VAPOR_BIN" status --json 2>&1 | sed 's/^/[e2e] status: /' || true
-    # Per-intent "why stuck" rows (C8-29) — names the exact stage and
+    # Per-intent "why stuck" rows — names the exact stage and
     # blocker for anything wedged in the pipeline.
     "$VAPOR_BIN" diagnostics --json 2>&1 | sed 's/^/[e2e] diag: /' || true
   fi
@@ -214,7 +214,9 @@ enqueue_high_water() {
 }
 
 run_state_is() {
-  "$VAPOR_BIN" status --json 2>/dev/null | grep -q "\"run_state\": \"$1\""
+  local out
+  out="$("$VAPOR_BIN" status --json 2>/dev/null)" || return 1
+  grep -q "\"run_state\": \"$1\"" <<<"$out"
 }
 
 queue_drained() {
@@ -392,7 +394,8 @@ wait_until 30 "deep-VAPOR_DIR daemon to be reachable over the relocated socket" 
   || fail "S9: daemon with over-budget socket path is not reachable via vapor status"
 [[ ! -S "$DEEP_HOME/vapord.sock" ]] \
   || fail "S9: socket bound at the canonical over-budget path instead of relocating"
-VAPOR_DIR="$DEEP_HOME" "$VAPOR_BIN" doctor | grep -q "rendezvous" \
+deep_doctor_out="$(VAPOR_DIR="$DEEP_HOME" "$VAPOR_BIN" doctor)" \
+  && grep -q "rendezvous" <<<"$deep_doctor_out" \
   || fail "S9: vapor doctor does not explain the socket relocation"
 deep_socket="$(grep "relocated under the OS temp directory" "$DEEP_HOME/logs/vapord.logs" \
   | tail -n 1 | sed 's/.*socket_path=\([^ ]*\).*/\1/')"
@@ -402,7 +405,7 @@ DEEP_PID=""
 rm -rf "$(dirname "$deep_socket")"
 log "PASS S9 — over-budget socket path relocated; CLI + doctor work; temp residue removed"
 
-# S10 — bidirectional filesystem sync (Wave 8): local writes land in the
+# S10 — bidirectional filesystem sync: local writes land in the
 # cloud root byte-for-byte, and cloud-born content flows back down.
 [[ -f "$CLOUD_ROOT/e2e-file-1.txt" ]] \
   || fail "S10: uploaded file missing in cloud root"
@@ -420,7 +423,7 @@ cmp -s "$CLOUD_ROOT/e2e-from-cloud.txt" "$LOCAL_ROOT/e2e-from-cloud.txt" \
 converge 30 || fail "S10: queue did not drain after bidirectional round-trip"
 log "PASS S10 — local→cloud upload and cloud→local download round-trip byte-for-byte"
 
-# S11 — keep-both conflict (Wave 8): the same path diverges on both
+# S11 — keep-both conflict: the same path diverges on both
 # sides while the daemon is down; the restart reconcile must preserve
 # BOTH payloads (one canonical, one ~conflict copy) — never overwrite.
 echo "conflict v1" >"$LOCAL_ROOT/e2e-conflict.txt"
@@ -444,7 +447,7 @@ grep -rq "edited in cloud while down" "$LOCAL_ROOT" "$CLOUD_ROOT" \
   || fail "S11: the cloud edit was lost"
 log "PASS S11 — diverged edits kept both payloads via a ~conflict copy; nothing lost"
 
-# S12 — pull-only strict mirror (Wave 8 sync modes): its own runtime
+# S12 — pull-only strict mirror: its own runtime
 # home; cloud is authoritative — cloud content materializes locally and
 # a local-only file is removed, never uploaded.
 PULL_HOME="$E2E_ROOT/pull-home"
@@ -477,13 +480,14 @@ stop_daemon "$PULL_PID" || fail "S12: pull-only daemon did not stop cleanly"
 PULL_PID=""
 log "PASS S12 — pull-only mirror: cloud materialized locally; local-only file removed, never uploaded"
 
-# S13 — Wave 8 CLI observability: per-intent diagnostics answer over
+# S13 — CLI observability: per-intent diagnostics answer over
 # IPC and the support bundle exports with live captures.
-"$VAPOR_BIN" diagnostics --json | grep -q '"schema_version"' \
+diagnostics_out="$("$VAPOR_BIN" diagnostics --json)" \
+  && grep -q '"schema_version"' <<<"$diagnostics_out" \
   || fail "S13: vapor diagnostics --json did not answer"
 SUPPORT_OUT="$E2E_ROOT/support"
-"$VAPOR_BIN" support-bundle --output "$SUPPORT_OUT" --json \
-  | grep -q '"daemonReachable": true' \
+support_out="$("$VAPOR_BIN" support-bundle --output "$SUPPORT_OUT" --json)" \
+  && grep -q '"daemonReachable": true' <<<"$support_out" \
   || fail "S13: support bundle did not capture the live daemon"
 compgen -G "$SUPPORT_OUT/vapor-support-*/manifest.json" >/dev/null \
   || fail "S13: support bundle manifest missing"
@@ -491,7 +495,7 @@ compgen -G "$SUPPORT_OUT/vapor-support-*/status.json" >/dev/null \
   || fail "S13: support bundle live status capture missing"
 log "PASS S13 — diagnostics respond; support bundle exported with live captures"
 
-# S14 — symmetric ignore filtering (Wave 8 fix): ignored names (Finder
+# S14 — symmetric ignore filtering: ignored names (Finder
 # metadata, temp files) never sync in either direction — not through
 # the changes feed, not through reconcile — and divergence between the
 # two sides never manufactures a ~conflict copy.
@@ -520,9 +524,10 @@ log "PASS S14 — ignore rules hold in both directions; no conflict copies for i
 # copy S11 left behind (the files are the durable registry — no
 # timeline cap applies), `resolve --keep copy` promotes the preserved
 # version, and the resolution syncs like any other edit.
-"$VAPOR_BIN" conflicts list --json | grep -q 'e2e-conflict~conflict-' \
+conflicts_out="$("$VAPOR_BIN" conflicts list --json)" \
+  && grep -q 'e2e-conflict~conflict-' <<<"$conflicts_out" \
   || fail "S15: conflicts list did not find the S11 conflict copy"
-"$VAPOR_BIN" conflicts list --json | grep -q '"deviceId"' \
+grep -q '"deviceId"' <<<"$conflicts_out" \
   || fail "S15: conflict record is missing the origin device id"
 # S11 can preserve a divergent copy per side; promote the first and
 # discard any others so the scope ends conflict-free.
@@ -544,7 +549,8 @@ no_cloud_conflict_copy() { ! conflict_copy_exists "$CLOUD_ROOT" "e2e-conflict"; 
 wait_until 30 "resolved conflict copy to disappear from the cloud root" \
   no_cloud_conflict_copy \
   || fail "S15: resolution did not propagate the copy's deletion to the cloud"
-"$VAPOR_BIN" conflicts list --json | grep -q '"conflicts": \[\]' \
+conflicts_after_out="$("$VAPOR_BIN" conflicts list --json)" \
+  && grep -q '"conflicts": \[\]' <<<"$conflicts_after_out" \
   || fail "S15: conflicts list is not empty after resolution"
 log "PASS S15 — conflicts listed from durable file state; resolve promoted the copy and synced"
 
@@ -575,7 +581,16 @@ converge 30 || fail "S17: queue did not drain with a FIFO in the watched root"
   || fail "S17: a special file produced a remote object"
 log "PASS S17 — special files are ignored; queue drains with a FIFO present"
 
-# --- service lifecycle round-trip (--full only; cli.md L2-5 / macos.md M2-4) ---
+# S18 — pipeline friendliness: a downstream reader that closes the pipe
+# early (head, grep -q) must not make the CLI panic. The CLI restores
+# default SIGPIPE handling, so it dies silently like standard Unix
+# tools instead of printing a stdout panic.
+sigpipe_err="$( { "$VAPOR_BIN" logs 2>&1 | head -n 1 >/dev/null; } 2>&1 || true )"
+[[ "$sigpipe_err" != *panicked* ]] \
+  || fail "S18: vapor logs | head -1 panicked on SIGPIPE: $sigpipe_err"
+log "PASS S18 — early-closed pipe does not panic the CLI"
+
+# --- service lifecycle round-trip (--full only) ---
 #
 # Everything below drives `vapor service` against the REAL macOS
 # service manager: install → start → status → crash-loop supervision
@@ -619,7 +634,9 @@ expect_last() {
 }
 
 service_status_is() {
-  "$VAPOR_BIN" service status --json 2>/dev/null | grep -q "\"status\": \"$1\""
+  local out
+  out="$("$VAPOR_BIN" service status --json 2>/dev/null)" || return 1
+  grep -q "\"status\": \"$1\"" <<<"$out"
 }
 
 daemon_pid_from_launchd() {
@@ -710,7 +727,7 @@ expect_last '"paused": true' "R6: crash_loop.paused"
 svc start --json
 expect_last '"result": "crash_loop_paused"' "R6: start refused while paused"
 # The pause must be durable state, not process memory: every CLI
-# invocation above was a separate process (M2-6).
+# invocation above was a separate process.
 grep -q '"paused_indefinitely": true' "$VAPOR_DIR/state/lifecycle.json" \
   || fail "R6: pause not persisted in lifecycle.json"
 log "PASS R6 — crash-loop pause engaged, durable, and refusing restarts"

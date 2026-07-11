@@ -5,7 +5,7 @@
 //! exercise it without spawning the binary. `src/main.rs` wires `clap`
 //! to these entry points and exits with the right status code.
 //!
-//! See `docs/plans/cli.md` and `docs/tasks/cli.md`.
+//! See `docs/plans/cli.md`.
 
 #![forbid(unsafe_code)]
 

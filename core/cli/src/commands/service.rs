@@ -1,11 +1,10 @@
 //! `vapor service bootstrap|install|uninstall|start|stop|restart|status|check|acknowledge`.
 //!
 //! Drives `core/lifecycle::DaemonLifecycleManager` over the platform's
-//! native `ServiceInstaller`. macOS today; Windows / Linux land in
-//! Waves 12 / 13. Closes `cli.md` L2-1 … L2-4 and, together with the
-//! durable lifecycle state in `core/lifecycle`, provides the stable
-//! subprocess surface the macOS Swift app consumes (`core.md` C4-5,
-//! `macos.md` M2-1 … M2-6).
+//! native `ServiceInstaller`. macOS today; Windows / Linux land with
+//! their platform support. Together with the durable lifecycle state
+//! in `core/lifecycle`, this provides the stable subprocess surface
+//! the macOS Swift app consumes.
 //!
 //! Every subcommand renders both a human line and, with `--json`, a
 //! stable machine shape (documented per-variant on
@@ -180,7 +179,7 @@ pub fn dispatch(
             // The installer can only see the OS service manager; the
             // crash-loop pause lives in the durable lifecycle state.
             // Overlay it so `CrashLoopPaused` is a real, reportable
-            // state (L2-4) — unless the daemon is observably running.
+            // state — unless the daemon is observably running.
             let status = if manager.is_in_crash_loop_pause() && probed != ServiceStatus::Running {
                 ServiceStatus::CrashLoopPaused
             } else {
@@ -348,7 +347,7 @@ pub fn render_text(outcome: &ServiceCommandOutcome) -> String {
 ///
 /// The manager is built over the durable lifecycle state at
 /// `<vapor_dir>/state/lifecycle.json`, so crash-loop backoff and pause
-/// survive across invocations and surfaces (M2-6).
+/// survive across invocations and surfaces.
 #[cfg(target_os = "macos")]
 pub fn build_native_macos(
     config_path: PathBuf,

@@ -1,9 +1,9 @@
 //! High-level client used by the `vapor` CLI and (eventually) by the
 //! macOS / Windows / Linux apps.
 //!
-//! The Wave 6 phase 2 surface is intentionally minimal: a handshake +
-//! a `status()` call. Wave 7 grows the trait once the IPC-driven
-//! commands (`pause`, `resume`, `flush-now`, etc.) land.
+//! The surface is intentionally minimal: a handshake, a `status()`
+//! call, and the IPC-driven control commands (`pause`, `resume`,
+//! `flush-now`, etc.).
 
 use std::error::Error;
 use std::fmt::{self, Display};
@@ -25,7 +25,7 @@ use crate::transport::{StreamHandle, TransportError, connect_to_socket};
 /// classifies as "daemon not running" / "daemon unresponsive".
 ///
 /// Conservative enough to absorb real daemon latency under load, tight
-/// enough to satisfy the L3-7 1 s exit goal in the common case where
+/// enough to satisfy the 1 s exit goal in the common case where
 /// the daemon is genuinely down (the OS returns `ECONNREFUSED` /
 /// `ENOENT` immediately so we never hit this window in that path).
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(3);
@@ -94,9 +94,8 @@ impl Client {
     /// Connects to the daemon listening at `socket_path`. Performs the
     /// handshake and returns a ready session. Applies
     /// [`DEFAULT_CALL_TIMEOUT`] to reads and writes so the client
-    /// never hangs on a wedged daemon — see L3-7 in
-    /// `docs/tasks/cli.md`. Pre-Wave-12 the Windows transport is
-    /// unsupported and returns [`TransportError::Unsupported`].
+    /// never hangs on a wedged daemon. The Windows transport is
+    /// currently unsupported and returns [`TransportError::Unsupported`].
     pub fn connect(socket_path: &Path, client_id: &str) -> Result<Self, ClientError> {
         Self::connect_with_timeout(socket_path, client_id, DEFAULT_CALL_TIMEOUT)
     }
@@ -105,7 +104,7 @@ impl Client {
     /// Pass `Duration::MAX` to opt out (e.g., a long-running streaming
     /// client). The deadline bounds each individual `read` / `write`
     /// call rather than the whole session, but for the single-call
-    /// CLI shape that is enough to honor L3-7.
+    /// CLI shape that is enough to honor the never-hang goal.
     pub fn connect_with_timeout(
         socket_path: &Path,
         client_id: &str,
@@ -235,7 +234,7 @@ fn apply_stream_timeout(stream: &StreamHandle, timeout: Duration) -> Result<(), 
 
 #[cfg(windows)]
 fn apply_stream_timeout(_stream: &StreamHandle, _timeout: Duration) -> Result<(), ClientError> {
-    // Windows IPC transport is stubbed until Wave 12. The named-pipe
+    // Windows IPC transport is stubbed. The future named-pipe
     // implementation will set per-call timeouts via the same
     // signature; until then the connect path returns `Unsupported`
     // before we reach this helper.
@@ -244,7 +243,7 @@ fn apply_stream_timeout(_stream: &StreamHandle, _timeout: Duration) -> Result<()
 
 // The only test here exercises the Unix-domain-socket connect path, so the
 // whole module is Unix-only; on Windows it would otherwise leave `use super::*`
-// unused, which `-D warnings` rejects. The named-pipe transport (Wave 12) will
+// unused, which `-D warnings` rejects. The future named-pipe transport will
 // add its own `#[cfg(windows)]` tests.
 #[cfg(all(test, unix))]
 mod tests {
@@ -252,7 +251,7 @@ mod tests {
 
     #[test]
     fn connect_with_timeout_returns_promptly_against_wedged_peer() {
-        // L3-7 invariant: the CLI must never hang against a daemon
+        // Invariant: the CLI must never hang against a daemon
         // that accepted the connection but is not answering. We bind
         // a UDS, accept the client, then sit on the stream without
         // writing anything; `Client::connect_with_timeout` must
@@ -287,7 +286,7 @@ mod tests {
         );
         // Generous bound — the deadline is 200 ms, but CI can be slow
         // and the OS scheduler adds noise. Anything well under the
-        // L3-7 1 s budget is fine.
+        // 1 s budget is fine.
         assert!(
             elapsed < Duration::from_millis(900),
             "client took {elapsed:?} to give up against wedged peer; expected < 900 ms",

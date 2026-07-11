@@ -12,7 +12,7 @@
 //! turns the underlying transport / framing errors into a single
 //! [`IpcCliError::DaemonNotRunning`] so the binary can exit non-zero
 //! within 1 s with the documented message instead of hanging or
-//! printing a confusing low-level error. Closes `cli.md` L3-7.
+//! printing a confusing low-level error.
 
 use std::error::Error;
 use std::fmt::{self, Display};
@@ -33,7 +33,7 @@ pub enum IpcCliError {
     /// The connection succeeded but the daemon never answered within
     /// the per-call deadline. Renders as
     /// `vapor: daemon is not responding — check \`vapor logs\``.
-    /// L3-7 says the CLI must never hang; this is the variant that
+    /// The CLI must never hang; this is the variant that
     /// fires when a wedged but accepting daemon would otherwise stall
     /// us.
     DaemonUnresponsive,
@@ -246,7 +246,7 @@ pub fn render_diagnostics(diagnostics: &DiagnosticsResponse) -> String {
 }
 
 /// Tail the daemon log file at `<vapor_dir>/logs/vapord.logs`.
-/// `cli.md` L3-6 specifies tailing rather than going through IPC since
+/// Reads the file directly rather than going through IPC since
 /// the log lines already include redaction. Returns the last `tail`
 /// lines (or the whole file when `tail` is `None`).
 pub fn tail_logs(tail: Option<usize>) -> io::Result<String> {

@@ -43,7 +43,7 @@ public struct ServiceStatusSnapshot: Equatable, Sendable {
   }
 }
 
-/// The app's seam onto daemon lifecycle operations. Since M2-1 the
+/// The app's seam onto daemon lifecycle operations. The
 /// default implementation is `VaporCLIServiceController`, which invokes
 /// the bundled `vapor` CLI as a subprocess — all lifecycle *policy*
 /// (autolaunch persistence, crash-loop backoff and pause, supervision)
@@ -126,8 +126,8 @@ public struct NoopLaunchAgentController: LaunchAgentControlling {
 /// Thin coordinator over the `LaunchAgentControlling` seam. Owns
 /// serialization (one lifecycle operation at a time) and macOS login-item
 /// registration; every lifecycle decision is delegated to the Rust
-/// `core/lifecycle` layer through the controller (M2-1 / M2-2 / C4-7 —
-/// no runtime or lifecycle policy lives in Swift anymore).
+/// `core/lifecycle` layer through the controller — no runtime or
+/// lifecycle policy lives in Swift.
 public final class DaemonLifecycleManager: @unchecked Sendable {
   private let launchAgentController: any LaunchAgentControlling
   private let loginItemController: (any LoginItemControlling)?

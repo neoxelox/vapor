@@ -1,4 +1,4 @@
-//! Op-id tagging with xattr-primary + side-file fallback (C8-3, C8-7).
+//! Op-id tagging with xattr-primary + side-file fallback.
 //!
 //! Semantics per `docs/architecture/data-flow.md §Loop prevention`:
 //! writes attempt the platform metadata tag (xattr / ADS) first; when

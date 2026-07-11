@@ -1,4 +1,4 @@
-//! Filesystem-backed remote changes feed (C8-4).
+//! Filesystem-backed remote changes feed.
 //!
 //! A `core/platform/fs_watch` watcher on the remote root feeds a
 //! bounded in-memory ring of [`RemoteChange`]s, each tagged with a

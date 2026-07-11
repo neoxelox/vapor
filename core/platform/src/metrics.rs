@@ -1,7 +1,7 @@
 //! `PlatformMetricsSampler` trait and the `StaticPlatformMetricsSampler`
 //! fallback. The native sampler (mach2 / IOKit on macOS, PSI on Linux,
 //! GetSystemTimes on Windows) is stubbed for now and forwards to the
-//! static sampler; full FFI lands incrementally as Wave 4 follow-ups.
+//! static sampler; the full FFI bridges land incrementally.
 //!
 //! See `docs/architecture/platform-abstractions.md` §`PlatformMetricsSampler`.
 //! The sample type is `vapor_shared::ThrottleInputs` — one shared struct
@@ -60,8 +60,7 @@ impl PlatformMetricsSampler for StaticPlatformMetricsSampler {
 pub type InMemoryPlatformMetricsSampler = StaticPlatformMetricsSampler;
 
 /// Native sampler. Until the per-OS bridges land it forwards to the
-/// static sampler; the trait surface is the stable seam Wave 4
-/// commits to.
+/// static sampler; the trait surface is the stable seam.
 #[derive(Debug, Default)]
 pub struct NativePlatformMetricsSampler {
     fallback: StaticPlatformMetricsSampler,

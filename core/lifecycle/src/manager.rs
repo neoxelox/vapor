@@ -12,13 +12,11 @@
 //! - With a [`LifecycleStateStore`] attached, crash-loop bookkeeping is
 //!   hydrated from and persisted to `<vapor_dir>/state/lifecycle.json`,
 //!   so backoff and pause survive process restarts and are shared by
-//!   every surface (M2-6).
+//!   every surface.
 //! - [`check_daemon_health`](DaemonLifecycleManager::check_daemon_health)
 //!   is the supervision tick behind `vapor service check`: it detects an
 //!   unexpected daemon exit, routes it through the crash-loop guard, and
-//!   restarts when policy allows (M2-5's Rust half).
-//!
-//! Closes `core.md` C4-3; extended for M2-5 / M2-6.
+//!   restarts when policy allows.
 
 use std::error::Error;
 use std::fmt::{self, Display};
@@ -173,7 +171,7 @@ impl DaemonLifecycleManager {
     /// Production constructor: hydrates crash-loop bookkeeping from the
     /// durable store and persists every subsequent transition back to
     /// it, so lifecycle state survives process restarts and is shared
-    /// across surfaces (M2-6).
+    /// across surfaces.
     pub fn with_durable_state(
         installer: Arc<dyn ServiceInstaller>,
         settings: Arc<dyn AutoLaunchSettingStore>,
@@ -689,7 +687,7 @@ mod tests {
         assert_eq!(installer.status().expect("status"), ServiceStatus::Running);
     }
 
-    // --- durable state (M2-6) ---
+    // --- durable state ---
 
     #[test]
     fn successful_start_persists_supervision_expectation() {
@@ -727,7 +725,7 @@ mod tests {
 
     #[test]
     fn crash_loop_pause_survives_a_process_restart() {
-        // The M2-6 headline scenario: a manager pauses, the process
+        // Headline scenario: a manager pauses, the process
         // dies, and a brand-new manager over the same store still
         // refuses to start the daemon.
         let policy = CrashLoopPolicy::new(
@@ -826,7 +824,7 @@ mod tests {
         assert!(installer.operations().is_empty());
     }
 
-    // --- check_daemon_health (M2-5) ---
+    // --- check_daemon_health ---
 
     fn check_policy() -> CrashLoopPolicy {
         CrashLoopPolicy::new(

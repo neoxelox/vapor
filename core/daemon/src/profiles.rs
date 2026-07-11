@@ -1,4 +1,4 @@
-//! Durable profile model + override resolution (C8-19, C8-21).
+//! Durable profile model + override resolution.
 //!
 //! A profile is one sync pairing: a provider, a local root, a cloud
 //! root, and a sync mode. Without a `profiles` array the daemon runs
@@ -8,7 +8,7 @@
 //! Override semantics are **categorical** for the fields resolved here
 //! (provider, directories, syncMode): a profile's value replaces the
 //! top-level value outright. MIN-lowering resolution applies only to
-//! the resource-budget groups (C8-34), which are daemon-global runtime
+//! the resource-budget groups, which are daemon-global runtime
 //! inputs rather than per-profile scopes.
 
 use std::collections::BTreeSet;
@@ -22,7 +22,7 @@ use crate::sync_directories::{self, SyncScope};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedProfile {
     /// Stable filesystem-safe slug: names the per-profile state
-    /// directory and namespaces secrets (C8-20).
+    /// directory and namespaces secrets.
     pub id: String,
     pub display_name: String,
     /// Provider selection for this profile (`filesystem` /
@@ -35,7 +35,7 @@ pub struct ResolvedProfile {
 /// Resolves the configured profile set. Invalid entries (missing or
 /// duplicate ids, malformed values) are skipped with a loud log rather
 /// than aborting the daemon — one broken profile must not take down the
-/// others (blast-radius discipline, C8-24).
+/// others (blast-radius discipline).
 pub fn resolve_profiles(config: &VaporConfig) -> Vec<ResolvedProfile> {
     if config.profiles.is_empty() {
         return vec![implicit_default_profile(config)];
@@ -84,7 +84,7 @@ pub fn resolve_profiles(config: &VaporConfig) -> Vec<ResolvedProfile> {
             effective.sync_mode = sync_mode.clone();
         }
 
-        // One-way modes are explicit opt-in per profile (C8-63): a
+        // One-way modes are explicit opt-in per profile: a
         // malformed per-profile value falls back to the *top-level*
         // resolution path inside resolve_with_config, which itself
         // falls back to two-way with a warning.
@@ -143,10 +143,10 @@ pub fn is_valid_profile_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
-/// Safe profile disconnect/delete primitive (C8-25): removes a
+/// Safe profile disconnect/delete primitive: removes a
 /// profile's durable state directory and its namespaced secrets while
 /// leaving every other profile untouched. Callers (the profiles CLI /
-/// app surface, Wave 9) must stop the daemon first — this function is
+/// app surface) must stop the daemon first — this function is
 /// the storage-side primitive, not the orchestration.
 ///
 /// The implicit `default` profile is refused: its state lives on the
@@ -193,7 +193,7 @@ pub fn purge_profile_state(
 }
 
 /// The secret-store namespace for a profile's provider credentials
-/// (C8-20): `auth.{profile_id}.{provider}.{item}`.
+///: `auth.{profile_id}.{provider}.{item}`.
 pub fn secret_key(profile_id: &str, provider: &str, item: &str) -> String {
     format!("auth.{profile_id}.{provider}.{item}")
 }

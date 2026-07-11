@@ -93,7 +93,7 @@ pub trait FsWatcher: Send + 'static {
 /// Consumers that would otherwise advertise watch-backed capabilities
 /// (e.g. the filesystem provider's changes feed) must check this and
 /// degrade honestly on hosts whose native watcher is still a stub
-/// (Linux until Wave 13 / C7-1, Windows until Wave 12 / C6-1).
+/// (currently Linux and Windows).
 pub fn native_watcher_available() -> bool {
     cfg!(target_os = "macos")
 }

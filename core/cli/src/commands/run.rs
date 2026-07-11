@@ -6,7 +6,6 @@
 //! points cannot drift. Exits non-zero when another daemon already
 //! holds this `VAPOR_DIR`'s lock.
 //!
-//! Closes `cli.md` L1-1.
 
 use std::error::Error;
 use std::fmt::{self, Display};

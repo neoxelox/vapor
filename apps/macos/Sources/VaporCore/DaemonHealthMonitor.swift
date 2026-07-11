@@ -1,6 +1,6 @@
 import Foundation
 
-/// Periodic daemon supervision tick (M2-5).
+/// Periodic daemon supervision tick.
 ///
 /// The app owns only the *timer*; each tick delegates to
 /// `DaemonLifecycleManager.checkDaemonHealth()`, which runs

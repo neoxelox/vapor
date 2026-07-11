@@ -1,7 +1,7 @@
-//! Provider-driven staged executor (C8-5, C8-6).
+//! Provider-driven staged executor.
 //!
-//! Replaces the Phase 2.5 timed simulator: every stage performs real
-//! work against the local filesystem and the injected [`Provider`].
+//! Every stage performs real work against the local filesystem and
+//! the injected [`Provider`].
 //! Stage transitions happen on work completion, never on synthetic
 //! timers, and long work (hashing, transfers) is chunked so one advance
 //! call never exceeds its per-tick byte budget — the slice-budget
@@ -16,7 +16,7 @@
 //!
 //! Loop prevention: every completed provider write records into the
 //! remote echo cache; every completed local apply records into the
-//! local echo cache (C8-7).
+//! local echo cache.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -71,9 +71,9 @@ pub struct StagedExecutorReport {
     pub retried: usize,
     pub failed: usize,
     /// Strict-mirror local removals performed this advance (pull-only
-    /// restore path found no remote counterpart; C8-60 / C8-65).
+    /// restore path found no remote counterpart).
     pub mirror_deletes: usize,
-    /// Keep-both conflict copies created this advance (C8-14).
+    /// Keep-both conflict copies created this advance.
     pub conflicts: usize,
 }
 
@@ -83,17 +83,17 @@ pub struct ExecutionEnv<'a> {
     /// Canonical local sync root; `None` means no local scope is
     /// configured and every local-touching intent fails permanent.
     pub local_root: Option<&'a Path>,
-    /// Sync direction for the scope (C8-59). Direction gates live in
+    /// Sync direction for the scope. Direction gates live in
     /// the planner so no intent kind can bypass them; intents enqueued
     /// before a mode change complete as logged no-ops, which is what
     /// makes a mid-run mode change converge deterministically.
     pub sync_mode: vapor_shared::SyncMode,
-    /// Stable device identifier (C8-15): the conflict-suffix component
+    /// Stable device identifier: the conflict-suffix component
     /// and the op-id prefix.
     pub device_id: &'a str,
-    /// Auto-tuned per-tick transfer step budget (C8-42).
+    /// Auto-tuned per-tick transfer step budget.
     pub transfer_step_bytes: u64,
-    /// Daemon-wide bandwidth shaper (C8-38): every transfer step asks
+    /// Daemon-wide bandwidth shaper: every transfer step asks
     /// it for a byte grant; a zero grant holds the session at its
     /// checkpoint until tokens refill.
     pub bandwidth: &'a std::sync::Mutex<vapor_providers::BandwidthShaper>,
@@ -236,7 +236,7 @@ impl StagedExecutor {
 
     /// Diagnostic view of every active execution: (intent id, path,
     /// kind, stage, elapsed-in-stage). Consumed by the IPC diagnostics
-    /// surface (C8-29).
+    /// surface.
     pub fn active_stages(&self) -> Vec<(i64, PathBuf, PendingIntentKind, ExecutionStage, u64)> {
         let now_inst = self.clock.now();
         self.active
@@ -500,7 +500,7 @@ impl StagedExecutor {
                 if plan.verify_remote_before_upload {
                     // Two-way upload onto an unindexed remote object:
                     // identical content is silent convergence; divergent
-                    // content is a genuine conflict (C8-17 determinism
+                    // content is a genuine conflict (deterministic resolution
                     // for first-sync overlaps and index loss).
                     match app.provider().content_hash(&plan.remote_path) {
                         Ok(remote_hash) if Some(&remote_hash) == plan.content_hash.as_ref() => {
@@ -639,7 +639,7 @@ impl StagedExecutor {
                 let step_budget = grant_transfer_budget(env, &self.clock);
                 if step_budget == 0 {
                     // Bandwidth ceiling exhausted: hold at the slice
-                    // checkpoint until tokens refill (C8-38).
+                    // checkpoint until tokens refill.
                     execution.stage = ActiveStage::Upload {
                         permit,
                         plan,
@@ -683,7 +683,7 @@ impl StagedExecutor {
                         {
                             // The remote changed underneath the guarded
                             // upload: a race lost by this side. Keep both
-                            // (C8-17).
+                            //.
                             self.finish_as_conflict(
                                 app,
                                 state_db,
@@ -734,7 +734,7 @@ impl StagedExecutor {
                         if env.sync_mode == vapor_shared::SyncMode::PullOnly {
                             // Strict mirror: a pull-only restore that finds
                             // no remote counterpart means the local file is
-                            // local-only content — remove it (C8-60).
+                            // local-only content — remove it.
                             match apply_remote_delete_locally(env, &execution.intent.path, now) {
                                 PlanOutcome::AppliedLocally => report.mirror_deletes += 1,
                                 PlanOutcome::Noop(_) => {}
@@ -806,7 +806,7 @@ impl StagedExecutor {
                     }
                     Ok(TransferStep::Completed(outcome)) => {
                         app.release_work(permit);
-                        // Two-way keep-both (C8-14): applying a download
+                        // Two-way keep-both: applying a download
                         // over a locally-diverged file must not lose the
                         // local edit. The loser (local) moves to its
                         // conflict-copy path first, and the copy uploads
@@ -1012,7 +1012,7 @@ fn plan_intent(
     };
     let op_id = allocate_op_id(env, intent, now);
 
-    // Direction gates (C8-60 / C8-62): a one-way mode drops intents of
+    // Direction gates: a one-way mode drops intents of
     // the gated direction as logged no-ops. This also absorbs stale
     // intents that were durably enqueued before a mode change.
     if matches!(
@@ -1087,7 +1087,7 @@ fn plan_intent(
             })
         }
         PendingIntentKind::ApplyRemoteDelete => {
-            // Two-way deletion guard (C8-17): "data preservation wins
+            // Two-way deletion guard: "data preservation wins
             // over deletion". A remote deletion only applies when the
             // local copy is exactly what was last synced AND the sync
             // happened before the deletion was observed. A modified (or
@@ -1133,7 +1133,7 @@ impl PlanOutcome {
     }
 }
 
-/// Plans an upload with the two-way conflict guard (C8-14/C8-17). The
+/// Plans an upload with the two-way conflict guard. The
 /// sync index distinguishes "remote unchanged since our last sync"
 /// (safe overwrite, hash-guarded) from "remote changed by another
 /// writer" (keep both). One-way modes skip the guard entirely: strict
@@ -1172,8 +1172,8 @@ fn plan_upload(
     match app.provider().stat(&plan.remote_path) {
         Ok(None) => {
             // Remote absent. With an index this is a delete/modify race:
-            // the modification wins over the deletion (data preservation,
-            // C8-17); either way the upload is a guarded fresh create.
+            // the modification wins over the deletion (data
+            // preservation); either way the upload is a guarded fresh create.
             plan.precondition = RemotePrecondition::Absent;
             PlanOutcome::Upload(plan)
         }
@@ -1226,7 +1226,7 @@ fn plan_upload(
 }
 
 /// Keep-both resolution when the local side lost an upload race
-/// (C8-14): move the local loser to its conflict-copy path (suppressing
+///: move the local loser to its conflict-copy path (suppressing
 /// the rename's delete echo), enqueue an upload for the copy and a
 /// download for the remote canonical, and let the caller complete the
 /// original intent. Deterministic: the conflict path derives from the
@@ -1289,7 +1289,7 @@ fn resolve_upload_conflict(
     PlanOutcome::ConflictResolved
 }
 
-/// Download-side keep-both (C8-14): before a downloaded payload
+/// Download-side keep-both: before a downloaded payload
 /// replaces a local file, a locally-diverged version moves to its
 /// conflict-copy path (unless its content already equals the incoming
 /// payload). Returns whether a conflict copy was created; errors are
@@ -1343,7 +1343,7 @@ fn preserve_diverged_local_before_apply(
     }
 }
 
-/// C8-17 deletion guard: returns the preservation reason when a remote
+/// Deletion guard: returns the preservation reason when a remote
 /// deletion must NOT apply to the local file, `None` when the deletion
 /// may proceed.
 fn deletion_loses_to_local_state(
@@ -1887,7 +1887,7 @@ mod tests {
         let local_file = fixture.local_root.join("gone.txt");
         std::fs::write(&local_file, b"stale").expect("seed local");
         // The file was previously synced: the index matches its current
-        // content, so the C8-17 preservation guard lets the deletion
+        // content, so the preservation guard lets the deletion
         // proceed.
         let mtime = std::fs::symlink_metadata(&local_file)
             .and_then(|m| m.modified())

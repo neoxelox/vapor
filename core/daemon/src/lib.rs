@@ -62,7 +62,7 @@ pub struct DaemonApp {
     throttle_controller: ThrottleController,
     last_throttle_decision: Option<ThrottleDecision>,
     retry_slowdown_until: Option<SystemTime>,
-    /// Effective CPU ceiling from the resource budget (C8-37). `None`
+    /// Effective CPU ceiling from the resource budget. `None`
     /// until the budget runtime publishes; caps then scale relative to
     /// the default ceiling.
     resource_cpu_ceiling_percent: Option<u8>,
@@ -133,7 +133,7 @@ impl DaemonApp {
     }
 
     /// Applies the effective CPU ceiling from the resource budget
-    /// (C8-37): concurrency caps scale proportionally to the ceiling
+    ///: concurrency caps scale proportionally to the ceiling
     /// relative to the default `resourceLimits.cpuPercent`. Interacts
     /// with throttle caps via MIN semantics — a `Suspended` zero cap
     /// stays zero under any ceiling, and lowering the ceiling lowers
@@ -149,7 +149,7 @@ impl DaemonApp {
 
     fn lock_workgate(&self) -> std::sync::MutexGuard<'_, ThrottleWorkgate> {
         // Poison recovery: a panicking profile must not wedge the
-        // shared workgate for its healthy siblings (C8-24). Counts are
+        // shared workgate for its healthy siblings. Counts are
         // rebuilt by the next reconfigure; a leaked permit slot is
         // bounded and self-corrects as caps refresh.
         self.workgate
@@ -375,9 +375,9 @@ impl DaemonApp {
         allowed
     }
 
-    /// Ensures the provider-side sync root exists (C8-8). Returns the
+    /// Ensures the provider-side sync root exists. Returns the
     /// actionable error when it cannot; the runtime blocks regular sync
-    /// work until a later attempt succeeds (C8-50) — intents keep
+    /// work until a later attempt succeeds — intents keep
     /// accumulating durably, they are never dropped.
     pub fn ensure_cloud_sync_directory(
         &self,

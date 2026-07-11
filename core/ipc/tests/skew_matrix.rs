@@ -1,7 +1,7 @@
 //! End-to-end skew-matrix tests over a real Unix-domain-socket
 //! transport.
 //!
-//! Closes `core.md` C5-5 by exercising every supported version pair
+//!by exercising every supported version pair
 //! plus the documented negative cases. Each test spins up a server in
 //! a background thread, connects a client, and asserts on the
 //! handshake outcome.

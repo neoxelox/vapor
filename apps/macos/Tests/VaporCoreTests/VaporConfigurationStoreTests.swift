@@ -76,7 +76,7 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
 }
 
 // The `autoLaunch` key in `vapor.json` is owned by the Rust lifecycle
-// core since M2-1/C4-7 (`JsonFileAutoLaunchSettingStore`, covered in
+// core (`JsonFileAutoLaunchSettingStore`, covered in
 // core/lifecycle); Swift only reads it as part of the configuration.
 
 @Test
@@ -150,7 +150,7 @@ func loadSaveRoundTripPreservesRuntimeOwnedKeysAndDeviceId() throws {
   try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
   let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL)
 
-  // A vapor.json shaped by the Rust runtime: Wave 8 keys the app does
+  // A vapor.json shaped by the Rust runtime: runtime keys the app does
   // not model first-class must survive an app-side save untouched.
   let daemonWritten = """
     {

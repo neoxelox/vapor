@@ -1,4 +1,4 @@
-//! Windows `ServiceInstaller` stub. Wave 12 / `core.md` C6-2.
+//! Windows `ServiceInstaller` stub.
 
 use super::{ServiceDescriptor, ServiceInstallError, ServiceInstaller, ServiceStatus};
 
@@ -20,22 +20,22 @@ impl NativeServiceInstaller {
 impl ServiceInstaller for NativeServiceInstaller {
     fn install_and_enable(&self) -> Result<(), ServiceInstallError> {
         Err(ServiceInstallError::Unsupported(
-            "Windows ServiceInstaller is not implemented yet (Wave 12 / C6-2)",
+            "Windows ServiceInstaller is not implemented yet",
         ))
     }
     fn disable_and_uninstall(&self) -> Result<(), ServiceInstallError> {
         Err(ServiceInstallError::Unsupported(
-            "Windows ServiceInstaller is not implemented yet (Wave 12 / C6-2)",
+            "Windows ServiceInstaller is not implemented yet",
         ))
     }
     fn start_daemon(&self) -> Result<(), ServiceInstallError> {
         Err(ServiceInstallError::Unsupported(
-            "Windows ServiceInstaller is not implemented yet (Wave 12 / C6-2)",
+            "Windows ServiceInstaller is not implemented yet",
         ))
     }
     fn stop_daemon(&self) -> Result<(), ServiceInstallError> {
         Err(ServiceInstallError::Unsupported(
-            "Windows ServiceInstaller is not implemented yet (Wave 12 / C6-2)",
+            "Windows ServiceInstaller is not implemented yet",
         ))
     }
     fn status(&self) -> Result<ServiceStatus, ServiceInstallError> {

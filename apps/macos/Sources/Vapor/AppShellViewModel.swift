@@ -189,7 +189,7 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
-  /// M2-5: periodic supervision. The Rust core (via `vapor service
+  /// Periodic supervision. The Rust core (via `vapor service
   /// check`) owns detection and restart policy; the monitor only owns
   /// the timer and reflects the outcome into UI state.
   private func startDaemonHealthMonitoringIfNeeded() {
@@ -515,7 +515,7 @@ final class AppShellViewModel: ObservableObject {
   }
 
   /// Builds the production lifecycle manager: a thin facade over the
-  /// bundled `vapor` CLI (M2-1). The Rust `core/lifecycle` layer behind
+  /// bundled `vapor` CLI. The Rust `core/lifecycle` layer behind
   /// the CLI owns the LaunchAgent definition (per
   /// `docs/operations/macos/launchagent-policy.md`), autolaunch
   /// persistence, and crash-loop policy — one implementation for every

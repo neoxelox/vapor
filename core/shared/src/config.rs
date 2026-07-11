@@ -38,32 +38,32 @@ pub struct VaporConfig {
     pub post_ignore_rules: String,
     pub language_code: String,
     pub timeline_event_limit: i64,
-    /// Provider selection (C8-2): `filesystem` (default pre-GA) or
+    /// Provider selection: `filesystem` (default pre-GA) or
     /// `gdrive`. When `filesystem` is selected,
     /// `cloud_sync_directory` is reinterpreted as an absolute local
     /// directory that plays the cloud role.
     pub provider: String,
-    /// Sync direction selector (C8-59): `two-way` (default),
+    /// Sync direction selector: `two-way` (default),
     /// `pull-only`, `push-only`. One-way values are strict mirrors and
     /// destructive to the subordinate side; they only activate through
     /// an explicit, enum-validated set — see
     /// `docs/architecture/sync-modes.md`.
     pub sync_mode: String,
-    /// Sync profiles (C8-19). Empty means one implicit profile
+    /// Sync profiles. Empty means one implicit profile
     /// (`default`) assembled from the top-level fields above. Each
     /// entry overrides the profile-capable fields outright; unset
     /// fields inherit the top-level values.
     pub profiles: Vec<ProfileConfig>,
-    /// Hard user ceilings on daemon device impact (C8-32). Values are
+    /// Hard user ceilings on daemon device impact. Values are
     /// clamped into `1..=100` at load with a classified warning
     /// surfaced through `load_issue`.
     pub resource_limits: ResourceLimitsConfig,
-    /// Idle-boost group (C8-33). `boost*Percent` values below their
+    /// Idle-boost group. `boost*Percent` values below their
     /// matching `resourceLimits` ceiling are clamped up at load.
     pub idle_boost: IdleBoostConfig,
 }
 
-/// The `resourceLimits` config group (C8-32).
+/// The `resourceLimits` config group.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceLimitsConfig {
@@ -95,7 +95,7 @@ impl Default for ResourceLimitsConfig {
     }
 }
 
-/// The `idleBoost` config group (C8-33).
+/// The `idleBoost` config group.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdleBoostConfig {
@@ -159,7 +159,7 @@ impl Default for IdleBoostConfig {
 
 /// One entry of the `profiles` array. Every field except `id` is
 /// optional on the wire; unset fields inherit the top-level defaults
-/// (categorical override semantics per C8-21 — a profile value wins
+/// (categorical override semantics — a profile value wins
 /// outright, no merging).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -179,11 +179,11 @@ pub struct ProfileConfig {
     #[serde(default)]
     pub enabled: Option<bool>,
     /// Optional per-profile ceilings; resolved by MIN-lowering against
-    /// the top-level group (C8-34) — a profile can only tighten.
+    /// the top-level group — a profile can only tighten.
     #[serde(default)]
     pub resource_limits: Option<ResourceLimitsConfig>,
     /// Optional per-profile idle-boost override. Any enabled profile
-    /// with `enabled = false` disables boost daemon-wide (C8-34).
+    /// with `enabled = false` disables boost daemon-wide.
     #[serde(default)]
     pub idle_boost: Option<IdleBoostConfig>,
 }

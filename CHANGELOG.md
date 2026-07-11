@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- The `vapor` CLI no longer panics with "failed printing to stdout: Broken pipe" when a downstream pipe reader exits early (`vapor logs | head -1`, `vapor status --json | grep -q ...`): default SIGPIPE handling is restored on Unix so the CLI behaves like standard tools in pipelines. The Tier E2E harness also stopped closing pipes on the CLI mid-write (capture-then-match), removing a timing-dependent CI failure.
+
+### Changed
+
+- Cleaned code comments across the runtime, apps, and scripts: removed all internal task-list references (task ids, wave/phase numbers, `docs/tasks/*` pointers) from code comments and stub error messages, corrected comments that had gone stale against shipped behavior (OAuth-PKCE login flow, diagnostics timeline), and trimmed historical narration. No behavior change.
+
 ### Added
 
 - Real bidirectional sync end to end (Wave 8, C8-1…C8-13). The provider trait (`enumerate`/`stat`/`content_hash`/`begin_upload`/`begin_download`/`delete`/`rename`/`poll_changes` + capability flags + `Transient`/`RateLimited`/`Authentication`/`PreconditionFailed`/`NotFound`/`Permanent` error taxonomy) now fronts a real filesystem reference provider: atomic temp-file+rename writes, strict scope enforcement (symlink-escape / traversal / device-crossing refused), op-id tagging via xattr with an atomic `.vapor-meta.json` side-file fallback (hidden from enumeration), and a bounded in-provider changes feed whose cursor expires into a reconcile + re-baseline. The Phase 2.5 staged-executor simulator is deleted; planner/hash/transfer stages do real work under the existing workgate/throttle caps, transfers are chunked `TransferSession`s that hold at their checkpoint under `Suspended`, and the remote→local pipeline (poll → durable intent → download/apply-delete) advances its cursor only after durable enqueue (at-least-once). Loop prevention ships as the `self_write_cache` pair (local + remote echoes; op-id primary, size-gated content-hash fallback, TTL/entry floors under memory pressure).

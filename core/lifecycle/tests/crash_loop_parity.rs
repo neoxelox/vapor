@@ -1,7 +1,7 @@
 //! Contract lock for the crash-loop backoff schedule.
 //!
-//! Originally the Rust half of a Rust↔Swift parity pair (C4-6); the
-//! Swift `CrashLoopGuard` retired with M2-2 / C4-7, so this file is now
+//! Originally the Rust half of a Rust↔Swift parity pair; the Swift
+//! `CrashLoopGuard` was retired, so this file is now
 //! the single contract every surface inherits through the `vapor
 //! service` CLI. The canonical schedule is documented in
 //! `docs/operations/macos/launchagent-policy.md`: with the default

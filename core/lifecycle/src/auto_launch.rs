@@ -1,11 +1,10 @@
 //! `AutoLaunchSettingStore` — persist the user's autolaunch preference.
 //!
 //! The single owner of the `autoLaunch` key in `vapor.json` since the
-//! Swift `AutoLaunchSettingStore` family retired with M2-1 / C4-7: the
+//! Swift `AutoLaunchSettingStore` family was retired: the
 //! macOS app reads and writes the preference through the `vapor
 //! service` CLI, which lands here.
 //!
-//! Closes `core.md` C4-4.
 
 use std::error::Error;
 use std::fmt::{self, Display};
@@ -57,8 +56,7 @@ pub trait AutoLaunchSettingStore: Send + Sync {
     fn write(&self, value: bool) -> Result<(), JsonFileError>;
 }
 
-/// Process-local in-memory store. Used by tests and by the
-/// pre-Wave-6 scaffolding while the CLI consumer is being written.
+/// Process-local in-memory store. Used by tests.
 #[derive(Debug, Default)]
 pub struct InMemoryAutoLaunchSettingStore {
     inner: Mutex<Option<bool>>,

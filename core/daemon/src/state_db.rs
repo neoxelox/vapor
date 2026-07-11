@@ -12,7 +12,7 @@ use crate::retry::{RetryDecision, RetryFailureKind, RetryPolicy};
 const CURRENT_SCHEMA_VERSION: i64 = 4;
 /// The last schema version this build can migrate forward in place.
 /// v3 → v4 widened the intent-kind vocabulary with the remote→local
-/// pipeline kinds (`download`, `apply_remote_delete`; C8-6), which only
+/// pipeline kinds (`download`, `apply_remote_delete`), which only
 /// requires recreating the two intent tables with the wider CHECK.
 const MIGRATABLE_SCHEMA_VERSION: i64 = 3;
 const STATE_PENDING: &str = "pending";
@@ -193,7 +193,7 @@ impl DurableStateDb {
     }
 
     /// The oldest `limit` queue rows (pending and leased) for the
-    /// per-intent diagnostics surface (C8-29).
+    /// per-intent diagnostics surface.
     pub fn list_queue_intents(
         &self,
         limit: usize,
@@ -767,7 +767,7 @@ impl DurableStateDb {
     }
 }
 
-/// Per-path last-synced state (C8-14/C8-17). One row per path that has
+/// Per-path last-synced state. One row per path that has
 /// completed a transfer in either direction; the conflict machinery
 /// compares current local/remote state against it to distinguish
 /// "unchanged since last sync" from "concurrently modified".
@@ -810,7 +810,7 @@ impl TombstoneOrigin {
     }
 }
 
-/// Durable deletion marker with restart-safe replay semantics (C8-16).
+/// Durable deletion marker with restart-safe replay semantics.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TombstoneRecord {
     pub path: PathBuf,
@@ -947,7 +947,7 @@ impl DurableStateDb {
     }
 
     /// Startup hygiene: drops tombstones past the retention window so
-    /// the table stays bounded (C8-16).
+    /// the table stays bounded.
     pub fn prune_tombstones(&mut self, now: SystemTime) -> Result<usize, StateDbError> {
         let now_ms = system_time_to_millis(now)?;
         let cutoff = now_ms.saturating_sub(
@@ -2129,7 +2129,7 @@ mod tests {
 
     #[test]
     fn version_two_database_is_rejected_after_pre_ga_path_text_bump() {
-        // Schema v2 stored paths as `path_bytes BLOB`. The C1-3 portability
+        // Schema v2 stored paths as `path_bytes BLOB`. The portability
         // bump moved to `path_text TEXT`. Pre-GA we reject the prior schema
         // outright per AGENTS.md §1.1; a future GA migration step would
         // upgrade in place.

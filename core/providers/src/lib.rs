@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Provider trait surface + provider-neutral types (C8-1, C8-43).
+//! Provider trait surface + provider-neutral types.
 //!
 //! The engine talks to every cloud backend through [`Provider`]. The
 //! trait is deliberately synchronous and chunk-oriented: long transfers
@@ -28,7 +28,7 @@ pub use bandwidth::BandwidthShaper;
 pub use paths::{RemotePath, RemotePathError};
 
 /// Typed provider failure carrying the provider-neutral taxonomy from
-/// `core/shared` (C8-1). The engine maps `kind.retry_classification()`
+/// `core/shared`. The engine maps `kind.retry_classification`
 /// onto the retry policy and keeps the full kind for diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderError {
@@ -94,7 +94,7 @@ pub enum HashAlgorithm {
     Md5,
 }
 
-/// Finalized provider capability model (C8-43). Capabilities gate
+/// Finalized provider capability model. Capabilities gate
 /// engine behavior; a provider must never advertise a capability its
 /// implementation does not honor (enforced by the contract suite in
 /// `tests/provider_contract.rs`).
@@ -158,7 +158,7 @@ pub struct RemoteEntry {
     pub op_id: Option<String>,
 }
 
-/// Write guard for uploads (C8-17 deterministic race resolution). A
+/// Write guard for uploads (deterministic race resolution). A
 /// failed guard surfaces as [`ProviderErrorKind::PreconditionFailed`],
 /// which the engine treats as "re-plan against fresh remote state".
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -178,7 +178,7 @@ pub struct UploadRequest {
     /// Destination relative to the cloud sync root.
     pub remote_path: RemotePath,
     /// Opaque operation id the provider must attach to the written
-    /// object when `supports_op_id_tags` (loop prevention, C8-7).
+    /// object when `supports_op_id_tags` (loop prevention).
     pub op_id: String,
     pub precondition: RemotePrecondition,
 }
@@ -246,7 +246,7 @@ pub struct RemoteChangesPage {
     pub changes: Vec<RemoteChange>,
     /// Opaque cursor for the next poll. The engine persists it durably
     /// only after every change in this page reached the durable queue
-    /// (C8-6: cursor advance on durable intent completion).
+    /// (cursor advance on durable intent completion).
     pub next_cursor: String,
 }
 
@@ -261,7 +261,7 @@ pub enum ChangesPoll {
     CursorExpired,
 }
 
-/// The provider trait every cloud backend implements (C8-1).
+/// The provider trait every cloud backend implements.
 ///
 /// Path vocabulary: all remote paths are [`RemotePath`]s — relative to
 /// the configured cloud sync root, forward-slash separated, no
@@ -287,10 +287,10 @@ pub trait Provider: Send + Sync {
     }
 
     /// Ensures the cloud-side sync root exists, creating it when the
-    /// backend allows (C8-8). Required (no silent-Ok default): every
+    /// backend allows. Required (no silent-Ok default): every
     /// provider must state explicitly whether it can honor this
     /// safety-relevant operation. A failure blocks regular sync work
-    /// with an actionable configuration error (C8-50).
+    /// with an actionable configuration error.
     fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), ProviderError>;
 
     /// Lists the immediate children of `directory` (non-recursive, so
@@ -341,7 +341,7 @@ pub use filesystem::FilesystemProvider;
 pub use gdrive::GoogleDriveProvider;
 
 /// Resolves the configured `provider` value onto a provider instance
-/// (C8-9). Unknown values are a configuration error the caller must
+///. Unknown values are a configuration error the caller must
 /// surface — never a silent fallback, because a wrong provider guess
 /// could sync into the wrong place.
 pub fn select_provider(kind: &str) -> Result<Box<dyn Provider>, ProviderError> {
@@ -351,12 +351,12 @@ pub fn select_provider(kind: &str) -> Result<Box<dyn Provider>, ProviderError> {
     )
 }
 
-/// Profile-aware provider selection (C8-54): `gdrive` is now
+/// Profile-aware provider selection: `gdrive` is now
 /// selectable, constructed against the profile's namespaced
 /// credentials. Missing credentials do not fail selection — they
 /// surface as an actionable `Authentication` error when the engine
 /// ensures the cloud root, which blocks sync until
-/// `vapor auth login gdrive` runs (C8-50).
+/// `vapor auth login gdrive` runs.
 pub fn select_provider_for_profile(
     kind: &str,
     profile_id: &str,
@@ -380,7 +380,7 @@ pub fn select_provider_for_profile(
 /// completes as a successful no-op so pipeline tests can drive intents
 /// end-to-end without a real backend; it is not selectable via the
 /// `provider` config key and must never ship as a production default
-/// beyond the pre-GA bring-up (C8-9 wires the real
+/// beyond the pre-GA bring-up (a later task wires the real
 /// [`FilesystemProvider`] as the default).
 #[derive(Debug, Default)]
 pub struct FilesystemStubProvider;

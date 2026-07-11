@@ -1,4 +1,4 @@
-//! Bounded in-memory daemon activity timeline (C8-30).
+//! Bounded in-memory daemon activity timeline.
 //!
 //! One buffer serves the whole daemon: every profile runtime appends
 //! noteworthy events (state transitions, conflicts, terminal failures,
@@ -93,7 +93,7 @@ impl TimelineBuffer {
         inner.entries.iter().skip(take_from).cloned().collect()
     }
 
-    /// Trims capacity under memory pressure (C8-39). The documented
+    /// Trims capacity under memory pressure. The documented
     /// floor keeps the timeline useful even when squeezed.
     pub fn set_max_entries(&self, max_entries: usize) {
         let mut inner = self.lock();

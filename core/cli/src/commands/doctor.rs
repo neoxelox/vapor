@@ -1,7 +1,7 @@
 //! `vapor doctor` — platform-aware sanity checks.
 //!
-//! Closes `cli.md` L1-4 (macOS flavor). Linux / Windows checks land
-//! alongside Wave 13 / 12 respectively. The current macOS check set:
+//! Linux / Windows checks land alongside their platform support.
+//! The current macOS check set:
 //!
 //! - `vapor_dir` exists, is writable, and (Unix) has private permissions.
 //! - The IPC socket path fits the Unix socket-address budget, with an

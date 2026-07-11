@@ -88,7 +88,7 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
         );
     }
 
-    // Stable device identifier (C8-15): persisted at first run, never
+    // Stable device identifier: persisted at first run, never
     // silently regenerated. A write failure degrades to an ephemeral id
     // for this run rather than blocking the daemon.
     let config_path = vapor_shared::runtime_paths::vapor_directory()
@@ -105,7 +105,7 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     };
 
     // One runtime per enabled profile over a shared workgate and
-    // deduplicated watchers (C8-19..C8-24). A configuration without a
+    // deduplicated watchers. A configuration without a
     // `profiles` array runs the single implicit `default` profile on
     // the legacy state paths.
     let profiles = crate::profiles::resolve_profiles(&config);
@@ -179,7 +179,7 @@ fn install_shutdown_signal_handlers() {
     // `ProcessSupervisor`. The macOS / Linux native impl uses
     // `signal-hook` to translate `SIGTERM` / `SIGINT` into a flag-flip
     // on `runtime::SHUTDOWN_REQUESTED`; the Windows native impl
-    // (Wave 12 / C6-7) returns `Unsupported` until its bridge lands.
+    // returns `Unsupported` until its bridge lands.
     let supervisor = NativeProcessSupervisor::new();
     if let Err(error) = supervisor.register_shutdown_handler(runtime::request_shutdown) {
         logging::warning(

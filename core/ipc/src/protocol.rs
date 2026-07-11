@@ -61,20 +61,20 @@ pub enum Method {
     /// Flip `RunState` back to `Running` — idempotent.
     Resume,
     /// Hint the runtime to drain pending work as fast as the throttle
-    /// allows. The engine already drains opportunistically; Wave 7
-    /// ships this as an acknowledgement.
+    /// allows. The engine already drains opportunistically; this is
+    /// effectively an acknowledgement.
     FlushNow,
     /// Request a fresh whole-scope reconcile against the local sync
     /// directory.
     Reconcile,
-    /// Read the bounded daemon activity timeline (C8-30).
+    /// Read the bounded daemon activity timeline.
     Timeline,
-    /// Per-intent "why stuck" diagnostics (schema v2, C8-29).
+    /// Per-intent "why stuck" diagnostics (schema v2).
     Diagnostics,
-    /// Persist the `autoLaunch` config value (schema v2, C8-27). The
+    /// Persist the `autoLaunch` config value (schema v2). The
     /// service-manager (un)install itself stays with `vapor service`.
     SetAutoLaunch { enabled: bool },
-    /// Persist updated ignore rules (schema v2, C8-27). Applied to the
+    /// Persist updated ignore rules (schema v2). Applied to the
     /// live path filter at the next daemon restart (pre-GA contract;
     /// the ack note says so).
     UpdateExcludes {
@@ -85,8 +85,7 @@ pub enum Method {
     },
 }
 
-/// Top-level request envelope. Wave 6 phase 2 ships only the `Status`
-/// method; later waves grow this enum.
+/// Top-level request envelope.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "payload")]
 pub enum Request {
@@ -104,8 +103,9 @@ pub enum ResponseBody {
     Status(StatusResponse),
     /// Generic acknowledgement for fire-and-forget control endpoints
     /// (Pause / Resume / FlushNow / Reconcile). The `accepted` flag
-    /// reflects whether the request actually changed any state — Wave 7
-    /// always returns `true` once the request reaches the runtime, but
+    /// reflects whether the request actually changed any state — the
+    /// daemon currently always returns `true` once the request reaches
+    /// the runtime, but
     /// future versions may return `false` for no-op cases (e.g.
     /// pausing an already-paused daemon).
     Ack(AckResponse),
@@ -132,7 +132,7 @@ pub struct TimelineEntry {
 }
 
 /// One pending or in-flight intent with its "why stuck" context
-/// (schema v2, C8-29).
+/// (schema v2).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct IntentDiagnostic {
     pub intent_id: i64,
@@ -166,7 +166,7 @@ pub struct DiagnosticsResponse {
     #[serde(default)]
     pub truncated: bool,
     /// Events dropped at the bounded fs-event ingest boundary since
-    /// startup (callback-vs-runtime backpressure signal, C8-29).
+    /// startup (callback-vs-runtime backpressure signal).
     #[serde(default)]
     pub dropped_incoming_events: u64,
 }
@@ -205,10 +205,9 @@ pub enum ErrorBody {
 
 /// `Status` method response.
 ///
-/// Wave 6 phase 2 keeps this minimal — the runtime's `RunState`,
-/// throttle state, and the last decision reason. Wave 7 expands it
-/// (queue depth, ceilings, idle-boost state, etc.) per the contracts
-/// doc.
+/// Kept minimal — the runtime's `RunState`, throttle state, and the
+/// last decision reason — and expanded over time (queue depth,
+/// ceilings, idle-boost state, etc.) per the contracts doc.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct StatusResponse {
     pub schema_version: u32,
@@ -223,7 +222,7 @@ pub struct StatusResponse {
     /// diagnostic — lets clients report which daemon build answered.
     #[serde(default)]
     pub daemon_id: String,
-    /// Schema v2 (C8-27/C8-28/C8-65) — every field defaulted so v1
+    /// Schema v2 — every field defaulted so v1
     /// peers interoperate under the skew rules.
     /// Total durable queue depth across profiles.
     #[serde(default)]
@@ -242,11 +241,11 @@ pub struct StatusResponse {
     pub mirror_reverts: u64,
     #[serde(default)]
     pub mirror_deletes: u64,
-    /// Per-profile status rows (C8-65).
+    /// Per-profile status rows.
     #[serde(default)]
     pub profiles: Vec<ProfileStatus>,
     /// Effective resource ceilings + utilization + idle-boost state
-    /// (C8-40). `None` until the resource-budget runtime publishes.
+    ///. `None` until the resource-budget runtime publishes.
     #[serde(default)]
     pub resource_budget: Option<ResourceBudgetStatus>,
 }
@@ -259,7 +258,7 @@ pub struct ProfileStatus {
     pub display_name: String,
     #[serde(default)]
     pub provider_name: String,
-    /// `two-way` / `pull-only` / `push-only` (C8-65).
+    /// `two-way` / `pull-only` / `push-only`.
     #[serde(default)]
     pub sync_mode: String,
     #[serde(default)]
@@ -282,7 +281,7 @@ pub struct ProfileStatus {
 }
 
 /// Effective resource ceilings, measured utilization, and idle-boost
-/// state (schema v2, C8-40).
+/// state (schema v2).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
 pub struct ResourceBudgetStatus {
     #[serde(default)]

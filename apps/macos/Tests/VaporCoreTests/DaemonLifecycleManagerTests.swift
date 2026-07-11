@@ -3,7 +3,7 @@ import Testing
 
 @testable import VaporCore
 
-// `DaemonLifecycleManager` is a thin facade since M2-1/C4-7: lifecycle
+// `DaemonLifecycleManager` is a thin facade: lifecycle
 // *policy* (autolaunch persistence, crash-loop backoff/pause,
 // supervision) lives in the Rust `core/lifecycle` crate behind the
 // `vapor` CLI and is tested there. These tests cover what Swift still

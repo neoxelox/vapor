@@ -1,7 +1,7 @@
 //! `CrashLoopGuard` — pure-logic crash-loop backoff policy.
 //!
-//! This is the only implementation: the Swift copy retired with M2-2 /
-//! C4-7, and every surface consumes this guard through the `vapor
+//! This is the only implementation: the Swift copy was retired, and
+//! every surface consumes this guard through the `vapor
 //! service` CLI. Defaults: `base_delay = 2s`, `max_delay = 120s`,
 //! `delay_starts_after_failures = 1`,
 //! `max_consecutive_failures_before_pause = 5`, `failure_window = 600s`.
@@ -17,7 +17,6 @@
 //! the window restart without delay; crash N+1 gets `base_delay`,
 //! doubling per crash after that.
 //!
-//! Closes `core.md` C4-2.
 
 use std::time::{Duration, Instant};
 
@@ -101,7 +100,7 @@ impl CrashLoopGuard {
         }
     }
 
-    /// Rebuilds a guard from durably persisted state (M2-6).
+    /// Rebuilds a guard from durably persisted state.
     /// `last_crash_elapsed` is how long before `now` the most recent
     /// crash happened. Reconstruction replays `consecutive_crashes`
     /// registrations at that moment, so the backoff deadline and pause
@@ -242,7 +241,7 @@ mod tests {
 
     #[test]
     fn default_policy_matches_swift_baseline() {
-        // C4-2 verbatim port: `CrashLoopPolicy.default` in Swift is
+        // Verbatim port: the retired Swift `CrashLoopPolicy.default` was
         // (600 s, 2 s, 120 s, 1, 5). Drift here means surfaces would
         // disagree on backoff, so guard the constants explicitly.
         let policy = CrashLoopPolicy::default();

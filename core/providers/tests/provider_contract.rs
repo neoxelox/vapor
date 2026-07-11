@@ -1,4 +1,4 @@
-//! Provider contract suite (C8-44/C8-45).
+//! Provider contract suite.
 //!
 //! Every provider implementation must satisfy the same behavioral
 //! contract behind the `Provider` trait. The suite runs each contract
@@ -13,7 +13,7 @@
 //!
 //! Capability honesty is the core rule: a provider must implement what
 //! it advertises and error loudly on what it does not — never silently
-//! no-op (C8-43).
+//! no-op.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -319,7 +319,7 @@ fn contract_scope_rejects_traversal_shapes_at_the_type_boundary() {
     assert!(RemotePath::new("/absolute").is_err());
 }
 
-/// Cheap adapter-overhead guard (C8-46): a hundred small uploads
+/// Cheap adapter-overhead guard: a hundred small uploads
 /// through the full session machinery must complete quickly. Catches
 /// "someone made every session step allocate/copy quadratically"-class
 /// regressions, not SLO-grade measurement (that is Tier 2).

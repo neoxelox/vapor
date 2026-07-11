@@ -17,7 +17,6 @@ use crate::protocol::{
 };
 
 /// Implemented by the daemon to provide the data each method exposes.
-/// Wave 7 grows the surface to cover the L3 IPC-driven CLI commands.
 /// Every non-Status method has a default implementation returning an
 /// `unsupported` ack so older daemon binaries that pre-date a method
 /// can still answer the request without code changes.

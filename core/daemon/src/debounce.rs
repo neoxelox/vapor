@@ -195,7 +195,7 @@ impl DebounceLoop {
     fn tick_is_due(&self, now_inst: Instant) -> bool {
         // Monotonic Instant elapsed: wall-clock rewinds (DST / NTP / `date`)
         // cannot make the daemon spin extra ticks. The injected clock seam
-        // means tests can assert this property deterministically. C2-3.
+        // means tests can assert this property deterministically.
         let Some(last_tick_inst) = self.last_tick_inst else {
             return true;
         };
@@ -519,12 +519,12 @@ mod tests {
 
     #[test]
     fn tick_cadence_is_unaffected_by_wall_clock_rewind_under_injected_clock() {
-        // C2-3 invariant: tick cadence reads from a monotonic Instant, so
+        // Invariant: tick cadence reads from a monotonic Instant, so
         // wall-clock rewinds (DST / NTP / `date -s`) cannot make the loop
         // spin extra ticks. We drive the wall clock backwards by a full
         // hour while the monotonic axis stays still and assert that the
         // next `run_tick` call is *not* prematurely due — i.e., the
-        // pre-Wave-3 SystemTime code path that woke immediately on a
+        // old SystemTime code path that woke immediately on a
         // negative `duration_since` is gone.
         let watch_root = PathBuf::from("/tmp/vapor-root");
         let path = watch_root.join("src/main.rs");
@@ -541,9 +541,9 @@ mod tests {
             .expect("primed last tick");
 
         // Walk the wall clock backwards by one hour without touching the
-        // monotonic axis. Pre-C2-3 this triggered the
+        // monotonic axis. Wall-clock arithmetic would have triggered the
         // `duration_since` `Err(_)` branch and forced an immediate tick;
-        // post-C2-3 the monotonic Instant is unchanged so `tick_is_due`
+        // here the monotonic Instant is unchanged so `tick_is_due`
         // remains false.
         clock.advance_system(Duration::ZERO);
         clock.set_system(timestamp(1_000));
