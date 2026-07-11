@@ -664,8 +664,8 @@ outside the sync contract. The full first-class-folder workstream
 evaluated and rejected — the file-only model is what keeps the conflict,
 echo-suppression, and transfer machinery simple and robust, and the
 rename fallback (delete + re-upload through children) is data-safe.
-User-facing contract: root `README.md` **What Syncs** table. Engine
-semantics: `data-flow.md §Directory and symlink semantics`.
+Contract and engine semantics:
+`data-flow.md §Directory and symlink semantics`.
 
 ## Phase C9 - `vapor` CLI delivery
 
