@@ -54,12 +54,15 @@ pub struct VaporConfig {
     /// entry overrides the profile-capable fields outright; unset
     /// fields inherit the top-level values.
     pub profiles: Vec<ProfileConfig>,
-    /// Hard user ceilings on daemon device impact. Values are
-    /// clamped into `1..=100` at load with a classified warning
-    /// surfaced through `load_issue`.
+    /// Hard user ceilings on daemon device impact. Out-of-range values
+    /// are clamped into `1..=100` when the daemon resolves its effective
+    /// budget (`resource_budget.rs`, with a logged warning), not at
+    /// config load — so a non-daemon consumer of `load_from` sees the raw
+    /// values.
     pub resource_limits: ResourceLimitsConfig,
-    /// Idle-boost group. `boost*Percent` values below their
-    /// matching `resourceLimits` ceiling are clamped up at load.
+    /// Idle-boost group. `boost*Percent` values below their matching
+    /// `resourceLimits` ceiling are clamped up at daemon budget-resolve
+    /// time (same place as `resource_limits`), not at config load.
     pub idle_boost: IdleBoostConfig,
 }
 
@@ -260,10 +263,12 @@ pub fn load_from(path: &Path) -> VaporConfigLoadResult {
         };
     }
 
-    match serde_json::from_str::<RawVaporConfig>(&contents) {
-        Ok(raw) => VaporConfigLoadResult {
-            config: raw.into_config(),
-            load_issue: None,
+    match serde_json::from_str::<serde_json::Value>(&contents) {
+        Ok(serde_json::Value::Object(map)) => config_from_object(&map),
+        // Valid JSON but not an object: the file shape is wrong.
+        Ok(_) => VaporConfigLoadResult {
+            config: VaporConfig::default(),
+            load_issue: Some(format!("{} is not a JSON object", path.display())),
         },
         Err(error) => VaporConfigLoadResult {
             config: VaporConfig::default(),
@@ -272,51 +277,111 @@ pub fn load_from(path: &Path) -> VaporConfigLoadResult {
     }
 }
 
-/// Wire shape: every field optional so partial files (written by an older
-/// surface, or hand-edited) fill in per-field defaults, mirroring the
-/// Swift store's `decodeIfPresent` behavior. Unknown fields are ignored.
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawVaporConfig {
-    auto_launch: Option<bool>,
-    use_git_ignore: Option<bool>,
-    use_vapor_ignore: Option<bool>,
-    local_sync_directory: Option<String>,
-    cloud_sync_directory: Option<String>,
-    pre_ignore_rules: Option<String>,
-    post_ignore_rules: Option<String>,
-    language_code: Option<String>,
-    timeline_limit: Option<i64>,
-    provider: Option<String>,
-    sync_mode: Option<String>,
-    profiles: Option<Vec<ProfileConfig>>,
-    resource_limits: Option<ResourceLimitsConfig>,
-    idle_boost: Option<IdleBoostConfig>,
-}
+/// Per-field-tolerant decode. Each known field is decoded independently:
+/// one malformed value (a type mismatch, an out-of-range number) reverts
+/// only that field to its default and is noted in `load_issue`, instead
+/// of discarding the user's entire configuration. Unknown top-level keys
+/// (typos like `profles`) are surfaced the same way rather than silently
+/// dropped. Absent fields fill in defaults (partial files stay valid).
+fn config_from_object(map: &serde_json::Map<String, serde_json::Value>) -> VaporConfigLoadResult {
+    use constants::config as keys;
 
-impl RawVaporConfig {
-    fn into_config(self) -> VaporConfig {
-        let defaults = VaporConfig::default();
-        VaporConfig {
-            auto_launch: self.auto_launch.unwrap_or(defaults.auto_launch),
-            use_git_ignore: self.use_git_ignore.unwrap_or(defaults.use_git_ignore),
-            use_vapor_ignore: self.use_vapor_ignore.unwrap_or(defaults.use_vapor_ignore),
-            local_sync_directory: self
-                .local_sync_directory
-                .unwrap_or(defaults.local_sync_directory),
-            cloud_sync_directory: self
-                .cloud_sync_directory
-                .unwrap_or(defaults.cloud_sync_directory),
-            pre_ignore_rules: self.pre_ignore_rules.unwrap_or(defaults.pre_ignore_rules),
-            post_ignore_rules: self.post_ignore_rules.unwrap_or(defaults.post_ignore_rules),
-            language_code: self.language_code.unwrap_or(defaults.language_code),
-            timeline_limit: self.timeline_limit.unwrap_or(defaults.timeline_limit),
-            provider: self.provider.unwrap_or(defaults.provider),
-            sync_mode: self.sync_mode.unwrap_or(defaults.sync_mode),
-            profiles: self.profiles.unwrap_or_default(),
-            resource_limits: self.resource_limits.unwrap_or_default(),
-            idle_boost: self.idle_boost.unwrap_or_default(),
+    fn field<T: serde::de::DeserializeOwned>(
+        map: &serde_json::Map<String, serde_json::Value>,
+        key: &str,
+        default: T,
+        issues: &mut Vec<String>,
+    ) -> T {
+        match map.get(key) {
+            None => default,
+            Some(value) => match serde_json::from_value::<T>(value.clone()) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    issues.push(format!("ignoring invalid `{key}`: {error}"));
+                    default
+                }
+            },
         }
+    }
+
+    let defaults = VaporConfig::default();
+    let mut issues: Vec<String> = Vec::new();
+    let config = VaporConfig {
+        auto_launch: field(
+            map,
+            keys::KEY_AUTO_LAUNCH,
+            defaults.auto_launch,
+            &mut issues,
+        ),
+        use_git_ignore: field(
+            map,
+            keys::KEY_USE_GIT_IGNORE,
+            defaults.use_git_ignore,
+            &mut issues,
+        ),
+        use_vapor_ignore: field(
+            map,
+            keys::KEY_USE_VAPOR_IGNORE,
+            defaults.use_vapor_ignore,
+            &mut issues,
+        ),
+        local_sync_directory: field(
+            map,
+            keys::KEY_LOCAL_SYNC_DIRECTORY,
+            defaults.local_sync_directory,
+            &mut issues,
+        ),
+        cloud_sync_directory: field(
+            map,
+            keys::KEY_CLOUD_SYNC_DIRECTORY,
+            defaults.cloud_sync_directory,
+            &mut issues,
+        ),
+        pre_ignore_rules: field(
+            map,
+            keys::KEY_PRE_IGNORE_RULES,
+            defaults.pre_ignore_rules,
+            &mut issues,
+        ),
+        post_ignore_rules: field(
+            map,
+            keys::KEY_POST_IGNORE_RULES,
+            defaults.post_ignore_rules,
+            &mut issues,
+        ),
+        language_code: field(
+            map,
+            keys::KEY_LANGUAGE_CODE,
+            defaults.language_code,
+            &mut issues,
+        ),
+        timeline_limit: field(
+            map,
+            keys::KEY_TIMELINE_LIMIT,
+            defaults.timeline_limit,
+            &mut issues,
+        ),
+        provider: field(map, keys::KEY_PROVIDER, defaults.provider, &mut issues),
+        sync_mode: field(map, keys::KEY_SYNC_MODE, defaults.sync_mode, &mut issues),
+        profiles: field(map, keys::KEY_PROFILES, defaults.profiles, &mut issues),
+        resource_limits: field(
+            map,
+            keys::KEY_RESOURCE_LIMITS,
+            defaults.resource_limits,
+            &mut issues,
+        ),
+        idle_boost: field(map, keys::KEY_IDLE_BOOST, defaults.idle_boost, &mut issues),
+    };
+
+    for key in map.keys() {
+        if !keys::ALL_KEYS.contains(&key.as_str()) {
+            issues.push(format!("unrecognized config key `{key}`"));
+        }
+    }
+
+    VaporConfigLoadResult {
+        config,
+        load_issue: (!issues.is_empty()).then(|| issues.join("; ")),
     }
 }
 
@@ -355,15 +420,43 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fields_are_tolerated() {
+    fn unknown_fields_are_tolerated_but_surfaced() {
         let temp = TempDir::new().expect("temp dir");
         let path = temp.path().join("vapor.json");
         std::fs::write(&path, r#"{ "futureKey": [1, 2], "autoLaunch": false }"#)
             .expect("seed config");
 
         let result = load_from(&path);
-        assert!(result.load_issue.is_none());
+        // Forward-compat: the known field still applies...
         assert!(!result.config.auto_launch);
+        // ...but the unrecognized key is reported (a typo like `profles`
+        // must not be dropped silently).
+        let issue = result.load_issue.expect("unknown key surfaced");
+        assert!(issue.contains("futureKey"), "issue: {issue}");
+    }
+
+    #[test]
+    fn one_malformed_field_reverts_only_that_field_not_the_whole_config() {
+        let temp = TempDir::new().expect("temp dir");
+        let path = temp.path().join("vapor.json");
+        // `timelineLimit` has the wrong type; `localSyncDirectory` is valid.
+        std::fs::write(
+            &path,
+            r#"{ "timelineLimit": "oops", "localSyncDirectory": "~/Keep" }"#,
+        )
+        .expect("seed config");
+
+        let result = load_from(&path);
+        // The valid field is preserved (not discarded to defaults)...
+        assert_eq!(result.config.local_sync_directory, "~/Keep");
+        // ...the bad field falls back to its default...
+        assert_eq!(
+            result.config.timeline_limit,
+            VaporConfig::default().timeline_limit
+        );
+        // ...and the problem is surfaced.
+        let issue = result.load_issue.expect("bad field surfaced");
+        assert!(issue.contains("timelineLimit"), "issue: {issue}");
     }
 
     #[test]

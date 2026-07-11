@@ -1238,7 +1238,7 @@ The AuthAction::Login help text (core/cli/src/main.rs:139-144) promises "Omit --
 
 **Suggested fix**: Only auto-run the PKCE flow when stdin is a TTY (fall back to the stdin read otherwise), or gate the browser flow behind an explicit flag (e.g. --oauth). At minimum, correct the Login help text to state the gdrive exception so scripts don't follow a false contract.
 
-### [medium] One malformed field value silently discards the user's entire configuration (whole-file serde failure -> all defaults)
+### [medium] One malformed field value silently discards the user's entire configuration (whole-file serde failure -> all defaults)  ✅ DONE
 
 **Category**: bug · **Where**: `core/shared/src/config.rs:268` · **Review group**: shared
 
@@ -1246,7 +1246,7 @@ A single malformed field value in vapor.json (type mismatch like "timelineEventL
 
 **Suggested fix**: Parse to serde_json::Value first and decode each known field individually (collecting per-field issues into load_issue) so one bad field only reverts that field; alternatively make the daemon refuse to start sync work (Paused with reason) when load_issue is set, rather than running against defaults.
 
-### [medium] Unknown/misspelled top-level config keys are silently dropped even though ALL_KEYS exists for validation
+### [medium] Unknown/misspelled top-level config keys are silently dropped even though ALL_KEYS exists for validation  ✅ DONE
 
 **Category**: improvement · **Where**: `core/shared/src/config.rs:280` · **Review group**: shared
 
@@ -1254,7 +1254,7 @@ RawVaporConfig (core/shared/src/config.rs:280) silently ignores unknown top-leve
 
 **Suggested fix**: After a successful parse, deserialize to serde_json::Value as well, diff top-level keys against constants::config::ALL_KEYS, and surface unrecognized keys as a non-fatal warning (a new `warnings` field next to load_issue, logged by the daemon and shown by `vapor doctor`).
 
-### [medium] resolve_or_persist read-modify-write races with other config writers and can silently revert their settings
+### [medium] resolve_or_persist read-modify-write races with other config writers and can silently revert their settings  ✅ DONE
 
 **Category**: bug · **Where**: `core/shared/src/device_id.rs:47` · **Review group**: shared
 
@@ -1262,7 +1262,7 @@ resolve_or_persist (core/shared/src/device_id.rs:47) performs an unlocked read-m
 
 **Suggested fix**: Take an advisory lock (e.g. flock on vapor.json or a sibling lock file, as vapord.lock already does for the daemon) around the read-modify-write, or re-read and verify the deviceId key is still absent immediately before rename; use a unique temp filename (PID/random suffix).
 
-### [medium] resolve_or_persist writes vapor.json with default (world-readable) permissions and creates vapor_dir 0755, bypassing the PRIVATE_*_MODE policy
+### [medium] resolve_or_persist writes vapor.json with default (world-readable) permissions and creates vapor_dir 0755, bypassing the PRIVATE_*_MODE policy  ✅ DONE
 
 **Category**: security · **Where**: `core/shared/src/device_id.rs:74` · **Review group**: shared
 
@@ -1358,7 +1358,7 @@ loadResult() (VaporConfiguration.swift:222-225) does fileExists → `try? save(d
 
 **Suggested fix**: Create the initial file exclusively (fail if it appeared meanwhile, then re-read instead of overwriting), and report save failures through VaporConfigurationLoadIssue rather than discarding them with try?.
 
-### [low] Runtime-dir resolution diverges from Rust under XCTest: app and spawned CLI use different vapor_dirs
+### [low] Runtime-dir resolution diverges from Rust under XCTest: app and spawned CLI use different vapor_dirs  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/VaporCore/VaporPaths.swift:34` · **Review group**: macos-app-core
 
@@ -1462,7 +1462,7 @@ resolve_auth_token's Some(value) branch (core/cli/src/main.rs:537-543) returns t
 
 **Suggested fix**: Trim the explicit --token value and reject empty results with the same error as the stdin path ("no token provided") before calling login_into.
 
-### [low] Doc/code mismatch: config.rs claims resource-limit/idle-boost clamping happens at load and is surfaced via load_issue; the loader does neither
+### [low] Doc/code mismatch: config.rs claims resource-limit/idle-boost clamping happens at load and is surfaced via load_issue; the loader does neither  ✅ DONE
 
 **Category**: improvement · **Where**: `core/shared/src/config.rs:57` · **Review group**: shared
 
@@ -1470,7 +1470,7 @@ Doc/code mismatch in core/shared/src/config.rs (lines 57-63): the VaporConfig fi
 
 **Suggested fix**: Fix the doc comments to say clamping happens at budget-resolve time in the daemon (with a logged warning), or actually clamp in into_config and report via a warnings channel — pick one and make code and comment agree.
 
-### [low] Log redaction misses JSON-shaped secrets ("access_token": "...") — tokens can reach log files verbatim
+### [low] Log redaction misses JSON-shaped secrets ("access_token": "...") — tokens can reach log files verbatim  ✅ DONE
 
 **Category**: security · **Where**: `core/shared/src/logging.rs:236` · **Review group**: shared
 
@@ -1478,7 +1478,7 @@ redact_inline_secrets (core/shared/src/logging.rs:236) only matches equals-sign 
 
 **Suggested fix**: Extend INLINE_SECRET_MARKERS to cover JSON key forms (e.g. "access_token\"", "refresh_token\"", "id_token\"", "client_secret\"" or a generic regex like (access|refresh|id)_token\s*["=:] ), or redact by matching the key name anywhere followed by a delimiter ([=:"]) rather than requiring '=' specifically.
 
-### [low] Any CI env value (including CI=false or empty) silently redirects vapor_dir to cwd-relative ./.vapor, even when VAPOR_ENV=prod
+### [low] Any CI env value (including CI=false or empty) silently redirects vapor_dir to cwd-relative ./.vapor, even when VAPOR_ENV=prod  ✅ DONE
 
 **Category**: bug · **Where**: `core/shared/src/runtime_paths.rs:17` · **Review group**: shared
 

@@ -249,6 +249,14 @@ const INLINE_SECRET_MARKERS: &[&str] = &[
     "set-cookie:",
     "token=",
     "x-api-key:",
+    // JSON colon-quote forms (`"access_token": "ya29..."`): the `=`/`:`
+    // markers above miss a token embedded in a JSON body, so one careless
+    // log of an OAuth response body would leak verbatim.
+    "\"access_token\"",
+    "\"refresh_token\"",
+    "\"id_token\"",
+    "\"client_secret\"",
+    "\"password\"",
 ];
 
 #[cfg(test)]
@@ -307,6 +315,21 @@ mod tests {
             sanitize_diagnostic_text("routine event without secrets"),
             "routine event without secrets"
         );
+    }
+
+    #[test]
+    fn redacts_json_shaped_token_bodies() {
+        for input in [
+            r#"token response: {"access_token": "ya29.abc", "expires_in": 3600}"#,
+            r#"{"refresh_token":"1//rotate"}"#,
+            r#"{"client_secret": "shhh"}"#,
+        ] {
+            assert_eq!(
+                sanitize_diagnostic_text(input),
+                "[REDACTED]",
+                "JSON token body should be redacted: {input}"
+            );
+        }
     }
 
     #[test]

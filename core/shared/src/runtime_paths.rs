@@ -14,13 +14,20 @@ pub fn vapor_directory() -> PathBuf {
         return path;
     }
 
-    if (env::var_os("CI").is_some()
-        || env::var(constants::env::VAPOR_ENV)
-            .ok()
-            .map(|value| value.eq_ignore_ascii_case("dev"))
-            .unwrap_or(false))
-        && let Ok(current_directory) = env::current_dir()
-    {
+    // Dev/CI default (`./.vapor`) selection. An explicit `VAPOR_ENV`
+    // wins over the CI heuristic (so `VAPOR_ENV=prod` uses `~/.vapor`
+    // even under CI), and `CI` is honored only when *truthy* — a leaked
+    // or explicitly-false `CI` (e.g. `CI=false` in a shell) must not
+    // silently redirect `vapor_dir` to a cwd-relative path.
+    let vapor_env = env::var(constants::env::VAPOR_ENV)
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase());
+    let use_dev_directory = match vapor_env.as_deref() {
+        Some("dev") => true,
+        Some("prod") => false,
+        _ => ci_is_truthy(),
+    };
+    if use_dev_directory && let Ok(current_directory) = env::current_dir() {
         return current_directory.join(constants::runtime::VAPOR_DIRECTORY_NAME);
     }
 
@@ -31,6 +38,18 @@ pub fn vapor_directory() -> PathBuf {
     env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(constants::runtime::VAPOR_DIRECTORY_NAME)
+}
+
+/// Whether the `CI` environment variable is set to a truthy value
+/// (`true`/`1`, case-insensitive). Mere presence is not enough — many
+/// tools set `CI=false`, which must not trigger the dev directory.
+fn ci_is_truthy() -> bool {
+    env::var("CI")
+        .map(|value| {
+            let value = value.trim();
+            value.eq_ignore_ascii_case("true") || value == "1"
+        })
+        .unwrap_or(false)
 }
 
 pub fn logs_directory() -> PathBuf {

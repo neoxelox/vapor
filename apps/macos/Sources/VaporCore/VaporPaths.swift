@@ -31,10 +31,28 @@ public enum VaporPaths {
       return configuredByEnvironment
     }
 
-    if environment["XCTestConfigurationFilePath"] != nil
-      || environment["CI"] != nil
-      || environment[environmentKey]?.lowercased() == "dev"
-    {
+    // Mirror the Rust resolution (core/shared/src/runtime_paths.rs): an
+    // explicit VAPOR_ENV wins over the CI heuristic, and CI is honored only
+    // when truthy (`true`/`1`) — a leaked or false `CI` must not redirect
+    // the runtime dir. The XCTest special case is intentionally gone: the
+    // wrapper scripts export VAPOR_DIR/VAPOR_ENV=dev (§8.5), so it only
+    // caused the app and the spawned CLI to diverge under XCTest.
+    let vaporEnv = environment[environmentKey]?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+    let useDevDirectory: Bool
+    switch vaporEnv {
+    case "dev":
+      useDevDirectory = true
+    case "prod":
+      useDevDirectory = false
+    default:
+      let ci = environment["CI"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+      useDevDirectory = ci == "true" || ci == "1"
+    }
+    if useDevDirectory {
       return URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
         .appendingPathComponent(VaporConstants.Runtime.vaporDirectoryName, isDirectory: true)
     }
