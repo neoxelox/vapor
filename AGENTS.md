@@ -312,6 +312,28 @@ It does not override the "latest stable" policy above.
 - When adding or changing user-facing UI text, contributors must update `en.json` (and any other available catalogs) in the same change set.
 - If a translation key is missing in a non-English catalog, fallback behavior must remain deterministic and resolve to English.
 
+## 8.8) Code comment policy
+
+- Code comments must never reference internal task-list or roadmap
+  identifiers: no task ids (`C8-12`, `M2-1`, `L3-7`, …), no wave or phase
+  numbers, and no pointers to `docs/tasks/*`. Task tracking lives in
+  `docs/tasks/`; a code comment must stand on its own for a reader who has
+  never seen the task lists. The same applies to strings that surface to
+  users or logs (e.g. `unimplemented!()` messages).
+- Referencing stable documentation (`docs/architecture/*`, `docs/plans/*`,
+  `AGENTS.md` sections) is fine — those documents describe the system, not
+  the work schedule.
+- Keep comments short and direct. A comment earns its place by stating a
+  constraint, invariant, or non-obvious "why" that the code cannot express;
+  it should not restate what the code does.
+- Do not leave useless comments. Delete comments that narrate history
+  ("replaces the old X", "retired with Y"), describe the change instead of
+  the code, or restate a default/constant defined elsewhere. If a
+  historical fact matters (e.g. "this is the only implementation"), keep
+  the fact and drop the archaeology.
+- A stale comment is a bug: when a change makes a nearby comment wrong or
+  obsolete, update or delete it in the same change set.
+
 ## 9) Required test matrix
 
 Testing is a non-negotiable part of every change. Vapor is coded
