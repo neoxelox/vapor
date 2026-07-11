@@ -4,7 +4,7 @@
 //! noteworthy events (state transitions, conflicts, terminal failures,
 //! mirror actions, reconcile completions, feed-cursor expiry) and the
 //! IPC `Timeline` endpoint reads a snapshot. The buffer is bounded by
-//! the `timelineEventLimit` config key (default 1000): when full, the
+//! the `timelineLimit` config key (default 1000): when full, the
 //! oldest entries fall off — diagnostics favor recency.
 
 use std::collections::VecDeque;
@@ -56,7 +56,7 @@ impl TimelineBuffer {
         let max_entries = usize::try_from(limit)
             .ok()
             .filter(|value| *value > 0)
-            .unwrap_or(constants::config::DEFAULT_TIMELINE_EVENT_LIMIT as usize);
+            .unwrap_or(constants::config::DEFAULT_TIMELINE_LIMIT as usize);
         Self::new(max_entries)
     }
 

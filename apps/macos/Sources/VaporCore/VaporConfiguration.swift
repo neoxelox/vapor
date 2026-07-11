@@ -57,7 +57,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   public var preIgnoreRules: String
   public var postIgnoreRules: String
   public var languageCode: String
-  public var timelineEventLimit: Int
+  public var timelineLimit: Int
   /// Stable per-device identifier. Generated and persisted by
   /// the daemon; the app only preserves and displays it, so `nil`
   /// simply means the daemon has not run yet.
@@ -84,7 +84,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     preIgnoreRules: String = defaultPreIgnoreRules,
     postIgnoreRules: String = defaultPostIgnoreRules,
     languageCode: String = defaultLanguageCode,
-    timelineEventLimit: Int = VaporConstants.Defaults.timelineEventLimit,
+    timelineLimit: Int = VaporConstants.Defaults.timelineLimit,
     deviceId: String? = nil,
     additionalKeys: [String: JSONValue] = [:]
   ) {
@@ -96,7 +96,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     self.preIgnoreRules = preIgnoreRules
     self.postIgnoreRules = postIgnoreRules
     self.languageCode = Self.normalizedLanguageCode(languageCode)
-    self.timelineEventLimit = timelineEventLimit
+    self.timelineLimit = timelineLimit
     self.deviceId = deviceId
     self.additionalKeys = additionalKeys
   }
@@ -110,7 +110,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     case preIgnoreRules
     case postIgnoreRules
     case languageCode
-    case timelineEventLimit
+    case timelineLimit
     case deviceId
   }
 
@@ -149,8 +149,8 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
         ?? Self.defaultPostIgnoreRules,
       languageCode: try container.decodeIfPresent(String.self, forKey: .languageCode)
         ?? Self.defaultLanguageCode,
-      timelineEventLimit: try container.decodeIfPresent(Int.self, forKey: .timelineEventLimit)
-        ?? VaporConstants.Defaults.timelineEventLimit,
+      timelineLimit: try container.decodeIfPresent(Int.self, forKey: .timelineLimit)
+        ?? VaporConstants.Defaults.timelineLimit,
       deviceId: try container.decodeIfPresent(String.self, forKey: .deviceId),
       additionalKeys: additionalKeys
     )
@@ -166,7 +166,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     try container.encode(preIgnoreRules, forKey: .preIgnoreRules)
     try container.encode(postIgnoreRules, forKey: .postIgnoreRules)
     try container.encode(languageCode, forKey: .languageCode)
-    try container.encode(timelineEventLimit, forKey: .timelineEventLimit)
+    try container.encode(timelineLimit, forKey: .timelineLimit)
     // The daemon owns device-id generation; the app writes the key only
     // when one already exists.
     try container.encodeIfPresent(deviceId, forKey: .deviceId)

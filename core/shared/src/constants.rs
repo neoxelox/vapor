@@ -69,7 +69,7 @@ pub mod config {
     pub const KEY_PRE_IGNORE_RULES: &str = "preIgnoreRules";
     pub const KEY_POST_IGNORE_RULES: &str = "postIgnoreRules";
     pub const KEY_LANGUAGE_CODE: &str = "languageCode";
-    pub const KEY_TIMELINE_EVENT_LIMIT: &str = "timelineEventLimit";
+    pub const KEY_TIMELINE_LIMIT: &str = "timelineLimit";
     /// Provider selection: `filesystem` (default pre-GA) or
     /// `gdrive`. See `provider::*` for the accepted values.
     pub const KEY_PROVIDER: &str = "provider";
@@ -103,7 +103,7 @@ pub mod config {
         KEY_PRE_IGNORE_RULES,
         KEY_POST_IGNORE_RULES,
         KEY_LANGUAGE_CODE,
-        KEY_TIMELINE_EVENT_LIMIT,
+        KEY_TIMELINE_LIMIT,
         KEY_PROVIDER,
         KEY_SYNC_MODE,
         KEY_DEVICE_ID,
@@ -121,7 +121,7 @@ pub mod config {
     pub const DEFAULT_USE_GIT_IGNORE: bool = true;
     pub const DEFAULT_USE_VAPOR_IGNORE: bool = true;
     pub const DEFAULT_LANGUAGE_CODE: &str = "en";
-    pub const DEFAULT_TIMELINE_EVENT_LIMIT: i64 = 1_000;
+    pub const DEFAULT_TIMELINE_LIMIT: i64 = 1_000;
 }
 
 pub mod provider {

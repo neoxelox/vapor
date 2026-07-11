@@ -37,7 +37,7 @@ pub struct VaporConfig {
     pub pre_ignore_rules: String,
     pub post_ignore_rules: String,
     pub language_code: String,
-    pub timeline_event_limit: i64,
+    pub timeline_limit: i64,
     /// Provider selection: `filesystem` (default pre-GA) or
     /// `gdrive`. When `filesystem` is selected,
     /// `cloud_sync_directory` is reinterpreted as an absolute local
@@ -199,7 +199,7 @@ impl Default for VaporConfig {
             pre_ignore_rules: default_pre_ignore_rules(),
             post_ignore_rules: String::new(),
             language_code: constants::config::DEFAULT_LANGUAGE_CODE.to_string(),
-            timeline_event_limit: constants::config::DEFAULT_TIMELINE_EVENT_LIMIT,
+            timeline_limit: constants::config::DEFAULT_TIMELINE_LIMIT,
             provider: constants::provider::DEFAULT.to_string(),
             sync_mode: constants::sync_mode::DEFAULT.to_string(),
             profiles: Vec::new(),
@@ -286,7 +286,7 @@ struct RawVaporConfig {
     pre_ignore_rules: Option<String>,
     post_ignore_rules: Option<String>,
     language_code: Option<String>,
-    timeline_event_limit: Option<i64>,
+    timeline_limit: Option<i64>,
     provider: Option<String>,
     sync_mode: Option<String>,
     profiles: Option<Vec<ProfileConfig>>,
@@ -310,9 +310,7 @@ impl RawVaporConfig {
             pre_ignore_rules: self.pre_ignore_rules.unwrap_or(defaults.pre_ignore_rules),
             post_ignore_rules: self.post_ignore_rules.unwrap_or(defaults.post_ignore_rules),
             language_code: self.language_code.unwrap_or(defaults.language_code),
-            timeline_event_limit: self
-                .timeline_event_limit
-                .unwrap_or(defaults.timeline_event_limit),
+            timeline_limit: self.timeline_limit.unwrap_or(defaults.timeline_limit),
             provider: self.provider.unwrap_or(defaults.provider),
             sync_mode: self.sync_mode.unwrap_or(defaults.sync_mode),
             profiles: self.profiles.unwrap_or_default(),
