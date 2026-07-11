@@ -1126,7 +1126,7 @@ run_gdrive_pkce_flow (core/cli/src/commands/auth.rs:216-227) extracts the 'code=
 
 **Suggested fix**: Percent-decode the extracted query value (at minimum decode %XX sequences and '+') in run_gdrive_pkce_flow before passing it to exchange_code, and add a test with a code containing '%2F' asserting the exchange body carries the single-encoded form.
 
-### [medium] Preflight `git fetch origin main --depth=1` can shallow-graft main and falsely reject a valid release tag
+### [medium] Preflight `git fetch origin main --depth=1` can shallow-graft main and falsely reject a valid release tag  ✅ DONE
 
 **Category**: bug · **Where**: `.github/workflows/release.yml:73` · **Review group**: ci
 
@@ -1134,7 +1134,7 @@ In .github/workflows/release.yml the preflight job checks out with fetch-depth: 
 
 **Suggested fix**: Drop `--depth=1` (the checkout already fetched full history, so `git fetch origin main` is cheap), or use `gh api` / `git branch -r --contains` against the fully-fetched refs instead of a fresh shallow fetch.
 
-### [medium] Release job uses GitHub Environment `release` but the contract and docs mandate `release-macos`
+### [medium] Release job uses GitHub Environment `release` but the contract and docs mandate `release-macos`  ✅ DONE
 
 **Category**: bug · **Where**: `.github/workflows/release.yml:96` · **Review group**: ci
 
@@ -1142,7 +1142,7 @@ The release job in .github/workflows/release.yml:96 declares `environment: relea
 
 **Suggested fix**: Change to `environment: release-macos` (or `environment: release-macos` per job once other platforms land) so the workflow matches the documented trust-chain policy, and verify the secrets are provisioned under that environment.
 
-### [medium] Signing/release job restores shared incremental build cache into the artifacts it signs and notarizes
+### [medium] Signing/release job restores shared incremental build cache into the artifacts it signs and notarizes  ✅ DONE
 
 **Category**: security · **Where**: `.github/workflows/release.yml:122` · **Review group**: ci
 
@@ -1150,7 +1150,7 @@ The release job in .github/workflows/release.yml (lines 121-132) restores target
 
 **Suggested fix**: Drop the cargo/SPM cache-restore steps from the `release` job (accept the clean full build; the job already has a 60-minute budget), or at minimum scope the key exactly to release builds with no prefix restore-keys.
 
-### [medium] Re-running the release workflow demotes an already-published release back to draft (and never clears the prerelease flag)
+### [medium] Re-running the release workflow demotes an already-published release back to draft (and never clears the prerelease flag)  ✅ DONE
 
 **Category**: bug · **Where**: `.github/workflows/release.yml:334` · **Review group**: ci
 
@@ -1158,7 +1158,7 @@ The 'Create or update GitHub Release' step (.github/workflows/release.yml:334) u
 
 **Suggested fix**: Only pass `--draft` when the existing release is still a draft (check `gh release view --json isDraft`), or skip the edit for published releases and fail loudly instead. Use explicit `--prerelease=true|false` (gh supports the `=false` form on edit) so the flag is always reconciled to `RELEASE_PRERELEASE`.
 
-### [medium] Identical cargo cache key across lint/test/build/perf/release jobs means only one job's target/ ever gets saved
+### [medium] Identical cargo cache key across lint/test/build/perf/release jobs means only one job's target/ ever gets saved  ✅ DONE
 
 **Category**: perf · **Where**: `.github/workflows/test.yml:58` · **Review group**: ci
 
@@ -1302,7 +1302,7 @@ The pre-commit hook installed by scripts/hooks.sh (line 63 of the emitted hook) 
 
 **Suggested fix**: Drop the `2>&1` redirect (keep stderr, or capture it and surface via die on failure), e.g. `cargo update --workspace --manifest-path "$CARGO_TOML" >/dev/null || die "cargo update --workspace failed; VERSION/Cargo.toml were already updated — inspect the worktree"`.
 
-### [low] Release output validation checks only 2 of the 3 mandated bundle executables — Contents/Helpers/vapor is unverified
+### [low] Release output validation checks only 2 of the 3 mandated bundle executables — Contents/Helpers/vapor is unverified  ✅ DONE
 
 **Category**: improvement · **Where**: `.github/workflows/release.yml:291` · **Review group**: ci
 
@@ -1310,7 +1310,7 @@ The release workflow's "Validate packaged outputs" step (.github/workflows/relea
 
 **Suggested fix**: Add `test -x dist/Vapor.app/Contents/Helpers/vapor` (and optionally a `--version` smoke run of all three executables) to the validation step.
 
-### [low] No concurrency groups on PR-triggered workflows — superseded pushes keep burning macOS runners
+### [low] No concurrency groups on PR-triggered workflows — superseded pushes keep burning macOS runners  ✅ DONE
 
 **Category**: improvement · **Where**: `.github/workflows/test.yml:3` · **Review group**: ci
 

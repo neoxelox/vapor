@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Tooling / CI
+
+- Release & CI pipeline fixes (full-repo review):
+  - The tag-reachability preflight uses a full `git fetch` (not `--depth=1`), so a valid release tag is no longer deterministically rejected once `main` advances past it.
+  - Re-running the release workflow no longer demotes an already-published release back to draft (it only re-applies `--draft` to a still-draft release) and reconciles the prerelease flag explicitly.
+  - The release job's cargo/SPM caches are release-scoped with no prefix restore-keys, so signed/notarized artifacts cannot link objects restored from another job's cache; the PR workflows key their caches per workflow so they stop fighting over one shared key.
+  - Packaged-output validation also asserts `Contents/Helpers/vapor` (the third mandated executable).
+  - PR workflows cancel superseded runs via a concurrency group (main pushes and release-invoked runs are never cancelled).
+  - Added `.github/dependabot.yml` for GitHub Actions (SHA-pinning of third-party actions remains a tracked hardening follow-up).
+
 ### Fixed (providers & auth)
 
 - Provider & OAuth fixes (full-repo review):

@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Keep GitHub Actions pins fresh. Actions are referenced by tag today;
+  # the hardening follow-up (AGENTS.md §7.1) is to pin every third-party
+  # action to a full commit SHA (a mutable tag can be force-moved into the
+  # secret-bearing release job). Dependabot updates the pins once they are
+  # SHA-pinned, and surfaces new tags in the meantime.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
