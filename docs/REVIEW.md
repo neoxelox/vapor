@@ -527,7 +527,7 @@ write_config_key does read vapor.json -> mutate one key -> write to the fixed te
 
 **Suggested fix**: Guard write_config_key with a process-wide Mutex (or route config mutations through RuntimeControl to the single tick thread), and use a unique temp filename per write (e.g., include the op/thread id) before the atomic rename.
 
-### [medium] Retry-slowdown upload clamp is applied before the CPU-ceiling scale factor, which multiplies it back up during rate-limit storms
+### [medium] Retry-slowdown upload clamp is applied before the CPU-ceiling scale factor, which multiplies it back up during rate-limit storms  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/lib.rs:419`
 
@@ -535,7 +535,7 @@ effective_throttle_caps() applies the rate-limit slowdown first (`caps.upload_co
 
 **Suggested fix**: Apply the slowdown clamp AFTER the ceiling scaling (move the `min(1)` below the `scale_cap` block), or treat slowdown like the Suspended zero-cap case that scaling explicitly refuses to relax.
 
-### [medium] CPU-ceiling scaling can raise Throttled/Light caps far above the throttle ladder, contradicting the documented 'ceilings only ever lower' contract
+### [medium] CPU-ceiling scaling can raise Throttled/Light caps far above the throttle ladder, contradicting the documented 'ceilings only ever lower' contract  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/lib.rs:421`
 
