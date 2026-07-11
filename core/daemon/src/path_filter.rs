@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use globset::{GlobBuilder, GlobMatcher};
+use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use vapor_shared::constants;
 
 use crate::logging;
@@ -103,21 +103,36 @@ enum RuleAction {
 #[derive(Debug)]
 struct CompiledRule {
     action: RuleAction,
-    matchers: Vec<GlobMatcher>,
-}
-
-impl CompiledRule {
-    fn matches(&self, relative_path: &str) -> bool {
-        self.matchers
-            .iter()
-            .any(|matcher| matcher.is_match(relative_path))
-    }
+    globs: Vec<Glob>,
 }
 
 #[derive(Debug)]
 pub struct EventPathFilter {
     watch_root: PathBuf,
     rules: Vec<CompiledRule>,
+    /// All rule globs compiled into one automaton for O(1)-per-event
+    /// matching on the fs-watch callback thread; `glob_owner[i]` is the
+    /// index of the rule that contributed the i-th glob so last-match-wins
+    /// (highest matching rule index) still holds.
+    glob_set: GlobSet,
+    glob_owner: Vec<usize>,
+}
+
+/// Compiles every rule's globs into a single [`GlobSet`], recording which
+/// rule each glob belongs to.
+fn build_glob_set(rules: &[CompiledRule]) -> (GlobSet, Vec<usize>) {
+    let mut builder = GlobSetBuilder::new();
+    let mut glob_owner = Vec::new();
+    for (rule_index, rule) in rules.iter().enumerate() {
+        for glob in &rule.globs {
+            builder.add(glob.clone());
+            glob_owner.push(rule_index);
+        }
+    }
+    // Every glob already compiled individually in compile_rule, so the set
+    // build cannot fail; fall back to an empty set defensively.
+    let glob_set = builder.build().unwrap_or_else(|_| GlobSet::empty());
+    (glob_set, glob_owner)
 }
 
 impl EventPathFilter {
@@ -167,9 +182,12 @@ impl EventPathFilter {
             ],
         );
 
+        let (glob_set, glob_owner) = build_glob_set(&rules);
         Self {
             watch_root: watch_root.to_path_buf(),
             rules,
+            glob_set,
+            glob_owner,
         }
     }
 
@@ -191,14 +209,18 @@ impl EventPathFilter {
             return false;
         }
 
-        let mut ignored = false;
-        for rule in &self.rules {
-            if rule.matches(&normalized_relative_path) {
-                ignored = matches!(rule.action, RuleAction::Ignore);
-            }
+        // One automaton pass returns the matching glob indices; the
+        // highest-indexed rule among them wins (last-match-wins).
+        let winning_rule = self
+            .glob_set
+            .matches(&normalized_relative_path)
+            .into_iter()
+            .map(|glob_index| self.glob_owner[glob_index])
+            .max();
+        match winning_rule {
+            Some(rule_index) => matches!(self.rules[rule_index].action, RuleAction::Ignore),
+            None => false,
         }
-
-        ignored
     }
 }
 
@@ -221,7 +243,15 @@ fn append_rules_from_file_tree(
     watch_root: &Path,
     file_name: &str,
 ) -> usize {
-    let ignore_files = collect_ignore_files(watch_root, file_name);
+    // Mirror git: never read an ignore file inside a directory that the
+    // rules compiled so far already exclude. Otherwise a third-party
+    // ignore file (e.g. a vendored `.gitignore` with a `!keep` negation)
+    // inside a user-excluded `vendor/` could re-include content the user
+    // opted out of, and the walk would descend huge excluded trees.
+    let (glob_set, glob_owner) = build_glob_set(rules);
+    let is_ignored_dir =
+        |dir: &Path| evaluate_rules(rules, &glob_set, &glob_owner, watch_root, dir);
+    let ignore_files = collect_ignore_files(watch_root, file_name, &is_ignored_dir);
     for ignore_file in &ignore_files {
         append_rules_from_file(rules, watch_root, ignore_file.as_path());
     }
@@ -229,7 +259,36 @@ fn append_rules_from_file_tree(
     ignore_files.len()
 }
 
-fn collect_ignore_files(watch_root: &Path, file_name: &str) -> Vec<PathBuf> {
+/// Evaluates the compiled rules against `path` (last-match-wins), used to
+/// prune already-excluded directories during ignore-file discovery.
+fn evaluate_rules(
+    rules: &[CompiledRule],
+    glob_set: &GlobSet,
+    glob_owner: &[usize],
+    watch_root: &Path,
+    path: &Path,
+) -> bool {
+    let Ok(relative_path) = path.strip_prefix(watch_root) else {
+        return false;
+    };
+    let normalized = normalize_relative_path(relative_path);
+    if normalized.is_empty() {
+        return false;
+    }
+    glob_set
+        .matches(&normalized)
+        .into_iter()
+        .map(|glob_index| glob_owner[glob_index])
+        .max()
+        .map(|rule_index| matches!(rules[rule_index].action, RuleAction::Ignore))
+        .unwrap_or(false)
+}
+
+fn collect_ignore_files(
+    watch_root: &Path,
+    file_name: &str,
+    is_ignored_dir: &dyn Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
     let mut discovered = Vec::new();
     let mut pending = vec![watch_root.to_path_buf()];
 
@@ -277,6 +336,11 @@ fn collect_ignore_files(watch_root: &Path, file_name: &str) -> Vec<PathBuf> {
 
             if file_type.is_dir() {
                 if is_heavy_ignore_discovery_skip_dir(path.file_name().and_then(|n| n.to_str())) {
+                    continue;
+                }
+                // Never descend into (or read ignore files under) a
+                // directory the rules already exclude.
+                if is_ignored_dir(&path) {
                     continue;
                 }
                 pending.push(path);
@@ -440,25 +504,32 @@ fn compile_rule(
     raw_pattern: &str,
     base_directory: Option<&Path>,
 ) -> Result<CompiledRule, String> {
-    let patterns = expand_glob_patterns(raw_pattern, base_directory)?;
-    let mut matchers = Vec::with_capacity(patterns.len());
+    // Git semantics: a non-negated bare pattern (`target`, `/build`) also
+    // excludes the directory's whole subtree, not just an entry named
+    // `target`. Emit the descendant glob for ignore rules so
+    // `target/debug/app.o` is filtered even without a trailing slash. A
+    // negation (allow) rule only re-includes the named path, so it does
+    // not get the blanket descendant expansion.
+    let emit_descendants = matches!(action, RuleAction::Ignore);
+    let patterns = expand_glob_patterns(raw_pattern, base_directory, emit_descendants)?;
+    let mut globs = Vec::with_capacity(patterns.len());
 
     for pattern in patterns {
-        let matcher = GlobBuilder::new(&pattern)
+        let glob = GlobBuilder::new(&pattern)
             .literal_separator(true)
             .backslash_escape(true)
             .build()
-            .map_err(|error| error.to_string())?
-            .compile_matcher();
-        matchers.push(matcher);
+            .map_err(|error| error.to_string())?;
+        globs.push(glob);
     }
 
-    Ok(CompiledRule { action, matchers })
+    Ok(CompiledRule { action, globs })
 }
 
 fn expand_glob_patterns(
     raw_pattern: &str,
     base_directory: Option<&Path>,
+    emit_descendants: bool,
 ) -> Result<Vec<String>, String> {
     let anchored = raw_pattern.starts_with('/');
     let directory_only = raw_pattern.ends_with('/');
@@ -496,7 +567,7 @@ fn expand_glob_patterns(
         }
 
         patterns.push(resolved.clone());
-        if directory_only {
+        if directory_only || emit_descendants {
             patterns.push(format!("{resolved}/**"));
         }
     }
@@ -702,6 +773,31 @@ mod tests {
     }
 
     #[test]
+    fn ignore_files_inside_user_excluded_directories_do_not_leak_negations() {
+        let (_watch_root_guard, watch_root) = create_test_directory();
+        // A vendored package ships its own .gitignore with a re-include.
+        fs::create_dir_all(watch_root.join("vendor/pkg")).expect("nested dir");
+        fs::write(watch_root.join("vendor/pkg/.gitignore"), "!important.txt\n")
+            .expect("vendored .gitignore");
+
+        let filter = EventPathFilter::for_watch_root(
+            &watch_root,
+            &EventPathFilterOptions {
+                use_gitignore: true,
+                use_vaporignore: false,
+                // The user explicitly excludes the whole vendor tree.
+                pre_user_rules: vec!["vendor/".to_string()],
+                post_user_rules: Vec::new(),
+            },
+        );
+
+        // The vendored negation must not re-include content under the
+        // user-excluded directory: git never reads ignore files there.
+        assert!(filter.should_ignore(&watch_root.join("vendor/pkg/important.txt")));
+        assert!(filter.should_ignore(&watch_root.join("vendor/pkg/other.txt")));
+    }
+
+    #[test]
     fn recursively_loads_nested_vaporignore_files() {
         let (_watch_root_guard, watch_root) = create_test_directory();
         fs::create_dir_all(watch_root.join("apps/desktop"))
@@ -744,6 +840,30 @@ mod tests {
         assert!(filter.should_ignore(&watch_root.join("tmp/a.txt")));
         assert!(!filter.should_ignore(&watch_root.join("tmp/keep.txt")));
         assert!(filter.should_ignore(&watch_root.join("#literal-file")));
+    }
+
+    #[test]
+    fn bare_directory_pattern_ignores_the_directory_subtree() {
+        let (_watch_root_guard, watch_root) = create_test_directory();
+        let filter = EventPathFilter::for_watch_root(
+            &watch_root,
+            &EventPathFilterOptions {
+                use_gitignore: false,
+                use_vaporignore: false,
+                // Bare (no trailing slash) directory rules, git-style.
+                pre_user_rules: vec!["target".to_string(), "/build".to_string()],
+                post_user_rules: Vec::new(),
+            },
+        );
+
+        // The directory entry itself and its whole subtree are ignored.
+        assert!(filter.should_ignore(&watch_root.join("target")));
+        assert!(filter.should_ignore(&watch_root.join("target/debug/app.o")));
+        assert!(filter.should_ignore(&watch_root.join("crate/target/debug/x.rlib")));
+        assert!(filter.should_ignore(&watch_root.join("build/out.bin")));
+        // An anchored `build` rule does not match a nested build dir.
+        assert!(!filter.should_ignore(&watch_root.join("sub/build/out.bin")));
+        assert!(!filter.should_ignore(&watch_root.join("src/main.rs")));
     }
 
     #[test]

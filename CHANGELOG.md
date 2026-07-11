@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Ignore-rule filtering (full-repo review):
+  - A bare directory pattern (`target`, `/build`) now excludes the directory's whole subtree, matching git semantics — a Rust repo's `target` entry no longer left every build artifact watched, hashed, and uploaded.
+  - `should_ignore` now matches through a single compiled glob-set automaton instead of a per-event linear scan of every rule, so a monorepo with thousands of ignore lines no longer runs millions of regex evaluations per event burst on the fs-watch callback thread.
+  - Ignore files inside a user-excluded directory are no longer read (mirroring git), so a vendored `.gitignore`/`.vaporignore` negation can no longer re-include content the user opted out of, and startup discovery no longer descends huge excluded trees.
 - Multi-profile daemon blast-radius containment (full-repo review):
   - A profile with an invalid/misspelled provider is now suspended at composition (surfaced in status as `Error`) instead of falling back to a live no-op stub — which, for a pull-only profile, would have let the startup reconcile classify the whole local root as local-only and strict-mirror-delete it.
   - A suspended or panicking profile now reclaims the shared-workgate permits its in-flight transfers and running reconcile held, so healthy profiles are no longer starved of upload/hash/reconcile concurrency for the process lifetime.

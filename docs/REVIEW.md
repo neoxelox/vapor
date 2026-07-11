@@ -130,7 +130,7 @@ The "every profile has failed" exit condition is `ticked_profiles == 0 && failed
 
 **Suggested fix**: Base the exit decision on durable per-slot state, not on the per-tick report: exit only when self.slots.iter().all(|s| s.failed.is_some()). Alternatively count error-but-not-suspended ticks as live (e.g. a `live_profiles` count of slots with failed.is_none()).
 
-### [high] Bare directory patterns in gitignore/vaporignore files do not ignore the directory's contents
+### [high] Bare directory patterns in gitignore/vaporignore files do not ignore the directory's contents  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/path_filter.rs:464` · **Review group**: ingest
 
@@ -202,7 +202,7 @@ start_with_state_root uses `?` on per-profile startup steps — DurableStateDb::
 
 **Suggested fix**: Treat per-profile startup failures like tick failures: catch the error, mark that slot failed = Some(reason) (skipping its watcher), and continue composing the remaining profiles. Only fail start() when zero profiles could be composed.
 
-### [medium] should_ignore linearly evaluates every compiled rule per event on the fs-watch callback thread
+### [medium] should_ignore linearly evaluates every compiled rule per event on the fs-watch callback thread  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/path_filter.rs:195` · **Review group**: ingest
 
@@ -210,7 +210,7 @@ should_ignore runs a last-match-wins loop over all compiled rules, and each rule
 
 **Suggested fix**: Compile all patterns into a single globset::GlobSet and use matches_candidate_into to get the set of matching rule indices in one pass (last-match-wins = highest matching index), or use the `ignore` crate's Gitignore which is built for this. Both reduce per-event cost from O(rules) regex runs to one automaton pass.
 
-### [medium] Ignore rules (including negations) are loaded from ignore files inside user-ignored directories
+### [medium] Ignore rules (including negations) are loaded from ignore files inside user-ignored directories  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/path_filter.rs:232` · **Review group**: ingest
 
