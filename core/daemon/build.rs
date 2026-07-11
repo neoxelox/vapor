@@ -23,8 +23,11 @@ fn main() {
 
     let generated = format!(
         "pub const VERSION: &str = {:?};\n\
-pub const GIT_COMMIT_SHORT: &str = {:?};\n",
-        version, git_commit_short,
+pub const GIT_COMMIT_SHORT: &str = {:?};\n\
+pub const VERSION_WITH_COMMIT: &str = {:?};\n",
+        version,
+        git_commit_short,
+        format!("{version} ({git_commit_short})"),
     );
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));

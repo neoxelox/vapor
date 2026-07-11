@@ -1222,7 +1222,7 @@ The PKCE loopback flow in run_gdrive_pkce_flow (core/cli/src/commands/auth.rs:20
 
 **Suggested fix**: Generate a random `state` value, include it in the authorization URL, and loop on accept() (with per-connection read timeouts and an overall flow deadline) discarding any request whose state does not match; respond to error= redirects with a proper page before returning the error.
 
-### [medium] vapor.json read-modify-write has no locking and shares a fixed temp filename with the lifecycle autolaunch store — concurrent writes are lost or fail
+### [medium] vapor.json read-modify-write has no locking and shares a fixed temp filename with the lifecycle autolaunch store — concurrent writes are lost or fail  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/commands/config.rs:85` · **Review group**: cli-commands
 
@@ -1230,7 +1230,7 @@ vapor.json writers do unlocked read-modify-write and share the fixed staging nam
 
 **Suggested fix**: Use a unique temp name per writer (e.g. tempfile in the same directory / PID+random suffix) and serialize vapor.json writers with an advisory file lock (flock on a sidecar) shared by config.rs and the lifecycle stores, so a set() re-reads under the lock before publishing.
 
-### [medium] vapor auth login gdrive silently ignores the documented stdin-token path and blocks on a browser OAuth flow
+### [medium] vapor auth login gdrive silently ignores the documented stdin-token path and blocks on a browser OAuth flow  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/main.rs:470` · **Review group**: cli-core
 
@@ -1366,7 +1366,7 @@ Swift runtime-dir resolution (apps/macos/Sources/VaporCore/VaporPaths.swift:34) 
 
 **Suggested fix**: Drop the XCTestConfigurationFilePath special case (rely on scripts exporting VAPOR_DIR/VAPOR_ENV=dev as §8.5 mandates), or mirror the same trigger into runtime_paths.rs so both sides resolve identically.
 
-### [low] timelineEventLimit accepts negative and zero values that the daemon silently ignores
+### [low] timelineEventLimit accepts negative and zero values that the daemon silently ignores  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/commands/config.rs:128` · **Review group**: cli-commands
 
@@ -1422,7 +1422,7 @@ collect_support_bundle (core/cli/src/commands/support.rs:64-65) uses fs::create_
 
 **Suggested fix**: Use fs::create_dir for the bundle directory and disambiguate on AlreadyExists (append a counter or random suffix), and propagate an error instead of unwrap_or(0) when SystemTime is before the epoch.
 
-### [low] vapor --version omits the git commit, diverging from vapor version, vapord --version, and the documented contract
+### [low] vapor --version omits the git commit, diverging from vapor version, vapord --version, and the documented contract  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/main.rs:25` · **Review group**: cli-core
 
@@ -1438,7 +1438,7 @@ dispatch_support_bundle (core/cli/src/main.rs:356) requires all three IPC captur
 
 **Suggested fix**: Capture each endpoint independently (Option per artifact), set daemon_reachable when at least the status call succeeded, and record per-endpoint capture errors in the manifest so partial failures are visible instead of silent.
 
-### [low] vapor timeline help and empty-state message falsely claim the C8-30 timeline buffer has not shipped
+### [low] vapor timeline help and empty-state message falsely claim the C8-30 timeline buffer has not shipped  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/main.rs:421` · **Review group**: cli-core
 
@@ -1454,7 +1454,7 @@ The vapor CLI never handles SIGPIPE/EPIPE: Rust std sets SIGPIPE to SIG_IGN befo
 
 **Suggested fix**: Write output through a locked io::stdout() with writeln!, treat ErrorKind::BrokenPipe as clean success (exit 0), and map other write errors to exit 1. Alternatively restore SIGPIPE to SIG_DFL on unix at the top of main().
 
-### [low] Explicit --token accepts empty/whitespace values that the stdin path rejects, storing a useless credential
+### [low] Explicit --token accepts empty/whitespace values that the stdin path rejects, storing a useless credential  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/main.rs:537` · **Review group**: cli-core
 

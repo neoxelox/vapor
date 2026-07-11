@@ -22,7 +22,9 @@ use vapor_cli::{
 #[derive(Parser, Debug)]
 #[command(
     name = "vapor",
-    version = vapor_daemon::build_info::VERSION,
+    // Include the git commit so `vapor --version` matches `vapor version`
+    // and `vapord --version` (clap prepends the binary name).
+    version = vapor_daemon::build_info::VERSION_WITH_COMMIT,
     about = "Vapor CLI — control plane for the portable Rust runtime",
 )]
 struct Cli {
@@ -426,9 +428,7 @@ fn dispatch_timeline(json: bool) -> Result<ExitCode, String> {
         let serialized = serde_json::to_string_pretty(&timeline).map_err(|e| e.to_string())?;
         println!("{serialized}");
     } else if timeline.entries.is_empty() {
-        println!(
-            "(timeline is empty — Wave 7 ships the IPC seam; in-memory buffer lands with C8-30)"
-        );
+        println!("(no timeline events recorded yet)");
     } else {
         for entry in &timeline.entries {
             println!(
@@ -473,10 +473,16 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
             profile,
         } => {
             // Google Drive without an explicit --token runs the full
-            // OAuth-PKCE browser flow; every other path keeps
-            // the explicit/stdin token behavior.
-            let token = if provider == vapor_shared::constants::provider::GDRIVE && token.is_none()
-            {
+            // OAuth-PKCE browser flow — but only interactively. When stdin
+            // is not a TTY (`echo "$TOKEN" | vapor auth login gdrive`, CI,
+            // automation) fall back to the documented stdin read instead of
+            // binding a loopback listener and blocking forever on a browser
+            // redirect that will never come.
+            use std::io::IsTerminal;
+            let interactive_gdrive = provider == vapor_shared::constants::provider::GDRIVE
+                && token.is_none()
+                && std::io::stdin().is_terminal();
+            let token = if interactive_gdrive {
                 auth_cmd::run_gdrive_pkce_flow()?
             } else {
                 resolve_auth_token(token)?
@@ -543,11 +549,18 @@ fn resolve_auth_token(token: Option<String>) -> Result<String, String> {
             Ok(token.to_string())
         }
         Some(value) => {
+            // Trim and reject empty like the stdin path: an explicit
+            // `--token ""` (or unset `$TOKEN`) otherwise stores a useless
+            // empty credential that reports as "bound but broken".
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err("no token provided".to_string());
+            }
             eprintln!(
                 "vapor: warning: passing --token on the command line exposes the secret to \
                  shell history and process listings; prefer piping it via stdin (`--token -`)."
             );
-            Ok(value.to_string())
+            Ok(trimmed.to_string())
         }
     }
 }

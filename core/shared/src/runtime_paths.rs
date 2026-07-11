@@ -52,6 +52,44 @@ fn ci_is_truthy() -> bool {
         .unwrap_or(false)
 }
 
+/// Runs `body` while holding an exclusive advisory lock on a sidecar
+/// (`<config_path>.lock`), serializing `vapor.json` read-modify-write
+/// across every surface (CLI, daemon, app) and process. Without it two
+/// writers can each read the same document and the last rename silently
+/// drops the other's change. The lock releases when `body` returns.
+pub fn with_config_lock<T, E>(
+    config_path: &std::path::Path,
+    body: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<std::io::Error>,
+{
+    let mut lock_path = config_path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock_path = PathBuf::from(lock_path);
+    if let Some(parent) = lock_path.parent() {
+        ensure_private_directory(parent).map_err(E::from)?;
+    }
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(E::from)?;
+    // Blocking exclusive advisory lock (flock on Unix, LockFileEx on
+    // Windows). Released when `lock_file` drops at the end of this fn.
+    lock_file.lock().map_err(E::from)?;
+    body()
+}
+
+/// A unique temp path next to `target` for an atomic write, so concurrent
+/// writers never collide on one shared staging filename.
+pub fn unique_temp_path(target: &std::path::Path) -> PathBuf {
+    let mut name = target.as_os_str().to_owned();
+    name.push(format!(".vapor-tmp-{}", std::process::id()));
+    PathBuf::from(name)
+}
+
 pub fn logs_directory() -> PathBuf {
     vapor_directory().join(constants::runtime::LOGS_DIRECTORY_NAME)
 }

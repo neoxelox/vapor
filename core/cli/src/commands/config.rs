@@ -66,26 +66,54 @@ pub fn get(path: &Path, key: &str) -> Result<Option<String>, ConfigError> {
 /// Swift `VaporConfigurationStore` doesn't lose state on next read.
 pub fn set(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
     validate_key(key)?;
-    let mut document = read_or_empty_object(path)?;
     let new_value = parse_value_for_key(key, value)?;
 
-    let object = document
-        .as_object_mut()
-        .expect("read_or_empty_object returns an object");
-    object.insert(key.to_string(), new_value);
+    // Serialize the whole read-modify-write against every other vapor.json
+    // writer (the daemon, the app, a concurrent CLI): otherwise two writers
+    // each read the same document and the last rename silently drops the
+    // other's key.
+    vapor_shared::runtime_paths::with_config_lock(path, || {
+        let mut document = read_or_empty_object(path)?;
+        let object = document
+            .as_object_mut()
+            .expect("read_or_empty_object returns an object");
+        object.insert(key.to_string(), new_value);
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        if let Some(parent) = path.parent() {
+            // 0700 parent (not umask 0755): config holds sync-root paths.
+            vapor_shared::runtime_paths::ensure_private_directory(parent)?;
+        }
+        let mut serialized = serde_json::to_string_pretty(&document)
+            .map_err(|error| ConfigError::Parse(error.to_string()))?;
+        serialized.push('\n');
+
+        // Unique per-writer temp name so a concurrent write cannot clobber
+        // or ENOENT our staging file.
+        let tmp_path = vapor_shared::runtime_paths::unique_temp_path(path);
+        write_private(&tmp_path, serialized.as_bytes())?;
+        fs::rename(&tmp_path, path)?;
+        Ok(())
+    })
+}
+
+/// Writes `contents` to `path`, creating it 0600 on Unix.
+fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(constants::runtime::PRIVATE_FILE_MODE)
+            .open(path)?;
+        file.write_all(contents)
     }
-    let serialized = serde_json::to_string_pretty(&document)
-        .map_err(|error| ConfigError::Parse(error.to_string()))?;
-    let mut serialized = serialized;
-    serialized.push('\n');
-
-    let tmp_path = path.with_extension("vapor-tmp");
-    fs::write(&tmp_path, serialized.as_bytes())?;
-    fs::rename(&tmp_path, path)?;
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents)
+    }
 }
 
 fn validate_key(key: &str) -> Result<(), ConfigError> {
@@ -126,10 +154,18 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
         };
     }
     if key == KEY_TIMELINE_LIMIT {
-        return raw
-            .parse::<i64>()
-            .map(|value| Value::Number(value.into()))
-            .map_err(|error| ConfigError::Parse(format!("expected integer for '{key}': {error}")));
+        let parsed = raw.parse::<i64>().map_err(|error| {
+            ConfigError::Parse(format!("expected integer for '{key}': {error}"))
+        })?;
+        // The daemon silently ignores non-positive limits (keeps the
+        // default), so storing one would leave config and behavior in
+        // permanent disagreement — reject it here.
+        if parsed < 1 {
+            return Err(ConfigError::Parse(format!(
+                "'{key}' must be a positive integer, got {parsed}"
+            )));
+        }
+        return Ok(Value::Number(parsed.into()));
     }
     if key == KEY_PROVIDER {
         return parse_enum_value(key, raw, constants::provider::ALL);
@@ -265,5 +301,21 @@ mod tests {
         let error = set(&path, "syncMode", "mirror").expect_err("unknown mode");
         assert!(matches!(error, ConfigError::Parse(_)));
         assert!(error.to_string().contains("two-way"));
+    }
+
+    #[test]
+    fn timeline_limit_rejects_non_positive_values() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        set(&path, "timelineLimit", "500").expect("positive accepted");
+        for bad in ["0", "-100"] {
+            let error = set(&path, "timelineLimit", bad).expect_err("non-positive rejected");
+            assert!(matches!(error, ConfigError::Parse(_)), "got {error:?}");
+        }
+        // The valid value from the first set is intact.
+        assert_eq!(
+            get(&path, "timelineLimit").expect("get").as_deref(),
+            Some("500")
+        );
     }
 }
