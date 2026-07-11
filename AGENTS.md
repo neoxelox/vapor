@@ -141,12 +141,13 @@ must never violate.
 
 - Release artifacts are produced from a script-first pipeline, not an IDE
   archive flow. Every platform packaging script is CI-runnable.
-- Release secrets live in an isolated GitHub Environment, never as
-  repository-wide secrets. Today that is the single `release`
-  environment holding the macOS signing/notarization secrets; when a
-  new platform starts shipping, it gets its own environment
-  (`release-windows`, `release-linux`) so secrets never cross-leak
-  between platform release jobs.
+- Each shipping platform gets an isolated GitHub Environment holding
+  its release secrets (`release-macos` today; `release-windows` /
+  `release-linux` when those platforms ship), never repository-wide
+  secrets. Secrets never cross-leak between platform release jobs.
+  The `vapor` CLI has no environment of its own: CLI artifacts are
+  signed and published by each platform's release job under that
+  platform's environment (see §7.5).
 - App/daemon version compatibility rules must be maintained and tested
   per OS.
 - Product release version source-of-truth is the repository root `VERSION`
@@ -204,7 +205,10 @@ Lands with `apps/linux`. Expected controls: GPG-signed AppImage first;
 Pure Rust binaries per supported target triple, zstd-compressed, checksummed.
 Signing follows the host-OS policy (Developer ID on macOS, EV cert on
 Windows, GPG signature on Linux). Published alongside platform installers
-under the same GitHub Release tag.
+under the same GitHub Release tag. CLI release jobs run under the owning
+platform's GitHub Environment (`release-macos`, `release-windows`,
+`release-linux`); there is no separate `release-cli` environment because
+the CLI has no secrets or trust chain of its own.
 
 ## 8) Engineering standards
 

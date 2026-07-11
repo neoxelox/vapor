@@ -17,10 +17,11 @@ concrete policy for each platform lives in the per-platform doc below.
 
 - Release artifacts are produced from a script-first pipeline, not an IDE
   archive flow.
-- Release secrets live in an isolated GitHub Environment, never as
-  repository-wide secrets. Today that is the single `release`
-  environment (macOS signing/notarization); each new shipping platform
-  gets its own environment (`release-windows`, `release-linux`).
+- Each shipping platform owns an isolated GitHub Environment for its
+  release secrets (`release-macos` today; `release-windows` /
+  `release-linux` when those platforms ship). The `vapor` CLI has no
+  environment of its own: its artifacts are signed and published by
+  each platform's release job under that platform's environment.
 - Each platform's signing secrets and notarization/signing tools never
   cross-leak into another platform's release job.
 - Rollback artifacts are preserved per platform for every release.

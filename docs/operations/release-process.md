@@ -45,22 +45,22 @@ Release invariants:
 - `Cargo.lock` refreshed after the version change so workspace package versions stay aligned.
 - Run release preparation from `main`.
 - Before invoking `./scripts/version.sh`, the worktree must be clean except for `CHANGELOG.md`.
-- GitHub Environment `release` exists and is configured for release jobs.
+- GitHub Environment `release-macos` exists and is configured for release jobs.
 - For stable releases:
-  - `VAPOR_SIGN_IDENTITY` configured in the `release` environment secrets.
-  - `VAPOR_NOTARY_PROFILE` configured in the `release` environment secrets.
-  - `APPLE_DEVELOPER_ID_P12_BASE64` configured in the `release` environment secrets.
-  - `APPLE_DEVELOPER_ID_P12_PASSWORD` configured in the `release` environment secrets.
-  - `APPLE_KEYCHAIN_PASSWORD` configured in the `release` environment secrets.
-  - `APPLE_NOTARY_API_KEY_P8_BASE64` configured in the `release` environment secrets.
-  - `APPLE_NOTARY_KEY_ID` configured in the `release` environment secrets.
-  - `APPLE_NOTARY_ISSUER_ID` configured in the `release` environment secrets when using an App Store Connect Team key; omit it for Individual keys.
+  - `VAPOR_SIGN_IDENTITY` configured in the `release-macos` environment secrets.
+  - `VAPOR_NOTARY_PROFILE` configured in the `release-macos` environment secrets.
+  - `APPLE_DEVELOPER_ID_P12_BASE64` configured in the `release-macos` environment secrets.
+  - `APPLE_DEVELOPER_ID_P12_PASSWORD` configured in the `release-macos` environment secrets.
+  - `APPLE_KEYCHAIN_PASSWORD` configured in the `release-macos` environment secrets.
+  - `APPLE_NOTARY_API_KEY_P8_BASE64` configured in the `release-macos` environment secrets.
+  - `APPLE_NOTARY_KEY_ID` configured in the `release-macos` environment secrets.
+  - `APPLE_NOTARY_ISSUER_ID` configured in the `release-macos` environment secrets when using an App Store Connect Team key; omit it for Individual keys.
 - Optional:
   - `VAPOR_ENTITLEMENTS` path override when needed.
 
 ## GitHub release environment setup
 
-- Create a GitHub Actions environment named `release` before the first tagged release.
+- Create a GitHub Actions environment named `release-macos` before the first tagged release.
 - Grant the environment required reviewers if you want a human approval gate before signing/notarization starts.
 - Move Apple signing and notarization secrets into that environment instead of leaving them as repository-wide secrets.
 - Keep workflow permissions least-privilege:

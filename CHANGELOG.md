@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The macOS release pipeline targets the `release-macos` GitHub Environment (was `release`), establishing the per-platform environment convention (`release-windows` / `release-linux` when those platforms ship; the CLI shares the owning platform's environment). The new environment already exists in repository settings; the old one carried no secrets or protection rules.
 - The diagnostics timeline cap config key is `timelineLimit` (was `timelineEventLimit` earlier in this unreleased cycle): `vapor.json`, `vapor config get/set`, and the macOS app settings store all use the new name. No released version ever shipped the old name; dev setups carrying `timelineEventLimit` in `vapor.json` should rename the field — the old key is now ignored and the default of 1000 applies.
 - Cleaned code comments across the runtime, apps, and scripts: removed all internal task-list references (task ids, wave/phase numbers, `docs/tasks/*` pointers) from code comments and stub error messages, corrected comments that had gone stale against shipped behavior (OAuth-PKCE login flow, diagnostics timeline), and trimmed historical narration. No behavior change.
 
