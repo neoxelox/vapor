@@ -1548,7 +1548,7 @@ make_repo's `git -C "$repo" commit` (line 90) — and the release commits create
 | low | improvement | `Cargo.toml:13` | No [workspace.dependencies] inheritance: pinned '=' versions hand-duplicated across seven manifests |
 | low | improvement | `README.md:14` | README Install states Windows/Linux are 'in flight', but the roadmap classifies them as deferred/optional and not committed |
 
-### [medium] Gitignored VaporCore Resources directory makes a fresh clone fail `swift build` outright
+### [medium] Gitignored VaporCore Resources directory makes a fresh clone fail `swift build` outright  ✅ DONE
 
 **Category**: improvement · **Where**: `.gitignore:55`
 
@@ -1556,7 +1556,7 @@ The entire apps/macos/Sources/VaporCore/Resources/locales/ mirror is gitignored 
 
 **Suggested fix**: Narrow the ignore to the generated JSON files (e.g. `apps/macos/Sources/VaporCore/Resources/locales/*.json`) and track a placeholder (`!.../locales/.gitkeep`) so the Resources tree always exists, or generate the mirror via a SwiftPM build-tool plugin so plain `swift build` is self-sufficient.
 
-### [medium] README claims VAPOR_* env vars override every vapor.json key, but only 6 of 15 keys have env counterparts
+### [medium] README claims VAPOR_* env vars override every vapor.json key, but only 6 of 15 keys have env counterparts  ✅ DONE
 
 **Category**: bug · **Where**: `README.md:77`
 
@@ -1572,7 +1572,7 @@ The production `lifecycleManagerFactory` (`{ _ in AppShellViewModel.makeDefaultL
 
 **Suggested fix**: Since the factory deliberately ignores configuration, stop recreating the manager on config saves (keep one instance for the app's lifetime), or if recreation is ever needed, hand the new manager to the health monitor and drain in-flight operations first.
 
-### [low] vapor-debug skill misstates timeline availability and omits two durable-DB tables
+### [low] vapor-debug skill misstates timeline availability and omits two durable-DB tables  ✅ DONE
 
 **Category**: improvement · **Where**: `.agents/skills/vapor-debug/SKILL.md:58`
 
@@ -1580,7 +1580,7 @@ Two factual doc/code mismatches that steer a debugging agent wrong: (1) line 58 
 
 **Suggested fix**: Drop the C8-30 caveat (timeline now returns real activity events) and extend the table list at line 45 with `sync_index` and `tombstones`.
 
-### [low] vapor-e2e skill's 'Known limits' describes pre-Wave-8 behavior that no longer exists
+### [low] vapor-e2e skill's 'Known limits' describes pre-Wave-8 behavior that no longer exists  ✅ DONE
 
 **Category**: improvement · **Where**: `.agents/skills/vapor-e2e/SKILL.md:107`
 
@@ -1588,7 +1588,7 @@ The skill states 'The stub provider has no cloud side: the suite proves pipeline
 
 **Suggested fix**: Rewrite the 'Known limits (today)' section and line 43: default provider is the filesystem reference provider with real byte replication (asserted by S10), and `vapor timeline` returns real activity events; remove the C8-30 caveat.
 
-### [low] Dead gitignore negation: !.cursor/environment.json can never re-include the file
+### [low] Dead gitignore negation: !.cursor/environment.json can never re-include the file  ✅ DONE
 
 **Category**: bug · **Where**: `.gitignore:66`
 
@@ -1604,7 +1604,7 @@ Shared external deps are hand-duplicated with exact `=` pins across all seven cr
 
 **Suggested fix**: Add a [workspace.dependencies] table in the root Cargo.toml with the single pinned version per crate (and shared feature sets), and switch member manifests to `dep.workspace = true`; the daemon's Windows-only bundled-rusqlite override can stay as `features = ["bundled"]` layered on the workspace entry.
 
-### [low] README Install states Windows/Linux are 'in flight', but the roadmap classifies them as deferred/optional and not committed
+### [low] README Install states Windows/Linux are 'in flight', but the roadmap classifies them as deferred/optional and not committed  ✅ DONE
 
 **Category**: improvement · **Where**: `README.md:14`
 

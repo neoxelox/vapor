@@ -40,8 +40,10 @@ Full process doc: `docs/development/e2e-verification.md`. Policy:
 - Never run `vapor service install` / `launchctl` mutations, and never
   open the macOS app or any packaged app — UI verification is the
   project owner's job.
-- No network. Today's default provider is the inert filesystem stub;
-  the live cloud tier is future work and explicitly gated.
+- No network. The default provider is the real filesystem reference
+  provider (a local directory playing the cloud role), so the suite
+  asserts real byte-for-byte replication; the live cloud tier (Google
+  Drive against a real account) is future work and explicitly gated.
 - Residue is removed by `rm -rf` of the run directory or
   `./scripts/clean.sh`. Stop any daemon you started (`kill -TERM
   <pid>`) before finishing.
@@ -104,11 +106,13 @@ Finish by stopping the daemon (`kill -TERM <pid>`, verify with
 
 ## Known limits (today)
 
-- The stub provider has no cloud side: the suite proves pipeline
-  convergence (watch → debounce → durable queue → executor → drained),
-  not byte replication. Replication assertions arrive with the Wave 8
-  filesystem reference provider.
-- `vapor timeline` returns an empty list until C8-30 lands.
+- The filesystem reference provider is a local directory, not a real
+  cloud: the suite proves both pipeline convergence (watch → debounce →
+  durable queue → executor → drained) and real byte-for-byte
+  local→cloud→local replication (S10). Live cloud-provider E2E (real
+  Google Drive) is a separate, explicitly-gated future tier.
+- `vapor timeline` returns real activity events (an empty list just means
+  none were recorded yet).
 - macOS caps Unix-socket paths (~104 bytes). Over-budget `VAPOR_DIR`s
   relocate the socket deterministically under the OS temp dir (S9
   covers it; `vapor doctor` explains it) — so a daemon that seems

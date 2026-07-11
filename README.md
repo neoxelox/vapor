@@ -11,7 +11,7 @@ Vapor is an invisible-first cloud sync app that stays out of your way. It keeps 
 Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/vapor/releases) page.
 
 - **macOS**: install the `Vapor` app bundle (`Vapor.zip`) from the latest release assets.
-- **Windows / Linux**: in flight. The CLI (`vapor`) will ship for Windows and Linux before the GUI apps do.
+- **Windows / Linux**: planned, not yet committed. The portable Rust runtime already compiles on Windows and Linux; app and CLI distribution for those platforms will follow if and when the project owner opens a non-macOS surface (the CLI would ship before the GUI apps).
 - **CLI (`vapor`)**: the command-line tool ships alongside every platform's installer under the same release tag.
 
 ## Features
@@ -59,7 +59,7 @@ In flight and coming next:
 
 All user-facing configuration is documented here with meaning and defaults.
 
-All persisted user configuration lives in `<vapor_dir>/vapor.json`; Vapor reads it at startup, so changes apply the next time it starts. Matching `VAPOR_*` environment variables, when set, take priority over the file.
+All persisted user configuration lives in `<vapor_dir>/vapor.json`; Vapor reads it at startup, so changes apply the next time it starts. A subset of keys can be overridden by an environment variable that takes priority over the file: `VAPOR_LOCAL_SYNC_DIRECTORY`, `VAPOR_CLOUD_SYNC_DIRECTORY`, `VAPOR_USE_GITIGNORE`, `VAPOR_USE_VAPORIGNORE`, `VAPOR_PRE_IGNORE_RULES`, and `VAPOR_POST_IGNORE_RULES` (plus the runtime-location variables `VAPOR_DIR` / `VAPOR_ENV`, the log level `VAPOR_LOG_LEVEL`, and the Google Drive credentials `VAPOR_GDRIVE_CLIENT_ID` / `VAPOR_GDRIVE_CLIENT_SECRET`). Other keys — including `syncMode`, `provider`, `profiles`, `resourceLimits`, and `idleBoost` — have no environment override and are configured only in `vapor.json`.
 
 | Key                  | Type     | Default                                             | Description                                                                              |
 | -------------------- | -------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |

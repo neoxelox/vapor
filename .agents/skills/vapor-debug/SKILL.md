@@ -42,7 +42,7 @@ Inside `VAPOR_DIR`:
 |----------|------|
 | Config | `vapor.json` |
 | Daemon log | `logs/vapord.logs` |
-| Durable queue/state DB | `state/vapor.sqlite` (tables: `queue_intents`, `failed_intents`, `state_entries`, `schema_meta`) |
+| Durable queue/state DB | `state/vapor.sqlite` (tables: `queue_intents`, `failed_intents`, `state_entries`, `sync_index`, `tombstones`, `schema_meta`) |
 | IPC socket (framed JSON over UDS — Vapor does not use XPC) | `vapord.sock` |
 | Singleton lock | `vapord.lock` |
 
@@ -55,7 +55,7 @@ The `vapor` CLI is the fastest signal — use it before reading raw files:
 - `vapor status --json` — run state, throttle state + reason, provider, daemon id. "daemon not running" vs "daemon is not responding" are different failures (no socket vs wedged process).
 - `vapor doctor` — sanity probes (vapor_dir writable/private, `vapord` binary discoverable, LaunchAgent plist present).
 - `vapor logs --tail 100` — recent daemon log lines, already redacted.
-- `vapor timeline --json` — diagnostics timeline (empty until C8-30 lands; don't be surprised).
+- `vapor timeline --json` — diagnostics activity timeline (real events; an empty list means nothing has been recorded yet, not that the feature is missing).
 - `launchctl list | grep sh.arn.vapor` and `ps aux | grep vapord` — is the service loaded / process alive? (The LaunchAgent label is `sh.arn.vapor.daemon`.)
 
 ### Step 2 — Gather logs and crash reports
