@@ -15,6 +15,9 @@ vapor-platform = { path = "../platform" }
 vapor-providers = { path = "../providers" }
 vapor-shared = { path = "../shared" }
 
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.183"
+
 [dev-dependencies]
 tempfile = "=3.27.0"
 

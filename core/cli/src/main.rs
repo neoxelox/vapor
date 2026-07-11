@@ -230,6 +230,14 @@ enum ServiceAction {
 }
 
 fn main() -> ExitCode {
+    // Rust's runtime sets SIGPIPE to ignore, which turns writes to a
+    // closed pipe (`vapor logs | head -1`) into stdout panics. Restore
+    // the default die-on-SIGPIPE so the CLI behaves like standard Unix
+    // tools in pipelines.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     match dispatch(cli) {
         Ok(code) => code,

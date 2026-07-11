@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- The `vapor` CLI no longer panics with "failed printing to stdout: Broken pipe" when a downstream pipe reader exits early (`vapor logs | head -1`, `vapor status --json | grep -q ...`): default SIGPIPE handling is restored on Unix so the CLI behaves like standard tools in pipelines. The Tier E2E harness also stopped closing pipes on the CLI mid-write (capture-then-match), removing a timing-dependent CI failure.
+
 ### Changed
 
 - Cleaned code comments across the runtime, apps, and scripts: removed all internal task-list references (task ids, wave/phase numbers, `docs/tasks/*` pointers) from code comments and stub error messages, corrected comments that had gone stale against shipped behavior (OAuth-PKCE login flow, diagnostics timeline), and trimmed historical narration. No behavior change.

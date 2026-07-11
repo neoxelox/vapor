@@ -214,7 +214,9 @@ enqueue_high_water() {
 }
 
 run_state_is() {
-  "$VAPOR_BIN" status --json 2>/dev/null | grep -q "\"run_state\": \"$1\""
+  local out
+  out="$("$VAPOR_BIN" status --json 2>/dev/null)" || return 1
+  grep -q "\"run_state\": \"$1\"" <<<"$out"
 }
 
 queue_drained() {
@@ -392,7 +394,8 @@ wait_until 30 "deep-VAPOR_DIR daemon to be reachable over the relocated socket" 
   || fail "S9: daemon with over-budget socket path is not reachable via vapor status"
 [[ ! -S "$DEEP_HOME/vapord.sock" ]] \
   || fail "S9: socket bound at the canonical over-budget path instead of relocating"
-VAPOR_DIR="$DEEP_HOME" "$VAPOR_BIN" doctor | grep -q "rendezvous" \
+deep_doctor_out="$(VAPOR_DIR="$DEEP_HOME" "$VAPOR_BIN" doctor)" \
+  && grep -q "rendezvous" <<<"$deep_doctor_out" \
   || fail "S9: vapor doctor does not explain the socket relocation"
 deep_socket="$(grep "relocated under the OS temp directory" "$DEEP_HOME/logs/vapord.logs" \
   | tail -n 1 | sed 's/.*socket_path=\([^ ]*\).*/\1/')"
@@ -479,11 +482,12 @@ log "PASS S12 — pull-only mirror: cloud materialized locally; local-only file 
 
 # S13 — CLI observability: per-intent diagnostics answer over
 # IPC and the support bundle exports with live captures.
-"$VAPOR_BIN" diagnostics --json | grep -q '"schema_version"' \
+diagnostics_out="$("$VAPOR_BIN" diagnostics --json)" \
+  && grep -q '"schema_version"' <<<"$diagnostics_out" \
   || fail "S13: vapor diagnostics --json did not answer"
 SUPPORT_OUT="$E2E_ROOT/support"
-"$VAPOR_BIN" support-bundle --output "$SUPPORT_OUT" --json \
-  | grep -q '"daemonReachable": true' \
+support_out="$("$VAPOR_BIN" support-bundle --output "$SUPPORT_OUT" --json)" \
+  && grep -q '"daemonReachable": true' <<<"$support_out" \
   || fail "S13: support bundle did not capture the live daemon"
 compgen -G "$SUPPORT_OUT/vapor-support-*/manifest.json" >/dev/null \
   || fail "S13: support bundle manifest missing"
@@ -520,9 +524,10 @@ log "PASS S14 — ignore rules hold in both directions; no conflict copies for i
 # copy S11 left behind (the files are the durable registry — no
 # timeline cap applies), `resolve --keep copy` promotes the preserved
 # version, and the resolution syncs like any other edit.
-"$VAPOR_BIN" conflicts list --json | grep -q 'e2e-conflict~conflict-' \
+conflicts_out="$("$VAPOR_BIN" conflicts list --json)" \
+  && grep -q 'e2e-conflict~conflict-' <<<"$conflicts_out" \
   || fail "S15: conflicts list did not find the S11 conflict copy"
-"$VAPOR_BIN" conflicts list --json | grep -q '"deviceId"' \
+grep -q '"deviceId"' <<<"$conflicts_out" \
   || fail "S15: conflict record is missing the origin device id"
 # S11 can preserve a divergent copy per side; promote the first and
 # discard any others so the scope ends conflict-free.
@@ -544,7 +549,8 @@ no_cloud_conflict_copy() { ! conflict_copy_exists "$CLOUD_ROOT" "e2e-conflict"; 
 wait_until 30 "resolved conflict copy to disappear from the cloud root" \
   no_cloud_conflict_copy \
   || fail "S15: resolution did not propagate the copy's deletion to the cloud"
-"$VAPOR_BIN" conflicts list --json | grep -q '"conflicts": \[\]' \
+conflicts_after_out="$("$VAPOR_BIN" conflicts list --json)" \
+  && grep -q '"conflicts": \[\]' <<<"$conflicts_after_out" \
   || fail "S15: conflicts list is not empty after resolution"
 log "PASS S15 — conflicts listed from durable file state; resolve promoted the copy and synced"
 
@@ -574,6 +580,15 @@ converge 30 || fail "S17: queue did not drain with a FIFO in the watched root"
 [[ ! -e "$CLOUD_ROOT/e2e-pipe.fifo" ]] \
   || fail "S17: a special file produced a remote object"
 log "PASS S17 — special files are ignored; queue drains with a FIFO present"
+
+# S18 — pipeline friendliness: a downstream reader that closes the pipe
+# early (head, grep -q) must not make the CLI panic. The CLI restores
+# default SIGPIPE handling, so it dies silently like standard Unix
+# tools instead of printing a stdout panic.
+sigpipe_err="$( { "$VAPOR_BIN" logs 2>&1 | head -n 1 >/dev/null; } 2>&1 || true )"
+[[ "$sigpipe_err" != *panicked* ]] \
+  || fail "S18: vapor logs | head -1 panicked on SIGPIPE: $sigpipe_err"
+log "PASS S18 — early-closed pipe does not panic the CLI"
 
 # --- service lifecycle round-trip (--full only) ---
 #
@@ -619,7 +634,9 @@ expect_last() {
 }
 
 service_status_is() {
-  "$VAPOR_BIN" service status --json 2>/dev/null | grep -q "\"status\": \"$1\""
+  local out
+  out="$("$VAPOR_BIN" service status --json 2>/dev/null)" || return 1
+  grep -q "\"status\": \"$1\"" <<<"$out"
 }
 
 daemon_pid_from_launchd() {

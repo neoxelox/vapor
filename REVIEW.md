@@ -1446,7 +1446,7 @@ The `vapor timeline` subcommand help (core/cli/src/main.rs:77-78) and its empty-
 
 **Suggested fix**: Update the Timeline subcommand doc comment and change the empty-state message to something like "(no timeline events recorded yet)".
 
-### [low] println!-based output panics on closed stdout (broken pipe) — vapor logs | head exits 101 with a panic message
+### [low] println!-based output panics on closed stdout (broken pipe) — vapor logs | head exits 101 with a panic message ✅ FIXED in this PR
 
 **Category**: bug · **Where**: `core/cli/src/main.rs:453` · **Review group**: cli-core
 
