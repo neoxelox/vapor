@@ -204,3 +204,45 @@ func absentDeviceIdIsNotInventedByTheApp() throws {
   let object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
   #expect(object["deviceId"] == nil, "the daemon owns device-id generation")
 }
+
+@Test
+func saveMergesOntoDiskAndPreservesDaemonOwnedKeys() throws {
+  let fileManager = FileManager.default
+  let rootURL = fileManager.temporaryDirectory
+    .appendingPathComponent("vapor-config-merge-tests")
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+  defer { try? fileManager.removeItem(at: rootURL) }
+
+  let store = VaporConfigurationStore(
+    fileManager: fileManager,
+    environment: ["VAPOR_DIR": rootURL.path]
+  )
+  // App loads its snapshot at launch.
+  var appConfig = store.load()
+
+  // Meanwhile the daemon/CLI writes daemon-owned keys straight to disk.
+  let configURL = VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL)
+  let daemonWritten = """
+    {
+      "autoLaunch": true,
+      "deviceId": "device-xyz",
+      "syncMode": "pull-only",
+      "provider": "gdrive"
+    }
+    """
+  try Data(daemonWritten.utf8).write(to: configURL)
+
+  // The app saves its (stale) snapshot after a settings toggle.
+  appConfig.useGitIgnore = false
+  try store.save(appConfig)
+
+  let reloaded = store.load()
+  // The app-modeled change applied...
+  #expect(reloaded.useGitIgnore == false)
+  // ...and the daemon-owned keys survived (not clobbered by the stale
+  // snapshot).
+  #expect(reloaded.deviceId == "device-xyz")
+  #expect(reloaded.additionalKeys["syncMode"] == .string("pull-only"))
+  #expect(reloaded.additionalKeys["provider"] == .string("gdrive"))
+}

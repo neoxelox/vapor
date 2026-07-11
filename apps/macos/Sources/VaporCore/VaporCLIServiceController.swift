@@ -23,6 +23,7 @@ public enum VaporCLIServiceError: Error, Equatable {
   case cliExecutableMissing(path: String)
   case commandFailed(arguments: [String], exitCode: Int32, standardError: String)
   case malformedResponse(arguments: [String], detail: String)
+  case timedOut(arguments: [String], seconds: Int)
 }
 
 /// Spawns the bundled `vapor` binary as a subprocess. The app's
@@ -38,6 +39,12 @@ public struct ProcessVaporCLIRunner: VaporCLIRunning {
     self.fileManager = fileManager
   }
 
+  /// Upper bound on a single CLI invocation. Lifecycle commands round-trip
+  /// through `launchctl` and can take a second or two; this only fires when
+  /// the child is genuinely wedged (a stalled launchctl, lock contention),
+  /// so it must never permanently freeze the lifecycle queue.
+  static let timeoutSeconds = 30
+
   public func run(arguments: [String]) throws -> VaporCLIResult {
     guard fileManager.isExecutableFile(atPath: cliExecutableURL.path) else {
       throw VaporCLIServiceError.cliExecutableMissing(path: cliExecutableURL.path)
@@ -52,18 +59,52 @@ public struct ProcessVaporCLIRunner: VaporCLIRunning {
     process.standardOutput = outputPipe
     process.standardError = errorPipe
 
-    try process.run()
-    process.waitUntilExit()
+    // Drain both pipes concurrently, BEFORE waiting: a child that writes
+    // more than the ~64KB pipe buffer (a Rust panic backtrace, verbose
+    // stderr) would otherwise block in write() while we block in
+    // waitUntilExit() — a permanent deadlock that freezes every serialized
+    // lifecycle operation.
+    let outputBox = DataBox()
+    let errorBox = DataBox()
+    let drains = DispatchGroup()
+    let drainQueue = DispatchQueue(label: "sh.arn.vapor.cli-drain", attributes: .concurrent)
+    let outputHandle = outputPipe.fileHandleForReading
+    let errorHandle = errorPipe.fileHandleForReading
+    drainQueue.async(group: drains) { outputBox.data = outputHandle.readDataToEndOfFile() }
+    drainQueue.async(group: drains) { errorBox.data = errorHandle.readDataToEndOfFile() }
 
-    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-    let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+    let exited = DispatchSemaphore(value: 0)
+    process.terminationHandler = { _ in exited.signal() }
+    try process.run()
+
+    // Bounded wait; kill a wedged CLI so a hung invocation cannot hang the
+    // lifecycle queue (and, transitively, Quit Vapor) forever.
+    let timedOut = exited.wait(timeout: .now() + .seconds(Self.timeoutSeconds)) == .timedOut
+    if timedOut {
+      process.terminate()
+      exited.wait()
+    }
+    // The drains complete once the child exits (or is terminated) and its
+    // pipe write ends close.
+    drains.wait()
+
+    if timedOut {
+      throw VaporCLIServiceError.timedOut(arguments: arguments, seconds: Self.timeoutSeconds)
+    }
 
     return VaporCLIResult(
       exitCode: process.terminationStatus,
-      standardOutput: String(data: outputData, encoding: .utf8) ?? "",
-      standardError: String(data: errorData, encoding: .utf8) ?? ""
+      standardOutput: String(data: outputBox.data, encoding: .utf8) ?? "",
+      standardError: String(data: errorBox.data, encoding: .utf8) ?? ""
     )
   }
+}
+
+/// Mutable box so the concurrent pipe-drain closures can hand their result
+/// back. Each box is written by exactly one closure and read only after
+/// `DispatchGroup.wait()`, so no additional synchronization is needed.
+private final class DataBox: @unchecked Sendable {
+  var data = Data()
 }
 
 /// Default `LaunchAgentControlling` implementation: every

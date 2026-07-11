@@ -1102,7 +1102,7 @@ The release job runs `maxim-lobanov/setup-xcode@v1.6.0` (personal-account action
 
 **Suggested fix**: Pin every third-party (and ideally first-party) action to a full commit SHA with a version comment, e.g. `maxim-lobanov/setup-xcode@60606e260d2fc5762a71e64e74b2174e8ea3c8bd # v1.6.0`, and add Dependabot/Renovate for github-actions to keep pins fresh. At minimum do this for the release.yml jobs that can see signing secrets.
 
-### [high] Main window auto-presents at launch, violating menubar-first startup (CLAUDE.md 2.1)
+### [high] Main window auto-presents at launch, violating menubar-first startup (CLAUDE.md 2.1)  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/Vapor/VaporApp.swift:21` · **Review group**: macos-app-shell
 
@@ -1110,7 +1110,7 @@ The `Window` scene in apps/macos/Sources/Vapor/VaporApp.swift:21 is the primary 
 
 **Suggested fix**: Apply `.defaultLaunchBehavior(.suppressed)` (and `.restorationBehavior(.disabled)`, macOS 15+; the project baseline is macOS 26) to the `Window` scene so it only opens via the menubar `openWindow` action. Then `prepareMenubarOnlyStartupSurface()` can be removed or reduced to a log line.
 
-### [high] App config save clobbers daemon-owned keys with a stale startup snapshot
+### [high] App config save clobbers daemon-owned keys with a stale startup snapshot  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/VaporCore/VaporConfiguration.swift:252` · **Review group**: macos-app-core
 
@@ -1206,7 +1206,7 @@ registerLoginItemIfAvailable() (apps/macos/Sources/VaporCore/DaemonLifecycle.swi
 
 **Suggested fix**: Propagate a distinct outcome (e.g. `loginItemRequiresApproval`) from `setAutoLaunchEnabled`, check `service.status` in `SMAppServiceLoginItemController` after register, surface it in `AppShellState` with a hint that opens System Settings (`SMAppService.openSystemSettingsLoginItems()`).
 
-### [medium] ProcessVaporCLIRunner reads pipes only after waitUntilExit and has no timeout — latent permanent deadlock
+### [medium] ProcessVaporCLIRunner reads pipes only after waitUntilExit and has no timeout — latent permanent deadlock  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/VaporCore/VaporCLIServiceController.swift:56` · **Review group**: macos-app-core
 

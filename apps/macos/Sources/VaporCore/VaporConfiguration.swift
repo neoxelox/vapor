@@ -257,8 +257,23 @@ public final class VaporConfigurationStore {
       fileManager: fileManager
     )
 
-    let data = try encoder.encode(configuration)
     let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: vaporDirectoryURL)
+
+    // Merge onto a FRESH read of the on-disk file rather than writing the
+    // caller's (possibly stale) snapshot. The app loads its configuration
+    // once at launch, so a naive write would clobber daemon/CLI-owned keys
+    // that changed since: `deviceId` (persisted by the daemon) and every
+    // key the app does not model — `provider`, `syncMode`, `profiles`,
+    // `resourceLimits`, `idleBoost` (carried in `additionalKeys`).
+    var merged = configuration
+    if let onDisk = decodeOnDisk(at: configurationURL) {
+      merged.additionalKeys = onDisk.additionalKeys
+      if let diskDeviceId = onDisk.deviceId {
+        merged.deviceId = diskDeviceId
+      }
+    }
+
+    let data = try encoder.encode(merged)
     try data.write(to: configurationURL, options: .atomic)
     try VaporPaths.ensurePrivateFile(at: configurationURL, fileManager: fileManager)
 
@@ -266,6 +281,16 @@ public final class VaporConfigurationStore {
       "Persisted vapor configuration",
       metadata: ["config_path": configurationURL.path]
     )
+  }
+
+  /// Best-effort decode of the current on-disk configuration (nil on
+  /// missing/unreadable/corrupt file), used to preserve daemon-owned keys
+  /// across an app-side save.
+  private func decodeOnDisk(at configurationURL: URL) -> VaporConfiguration? {
+    guard let data = try? Data(contentsOf: configurationURL) else {
+      return nil
+    }
+    return try? decoder.decode(VaporConfiguration.self, from: data)
   }
 
   public func resolveVaporDirectoryURL() -> URL {
