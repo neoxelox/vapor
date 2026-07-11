@@ -253,8 +253,7 @@ const FILE_FIELDS: &str =
 // ---------------------------------------------------------------------
 
 pub struct GoogleDriveProvider {
-    tokens: TokenManager,
-    transport: Arc<dyn HttpTransport>,
+    tokens: Arc<TokenManager>,
     /// Resolved id of the configured cloud root folder.
     root_id: Mutex<Option<String>>,
     /// Path → file-id cache; pruned on deletes/renames.
@@ -272,13 +271,12 @@ impl GoogleDriveProvider {
         transport: Arc<dyn HttpTransport>,
     ) -> Self {
         Self {
-            tokens: TokenManager {
+            tokens: Arc::new(TokenManager {
                 config,
                 secrets,
-                transport: transport.clone(),
+                transport,
                 cached: Mutex::new(None),
-            },
-            transport,
+            }),
             root_id: Mutex::new(None),
             id_by_path: Mutex::new(BTreeMap::new()),
             path_by_id: Mutex::new(BTreeMap::new()),
@@ -328,32 +326,12 @@ impl GoogleDriveProvider {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> Result<HttpResponse, ProviderError> {
-        let mut attempt = 0;
-        loop {
-            let token = self.tokens.access_token()?;
-            let mut all_headers = headers.clone();
-            all_headers.push(("Authorization".to_string(), format!("Bearer {token}")));
-            let response = self
-                .transport
-                .execute(HttpRequest {
-                    method,
-                    url: url.clone(),
-                    headers: all_headers,
-                    body: body.clone(),
-                })
-                .map_err(|error| {
-                    ProviderError::transient(format!("Drive API unreachable: {}", error.message))
-                })?;
-            if response.status == 401 && attempt == 0 {
-                // Stale token despite the expiry margin: force one
-                // refresh and retry.
-                attempt += 1;
-                self.tokens.invalidate();
-                let current = self.tokens.load()?;
-                self.tokens.force_refresh(&current)?;
-                continue;
-            }
-            return Ok(response);
+        execute_authed_with(&self.tokens, method, url, headers, body)
+    }
+
+    fn handle(&self) -> ProviderHandle {
+        ProviderHandle {
+            tokens: self.tokens.clone(),
         }
     }
 
@@ -813,9 +791,7 @@ impl Provider for GoogleDriveProvider {
 
         Ok(Box::new(GdriveUploadSession {
             state: UploadState::NotStarted,
-            provider_transport: self.transport.clone(),
-            token_manager_config: self.tokens.config.clone(),
-            secrets: self.tokens.secrets.clone(),
+            tokens: self.tokens.clone(),
             file_id: existing.map(|file| file.id),
             metadata,
             source,
@@ -850,11 +826,7 @@ impl Provider for GoogleDriveProvider {
             ProviderError::transient(format!("cannot create download destination: {error}"))
         })?;
         Ok(Box::new(GdriveDownloadSession {
-            provider: ProviderHandle {
-                transport: self.transport.clone(),
-                config: self.tokens.config.clone(),
-                secrets: self.tokens.secrets.clone(),
-            },
+            provider: self.handle(),
             file_id: file.id,
             destination: Some(destination),
             destination_path: request.destination,
@@ -1029,10 +1001,12 @@ impl Provider for GoogleDriveProvider {
 
 /// Minimal token+transport handle for sessions (they outlive the
 /// borrow of the provider).
+/// A cheap, cloneable handle over the provider's shared `TokenManager`
+/// that upload/download sessions carry for their hot-path requests. It
+/// clones an `Arc`, so it neither re-reads the SecretStore per request
+/// nor loses the token cache (a fresh manager per chunk would do both).
 struct ProviderHandle {
-    transport: Arc<dyn HttpTransport>,
-    config: GdriveConfig,
-    secrets: Arc<dyn SecretStore>,
+    tokens: Arc<TokenManager>,
 }
 
 impl ProviderHandle {
@@ -1043,25 +1017,46 @@ impl ProviderHandle {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> Result<HttpResponse, ProviderError> {
-        let manager = TokenManager {
-            config: self.config.clone(),
-            secrets: self.secrets.clone(),
-            transport: self.transport.clone(),
-            cached: Mutex::new(None),
-        };
-        let token = manager.access_token()?;
-        let mut all_headers = headers;
+        execute_authed_with(&self.tokens, method, url, headers, body)
+    }
+}
+
+/// The one authenticated-request path, shared by the provider and every
+/// session handle: attach a bearer token from the shared cache and, on a
+/// single `401`, force one refresh and resend. Without the retry a chunk
+/// PUT whose token expired mid-upload would fail the whole intent
+/// terminally instead of refreshing and resending that one chunk.
+fn execute_authed_with(
+    tokens: &TokenManager,
+    method: &'static str,
+    url: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> Result<HttpResponse, ProviderError> {
+    let mut attempt = 0;
+    loop {
+        let token = tokens.access_token()?;
+        let mut all_headers = headers.clone();
         all_headers.push(("Authorization".to_string(), format!("Bearer {token}")));
-        self.transport
+        let response = tokens
+            .transport
             .execute(HttpRequest {
                 method,
-                url,
+                url: url.clone(),
                 headers: all_headers,
-                body,
+                body: body.clone(),
             })
             .map_err(|error| {
                 ProviderError::transient(format!("Drive API unreachable: {}", error.message))
-            })
+            })?;
+        if response.status == 401 && attempt == 0 {
+            attempt += 1;
+            tokens.invalidate();
+            let current = tokens.load()?;
+            tokens.force_refresh(&current)?;
+            continue;
+        }
+        return Ok(response);
     }
 }
 
@@ -1077,9 +1072,7 @@ enum UploadState {
 
 struct GdriveUploadSession {
     state: UploadState,
-    provider_transport: Arc<dyn HttpTransport>,
-    token_manager_config: GdriveConfig,
-    secrets: Arc<dyn SecretStore>,
+    tokens: Arc<TokenManager>,
     /// `Some` when updating an existing file.
     file_id: Option<String>,
     metadata: serde_json::Value,
@@ -1096,9 +1089,7 @@ struct GdriveUploadSession {
 impl GdriveUploadSession {
     fn handle(&self) -> ProviderHandle {
         ProviderHandle {
-            transport: self.provider_transport.clone(),
-            config: self.token_manager_config.clone(),
-            secrets: self.secrets.clone(),
+            tokens: self.tokens.clone(),
         }
     }
 

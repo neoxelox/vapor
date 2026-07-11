@@ -519,7 +519,7 @@ core/daemon/src/fs_events.rs bypasses the vapor_platform::fs_watch trait: it imp
 
 **Suggested fix**: Make core/daemon consume vapor_platform::fs_watch (extending WatchEventKind with the From/To rename distinction the daemon needs), delete the duplicate notify plumbing from fs_events.rs, and keep exactly one OS-event→kind mapping with shared tests.
 
-### [medium] IPC config writes are unsynchronized read-modify-write with a shared fixed temp filename, so concurrent IPC calls lose updates
+### [medium] IPC config writes are unsynchronized read-modify-write with a shared fixed temp filename, so concurrent IPC calls lose updates  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/ipc_service.rs:142`
 
@@ -772,7 +772,7 @@ The IPC protocol doc (core/ipc/src/protocol.rs:53-55) promises that unknown meth
 
 **Suggested fix**: Before/after connecting, verify the peer: check `fs::metadata(socket_path).uid() == geteuid()` on the socket file, and/or verify the connected peer's uid via `getpeereid` (macOS) / `SO_PEERCRED` (Linux) before sending `Hello`. Fail with a typed 'foreign socket' error.
 
-### [medium] Upload precondition check and rename are not atomic; a concurrent writer between the check and the rename is silently overwritten
+### [medium] Upload precondition check and rename are not atomic; a concurrent writer between the check and the rename is silently overwritten  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/filesystem/mod.rs:609` · **Review group**: provider-fs
 
@@ -780,7 +780,7 @@ FilesystemUploadSession::finalize() (core/providers/src/filesystem/mod.rs:609) r
 
 **Suggested fix**: Narrow the race with an exclusive advisory lock (flock) or a link/renameat2(RENAME_NOREPLACE)-style create for `Absent`, and at minimum re-order to hash immediately before rename; document the residual race as a known limitation of the reference provider if full atomicity is out of scope.
 
-### [medium] HashEquals precondition hashes the entire existing target inside a budgeted step() call, breaking bounded-checkpoint interruptibility
+### [medium] HashEquals precondition hashes the entire existing target inside a budgeted step() call, breaking bounded-checkpoint interruptibility  ✅ DONE
 
 **Category**: perf · **Where**: `core/providers/src/filesystem/mod.rs:671` · **Review group**: provider-fs
 
@@ -796,7 +796,7 @@ The changes.list request (core/providers/src/gdrive/mod.rs:852) sets no restrict
 
 **Suggested fix**: Cache negative results (file-id -> out-of-scope, with TTL) and cache every parent id visited during the walk (currently only the changed file's path is cached, not intermediate parents outside the mapping). Consider maintaining a folder-id set for the sync subtree so most out-of-scope changes are rejected with zero requests.
 
-### [medium] ProviderHandle builds a fresh TokenManager per HTTP call: a SecretStore/Keychain read per transfer chunk and no 401 refresh-retry
+### [medium] ProviderHandle builds a fresh TokenManager per HTTP call: a SecretStore/Keychain read per transfer chunk and no 401 refresh-retry  ✅ DONE
 
 **Category**: perf · **Where**: `core/providers/src/gdrive/mod.rs:959` · **Review group**: gdrive
 
@@ -983,7 +983,7 @@ bootstrap_if_needed (core/lifecycle/src/manager.rs:236) invokes installer.instal
 
 **Suggested fix**: Consult the guard before install: in bootstrap_if_needed and set_auto_launch_enabled(true), return RelaunchDeferred without calling install_and_enable() when the guard is paused or a backoff is pending; alternatively make install_and_enable not auto-start (RunAtLoad=false or bootstrap without launch) and rely solely on start_daemon() for launching.
 
-### [medium] Autolaunch write rewrites the whole vapor.json from a stale read, losing concurrent edits by other commands
+### [medium] Autolaunch write rewrites the whole vapor.json from a stale read, losing concurrent edits by other commands  ✅ DONE
 
 **Category**: improvement · **Where**: `core/lifecycle/src/auto_launch.rs:137`
 

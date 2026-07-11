@@ -361,6 +361,58 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn config_lock_serializes_concurrent_read_modify_write() {
+        // Each thread runs read-count → increment → write under the lock. If
+        // the lock did not actually serialize the cycle, interleaved readers
+        // would share a base value and the last writer would clobber the
+        // others, leaving a final count below the thread count.
+        let dir = TempDir::new().expect("tempdir");
+        let path = std::sync::Arc::new(dir.path().join("vapor.json"));
+        fs::write(path.as_path(), b"{\"count\":0}\n").expect("seed");
+
+        const THREADS: u64 = 12;
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    with_config_lock::<(), std::io::Error>(&path, || {
+                        let text = fs::read_to_string(path.as_path())?;
+                        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        let current = doc["count"].as_u64().unwrap();
+                        doc["count"] = serde_json::json!(current + 1);
+                        let tmp = unique_temp_path(&path);
+                        fs::write(&tmp, format!("{doc}\n").as_bytes())?;
+                        fs::rename(&tmp, path.as_path())?;
+                        Ok(())
+                    })
+                    .expect("locked write");
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("thread joins");
+        }
+
+        let final_text = fs::read_to_string(path.as_path()).expect("read back");
+        let doc: serde_json::Value = serde_json::from_str(&final_text).expect("parse");
+        assert_eq!(doc["count"].as_u64(), Some(THREADS));
+    }
+
+    #[test]
+    fn unique_temp_path_sits_next_to_the_target() {
+        let target = PathBuf::from("/tmp/vapor/vapor.json");
+        let temp = unique_temp_path(&target);
+        assert_eq!(temp.parent(), target.parent());
+        assert!(
+            temp.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("vapor.json.vapor-tmp-"),
+            "temp name was {temp:?}"
+        );
+    }
+
+    #[test]
     fn tilde_override_expands_against_home_directory() {
         // `expand_tilde` reads the real HOME/USERPROFILE; assert only the
         // structural property (prefix replaced) so the test is hermetic.

@@ -142,34 +142,43 @@ impl DaemonIpcService {
     fn write_config_key(key: &str, value: serde_json::Value) -> Result<(), String> {
         let path = vapor_shared::runtime_paths::vapor_directory()
             .join(constants::runtime::CONFIGURATION_FILE_NAME);
-        let mut document: serde_json::Value = match std::fs::read_to_string(&path) {
-            Ok(contents) if contents.trim().is_empty() => {
-                serde_json::Value::Object(Default::default())
+        // The whole read-modify-write must be atomic against every other
+        // surface (CLI, app, and the 32 concurrent IPC connections). Without
+        // the cross-process lock two writers each read the same document and
+        // the last rename silently drops the other's key.
+        vapor_shared::runtime_paths::with_config_lock::<(), std::io::Error>(&path, || {
+            let mut document: serde_json::Value = match std::fs::read_to_string(&path) {
+                Ok(contents) if contents.trim().is_empty() => {
+                    serde_json::Value::Object(Default::default())
+                }
+                Ok(contents) => serde_json::from_str(&contents).map_err(|error| {
+                    std::io::Error::other(format!("cannot parse {}: {error}", path.display()))
+                })?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    serde_json::Value::Object(Default::default())
+                }
+                Err(error) => return Err(error),
+            };
+            document
+                .as_object_mut()
+                .ok_or_else(|| std::io::Error::other("configuration root is not an object"))?
+                .insert(key.to_string(), value);
+            let mut serialized = serde_json::to_string_pretty(&document).map_err(|error| {
+                std::io::Error::other(format!("cannot serialize configuration: {error}"))
+            })?;
+            serialized.push('\n');
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
             }
-            Ok(contents) => serde_json::from_str(&contents)
-                .map_err(|error| format!("cannot parse {}: {error}", path.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                serde_json::Value::Object(Default::default())
-            }
-            Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
-        };
-        document
-            .as_object_mut()
-            .ok_or_else(|| "configuration root is not an object".to_string())?
-            .insert(key.to_string(), value);
-        let mut serialized = serde_json::to_string_pretty(&document)
-            .map_err(|error| format!("cannot serialize configuration: {error}"))?;
-        serialized.push('\n');
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("cannot create config directory: {error}"))?;
-        }
-        let temp = path.with_extension("vapor-tmp");
-        std::fs::write(&temp, serialized.as_bytes())
-            .map_err(|error| format!("cannot write config temp file: {error}"))?;
-        std::fs::rename(&temp, &path)
-            .map_err(|error| format!("cannot replace config file: {error}"))?;
-        Ok(())
+            // A per-writer temp name (not one shared `vapor.vapor-tmp`) so a
+            // second writer's rename can never consume the first's staging
+            // file and fail spuriously.
+            let temp = vapor_shared::runtime_paths::unique_temp_path(&path);
+            std::fs::write(&temp, serialized.as_bytes())?;
+            std::fs::rename(&temp, &path)?;
+            Ok(())
+        })
+        .map_err(|error| format!("cannot update {}: {error}", path.display()))
     }
 
     fn ack(accepted: bool, note: impl Into<String>) -> AckResponse {

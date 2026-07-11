@@ -10,8 +10,13 @@
 //!
 //! Safety properties:
 //! - **Atomic writes**: uploads land in a hidden temp file in the target
-//!   directory and are renamed into place after the payload and the
-//!   op-id tag are complete.
+//!   directory and are committed after the payload and the op-id tag are
+//!   complete — renamed into place for the overwrite modes, or
+//!   hard-linked (atomic no-clobber) for an `Absent` guard so a
+//!   concurrent writer cannot be silently overwritten. A `HashEquals`
+//!   guard re-checks the target's `(size, mtime)` just before the commit
+//!   (a residual sub-stat TOCTOU on a shared network mount is a
+//!   documented limitation of this reference provider).
 //! - **Strict scope enforcement**: every operation resolves its
 //!   [`RemotePath`] under the canonical root and refuses symlink
 //!   escapes, traversal, and device crossings.
@@ -399,6 +404,49 @@ impl Provider for FilesystemProvider {
             ))
         })?;
 
+        // Resolve the precondition into a phase. `HashEquals` opens the
+        // target now (cheap) and defers the actual read to budgeted
+        // `step()` slices; `Absent`/`None` stream immediately (the real
+        // Absent guard is the no-clobber create at finalize).
+        let (require_absent, hash_guard, phase) = match request.precondition {
+            RemotePrecondition::None => (false, None, UploadPhase::Streaming),
+            RemotePrecondition::Absent => {
+                if target.exists() {
+                    return Err(ProviderError::precondition_failed(format!(
+                        "upload target {} already exists",
+                        request.remote_path
+                    )));
+                }
+                (true, None, UploadPhase::Streaming)
+            }
+            RemotePrecondition::HashEquals(expected) => {
+                let target_file = fs::File::open(&target).map_err(|error| {
+                    if error.kind() == io::ErrorKind::NotFound {
+                        ProviderError::precondition_failed(format!(
+                            "upload target {} vanished while guarded by a hash precondition",
+                            request.remote_path
+                        ))
+                    } else {
+                        ProviderError::transient(format!(
+                            "cannot open upload target {} to verify precondition: {error}",
+                            request.remote_path
+                        ))
+                    }
+                })?;
+                (
+                    false,
+                    Some(HashGuard {
+                        expected,
+                        verified_size_mtime: None,
+                    }),
+                    UploadPhase::VerifyingHash {
+                        target: target_file,
+                        hasher: Sha256::new(),
+                    },
+                )
+            }
+        };
+
         Ok(Box::new(FilesystemUploadSession {
             source,
             temp: Some(temp),
@@ -406,7 +454,9 @@ impl Provider for FilesystemProvider {
             target,
             remote_path: request.remote_path,
             op_id: request.op_id,
-            precondition: request.precondition,
+            require_absent,
+            hash_guard,
+            phase,
             caps: self.caps.clone(),
             tags: self.tags.clone(),
             hasher: Sha256::new(),
@@ -620,6 +670,25 @@ fn enforce_same_device(
     Ok(())
 }
 
+/// A HashEquals guard: the expected content hash plus the (size, mtime)
+/// of the target observed at the end of the budgeted verification pass,
+/// so `finalize` can cheaply re-stat immediately before the rename and
+/// refuse the write if the target moved under us in the interim.
+struct HashGuard {
+    expected: String,
+    verified_size_mtime: Option<(u64, SystemTime)>,
+}
+
+/// Upload proceeds in two phases so a `HashEquals` precondition never
+/// stalls the tick loop: the old remote copy is hashed in budgeted
+/// chunks across `step()` calls before any payload is streamed.
+enum UploadPhase {
+    /// Reading the existing target to verify a `HashEquals` precondition.
+    VerifyingHash { target: fs::File, hasher: Sha256 },
+    /// Streaming the source payload into the temp file.
+    Streaming,
+}
+
 struct FilesystemUploadSession {
     source: fs::File,
     temp: Option<fs::File>,
@@ -627,7 +696,11 @@ struct FilesystemUploadSession {
     target: PathBuf,
     remote_path: RemotePath,
     op_id: String,
-    precondition: RemotePrecondition,
+    /// `Absent` requires an atomic no-clobber create; `HashEquals` carries
+    /// its guard here; `None` is absent.
+    require_absent: bool,
+    hash_guard: Option<HashGuard>,
+    phase: UploadPhase,
     caps: Arc<dyn FilesystemCapabilities>,
     tags: OpIdTagStore,
     hasher: Sha256,
@@ -637,8 +710,6 @@ struct FilesystemUploadSession {
 
 impl FilesystemUploadSession {
     fn finalize(&mut self) -> Result<TransferOutcome, ProviderError> {
-        self.check_precondition()?;
-
         let temp = self.temp.take().expect("finalize called with live temp");
         temp.sync_all().map_err(|error| {
             ProviderError::transient(format!(
@@ -660,12 +731,24 @@ impl FilesystemUploadSession {
             )
             .is_err();
 
-        fs::rename(&self.temp_path, &self.target).map_err(|error| {
-            ProviderError::transient(format!(
-                "cannot move upload into place at {}: {error}",
-                self.remote_path
-            ))
-        })?;
+        // Narrow the TOCTOU window: re-check the HashEquals guard against
+        // the target's current (size, mtime) immediately before committing.
+        // A full re-hash here would re-introduce the unbounded read this
+        // session exists to avoid, so a residual sub-stat race remains a
+        // documented limitation of the reference provider.
+        if let Some(guard) = &self.hash_guard {
+            let current = current_size_mtime(&self.target);
+            if current != guard.verified_size_mtime {
+                let _ = fs::remove_file(&self.temp_path);
+                self.finished = true;
+                return Err(ProviderError::precondition_failed(format!(
+                    "upload target {} changed after its hash was verified",
+                    self.remote_path
+                )));
+            }
+        }
+
+        self.commit()?;
         if needs_side_file {
             self.tags
                 .write_op_id(&self.target, &self.op_id)
@@ -684,49 +767,103 @@ impl FilesystemUploadSession {
         })
     }
 
-    fn check_precondition(&self) -> Result<(), ProviderError> {
-        match &self.precondition {
-            RemotePrecondition::None => Ok(()),
-            RemotePrecondition::Absent => {
-                if self.target.exists() {
-                    Err(ProviderError::precondition_failed(format!(
-                        "upload target {} already exists",
-                        self.remote_path
-                    )))
-                } else {
+    /// Move the staged temp into place. `Absent` uses an atomic no-clobber
+    /// create (hard-link then unlink the temp name) so a concurrent writer
+    /// that lands the target between the check and here is not silently
+    /// overwritten; the overwrite modes (`None`/`HashEquals`) rename.
+    fn commit(&self) -> Result<(), ProviderError> {
+        if self.require_absent {
+            match fs::hard_link(&self.temp_path, &self.target) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&self.temp_path);
                     Ok(())
                 }
-            }
-            RemotePrecondition::HashEquals(expected) => {
-                let current = hash_hex_of_file(&self.target).map_err(|error| {
-                    if error.kind() == io::ErrorKind::NotFound {
-                        ProviderError::precondition_failed(format!(
-                            "upload target {} vanished while guarded by a hash precondition",
-                            self.remote_path
-                        ))
-                    } else {
-                        ProviderError::transient(format!(
-                            "cannot verify precondition hash for {}: {error}",
-                            self.remote_path
-                        ))
-                    }
-                })?;
-                if &current == expected {
-                    Ok(())
-                } else {
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_file(&self.temp_path);
                     Err(ProviderError::precondition_failed(format!(
-                        "upload target {} changed since planning",
+                        "upload target {} was created by another writer during the transfer",
                         self.remote_path
                     )))
                 }
+                Err(error) => Err(ProviderError::transient(format!(
+                    "cannot link upload into place at {}: {error}",
+                    self.remote_path
+                ))),
             }
+        } else {
+            fs::rename(&self.temp_path, &self.target).map_err(|error| {
+                ProviderError::transient(format!(
+                    "cannot move upload into place at {}: {error}",
+                    self.remote_path
+                ))
+            })
         }
     }
+
+    /// One budgeted read of the existing target during hash verification.
+    /// Returns `true` once the target reaches EOF (verification complete).
+    fn verify_step(&mut self, max_bytes: u64) -> Result<(u64, bool), ProviderError> {
+        let UploadPhase::VerifyingHash { target, hasher } = &mut self.phase else {
+            unreachable!("verify_step called outside the verification phase");
+        };
+        let mut remaining = max_bytes.max(1);
+        let mut buffer = vec![0_u8; 64 * 1024];
+        let mut consumed = 0_u64;
+        while remaining > 0 {
+            let chunk = buffer.len().min(remaining as usize);
+            let read = target.read(&mut buffer[..chunk]).map_err(|error| {
+                ProviderError::transient(format!(
+                    "cannot read upload target {} to verify precondition: {error}",
+                    self.remote_path
+                ))
+            })?;
+            if read == 0 {
+                let current = hex_encode(&std::mem::take(hasher).finalize());
+                let guard = self
+                    .hash_guard
+                    .as_mut()
+                    .expect("verification phase implies a hash guard");
+                if current != guard.expected {
+                    return Err(ProviderError::precondition_failed(format!(
+                        "upload target {} changed since planning",
+                        self.remote_path
+                    )));
+                }
+                guard.verified_size_mtime = current_size_mtime(&self.target);
+                return Ok((consumed, true));
+            }
+            hasher.update(&buffer[..read]);
+            consumed += read as u64;
+            remaining -= read as u64;
+        }
+        Ok((consumed, false))
+    }
+}
+
+/// The target's (size, mtime) if it can be stat'd, for the pre-commit
+/// TOCTOU re-check. `None` (e.g. the file vanished) is itself a change.
+fn current_size_mtime(path: &Path) -> Option<(u64, SystemTime)> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.len(), metadata.modified().ok()?))
 }
 
 impl TransferSession for FilesystemUploadSession {
     fn step(&mut self, max_bytes: u64) -> Result<TransferStep, ProviderError> {
         debug_assert!(!self.finished, "step called after completion");
+
+        // Phase 1: verify the HashEquals precondition by reading the old
+        // remote copy in budgeted slices, so overwriting a multi-GB file
+        // never holds the tick thread for one unbounded hash.
+        if matches!(self.phase, UploadPhase::VerifyingHash { .. }) {
+            let (bytes, done) = self.verify_step(max_bytes)?;
+            if done {
+                self.phase = UploadPhase::Streaming;
+            }
+            return Ok(TransferStep::Progressed {
+                bytes_transferred: bytes,
+            });
+        }
+
         let mut remaining = max_bytes;
         let mut buffer = vec![0_u8; 64 * 1024];
         let mut transferred = 0_u64;
@@ -949,21 +1086,22 @@ mod tests {
         let source = dir.path().join("source.txt");
         fs::write(&source, b"new content").expect("seed source");
 
-        let session = provider
-            .begin_upload(UploadRequest {
-                local_source: source,
-                remote_path: RemotePath::new("docs/hello.txt").expect("remote path"),
-                op_id: "op-upload-2".to_string(),
-                precondition: RemotePrecondition::Absent,
-            })
-            .expect("upload session");
-        let mut session = session;
-        let error = loop {
-            match session.step(8 * 1024) {
-                Ok(TransferStep::Progressed { .. }) => continue,
-                Ok(TransferStep::Completed(_)) => panic!("must fail the precondition"),
-                Err(error) => break error,
-            }
+        // An Absent guard against an already-present target fails fast at
+        // begin_upload (or, if it somehow slipped past, while stepping).
+        let error = match provider.begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("docs/hello.txt").expect("remote path"),
+            op_id: "op-upload-2".to_string(),
+            precondition: RemotePrecondition::Absent,
+        }) {
+            Ok(mut session) => loop {
+                match session.step(8 * 1024) {
+                    Ok(TransferStep::Progressed { .. }) => continue,
+                    Ok(TransferStep::Completed(_)) => panic!("must fail the precondition"),
+                    Err(error) => break error,
+                }
+            },
+            Err(error) => error,
         };
         assert_eq!(
             error.kind,
@@ -973,6 +1111,47 @@ mod tests {
             fs::read(cloud.join("docs/hello.txt")).expect("target intact"),
             b"pre-existing",
             "failed precondition must not touch the target"
+        );
+    }
+
+    #[test]
+    fn absent_precondition_is_atomic_no_clobber_when_target_appears_mid_transfer() {
+        // The begin-time exists() check is a fast path, not the guard: a
+        // concurrent writer that lands the target between begin_upload and
+        // the commit must not be silently overwritten last-write-wins.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cloud = dir.path().join("cloud");
+        let provider = provider_at(&cloud);
+        let source = dir.path().join("source.txt");
+        fs::write(&source, b"our upload").expect("seed source");
+
+        let mut session = provider
+            .begin_upload(UploadRequest {
+                local_source: source,
+                remote_path: RemotePath::new("race.txt").expect("remote path"),
+                op_id: "op-race".to_string(),
+                precondition: RemotePrecondition::Absent,
+            })
+            .expect("session opens: target absent at begin");
+
+        // Another writer lands the target after the begin-time check.
+        fs::write(cloud.join("race.txt"), b"someone else won").expect("racing write");
+
+        let error = loop {
+            match session.step(8 * 1024) {
+                Ok(TransferStep::Progressed { .. }) => continue,
+                Ok(TransferStep::Completed(_)) => panic!("no-clobber create must refuse"),
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(
+            error.kind,
+            vapor_shared::ProviderErrorKind::PreconditionFailed
+        );
+        assert_eq!(
+            fs::read(cloud.join("race.txt")).expect("racing content intact"),
+            b"someone else won",
+            "the concurrent writer's content must survive"
         );
     }
 
@@ -1018,6 +1197,95 @@ mod tests {
             .expect("session");
         let outcome = drive_to_completion(session);
         assert_eq!(outcome.content_hash, hash_hex_of_bytes(b"version-2"));
+    }
+
+    #[test]
+    fn hash_precondition_is_verified_in_budgeted_slices() {
+        // Overwriting a large existing file must not hash the whole old copy
+        // in one unbudgeted step(): the verification is sliced so throttle
+        // transitions and shutdown are honored between reads.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cloud = dir.path().join("cloud");
+        let provider = provider_at(&cloud);
+        let old = vec![3_u8; 200_000];
+        fs::write(cloud.join("big.bin"), &old).expect("seed target");
+        let source = dir.path().join("source.txt");
+        fs::write(&source, b"replacement").expect("seed source");
+
+        let mut session = provider
+            .begin_upload(UploadRequest {
+                local_source: source,
+                remote_path: RemotePath::new("big.bin").expect("remote path"),
+                op_id: "op-budget".to_string(),
+                precondition: RemotePrecondition::HashEquals(hash_hex_of_bytes(&old)),
+            })
+            .expect("session");
+
+        let mut steps = 0_u32;
+        let outcome = loop {
+            steps += 1;
+            match session.step(1024).expect("step") {
+                TransferStep::Progressed { .. } => continue,
+                TransferStep::Completed(outcome) => break outcome,
+            }
+        };
+        // 200 KB verified 1 KB at a time cannot complete in a handful of steps.
+        assert!(
+            steps > 100,
+            "verification must be sliced, took only {steps} steps"
+        );
+        assert_eq!(outcome.content_hash, hash_hex_of_bytes(b"replacement"));
+        assert_eq!(
+            fs::read(cloud.join("big.bin")).expect("target"),
+            b"replacement"
+        );
+    }
+
+    #[test]
+    fn hash_precondition_rechecks_target_just_before_commit() {
+        // The target passes hash verification, then a concurrent writer
+        // changes it before the rename lands. The pre-commit (size, mtime)
+        // re-check must refuse rather than silently overwrite.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cloud = dir.path().join("cloud");
+        let provider = provider_at(&cloud);
+        fs::write(cloud.join("c.txt"), b"planned").expect("seed target");
+        let source = dir.path().join("source.txt");
+        fs::write(&source, b"our new bytes").expect("seed source");
+
+        let mut session = provider
+            .begin_upload(UploadRequest {
+                local_source: source,
+                remote_path: RemotePath::new("c.txt").expect("remote path"),
+                op_id: "op-recheck".to_string(),
+                precondition: RemotePrecondition::HashEquals(hash_hex_of_bytes(b"planned")),
+            })
+            .expect("session");
+
+        // First step verifies the (tiny) target's hash and transitions to
+        // streaming. Mutate the target now, before the commit re-check.
+        assert!(matches!(
+            session.step(64 * 1024).expect("verify step"),
+            TransferStep::Progressed { .. }
+        ));
+        fs::write(cloud.join("c.txt"), b"changed underneath us").expect("racing write");
+
+        let error = loop {
+            match session.step(64 * 1024) {
+                Ok(TransferStep::Progressed { .. }) => continue,
+                Ok(TransferStep::Completed(_)) => panic!("commit re-check must refuse"),
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(
+            error.kind,
+            vapor_shared::ProviderErrorKind::PreconditionFailed
+        );
+        assert_eq!(
+            fs::read(cloud.join("c.txt")).expect("target intact"),
+            b"changed underneath us",
+            "the concurrent write must survive the refused commit"
+        );
     }
 
     #[test]

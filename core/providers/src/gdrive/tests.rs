@@ -512,6 +512,48 @@ fn a_401_forces_one_refresh_and_retries() {
 }
 
 #[test]
+fn a_401_on_a_download_chunk_refreshes_and_resends_instead_of_failing_the_intent() {
+    // The session hot path (download ranges, upload chunks) shares the
+    // provider's TokenManager and its one-shot 401 refresh-retry. A token
+    // that expires mid-transfer must resend the chunk, not fail the whole
+    // multi-gigabyte intent terminally.
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    // resolve the file.
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"dl","name":"data.bin","mimeType":"application/octet-stream","size":"4"}]}"#,
+    );
+    transport.push_response(401, ""); // first range: token went stale
+    transport.push_response(200, r#"{"access_token":"ya29.fresh","expires_in":3600}"#);
+    transport.push_response(206, "data"); // resent range succeeds
+
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let destination = scratch.path().join("data.bin");
+    let mut session = provider
+        .begin_download(DownloadRequest {
+            remote_path: RemotePath::new("data.bin").expect("path"),
+            destination: destination.clone(),
+        })
+        .expect("session");
+
+    let outcome = match session.step(4).expect("range after refresh") {
+        TransferStep::Completed(outcome) => outcome,
+        other => panic!("expected completion, got {other:?}"),
+    };
+    assert_eq!(outcome.bytes_total, 4);
+    assert_eq!(std::fs::read(&destination).expect("payload"), b"data");
+
+    let requests = transport.recorded_requests();
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.url.contains("oauth2.googleapis.com")),
+        "a token refresh must have been issued on the session path"
+    );
+}
+
+#[test]
 fn missing_credentials_surface_an_actionable_auth_error() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = GoogleDriveProvider::new(
