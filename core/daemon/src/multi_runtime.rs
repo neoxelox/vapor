@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use vapor_shared::{RunState, ThrottleState, constants};
 
@@ -106,6 +106,27 @@ pub struct MultiProfileRuntime {
     clock: SharedClock,
     tick_interval: Duration,
     idle_tick_interval: Duration,
+    /// Per-slot state fingerprints at the last status publish; a
+    /// mismatch marks the published snapshot stale.
+    last_published_slot_states: Vec<SlotStateFingerprint>,
+    last_status_publish_inst: Option<Instant>,
+    /// Whether the previous tick reported pending work — publishes one
+    /// trailing snapshot after work quiets so final counts land.
+    last_any_pending_work: bool,
+}
+
+/// The cheap observable state of one profile: enough to detect that a
+/// published status snapshot went stale without re-running its SQL.
+type SlotStateFingerprint = (RunState, ThrottleState, bool, String);
+
+fn slot_state_fingerprint(slot: &ProfileSlot) -> SlotStateFingerprint {
+    let app_snapshot = slot.runtime.app().snapshot();
+    (
+        slot_effective_run_state(slot),
+        app_snapshot.throttle_state,
+        slot.failed.is_some(),
+        app_snapshot.reason.clone(),
+    )
 }
 
 impl MultiProfileRuntime {
@@ -138,6 +159,17 @@ impl MultiProfileRuntime {
     /// runtime appends to it; the IPC service reads it.
     pub fn timeline(&self) -> Arc<crate::timeline::TimelineBuffer> {
         self.timeline.clone()
+    }
+
+    /// Moves every profile's provider I/O onto worker threads (see
+    /// [`DaemonRuntime::enable_transfer_workers`]). The daemon
+    /// bootstrap calls this once after composition; tests keep the
+    /// deterministic inline mode by not calling it.
+    pub fn enable_transfer_workers(&mut self) {
+        let waker = self.tick_waker.clone();
+        for slot in &mut self.slots {
+            slot.runtime.enable_transfer_workers(Some(waker.clone()));
+        }
     }
 
     /// Applies the configured `timelineLimit`.
@@ -334,6 +366,9 @@ impl MultiProfileRuntime {
             clock,
             tick_interval: Duration::from_millis(constants::engine::DEBOUNCE_TICK_MILLIS),
             idle_tick_interval: Duration::from_millis(constants::engine::IDLE_TICK_MILLIS),
+            last_published_slot_states: Vec::new(),
+            last_status_publish_inst: None,
+            last_any_pending_work: false,
         })
     }
 
@@ -393,9 +428,10 @@ impl MultiProfileRuntime {
     /// Ticks every live profile once. Panics and repeated errors
     /// suspend only the offending profile.
     pub fn tick_all(&mut self, now: SystemTime) -> MultiTickReport {
-        self.forward_external_control();
+        let control_forwarded = self.forward_external_control();
 
         let mut report = MultiTickReport::default();
+        let mut completed_this_tick: u64 = 0;
         for slot in &mut self.slots {
             if slot.failed.is_some() {
                 report.failed_profiles += 1;
@@ -406,6 +442,7 @@ impl MultiProfileRuntime {
                 Ok(Ok(tick_report)) => {
                     slot.consecutive_tick_errors = 0;
                     report.ticked_profiles += 1;
+                    completed_this_tick += tick_report.completed_intents as u64;
                     report.any_pending_work |= slot.runtime.profile_has_pending_work(&tick_report);
                 }
                 Ok(Err(error)) => {
@@ -447,29 +484,63 @@ impl MultiProfileRuntime {
         }
 
         // Auto-tuning: one small change per cycle, driven by
-        // aggregate rate-limit + queue-depth signals, bounded by the
-        // ceilings via the bandwidth shaper.
+        // aggregate rate-limit + queue-depth + drain-rate signals,
+        // bounded by the ceilings via the bandwidth shaper.
         // Suspended slots are excluded from the tuning signal: their
         // never-draining queue and stale state would skew the tuner, and
         // reading a half-mutated post-panic runtime here (outside the
         // catch_unwind) is a containment hazard.
-        let rate_limited = self
-            .slots
-            .iter()
-            .filter(|slot| slot.failed.is_none())
-            .any(|slot| slot.runtime.app().retry_slowdown_until().is_some());
-        let total_queue_depth: u64 = self
-            .slots
-            .iter()
-            .filter(|slot| slot.failed.is_none())
-            .map(|slot| slot.runtime.state_db().queue_depth().unwrap_or(0) as u64)
-            .sum();
-        self.auto_tuner
-            .evaluate(rate_limited, total_queue_depth, self.clock.now());
-
-        if let Some(publisher) = self.status_publisher.as_ref() {
-            publisher.publish(self.aggregate_status(now));
+        // The SQL-backed depth signal is gathered only when a tuning
+        // cycle is actually due (~every 90s), not on every idle tick.
+        self.auto_tuner.record_completions(completed_this_tick);
+        let now_inst = self.clock.now();
+        if self.auto_tuner.cycle_due(now_inst) {
+            let rate_limited = self
+                .slots
+                .iter()
+                .filter(|slot| slot.failed.is_none())
+                .any(|slot| slot.runtime.app().retry_slowdown_until().is_some());
+            let total_queue_depth: u64 = self
+                .slots
+                .iter()
+                .filter(|slot| slot.failed.is_none())
+                .map(|slot| slot.runtime.state_db().queue_depth().unwrap_or(0) as u64)
+                .sum();
+            self.auto_tuner
+                .evaluate(rate_limited, total_queue_depth, now_inst);
         }
+
+        // Publish a fresh status snapshot only when something observable
+        // could have changed: building one runs per-profile SQL (depths,
+        // failed counts, diagnostics rows), which a fully idle daemon
+        // must not pay on every 1 Hz wakeup. Busy ticks (plus one
+        // trailing tick so final counts land), control requests,
+        // per-slot state flips, and a slow heartbeat for anything the
+        // fingerprint misses all mark it stale.
+        if let Some(publisher) = self.status_publisher.as_ref() {
+            let slot_states: Vec<SlotStateFingerprint> =
+                self.slots.iter().map(slot_state_fingerprint).collect();
+            let heartbeat_due = self
+                .last_status_publish_inst
+                .map(|last| {
+                    now_inst.saturating_duration_since(last)
+                        >= Duration::from_secs(
+                            constants::engine::STATUS_REPUBLISH_HEARTBEAT_SECONDS,
+                        )
+                })
+                .unwrap_or(true);
+            let stale = report.any_pending_work
+                || self.last_any_pending_work
+                || control_forwarded
+                || heartbeat_due
+                || slot_states != self.last_published_slot_states;
+            if stale {
+                publisher.publish(self.aggregate_status(now));
+                self.last_status_publish_inst = Some(now_inst);
+                self.last_published_slot_states = slot_states;
+            }
+        }
+        self.last_any_pending_work = report.any_pending_work;
         report
     }
 
@@ -510,10 +581,11 @@ impl MultiProfileRuntime {
     }
 
     /// Broadcast pending external control requests to every profile
-    /// (pause/resume/flush/reconcile are daemon-wide actions).
-    fn forward_external_control(&mut self) {
+    /// (pause/resume/flush/reconcile are daemon-wide actions). Returns
+    /// whether any request was forwarded (a status-publish trigger).
+    fn forward_external_control(&mut self) -> bool {
         let Some(external) = self.external_control.as_ref() else {
-            return;
+            return false;
         };
         let pause = external.take_pause_request();
         let flush = external.take_flush_request();
@@ -531,6 +603,7 @@ impl MultiProfileRuntime {
                 slot.control.request_reconcile();
             }
         }
+        pause.is_some() || flush || reconcile
     }
 
     /// One status snapshot for the whole daemon: the most

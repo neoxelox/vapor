@@ -496,9 +496,7 @@ impl DaemonRuntime {
                 sync_mode: self.sync_scope.sync_mode,
                 device_id: &self.device_id,
                 hash_algorithm: self.app.provider().content_hash_algorithm(),
-                transfer_step_bytes: self
-                    .transfer_step_bytes
-                    .load(std::sync::atomic::Ordering::Relaxed),
+                transfer_step_bytes: &self.transfer_step_bytes,
                 bandwidth: &self.bandwidth_shaper,
                 tags: &self.tags,
                 local_echoes: &mut self.local_echoes,
@@ -596,7 +594,39 @@ impl DaemonRuntime {
         }
 
         if !paused {
-            self.process_ready_queue(now, &mut report)?;
+            let started_intent_ids = self.process_ready_queue(now, &mut report)?;
+            if !started_intent_ids.is_empty() {
+                // Freshly-leased intents start planning in their lease
+                // tick: without this pass every file would pay one full
+                // tick of dead latency between admission and its planner.
+                let mut env = ExecutionEnv {
+                    local_root: self.sync_scope.local_sync_directory.as_deref(),
+                    sync_mode: self.sync_scope.sync_mode,
+                    device_id: &self.device_id,
+                    hash_algorithm: self.app.provider().content_hash_algorithm(),
+                    transfer_step_bytes: &self.transfer_step_bytes,
+                    bandwidth: &self.bandwidth_shaper,
+                    tags: &self.tags,
+                    local_echoes: &mut self.local_echoes,
+                    remote_echoes: &mut self.remote_echoes,
+                };
+                let mut admission_report = crate::executor::StagedExecutorReport::default();
+                self.staged_executor.advance_intents(
+                    &mut self.app,
+                    &mut self.state_db,
+                    &mut env,
+                    now,
+                    &started_intent_ids,
+                    &mut admission_report,
+                )?;
+                report.completed_intents += admission_report.completed;
+                report.requeued_intents += admission_report.retried;
+                report.failed_intents += admission_report.failed;
+                report.mirror_deletes += admission_report.mirror_deletes;
+                self.mirror_delete_count += admission_report.mirror_deletes as u64;
+                report.conflicts += admission_report.conflicts;
+                self.conflict_count += admission_report.conflicts as u64;
+            }
         }
 
         report.staged_executor = self.staged_executor.snapshot();
@@ -919,6 +949,15 @@ impl DaemonRuntime {
     /// Wires the shared daemon activity timeline in.
     pub fn attach_timeline(&mut self, timeline: Arc<crate::timeline::TimelineBuffer>) {
         self.timeline = Some(timeline);
+    }
+
+    /// Switches this runtime's provider I/O (probes, transfer sessions,
+    /// remote deletes) onto worker threads so provider RTT never stalls
+    /// the tick loop. Production only: tests keep the deterministic
+    /// inline mode. `waker` is notified on every completed job so the
+    /// tick loop harvests promptly.
+    pub fn enable_transfer_workers(&mut self, waker: Option<Arc<TickWaker>>) {
+        self.staged_executor.enable_worker_threads(waker);
     }
 
     /// Wires the daemon-wide resource management set in:
@@ -1627,10 +1666,10 @@ impl DaemonRuntime {
             return Ok(0);
         }
 
-        // Priority classes: within one flush batch, key config
-        // and code paths enqueue before lockfile noise, so they get the
-        // lower durable ids that break lease-order ties. Stable sort
-        // preserves arrival order inside each class.
+        // Priority classes: the durable priority_rank column orders
+        // leasing across batches; this in-batch stable sort additionally
+        // gives key config and code paths the lower durable ids that
+        // break ties inside one class, preserving arrival order.
         let windows = crate::debounce::DebounceWindows::default();
         claimed.sort_by_key(|intent| {
             crate::safeguards::intent_priority_rank(windows.classify_path(&intent.path).0)
@@ -1640,7 +1679,9 @@ impl DaemonRuntime {
             .iter()
             .map(|intent| (intent.path.clone(), intent.kind, intent.last_observed_at))
             .collect();
-        let enqueued = self.state_db.enqueue_intents_coalesced(&batch)?;
+        let enqueued = self
+            .state_db
+            .enqueue_intents_coalesced(&batch, crate::safeguards::IntentSource::Fresh)?;
 
         for intent in &claimed {
             let disposition = self
@@ -1657,15 +1698,20 @@ impl DaemonRuntime {
         Ok(enqueued)
     }
 
+    /// Leases ready intents and starts them on the staged executor.
+    /// Returns the ids of the executions started this call so the tick
+    /// can immediately advance them (no dead tick between admission and
+    /// planning).
     fn process_ready_queue(
         &mut self,
         now: SystemTime,
         report: &mut RuntimeTickReport,
-    ) -> Result<(), DaemonRuntimeError> {
+    ) -> Result<Vec<i64>, DaemonRuntimeError> {
         self.evaluate_startup_barrier(now);
+        let mut started_intent_ids = Vec::new();
 
         if self.startup_reconstruction_barrier && self.running_reconcile_intent_id.is_some() {
-            return Ok(());
+            return Ok(started_intent_ids);
         }
 
         let batch_limit = if self.startup_reconstruction_barrier {
@@ -1752,16 +1798,33 @@ impl DaemonRuntime {
                     }
 
                     let intent_id = intent.id;
-                    if self.try_start_staged_intent(intent, now) {
-                        report.started_staged_intents += 1;
-                    } else {
-                        self.requeue_runtime_intent(
-                            intent_id,
-                            now + blocked_intent_requeue_delay(),
-                            "waiting for planner permit",
-                        )?;
-                        report.requeued_intents += 1;
-                        break;
+                    match self.try_start_staged_intent(intent, now) {
+                        crate::executor::StartDecision::Started => {
+                            report.started_staged_intents += 1;
+                            started_intent_ids.push(intent_id);
+                        }
+                        crate::executor::StartDecision::PathBusy => {
+                            // Per-path serialization blocks only this
+                            // intent (an execution is in flight for the
+                            // same path); the rest of the batch keeps
+                            // admitting — breaking here would pin every
+                            // later-id intent behind one long transfer.
+                            self.requeue_runtime_intent(
+                                intent_id,
+                                now + blocked_intent_requeue_delay(),
+                                "waiting for in-flight work on the same path",
+                            )?;
+                            report.requeued_intents += 1;
+                        }
+                        crate::executor::StartDecision::AtCapacity => {
+                            self.requeue_runtime_intent(
+                                intent_id,
+                                now + blocked_intent_requeue_delay(),
+                                "waiting for planner permit",
+                            )?;
+                            report.requeued_intents += 1;
+                            break;
+                        }
                     }
                 }
             }
@@ -1776,10 +1839,14 @@ impl DaemonRuntime {
             report.requeued_intents += 1;
         }
 
-        Ok(())
+        Ok(started_intent_ids)
     }
 
-    fn try_start_staged_intent(&mut self, intent: DurableIntentRecord, now: SystemTime) -> bool {
+    fn try_start_staged_intent(
+        &mut self,
+        intent: DurableIntentRecord,
+        now: SystemTime,
+    ) -> crate::executor::StartDecision {
         self.staged_executor.try_start(&mut self.app, intent, now)
     }
 
@@ -2156,10 +2223,11 @@ mod tests {
         assert_eq!(first_tick.stabilized_events, 1);
         assert_eq!(first_tick.durable_enqueues, 1);
         assert_eq!(first_tick.started_staged_intents, 1);
-        assert_eq!(first_tick.completed_intents, 0);
 
         // Drive follow-up ticks until the pipeline completes the upload.
-        let mut completed = 0;
+        // (Stage chaining can complete a small file within its lease
+        // tick, so the first tick may already report the completion.)
+        let mut completed = first_tick.completed_intents;
         for tick_index in 0..8 {
             clock.advance(Duration::from_millis(250));
             let report = runtime
@@ -2189,6 +2257,9 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
+        // Durable intent paths must live under the runtime's *canonical*
+        // watch root, exactly like real watcher events do.
+        let watch_root = watch_root.canonicalize().expect("canonical watch root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         for index in 0..6 {
@@ -2215,9 +2286,13 @@ mod tests {
             .tick_with_inputs(timestamp_ms(250), ThrottleInputs::default())
             .expect("runtime tick");
 
+        // Admission is capped at the planner-worker count (4): only 4 of
+        // the 6 ready intents lease this tick. Stage chaining then runs
+        // the admitted intents through the stub provider within the same
+        // tick, so they complete rather than sit in the planner stage.
         assert_eq!(first_tick.started_staged_intents, 4);
-        assert_eq!(first_tick.staged_executor.planner_running, 4);
-        assert_eq!(runtime.state_db().leased_depth().expect("leased depth"), 4);
+        assert_eq!(first_tick.completed_intents, 4);
+        assert_eq!(runtime.state_db().leased_depth().expect("leased depth"), 0);
         assert_eq!(
             runtime.state_db().pending_depth().expect("pending depth"),
             2
@@ -3305,29 +3380,22 @@ mod tests {
         };
 
         // First daemon: lease the intent into flight, then "crash"
-        // (drop) before completing it.
+        // (drop) before completing it. The lease is taken directly on
+        // the durable DB — exactly the state a daemon that died between
+        // leasing and completing leaves behind. (A ticking runtime can
+        // no longer model this window: stage chaining completes a small
+        // upload within its lease tick.)
         {
             let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
             state_db
                 .enqueue_intent(&local_file, PendingIntentKind::Upload, timestamp_ms(0))
                 .expect("enqueue");
-            let clock = Arc::new(crate::clock::ManualClock::at_now());
-            let mut runtime = DaemonRuntime::build(
-                sync_scope(),
-                EventPathFilterOptions::default(),
-                state_db,
-                Box::new(vapor_providers::FilesystemProvider::new()),
-                Arc::new(StaticMetricsSampler::default()),
-                clock.clone(),
-                false,
-            )
-            .expect("first runtime");
-            clock.advance(Duration::from_millis(250));
-            let report = runtime
-                .tick_with_inputs(timestamp_ms(250), ThrottleInputs::default())
-                .expect("tick");
-            assert_eq!(report.leased_intents, 1, "intent must be in flight");
-            assert_eq!(runtime.state_db().leased_depth().expect("leased"), 1);
+            let leased = state_db
+                .lease_next_ready(timestamp_ms(250))
+                .expect("lease")
+                .expect("intent leased");
+            assert_eq!(leased.path, local_file);
+            assert_eq!(state_db.leased_depth().expect("leased"), 1);
             // Dropped here with the lease still open — simulated crash.
         }
 

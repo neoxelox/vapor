@@ -407,10 +407,18 @@ pub mod engine {
     /// Bounds the per-tick CPU/read cost of the hash stage while still
     /// hashing large files at a useful rate (8 MiB * 4 Hz = 32 MiB/s).
     pub const HASH_STAGE_STEP_BYTES: u64 = 8 * 1024 * 1024;
-    /// Byte budget one upload/download transfer session may consume per
-    /// runtime tick. The bandwidth shaper lowers the effective
-    /// budget further when a user bandwidth ceiling applies.
+    /// Byte budget one upload/download transfer step may consume before
+    /// re-checking the throttle gates and bandwidth shaper — the
+    /// interruptibility granularity of a transfer session. The shaper
+    /// lowers the effective budget further when a user bandwidth
+    /// ceiling applies.
     pub const TRANSFER_STAGE_STEP_BYTES: u64 = 8 * 1024 * 1024;
+    /// Upper bound on worker threads running blocking provider I/O
+    /// (probes, transfer sessions, remote deletes) off the runtime tick
+    /// thread. Threads spawn lazily per in-flight job and sit parked on
+    /// a channel otherwise; the throttle workgate, not this cap, bounds
+    /// how much work is admitted.
+    pub const PROVIDER_JOB_WORKERS_MAX: usize = 8;
     /// Remote changes-feed poll cadence per throttle state; Google
     /// Drive follows the same discipline. Suspended never polls.
     pub const REMOTE_POLL_IDLE_DRAIN_SECONDS: u64 = 5;
@@ -439,6 +447,12 @@ pub mod engine {
     /// Auto-tuning cadence: one small change per cycle within
     /// the documented 60-120s window.
     pub const AUTO_TUNE_INTERVAL_SECONDS: u64 = 90;
+    /// Fallback cadence for re-publishing the IPC status snapshot while
+    /// idle. Busy ticks, control requests, and per-profile state flips
+    /// publish immediately; this heartbeat only bounds the staleness of
+    /// anything those triggers miss, so a fully idle daemon runs the
+    /// snapshot's per-profile SQL at this cadence instead of every tick.
+    pub const STATUS_REPUBLISH_HEARTBEAT_SECONDS: u64 = 10;
     /// Auto-tuned transfer step budget bounds, as multiples of
     /// `TRANSFER_STAGE_STEP_BYTES` expressed in percent (50% .. 200%).
     pub const AUTO_TUNE_MIN_STEP_PERCENT: u64 = 50;

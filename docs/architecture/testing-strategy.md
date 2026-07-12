@@ -47,12 +47,18 @@ Target modules with heavy coverage expected in `core/daemon`:
   persistence; corruption guards; bounded durable fields.
 - `reconcile.rs` — idle-bias; slice yielding; boundary clearing.
 - `executor.rs` — stage transitions; permit handoff; admission capacity
-  math.
+  math; provider-job dispatch/harvest (the pool runs inline —
+  synchronously at dispatch — in tests so ticks stay deterministic;
+  one dedicated test exercises the threaded production mode
+  end-to-end).
+- `provider_jobs.rs` — pool modes (inline vs worker threads); probe
+  shapes; transfer hold/resume; generation-based cancellation.
 - `path_filter.rs` — gitignore/vaporignore precedence; nested discovery;
   heavy-dir skip.
 - `event_intents.rs` — compaction; deferred markers; bounded caps.
-- `fs_events.rs` — callback discipline; symlink-escape rejection; path
-  normalization invariants.
+- `fs_events.rs` — bridge discipline (platform watch events →
+  normalize → filter → recorder); symlink-escape rejection; path
+  normalization invariants; one real-watcher bridge round-trip.
 
 In `core/shared`:
 

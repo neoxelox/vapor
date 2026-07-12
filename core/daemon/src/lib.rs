@@ -38,6 +38,7 @@ pub mod metrics;
 pub mod multi_runtime;
 pub mod path_filter;
 pub mod profiles;
+pub(crate) mod provider_jobs;
 pub mod reconcile;
 pub mod reconcile_walk;
 pub mod remote_sync;
@@ -58,7 +59,9 @@ pub mod workgate;
 
 pub struct DaemonApp {
     snapshot: StatusSnapshot,
-    provider: Box<dyn Provider>,
+    /// `Arc` so provider-job workers can drive uploads/downloads off
+    /// the tick thread while the app keeps trait-object access.
+    provider: Arc<dyn Provider>,
     throttle_controller: ThrottleController,
     last_throttle_decision: Option<ThrottleDecision>,
     retry_slowdown_until: Option<SystemTime>,
@@ -122,7 +125,7 @@ impl DaemonApp {
         logging::info("Initialized daemon app state", &[]);
         Self {
             snapshot: StatusSnapshot::default(),
-            provider,
+            provider: Arc::from(provider),
             throttle_controller: ThrottleController::with_clock(clock.clone()),
             last_throttle_decision: None,
             retry_slowdown_until: None,
@@ -172,9 +175,15 @@ impl DaemonApp {
         self.provider.as_ref()
     }
 
+    /// Shared handle for provider-job dispatch (workers hold the
+    /// provider across ticks).
+    pub(crate) fn provider_arc(&self) -> Arc<dyn Provider> {
+        self.provider.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn replace_provider_for_testing(&mut self, provider: Box<dyn Provider>) {
-        self.provider = provider;
+        self.provider = Arc::from(provider);
     }
 
     pub fn throttle_decision(&self) -> Option<&ThrottleDecision> {

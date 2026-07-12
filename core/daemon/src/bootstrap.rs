@@ -143,6 +143,10 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
         true,
         budget_config,
     )?;
+    // Production daemons run provider I/O on worker threads so network
+    // RTT never stalls the tick loop; tests keep the inline mode for
+    // deterministic single-threaded ticks.
+    runtime.enable_transfer_workers();
 
     log_started(&runtime);
 

@@ -10,12 +10,16 @@
 //! - A deep queue with no slowdown grows the step by 25% (latency).
 //! - Anything else holds.
 //!
-//! Every change records the pre-change queue depth; if the next cycle
-//! shows the queue growing instead of draining, the change rolls back
-//! and the tuner holds for a cooldown cycle (hysteresis +
-//! rollback-on-regression). The knob is bounded to 50%–200% of the
-//! compiled default and the bandwidth shaper still caps actual bytes,
-//! so tuning can never exceed the user's effective ceilings.
+//! Every change records the cycle's completion throughput; if the next
+//! cycle completes fewer intents than the one before the change, the
+//! change rolls back and the tuner holds for a cooldown cycle
+//! (hysteresis + rollback-on-regression). Throughput — not absolute
+//! queue depth — is the regression signal: depth is dominated by
+//! exogenous ingest, and judging on it would roll back every increase
+//! exactly when a deep queue needs it most. The knob is bounded to
+//! 50%–200% of the compiled default and the bandwidth shaper still
+//! caps actual bytes, so tuning can never exceed the user's effective
+//! ceilings.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,10 +35,10 @@ const DEEP_QUEUE_THRESHOLD: u64 = 100;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LastChange {
     None,
-    /// A change was made; holds the pre-change queue depth for the
-    /// regression check, and whether it was an increase.
+    /// A change was made; holds the pre-change cycle's completed-intent
+    /// count for the regression check, and whether it was an increase.
     Pending {
-        queue_depth_before: u64,
+        completed_before: u64,
         increased: bool,
     },
     /// Rolled back last cycle; hold one full cycle before touching the
@@ -43,12 +47,15 @@ enum LastChange {
 }
 
 pub struct AutoTuner {
-    /// The knob: per-tick transfer step budget in bytes, shared with
+    /// The knob: per-step transfer budget in bytes, shared with
     /// every profile runtime's executor.
     step_bytes: Arc<AtomicU64>,
     interval: Duration,
     last_cycle: Option<Instant>,
     last_change: LastChange,
+    /// Intents completed since the current cycle window opened —
+    /// the drain-rate signal the regression check judges on.
+    completed_in_window: u64,
 }
 
 impl AutoTuner {
@@ -58,6 +65,7 @@ impl AutoTuner {
             interval: Duration::from_secs(constants::engine::AUTO_TUNE_INTERVAL_SECONDS),
             last_cycle: None,
             last_change: LastChange::None,
+            completed_in_window: 0,
         }
     }
 
@@ -68,6 +76,7 @@ impl AutoTuner {
             interval,
             last_cycle: None,
             last_change: LastChange::None,
+            completed_in_window: 0,
         }
     }
 
@@ -79,40 +88,55 @@ impl AutoTuner {
         )
     }
 
-    /// One evaluation; call every tick, the tuner self-paces to its
-    /// cadence. `rate_limited` = any profile currently in a retry
-    /// slowdown window; `total_queue_depth` = durable depth across
-    /// profiles.
-    pub fn evaluate(&mut self, rate_limited: bool, total_queue_depth: u64, now_inst: Instant) {
-        let due = self
-            .last_cycle
+    /// Whether the next `evaluate` call would run a tuning cycle. Lets
+    /// the caller skip gathering the (SQL-backed) queue-depth signal on
+    /// the ~360 ticks per cycle where evaluate would ignore it.
+    pub fn cycle_due(&self, now_inst: Instant) -> bool {
+        self.last_cycle
             .map(|last| now_inst.saturating_duration_since(last) >= self.interval)
-            .unwrap_or(true);
-        if !due {
+            .unwrap_or(true)
+    }
+
+    /// Accumulates completed-intent counts from every tick; the cycle
+    /// window drains on each evaluation.
+    pub fn record_completions(&mut self, completed: u64) {
+        self.completed_in_window = self.completed_in_window.saturating_add(completed);
+    }
+
+    /// One evaluation; call when `cycle_due`. `rate_limited` = any
+    /// profile currently in a retry slowdown window;
+    /// `total_queue_depth` = durable depth across profiles.
+    pub fn evaluate(&mut self, rate_limited: bool, total_queue_depth: u64, now_inst: Instant) {
+        if !self.cycle_due(now_inst) {
             return;
         }
         self.last_cycle = Some(now_inst);
+        let completed_this_cycle = std::mem::take(&mut self.completed_in_window);
 
         let (min_step, max_step) = Self::bounds();
         let current = self.step_bytes.load(Ordering::Relaxed);
 
-        // Regression check for the previous cycle's change.
+        // Regression check for the previous cycle's change: judged on
+        // drain rate. Queue depth is confounded by ingest — a deep queue
+        // getting deeper during a burst says nothing about whether the
+        // step increase helped — but completed-per-cycle falling after a
+        // speed-up does.
         match self.last_change {
             LastChange::Pending {
-                queue_depth_before,
+                completed_before,
                 increased,
             } => {
-                if total_queue_depth > queue_depth_before && increased {
-                    // The queue grew after we sped up: the increase did
-                    // not help (or made pressure worse). Roll back.
+                if increased && completed_this_cycle < completed_before {
                     let reverted = (current * 100 / 125).clamp(min_step, max_step);
                     self.step_bytes.store(reverted, Ordering::Relaxed);
                     self.last_change = LastChange::Cooldown;
                     logging::info(
-                        "Auto-tuner rolled back a step increase after queue regression",
+                        "Auto-tuner rolled back a step increase after throughput regression",
                         &[
                             ("previous_step_bytes", current.to_string()),
                             ("reverted_step_bytes", reverted.to_string()),
+                            ("completed_before", completed_before.to_string()),
+                            ("completed_after", completed_this_cycle.to_string()),
                         ],
                     );
                     return;
@@ -132,7 +156,7 @@ impl AutoTuner {
             if lowered != current {
                 self.step_bytes.store(lowered, Ordering::Relaxed);
                 self.last_change = LastChange::Pending {
-                    queue_depth_before: total_queue_depth,
+                    completed_before: completed_this_cycle,
                     increased: false,
                 };
                 logging::info(
@@ -145,7 +169,7 @@ impl AutoTuner {
             if raised != current {
                 self.step_bytes.store(raised, Ordering::Relaxed);
                 self.last_change = LastChange::Pending {
-                    queue_depth_before: total_queue_depth,
+                    completed_before: completed_this_cycle,
                     increased: true,
                 };
                 logging::info(
@@ -199,16 +223,19 @@ mod tests {
     }
 
     #[test]
-    fn regression_after_an_increase_rolls_back_and_cools_down() {
+    fn throughput_regression_after_an_increase_rolls_back_and_cools_down() {
         let (mut tuner, step) = tuner();
         let base = constants::engine::TRANSFER_STAGE_STEP_BYTES;
         let t0 = Instant::now();
 
+        tuner.record_completions(100);
         tuner.evaluate(false, 500, t0);
         let raised = step.load(Ordering::Relaxed);
         assert!(raised > base);
 
-        // Queue got DEEPER after the increase: rollback.
+        // Fewer intents completed after the increase: the speed-up hurt
+        // throughput. Rollback.
+        tuner.record_completions(40);
         tuner.evaluate(false, 900, t0 + Duration::from_secs(91));
         assert!(step.load(Ordering::Relaxed) < raised, "rolled back");
 
@@ -226,12 +253,35 @@ mod tests {
     fn improvement_after_an_increase_keeps_the_change() {
         let (mut tuner, step) = tuner();
         let t0 = Instant::now();
+        tuner.record_completions(100);
         tuner.evaluate(false, 500, t0);
         let raised = step.load(Ordering::Relaxed);
 
-        // Queue drained: the change sticks and can grow again.
+        // Throughput held up: the change sticks and can grow again.
+        tuner.record_completions(150);
         tuner.evaluate(false, 200, t0 + Duration::from_secs(91));
         assert!(step.load(Ordering::Relaxed) >= raised);
+    }
+
+    #[test]
+    fn increase_sticks_when_ingest_outpaces_drain_but_throughput_improved() {
+        // The scenario the depth-based check got wrong: a sustained
+        // ingest keeps the queue growing no matter what the tuner does.
+        // Depth after the increase is WORSE, but the drain rate improved
+        // — the increase must stick.
+        let (mut tuner, step) = tuner();
+        let t0 = Instant::now();
+
+        tuner.record_completions(100);
+        tuner.evaluate(false, 5_000, t0);
+        let raised = step.load(Ordering::Relaxed);
+
+        tuner.record_completions(160);
+        tuner.evaluate(false, 9_000, t0 + Duration::from_secs(91));
+        assert!(
+            step.load(Ordering::Relaxed) >= raised,
+            "a deeper queue with better throughput must not roll back"
+        );
     }
 
     #[test]
