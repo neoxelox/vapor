@@ -2587,16 +2587,65 @@ mod tests {
         // Canonical payload applied.
         assert_eq!(std::fs::read(&local).expect("applied"), b"remote version");
         // The diverged local edit was kept as a conflict copy, not lost.
+        // Skip internal side-files: on a filesystem without xattr support
+        // (Windows), the applied payload's op-id tag lands as a
+        // `doc.txt.vapor-meta.json` side-file, which also starts with
+        // "doc" — the conflict copy is the non-internal `doc~conflict-…`.
         let conflict = std::fs::read_dir(&fixture.local_root)
             .expect("read local root")
             .filter_map(|e| e.ok())
             .find(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                name.starts_with("doc") && name != "doc.txt"
+                name.starts_with("doc")
+                    && name != "doc.txt"
+                    && !vapor_providers::filesystem::is_internal_file_name(&name)
             });
         let conflict = conflict.expect("a conflict copy was created");
         assert_eq!(
             std::fs::read(conflict.path()).expect("conflict body"),
+            b"local edit"
+        );
+    }
+
+    #[test]
+    fn conflict_copy_lookup_excludes_op_id_side_files() {
+        // Regression guard for the Windows keep-both path. Without xattr
+        // support the applied payload's op-id tag lands as a
+        // `doc.txt.vapor-meta.json` side-file next to the canonical file —
+        // which also starts with "doc" and is not "doc.txt". A conflict-copy
+        // search must exclude internal side-files (order-independently) and
+        // resolve to the real `doc~conflict-…` copy, else it can read the
+        // side-file's JSON instead of the preserved local bytes.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let root = dir.path();
+        std::fs::write(root.join("doc.txt"), b"remote version").expect("canonical");
+        std::fs::write(root.join("doc.txt.vapor-meta.json"), br#"{"opId":"x"}"#)
+            .expect("side-file");
+        std::fs::write(
+            root.join("doc~conflict-devA-1750000000000.txt"),
+            b"local edit",
+        )
+        .expect("conflict copy");
+
+        let matches: Vec<_> = std::fs::read_dir(root)
+            .expect("read root")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("doc")
+                    && name != "doc.txt"
+                    && !vapor_providers::filesystem::is_internal_file_name(&name)
+            })
+            .collect();
+
+        assert_eq!(
+            matches.len(),
+            1,
+            "exactly the conflict copy must match; the side-file must be excluded: {:?}",
+            matches.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            std::fs::read(matches[0].path()).expect("conflict body"),
             b"local edit"
         );
     }

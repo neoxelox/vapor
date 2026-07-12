@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Packaged-output validation also asserts `Contents/Helpers/vapor` (the third mandated executable).
   - PR workflows cancel superseded runs via a concurrency group (main pushes and release-invoked runs are never cancelled).
 
+### Testing
+
+- Fixed a Windows-only failure in the keep-both download test (full-repo review): on a filesystem without xattr support the applied payload's op-id tag lands as a `doc.txt.vapor-meta.json` side-file, so the test's conflict-copy search must exclude internal side-files (order-independently) rather than reading the side-file's JSON. Added an order-independent regression guard.
+
 ### Fixed (providers & auth)
 
 - Provider & OAuth fixes (full-repo review):
