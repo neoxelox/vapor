@@ -166,6 +166,12 @@ pub mod provider {
     /// enumeration and every changes feed hide these; the local ingest
     /// path filter drops them unconditionally.
     pub const TEMP_FILE_PREFIX: &str = ".vapor-tmp-";
+    /// A hidden `TEMP_FILE_PREFIX` staging file older than this is
+    /// orphaned crash residue (an interrupted upload/download stage), not
+    /// an in-flight transfer, and is reaped so it cannot accumulate in the
+    /// user's folder across repeated unclean shutdowns. Conservative so a
+    /// legitimately long, throttle-paused transfer's temp is never reaped.
+    pub const STALE_TEMP_FILE_MAX_AGE_MILLIS: u64 = 24 * 60 * 60 * 1_000;
     /// Bounded in-memory ring size of the filesystem provider's changes
     /// feed. A cursor older than the ring floor reports `CursorExpired`,
     /// which forces a reconcile instead of silently missing changes.

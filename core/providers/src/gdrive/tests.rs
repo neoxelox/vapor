@@ -513,6 +513,21 @@ fn a_busy_out_of_scope_file_is_walked_once_then_served_from_the_negative_cache()
 }
 
 #[test]
+fn a_changes_response_that_advances_no_cursor_is_a_transient_error_not_progress() {
+    // A parsable 200 with neither nextPageToken nor newStartPageToken must
+    // not persist the same cursor (which would re-poll the identical page
+    // forever); surface it transiently so the poll retries.
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(200, r#"{"changes":[]}"#);
+
+    let error = provider
+        .poll_changes(Some("cursor-1"), 100)
+        .expect_err("no-cursor response must not be accepted as progress");
+    assert_eq!(error.kind, ProviderErrorKind::Transient);
+}
+
+#[test]
 fn expired_page_token_maps_to_cursor_expired() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = ensured_provider(transport.clone());

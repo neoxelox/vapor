@@ -26,6 +26,7 @@ use vapor_platform::fs_watch::{FsWatcher, WatchEvent, WatchEventKind, start_nati
 use vapor_shared::constants;
 
 use super::is_internal_file_name;
+use crate::logging;
 use crate::tags::OpIdTagStore;
 use crate::{
     ChangesPoll, ProviderError, RemoteChange, RemoteChangeKind, RemoteChangesPage, RemotePath,
@@ -210,7 +211,18 @@ fn normalize_watch_event(
     tags: &OpIdTagStore,
     event: WatchEvent,
 ) -> Option<RemoteChange> {
-    let name = event.path.file_name()?.to_str()?;
+    let name_os = event.path.file_name()?;
+    let Some(name) = name_os.to_str() else {
+        // Non-UTF-8 names are unrepresentable (RemotePath is UTF-8). macOS
+        // enforces UTF-8 at creation, so this is near-unreachable there;
+        // log it so a missing file on another filesystem is diagnosable
+        // instead of silently absent.
+        logging::warning(
+            "Skipping watch event for a non-UTF-8 path (cannot be synced)",
+            &[("path", event.path.to_string_lossy().into_owned())],
+        );
+        return None;
+    };
     if is_internal_file_name(name) {
         return None;
     }
@@ -237,7 +249,27 @@ fn normalize_watch_event(
             op_id: None,
             content_hash: None,
         }),
-        Err(_) => None,
+        // A transient stat failure (EACCES during a permission change,
+        // EIO on a network mount) must not silently drop the change — the
+        // event is already consumed from the watch channel, so dropping it
+        // loses the change until the next reconcile (which has no periodic
+        // cadence). Emit optimistically; the engine re-stats before acting.
+        Err(error) => {
+            logging::warning(
+                "Emitting a watch event optimistically after a non-fatal stat failure",
+                &[
+                    ("path", remote_path.as_str().to_string()),
+                    ("error", error.to_string()),
+                ],
+            );
+            Some(RemoteChange {
+                path: remote_path,
+                kind: RemoteChangeKind::CreatedOrModified,
+                observed_at: event.observed_at,
+                op_id: None,
+                content_hash: None,
+            })
+        }
     }
 }
 

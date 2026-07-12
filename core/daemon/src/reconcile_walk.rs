@@ -190,9 +190,24 @@ impl ReconcileWalker {
             Ok(entries) => {
                 for entry in entries.flatten() {
                     let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+                        // Non-UTF-8 names are unrepresentable in the sync
+                        // path model; log so a file that never syncs is
+                        // diagnosable (macOS enforces UTF-8, so this is rare).
+                        crate::logging::warning(
+                            "Reconcile walk skipped a non-UTF-8 local file name (cannot be synced)",
+                            &[("path", entry.path().to_string_lossy().into_owned())],
+                        );
                         continue;
                     };
                     if vapor_providers::filesystem::is_internal_file_name(&name) {
+                        // Reap orphaned download-staging temps from unclean
+                        // crashes as we pass over them; in-flight (young)
+                        // temps are left alone.
+                        vapor_providers::filesystem::reap_if_stale_temp_file(
+                            &entry.path(),
+                            &name,
+                            SystemTime::now(),
+                        );
                         continue;
                     }
                     if self.ignores(&entry.path()) {

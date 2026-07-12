@@ -107,6 +107,28 @@ pub fn is_internal_file_name(name: &str) -> bool {
         || name.ends_with(constants::provider::OP_ID_SIDE_FILE_SUFFIX)
 }
 
+/// Best-effort reap of an orphaned staging temp file. A `TEMP_FILE_PREFIX`
+/// file older than the stale-age threshold is crash residue (an
+/// interrupted upload/download stage) — hidden from sync but never
+/// otherwise removed, so it would accumulate across unclean shutdowns.
+/// A young temp file (an in-flight, possibly throttle-paused transfer) is
+/// left alone. Errors are ignored: this is cleanup, never load-bearing.
+pub fn reap_if_stale_temp_file(path: &Path, name: &str, now: SystemTime) {
+    if !name.starts_with(constants::provider::TEMP_FILE_PREFIX) {
+        return;
+    }
+    let stale = fs::symlink_metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| now.duration_since(modified).ok())
+        .is_some_and(|age| {
+            age.as_millis() as u64 >= constants::provider::STALE_TEMP_FILE_MAX_AGE_MILLIS
+        });
+    if stale {
+        let _ = fs::remove_file(path);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FeedMode {
     Native,
@@ -333,9 +355,20 @@ impl Provider for FilesystemProvider {
             })?;
             let name = dir_entry.file_name();
             let Some(name) = name.to_str() else {
+                // Unrepresentable in the UTF-8 RemotePath: log so a file
+                // that never syncs is diagnosable rather than silently
+                // absent (macOS enforces UTF-8 names, so this is rare).
+                crate::logging::warning(
+                    "Skipping non-UTF-8 remote file name during enumeration (cannot be synced)",
+                    &[("path", dir_entry.path().to_string_lossy().into_owned())],
+                );
                 continue;
             };
             if is_internal_file_name(name) {
+                // Opportunistically reap orphaned staging temp files left
+                // by an unclean crash so they cannot accumulate hidden in
+                // the cloud folder; in-flight (young) temps are untouched.
+                reap_if_stale_temp_file(&dir_entry.path(), name, SystemTime::now());
                 continue;
             }
             let Ok(child) = directory.join(name) else {
@@ -1286,6 +1319,49 @@ mod tests {
             b"changed underneath us",
             "the concurrent write must survive the refused commit"
         );
+    }
+
+    #[test]
+    fn stale_staging_temp_files_are_reaped_but_in_flight_ones_survive() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let stale = dir
+            .path()
+            .join(format!("{}dl-old", constants::provider::TEMP_FILE_PREFIX));
+        let fresh = dir
+            .path()
+            .join(format!("{}dl-new", constants::provider::TEMP_FILE_PREFIX));
+        let user_file = dir.path().join("keep.txt");
+        std::fs::write(&stale, b"orphan").expect("seed stale");
+        std::fs::write(&fresh, b"in flight").expect("seed fresh");
+        std::fs::write(&user_file, b"user data").expect("seed user file");
+
+        let now = SystemTime::now();
+        let stale_age = now
+            + std::time::Duration::from_millis(
+                constants::provider::STALE_TEMP_FILE_MAX_AGE_MILLIS + 60_000,
+            );
+
+        // The stale temp is older than the threshold relative to `stale_age`.
+        reap_if_stale_temp_file(&stale, "dl-old", now); // name lacks prefix here
+        assert!(stale.exists(), "guard only reaps prefixed names");
+
+        reap_if_stale_temp_file(
+            &stale,
+            &format!("{}dl-old", constants::provider::TEMP_FILE_PREFIX),
+            stale_age,
+        );
+        assert!(!stale.exists(), "an aged staging temp must be reaped");
+
+        reap_if_stale_temp_file(
+            &fresh,
+            &format!("{}dl-new", constants::provider::TEMP_FILE_PREFIX),
+            now,
+        );
+        assert!(fresh.exists(), "a young in-flight temp must survive");
+
+        // A real user file is never a candidate (no reserved prefix).
+        reap_if_stale_temp_file(&user_file, "keep.txt", stale_age);
+        assert!(user_file.exists());
     }
 
     #[test]

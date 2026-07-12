@@ -575,7 +575,7 @@ When a completed download detects local divergence, preserve_diverged_local_befo
 
 **Suggested fix**: Split the follow-up enqueue out of resolve_upload_conflict (parameterize it): the upload-gate/precondition callers need both follow-ups, but the download-apply caller only needs the conflict-copy Upload since it applies the canonical payload itself.
 
-### [low] record_download_index stores the daemon's own download op-id instead of the remote object's op-id, defeating the op-id fast path for every subsequent upload
+### [low] record_download_index stores the daemon's own download op-id instead of the remote object's op-id, defeating the op-id fast path for every subsequent upload  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/executor.rs:1436`
 
@@ -608,7 +608,7 @@ The field doc claims 'a rewound clock only shrinks the observed rate (fails safe
 **Suggested fix**: In prune() (or record()), also drop or clamp entries with timestamps greater than `now` (e.g. `while front > now { pop }` or clamp on push), and fix the misleading field comment.
 
 
-### [low] Orphaned `.vapor-tmp-dl-*` staging files accumulate in the user's sync folder after crashes or failed applies
+### [low] Orphaned `.vapor-tmp-dl-*` staging files accumulate in the user's sync folder after crashes or failed applies  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/executor.rs:1074` (staging-name generation; line pre-cleanup)
 
@@ -916,7 +916,7 @@ BandwidthShaper::budget() (core/providers/src/bandwidth.rs:63) debits the full g
 
 **Suggested fix**: Add a `refund(unused: u64)` (or `settle(granted, used)`) method that returns unspent tokens to the bucket (clamped to the 1-second cap), and call it from the executor after each step with granted minus actual bytes_transferred.
 
-### [low] Watch events are silently dropped when stat fails with anything other than NotFound, permanently losing the change from the feed
+### [low] Watch events are silently dropped when stat fails with anything other than NotFound, permanently losing the change from the feed  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/filesystem/feed.rs:240` · **Review group**: provider-fs
 
@@ -924,7 +924,7 @@ BandwidthShaper::budget() (core/providers/src/bandwidth.rs:63) debits the full g
 
 **Suggested fix**: On non-NotFound stat errors, emit the change optimistically as CreatedOrModified with `op_id: None` (the engine re-stats and hash-checks anyway), or at minimum log the drop so missed-change reports are diagnosable.
 
-### [low] Non-UTF-8 remote file names are silently invisible to enumerate, stat-by-feed, and the changes feed — files never sync with no diagnostic
+### [low] Non-UTF-8 remote file names are silently invisible to enumerate, stat-by-feed, and the changes feed — files never sync with no diagnostic  ✅ DONE
 
 **Category**: improvement · **Where**: `core/providers/src/filesystem/mod.rs:306` · **Review group**: provider-fs
 
@@ -932,7 +932,7 @@ enumerate (core/providers/src/filesystem/mod.rs:306) skips directory entries who
 
 **Suggested fix**: Log a warning (redacting nothing sensitive — path bytes lossily) the first time a non-representable name is skipped, and surface a count through diagnostics/doctor so the exclusion is observable rather than silent.
 
-### [low] Orphaned upload temp files from crashes are never cleaned up and are permanently invisible
+### [low] Orphaned upload temp files from crashes are never cleaned up and are permanently invisible  ✅ DONE
 
 **Category**: improvement · **Where**: `core/providers/src/filesystem/mod.rs:370` · **Review group**: provider-fs
 
@@ -940,7 +940,7 @@ A daemon crash (SIGKILL, panic-abort, power loss) between `begin_upload` and fin
 
 **Suggested fix**: Sweep stale `TEMP_FILE_PREFIX` files (older than some conservative age) during `ensure_cloud_sync_directory` or the reconcile walk.
 
-### [low] poll_changes falls back to re-using the same cursor when Drive returns neither nextPageToken nor newStartPageToken
+### [low] poll_changes falls back to re-using the same cursor when Drive returns neither nextPageToken nor newStartPageToken  ✅ DONE
 
 **Category**: improvement · **Where**: `core/providers/src/gdrive/mod.rs:932` · **Review group**: gdrive
 
@@ -956,7 +956,7 @@ HttpRequest (core/providers/src/http.rs:12) derives Debug while carrying raw "Au
 
 **Suggested fix**: Replace the derived Debug with a manual impl that redacts values of Authorization/Proxy-Authorization (and any header name containing 'token'/'secret'), keeping method/url/header-names visible for diagnostics.
 
-### [low] Side-file temp `.vapor-meta.json.tmp` is not recognized as internal and leaks into the sync scope on crash
+### [low] Side-file temp `.vapor-meta.json.tmp` is not recognized as internal and leaks into the sync scope on crash  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/tags.rs:131` · **Review group**: provider-core
 

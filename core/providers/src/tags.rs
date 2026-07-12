@@ -158,7 +158,21 @@ impl OpIdTagStore {
             op_id: op_id.to_string(),
         })
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let temp = side_file.with_extension("json.tmp");
+        // Stage inside the reserved internal namespace (TEMP_FILE_PREFIX) so
+        // a crash between write and rename leaves an orphan that stays
+        // hidden from sync by the filter's unconditional internal-artifact
+        // check — not a `*.tmp` name that relies on a user-editable rule.
+        let staged_name = side_file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| format!("{}{name}", constants::provider::TEMP_FILE_PREFIX))
+            .unwrap_or_else(|| {
+                format!(
+                    "{}side.vapor-meta.json",
+                    constants::provider::TEMP_FILE_PREFIX
+                )
+            });
+        let temp = side_file.with_file_name(staged_name);
         fs::write(&temp, payload)?;
         fs::rename(&temp, &side_file)
     }

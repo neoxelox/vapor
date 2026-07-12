@@ -1069,10 +1069,16 @@ impl Provider for GoogleDriveProvider {
             });
         }
 
-        let next_cursor = list
-            .next_page_token
-            .or(list.new_start_page_token)
-            .unwrap_or_else(|| cursor.to_string());
+        // Drive must return a cursor to advance on: `nextPageToken` for more
+        // pages, else `newStartPageToken` for the next baseline. A parsable
+        // response missing both is not progress — reusing the old cursor
+        // would durably re-poll the identical page forever. Surface it as
+        // transient so the poll retries instead of wedging.
+        let Some(next_cursor) = list.next_page_token.or(list.new_start_page_token) else {
+            return Err(ProviderError::transient(
+                "Drive changes response advanced no cursor (no nextPageToken/newStartPageToken)",
+            ));
+        };
         Ok(ChangesPoll::Page(RemoteChangesPage {
             changes,
             next_cursor,

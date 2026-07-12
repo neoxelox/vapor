@@ -153,6 +153,12 @@ struct TransferPlan {
     /// the post-upload index write detect a mid-transfer edit and decline
     /// to record a stale mtime.
     hashed_local_state: Option<(u64, Option<SystemTime>)>,
+    /// For a download, the op-id tag on the remote object being fetched
+    /// (the id of whichever device wrote it). Recorded as the sync
+    /// index's `last_op_id` so a later upload of this path can correlate
+    /// by op-id instead of falling back to a full-remote-read hash
+    /// comparison. `None` for uploads (they record their own op-id).
+    remote_op_id: Option<String>,
 }
 
 enum ActiveStage {
@@ -1172,6 +1178,16 @@ fn plan_intent(
                 .parent()
                 .unwrap_or(local_root)
                 .join(staging_name);
+            // Best-effort: capture the remote object's op-id so the sync
+            // index records the writer's id, not this device's download
+            // id. A stat failure just leaves the op-id correlator disabled
+            // for this path (the hash comparison still converges).
+            let remote_op_id = app
+                .provider()
+                .stat(&remote_path)
+                .ok()
+                .flatten()
+                .and_then(|entry| entry.op_id);
             PlanOutcome::Download(TransferPlan {
                 remote_path,
                 op_id,
@@ -1181,6 +1197,7 @@ fn plan_intent(
                 precondition: RemotePrecondition::None,
                 verify_remote_before_upload: false,
                 hashed_local_state: None,
+                remote_op_id,
             })
         }
         PendingIntentKind::ApplyRemoteDelete => {
@@ -1272,6 +1289,7 @@ fn plan_delete(
         precondition: RemotePrecondition::None,
         verify_remote_before_upload: false,
         hashed_local_state: None,
+        remote_op_id: None,
     };
     if env.sync_mode != vapor_shared::SyncMode::TwoWay {
         return PlanOutcome::RemoteDelete(plan);
@@ -1375,6 +1393,7 @@ fn plan_upload(
         precondition: RemotePrecondition::None,
         verify_remote_before_upload: false,
         hashed_local_state: None,
+        remote_op_id: None,
     };
     if env.sync_mode != vapor_shared::SyncMode::TwoWay {
         return PlanOutcome::Upload(plan);
@@ -1630,6 +1649,8 @@ fn record_upload_index(
         content_hash,
         size_bytes,
         local_modified_at,
+        // An upload records our own op-id (the tag we just wrote remotely).
+        &plan.op_id,
         now,
     );
 }
@@ -1646,12 +1667,18 @@ fn record_download_index(
     let local_modified_at = fs::symlink_metadata(&plan.local_path)
         .and_then(|metadata| metadata.modified())
         .ok();
+    // Record the REMOTE object's op-id (whoever wrote it), not this
+    // device's download id — so a later upload of this path correlates by
+    // op-id. An untagged remote records an empty id (never matches), which
+    // correctly falls through to the hash comparison.
+    let last_op_id = plan.remote_op_id.as_deref().unwrap_or("");
     write_sync_index_entry(
         state_db,
         plan,
         content_hash,
         size_bytes,
         local_modified_at,
+        last_op_id,
         now,
     );
 }
@@ -1662,6 +1689,7 @@ fn write_sync_index_entry(
     content_hash: &str,
     size_bytes: u64,
     local_modified_at: Option<SystemTime>,
+    last_op_id: &str,
     now: SystemTime,
 ) {
     if let Err(error) = state_db.set_sync_index(
@@ -1669,7 +1697,7 @@ fn write_sync_index_entry(
         content_hash,
         size_bytes,
         local_modified_at,
-        &plan.op_id,
+        last_op_id,
         now,
     ) {
         crate::logging::warning(
@@ -2576,6 +2604,39 @@ mod tests {
         assert_eq!(report.failed, 1);
         // Nothing was written outside the sync root.
         assert!(!outside.join("payload.txt").exists());
+    }
+
+    #[test]
+    fn download_records_the_remote_objects_op_id_in_the_sync_index() {
+        let mut fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.cloud_root.join("docs")).expect("dirs");
+        let cloud_path = fixture.cloud_root.join("docs/new.txt");
+        std::fs::write(&cloud_path, b"from the cloud").expect("seed remote");
+        // The remote object was written by another device; tag it so.
+        fixture
+            .tags
+            .write_op_id(&cloud_path, "remote-writer-op")
+            .expect("tag remote object");
+
+        let local_target = fixture.local_root.join("docs/new.txt");
+        let intent = fixture.enqueue_and_lease(&local_target, PendingIntentKind::Download);
+        assert!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0))
+        );
+        let report = fixture.run_to_quiescence(16);
+        assert_eq!(report.completed, 1);
+
+        let index = fixture
+            .state_db
+            .sync_index(&local_target)
+            .expect("read index")
+            .expect("index present after download");
+        assert_eq!(
+            index.last_op_id, "remote-writer-op",
+            "the sync index must record the remote writer's op-id, not this device's download id"
+        );
     }
 
     #[test]
