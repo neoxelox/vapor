@@ -16,7 +16,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - The release job's cargo/SPM caches are release-scoped with no prefix restore-keys, so signed/notarized artifacts cannot link objects restored from another job's cache; the PR workflows key their caches per workflow so they stop fighting over one shared key.
   - Packaged-output validation also asserts `Contents/Helpers/vapor` (the third mandated executable).
   - PR workflows cancel superseded runs via a concurrency group (main pushes and release-invoked runs are never cancelled).
-  - Every GitHub Actions `uses:` (the third-party `maxim-lobanov/setup-xcode` and `actions-rust-lang/setup-rust-toolchain`, and first-party `actions/checkout` / `actions/cache`) is pinned to a full commit SHA with a `# vX.Y` comment, so a force-moved mutable tag can no longer execute attacker code inside the secret-bearing release job (which sees the Developer ID and notary credentials). `.github/dependabot.yml` keeps the SHAs (and comments) fresh.
 
 ### Fixed (providers & auth)
 

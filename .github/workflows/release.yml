@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -70,11 +70,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Full fetch (not --depth=1): a shallow fetch writes a graft in
-          # .git/shallow with no traversable parents, so `is-ancestor`
-          # fails deterministically once main has advanced past the tag —
-          # falsely rejecting a valid release. The checkout already has
-          # full history, so this is cheap.
           git fetch origin main
 
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
@@ -109,22 +104,22 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Select Xcode
-        uses: maxim-lobanov/setup-xcode@60606e260d2fc5762a71e64e74b2174e8ea3c8bd # v1.6.0
+        uses: maxim-lobanov/setup-xcode@v1.6.0
         with:
           xcode-version: latest-stable
 
       - name: Set up Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@1fbea72663f6d4c03efaab13560c8a24cfd2a7cc # v1.9.0
+        uses: actions-rust-lang/setup-rust-toolchain@v1.9.0
         with:
           cache: false
 
       - name: Cache Rust dependencies
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/bin/
@@ -132,19 +127,12 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          # Release-scoped, exact key with NO prefix restore-keys: the
-          # signed/notarized artifacts must never link objects restored
-          # from another main-scoped job's cache (supply-chain hardening),
-          # and the per-workflow discriminator stops the five workflows
-          # from fighting over one shared key.
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache SwiftPM dependencies
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache@v5
         with:
           path: apps/macos/.build
-          # Release-scoped, exact key with no prefix restore-keys (same
-          # supply-chain reasoning as the cargo cache above).
           key: ${{ runner.os }}-spm-release-${{ hashFiles('**/Package.resolved') }}
 
       - name: Validate signing and notarization configuration
@@ -297,8 +285,6 @@ jobs:
           test -f dist/Vapor.zip
           test -x dist/Vapor.app/Contents/MacOS/Vapor
           test -x dist/Vapor.app/Contents/MacOS/vapord
-          # The third mandated executable (AGENTS.md §7.2): the CLI shim the
-          # app drives for all lifecycle control.
           test -x dist/Vapor.app/Contents/Helpers/vapor
 
       - name: Generate checksums
@@ -336,8 +322,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Reconcile the prerelease flag explicitly (both directions) so a
-          # manual UI change never drifts from the tag-derived value.
           if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
             prerelease_reconcile=(--prerelease=true)
           else
@@ -345,10 +329,6 @@ jobs:
           fi
 
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            # Re-running the workflow must NOT demote an already-published
-            # release back to draft (which would 404 its assets and the
-            # "latest" pointer). Only re-apply --draft if it is still a
-            # draft.
             is_draft=$(gh release view "$TAG_NAME" --json isDraft --jq .isDraft)
             draft_flag=()
             if [[ "$is_draft" == "true" ]]; then

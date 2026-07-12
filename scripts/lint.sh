@@ -15,7 +15,4 @@ else
   echo "[lint] Host is not macOS. Skipping Swift lint (apps/macos is macOS-only)."
 fi
 
-# Only the Rust format check here: the Swift lint above already ran the
-# same `swift format lint`, and calling the aggregate `format.sh check`
-# would run it a second time for no added coverage.
 "$ROOT_DIR/scripts/rust/format.sh" check

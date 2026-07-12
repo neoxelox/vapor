@@ -52,9 +52,6 @@ runtime/
 data/runtime/
 
 # --- Generated locale mirror (source-of-truth is assets/locales) ---
-# Ignore only the generated JSON, not the whole directory: Package.swift's
-# `.process("Resources")` needs the tree to exist, so a fresh clone must
-# not fail `swift build` before a wrapper script has run locales.sh.
 apps/macos/Sources/VaporCore/Resources/locales/*.json
 
 # SQLite sidecar files (allow explicit DB files if needed)
@@ -65,8 +62,5 @@ apps/macos/Sources/VaporCore/Resources/locales/*.json
 .claude
 .codex
 .opencode
-# Exclude the directory contents (not the directory itself) so the
-# negation can re-include the shared Cursor env config — a file inside an
-# excluded *directory* cannot be re-included by a later `!` rule.
-.cursor/*
+.cursor
 !.cursor/environment.json
