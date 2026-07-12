@@ -50,7 +50,12 @@ cat >"$PRE_COMMIT_HOOK" <<'HOOK'
 #
 # Installed by scripts/hooks.sh. Runs the full local validation pipeline
 # before every commit so agentic contributors and humans share one bar:
-# clean -> lint -> test -> build. Any failure aborts the commit.
+# lint -> test -> build. Any failure aborts the commit.
+#
+# Builds incrementally: the from-scratch, empty-cache guarantee lives in
+# CI (fresh checkout on every PR), so the hook stays fast. It also no
+# longer wipes runtime state — a `clean.sh` here would delete `.vapor`,
+# destroying a preserved or running e2e sandbox.
 #
 # Re-run scripts/hooks.sh install to refresh after updates; remove via
 # scripts/hooks.sh uninstall.
@@ -58,9 +63,6 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
-
-echo "Cleaning build and distribution artifacts..."
-"$REPO_ROOT/scripts/clean.sh"
 
 echo "Linting source files..."
 "$REPO_ROOT/scripts/lint.sh"
@@ -76,4 +78,4 @@ HOOK
 
 chmod +x "$PRE_COMMIT_HOOK"
 echo "[hooks] installed pre-commit hook at $PRE_COMMIT_HOOK"
-echo "[hooks] runs: clean -> lint -> test -> build"
+echo "[hooks] runs: lint -> test -> build"

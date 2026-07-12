@@ -1286,7 +1286,7 @@ scripts/e2e.sh:402 runs `rm -rf "$(dirname "$deep_socket")"` where `$deep_socket
 
 **Suggested fix**: Validate before deleting: require `[[ "$deep_socket" == */vapord.sock ]]` (or a vapor-specific directory component) and that the resolved dir is under "${TMPDIR:-/tmp}"; otherwise skip the removal and fail with diagnostics. Alternatively remove only the socket file itself with rm -f.
 
-### [medium] Pre-commit hook runs clean.sh, forcing a full cold rebuild of the entire workspace on every commit
+### [medium] Pre-commit hook runs clean.sh, forcing a full cold rebuild of the entire workspace on every commit  ✅ DONE
 
 **Category**: perf · **Where**: `scripts/hooks.sh:63` · **Review group**: scripts
 

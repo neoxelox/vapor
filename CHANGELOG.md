@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Tooling / CI
 
+- The optional pre-commit hook no longer runs `clean.sh` (full-repo review): it builds incrementally (`lint → test → build`) so commits are fast, and — the genuine fix — it no longer wipes `.vapor`/`dist`, which previously destroyed a preserved or running e2e sandbox on every commit. The from-scratch, empty-cache guarantee is owned by CI (fresh checkout on every PR); test execution is never cached, so a failing test can't slip through incrementally.
 - Shared external dependencies are pinned once in a root `[workspace.dependencies]` table and inherited via `{ workspace = true }` across all seven crate manifests (full-repo review), so a version bump no longer risks a missed hand-duplicated copy producing conflicting `=` pins that break workspace resolution.
 - Release & CI pipeline fixes (full-repo review):
   - The tag-reachability preflight uses a full `git fetch` (not `--depth=1`), so a valid release tag is no longer deterministically rejected once `main` advances past it.
