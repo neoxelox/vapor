@@ -10,10 +10,92 @@ security issues, plus a comment-cleanup pass over the codebase.
 - **Severity scale**: `critical` (data loss / security compromise), `high` (real bug users
   will hit), `medium` (bug in edge cases or meaningful perf/robustness gap), `low`
   (minor issue or polish).
-- **Status (2026-07-12)**: all 169 confirmed findings have been implemented. 157 were
-  resolved in PR #6 / PR #8 and their entries removed from this document; the 12
-  below (the architectural/performance remainder) were resolved in the follow-up
-  change set and are kept for reference with their resolutions.
+- **Status (2026-07-12)**: all 169 confirmed findings from the original review have
+  been implemented. 157 were resolved in PR #6 / PR #8 and their entries removed from
+  this document; the 12 in "Resolved in the follow-up change set" (the
+  architectural/performance remainder) were resolved next and are kept for reference.
+  **8 new findings from the project owner's field testing are OPEN** — see
+  "Open findings — field testing (2026-07-12)" below.
+
+## Open findings — field testing (2026-07-12)
+
+Reported by the project owner while exercising the `filesystem` provider on macOS;
+each verified against the code before being recorded.
+
+| Sev | Category | Location | Finding |
+|---|---|---|---|
+| high | bug | `core/daemon/src/runtime.rs:1229` | Deleting the cloud sync root mid-run wedges reconcile in an infinite failure loop instead of re-ensuring the root |
+| high | bug | `core/daemon/src/sync_directories.rs:197` | No overlap validation between localSyncDirectory and cloudSyncDirectory (filesystem provider): equal or nested roots feed the engine its own writes |
+| medium | bug | `core/daemon/src/sync_directories.rs:197` | `~` in cloudSyncDirectory is not expanded — `~/x` becomes `/~/x` and the filesystem provider fails with "Read-only file system" |
+| medium | bug | `core/providers/src/filesystem/mod.rs` | POSIX file mode is not preserved through sync — executable scripts arrive as 0644 |
+| medium | bug | `apps/macos/Sources/VaporCore/AppShellState.swift:123` | macOS app permanently displays the hardcoded "Filesystem (stub)" provider name; never refreshed from config or daemon status |
+| low | improvement | `core/shared/src/constants.rs:468` | Mass-delete guard threshold (200 deletions / 60s) is not user-configurable |
+| low | improvement | `core/shared/src/constants.rs:391` | Transfer/hash concurrency caps are compiled constants — not derived from core count and with no direct config knob (only `resourceLimits.cpuPercent` scaling) |
+| low | improvement | `core/shared/src/constants.rs:487` | Storm bursts defer a whole-subtree reconcile by a fixed 30s even when the device goes idle immediately, making bulk operations (repo clone) feel laggy |
+
+### [high] Deleting the cloud sync root mid-run wedges reconcile in an infinite failure loop instead of re-ensuring the root
+
+**Category**: bug · **Where**: `core/daemon/src/runtime.rs:1229` · **Source**: field testing
+
+`cloud_root_ready` is only computed at startup and re-checked by `retry_cloud_root_if_needed` *when already false*. When the user deletes the cloud sync root while the daemon runs, nothing flips it back to false: the filesystem provider's scope check (`resolve_in_scope`, filesystem/mod.rs:202) canonicalizes the deepest *existing* ancestor — now the root's parent — and returns the Permanent error "remote path … escapes the cloud sync root (resolves through …)". `process_reconcile_walk` treats every walk error identically: warn, abort the walker, requeue the reconcile intent +1s, retry — producing an infinite WARNING loop (observed live) while sync is stalled on a condition the daemon is explicitly required to self-heal (AGENTS §1: ensure the cloud root exists provider-side before regular sync work proceeds). Uploads hit the same escape error and burn their whole retry budget into `failed_intents` instead of waiting for the root to come back.
+
+**Suggested fix**: On a Permanent provider error from the walk (or any executor provider call) whose class is root-unavailability, re-run `ensure_cloud_sync_directory`; if it fails, set `cloud_root_ready = false` (entering the existing Error state + 60s ensure-retry loop that recreates the root) and requeue the intent without consuming retry budget. Detect root-unavailability explicitly (e.g. a dedicated `ProviderErrorKind::CloudRootUnavailable` or a root-exists probe) rather than string-matching.
+
+### [high] No overlap validation between localSyncDirectory and cloudSyncDirectory (filesystem provider)
+
+**Category**: bug · **Where**: `core/daemon/src/sync_directories.rs:197` · **Source**: field testing
+
+`resolve_local_directory` and `resolve_cloud_directory` never cross-check the two paths, and profile resolution doesn't either. With `provider = "filesystem"`, configuring the same directory (or one nested inside the other) makes the provider write into the watched tree: every upload's temp+rename lands as a fresh watcher event (upload writes are recorded in the *remote* echo cache, not the local one, so stabilization does not suppress them), which re-enqueues an upload of the same path — self-sustaining churn that rewrites files forever and burns CPU/disk on a loop the loop-prevention machinery was never designed to break. The provider's changes feed additionally watches the same tree, so every local edit is also reported as a remote change. In `pull-only` strict-mirror mode an overlap is potentially destructive. Nothing warns the user; the daemon just starts.
+
+**Suggested fix**: At scope/profile resolution (and in `vapor doctor`), refuse to compose a profile whose canonicalized local root equals, contains, or is contained by the canonicalized cloud root when the provider is filesystem-backed — suspend the profile with an actionable reason like invalid-provider suspension does today.
+
+### [medium] `~` in cloudSyncDirectory is not expanded
+
+**Category**: bug · **Where**: `core/daemon/src/sync_directories.rs:197` · **Source**: field testing
+
+`resolve_local_directory` goes through `resolve_path`, which expands `~` / `~/…` against the home directory. `resolve_cloud_directory` does not: it trims and, if the value does not start with `/`, prepends one. `cloudSyncDirectory = "~/Desktop/Vapor"` therefore becomes the literal path `/~/Desktop/Vapor`, and the filesystem provider fails with "cannot create filesystem cloud sync directory /~/Desktop/Vapor: Read-only file system (os error 30)" (observed live). The `/`-prepend is right for real cloud providers (remote paths are root-relative), but wrong for the filesystem provider where the value is a local absolute path.
+
+**Suggested fix**: When the profile's provider is filesystem-backed, resolve `cloudSyncDirectory` with the same `resolve_path` used for the local root (tilde expansion + absolutization) and reject non-absolute results with an actionable error instead of silently prefixing `/`. Mirror the same expansion in the Swift config surface if it validates paths.
+
+### [medium] POSIX file mode is not preserved through sync
+
+**Category**: bug · **Where**: `core/providers/src/filesystem/mod.rs` · **Source**: field testing
+
+Uploads and downloads write a `.vapor-tmp-*` staging file (created with the process umask, effectively 0644) and rename it into place; nothing ever reads or applies the source file's permissions (`set_permissions` appears nowhere in the provider or the executor apply path). A `0755` script synced through Vapor arrives as `0644` on the other side — observed as a `100755 → 100644` diff — silently breaking executables, git working trees, and build scripts. A chmod-only change (no content change) also never propagates, since sync state compares content hashes only.
+
+**Suggested fix**: For the filesystem provider, capture the source mode in the transfer metadata and apply it to the staging file before the rename on both directions (at minimum preserve the executable bits). For providers without a native mode concept (gdrive), carry the mode in the op-id side metadata so filesystem↔cloud↔filesystem round trips restore it; document that mode-only changes do not currently propagate.
+
+### [medium] macOS app permanently displays "Filesystem (stub)" as the provider
+
+**Category**: bug · **Where**: `apps/macos/Sources/VaporCore/AppShellState.swift:123` · **Source**: field testing
+
+`AppShellState.initial` seeds `providerName` from `VaporConstants.Daemon.preGADefaultProviderDisplayName = "Filesystem (stub)"`, and no code path ever assigns `state.providerName` again — the value is rendered verbatim in the shell header, menubar, and diagnostics pane. The daemon has shipped the *real* filesystem provider as the default since Wave 8 (the inert stub is not even selectable via config), so the label is wrong for every user and alarming ("stub") besides. It also never reflects `provider = "gdrive"`.
+
+**Suggested fix**: Populate `providerName` from the loaded configuration at startup (config `provider` key → display name) and refresh it from the daemon status (IPC `provider_name`) alongside the other lifecycle-backed values; retire the stale `preGADefaultProviderDisplayName` constant.
+
+### [low] Mass-delete guard threshold is not user-configurable
+
+**Category**: improvement · **Where**: `core/shared/src/constants.rs:468` · **Source**: field testing
+
+The guard pauses all sync after 200 locally-observed deletions inside a rolling 60s window and latches until `vapor resume`. The constants are compiled in; a user whose normal workflow deletes large trees with per-file unlinks (`rm -rf` of ≥200 files, build cleans) will trip it and must manually resume, with no way to raise the threshold or opt out. (A Finder folder delete typically arrives as one rename/removal of the directory and does not trip it.)
+
+**Suggested fix**: Add a `safeguards` config group (e.g. `massDeleteThreshold`, `massDeleteWindowSeconds`, `enabled`) with the current values as defaults, clamped to sane minimums; surface the trip reason + threshold in `vapor status` so the resume prompt explains itself. Keep the default conservative — the guard is the ransomware backstop.
+
+### [low] Concurrency caps are compiled constants — no core-awareness, no direct knob
+
+**Category**: improvement · **Where**: `core/shared/src/constants.rs:391` · **Source**: field testing
+
+Upload/download/hash/planner caps come from the fixed throttle ladder (IdleDrain 4, Light 2, Throttled 1, Suspended 0) scaled by `resourceLimits.cpuPercent` relative to its default — there is no direct `uploadConcurrency`-style knob, and neither the ladder nor `PROVIDER_JOB_WORKERS_MAX` (8) consults `std::thread::available_parallelism`. On a 16-core machine with fast I/O the ceiling is conservative; on a 2-core machine the IdleDrain boost could oversubscribe.
+
+**Suggested fix**: Derive the ladder's IdleDrain tier (and the provider-job worker cap) from `available_parallelism` with the current values as floor/ceiling, and/or expose explicit per-profile concurrency overrides in the config; keep `resourceLimits.cpuPercent` as the impact-first governor.
+
+### [low] Storm bursts defer reconcile by a fixed 30s even when the device is idle
+
+**Category**: improvement · **Where**: `core/shared/src/constants.rs:487` · **Source**: field testing
+
+A bulk operation (repo clone, `npm install`) trips the per-directory storm thresholds (200 unique paths / 600 events in 2s), which is by design: per-file events compact into one deferred subtree reconcile. But the deferral is a fixed `DEFERRED_RECONCILE_DELAY_MILLIS = 30s` from the last observation and the reconcile then still waits for an `IdleDrain` window, so the user watches an empty cloud folder for 30+ seconds and then sees everything appear at once — perceived lag even when the device went idle immediately after the burst.
+
+**Suggested fix**: Release a deferred reconcile early once the storm window has been quiet and the throttle state is `IdleDrain` (e.g. quiet-for-5s under idle beats the fixed 30s), keeping the 30s ceiling for the active-use case. The low-impact contract is preserved — the walk still only runs under IdleDrain.
 
 ## Resolved in the follow-up change set
 
