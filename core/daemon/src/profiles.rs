@@ -108,7 +108,11 @@ pub fn resolve_profiles(config: &VaporConfig) -> Vec<ResolvedProfile> {
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or_else(|| id.to_string()),
             provider_kind: effective.provider.clone(),
-            scope: sync_directories::resolve_with_config(&effective),
+            scope: sync_directories::resolve_profile_scope(
+                &effective,
+                profile.local_sync_directory.is_some(),
+                profile.cloud_sync_directory.is_some(),
+            ),
             enabled: profile.enabled.unwrap_or(true),
         });
     }

@@ -131,6 +131,14 @@ impl ReconcileWalker {
     /// Compares up to `max_directories` directories and durably
     /// enqueues the resulting convergence intents. Returns `Ok(true)`
     /// when the walk has no work left.
+    ///
+    /// `should_continue` is consulted after each directory so the caller
+    /// can bound the chunk by a wall-clock slice: a provider whose
+    /// `enumerate` is a slow network call must not hold the tick thread
+    /// for the full directory budget (throttle transitions, status
+    /// publishing, and other intents would all stall). The directory
+    /// budget can therefore be set high for fast (filesystem) providers
+    /// while the deadline caps the cost for slow ones.
     pub fn process(
         &mut self,
         provider: &dyn Provider,
@@ -138,6 +146,7 @@ impl ReconcileWalker {
         state_db: &mut DurableStateDb,
         max_directories: usize,
         now: SystemTime,
+        should_continue: &dyn Fn() -> bool,
     ) -> Result<bool, WalkError> {
         for _ in 0..max_directories {
             let Some(directory) = self.pending_dirs.pop_front() else {
@@ -145,6 +154,9 @@ impl ReconcileWalker {
             };
             self.compare_directory(provider, sync_mode, state_db, &directory, now)?;
             self.stats.directories_compared += 1;
+            if !should_continue() {
+                break;
+            }
         }
         Ok(self.pending_dirs.is_empty())
     }
@@ -178,16 +190,47 @@ impl ReconcileWalker {
             Ok(entries) => {
                 for entry in entries.flatten() {
                     let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+                        // Non-UTF-8 names are unrepresentable in the sync
+                        // path model; log so a file that never syncs is
+                        // diagnosable (macOS enforces UTF-8, so this is rare).
+                        crate::logging::warning(
+                            "Reconcile walk skipped a non-UTF-8 local file name (cannot be synced)",
+                            &[("path", entry.path().to_string_lossy().into_owned())],
+                        );
                         continue;
                     };
                     if vapor_providers::filesystem::is_internal_file_name(&name) {
+                        // Reap orphaned download-staging temps from unclean
+                        // crashes as we pass over them; in-flight (young)
+                        // temps are left alone.
+                        vapor_providers::filesystem::reap_if_stale_temp_file(
+                            &entry.path(),
+                            &name,
+                            SystemTime::now(),
+                        );
                         continue;
                     }
                     if self.ignores(&entry.path()) {
                         continue;
                     }
-                    let Ok(metadata) = entry.path().symlink_metadata() else {
-                        continue;
+                    let metadata = match entry.path().symlink_metadata() {
+                        Ok(metadata) => metadata,
+                        // The entry was just listed, so it exists — a stat
+                        // failure is transient (permission, EIO). Never let
+                        // it read as "locally absent": that would drive a
+                        // strict-mirror remote delete of content that is
+                        // still present. Abandon this directory; a later
+                        // reconcile retries it.
+                        Err(error) => {
+                            crate::logging::warning(
+                                "Reconcile walk cannot stat a local entry; deferring the directory",
+                                &[
+                                    ("path", entry.path().display().to_string()),
+                                    ("error", error.to_string()),
+                                ],
+                            );
+                            return Ok(());
+                        }
                     };
                     // Regular files and directories only: symlinks,
                     // FIFOs, sockets, and device nodes are outside the
@@ -205,14 +248,21 @@ impl ReconcileWalker {
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            // A non-NotFound read failure (EPERM/EACCES/EMFILE/EIO) is NOT a
+            // positively-observed empty directory. Falling through with an
+            // empty local view would classify every remote entry as
+            // local-only and strict-mirror-delete the cloud tree (or churn
+            // spurious downloads in two-way). Skip the directory entirely
+            // and let a later reconcile pass retry once the error clears.
             Err(error) => {
                 crate::logging::warning(
-                    "Reconcile walk cannot read a local directory; skipping it",
+                    "Reconcile walk cannot read a local directory; deferring it",
                     &[
                         ("directory", directory.display().to_string()),
                         ("error", error.to_string()),
                     ],
                 );
+                return Ok(());
             }
         }
 
@@ -264,11 +314,17 @@ impl ReconcileWalker {
                         }
                     }
                     // Type mismatch (file vs directory): resolve in favor
-                    // of the mode's source of truth. The clearing intent
-                    // and the re-materializing intents share a path, so
-                    // the executor's per-path serialization (and retry
-                    // backoff for parents that are still blocked) orders
-                    // them safely.
+                    // of the mode's source of truth. For the file/file and
+                    // dir/dir replacements the clearing intent and the
+                    // re-materializing intent share a path, so the
+                    // executor's per-path serialization orders them. For a
+                    // local-file-vs-remote-directory clear the children are
+                    // enqueued at *different* paths (local_path/child), so
+                    // ordering is NOT guaranteed: a child transfer whose
+                    // parent has not yet been cleared fails transiently and
+                    // converges via retry backoff (never a lost update). Do
+                    // not add code here that relies on the parent clearing
+                    // before its children.
                     (local_is_dir, remote_kind) => match sync_mode {
                         SyncMode::PullOnly => {
                             batch.push((
@@ -452,7 +508,7 @@ mod tests {
             let mut walker = ReconcileWalker::new(&self.local_root, &self.local_root, None);
             for _ in 0..64 {
                 let done = walker
-                    .process(&self.provider, mode, &mut self.state_db, 8, ts(0))
+                    .process(&self.provider, mode, &mut self.state_db, 8, ts(0), &|| true)
                     .expect("walk step");
                 if done {
                     break;
@@ -718,6 +774,7 @@ mod tests {
                     &mut fixture.state_db,
                     8,
                     ts(0),
+                    &|| true,
                 )
                 .expect("walk step");
             if done {
@@ -755,6 +812,7 @@ mod tests {
                 &mut fixture.state_db,
                 2,
                 ts(0),
+                &|| true,
             )
             .expect("walk step");
         assert!(!first_done, "five child dirs cannot finish in one call");
@@ -768,6 +826,7 @@ mod tests {
                     &mut fixture.state_db,
                     2,
                     ts(0),
+                    &|| true,
                 )
                 .expect("walk step");
             if done {

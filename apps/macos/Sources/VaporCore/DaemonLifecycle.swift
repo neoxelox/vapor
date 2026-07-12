@@ -131,7 +131,17 @@ public struct NoopLaunchAgentController: LaunchAgentControlling {
 public final class DaemonLifecycleManager: @unchecked Sendable {
   private let launchAgentController: any LaunchAgentControlling
   private let loginItemController: (any LoginItemControlling)?
-  private let stateQueue = DispatchQueue(label: "sh.arn.vapor.daemon-lifecycle.state")
+  // Process-shared so that "one lifecycle operation at a time" holds even
+  // when the app swaps in a fresh manager on a config save: the health
+  // monitor keeps a reference to the original manager, so a per-instance
+  // queue would let a periodic `vapor service check` run concurrently with
+  // a user-initiated install/uninstall/stop on a different queue — the
+  // check could then observe the daemon vanishing mid-uninstall and
+  // restart it (or register a spurious crash toward crash-loop pause).
+  private var stateQueue: DispatchQueue { Self.sharedStateQueue }
+  private static let sharedStateQueue = DispatchQueue(
+    label: "sh.arn.vapor.daemon-lifecycle.state"
+  )
   private let logger: StructuredLogger
 
   public init(
@@ -211,31 +221,21 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
     }
   }
 
-  public var isInCrashLoopPause: Bool {
-    stateQueue.sync {
-      do {
-        return try launchAgentController.status().crashLoopPaused
-      } catch {
-        logger.error(
-          "Failed to read crash-loop state from the vapor CLI",
-          metadata: ["error": String(describing: error)]
-        )
-        return false
-      }
+  /// Crash-loop pause state, or the CLI error. Unlike the fail-open
+  /// `autoLaunchEnabled` default, this must NOT default to "not paused":
+  /// a transient read failure that silently reported healthy would let
+  /// the UI clear a real pause banner. Callers keep their previous known
+  /// state on error (the 30s health tick restores the truth regardless).
+  public func crashLoopPauseState() throws -> Bool {
+    try stateQueue.sync {
+      try launchAgentController.status().crashLoopPaused
     }
   }
 
-  public func acknowledgeCrashLoopPause() {
-    stateQueue.sync {
-      do {
-        try launchAgentController.acknowledgeCrashLoopPause()
-        logger.warning("Acknowledged crash-loop pause; auto-restart may proceed again")
-      } catch {
-        logger.error(
-          "Failed to acknowledge crash-loop pause",
-          metadata: ["error": String(describing: error)]
-        )
-      }
+  public func acknowledgeCrashLoopPause() throws {
+    try stateQueue.sync {
+      try launchAgentController.acknowledgeCrashLoopPause()
+      logger.warning("Acknowledged crash-loop pause; auto-restart may proceed again")
     }
   }
 

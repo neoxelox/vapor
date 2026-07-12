@@ -172,7 +172,16 @@ cleanup() {
     VAPOR_DIR="$SERVICE_HOME" "$VAPOR_BIN" service uninstall >/dev/null 2>&1 || true
     launchctl bootout "$DOMAIN_TARGET" "$PLIST_PATH" >/dev/null 2>&1 || true
     rm -f "$PLIST_PATH" 2>/dev/null || true
-    pkill -f "$ROOT_DIR/target/debug/vapord" 2>/dev/null || true
+    # Match by executable path, not `pkill -f "<repo path>"`: the repo path
+    # is passed to pkill as a regex, so metacharacters in a checkout path
+    # (e.g. `budapest[wip]`) would either mis-match or fail to compile and
+    # leave a straggler daemon running against a deleted sandbox.
+    for straggler_pid in $(pgrep -x vapord 2>/dev/null || true); do
+      straggler_exe="$(ps -p "$straggler_pid" -o comm= 2>/dev/null || true)"
+      if [[ "$straggler_exe" == "$ROOT_DIR/target/debug/vapord" ]]; then
+        kill "$straggler_pid" 2>/dev/null || true
+      fi
+    done
   fi
   if [[ "$FAILED" -eq 1 || "$KEEP_SANDBOX" -eq 1 ]]; then
     log "sandbox preserved at $E2E_ROOT (remove with ./scripts/clean.sh)"
@@ -346,12 +355,31 @@ converge 30 || fail "S4: backlog did not drain after resume"
 log "PASS S4 — pause/resume round-trip; paused backlog drained on resume"
 
 # S5 — singleton lock: a second daemon on the same VAPOR_DIR must refuse.
-set +e
-second_output="$("$VAPOR_BIN" run --foreground 2>&1)"
-second_exit=$?
-set -e
+# Bound the wait: if the lock regresses the second daemon proceeds into the
+# runtime loop and never returns, so a plain command substitution would
+# hang the suite forever (the only unbounded wait it had). Background it and
+# poll for exit instead.
+s5_out="$E2E_ROOT/s5-second-daemon.out"
+: >"$s5_out"
+"$VAPOR_BIN" run --foreground >"$s5_out" 2>&1 &
+s5_pid=$!
+second_exit=""
+for _ in $(seq 1 60); do
+  if ! kill -0 "$s5_pid" 2>/dev/null; then
+    second_exit=0
+    wait "$s5_pid" || second_exit=$?
+    break
+  fi
+  sleep 0.25
+done
+if [[ -z "$second_exit" ]]; then
+  kill "$s5_pid" 2>/dev/null || true
+  wait "$s5_pid" 2>/dev/null || true
+  fail "S5: second daemon did not exit within 15s (singleton-lock regression?)"
+fi
+second_output="$(cat "$s5_out")"
 [[ "$second_exit" -ne 0 ]] || fail "S5: second daemon did not exit non-zero"
-echo "$second_output" | grep -qi "already running" \
+grep -qi "already running" <<<"$second_output" \
   || fail "S5: second daemon refusal message missing (got: $second_output)"
 log "PASS S5 — second daemon on same VAPOR_DIR refused by singleton lock"
 
@@ -398,11 +426,21 @@ deep_doctor_out="$(VAPOR_DIR="$DEEP_HOME" "$VAPOR_BIN" doctor)" \
   && grep -q "rendezvous" <<<"$deep_doctor_out" \
   || fail "S9: vapor doctor does not explain the socket relocation"
 deep_socket="$(grep "relocated under the OS temp directory" "$DEEP_HOME/logs/vapord.logs" \
-  | tail -n 1 | sed 's/.*socket_path=\([^ ]*\).*/\1/')"
+  | tail -n 1 | sed 's/.*socket_path=\([^ ]*\).*/\1/' || true)"
 [[ -n "$deep_socket" ]] || fail "S9: daemon log does not record the relocation"
 stop_daemon "$DEEP_PID" || fail "S9: deep-VAPOR_DIR daemon did not stop cleanly"
 DEEP_PID=""
-rm -rf "$(dirname "$deep_socket")"
+# Validate before deleting: the sed capture uses `[^ ]*`, so a
+# space-containing TMPDIR could truncate the path and turn this into an
+# rm -rf of a real parent directory. Only rm -rf a positively-recognized
+# `vapor-*` relocation dir; otherwise remove just the socket file.
+socket_dir="$(dirname "$deep_socket")"
+if [[ "$deep_socket" == */vapord.sock && "$(basename "$socket_dir")" == vapor-* ]]; then
+  rm -rf "$socket_dir"
+else
+  rm -f "$deep_socket"
+  log "S9: relocated dir shape unexpected ($socket_dir); removed only the socket file"
+fi
 log "PASS S9 — over-budget socket path relocated; CLI + doctor work; temp residue removed"
 
 # S10 — bidirectional filesystem sync: local writes land in the
@@ -531,7 +569,10 @@ grep -q '"deviceId"' <<<"$conflicts_out" \
   || fail "S15: conflict record is missing the origin device id"
 # S11 can preserve a divergent copy per side; promote the first and
 # discard any others so the scope ends conflict-free.
-S15_COPY="$(compgen -G "$LOCAL_ROOT/e2e-conflict~conflict-*" | head -n 1)"
+# `|| true` so an empty match does not abort the script under
+# `set -euo pipefail` before the guarded `[[ -n ]]` check can fail loudly
+# with diagnostics (and preserve the sandbox).
+S15_COPY="$(compgen -G "$LOCAL_ROOT/e2e-conflict~conflict-*" | head -n 1 || true)"
 [[ -n "$S15_COPY" ]] || fail "S15: local conflict copy missing"
 S15_KEPT_PAYLOAD="$(cat "$S15_COPY")"
 "$VAPOR_BIN" conflicts resolve "$S15_COPY" --keep copy >/dev/null \

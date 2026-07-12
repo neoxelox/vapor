@@ -36,10 +36,18 @@ impl LogLevel {
     }
 }
 
+/// The open log file plus enough state to size-rotate it without a
+/// per-line `stat`.
+struct LogSink {
+    file: File,
+    path: PathBuf,
+    written: u64,
+}
+
 pub struct StructuredLogger {
     component: &'static str,
     min_level: LogLevel,
-    file: Mutex<Option<File>>,
+    sink: Mutex<Option<LogSink>>,
 }
 
 impl StructuredLogger {
@@ -50,7 +58,7 @@ impl StructuredLogger {
             .unwrap_or_else(build_default_level);
 
         let file_path = logs_directory().join(file_name);
-        let file = open_log_file(&file_path)
+        let sink = open_log_file(&file_path)
             .map_err(|error| {
                 let _ = writeln!(
                     stderr(),
@@ -60,12 +68,20 @@ impl StructuredLogger {
                 );
                 error
             })
-            .ok();
+            .ok()
+            .map(|file| {
+                let written = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+                LogSink {
+                    file,
+                    path: file_path,
+                    written,
+                }
+            });
 
         Self {
             component,
             min_level,
-            file: Mutex::new(file),
+            sink: Mutex::new(sink),
         }
     }
 
@@ -103,15 +119,95 @@ impl StructuredLogger {
 
         line.push('\n');
 
-        if let Ok(mut file) = self.file.lock() {
-            if let Some(file) = file.as_mut() {
-                let _ = file.write_all(line.as_bytes());
-                let _ = file.flush();
+        if let Ok(mut guard) = self.sink.lock() {
+            if let Some(sink) = guard.as_mut() {
+                if sink.file.write_all(line.as_bytes()).is_ok() {
+                    let _ = sink.file.flush();
+                    sink.written += line.len() as u64;
+                    if sink.written >= constants::runtime::LOG_FILE_MAX_BYTES {
+                        rotate_sink(sink);
+                    }
+                }
             } else {
                 let _ = stderr().write_all(line.as_bytes());
             }
         }
     }
+}
+
+/// Size-rotates a full log file: shifts `<name>.{N-1}` → `<name>.N`
+/// (dropping the oldest), moves the live file to `<name>.1`, and reopens
+/// a fresh live file. A failure to reopen drops the sink to stderr rather
+/// than losing the logger entirely.
+fn rotate_sink(sink: &mut LogSink) {
+    let generations = constants::runtime::LOG_FILE_GENERATIONS;
+    if generations == 0 {
+        // No generations kept: just truncate in place.
+        if let Ok(file) = reopen_truncated(&sink.path) {
+            sink.file = file;
+            sink.written = 0;
+        }
+        return;
+    }
+    // Drop the oldest kept generation, then cascade the rest down.
+    let _ = std::fs::remove_file(rotated_path(&sink.path, generations));
+    for generation in (1..generations).rev() {
+        let _ = std::fs::rename(
+            rotated_path(&sink.path, generation),
+            rotated_path(&sink.path, generation + 1),
+        );
+    }
+    if std::fs::rename(&sink.path, rotated_path(&sink.path, 1)).is_err() {
+        return;
+    }
+    match open_log_file(&sink.path) {
+        Ok(file) => {
+            sink.file = file;
+            sink.written = 0;
+        }
+        Err(error) => {
+            let _ = writeln!(
+                stderr(),
+                "vapor logging: failed to reopen {} after rotation: {error}",
+                sink.path.display()
+            );
+        }
+    }
+}
+
+/// Truncates a service-manager stdout/stderr redirect file at daemon
+/// startup if it has grown past the size cap. These are held open by
+/// launchd/systemd, so — unlike the structured log — we truncate in
+/// place: the service's fd stays valid and its `O_APPEND` writes resume
+/// from the new (zero) EOF, whereas renaming the inode would leave the
+/// service writing into the rotated-away file forever.
+pub fn trim_redirect_log_if_oversized(path: &std::path::Path) {
+    let over_cap = std::fs::metadata(path)
+        .map(|metadata| metadata.len() >= constants::runtime::LOG_FILE_MAX_BYTES)
+        .unwrap_or(false);
+    if over_cap && let Err(error) = OpenOptions::new().write(true).truncate(true).open(path) {
+        let _ = writeln!(
+            stderr(),
+            "vapor logging: could not trim redirect log {}: {error}",
+            path.display()
+        );
+    }
+}
+
+/// `<path>.<generation>` — the rotated-generation file name.
+fn rotated_path(path: &std::path::Path, generation: u32) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(format!(".{generation}"));
+    PathBuf::from(name)
+}
+
+fn reopen_truncated(path: &std::path::Path) -> std::io::Result<File> {
+    runtime_paths::ensure_private_file(path)?;
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
 }
 
 pub struct GlobalComponentLogger {
@@ -249,6 +345,14 @@ const INLINE_SECRET_MARKERS: &[&str] = &[
     "set-cookie:",
     "token=",
     "x-api-key:",
+    // JSON colon-quote forms (`"access_token": "ya29..."`): the `=`/`:`
+    // markers above miss a token embedded in a JSON body, so one careless
+    // log of an OAuth response body would leak verbatim.
+    "\"access_token\"",
+    "\"refresh_token\"",
+    "\"id_token\"",
+    "\"client_secret\"",
+    "\"password\"",
 ];
 
 #[cfg(test)]
@@ -310,6 +414,21 @@ mod tests {
     }
 
     #[test]
+    fn redacts_json_shaped_token_bodies() {
+        for input in [
+            r#"token response: {"access_token": "ya29.abc", "expires_in": 3600}"#,
+            r#"{"refresh_token":"1//rotate"}"#,
+            r#"{"client_secret": "shhh"}"#,
+        ] {
+            assert_eq!(
+                sanitize_diagnostic_text(input),
+                "[REDACTED]",
+                "JSON token body should be redacted: {input}"
+            );
+        }
+    }
+
+    #[test]
     fn metadata_keys_with_auth_related_markers_are_sensitive() {
         for key in [
             "api_key",
@@ -336,5 +455,68 @@ mod tests {
         let result = open_log_file(&directory_path);
 
         assert!(result.is_err());
+    }
+
+    fn open_sink(path: &std::path::Path) -> LogSink {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("open");
+        let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        LogSink {
+            file,
+            path: path.to_path_buf(),
+            written,
+        }
+    }
+
+    #[test]
+    fn rotation_moves_the_full_file_aside_and_reopens_empty() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("vapord.logs");
+        std::fs::write(&path, b"first generation\n").expect("seed");
+
+        let mut sink = open_sink(&path);
+        rotate_sink(&mut sink);
+
+        assert_eq!(sink.written, 0, "reopened live file starts empty");
+        assert_eq!(std::fs::read(&path).expect("live"), b"");
+        assert_eq!(
+            std::fs::read(rotated_path(&path, 1)).expect(".1"),
+            b"first generation\n"
+        );
+    }
+
+    #[test]
+    fn rotation_cascades_generations_and_drops_the_oldest() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("vapord.logs");
+        let generations = constants::runtime::LOG_FILE_GENERATIONS;
+
+        // Rotate one more time than we keep, tagging each live file so we
+        // can tell which generation survived.
+        for round in 0..=generations {
+            std::fs::write(&path, format!("round {round}\n")).expect("seed");
+            let mut sink = open_sink(&path);
+            rotate_sink(&mut sink);
+        }
+
+        // Exactly `generations` rotated files exist; the very first round
+        // has aged out.
+        assert!(
+            !rotated_path(&path, generations + 1).exists(),
+            "no generation beyond the cap is kept"
+        );
+        assert_eq!(
+            std::fs::read(rotated_path(&path, 1)).expect(".1"),
+            format!("round {generations}\n").into_bytes(),
+            "newest rotation is at .1"
+        );
+        assert_eq!(
+            std::fs::read(rotated_path(&path, generations)).expect("oldest kept"),
+            b"round 1\n",
+            "oldest kept generation is round 1 (round 0 aged out)"
+        );
     }
 }

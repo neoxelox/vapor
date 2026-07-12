@@ -74,7 +74,7 @@ specialists (end-to-end sync-latency trace, bidirectional data-loss hunt).
 | low | perf | `core/daemon/src/storm.rs:96` | Storm detector clones the full event path into every ancestor directory's window on each event |
 | low | perf | `core/shared/src/constants.rs:340` | 4 s default debounce window applies to the most common user documents |
 
-### [critical] Local delete propagates to the remote with no precondition, silently destroying a concurrent remote modification fleet-wide
+### [critical] Local delete propagates to the remote with no precondition, silently destroying a concurrent remote modification fleet-wide  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:1065` · **Review group**: executor
 
@@ -82,7 +82,7 @@ The Delete route builds its plan with RemotePrecondition::None and never consult
 
 **Suggested fix**: Guard remote deletes the same way uploads are guarded: at plan time stat the remote and compare op-id/content-hash against the sync-index entry; if the remote diverged from what was last synced, skip the delete and enqueue a Download instead (modification wins over deletion). Ideally extend the provider delete API with a precondition (hash/revision) so the check-then-delete window is closed, mirroring RemotePrecondition on uploads.
 
-### [critical] Invalid provider kind falls back to a live no-op stub provider, which can mass-delete a pull-only profile's local data
+### [critical] Invalid provider kind falls back to a live no-op stub provider, which can mass-delete a pull-only profile's local data  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/multi_runtime.rs:213` · **Review group**: runtime-shell
 
@@ -90,7 +90,7 @@ In start_with_state_root, a profile whose provider_kind fails select_provider_fo
 
 **Suggested fix**: Do not substitute a functioning provider. Mark the profile as failed/suspended at composition time (set slot.failed = Some(reason), RunState::Error, skip schedule_startup_reconcile and watchers for it) so it surfaces in status but performs zero sync work until the configuration is fixed. At minimum, never allow the stub fallback for profiles whose sync_mode is not TwoWay.
 
-### [critical] Corruption recovery quarantines the durable DB on ANY SQLite error, destroying all intent state on transient I/O failures
+### [critical] Corruption recovery quarantines the durable DB on ANY SQLite error, destroying all intent state on transient I/O failures  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/state_db.rs:151` · **Review group**: state-db
 
@@ -98,7 +98,7 @@ open_with_corruption_recovery treats every StateDbError::Sql as corruption. rusq
 
 **Suggested fix**: Only quarantine when error.sqlite_error_code() is one of SQLITE_NOTADB / SQLITE_CORRUPT (and optionally after a failed 'PRAGMA integrity_check'). Propagate all other SQLite errors (BUSY, FULL, IOERR, PERM) as ordinary startup failures so the crash-loop guard retries instead of destroying state.
 
-### [high] Divergence/conflict checks hash local files with hard-coded SHA-256 but compare against provider-algorithm hashes, breaking for MD5 providers (Google Drive MVP)
+### [high] Divergence/conflict checks hash local files with hard-coded SHA-256 but compare against provider-algorithm hashes, breaking for MD5 providers (Google Drive MVP)  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:1390` · **Review group**: executor
 
@@ -106,7 +106,7 @@ hash_hex_of_file_or_err delegates to vapor_providers::filesystem::hash_hex_of_fi
 
 **Suggested fix**: Thread the provider's HashAlgorithm through these helpers (reuse StreamingFileHash or add hash_hex_of_file_with(path, algorithm)) so every local hash compared against index/outcome/echo hashes uses the provider's algorithm. Add a contract test that runs the conflict/deletion guards against an MD5-algorithm fake provider.
 
-### [high] Applying remote changes locally follows symlinked parent directories, allowing writes/deletes outside the local sync root
+### [high] Applying remote changes locally follows symlinked parent directories, allowing writes/deletes outside the local sync root  ✅ DONE
 
 **Category**: security · **Where**: `core/daemon/src/executor.rs:1544` · **Review group**: executor
 
@@ -114,7 +114,7 @@ RemotePath validation is purely lexical (no '..' segments), and paths.rs explici
 
 **Suggested fix**: Before applying any remote-sourced intent locally (download apply, remote-delete apply, staging-file creation), verify containment non-lexically: open/canonicalize the parent directory (or walk components with symlink_metadata refusing any symlink component) and confirm the resolved parent is still inside the canonical local root; fail the intent as Permanent otherwise. On Unix, O_NOFOLLOW/openat-style traversal of each component is the robust fix.
 
-### [high] A panicking or suspended profile permanently leaks shared-workgate permits, starving all other profiles' uploads/reconciles
+### [high] A panicking or suspended profile permanently leaks shared-workgate permits, starving all other profiles' uploads/reconciles  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/multi_runtime.rs:345` · **Review group**: runtime-shell
 
@@ -122,7 +122,7 @@ WorkPermit has no Drop guard — release is manual (executor.rs releases at exit
 
 **Suggested fix**: On suspend_profile, reclaim the slot's outstanding permits: give DaemonRuntime an abort/drain method that releases staged-executor session permits and aborts a running reconcile (reconcile.rs already has abort_running), and call it from the suspension paths (both the panic arm — best-effort under catch_unwind — and the repeated-error arm). Longer term, make WorkPermit an RAII guard over the shared workgate. Also fix the misleading poison-recovery comment in lib.rs::lock_workgate.
 
-### [high] run_forever exits the whole daemon when a suspended profile coexists with a healthy profile that hits a single transient tick error
+### [high] run_forever exits the whole daemon when a suspended profile coexists with a healthy profile that hits a single transient tick error  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/multi_runtime.rs:417` · **Review group**: runtime-shell
 
@@ -130,7 +130,7 @@ The "every profile has failed" exit condition is `ticked_profiles == 0 && failed
 
 **Suggested fix**: Base the exit decision on durable per-slot state, not on the per-tick report: exit only when self.slots.iter().all(|s| s.failed.is_some()). Alternatively count error-but-not-suspended ticks as live (e.g. a `live_profiles` count of slots with failed.is_none()).
 
-### [high] Bare directory patterns in gitignore/vaporignore files do not ignore the directory's contents
+### [high] Bare directory patterns in gitignore/vaporignore files do not ignore the directory's contents  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/path_filter.rs:464` · **Review group**: ingest
 
@@ -138,7 +138,7 @@ expand_glob_patterns appends the `{resolved}/**` descendant pattern only when th
 
 **Suggested fix**: Treat every non-negated pattern as potentially matching a directory: emit `{resolved}/**` for all expanded stems (not only directory_only ones), or track directory matches separately by also testing each ancestor of the relative path against the rule list. Alternatively adopt the `ignore` crate's Gitignore matcher, which implements git's directory-exclusion semantics exactly.
 
-### [high] Server-supplied Retry-After is used uncapped: a bogus header can panic the daemon or persist a multi-year global retry slowdown
+### [high] Server-supplied Retry-After is used uncapped: a bogus header can panic the daemon or persist a multi-year global retry slowdown  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/retry.rs:68` · **Review group**: state-db
 
@@ -146,7 +146,7 @@ decide() (core/daemon/src/retry.rs:68) uses std::cmp::max(exponential_delay, ret
 
 **Suggested fix**: Clamp retry_after (and the derived slowdown_until) to a sane documented ceiling (e.g. max(RETRY_MAX_DELAY, 1h)) in RetryPolicy::decide, and use checked/saturating arithmetic for now + delay.
 
-### [high] Cloud-root recovery silently overrides a user pause and the mass-deletion (ransomware) guard pause
+### [high] Cloud-root recovery silently overrides a user pause and the mass-deletion (ransomware) guard pause  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/runtime.rs:1156` · **Review group**: runtime
 
@@ -154,7 +154,7 @@ retry_cloud_root_if_needed() runs on every tick while cloud_root_ready is false,
 
 **Suggested fix**: Only transition to Running when the previous run_state was the cloud-root Error state (or track 'blocked by cloud root' separately from run_state). If run_state == Paused, set cloud_root_ready = true but leave the run state and pause reason untouched.
 
-### [high] Shipping daemon caps ALL transfers at ~312 KB/s: placeholder 10 Mbps 'measured' throughput feeds the bandwidth shaper
+### [high] Shipping daemon caps ALL transfers at ~312 KB/s: placeholder 10 Mbps 'measured' throughput feeds the bandwidth shaper  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/runtime.rs:1281` · **Review group**: sync-pipeline-e2e
 
@@ -162,7 +162,7 @@ sample_throttle_inputs always sets the shaper to Some(rate) where rate = capacit
 
 **Suggested fix**: Make the static/native fallback report network_throughput_kbps: None until a real per-OS measurement exists (then ASSUMED_LINK_CAPACITY_KBPS applies, giving ~3.1 MB/s at 25%), or leave the shaper unlimited when no measurement exists. Also consider whether a placeholder Some(10_000) belongs in ThrottleInputs::default() at all — it silently masquerades as a measurement everywhere inputs are defaulted.
 
-### [high] Stale-lease sweep reclaims leases still held by live executions (no lease renewal), causing duplicate concurrent work and dropped completions
+### [high] Stale-lease sweep reclaims leases still held by live executions (no lease renewal), causing duplicate concurrent work and dropped completions  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/state_db.rs:604` · **Review group**: state-db
 
@@ -186,7 +186,7 @@ All provider I/O — session.step (up to 8 MiB per blocking ureq HTTP call in th
 
 **Suggested fix**: Move transfer sessions (and planner remote stats) onto worker threads or async tasks, keeping the workgate permits as the concurrency limiter and the tick loop as the orchestrator that harvests completions. At minimum, keep provider network calls off the same thread that drains fs events and runs debounce.
 
-### [medium] Ignore-file events inside ignored directories trigger repeated full-tree filter rebuilds
+### [medium] Ignore-file events inside ignored directories trigger repeated full-tree filter rebuilds  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/fs_events.rs:294` · **Review group**: ingest
 
@@ -194,7 +194,7 @@ record_callback_result (fs_events.rs:294) calls note_observed_path before the sh
 
 **Suggested fix**: Only request a reload when the observed ignore file would actually contribute rules: check should_ignore(path) (and the heavy-skip-dir list) before calling note_observed_path, or debounce/rate-limit rebuilds (e.g. rebuild at most once per N seconds of ignore-file quiet) so bursts coalesce into one walk.
 
-### [medium] One profile's watcher/root failure at startup aborts the entire multi-profile daemon
+### [medium] One profile's watcher/root failure at startup aborts the entire multi-profile daemon  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/multi_runtime.rs:619` · **Review group**: runtime-shell
 
@@ -202,7 +202,7 @@ start_with_state_root uses `?` on per-profile startup steps — DurableStateDb::
 
 **Suggested fix**: Treat per-profile startup failures like tick failures: catch the error, mark that slot failed = Some(reason) (skipping its watcher), and continue composing the remaining profiles. Only fail start() when zero profiles could be composed.
 
-### [medium] should_ignore linearly evaluates every compiled rule per event on the fs-watch callback thread
+### [medium] should_ignore linearly evaluates every compiled rule per event on the fs-watch callback thread  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/path_filter.rs:195` · **Review group**: ingest
 
@@ -210,7 +210,7 @@ should_ignore runs a last-match-wins loop over all compiled rules, and each rule
 
 **Suggested fix**: Compile all patterns into a single globset::GlobSet and use matches_candidate_into to get the set of matching rule indices in one pass (last-match-wins = highest matching index), or use the `ignore` crate's Gitignore which is built for this. Both reduce per-event cost from O(rules) regex runs to one automaton pass.
 
-### [medium] Ignore rules (including negations) are loaded from ignore files inside user-ignored directories
+### [medium] Ignore rules (including negations) are loaded from ignore files inside user-ignored directories  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/path_filter.rs:232` · **Review group**: ingest
 
@@ -218,7 +218,7 @@ collect_ignore_files walks the whole tree skipping only the hardcoded SKIP_DIRS 
 
 **Suggested fix**: During the discovery walk, apply the already-compiled preceding rules (pre-user rules and parent ignore files) to prune ignored directories, mirroring git's behavior of never reading ignore files under excluded paths. This fixes both the negation leak and the walk cost.
 
-### [medium] Remote poller drains one 256-change page per cadence: large remote bursts take minutes to enqueue
+### [medium] Remote poller drains one 256-change page per cadence: large remote bursts take minutes to enqueue  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/remote_sync.rs:139` · **Review group**: sync-pipeline-e2e
 
@@ -226,7 +226,7 @@ poll_if_due issues exactly one poll_changes call (REMOTE_CHANGES_PAGE_MAX=256) p
 
 **Suggested fix**: Loop while the returned page is full (bounded, e.g., a few pages per tick to preserve interruptibility), or call request_immediate_poll()-equivalent when page.changes.len() == REMOTE_CHANGES_PAGE_MAX so the next tick continues draining instead of waiting the full cadence.
 
-### [medium] Paused daemon keeps polling the remote changes feed, contradicting the pause semantics documented in the same block
+### [medium] Paused daemon keeps polling the remote changes feed, contradicting the pause semantics documented in the same block  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/runtime.rs:451` · **Review group**: runtime
 
@@ -250,7 +250,7 @@ In process_ready_queue (runtime.rs:1659-1668), when try_start_staged_intent retu
 
 **Suggested fix**: Distinguish the per-path-busy case from permit/capacity exhaustion (e.g., have try_start return an enum, or check active_paths in the runtime before calling) and `continue` instead of `break` when only that one path is blocked. Optionally skip leasing rows whose path is currently active.
 
-### [medium] Reconcile walk fixed at 8 directories per tick (~32 dirs/s) regardless of throttle state
+### [medium] Reconcile walk fixed at 8 directories per tick (~32 dirs/s) regardless of throttle state  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/runtime.rs:1723` · **Review group**: sync-pipeline-e2e
 
@@ -258,7 +258,7 @@ process_reconcile_walk (runtime.rs:1723) always passes the fixed RECONCILE_DIRS_
 
 **Suggested fix**: Scale the per-tick directory budget with the throttle state (e.g., 32-64 dirs under IdleDrain, 8 under Light, 1-2 under Throttled), or make the walk time-budgeted per slice (RECONCILE_SLICE_MILLIS already exists) instead of a fixed directory count.
 
-### [medium] Echo suppression hashes entire files unchunked on the tick thread
+### [medium] Echo suppression hashes entire files unchunked on the tick thread  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/runtime.rs:1810` · **Review group**: sync-pipeline-e2e
 
@@ -266,7 +266,7 @@ is_local_self_write_echo (core/daemon/src/runtime.rs:1810) calls hash_hex_of_fil
 
 **Suggested fix**: Route the echo-confirmation hash through the budgeted streaming hash machinery (or a bounded-size fast path: hash inline only below a few MB, otherwise defer the decision to a chunked check across ticks). Alternatively correlate large-file echoes via the op-id tag + size + mtime instead of a full content hash.
 
-### [medium] list_queue_intents ORDER BY cannot use the ready index — full scan and sort per diagnostics query
+### [medium] list_queue_intents ORDER BY cannot use the ready index — full scan and sort per diagnostics query  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/state_db.rs:201` · **Review group**: state-db
 
@@ -274,7 +274,7 @@ list_queue_intents (core/daemon/src/state_db.rs:201) orders by (available_at_ms,
 
 **Suggested fix**: Add an index on (available_at_ms, id), or query the two states separately through the existing index and merge the top rows in memory.
 
-### [medium] Coalesced enqueue dedup lookup has no supporting index — full table scan per intent on the ingest flush path
+### [medium] Coalesced enqueue dedup lookup has no supporting index — full table scan per intent on the ingest flush path  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/state_db.rs:752` · **Review group**: state-db
 
@@ -282,7 +282,7 @@ enqueue_intents_coalesced (state_db.rs:748-764) runs 'SELECT id FROM queue_inten
 
 **Suggested fix**: Add CREATE INDEX idx_queue_intents_path ON queue_intents(path_text, kind, state) (bump schema/migration accordingly); optionally fold the check into a single INSERT ... WHERE NOT EXISTS per row.
 
-### [medium] failed_intents table grows without bound — no retention, pruning, or clearing path anywhere in the codebase
+### [medium] failed_intents table grows without bound — no retention, pruning, or clearing path anywhere in the codebase  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/state_db.rs:1059` · **Review group**: state-db
 
@@ -290,7 +290,7 @@ Tombstones get prune_tombstones (30-day retention, called from the runtime) and 
 
 **Suggested fix**: Add a retention sweep symmetrical to prune_tombstones (e.g. FAILED_INTENT_RETENTION_MILLIS, pruned at startup/periodically) and/or a bounded row cap keeping only the newest N failures; expose a CLI clear/retry path for the surfaced failures.
 
-### [medium] v3->v4 migration resets the queue AUTOINCREMENT sequence when the queue is empty, allowing reused ids to collide with failed_intents primary keys
+### [medium] v3->v4 migration resets the queue AUTOINCREMENT sequence when the queue is empty, allowing reused ids to collide with failed_intents primary keys  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/state_db.rs:1120` · **Review group**: state-db
 
@@ -298,7 +298,7 @@ migrate_v3_to_v4 rebuilds queue_intents via CREATE TABLE + INSERT...SELECT + DRO
 
 **Suggested fix**: After the copy, restore the sequence explicitly (INSERT/UPDATE sqlite_sequence for queue_intents to MAX(old sequence, MAX(failed_intents.id))), or stop reusing queue ids as failed_intents PKs (give failed_intents its own rowid and store source_intent_id as a plain column).
 
-### [low] Shutdown signal does not wake the tick loop, delaying clean exit by up to a full idle sleep
+### [low] Shutdown signal does not wake the tick loop, delaying clean exit by up to a full idle sleep  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/bootstrap.rs:184` · **Review group**: runtime-shell
 
@@ -306,7 +306,7 @@ install_shutdown_signal_handlers registers runtime::request_shutdown, which only
 
 **Suggested fix**: Have the shutdown path notify the waker: e.g. register a handler closure that calls request_shutdown() and then notifies the multi runtime's TickWaker (a process-global shutdown waker registration alongside SHUTDOWN_REQUESTED keeps the signal-safe flag-flip pattern).
 
-### [low] Recorder drain-then-apply is not atomic, so concurrent state readers can apply event batches out of order
+### [low] Recorder drain-then-apply is not atomic, so concurrent state readers can apply event batches out of order  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/event_intents.rs:849` · **Review group**: ingest
 
@@ -314,7 +314,7 @@ drain_incoming_into_maps takes the incoming batch under the incoming_events mute
 
 **Suggested fix**: Acquire the maps lock before taking the incoming batch (hold it across take + apply), or funnel all drains through a single &mut entry point so the compiler enforces single-threaded draining.
 
-### [low] Watch-root/filter-root mismatch is only a debug_assert; in release it silently disables all ignore rules
+### [low] Watch-root/filter-root mismatch is only a debug_assert; in release it silently disables all ignore rules  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/fs_events.rs:225` · **Review group**: ingest
 
@@ -322,7 +322,7 @@ start_with_shared_filter canonicalizes its own watch root but only debug_asserts
 
 **Suggested fix**: Return a real FsEventsWatcherError (e.g. FilterRootMismatch) when path_filter.watch_root() != normalized watch_root instead of debug_assert_eq!, so misuse fails loudly on every build profile.
 
-### [low] After a caught panic, the suspended slot's runtime keeps being read every tick despite AssertUnwindSafe, outside any panic catcher
+### [low] After a caught panic, the suspended slot's runtime keeps being read every tick despite AssertUnwindSafe, outside any panic catcher  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/multi_runtime.rs:397` · **Review group**: runtime-shell
 
@@ -338,7 +338,7 @@ Every tick_all (250 ms busy / 1 s idle cadence, forever) runs auto-tune queue_de
 
 **Suggested fix**: Publish only when state changed (dirty flag set by tick reports / control requests / throttle transitions) or at a lower fixed cadence when idle; reuse the queue_depth values computed for auto-tune inside aggregate_status instead of re-querying; skip suspended slots in the auto-tune aggregation.
 
-### [low] Timeline events hardcode DEFAULT_PROFILE_ID, misattributing all activity to 'default' in multi-profile daemons
+### [low] Timeline events hardcode DEFAULT_PROFILE_ID, misattributing all activity to 'default' in multi-profile daemons  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/runtime.rs:1040` · **Review group**: runtime
 
@@ -346,7 +346,7 @@ emit_timeline_events (runtime.rs:1040) and the flush-boost (line 1221) and mass-
 
 **Suggested fix**: Store the resolved profile id on DaemonRuntime (it already carries device_id via a setter; multi_runtime already knows profile.id and passes it to RemotePoller-style consumers) and use it for every timeline push instead of DEFAULT_PROFILE_ID.
 
-### [low] `vapor resume` while the cloud root is unavailable reports RunState::Running, masking the blocking Error condition
+### [low] `vapor resume` while the cloud root is unavailable reports RunState::Running, masking the blocking Error condition  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/runtime.rs:1202` · **Review group**: runtime
 
@@ -354,7 +354,7 @@ apply_pending_control_requests handles a resume by unconditionally setting RunSt
 
 **Suggested fix**: On resume, re-derive the run state: if !cloud_root_ready, restore the Error state/reason (cloud directory unavailable) instead of Running; only report Running when work can actually be admitted.
 
-### [low] apply_memory_ceiling squeezes the timeline capacity but never restores it after memory pressure clears
+### [low] apply_memory_ceiling squeezes the timeline capacity but never restores it after memory pressure clears  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/runtime.rs:1318` · **Review group**: runtime
 
@@ -362,7 +362,7 @@ apply_memory_ceiling (core/daemon/src/runtime.rs:1300-1329) squeezes the shared 
 
 **Suggested fix**: In the restore branch, reset the timeline to its configured default capacity (mirror the echo-cache restore), e.g. timeline.set_max_entries(default_timeline_entries).
 
-### [low] schedule_retry spans five separate implicit transactions; a crash mid-sequence loses the durable rate-limit slowdown marker
+### [low] schedule_retry spans five separate implicit transactions; a crash mid-sequence loses the durable rate-limit slowdown marker  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/state_db.rs:467` · **Review group**: state-db
 
@@ -370,7 +370,7 @@ schedule_retry performs intent_record (SELECT), requeue_leased_with_attempt_bump
 
 **Suggested fix**: Wrap the whole operation in one TransactionBehavior::Immediate transaction (like finalize_leased_failure does) and build the returned record from the already-fetched row plus the known updates instead of re-reading.
 
-### [low] MAX_ATTEMPT_COUNT terminal-failure contract has no implementer, so the attempt cap wedges intents instead of finalizing them
+### [low] MAX_ATTEMPT_COUNT terminal-failure contract has no implementer, so the attempt cap wedges intents instead of finalizing them  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/state_db.rs:477` · **Review group**: state-db
 
@@ -386,7 +386,7 @@ observe_event builds a Vec<PathBuf> of all ancestors per event (directory_roots_
 
 **Suggested fix**: Store interned path IDs or relative-suffix hashes in path_last_seen instead of full PathBufs, reuse a scratch buffer for ancestor iteration (iterate Path::ancestors directly rather than collecting a Vec), and consider only tracking unique-path counts at the immediate parent while deriving ancestor rollups from child window aggregates.
 
-### [low] 4 s default debounce window applies to the most common user documents
+### [low] 4 s default debounce window applies to the most common user documents  ✅ DONE
 
 **Category**: perf · **Where**: `core/shared/src/constants.rs:340` · **Review group**: sync-pipeline-e2e
 
@@ -423,7 +423,7 @@ DEFAULT_DEBOUNCE_WINDOW_MILLIS=4000 (constants.rs:340) is the quiet window for e
 | low | improvement | `core/daemon/src/resource_budget.rs:257` | A single 1-second headroom blip cancels Active idle boost into a full down-ramp plus a fresh 30s up-ramp; RampingDown never re-checks the gates |
 | low | bug | `core/daemon/src/safeguards.rs:73` | Rolling-window prune keeps future-dated events after a wall-clock rewind, so MassChangeGuard can spuriously pause sync and ActiveCodingHeuristic can pin Throttled — contrary to its documented fail-safe claim |
 
-### [critical] Two-way remote directory deletion applies remove_dir_all without checking children, wiping unsynced local files
+### [critical] Two-way remote directory deletion applies remove_dir_all without checking children, wiping unsynced local files  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:1357`
 
@@ -431,7 +431,7 @@ deletion_loses_to_local_state returns Ok(None) for anything that is not a regula
 
 **Suggested fix**: When the ApplyRemoteDelete target is a directory in two-way mode, walk the subtree and run the per-file preservation check (sync-index provenance + divergence) on each child; delete only children that pass, preserve (and re-upload) the rest, and remove the directory only if it ends up empty. Alternatively, refuse directory tombstones and expand them into per-file ApplyRemoteDelete intents at plan time.
 
-### [high] Download apply TOCTOU: a local write landing between the divergence check and the staging rename is silently overwritten and its watcher echo is then suppressed
+### [high] Download apply TOCTOU: a local write landing between the divergence check and the staging rename is silently overwritten and its watcher echo is then suppressed  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:841`
 
@@ -439,7 +439,7 @@ On TransferStep::Completed in two-way mode the executor runs preserve_diverged_l
 
 **Suggested fix**: Close the window: always rename the existing local file aside (to a temp name) first, then rename the staging file in, then compare the set-aside file against the index/incoming hash and either delete it (unchanged) or promote it to the conflict-copy path (diverged). That makes the divergence decision operate on the exact bytes that were displaced instead of on a racy pre-check.
 
-### [high] VAPOR_LOCAL/CLOUD_SYNC_DIRECTORY env vars silently override every profile's per-profile directories, collapsing all profiles onto one root
+### [high] VAPOR_LOCAL/CLOUD_SYNC_DIRECTORY env vars silently override every profile's per-profile directories, collapsing all profiles onto one root  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/profiles.rs:111`
 
@@ -447,7 +447,7 @@ resolve_profiles builds an effective per-profile config and then calls sync_dire
 
 **Suggested fix**: Apply the env-var layer only to the top-level/implicit-default resolution (or only when the profile does not set the field). When profiles are configured and the env var is set, either ignore it with a loud warning or refuse to start; never let a process-wide env value replace an explicit per-profile root, especially for one-way profiles.
 
-### [high] Local read_dir/stat failure is treated as 'no local entries', so push-only reconcile enqueues remote Deletes for content that still exists locally
+### [high] Local read_dir/stat failure is treated as 'no local entries', so push-only reconcile enqueues remote Deletes for content that still exists locally  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/reconcile_walk.rs:208`
 
@@ -455,7 +455,7 @@ In compare_directory, a non-NotFound fs::read_dir error (lines 208-216) only log
 
 **Suggested fix**: On any non-NotFound read_dir error, skip the directory entirely (return Ok(()) without comparing), and on a symlink_metadata error skip the whole directory or at least never let that entry classify as locally-absent. A strict-mirror delete must only be derived from a positively-observed absence, never from a failed local read.
 
-### [high] Self-write-cache TTL (30s) is shorter than the Throttled poll cadence (60s) and the Suspended pause, so the daemon's own upload echoes replay as remote changes
+### [high] Self-write-cache TTL (30s) is shorter than the Throttled poll cadence (60s) and the Suspended pause, so the daemon's own upload echoes replay as remote changes  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/remote_sync.rs:80`
 
@@ -463,7 +463,7 @@ remote_echoes records an upload at completion with DEFAULT_TTL_MILLIS = 30_000, 
 
 **Suggested fix**: Make echo suppression not depend on a TTL shorter than the worst-case observation delay: either bound the TTL below by the active poll cadence (extend records while polling is deferred/suspended), or add a durable second-line correlator — e.g. suppress a CreatedOrModified whose op_id equals sync_index.last_op_id (and hash equals index.content_hash) for that path, which is already persisted.
 
-### [high] Remote poller enqueues intents with poll time instead of change.observed_at, so a stale remote Removed deletes a freshly re-uploaded/edited local file
+### [high] Remote poller enqueues intents with poll time instead of change.observed_at, so a stale remote Removed deletes a freshly re-uploaded/edited local file  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/remote_sync.rs:228`
 
@@ -479,7 +479,7 @@ vapor-daemon keeps its own notify = "=8.2.0" dependency and fs_events.rs:230 con
 
 **Suggested fix**: Route the daemon's local watcher through vapor_platform::fs_watch (keeping the callback-discipline half in fs_events), drop the direct notify dependency from vapor-daemon, and let the trait contract suite cover the shared translation logic; if the split is intentional, document it in AGENTS.md as an explicit exception.
 
-### [medium] build.rs emits no rerun marker for git worktrees or packed refs, embedding stale commit SHAs
+### [medium] build.rs emits no rerun marker for git worktrees or packed refs, embedding stale commit SHAs  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/build.rs:52`
 
@@ -487,7 +487,7 @@ emit_git_rerun_markers resolves HEAD's ref with git_dir.join(reference) and only
 
 **Suggested fix**: In resolve_git_dir/emit_git_rerun_markers, read the gitdir's `commondir` file when present and resolve refs relative to it; additionally emit cargo:rerun-if-changed for `<commondir>/packed-refs`, and emit the ref path even when it does not yet exist (cargo re-runs when a watched missing path appears).
 
-### [medium] Crash/power loss between a completed provider upload and the durable index/completion write replays as a manufactured keep-both conflict duplicate on both replicas
+### [medium] Crash/power loss between a completed provider upload and the durable index/completion write replays as a manufactured keep-both conflict duplicate on both replicas  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:1209`
 
@@ -495,7 +495,7 @@ After an upload completes at the provider, record_upload_index + complete_leased
 
 **Suggested fix**: In the op-id-mismatch branch, when remote_hash != index.content_hash do not conflict immediately; set plan.verify_remote_before_upload = true and defer to the upload gate, which compares the remote hash against the *local* content hash — identical content (the crash-replay case) then converges silently, and genuine divergence still resolves as keep-both.
 
-### [medium] resolve_upload_conflict renames the local file before durably enqueuing the follow-up intents; a failure between the two strands the conflict copy and leaves the canonical path missing
+### [medium] resolve_upload_conflict renames the local file before durably enqueuing the follow-up intents; a failure between the two strands the conflict copy and leaves the canonical path missing  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:1276`
 
@@ -503,7 +503,7 @@ resolve_upload_conflict renames the local file to its conflict-copy path before 
 
 **Suggested fix**: Reorder for crash-safety: durably enqueue the Download(original) follow-up before performing the rename, and enqueue the Upload(conflict_copy) immediately after the rename (or perform rename + enqueue such that a retried original intent detects the half-finished state — e.g. by finding the conflict-copy marker for its own enqueued_at timestamp — and completes the enqueue instead of no-opping).
 
-### [medium] record_upload_index captures the local mtime after the upload finishes, pairing a post-edit mtime with the as-uploaded hash and enabling silent overwrite of a mid-upload edit
+### [medium] record_upload_index captures the local mtime after the upload finishes, pairing a post-edit mtime with the as-uploaded hash and enabling silent overwrite of a mid-upload edit  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/executor.rs:1404`
 
@@ -519,7 +519,7 @@ core/daemon/src/fs_events.rs bypasses the vapor_platform::fs_watch trait: it imp
 
 **Suggested fix**: Make core/daemon consume vapor_platform::fs_watch (extending WatchEventKind with the From/To rename distinction the daemon needs), delete the duplicate notify plumbing from fs_events.rs, and keep exactly one OS-event→kind mapping with shared tests.
 
-### [medium] IPC config writes are unsynchronized read-modify-write with a shared fixed temp filename, so concurrent IPC calls lose updates
+### [medium] IPC config writes are unsynchronized read-modify-write with a shared fixed temp filename, so concurrent IPC calls lose updates  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/ipc_service.rs:142`
 
@@ -527,7 +527,7 @@ write_config_key does read vapor.json -> mutate one key -> write to the fixed te
 
 **Suggested fix**: Guard write_config_key with a process-wide Mutex (or route config mutations through RuntimeControl to the single tick thread), and use a unique temp filename per write (e.g., include the op/thread id) before the atomic rename.
 
-### [medium] Retry-slowdown upload clamp is applied before the CPU-ceiling scale factor, which multiplies it back up during rate-limit storms
+### [medium] Retry-slowdown upload clamp is applied before the CPU-ceiling scale factor, which multiplies it back up during rate-limit storms  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/lib.rs:419`
 
@@ -535,7 +535,7 @@ effective_throttle_caps() applies the rate-limit slowdown first (`caps.upload_co
 
 **Suggested fix**: Apply the slowdown clamp AFTER the ceiling scaling (move the `min(1)` below the `scale_cap` block), or treat slowdown like the Suspended zero-cap case that scaling explicitly refuses to relax.
 
-### [medium] CPU-ceiling scaling can raise Throttled/Light caps far above the throttle ladder, contradicting the documented 'ceilings only ever lower' contract
+### [medium] CPU-ceiling scaling can raise Throttled/Light caps far above the throttle ladder, contradicting the documented 'ceilings only ever lower' contract  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/lib.rs:421`
 
@@ -543,7 +543,7 @@ resource_budget.rs's module contract (lines 20-21) states 'Ceilings are hard cap
 
 **Suggested fix**: Only allow the scale factor to exceed 1.0 while the throttle state is IdleDrain (i.e., where boost is defined), or clamp scaled caps at the tier's compiled values for Light/Throttled: `scale_cap(cap).min(cap)` outside IdleDrain. Update the resource_budget doc if raising non-idle caps is actually intended.
 
-### [medium] Reconcile walk performs up to 8 synchronous provider enumerations per chunk with no intra-chunk slice/throttle check, blocking the daemon tick loop
+### [medium] Reconcile walk performs up to 8 synchronous provider enumerations per chunk with no intra-chunk slice/throttle check, blocking the daemon tick loop  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/reconcile_walk.rs:142`
 
@@ -551,7 +551,7 @@ ReconcileWalker::process loops max_directories (RECONCILE_DIRS_PER_CHECKPOINT = 
 
 **Suggested fix**: Check elapsed slice time (and ideally the current throttle state) between each directory inside process() — e.g., pass a deadline/should-yield callback from the controller — or lower the per-chunk directory budget to 1 for network providers so the 500ms slice discipline applies to real network latency.
 
-### [medium] Push-only strict mirror never restores a remotely-deleted directory because local_file_exists rejects directories
+### [medium] Push-only strict mirror never restores a remotely-deleted directory because local_file_exists rejects directories  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/remote_sync.rs:222`
 
@@ -567,7 +567,7 @@ The auto-tuner's regression check (auto_tune.rs:105) compares absolute durable q
 
 **Suggested fix**: Judge regressions on drain rate instead of depth: track completed intents (or bytes transferred) per cycle, or compare depth delta against the ingest counter, and roll back only when throughput fell after the increase.
 
-### [low] Download-side conflict resolution enqueues a redundant Download for a payload that is already fully staged
+### [low] Download-side conflict resolution enqueues a redundant Download for a payload that is already fully staged  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/executor.rs:1274`
 
@@ -575,7 +575,7 @@ When a completed download detects local divergence, preserve_diverged_local_befo
 
 **Suggested fix**: Split the follow-up enqueue out of resolve_upload_conflict (parameterize it): the upload-gate/precondition callers need both follow-ups, but the download-apply caller only needs the conflict-copy Upload since it applies the canonical payload itself.
 
-### [low] record_download_index stores the daemon's own download op-id instead of the remote object's op-id, defeating the op-id fast path for every subsequent upload
+### [low] record_download_index stores the daemon's own download op-id instead of the remote object's op-id, defeating the op-id fast path for every subsequent upload  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/executor.rs:1436`
 
@@ -583,7 +583,7 @@ After a download, sync_index.last_op_id is set to plan.op_id — the op-id this 
 
 **Suggested fix**: When recording the post-download index entry, store the remote change's op-id (available from the feed change / a post-download stat) as last_op_id instead of the local download intent's op-id, so the op-id equality fast path works in both directions.
 
-### [low] Type-mismatch re-materialization intents do not share the clearing intent's path, so the claimed executor ordering does not hold for remote directories
+### [low] Type-mismatch re-materialization intents do not share the clearing intent's path, so the claimed executor ordering does not hold for remote directories  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/reconcile_walk.rs:272`
 
@@ -591,7 +591,7 @@ The comment asserts 'the clearing intent and the re-materializing intents share 
 
 **Suggested fix**: Either enqueue the child downloads only after the clearing intent completes (defer descending into the mismatched directory to the next reconcile pass), or give the executor an explicit parent-path dependency for re-materializing intents; at minimum fix the comment so future changes don't rely on ordering that does not exist.
 
-### [low] A single 1-second headroom blip cancels Active idle boost into a full down-ramp plus a fresh 30s up-ramp; RampingDown never re-checks the gates
+### [low] A single 1-second headroom blip cancels Active idle boost into a full down-ramp plus a fresh 30s up-ramp; RampingDown never re-checks the gates  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/resource_budget.rs:257`
 
@@ -599,7 +599,7 @@ gates_pass() gates the Active idle-boost state on the instantaneous 1s non-Vapor
 
 **Suggested fix**: Require the headroom gate to fail for N consecutive samples (small debounce) before leaving Active, and/or let RampingDown reverse into RampingUp from the current ceiling when gates pass again mid-ramp.
 
-### [low] Rolling-window prune keeps future-dated events after a wall-clock rewind, so MassChangeGuard can spuriously pause sync and ActiveCodingHeuristic can pin Throttled — contrary to its documented fail-safe claim
+### [low] Rolling-window prune keeps future-dated events after a wall-clock rewind, so MassChangeGuard can spuriously pause sync and ActiveCodingHeuristic can pin Throttled — contrary to its documented fail-safe claim  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/safeguards.rs:73`
 
@@ -608,7 +608,7 @@ The field doc claims 'a rewound clock only shrinks the observed rate (fails safe
 **Suggested fix**: In prune() (or record()), also drop or clamp entries with timestamps greater than `now` (e.g. `while front > now { pop }` or clamp on push), and fix the misleading field comment.
 
 
-### [low] Orphaned `.vapor-tmp-dl-*` staging files accumulate in the user's sync folder after crashes or failed applies
+### [low] Orphaned `.vapor-tmp-dl-*` staging files accumulate in the user's sync folder after crashes or failed applies  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/executor.rs:1074` (staging-name generation; line pre-cleanup)
 
@@ -668,7 +668,7 @@ process), `core/lifecycle` (crash-loop guard, manager, durable store, auto-launc
 | low | improvement | `core/providers/src/http.rs:12` | HttpRequest derives Debug/Clone with raw Authorization headers, making bearer-token leaks one {:?} away |
 | low | bug | `core/providers/src/tags.rs:131` | Side-file temp `.vapor-meta.json.tmp` is not recognized as internal and leaks into the sync scope on crash |
 
-### [high] Authorization code is never percent-decoded, so real Google logins fail with invalid_grant
+### [high] Authorization code is never percent-decoded, so real Google logins fail with invalid_grant  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/commands/auth.rs:224` · **Review group**: gdrive-oauth
 
@@ -676,7 +676,7 @@ run_gdrive_pkce_flow() extracts the code from the raw redirect request line and 
 
 **Suggested fix**: Percent-decode the extracted code (and any other query values) before passing it to exchange_code. Add a test that feeds a redirect line containing 'code=4%2F0Axyz' and asserts the exchange form body carries 'code=4%2F0Axyz' exactly once-encoded.
 
-### [high] delete() falls back to remove_dir_all, destroying an entire remote directory tree the engine never saw
+### [high] delete() falls back to remove_dir_all, destroying an entire remote directory tree the engine never saw  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/filesystem/mod.rs:451` · **Review group**: provider-fs
 
@@ -684,7 +684,7 @@ FilesystemProvider::delete (core/providers/src/filesystem/mod.rs:451) falls back
 
 **Suggested fix**: Use `fs::remove_dir` (fails on non-empty) for the directory fallback, or return `precondition_failed` on a file-vs-directory kind mismatch so the engine re-plans against fresh remote state instead of recursively deleting.
 
-### [high] Duplicate file names in a Drive folder are silently resolved to an arbitrary match
+### [high] Duplicate file names in a Drive folder are silently resolved to an arbitrary match  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:415` · **Review group**: gdrive
 
@@ -692,7 +692,7 @@ Google Drive allows multiple children with the same name in one folder. find_chi
 
 **Suggested fix**: In find_child, detect files.len() > 1 and surface a deterministic outcome (e.g., pick by stable key such as smallest id — consistently everywhere — or return a Permanent 'ambiguous remote name' error the engine can surface as a conflict). In enumerate, de-duplicate same-name children deterministically instead of emitting colliding paths.
 
-### [high] Stale path->id cache hit validates only existence, so uploads write into a file that was renamed/moved away
+### [high] Stale path->id cache hit validates only existence, so uploads write into a file that was renamed/moved away  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:440` · **Review group**: gdrive
 
@@ -700,7 +700,7 @@ On a path->id cache hit, GoogleDriveProvider::resolve() (core/providers/src/gdri
 
 **Suggested fix**: On cache hit, verify the fetched GdFile still matches the cached path: compare file.name against the path's final segment and file.parents against the cached parent id (resolving the parent path the same way). On mismatch, evict and fall through to the segment walk. Also evict all cache entries under a directory prefix when a folder mapping is invalidated.
 
-### [high] path_for_changed_file prefers the stale cached path, so remote renames/moves are reported at the old path and never converge
+### [high] path_for_changed_file prefers the stale cached path, so remote renames/moves are reported at the old path and never converge  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:544` · **Review group**: gdrive
 
@@ -708,7 +708,7 @@ For a changed file id, path_for_changed_file (core/providers/src/gdrive/mod.rs:5
 
 **Suggested fix**: Do not trust the cached path for the changed file itself. Recompute the leaf from file.name + file.parents (the cached path of the parent id is fine as a short-circuit), compare with any cached path for the id, and when they differ emit Removed(old_path) + CreatedOrModified(new_path) and update both cache maps.
 
-### [high] Google-native files (Docs/Sheets/shortcuts) are enumerated as 0-byte regular files and 'download' instantly as empty local files
+### [high] Google-native files (Docs/Sheets/shortcuts) are enumerated as 0-byte regular files and 'download' instantly as empty local files  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:659` · **Review group**: gdrive
 
@@ -716,7 +716,7 @@ poll_changes filters out folders (gdrive/mod.rs:909) but nothing anywhere filter
 
 **Suggested fix**: Filter application/vnd.google-apps.* (except folder) out of enumerate, stat, and poll_changes results — or surface them as an explicit unsupported-entry kind — so the engine never plans transfers for them. Shortcuts (vnd.google-apps.shortcut) need the same treatment.
 
-### [high] Upload precondition is check-then-act across the whole (potentially long) transfer, allowing silent last-write-wins overwrite
+### [high] Upload precondition is check-then-act across the whole (potentially long) transfer, allowing silent last-write-wins overwrite  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:706` · **Review group**: gdrive
 
@@ -724,7 +724,7 @@ RemotePrecondition::HashEquals/Absent are verified once in GoogleDriveProvider::
 
 **Suggested fix**: Re-stat the target immediately before the committing request (final resumable chunk / the multipart call) and fail with PreconditionFailed if md5Checksum or modifiedTime moved since begin_upload; even better, for updates capture modifiedTime at begin_upload and compare. This shrinks the race window from the whole transfer to one round-trip, which the engine's deterministic re-plan can then handle.
 
-### [high] NativeHttpTransport has no read/overall timeout: a stalled connection hangs the daemon forever
+### [high] NativeHttpTransport has no read/overall timeout: a stalled connection hangs the daemon forever  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/http.rs:55` · **Review group**: provider-core
 
@@ -732,7 +732,7 @@ NativeHttpTransport::execute uses `ureq::request(...)` on the default agent. In 
 
 **Suggested fix**: Build a shared `ureq::Agent` via `AgentBuilder` with an explicit `timeout_read`/`timeout_write` (or an overall per-request `timeout`) sized to the chunk budget (e.g. 30-120s), and surface the timeout as a transient HttpTransportError so the existing retry/backoff machinery handles it.
 
-### [medium] Loopback listener accepts exactly one connection; browser preconnect/speculative sockets or any stray probe kill or hang the login
+### [medium] Loopback listener accepts exactly one connection; browser preconnect/speculative sockets or any stray probe kill or hang the login  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/commands/auth.rs:208` · **Review group**: gdrive-oauth
 
@@ -740,7 +740,7 @@ The loopback OAuth flow in run_gdrive_pkce_flow (core/cli/src/commands/auth.rs:2
 
 **Suggested fix**: Loop on listener.accept() with a read timeout per connection, discard connections that produce no parseable GET with a code (or that fail state validation, see the state finding), and only stop once a valid code is received or an overall deadline expires.
 
-### [medium] Accept-loop error path spins hot with no backoff (e.g. EMFILE) — sustained 100% CPU on a low-impact-first daemon
+### [medium] Accept-loop error path spins hot with no backoff (e.g. EMFILE) — sustained 100% CPU on a low-impact-first daemon  ✅ DONE
 
 **Category**: perf · **Where**: `core/daemon/src/ipc_server.rs:111` · **Review group**: ipc
 
@@ -748,7 +748,7 @@ The IPC accept loop in core/daemon/src/ipc_server.rs (lines 110-113) treats ever
 
 **Suggested fix**: On `Err` from accept, log once (rate-limited) and sleep with backoff (e.g. 10 ms → 1 s capped) before continuing; optionally treat repeated identical errors as a reason to surface a degraded-IPC status.
 
-### [medium] Server connections have no write timeout: a client that stops reading blocks a handler thread forever and permanently exhausts the 32-connection cap
+### [medium] Server connections have no write timeout: a client that stops reading blocks a handler thread forever and permanently exhausts the 32-connection cap  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/ipc_server.rs:126` · **Review group**: ipc
 
@@ -756,7 +756,7 @@ The daemon IPC accept loop (core/daemon/src/ipc_server.rs:126) sets only set_rea
 
 **Suggested fix**: Set a write timeout on the accepted stream alongside the read timeout (e.g. `stream.set_write_timeout(Some(idle_timeout))`), so a blocked `write_all` returns `WouldBlock`, `serve_connection` errors out, and the slot is released. Optionally add a total per-session deadline as defense in depth.
 
-### [medium] Unknown Method variants from a newer (in-window) peer are answered with Backend parse errors instead of the documented MethodNotFound
+### [medium] Unknown Method variants from a newer (in-window) peer are answered with Backend parse errors instead of the documented MethodNotFound  ✅ DONE
 
 **Category**: bug · **Where**: `core/ipc/src/server.rs:184` · **Review group**: ipc
 
@@ -764,7 +764,7 @@ The IPC protocol doc (core/ipc/src/protocol.rs:53-55) promises that unknown meth
 
 **Suggested fix**: In the per-method loop, on parse failure re-attempt a lenient decode (e.g. parse to `serde_json::Value`, check `kind == "Call"`, extract the method name/tag) and answer `ErrorBody::MethodNotFound(name)` for unknown variants, reserving `Backend`/parse errors for genuinely malformed frames.
 
-### [medium] Client performs no peer verification on the socket; the deterministic shared-temp relocation path enables daemon impersonation on multi-user hosts
+### [medium] Client performs no peer verification on the socket; the deterministic shared-temp relocation path enables daemon impersonation on multi-user hosts  ✅ DONE
 
 **Category**: security · **Where**: `core/ipc/src/transport.rs:120` · **Review group**: ipc
 
@@ -772,7 +772,7 @@ The IPC protocol doc (core/ipc/src/protocol.rs:53-55) promises that unknown meth
 
 **Suggested fix**: Before/after connecting, verify the peer: check `fs::metadata(socket_path).uid() == geteuid()` on the socket file, and/or verify the connected peer's uid via `getpeereid` (macOS) / `SO_PEERCRED` (Linux) before sending `Hello`. Fail with a typed 'foreign socket' error.
 
-### [medium] Upload precondition check and rename are not atomic; a concurrent writer between the check and the rename is silently overwritten
+### [medium] Upload precondition check and rename are not atomic; a concurrent writer between the check and the rename is silently overwritten  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/filesystem/mod.rs:609` · **Review group**: provider-fs
 
@@ -780,7 +780,7 @@ FilesystemUploadSession::finalize() (core/providers/src/filesystem/mod.rs:609) r
 
 **Suggested fix**: Narrow the race with an exclusive advisory lock (flock) or a link/renameat2(RENAME_NOREPLACE)-style create for `Absent`, and at minimum re-order to hash immediately before rename; document the residual race as a known limitation of the reference provider if full atomicity is out of scope.
 
-### [medium] HashEquals precondition hashes the entire existing target inside a budgeted step() call, breaking bounded-checkpoint interruptibility
+### [medium] HashEquals precondition hashes the entire existing target inside a budgeted step() call, breaking bounded-checkpoint interruptibility  ✅ DONE
 
 **Category**: perf · **Where**: `core/providers/src/filesystem/mod.rs:671` · **Review group**: provider-fs
 
@@ -788,7 +788,7 @@ In the filesystem provider, `FilesystemUploadSession::step()` invokes `finalize(
 
 **Suggested fix**: Verify the precondition incrementally (hash the target in budgeted chunks across step() calls before/while streaming the payload) or record the target's (size, mtime) at begin_upload and re-check cheaply at finalize, reserving full hashing for a chunked path.
 
-### [medium] Changes feed is Drive-wide and each out-of-scope change triggers an uncached N+1 parent-chain walk
+### [medium] Changes feed is Drive-wide and each out-of-scope change triggers an uncached N+1 parent-chain walk  ✅ DONE
 
 **Category**: perf · **Where**: `core/providers/src/gdrive/mod.rs:852` · **Review group**: gdrive
 
@@ -796,7 +796,7 @@ The changes.list request (core/providers/src/gdrive/mod.rs:852) sets no restrict
 
 **Suggested fix**: Cache negative results (file-id -> out-of-scope, with TTL) and cache every parent id visited during the walk (currently only the changed file's path is cached, not intermediate parents outside the mapping). Consider maintaining a folder-id set for the sync subtree so most out-of-scope changes are rejected with zero requests.
 
-### [medium] ProviderHandle builds a fresh TokenManager per HTTP call: a SecretStore/Keychain read per transfer chunk and no 401 refresh-retry
+### [medium] ProviderHandle builds a fresh TokenManager per HTTP call: a SecretStore/Keychain read per transfer chunk and no 401 refresh-retry  ✅ DONE
 
 **Category**: perf · **Where**: `core/providers/src/gdrive/mod.rs:959` · **Review group**: gdrive
 
@@ -804,7 +804,7 @@ ProviderHandle::execute_authed (core/providers/src/gdrive/mod.rs:959) constructs
 
 **Suggested fix**: Give ProviderHandle a persistent Arc<TokenManager> shared with the provider (TokenManager already has interior mutability and owns Arc'd secrets/transport), and mirror the one-shot 401 invalidate+refresh retry there.
 
-### [medium] Fixed multipart boundary makes files containing the boundary bytes permanently unsyncable or corrupted
+### [medium] Fixed multipart boundary makes files containing the boundary bytes permanently unsyncable or corrupted  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:1019` · **Review group**: gdrive
 
@@ -812,7 +812,7 @@ simple_multipart (core/providers/src/gdrive/mod.rs:1019) uses the fixed boundary
 
 **Suggested fix**: Generate a random per-request boundary (long random hex string) and, defensively, verify it does not occur in the payload before use (regenerate if it does).
 
-### [medium] Resumable upload ignores the 308 Range response header — partial chunk persistence corrupts the offset math
+### [medium] Resumable upload ignores the 308 Range response header — partial chunk persistence corrupts the offset math  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:1161` · **Review group**: gdrive
 
@@ -820,7 +820,7 @@ On a 308 the resumable upload session unconditionally does sent_bytes += chunk_l
 
 **Suggested fix**: Parse the Range header from every 308 response and set sent_bytes = last_acked_byte + 1 (0 if absent). If it is behind the local counter, re-seek and resend from the acknowledged offset instead of failing. Consider also issuing a 'Content-Range: bytes */total' status probe when a chunk PUT fails transiently, instead of abandoning the session URL.
 
-### [medium] Download session trusts status 200 + transport's silent 64 MiB body cap, allowing a truncated file to complete 'successfully'
+### [medium] Download session trusts status 200 + transport's silent 64 MiB body cap, allowing a truncated file to complete 'successfully'  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:1246` · **Review group**: gdrive
 
@@ -828,7 +828,7 @@ NativeHttpTransport (core/providers/src/http.rs:90) silently caps every response
 
 **Suggested fix**: On status 200, verify received_bytes == total_bytes (when total is known) before finishing, and return a Transient error on mismatch. Separately, make the transport signal truncation (error when the 64 MiB cap is hit) instead of silently clamping.
 
-### [medium] 403 dailyLimitExceeded quota errors classified as Permanent, dropping sync intents instead of backing off
+### [medium] 403 dailyLimitExceeded quota errors classified as Permanent, dropping sync intents instead of backing off  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/gdrive/mod.rs:1295` · **Review group**: gdrive
 
@@ -836,7 +836,7 @@ classify_api_failure (core/providers/src/gdrive/mod.rs:1295) detects 403 quota/r
 
 **Suggested fix**: Classify 403 bodies by the structured error reason (parse errors[0].reason from the JSON body) instead of substring sniffing; map dailyLimitExceeded / userRateLimitExceeded / rateLimitExceeded / sharingRateLimitExceeded to RateLimited, and keep storageQuotaExceeded as a distinct actionable (but retry-eventually) state rather than generic Permanent.
 
-### [medium] PKCE code verifier is generated from std's hash RandomState, not a CSPRNG
+### [medium] PKCE code verifier is generated from std's hash RandomState, not a CSPRNG  ✅ DONE
 
 **Category**: security · **Where**: `core/providers/src/gdrive/oauth.rs:43` · **Review group**: gdrive-oauth
 
@@ -844,7 +844,7 @@ generate_code_verifier() (core/providers/src/gdrive/oauth.rs:39-49) builds the R
 
 **Suggested fix**: Generate 32 octets from a CSPRNG (getrandom crate, or /dev/urandom via getrandom::getrandom) and encode with the existing base64_url_no_pad(), yielding a 43-char verifier per the RFC. Update verifier_shape_satisfies_pkce_requirements to assert the unreserved alphabet instead of hex.
 
-### [medium] No OAuth state parameter and no request validation on the loopback redirect endpoint
+### [medium] No OAuth state parameter and no request validation on the loopback redirect endpoint  ✅ DONE
 
 **Category**: security · **Where**: `core/providers/src/gdrive/oauth.rs:60` · **Review group**: gdrive-oauth
 
@@ -852,7 +852,7 @@ authorization_url() (core/providers/src/gdrive/oauth.rs:58) emits no state param
 
 **Suggested fix**: Generate a CSPRNG state value alongside the verifier, append '&state=...' in authorization_url (make it a parameter), and have the listener ignore any request whose state does not match instead of consuming it.
 
-### [medium] HTTP responses larger than 64 MiB are silently truncated instead of erroring
+### [medium] HTTP responses larger than 64 MiB are silently truncated instead of erroring  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/http.rs:90` · **Review group**: provider-core
 
@@ -860,7 +860,7 @@ NativeHttpTransport (core/providers/src/http.rs:90) caps body reads with .take(6
 
 **Suggested fix**: Read up to limit+1 bytes and return an HttpTransportError (or a distinct permanent-classifiable error) when the body exceeds the cap, or honor Content-Length and verify received length before returning Ok.
 
-### [medium] Backslash normalization and multi-segment join() silently remap legal filenames containing separators to nested paths
+### [medium] Backslash normalization and multi-segment join() silently remap legal filenames containing separators to nested paths  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/paths.rs:59` · **Review group**: provider-core
 
@@ -868,7 +868,7 @@ RemotePath::new (core/providers/src/paths.rs:59) unconditionally rewrites '\' to
 
 **Suggested fix**: Only translate '\\' to '/' where it is genuinely a separator (i.e. in Windows-origin native paths, at the from_local/OS boundary), not in RemotePath::new; make join() reject segments containing '/' or '\\'; percent-escape or refuse remote names containing the separator until an escaping scheme exists.
 
-### [medium] Op-id side-file namespace collides with real user files: silent overwrite and silent exclusion from sync
+### [medium] Op-id side-file namespace collides with real user files: silent overwrite and silent exclusion from sync  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/tags.rs:45` · **Review group**: provider-core
 
@@ -876,7 +876,7 @@ side_file_path derives `{path}.vapor-meta.json` inside the user's sync root with
 
 **Suggested fix**: Before writing a side-file, stat the target: if a file exists that does not parse as a Vapor SideFilePayload, refuse the fallback (or divert to a shadow directory under vapor_dir keyed by path hash, which also fixes the exclusion problem). At minimum, log a warning and surface excluded suffix-named user files in doctor/status output.
 
-### [low] Client deadline bounds each syscall, not the whole call — a byte-trickling daemon keeps the CLI alive nearly unboundedly
+### [low] Client deadline bounds each syscall, not the whole call — a byte-trickling daemon keeps the CLI alive nearly unboundedly  ✅ DONE
 
 **Category**: improvement · **Where**: `core/ipc/src/client.rs:31` · **Review group**: ipc
 
@@ -892,7 +892,7 @@ DEFAULT_CALL_TIMEOUT (core/ipc/src/client.rs:31) is applied as SO_RCVTIMEO/SO_SN
 
 **Suggested fix**: Perform a non-blocking connect with a poll/select deadline (or connect on a helper thread joined with the timeout) so the connect phase is bounded by the same deadline as reads/writes.
 
-### [low] Malformed JSON in the handshake frame closes the connection silently instead of returning a typed error
+### [low] Malformed JSON in the handshake frame closes the connection silently instead of returning a typed error  ✅ DONE
 
 **Category**: improvement · **Where**: `core/ipc/src/server.rs:150` · **Review group**: ipc
 
@@ -900,7 +900,7 @@ In serve_connection (core/ipc/src/server.rs:149-150), a first frame that passes 
 
 **Suggested fix**: Before returning `ServeError::Parse` on the handshake frame, best-effort send `Response::Err(ErrorBody::HandshakeRequired(..))` (or a dedicated parse-error body), matching the courtesy reply the other error paths already give.
 
-### [low] HelloAck server_id reports the IPC schema version where its own contract documents the product version
+### [low] HelloAck server_id reports the IPC schema version where its own contract documents the product version  ✅ DONE
 
 **Category**: improvement · **Where**: `core/ipc/src/server.rs:171` · **Review group**: ipc
 
@@ -908,7 +908,7 @@ HelloAck.server_id (core/ipc/src/server.rs:171) is built as format!("vapord/{cur
 
 **Suggested fix**: Build `server_id` from the product version (root `VERSION` via the existing build-info plumbing), e.g. `vapord/<product-version>`, keeping the schema version in the dedicated `schema_version` field.
 
-### [low] Bandwidth grant is consumed even when the transfer step uses fewer bytes or fails, systematically undershooting the configured rate
+### [low] Bandwidth grant is consumed even when the transfer step uses fewer bytes or fails, systematically undershooting the configured rate  ✅ DONE
 
 **Category**: perf · **Where**: `core/providers/src/bandwidth.rs:63` · **Review group**: provider-core
 
@@ -916,7 +916,7 @@ BandwidthShaper::budget() (core/providers/src/bandwidth.rs:63) debits the full g
 
 **Suggested fix**: Add a `refund(unused: u64)` (or `settle(granted, used)`) method that returns unspent tokens to the bucket (clamped to the 1-second cap), and call it from the executor after each step with granted minus actual bytes_transferred.
 
-### [low] Watch events are silently dropped when stat fails with anything other than NotFound, permanently losing the change from the feed
+### [low] Watch events are silently dropped when stat fails with anything other than NotFound, permanently losing the change from the feed  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/filesystem/feed.rs:240` · **Review group**: provider-fs
 
@@ -924,7 +924,7 @@ BandwidthShaper::budget() (core/providers/src/bandwidth.rs:63) debits the full g
 
 **Suggested fix**: On non-NotFound stat errors, emit the change optimistically as CreatedOrModified with `op_id: None` (the engine re-stats and hash-checks anyway), or at minimum log the drop so missed-change reports are diagnosable.
 
-### [low] Non-UTF-8 remote file names are silently invisible to enumerate, stat-by-feed, and the changes feed — files never sync with no diagnostic
+### [low] Non-UTF-8 remote file names are silently invisible to enumerate, stat-by-feed, and the changes feed — files never sync with no diagnostic  ✅ DONE
 
 **Category**: improvement · **Where**: `core/providers/src/filesystem/mod.rs:306` · **Review group**: provider-fs
 
@@ -932,7 +932,7 @@ enumerate (core/providers/src/filesystem/mod.rs:306) skips directory entries who
 
 **Suggested fix**: Log a warning (redacting nothing sensitive — path bytes lossily) the first time a non-representable name is skipped, and surface a count through diagnostics/doctor so the exclusion is observable rather than silent.
 
-### [low] Orphaned upload temp files from crashes are never cleaned up and are permanently invisible
+### [low] Orphaned upload temp files from crashes are never cleaned up and are permanently invisible  ✅ DONE
 
 **Category**: improvement · **Where**: `core/providers/src/filesystem/mod.rs:370` · **Review group**: provider-fs
 
@@ -940,7 +940,7 @@ A daemon crash (SIGKILL, panic-abort, power loss) between `begin_upload` and fin
 
 **Suggested fix**: Sweep stale `TEMP_FILE_PREFIX` files (older than some conservative age) during `ensure_cloud_sync_directory` or the reconcile walk.
 
-### [low] poll_changes falls back to re-using the same cursor when Drive returns neither nextPageToken nor newStartPageToken
+### [low] poll_changes falls back to re-using the same cursor when Drive returns neither nextPageToken nor newStartPageToken  ✅ DONE
 
 **Category**: improvement · **Where**: `core/providers/src/gdrive/mod.rs:932` · **Review group**: gdrive
 
@@ -948,7 +948,7 @@ next_cursor falls back to cursor.to_string() when both tokens are absent. If Dri
 
 **Suggested fix**: Treat the absence of both tokens as a protocol violation: return ProviderError::transient (retry) instead of echoing the input cursor, so the engine backs off rather than looping on identical state.
 
-### [low] HttpRequest derives Debug/Clone with raw Authorization headers, making bearer-token leaks one {:?} away
+### [low] HttpRequest derives Debug/Clone with raw Authorization headers, making bearer-token leaks one {:?} away  ✅ DONE
 
 **Category**: improvement · **Where**: `core/providers/src/http.rs:12` · **Review group**: provider-core
 
@@ -956,7 +956,7 @@ HttpRequest (core/providers/src/http.rs:12) derives Debug while carrying raw "Au
 
 **Suggested fix**: Replace the derived Debug with a manual impl that redacts values of Authorization/Proxy-Authorization (and any header name containing 'token'/'secret'), keeping method/url/header-names visible for diagnostics.
 
-### [low] Side-file temp `.vapor-meta.json.tmp` is not recognized as internal and leaks into the sync scope on crash
+### [low] Side-file temp `.vapor-meta.json.tmp` is not recognized as internal and leaks into the sync scope on crash  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/tags.rs:131` · **Review group**: provider-core
 
@@ -975,7 +975,7 @@ write_side_file (core/providers/src/tags.rs:131) stages the op-id side-file thro
 | medium | perf | `core/platform/src/metrics.rs:77` | NativePlatformMetricsSampler returns constant fabricated ThrottleInputs on macOS, so battery/thermal/CPU pressure never throttles the daemon |
 | low | improvement | `core/platform/src/service/macos.rs:230` | stop_daemon swallows all launchctl failures and returns success before the daemon has exited |
 
-### [high] bootstrap/install launches the daemon via RunAtLoad before the crash-loop guard is consulted, bypassing pause and backoff
+### [high] bootstrap/install launches the daemon via RunAtLoad before the crash-loop guard is consulted, bypassing pause and backoff  ✅ DONE
 
 **Category**: bug · **Where**: `core/lifecycle/src/manager.rs:236`
 
@@ -983,7 +983,7 @@ bootstrap_if_needed (core/lifecycle/src/manager.rs:236) invokes installer.instal
 
 **Suggested fix**: Consult the guard before install: in bootstrap_if_needed and set_auto_launch_enabled(true), return RelaunchDeferred without calling install_and_enable() when the guard is paused or a backoff is pending; alternatively make install_and_enable not auto-start (RunAtLoad=false or bootstrap without launch) and rely solely on start_daemon() for launching.
 
-### [medium] Autolaunch write rewrites the whole vapor.json from a stale read, losing concurrent edits by other commands
+### [medium] Autolaunch write rewrites the whole vapor.json from a stale read, losing concurrent edits by other commands  ✅ DONE
 
 **Category**: improvement · **Where**: `core/lifecycle/src/auto_launch.rs:137`
 
@@ -991,7 +991,7 @@ JsonFileAutoLaunchSettingStore::write does read-document → insert autoLaunch �
 
 **Suggested fix**: Share the same advisory file-lock discipline proposed for lifecycle.json for all vapor.json writers, and use a unique temp filename per writer so concurrent renames cannot fail with ENOENT or publish another writer's payload.
 
-### [medium] NativeIdleNotifier reports the user as always idle on macOS, defeating idle-gated throttling on the shipping OS
+### [medium] NativeIdleNotifier reports the user as always idle on macOS, defeating idle-gated throttling on the shipping OS  ✅ DONE
 
 **Category**: perf · **Where**: `core/platform/src/idle.rs:88`
 
@@ -999,7 +999,7 @@ NativeIdleNotifier (core/platform/src/idle.rs:88) is a stub that always reports 
 
 **Suggested fix**: Implement the macOS bridge via CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateHIDSystemState, kCGAnyInputEventType) (or IOHIDSystem HIDIdleTime); until it lands, make NativeIdleNotifier on macOS return Duration::ZERO (user treated as Active → work deferred) so the stub fails safe for device impact.
 
-### [medium] NativePlatformMetricsSampler returns constant fabricated ThrottleInputs on macOS, so battery/thermal/CPU pressure never throttles the daemon
+### [medium] NativePlatformMetricsSampler returns constant fabricated ThrottleInputs on macOS, so battery/thermal/CPU pressure never throttles the daemon  ✅ DONE
 
 **Category**: perf · **Where**: `core/platform/src/metrics.rs:77`
 
@@ -1007,7 +1007,7 @@ NativePlatformMetricsSampler::sample() (core/platform/src/metrics.rs:77) is a st
 
 **Suggested fix**: Land the macOS bridge (host_statistics64 for CPU, IOPSCopyPowerSourcesInfo for battery, OSThermalNotification/thermal pressure sysctl, statfs for disk). Until then, at minimum log a prominent startup warning that throttle inputs are static, and bias the static default toward the conservative side (e.g., on_battery=true) so the stub errs toward low impact rather than maximum impact.
 
-### [low] stop_daemon swallows all launchctl failures and returns success before the daemon has exited
+### [low] stop_daemon swallows all launchctl failures and returns success before the daemon has exited  ✅ DONE
 
 **Category**: improvement · **Where**: `core/platform/src/service/macos.rs:230`
 
@@ -1016,7 +1016,7 @@ stop_daemon() ignores the result of `launchctl kill TERM` entirely and returns O
 **Suggested fix**: Distinguish 'service not found' (treat as already-stopped) from other launchctl failures (return Backend error), and optionally poll status() briefly until the pid disappears (bounded, e.g. a few hundred ms) so stop reports the actual terminal state. Mirror whatever contract is chosen in the fake.
 
 
-### [low] `StoredTokens` derives `Debug` with plaintext token fields, bypassing the redaction the module relies on
+### [low] `StoredTokens` derives `Debug` with plaintext token fields, bypassing the redaction the module relies on  ✅ DONE
 
 **Category**: security · **Where**: `core/providers/src/gdrive/oauth.rs:23`
 
@@ -1038,7 +1038,6 @@ repo hygiene (.env.example, .gitignore, locales, agent skills, Cargo metadata).
 
 | Sev | Category | Location | Finding |
 |---|---|---|---|
-| high | security | `.github/workflows/release.yml:112` | Third-party actions referenced by mutable tags inside the secret-bearing release job |
 | high | bug | `apps/macos/Sources/Vapor/VaporApp.swift:21` | Main window auto-presents at launch, violating menubar-first startup (CLAUDE.md 2.1) |
 | high | bug | `apps/macos/Sources/VaporCore/VaporConfiguration.swift:252` | App config save clobbers daemon-owned keys with a stale startup snapshot |
 | high | bug | `core/cli/src/commands/auth.rs:216` | OAuth authorization code is never percent-decoded, then re-encoded on exchange — real Google logins fail with invalid_grant |
@@ -1094,15 +1093,7 @@ repo hygiene (.env.example, .gitignore, locales, agent skills, Cargo metadata).
 | low | perf | `scripts/lint.sh:18` | lint.sh runs the identical Swift lint command twice per invocation |
 | low | bug | `scripts/tests/version.sh:90` | version.sh fixture tests inherit the developer's global git config and fail on gpgsign/hooksPath machines |
 
-### [high] Third-party actions referenced by mutable tags inside the secret-bearing release job
-
-**Category**: security · **Where**: `.github/workflows/release.yml:112` · **Review group**: ci
-
-The release job runs `maxim-lobanov/setup-xcode@v1.6.0` (personal-account action) and `actions-rust-lang/setup-rust-toolchain@v1.9.0` by mutable git tag, not commit SHA (same pattern in build.yml, lint.yml, test.yml, perf.yml for checkout/cache/setup actions). Tags can be force-moved. Failure scenario: the `v1.6.0` tag of setup-xcode is retargeted to malicious code (account compromise); on the next `v*` tag push it executes inside the release job, where it can poison PATH/$GITHUB_ENV so later steps leak `APPLE_DEVELOPER_ID_P12_BASE64`, `APPLE_DEVELOPER_ID_P12_PASSWORD`, and the notary API key — enabling the attacker to sign and notarize malware as this Developer ID. The isolated GitHub Environment does not help because the action runs inside the environment-scoped job.
-
-**Suggested fix**: Pin every third-party (and ideally first-party) action to a full commit SHA with a version comment, e.g. `maxim-lobanov/setup-xcode@60606e260d2fc5762a71e64e74b2174e8ea3c8bd # v1.6.0`, and add Dependabot/Renovate for github-actions to keep pins fresh. At minimum do this for the release.yml jobs that can see signing secrets.
-
-### [high] Main window auto-presents at launch, violating menubar-first startup (CLAUDE.md 2.1)
+### [high] Main window auto-presents at launch, violating menubar-first startup (CLAUDE.md 2.1)  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/Vapor/VaporApp.swift:21` · **Review group**: macos-app-shell
 
@@ -1110,7 +1101,7 @@ The `Window` scene in apps/macos/Sources/Vapor/VaporApp.swift:21 is the primary 
 
 **Suggested fix**: Apply `.defaultLaunchBehavior(.suppressed)` (and `.restorationBehavior(.disabled)`, macOS 15+; the project baseline is macOS 26) to the `Window` scene so it only opens via the menubar `openWindow` action. Then `prepareMenubarOnlyStartupSurface()` can be removed or reduced to a log line.
 
-### [high] App config save clobbers daemon-owned keys with a stale startup snapshot
+### [high] App config save clobbers daemon-owned keys with a stale startup snapshot  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/VaporCore/VaporConfiguration.swift:252` · **Review group**: macos-app-core
 
@@ -1118,7 +1109,7 @@ save() (apps/macos/Sources/VaporCore/VaporConfiguration.swift:252) atomically re
 
 **Suggested fix**: In save(), re-load the on-disk file, re-capture unknown/daemon-owned keys (deviceId, profiles, syncMode, provider, resourceLimits, idleBoost) from the fresh read, overlay only the app-modeled fields being changed, and write under an advisory lock (or route config writes through the vapor CLI so the Rust side owns the read-modify-write).
 
-### [high] OAuth authorization code is never percent-decoded, then re-encoded on exchange — real Google logins fail with invalid_grant
+### [high] OAuth authorization code is never percent-decoded, then re-encoded on exchange — real Google logins fail with invalid_grant  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/commands/auth.rs:216` · **Review group**: cli-commands
 
@@ -1126,7 +1117,7 @@ run_gdrive_pkce_flow (core/cli/src/commands/auth.rs:216-227) extracts the 'code=
 
 **Suggested fix**: Percent-decode the extracted query value (at minimum decode %XX sequences and '+') in run_gdrive_pkce_flow before passing it to exchange_code, and add a test with a code containing '%2F' asserting the exchange body carries the single-encoded form.
 
-### [medium] Preflight `git fetch origin main --depth=1` can shallow-graft main and falsely reject a valid release tag
+### [medium] Preflight `git fetch origin main --depth=1` can shallow-graft main and falsely reject a valid release tag  ✅ DONE
 
 **Category**: bug · **Where**: `.github/workflows/release.yml:73` · **Review group**: ci
 
@@ -1134,7 +1125,7 @@ In .github/workflows/release.yml the preflight job checks out with fetch-depth: 
 
 **Suggested fix**: Drop `--depth=1` (the checkout already fetched full history, so `git fetch origin main` is cheap), or use `gh api` / `git branch -r --contains` against the fully-fetched refs instead of a fresh shallow fetch.
 
-### [medium] Release job uses GitHub Environment `release` but the contract and docs mandate `release-macos`
+### [medium] Release job uses GitHub Environment `release` but the contract and docs mandate `release-macos`  ✅ DONE
 
 **Category**: bug · **Where**: `.github/workflows/release.yml:96` · **Review group**: ci
 
@@ -1142,7 +1133,7 @@ The release job in .github/workflows/release.yml:96 declares `environment: relea
 
 **Suggested fix**: Change to `environment: release-macos` (or `environment: release-macos` per job once other platforms land) so the workflow matches the documented trust-chain policy, and verify the secrets are provisioned under that environment.
 
-### [medium] Signing/release job restores shared incremental build cache into the artifacts it signs and notarizes
+### [medium] Signing/release job restores shared incremental build cache into the artifacts it signs and notarizes  ✅ DONE
 
 **Category**: security · **Where**: `.github/workflows/release.yml:122` · **Review group**: ci
 
@@ -1150,7 +1141,7 @@ The release job in .github/workflows/release.yml (lines 121-132) restores target
 
 **Suggested fix**: Drop the cargo/SPM cache-restore steps from the `release` job (accept the clean full build; the job already has a 60-minute budget), or at minimum scope the key exactly to release builds with no prefix restore-keys.
 
-### [medium] Re-running the release workflow demotes an already-published release back to draft (and never clears the prerelease flag)
+### [medium] Re-running the release workflow demotes an already-published release back to draft (and never clears the prerelease flag)  ✅ DONE
 
 **Category**: bug · **Where**: `.github/workflows/release.yml:334` · **Review group**: ci
 
@@ -1158,7 +1149,7 @@ The 'Create or update GitHub Release' step (.github/workflows/release.yml:334) u
 
 **Suggested fix**: Only pass `--draft` when the existing release is still a draft (check `gh release view --json isDraft`), or skip the edit for published releases and fail loudly instead. Use explicit `--prerelease=true|false` (gh supports the `=false` form on edit) so the flag is always reconciled to `RELEASE_PRERELEASE`.
 
-### [medium] Identical cargo cache key across lint/test/build/perf/release jobs means only one job's target/ ever gets saved
+### [medium] Identical cargo cache key across lint/test/build/perf/release jobs means only one job's target/ ever gets saved  ✅ DONE
 
 **Category**: perf · **Where**: `.github/workflows/test.yml:58` · **Review group**: ci
 
@@ -1166,7 +1157,7 @@ All five workflows (lint, test, build, perf, release) compute the identical cach
 
 **Suggested fix**: Include the workflow/job name in the key (e.g. `${{ runner.os }}-cargo-${{ github.workflow }}-${{ hashFiles('**/Cargo.lock') }}`) or switch to `Swatinem/rust-cache` (SHA-pinned), which handles per-job keying and excludes `~/.cargo/bin` correctly.
 
-### [medium] Crash-loop acknowledge spawns two CLI subprocesses synchronously on the main thread
+### [medium] Crash-loop acknowledge spawns two CLI subprocesses synchronously on the main thread  ✅ DONE
 
 **Category**: perf · **Where**: `apps/macos/Sources/Vapor/AppShellViewModel.swift:214` · **Review group**: macos-app-shell
 
@@ -1174,7 +1165,7 @@ acknowledgeCrashLoopPause() (AppShellViewModel.swift:214-218) runs two synchrono
 
 **Suggested fix**: Move both operations onto `lifecycleQueue` like `toggleAutoLaunch()` does, and hop back to the main actor to publish the resulting `crashLoopPaused` value.
 
-### [medium] Quit can leave the daemon running: race between queued auto-launch work on lifecycleQueue and the main-thread quit path
+### [medium] Quit can leave the daemon running: race between queued auto-launch work on lifecycleQueue and the main-thread quit path  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/Vapor/AppShellViewModel.swift:239` · **Review group**: macos-app-shell
 
@@ -1182,7 +1173,7 @@ toggleAutoLaunch()/disableAutoLaunchAndStopNow() (and bootstrapDaemonLifecycleIf
 
 **Suggested fix**: Route the quit-time stop through the same `lifecycleQueue` (serializing behind any pending toggles) and call `terminateApplication()` only from that queue's completion hop back to the main actor, so quit is always the last lifecycle operation.
 
-### [medium] Quit path blocks the main thread on unbounded CLI subprocess waits — Quit Vapor can hang forever
+### [medium] Quit path blocks the main thread on unbounded CLI subprocess waits — Quit Vapor can hang forever  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/Vapor/AppShellViewModel.swift:240` · **Review group**: macos-app-shell
 
@@ -1190,7 +1181,7 @@ toggleAutoLaunch()/disableAutoLaunchAndStopNow() (and bootstrapDaemonLifecycleIf
 
 **Suggested fix**: Run the stop sequence off the main actor with a bounded deadline (e.g. a few seconds), then call `terminateApplication()` regardless of outcome; in `ProcessVaporCLIRunner`, read the pipes concurrently (readability handlers or background reads) before `waitUntilExit()` and add a kill-on-timeout.
 
-### [medium] Main thread blocks on vapor CLI subprocess behind a queue shared with the 30s health tick
+### [medium] Main thread blocks on vapor CLI subprocess behind a queue shared with the 30s health tick  ✅ DONE
 
 **Category**: perf · **Where**: `apps/macos/Sources/VaporCore/DaemonLifecycle.swift:215` · **Review group**: macos-app-core
 
@@ -1206,7 +1197,7 @@ registerLoginItemIfAvailable() (apps/macos/Sources/VaporCore/DaemonLifecycle.swi
 
 **Suggested fix**: Propagate a distinct outcome (e.g. `loginItemRequiresApproval`) from `setAutoLaunchEnabled`, check `service.status` in `SMAppServiceLoginItemController` after register, surface it in `AppShellState` with a hint that opens System Settings (`SMAppService.openSystemSettingsLoginItems()`).
 
-### [medium] ProcessVaporCLIRunner reads pipes only after waitUntilExit and has no timeout — latent permanent deadlock
+### [medium] ProcessVaporCLIRunner reads pipes only after waitUntilExit and has no timeout — latent permanent deadlock  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/VaporCore/VaporCLIServiceController.swift:56` · **Review group**: macos-app-core
 
@@ -1214,7 +1205,7 @@ run() calls process.waitUntilExit() before draining outputPipe/errorPipe. If the
 
 **Suggested fix**: Read both pipes concurrently (readabilityHandler or background readDataToEndOfFile on each pipe) BEFORE waitUntilExit, and add a bounded timeout that terminates the child and throws (e.g. process.terminate() after N seconds) so a hung CLI can never wedge the lifecycle queue.
 
-### [medium] PKCE loopback listener accepts exactly one connection with no state parameter, no read timeout, and no request filtering
+### [medium] PKCE loopback listener accepts exactly one connection with no state parameter, no read timeout, and no request filtering  ✅ DONE
 
 **Category**: security · **Where**: `core/cli/src/commands/auth.rs:207` · **Review group**: cli-commands
 
@@ -1222,7 +1213,7 @@ The PKCE loopback flow in run_gdrive_pkce_flow (core/cli/src/commands/auth.rs:20
 
 **Suggested fix**: Generate a random `state` value, include it in the authorization URL, and loop on accept() (with per-connection read timeouts and an overall flow deadline) discarding any request whose state does not match; respond to error= redirects with a proper page before returning the error.
 
-### [medium] vapor.json read-modify-write has no locking and shares a fixed temp filename with the lifecycle autolaunch store — concurrent writes are lost or fail
+### [medium] vapor.json read-modify-write has no locking and shares a fixed temp filename with the lifecycle autolaunch store — concurrent writes are lost or fail  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/commands/config.rs:85` · **Review group**: cli-commands
 
@@ -1230,7 +1221,7 @@ vapor.json writers do unlocked read-modify-write and share the fixed staging nam
 
 **Suggested fix**: Use a unique temp name per writer (e.g. tempfile in the same directory / PID+random suffix) and serialize vapor.json writers with an advisory file lock (flock on a sidecar) shared by config.rs and the lifecycle stores, so a set() re-reads under the lock before publishing.
 
-### [medium] vapor auth login gdrive silently ignores the documented stdin-token path and blocks on a browser OAuth flow
+### [medium] vapor auth login gdrive silently ignores the documented stdin-token path and blocks on a browser OAuth flow  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/main.rs:470` · **Review group**: cli-core
 
@@ -1238,7 +1229,7 @@ The AuthAction::Login help text (core/cli/src/main.rs:139-144) promises "Omit --
 
 **Suggested fix**: Only auto-run the PKCE flow when stdin is a TTY (fall back to the stdin read otherwise), or gate the browser flow behind an explicit flag (e.g. --oauth). At minimum, correct the Login help text to state the gdrive exception so scripts don't follow a false contract.
 
-### [medium] One malformed field value silently discards the user's entire configuration (whole-file serde failure -> all defaults)
+### [medium] One malformed field value silently discards the user's entire configuration (whole-file serde failure -> all defaults)  ✅ DONE
 
 **Category**: bug · **Where**: `core/shared/src/config.rs:268` · **Review group**: shared
 
@@ -1246,7 +1237,7 @@ A single malformed field value in vapor.json (type mismatch like "timelineEventL
 
 **Suggested fix**: Parse to serde_json::Value first and decode each known field individually (collecting per-field issues into load_issue) so one bad field only reverts that field; alternatively make the daemon refuse to start sync work (Paused with reason) when load_issue is set, rather than running against defaults.
 
-### [medium] Unknown/misspelled top-level config keys are silently dropped even though ALL_KEYS exists for validation
+### [medium] Unknown/misspelled top-level config keys are silently dropped even though ALL_KEYS exists for validation  ✅ DONE
 
 **Category**: improvement · **Where**: `core/shared/src/config.rs:280` · **Review group**: shared
 
@@ -1254,7 +1245,7 @@ RawVaporConfig (core/shared/src/config.rs:280) silently ignores unknown top-leve
 
 **Suggested fix**: After a successful parse, deserialize to serde_json::Value as well, diff top-level keys against constants::config::ALL_KEYS, and surface unrecognized keys as a non-fatal warning (a new `warnings` field next to load_issue, logged by the daemon and shown by `vapor doctor`).
 
-### [medium] resolve_or_persist read-modify-write races with other config writers and can silently revert their settings
+### [medium] resolve_or_persist read-modify-write races with other config writers and can silently revert their settings  ✅ DONE
 
 **Category**: bug · **Where**: `core/shared/src/device_id.rs:47` · **Review group**: shared
 
@@ -1262,7 +1253,7 @@ resolve_or_persist (core/shared/src/device_id.rs:47) performs an unlocked read-m
 
 **Suggested fix**: Take an advisory lock (e.g. flock on vapor.json or a sibling lock file, as vapord.lock already does for the daemon) around the read-modify-write, or re-read and verify the deviceId key is still absent immediately before rename; use a unique temp filename (PID/random suffix).
 
-### [medium] resolve_or_persist writes vapor.json with default (world-readable) permissions and creates vapor_dir 0755, bypassing the PRIVATE_*_MODE policy
+### [medium] resolve_or_persist writes vapor.json with default (world-readable) permissions and creates vapor_dir 0755, bypassing the PRIVATE_*_MODE policy  ✅ DONE
 
 **Category**: security · **Where**: `core/shared/src/device_id.rs:74` · **Review group**: shared
 
@@ -1270,7 +1261,7 @@ resolve_or_persist (core/shared/src/device_id.rs:74-75) writes vapor.json via fs
 
 **Suggested fix**: Create the parent via runtime_paths::ensure_private_directory, and write the temp file with OpenOptionsExt::mode(PRIVATE_FILE_MODE) (or chmod 0600 before rename), mirroring the discipline logging.rs/state_db.rs already use. The CLI's config write path (core/cli/src/commands/config.rs fs::write) has the same gap and should share one helper.
 
-### [medium] No log rotation or size cap: vapor.logs / vapord.logs grow without bound for a long-running daemon
+### [medium] No log rotation or size cap: vapor.logs / vapord.logs grow without bound for a long-running daemon  ✅ DONE
 
 **Category**: improvement · **Where**: `core/shared/src/logging.rs:175` · **Review group**: shared
 
@@ -1278,7 +1269,7 @@ open_log_file (core/shared/src/logging.rs:173-176) opens vapor.logs/vapord.logs 
 
 **Suggested fix**: Add size-based rotation in StructuredLogger (e.g. rename to vapord.logs.1 and reopen past an N-MiB cap defined in constants.rs, keeping K generations), and have the daemon trim the stdout/stderr redirect files at startup.
 
-### [medium] S9 runs rm -rf on a directory derived from an unvalidated log-parsed path
+### [medium] S9 runs rm -rf on a directory derived from an unvalidated log-parsed path  ✅ DONE
 
 **Category**: bug · **Where**: `scripts/e2e.sh:402` · **Review group**: scripts
 
@@ -1286,7 +1277,7 @@ scripts/e2e.sh:402 runs `rm -rf "$(dirname "$deep_socket")"` where `$deep_socket
 
 **Suggested fix**: Validate before deleting: require `[[ "$deep_socket" == */vapord.sock ]]` (or a vapor-specific directory component) and that the resolved dir is under "${TMPDIR:-/tmp}"; otherwise skip the removal and fail with diagnostics. Alternatively remove only the socket file itself with rm -f.
 
-### [medium] Pre-commit hook runs clean.sh, forcing a full cold rebuild of the entire workspace on every commit
+### [medium] Pre-commit hook runs clean.sh, forcing a full cold rebuild of the entire workspace on every commit  ✅ DONE
 
 **Category**: perf · **Where**: `scripts/hooks.sh:63` · **Review group**: scripts
 
@@ -1294,7 +1285,7 @@ The pre-commit hook installed by scripts/hooks.sh (line 63 of the emitted hook) 
 
 **Suggested fix**: Remove the clean.sh step from the hook (lint/test/build are already deterministic through the wrapper scripts); if a from-scratch guarantee is wanted, keep it in CI only. At minimum stop deleting `.vapor` and `target` in the commit path.
 
-### [medium] sync_cargo_lock swallows all cargo output, so release prep dies silently after already mutating VERSION/Cargo.toml on main
+### [medium] sync_cargo_lock swallows all cargo output, so release prep dies silently after already mutating VERSION/Cargo.toml on main  ✅ DONE
 
 **Category**: bug · **Where**: `scripts/version.sh:152` · **Review group**: scripts
 
@@ -1302,7 +1293,7 @@ The pre-commit hook installed by scripts/hooks.sh (line 63 of the emitted hook) 
 
 **Suggested fix**: Drop the `2>&1` redirect (keep stderr, or capture it and surface via die on failure), e.g. `cargo update --workspace --manifest-path "$CARGO_TOML" >/dev/null || die "cargo update --workspace failed; VERSION/Cargo.toml were already updated — inspect the worktree"`.
 
-### [low] Release output validation checks only 2 of the 3 mandated bundle executables — Contents/Helpers/vapor is unverified
+### [low] Release output validation checks only 2 of the 3 mandated bundle executables — Contents/Helpers/vapor is unverified  ✅ DONE
 
 **Category**: improvement · **Where**: `.github/workflows/release.yml:291` · **Review group**: ci
 
@@ -1310,7 +1301,7 @@ The release workflow's "Validate packaged outputs" step (.github/workflows/relea
 
 **Suggested fix**: Add `test -x dist/Vapor.app/Contents/Helpers/vapor` (and optionally a `--version` smoke run of all three executables) to the validation step.
 
-### [low] No concurrency groups on PR-triggered workflows — superseded pushes keep burning macOS runners
+### [low] No concurrency groups on PR-triggered workflows — superseded pushes keep burning macOS runners  ✅ DONE
 
 **Category**: improvement · **Where**: `.github/workflows/test.yml:3` · **Review group**: ci
 
@@ -1318,7 +1309,7 @@ lint.yml, test.yml, and build.yml (each a 3-OS matrix including 30-45-minute mac
 
 **Suggested fix**: Add to each PR workflow: `concurrency: { group: <name>-${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: ${{ github.ref != 'refs/heads/main' }} }` so superseded PR runs are cancelled while main pushes and workflow_call invocations from release are never cancelled.
 
-### [low] toggleAutoLaunch computes the target value from stale UI state, so rapid double-toggle re-applies instead of reverting
+### [low] toggleAutoLaunch computes the target value from stale UI state, so rapid double-toggle re-applies instead of reverting  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/Vapor/AppShellViewModel.swift:245` · **Review group**: macos-app-shell
 
@@ -1326,7 +1317,7 @@ lint.yml, test.yml, and build.yml (each a 3-OS matrix including 30-45-minute mac
 
 **Suggested fix**: Track the pending target (e.g. a `pendingAutoLaunchTarget` optional flipped on each click and used as the base for `!`), or optimistically update `state.autoLaunchEnabled` before enqueuing and roll back on failure; alternatively disable the toggle while an operation is in flight.
 
-### [low] Quit from menubar blocks the main thread on a subprocess with no time bound
+### [low] Quit from menubar blocks the main thread on a subprocess with no time bound  ✅ DONE
 
 **Category**: improvement · **Where**: `apps/macos/Sources/VaporCore/AppLifecycleCoordinator.swift:46` · **Review group**: macos-app-core
 
@@ -1334,7 +1325,7 @@ handleQuitFromMenuBar is @MainActor and synchronously runs stopDaemonForTerminat
 
 **Suggested fix**: Run the stop on a background task with a bounded deadline (e.g. a few seconds), then call terminateApplication() regardless of stop success/failure, logging the outcome — quitting must never be blockable by a wedged subprocess.
 
-### [low] Crash-loop state fails open: CLI errors report 'not paused', letting the UI clear a real pause
+### [low] Crash-loop state fails open: CLI errors report 'not paused', letting the UI clear a real pause  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/VaporCore/DaemonLifecycle.swift:223` · **Review group**: macos-app-core
 
@@ -1342,7 +1333,7 @@ isInCrashLoopPause (DaemonLifecycle.swift:214-226) returns false when `vapor ser
 
 **Suggested fix**: Propagate the error (or return an explicit .unknown state) instead of defaulting to the healthy value; have the view model keep the previous known state and surface a 'could not reach vapor CLI' condition rather than clearing the crash-loop indicator.
 
-### [low] StructuredLogger silently loses all logging after the log file is deleted
+### [low] StructuredLogger silently loses all logging after the log file is deleted  ✅ DONE
 
 **Category**: improvement · **Where**: `apps/macos/Sources/VaporCore/StructuredLogger.swift:126` · **Review group**: macos-app-core
 
@@ -1350,7 +1341,7 @@ StructuredLogger creates vapor_dir/logs/vapor.logs only in prepareLogFile() at i
 
 **Suggested fix**: In the fallback open path, recreate the file via VaporPaths.ensurePrivateFile before opening; optionally stat-check the cached handle's inode against the path periodically to detect deletion/rotation.
 
-### [low] First-launch default-config write can race the daemon and silently swallows errors
+### [low] First-launch default-config write can race the daemon and silently swallows errors  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/VaporCore/VaporConfiguration.swift:224` · **Review group**: macos-app-core
 
@@ -1358,7 +1349,7 @@ loadResult() (VaporConfiguration.swift:222-225) does fileExists → `try? save(d
 
 **Suggested fix**: Create the initial file exclusively (fail if it appeared meanwhile, then re-read instead of overwriting), and report save failures through VaporConfigurationLoadIssue rather than discarding them with try?.
 
-### [low] Runtime-dir resolution diverges from Rust under XCTest: app and spawned CLI use different vapor_dirs
+### [low] Runtime-dir resolution diverges from Rust under XCTest: app and spawned CLI use different vapor_dirs  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/VaporCore/VaporPaths.swift:34` · **Review group**: macos-app-core
 
@@ -1366,7 +1357,7 @@ Swift runtime-dir resolution (apps/macos/Sources/VaporCore/VaporPaths.swift:34) 
 
 **Suggested fix**: Drop the XCTestConfigurationFilePath special case (rely on scripts exporting VAPOR_DIR/VAPOR_ENV=dev as §8.5 mandates), or mirror the same trigger into runtime_paths.rs so both sides resolve identically.
 
-### [low] timelineEventLimit accepts negative and zero values that the daemon silently ignores
+### [low] timelineEventLimit accepts negative and zero values that the daemon silently ignores  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/commands/config.rs:128` · **Review group**: cli-commands
 
@@ -1374,7 +1365,7 @@ parse_value_for_key (core/cli/src/commands/config.rs:128-133) accepts any i64 fo
 
 **Suggested fix**: Reject values < 1 (and optionally cap an upper bound) in parse_value_for_key with the same ConfigError::Parse style used for booleans and enums.
 
-### [low] Conflict scan silently skips unreadable subdirectories, contradicting the 'never silently incomplete' contract
+### [low] Conflict scan silently skips unreadable subdirectories, contradicting the 'never silently incomplete' contract  ✅ DONE
 
 **Category**: improvement · **Where**: `core/cli/src/commands/conflicts.rs:96` · **Review group**: cli-commands
 
@@ -1382,7 +1373,7 @@ list_conflicts documents skipped_roots as guaranteeing "an empty result is never
 
 **Suggested fix**: Record unreadable directories (e.g. append them to skipped_roots or a skipped_directories field) instead of continuing silently, and surface them in render_list / the JSON report.
 
-### [low] Keep-copy fallback deletes the canonical file on any rename error, not only the Windows exists-collision it was written for
+### [low] Keep-copy fallback deletes the canonical file on any rename error, not only the Windows exists-collision it was written for  ✅ DONE
 
 **Category**: improvement · **Where**: `core/cli/src/commands/conflicts.rs:198` · **Review group**: cli-commands
 
@@ -1390,7 +1381,7 @@ resolve_conflict's KeepSide::Copy path treats every fs::rename error as the Wind
 
 **Suggested fix**: Gate the remove-then-rename fallback on cfg(windows) (or on the specific error kind, e.g. AlreadyExists/PermissionDenied from a dest-exists collision) and return the original rename error unchanged elsewhere.
 
-### [low] vapor logs without --tail loads the entire log file into memory before printing
+### [low] vapor logs without --tail loads the entire log file into memory before printing  ✅ DONE
 
 **Category**: perf · **Where**: `core/cli/src/commands/ipc.rs:258` · **Review group**: cli-core
 
@@ -1398,7 +1389,7 @@ tail_logs with tail=None (core/cli/src/commands/ipc.rs:258) does fs::read_to_str
 
 **Suggested fix**: Stream the no-tail path: open the file and io::copy it to a locked stdout (also fixing the extra-allocation println), or default --tail to a large-but-bounded line count.
 
-### [low] --foreground is an accepted no-op flag whose presence implies a background default that does not exist
+### [low] --foreground is an accepted no-op flag whose presence implies a background default that does not exist  ✅ DONE
 
 **Category**: improvement · **Where**: `core/cli/src/commands/run.rs:21` · **Review group**: cli-core
 
@@ -1406,7 +1397,7 @@ tail_logs with tail=None (core/cli/src/commands/ipc.rs:258) does fs::read_to_str
 
 **Suggested fix**: Until a real background mode ships, either hide the flag (#[arg(hide = true)]) or state "currently always runs in the foreground; this flag is reserved" in the subcommand and flag help so callers cannot infer a background default.
 
-### [low] vapor service stop unconditionally reports {"result":"stopped"} even when nothing was installed or running
+### [low] vapor service stop unconditionally reports {"result":"stopped"} even when nothing was installed or running  ✅ DONE
 
 **Category**: improvement · **Where**: `core/cli/src/commands/service.rs:166` · **Review group**: cli-commands
 
@@ -1414,7 +1405,7 @@ dispatch(ServiceCommand::Stop) (core/cli/src/commands/service.rs:166-171) hardco
 
 **Suggested fix**: Probe installer.status() before/after the stop and return Unchanged (or a distinct wire value) when the service was not installed or already stopped, keeping the JSON contract change coordinated with the Swift shim.
 
-### [low] Support-bundle directory name collides silently: same-millisecond or pre-epoch timestamps merge two bundles into one directory
+### [low] Support-bundle directory name collides silently: same-millisecond or pre-epoch timestamps merge two bundles into one directory  ✅ DONE
 
 **Category**: improvement · **Where**: `core/cli/src/commands/support.rs:65` · **Review group**: cli-core
 
@@ -1422,7 +1413,7 @@ collect_support_bundle (core/cli/src/commands/support.rs:64-65) uses fs::create_
 
 **Suggested fix**: Use fs::create_dir for the bundle directory and disambiguate on AlreadyExists (append a counter or random suffix), and propagate an error instead of unwrap_or(0) when SystemTime is before the epoch.
 
-### [low] vapor --version omits the git commit, diverging from vapor version, vapord --version, and the documented contract
+### [low] vapor --version omits the git commit, diverging from vapor version, vapord --version, and the documented contract  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/main.rs:25` · **Review group**: cli-core
 
@@ -1430,7 +1421,7 @@ clap's version attribute in core/cli/src/main.rs:25 is set to vapor_daemon::buil
 
 **Suggested fix**: Set the clap version to the full string, e.g. `version = vapor_cli::version_string()` (clap 4 accepts an owned String), or emit a combined VERSION_WITH_COMMIT constant from the daemon crate's build.rs and use it in both places.
 
-### [low] Support bundle drops all live captures and reports daemonReachable=false if any one of three IPC calls fails
+### [low] Support bundle drops all live captures and reports daemonReachable=false if any one of three IPC calls fails  ✅ DONE
 
 **Category**: improvement · **Where**: `core/cli/src/main.rs:356` · **Review group**: cli-core
 
@@ -1438,7 +1429,7 @@ dispatch_support_bundle (core/cli/src/main.rs:356) requires all three IPC captur
 
 **Suggested fix**: Capture each endpoint independently (Option per artifact), set daemon_reachable when at least the status call succeeded, and record per-endpoint capture errors in the manifest so partial failures are visible instead of silent.
 
-### [low] vapor timeline help and empty-state message falsely claim the C8-30 timeline buffer has not shipped
+### [low] vapor timeline help and empty-state message falsely claim the C8-30 timeline buffer has not shipped  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/main.rs:421` · **Review group**: cli-core
 
@@ -1446,7 +1437,7 @@ The `vapor timeline` subcommand help (core/cli/src/main.rs:77-78) and its empty-
 
 **Suggested fix**: Update the Timeline subcommand doc comment and change the empty-state message to something like "(no timeline events recorded yet)".
 
-### [low] println!-based output panics on closed stdout (broken pipe) — vapor logs | head exits 101 with a panic message ✅ FIXED in this PR
+### [low] println!-based output panics on closed stdout (broken pipe) — vapor logs | head exits 101 with a panic message ✅ FIXED in this PR  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/main.rs:453` · **Review group**: cli-core
 
@@ -1454,7 +1445,7 @@ The vapor CLI never handles SIGPIPE/EPIPE: Rust std sets SIGPIPE to SIG_IGN befo
 
 **Suggested fix**: Write output through a locked io::stdout() with writeln!, treat ErrorKind::BrokenPipe as clean success (exit 0), and map other write errors to exit 1. Alternatively restore SIGPIPE to SIG_DFL on unix at the top of main().
 
-### [low] Explicit --token accepts empty/whitespace values that the stdin path rejects, storing a useless credential
+### [low] Explicit --token accepts empty/whitespace values that the stdin path rejects, storing a useless credential  ✅ DONE
 
 **Category**: bug · **Where**: `core/cli/src/main.rs:537` · **Review group**: cli-core
 
@@ -1462,7 +1453,7 @@ resolve_auth_token's Some(value) branch (core/cli/src/main.rs:537-543) returns t
 
 **Suggested fix**: Trim the explicit --token value and reject empty results with the same error as the stdin path ("no token provided") before calling login_into.
 
-### [low] Doc/code mismatch: config.rs claims resource-limit/idle-boost clamping happens at load and is surfaced via load_issue; the loader does neither
+### [low] Doc/code mismatch: config.rs claims resource-limit/idle-boost clamping happens at load and is surfaced via load_issue; the loader does neither  ✅ DONE
 
 **Category**: improvement · **Where**: `core/shared/src/config.rs:57` · **Review group**: shared
 
@@ -1470,7 +1461,7 @@ Doc/code mismatch in core/shared/src/config.rs (lines 57-63): the VaporConfig fi
 
 **Suggested fix**: Fix the doc comments to say clamping happens at budget-resolve time in the daemon (with a logged warning), or actually clamp in into_config and report via a warnings channel — pick one and make code and comment agree.
 
-### [low] Log redaction misses JSON-shaped secrets ("access_token": "...") — tokens can reach log files verbatim
+### [low] Log redaction misses JSON-shaped secrets ("access_token": "...") — tokens can reach log files verbatim  ✅ DONE
 
 **Category**: security · **Where**: `core/shared/src/logging.rs:236` · **Review group**: shared
 
@@ -1478,7 +1469,7 @@ redact_inline_secrets (core/shared/src/logging.rs:236) only matches equals-sign 
 
 **Suggested fix**: Extend INLINE_SECRET_MARKERS to cover JSON key forms (e.g. "access_token\"", "refresh_token\"", "id_token\"", "client_secret\"" or a generic regex like (access|refresh|id)_token\s*["=:] ), or redact by matching the key name anywhere followed by a delimiter ([=:"]) rather than requiring '=' specifically.
 
-### [low] Any CI env value (including CI=false or empty) silently redirects vapor_dir to cwd-relative ./.vapor, even when VAPOR_ENV=prod
+### [low] Any CI env value (including CI=false or empty) silently redirects vapor_dir to cwd-relative ./.vapor, even when VAPOR_ENV=prod  ✅ DONE
 
 **Category**: bug · **Where**: `core/shared/src/runtime_paths.rs:17` · **Review group**: shared
 
@@ -1494,7 +1485,7 @@ normalize_absolute_path pops ParentDir components lexically. If a component is a
 
 **Suggested fix**: After lexical normalization, attempt fs::canonicalize on the deepest existing ancestor (falling back to the lexical result) so equivalent spellings converge before the socket-path hash is computed; at minimum document that VAPOR_DIR must use one consistent spelling across surfaces.
 
-### [low] cleanup uses pkill -f with the repo path as an unescaped regex
+### [low] cleanup uses pkill -f with the repo path as an unescaped regex  ✅ DONE
 
 **Category**: improvement · **Where**: `scripts/e2e.sh:175` · **Review group**: scripts
 
@@ -1502,7 +1493,7 @@ normalize_absolute_path pops ParentDir components lexically. If a component is a
 
 **Suggested fix**: Match the literal executable path instead: iterate `pgrep -x vapord` and compare each process's executable path, or escape the pattern (`printf '%s' "$ROOT_DIR/target/debug/vapord" | sed 's/[][(){}.*+?^$|\\]/\\&/g'`) before passing it to pkill -f.
 
-### [low] S5 hangs forever (no timeout) if the singleton lock regresses
+### [low] S5 hangs forever (no timeout) if the singleton lock regresses  ✅ DONE
 
 **Category**: bug · **Where**: `scripts/e2e.sh:348` · **Review group**: scripts
 
@@ -1510,7 +1501,7 @@ S5 (scripts/e2e.sh:348) captures the second daemon via an unbounded command subs
 
 **Suggested fix**: Bound the wait, e.g. run the second daemon in the background and `wait_until 15` for it to exit, or use `timeout 15 "$VAPOR_BIN" run --foreground` (with a perl/python fallback since macOS lacks coreutils timeout by default), then assert the non-zero exit and refusal message.
 
-### [low] e2e harness silently aborts and deletes the failure sandbox when a glob/grep assignment matches nothing
+### [low] e2e harness silently aborts and deletes the failure sandbox when a glob/grep assignment matches nothing  ✅ DONE
 
 **Category**: bug · **Where**: `scripts/e2e.sh:529` · **Review group**: scripts
 
@@ -1518,7 +1509,7 @@ Under `set -euo pipefail`, the assignments `S15_COPY="$(compgen -G ... | head -n
 
 **Suggested fix**: Make these assignments failure-tolerant so the existing checks fire, e.g. `S15_COPY="$(compgen -G ... | head -n 1 || true)"` and `deep_socket="$(grep ... | tail -n 1 | sed ... || true)"`, mirroring the `|| true` already used for warning_count on line 375.
 
-### [low] lint.sh runs the identical Swift lint command twice per invocation
+### [low] lint.sh runs the identical Swift lint command twice per invocation  ✅ DONE
 
 **Category**: perf · **Where**: `scripts/lint.sh:18` · **Review group**: scripts
 
@@ -1526,7 +1517,7 @@ On macOS, scripts/lint.sh runs the identical Swift lint twice: line 13 runs scri
 
 **Suggested fix**: Either drop the trailing `format.sh check` from lint.sh in favor of `rust/format.sh check` only, or make swift/lint.sh delegate to swift/format.sh check so the pass runs once.
 
-### [low] version.sh fixture tests inherit the developer's global git config and fail on gpgsign/hooksPath machines
+### [low] version.sh fixture tests inherit the developer's global git config and fail on gpgsign/hooksPath machines  ✅ DONE
 
 **Category**: bug · **Where**: `scripts/tests/version.sh:90` · **Review group**: scripts
 
@@ -1548,7 +1539,7 @@ make_repo's `git -C "$repo" commit` (line 90) — and the release commits create
 | low | improvement | `Cargo.toml:13` | No [workspace.dependencies] inheritance: pinned '=' versions hand-duplicated across seven manifests |
 | low | improvement | `README.md:14` | README Install states Windows/Linux are 'in flight', but the roadmap classifies them as deferred/optional and not committed |
 
-### [medium] Gitignored VaporCore Resources directory makes a fresh clone fail `swift build` outright
+### [medium] Gitignored VaporCore Resources directory makes a fresh clone fail `swift build` outright  ✅ DONE
 
 **Category**: improvement · **Where**: `.gitignore:55`
 
@@ -1556,7 +1547,7 @@ The entire apps/macos/Sources/VaporCore/Resources/locales/ mirror is gitignored 
 
 **Suggested fix**: Narrow the ignore to the generated JSON files (e.g. `apps/macos/Sources/VaporCore/Resources/locales/*.json`) and track a placeholder (`!.../locales/.gitkeep`) so the Resources tree always exists, or generate the mirror via a SwiftPM build-tool plugin so plain `swift build` is self-sufficient.
 
-### [medium] README claims VAPOR_* env vars override every vapor.json key, but only 6 of 15 keys have env counterparts
+### [medium] README claims VAPOR_* env vars override every vapor.json key, but only 6 of 15 keys have env counterparts  ✅ DONE
 
 **Category**: bug · **Where**: `README.md:77`
 
@@ -1564,7 +1555,7 @@ README.md:77 states that matching VAPOR_* env vars override any vapor.json key, 
 
 **Suggested fix**: State explicitly which keys have env-var counterparts (the six filtering/directory keys plus VAPOR_DIR/VAPOR_ENV/VAPOR_LOG_LEVEL/VAPOR_GDRIVE_*), or add the missing env overrides to the loader if per-key override is the intended contract.
 
-### [medium] Config-change manager swap defeats lifecycle-operation serialization and strands the health monitor on a stale manager
+### [medium] Config-change manager swap defeats lifecycle-operation serialization and strands the health monitor on a stale manager  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/Vapor/AppShellViewModel.swift:479`
 
@@ -1572,7 +1563,7 @@ The production `lifecycleManagerFactory` (`{ _ in AppShellViewModel.makeDefaultL
 
 **Suggested fix**: Since the factory deliberately ignores configuration, stop recreating the manager on config saves (keep one instance for the app's lifetime), or if recreation is ever needed, hand the new manager to the health monitor and drain in-flight operations first.
 
-### [low] vapor-debug skill misstates timeline availability and omits two durable-DB tables
+### [low] vapor-debug skill misstates timeline availability and omits two durable-DB tables  ✅ DONE
 
 **Category**: improvement · **Where**: `.agents/skills/vapor-debug/SKILL.md:58`
 
@@ -1580,7 +1571,7 @@ Two factual doc/code mismatches that steer a debugging agent wrong: (1) line 58 
 
 **Suggested fix**: Drop the C8-30 caveat (timeline now returns real activity events) and extend the table list at line 45 with `sync_index` and `tombstones`.
 
-### [low] vapor-e2e skill's 'Known limits' describes pre-Wave-8 behavior that no longer exists
+### [low] vapor-e2e skill's 'Known limits' describes pre-Wave-8 behavior that no longer exists  ✅ DONE
 
 **Category**: improvement · **Where**: `.agents/skills/vapor-e2e/SKILL.md:107`
 
@@ -1588,7 +1579,7 @@ The skill states 'The stub provider has no cloud side: the suite proves pipeline
 
 **Suggested fix**: Rewrite the 'Known limits (today)' section and line 43: default provider is the filesystem reference provider with real byte replication (asserted by S10), and `vapor timeline` returns real activity events; remove the C8-30 caveat.
 
-### [low] Dead gitignore negation: !.cursor/environment.json can never re-include the file
+### [low] Dead gitignore negation: !.cursor/environment.json can never re-include the file  ✅ DONE
 
 **Category**: bug · **Where**: `.gitignore:66`
 
@@ -1596,7 +1587,7 @@ Line 65 ignores the `.cursor` directory itself; per gitignore semantics, files i
 
 **Suggested fix**: Replace the pair with `.cursor/*` followed by `!.cursor/environment.json` (excluding directory contents rather than the directory allows the negation to work).
 
-### [low] No [workspace.dependencies] inheritance: pinned '=' versions hand-duplicated across seven manifests
+### [low] No [workspace.dependencies] inheritance: pinned '=' versions hand-duplicated across seven manifests  ✅ DONE
 
 **Category**: improvement · **Where**: `Cargo.toml:13`
 
@@ -1604,7 +1595,7 @@ Shared external deps are hand-duplicated with exact `=` pins across all seven cr
 
 **Suggested fix**: Add a [workspace.dependencies] table in the root Cargo.toml with the single pinned version per crate (and shared feature sets), and switch member manifests to `dep.workspace = true`; the daemon's Windows-only bundled-rusqlite override can stay as `features = ["bundled"]` layered on the workspace entry.
 
-### [low] README Install states Windows/Linux are 'in flight', but the roadmap classifies them as deferred/optional and not committed
+### [low] README Install states Windows/Linux are 'in flight', but the roadmap classifies them as deferred/optional and not committed  ✅ DONE
 
 **Category**: improvement · **Where**: `README.md:14`
 

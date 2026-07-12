@@ -21,7 +21,10 @@
 //! - The skew-matrix integration tests exercising every supported
 //!   `app-N ↔ daemon-M` pair plus the `|N - M| = 2` negative case.
 
-#![forbid(unsafe_code)]
+// `deny` rather than `forbid`: the Unix transport needs exactly one
+// tightly-scoped FFI call (`geteuid`) to verify socket ownership before
+// connecting. Every other module stays unsafe-free.
+#![deny(unsafe_code)]
 
 pub mod client;
 pub mod framing;

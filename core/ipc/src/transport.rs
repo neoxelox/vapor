@@ -16,6 +16,14 @@ pub enum TransportError {
     Io(io::Error),
     /// The current OS doesn't have a transport implementation yet.
     Unsupported(&'static str),
+    /// The socket at the resolved path is not owned by the current user.
+    /// On a multi-user host with a world-writable temp dir (the
+    /// deterministic relocation target), another user could pre-create
+    /// the socket and impersonate the daemon; refuse to talk to it.
+    ForeignSocket {
+        path: PathBuf,
+        owner_uid: u32,
+    },
 }
 
 impl Display for TransportError {
@@ -23,6 +31,11 @@ impl Display for TransportError {
         match self {
             Self::Io(error) => write!(f, "IPC transport I/O: {error}"),
             Self::Unsupported(reason) => write!(f, "IPC transport unsupported: {reason}"),
+            Self::ForeignSocket { path, owner_uid } => write!(
+                f,
+                "refusing to connect to IPC socket {} owned by uid {owner_uid}, not the current user",
+                path.display()
+            ),
         }
     }
 }
@@ -118,7 +131,42 @@ mod unix_impl {
     }
 
     pub fn connect_to_socket(socket_path: &Path) -> Result<UnixStream, TransportError> {
+        // Verify the socket is ours before connecting. The server side is
+        // protected by a 0o700 parent + 0o600 socket, but the client must
+        // not blindly trust whatever sits at the resolved path: under the
+        // deterministic temp-dir relocation, a foreign user on a
+        // world-writable /tmp could pre-create the socket and impersonate
+        // the daemon (forged status/acks, leaked UpdateExcludes contents).
+        use std::os::unix::fs::MetadataExt;
+        let owner_uid = fs::metadata(socket_path)?.uid();
+        verify_socket_owner(socket_path, owner_uid, current_euid())?;
         Ok(UnixStream::connect(socket_path)?)
+    }
+
+    /// The ownership gate as a pure decision so both branches are
+    /// testable without a privileged chown.
+    pub(super) fn verify_socket_owner(
+        socket_path: &Path,
+        owner_uid: u32,
+        current_uid: u32,
+    ) -> Result<(), TransportError> {
+        if owner_uid == current_uid {
+            Ok(())
+        } else {
+            Err(TransportError::ForeignSocket {
+                path: socket_path.to_path_buf(),
+                owner_uid,
+            })
+        }
+    }
+
+    /// The current process's effective uid. Isolated so the crate's
+    /// single FFI call has the narrowest possible unsafe surface.
+    #[allow(unsafe_code)]
+    fn current_euid() -> u32 {
+        // SAFETY: `geteuid` takes no arguments, cannot fail, and has no
+        // side effects.
+        unsafe { libc::geteuid() }
     }
 }
 
@@ -205,5 +253,19 @@ mod tests {
         server_stream.write_all(b"pong").expect("write");
         let response = join.join().expect("client thread");
         assert_eq!(&response, b"pong");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owner_gate_accepts_self_and_rejects_a_foreign_socket() {
+        use super::unix_impl::verify_socket_owner;
+        use super::*;
+
+        let path = Path::new("/tmp/vapor-abcd/vapord.sock");
+        assert!(verify_socket_owner(path, 501, 501).is_ok());
+        match verify_socket_owner(path, 502, 501) {
+            Err(TransportError::ForeignSocket { owner_uid, .. }) => assert_eq!(owner_uid, 502),
+            other => panic!("expected ForeignSocket, got {other:?}"),
+        }
     }
 }

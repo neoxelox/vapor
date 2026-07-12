@@ -15,6 +15,7 @@
 //! `docs/architecture/conflict-resolution.md`.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -51,6 +52,11 @@ pub struct ConflictListReport {
     /// unreadable) — listed so an empty result is never silently
     /// incomplete.
     pub skipped_roots: Vec<PathBuf>,
+    /// Subdirectories encountered during the walk that could not be read
+    /// (e.g. `chmod 000`). Recorded for the same reason as
+    /// `skipped_roots`: a conflict copy under such a directory would
+    /// otherwise be invisibly orphaned.
+    pub skipped_directories: Vec<PathBuf>,
 }
 
 /// Scans every enabled profile's local root for conflict copies.
@@ -62,6 +68,7 @@ pub fn list_conflicts(config: &VaporConfig) -> ConflictListReport {
     let filter_options = EventPathFilterOptions::from_environment_and_config(config);
     let mut conflicts = Vec::new();
     let mut skipped_roots = Vec::new();
+    let mut skipped_directories = Vec::new();
 
     for profile in resolve_profiles(config)
         .into_iter()
@@ -75,13 +82,21 @@ pub fn list_conflicts(config: &VaporConfig) -> ConflictListReport {
             continue;
         };
         let filter = EventPathFilter::for_watch_root(&root, &filter_options);
-        scan_root(&root, &filter, &profile.id, &mut conflicts);
+        scan_root(
+            &root,
+            &filter,
+            &profile.id,
+            &mut conflicts,
+            &mut skipped_directories,
+        );
     }
 
     conflicts.sort_by(|a, b| a.conflict_path.cmp(&b.conflict_path));
+    skipped_directories.sort();
     ConflictListReport {
         conflicts,
         skipped_roots,
+        skipped_directories,
     }
 }
 
@@ -90,11 +105,19 @@ fn scan_root(
     filter: &EventPathFilter,
     profile_id: &str,
     conflicts: &mut Vec<ConflictRecord>,
+    skipped_directories: &mut Vec<PathBuf>,
 ) {
     let mut pending = vec![root.to_path_buf()];
     while let Some(directory) = pending.pop() {
-        let Ok(entries) = fs::read_dir(&directory) else {
-            continue;
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            // An existing-but-unreadable directory (it canonicalized, then
+            // read_dir failed) must be surfaced, not dropped: a conflict
+            // copy beneath it would otherwise be invisibly orphaned.
+            Err(_) => {
+                skipped_directories.push(directory);
+                continue;
+            }
         };
         for entry in entries.flatten() {
             let path = entry.path();
@@ -196,7 +219,12 @@ pub fn resolve_conflict(conflict_path: &Path, keep: KeepSide) -> Result<Resoluti
             // remove-then-rename there — the version being kept (the
             // copy) is never the one at risk in that window.
             if let Err(error) = fs::rename(conflict_path, &canonical_path) {
-                if canonical_path.exists() {
+                // Only the Windows destination-exists collision warrants
+                // deleting the canonical file first. Any other error
+                // (read-only remount, immutable flag, EIO) must NOT remove
+                // the canonical version inside a failing path — the retry
+                // would still fail and we'd have destroyed it for nothing.
+                if error.kind() == io::ErrorKind::AlreadyExists {
                     fs::remove_file(&canonical_path).map_err(|error| {
                         format!("cannot replace {}: {error}", canonical_path.display())
                     })?;
@@ -229,7 +257,10 @@ pub fn resolve_conflict(conflict_path: &Path, keep: KeepSide) -> Result<Resoluti
 }
 
 pub fn render_list(report: &ConflictListReport) -> String {
-    if report.conflicts.is_empty() && report.skipped_roots.is_empty() {
+    if report.conflicts.is_empty()
+        && report.skipped_roots.is_empty()
+        && report.skipped_directories.is_empty()
+    {
         return "No unresolved conflicts.".to_string();
     }
     let mut out = String::new();
@@ -256,6 +287,12 @@ pub fn render_list(report: &ConflictListReport) -> String {
     }
     for root in &report.skipped_roots {
         out.push_str(&format!("  (skipped unreadable root {})\n", root.display()));
+    }
+    for directory in &report.skipped_directories {
+        out.push_str(&format!(
+            "  (skipped unreadable directory {}; a conflict copy beneath it would not be listed)\n",
+            directory.display()
+        ));
     }
     out.trim_end().to_string()
 }
@@ -393,6 +430,7 @@ mod tests {
                 canonical_size_bytes: Some(15),
             }],
             skipped_roots: vec![],
+            skipped_directories: vec![PathBuf::from("/r/locked")],
         };
         let rendered = serde_json::to_string_pretty(&report).expect("serialize");
         let expected = r#"{
@@ -408,7 +446,10 @@ mod tests {
       "canonicalSizeBytes": 15
     }
   ],
-  "skippedRoots": []
+  "skippedRoots": [],
+  "skippedDirectories": [
+    "/r/locked"
+  ]
 }"#;
         assert_eq!(rendered, expected);
     }

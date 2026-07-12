@@ -52,7 +52,7 @@ runtime/
 data/runtime/
 
 # --- Generated locale mirror (source-of-truth is assets/locales) ---
-apps/macos/Sources/VaporCore/Resources/locales/
+apps/macos/Sources/VaporCore/Resources/locales/*.json
 
 # SQLite sidecar files (allow explicit DB files if needed)
 *.sqlite-wal

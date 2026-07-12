@@ -23,8 +23,11 @@ fn main() {
 
     let generated = format!(
         "pub const VERSION: &str = {:?};\n\
-pub const GIT_COMMIT_SHORT: &str = {:?};\n",
-        version, git_commit_short,
+pub const GIT_COMMIT_SHORT: &str = {:?};\n\
+pub const VERSION_WITH_COMMIT: &str = {:?};\n",
+        version,
+        git_commit_short,
+        format!("{version} ({git_commit_short})"),
     );
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("missing OUT_DIR"));
@@ -37,8 +40,20 @@ fn emit_git_rerun_markers(root_dir: &Path) {
         return;
     };
 
+    // The worktree's own gitdir holds HEAD (it differs per worktree).
     let head_path = git_dir.join("HEAD");
     println!("cargo:rerun-if-changed={}", head_path.display());
+
+    // Refs (loose and packed) live in the COMMON git dir, not the
+    // worktree gitdir. Watching them under `git_dir` misses every commit
+    // on the same branch in a worktree (Conductor agents always work in
+    // worktrees) and in a normal checkout after `git pack-refs`/`gc` moves
+    // the ref into packed-refs.
+    let common_dir = resolve_common_dir(&git_dir);
+    println!(
+        "cargo:rerun-if-changed={}",
+        common_dir.join("packed-refs").display()
+    );
 
     let Ok(head_contents) = fs::read_to_string(&head_path) else {
         return;
@@ -48,10 +63,26 @@ fn emit_git_rerun_markers(root_dir: &Path) {
         return;
     };
 
-    let ref_path = git_dir.join(reference);
-    if ref_path.exists() {
-        println!("cargo:rerun-if-changed={}", ref_path.display());
-    }
+    // Emit the loose ref path even when it does not exist yet: cargo
+    // re-runs the build script when a watched missing path appears (e.g.
+    // the next commit writes the loose ref, or it moves out of
+    // packed-refs).
+    println!(
+        "cargo:rerun-if-changed={}",
+        common_dir.join(reference).display()
+    );
+}
+
+/// Resolves the common git directory for `git_dir`. A linked worktree's
+/// gitdir contains a `commondir` file pointing (usually relatively) at the
+/// main `.git`; a normal checkout has no such file and is its own common
+/// dir.
+fn resolve_common_dir(git_dir: &Path) -> PathBuf {
+    let Ok(contents) = fs::read_to_string(git_dir.join("commondir")) else {
+        return git_dir.to_path_buf();
+    };
+    let candidate = git_dir.join(contents.trim());
+    candidate.canonicalize().unwrap_or(candidate)
 }
 
 fn resolve_git_dir(root_dir: &Path) -> Option<PathBuf> {

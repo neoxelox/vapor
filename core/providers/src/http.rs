@@ -7,15 +7,48 @@
 //! [`ScriptedHttpTransport`].
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
-#[derive(Clone, Debug)]
+use vapor_shared::constants;
+
+#[derive(Clone)]
 pub struct HttpRequest {
     pub method: &'static str,
     pub url: String,
     /// Header names are matched case-insensitively by transports.
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for HttpRequest {
+    // Manual impl so a stray `{request:?}` (error path, panic payload)
+    // cannot leak an `Authorization: Bearer <token>` header or an OAuth
+    // secret in the body — the logging redaction layer would not catch a
+    // Debug payload on stderr.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                let lower = name.to_ascii_lowercase();
+                let redact = lower.contains("authorization")
+                    || lower.contains("token")
+                    || lower.contains("secret")
+                    || lower.contains("cookie");
+                (
+                    name.as_str(),
+                    if redact { "[REDACTED]" } else { value.as_str() },
+                )
+            })
+            .collect();
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &headers)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -50,9 +83,30 @@ pub trait HttpTransport: Send + Sync {
 #[derive(Debug, Default)]
 pub struct NativeHttpTransport;
 
+/// Shared agent with explicit socket/connect timeouts. ureq's default
+/// agent leaves read/write timeouts unset ("may block forever on reads"),
+/// which on the synchronous provider stack would wedge the tick loop on a
+/// stalled connection.
+fn shared_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(
+                constants::provider::HTTP_CONNECT_TIMEOUT_SECONDS,
+            ))
+            .timeout_read(Duration::from_secs(
+                constants::provider::HTTP_SOCKET_TIMEOUT_SECONDS,
+            ))
+            .timeout_write(Duration::from_secs(
+                constants::provider::HTTP_SOCKET_TIMEOUT_SECONDS,
+            ))
+            .build()
+    })
+}
+
 impl HttpTransport for NativeHttpTransport {
     fn execute(&self, request: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
-        let mut builder = ureq::request(request.method, &request.url);
+        let mut builder = shared_agent().request(request.method, &request.url);
         for (name, value) in &request.headers {
             builder = builder.set(name, value);
         }
@@ -85,13 +139,23 @@ impl HttpTransport for NativeHttpTransport {
             .collect();
         let mut body = Vec::new();
         use std::io::Read;
+        let cap = constants::provider::MAX_HTTP_RESPONSE_BYTES;
+        // Read one byte past the cap so we can distinguish "exactly the
+        // cap" from "over the cap" and error instead of silently truncating
+        // (a truncated body would otherwise complete a download as a
+        // self-consistent-but-corrupt file).
         response
             .into_reader()
-            .take(64 * 1024 * 1024)
+            .take(cap + 1)
             .read_to_end(&mut body)
             .map_err(|error| HttpTransportError {
                 message: format!("cannot read response body: {error}"),
             })?;
+        if body.len() as u64 > cap {
+            return Err(HttpTransportError {
+                message: format!("response body exceeded the {cap}-byte cap"),
+            });
+        }
         Ok(HttpResponse {
             status,
             headers,

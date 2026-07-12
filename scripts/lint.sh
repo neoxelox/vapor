@@ -15,4 +15,4 @@ else
   echo "[lint] Host is not macOS. Skipping Swift lint (apps/macos is macOS-only)."
 fi
 
-"$ROOT_DIR/scripts/format.sh" check
+"$ROOT_DIR/scripts/rust/format.sh" check

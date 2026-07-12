@@ -103,6 +103,12 @@ impl TimelineBuffer {
         }
     }
 
+    /// The current capacity, so the memory-ceiling logic can restore the
+    /// configured limit after squeezing it under pressure.
+    pub fn max_entries(&self) -> usize {
+        self.lock().max_entries
+    }
+
     pub fn len(&self) -> usize {
         self.lock().entries.len()
     }

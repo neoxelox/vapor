@@ -133,29 +133,38 @@ impl AutoLaunchSettingStore for JsonFileAutoLaunchSettingStore {
     }
 
     fn write(&self, value: bool) -> Result<(), JsonFileError> {
-        let mut document = read_document(&self.path)?
-            .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+        // Every `vapor.json` writer (this store, `vapor config`, the daemon's
+        // IPC config path) shares one advisory file-lock so the read → mutate
+        // one key → rewrite cycle is atomic across processes; otherwise the
+        // last rename re-emits its stale snapshot of every other top-level key
+        // and silently reverts a concurrent writer's change.
+        vapor_shared::runtime_paths::with_config_lock(&self.path, || {
+            let mut document = read_document(&self.path)?
+                .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
 
-        let object = document.as_object_mut().ok_or_else(|| {
-            JsonFileError::Parse("top-level JSON value is not an object".to_string())
-        })?;
-        object.insert(
-            constants::config::KEY_AUTO_LAUNCH.to_string(),
-            serde_json::Value::Bool(value),
-        );
+            let object = document.as_object_mut().ok_or_else(|| {
+                JsonFileError::Parse("top-level JSON value is not an object".to_string())
+            })?;
+            object.insert(
+                constants::config::KEY_AUTO_LAUNCH.to_string(),
+                serde_json::Value::Bool(value),
+            );
 
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+            if let Some(parent) = self.path.parent() {
+                fs::create_dir_all(parent)?;
+            }
 
-        let mut serialized = serde_json::to_string_pretty(&document)
-            .map_err(|error| JsonFileError::Parse(error.to_string()))?;
-        serialized.push('\n');
+            let mut serialized = serde_json::to_string_pretty(&document)
+                .map_err(|error| JsonFileError::Parse(error.to_string()))?;
+            serialized.push('\n');
 
-        let tmp_path = self.path.with_extension("vapor-tmp");
-        fs::write(&tmp_path, serialized.as_bytes())?;
-        fs::rename(&tmp_path, &self.path)?;
-        Ok(())
+            // Per-writer temp name so a concurrent rename cannot consume our
+            // staging file and fail with ENOENT.
+            let tmp_path = vapor_shared::runtime_paths::unique_temp_path(&self.path);
+            fs::write(&tmp_path, serialized.as_bytes())?;
+            fs::rename(&tmp_path, &self.path)?;
+            Ok(())
+        })
     }
 }
 

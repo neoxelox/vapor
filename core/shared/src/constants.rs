@@ -41,6 +41,13 @@ pub mod runtime {
     pub const LIFECYCLE_STATE_FILE_NAME: &str = "lifecycle.json";
     pub const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
     pub const PRIVATE_FILE_MODE: u32 = 0o600;
+    /// Size cap for a single structured-log file before it is rotated.
+    /// An always-on daemon logging at Debug under storms would otherwise
+    /// grow its log without bound, violating the low-device-impact goal.
+    pub const LOG_FILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+    /// How many rotated generations (`<name>.1` … `<name>.N`) are kept
+    /// alongside the live file; older generations are dropped.
+    pub const LOG_FILE_GENERATIONS: u32 = 3;
 }
 
 pub mod state {
@@ -50,6 +57,14 @@ pub mod state {
     /// anyway, and unbounded tombstone growth would violate the memory
     /// and storage bounds.
     pub const TOMBSTONE_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
+    /// Terminally-failed intent records older than this are pruned at
+    /// daemon startup: a single auth outage can finalize thousands of
+    /// rows, and the diagnostics surface only needs recent failures.
+    /// Unbounded growth would violate the low-device-impact storage bound.
+    pub const FAILED_INTENT_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
+    /// Hard cap on retained terminally-failed rows regardless of age, so a
+    /// single massive incident cannot bloat the durable DB.
+    pub const MAX_FAILED_INTENTS_RETAINED: usize = 10_000;
     pub const MAX_ATTEMPT_COUNT: u32 = 10_000;
     pub const MAX_DIAGNOSTIC_TEXT_LENGTH: usize = 1_024;
     pub const MAX_STATE_KEY_LENGTH: usize = 128;
@@ -151,12 +166,30 @@ pub mod provider {
     /// enumeration and every changes feed hide these; the local ingest
     /// path filter drops them unconditionally.
     pub const TEMP_FILE_PREFIX: &str = ".vapor-tmp-";
+    /// A hidden `TEMP_FILE_PREFIX` staging file older than this is
+    /// orphaned crash residue (an interrupted upload/download stage), not
+    /// an in-flight transfer, and is reaped so it cannot accumulate in the
+    /// user's folder across repeated unclean shutdowns. Conservative so a
+    /// legitimately long, throttle-paused transfer's temp is never reaped.
+    pub const STALE_TEMP_FILE_MAX_AGE_MILLIS: u64 = 24 * 60 * 60 * 1_000;
     /// Bounded in-memory ring size of the filesystem provider's changes
     /// feed. A cursor older than the ring floor reports `CursorExpired`,
     /// which forces a reconcile instead of silently missing changes.
     pub const CHANGES_FEED_RING_MAX_EVENTS: usize = 8_192;
     /// Profile id used by profile-agnostic provider selection calls.
     pub const DEFAULT_PROFILE_FALLBACK: &str = "default";
+    /// Per-socket read/write timeout for the native HTTP transport. A
+    /// black-holed connection (Wi-Fi switch, dropped NAT flow) must not
+    /// wedge the synchronous provider stack — and therefore the tick loop
+    /// — forever; a stalled read surfaces as a transient error the retry
+    /// machinery handles.
+    pub const HTTP_SOCKET_TIMEOUT_SECONDS: u64 = 120;
+    /// Connect timeout for the native HTTP transport.
+    pub const HTTP_CONNECT_TIMEOUT_SECONDS: u64 = 30;
+    /// Hard cap on a single HTTP response body. Reading one extra byte
+    /// past this and erroring (rather than silently truncating) keeps a
+    /// mis-ranged full-file download from completing as a corrupt file.
+    pub const MAX_HTTP_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 }
 
 pub mod profile {
@@ -336,6 +369,11 @@ pub mod engine {
     pub const KEY_CONFIG_DEBOUNCE_WINDOW_MILLIS: u64 = 900;
     pub const CODE_TEXT_DEBOUNCE_WINDOW_MILLIS: u64 = 1_200;
     pub const LOCKFILE_DEBOUNCE_WINDOW_MILLIS: u64 = 2_500;
+    /// Office documents, PDFs, and images — the files ordinary users care
+    /// about most. Their atomic-save patterns settle within 1–2s, and the
+    /// per-path coalescing map absorbs multi-event bursts, so they need
+    /// nowhere near the conservative `Other` window.
+    pub const DOCUMENT_DEBOUNCE_WINDOW_MILLIS: u64 = 1_500;
     pub const DEFAULT_DEBOUNCE_WINDOW_MILLIS: u64 = 4_000;
     pub const THROTTLE_SAMPLE_INTERVAL_MILLIS: u64 = 1_000;
     pub const STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS: u64 = 60_000;
@@ -388,6 +426,12 @@ pub mod engine {
     /// tick while a reconcile slice is active. Bounds per-tick I/O so
     /// the slice checkpoints keep their interruptibility guarantee.
     pub const RECONCILE_DIRS_PER_CHECKPOINT: usize = 8;
+    /// Per-tick directory budget for the reconcile walk (runs only under
+    /// IdleDrain). Higher than the checkpoint granularity so a large tree
+    /// converges quickly on a fast (filesystem) provider; the per-slice
+    /// wall-clock deadline caps the cost when the provider's enumerate is
+    /// a slow network call.
+    pub const RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN: usize = 64;
     /// Assumed link capacity when the platform sampler reports no
     /// measured throughput; the bandwidth ceiling applies against this
     /// until a real measurement exists.
@@ -415,6 +459,12 @@ pub mod engine {
     pub const RETRY_BASE_DELAY_MILLIS: u64 = 2_000;
     pub const RETRY_RATE_LIMIT_BASE_DELAY_MILLIS: u64 = 15_000;
     pub const RETRY_MAX_DELAY_MILLIS: u64 = 900_000;
+    /// Ceiling for a server-supplied `Retry-After`: a bogus or absurd
+    /// header (garbage seconds, a mistaken epoch timestamp) is clamped to
+    /// this so it cannot overflow time arithmetic or park an intent — and
+    /// the persisted global rate-limit slowdown — for months. One hour is
+    /// well past any legitimate provider backoff.
+    pub const RETRY_AFTER_CEILING_MILLIS: u64 = 3_600_000;
     pub const RETRY_JITTER_PERCENT: u8 = 20;
     pub const STORM_WINDOW_MILLIS: u64 = 2_000;
     pub const STORM_DIRECTORY_UNIQUE_PATHS_THRESHOLD: usize = 200;

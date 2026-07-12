@@ -149,7 +149,13 @@ sync_cargo_lock() {
   # lockfile entries. (`cargo generate-lockfile` would re-resolve every
   # third-party dependency to its newest compatible version, silently
   # bundling a dependency bump into the release-prep commit.)
-  cargo update --workspace --manifest-path "$CARGO_TOML" >/dev/null 2>&1
+  #
+  # Keep stderr: swallowing it (with `2>&1 >/dev/null`) hid the failure
+  # when cargo was missing/broken, so `set -euo pipefail` aborted mid-way
+  # through set_version_and_sync — leaving VERSION/Cargo.toml bumped but
+  # Cargo.lock stale, with no diagnostic.
+  cargo update --workspace --manifest-path "$CARGO_TOML" >/dev/null \
+    || die "cargo update --workspace failed; VERSION/Cargo.toml were already updated — inspect the worktree"
 }
 
 sync_cargo_from_version() {

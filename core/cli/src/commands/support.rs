@@ -20,12 +20,17 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 /// Live captures from the running daemon, already serialized to
-/// pretty-printed JSON by the caller. `None` means the daemon was
-/// unreachable — the bundle is still produced from on-disk artifacts.
+/// pretty-printed JSON by the caller. Each endpoint is captured
+/// independently: a daemon that answers `status` but fails `timeline`
+/// (shutdown mid-capture) still contributes the captures that succeeded,
+/// and the per-endpoint failures are recorded rather than discarded.
 pub struct LiveCaptures {
-    pub status_json: String,
-    pub diagnostics_json: String,
-    pub timeline_json: String,
+    pub status_json: Option<String>,
+    pub diagnostics_json: Option<String>,
+    pub timeline_json: Option<String>,
+    /// Per-endpoint capture failures (`"endpoint: error"`), surfaced in
+    /// the manifest so partial reachability is visible to the maintainer.
+    pub capture_errors: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -46,6 +51,9 @@ struct BundleManifest<'a> {
     arch: &'a str,
     daemon_reachable: bool,
     artifacts: &'a [String],
+    /// Per-endpoint live-capture failures (empty when all succeeded or the
+    /// daemon was fully unreachable).
+    capture_errors: &'a [String],
     /// Human-facing note on what the bundle can and cannot contain.
     redaction: &'a str,
 }
@@ -61,8 +69,7 @@ pub fn collect_support_bundle(
     live: Option<LiveCaptures>,
     timestamp_ms: u64,
 ) -> io::Result<SupportBundleReport> {
-    let bundle_dir = output_root.join(format!("vapor-support-{timestamp_ms}"));
-    fs::create_dir_all(&bundle_dir)?;
+    let bundle_dir = create_unique_bundle_dir(output_root, timestamp_ms)?;
     let mut artifacts = Vec::new();
 
     // Runtime config (no secrets by design; tokens live in the secret
@@ -97,16 +104,25 @@ pub fn collect_support_bundle(
         }
     }
 
-    // Live daemon captures (status / diagnostics / timeline).
-    let daemon_reachable = live.is_some();
+    // Live daemon captures, each independent. "Reachable" is decided by
+    // the status call alone — a later endpoint failing must not erase the
+    // captures that did land or misreport the daemon as unreachable.
+    let capture_errors = live
+        .as_ref()
+        .map(|live| live.capture_errors.clone())
+        .unwrap_or_default();
+    let mut daemon_reachable = false;
     if let Some(live) = live {
+        daemon_reachable = live.status_json.is_some();
         for (name, contents) in [
             ("status.json", &live.status_json),
             ("diagnostics.json", &live.diagnostics_json),
             ("timeline.json", &live.timeline_json),
         ] {
-            fs::write(bundle_dir.join(name), contents)?;
-            artifacts.push(name.to_string());
+            if let Some(contents) = contents {
+                fs::write(bundle_dir.join(name), contents)?;
+                artifacts.push(name.to_string());
+            }
         }
     }
 
@@ -120,6 +136,7 @@ pub fn collect_support_bundle(
         arch: std::env::consts::ARCH,
         daemon_reachable,
         artifacts: &artifacts,
+        capture_errors: &capture_errors,
         redaction: "config carries no credentials (tokens live in the platform secret \
                     store) and logs are written through the redacting logger; review \
                     file paths in logs/diagnostics before sharing if they are sensitive",
@@ -133,6 +150,33 @@ pub fn collect_support_bundle(
         artifacts,
         daemon_reachable,
     })
+}
+
+/// Creates a fresh bundle directory, disambiguating a name collision
+/// (same-millisecond invocations, or a repeated pre-epoch timestamp) with
+/// a numeric suffix. `create_dir` fails on an existing directory (unlike
+/// `create_dir_all`), so two bundles can never silently merge into one
+/// and leave the manifest describing contents that are not all there.
+fn create_unique_bundle_dir(output_root: &Path, timestamp_ms: u64) -> io::Result<PathBuf> {
+    fs::create_dir_all(output_root)?;
+    let base = format!("vapor-support-{timestamp_ms}");
+    for suffix in 0..1_000 {
+        let name = if suffix == 0 {
+            base.clone()
+        } else {
+            format!("{base}-{suffix}")
+        };
+        let candidate = output_root.join(name);
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "too many support bundles share this timestamp",
+    ))
 }
 
 /// Render the report for the human (non-`--json`) path.
@@ -200,9 +244,10 @@ mod tests {
         seed_vapor_dir(vapor_dir.path());
 
         let live = LiveCaptures {
-            status_json: "{\"runState\":\"Running\"}".to_string(),
-            diagnostics_json: "{\"intents\":[]}".to_string(),
-            timeline_json: "{\"entries\":[]}".to_string(),
+            status_json: Some("{\"runState\":\"Running\"}".to_string()),
+            diagnostics_json: Some("{\"intents\":[]}".to_string()),
+            timeline_json: Some("{\"entries\":[]}".to_string()),
+            capture_errors: Vec::new(),
         };
         let report = collect_support_bundle(vapor_dir.path(), output.path(), Some(live), 99)
             .expect("bundle collects");
@@ -212,6 +257,57 @@ mod tests {
             assert!(report.bundle_dir.join(name).is_file(), "missing {name}");
             assert!(report.artifacts.contains(&name.to_string()));
         }
+    }
+
+    #[test]
+    fn partial_live_capture_keeps_successes_and_records_failures() {
+        let vapor_dir = TempDir::new().expect("vapor dir");
+        let output = TempDir::new().expect("output dir");
+        seed_vapor_dir(vapor_dir.path());
+
+        // status succeeded; timeline failed mid-capture.
+        let live = LiveCaptures {
+            status_json: Some("{\"runState\":\"Running\"}".to_string()),
+            diagnostics_json: Some("{\"intents\":[]}".to_string()),
+            timeline_json: None,
+            capture_errors: vec!["timeline: daemon not responding".to_string()],
+        };
+        let report = collect_support_bundle(vapor_dir.path(), output.path(), Some(live), 42)
+            .expect("bundle collects");
+
+        // Reachability is decided by status, not by the failed endpoint.
+        assert!(report.daemon_reachable);
+        assert!(report.bundle_dir.join("status.json").is_file());
+        assert!(report.bundle_dir.join("diagnostics.json").is_file());
+        assert!(!report.bundle_dir.join("timeline.json").exists());
+
+        let manifest =
+            fs::read_to_string(report.bundle_dir.join("manifest.json")).expect("manifest");
+        let parsed: serde_json::Value = serde_json::from_str(&manifest).expect("manifest json");
+        assert_eq!(parsed["daemonReachable"], serde_json::Value::Bool(true));
+        assert_eq!(
+            parsed["captureErrors"][0],
+            serde_json::json!("timeline: daemon not responding")
+        );
+    }
+
+    #[test]
+    fn same_timestamp_bundles_get_distinct_directories() {
+        let vapor_dir = TempDir::new().expect("vapor dir");
+        let output = TempDir::new().expect("output dir");
+        seed_vapor_dir(vapor_dir.path());
+
+        let first = collect_support_bundle(vapor_dir.path(), output.path(), None, 1_000)
+            .expect("first bundle");
+        let second = collect_support_bundle(vapor_dir.path(), output.path(), None, 1_000)
+            .expect("second bundle");
+
+        assert_ne!(
+            first.bundle_dir, second.bundle_dir,
+            "a repeated timestamp must not merge two bundles into one directory"
+        );
+        assert!(first.bundle_dir.join("manifest.json").is_file());
+        assert!(second.bundle_dir.join("manifest.json").is_file());
     }
 
     #[test]

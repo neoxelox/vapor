@@ -142,22 +142,40 @@ func autoLaunchEnabledFallsBackToDefaultWhenCLIIsUnreachable() {
 }
 
 @Test
-func crashLoopPauseStateReflectsCLIStatusReport() {
+func crashLoopPauseStateReflectsCLIStatusReport() throws {
   let controller = RecordingServiceController()
   controller.statusSnapshot.crashLoopPaused = true
   let manager = DaemonLifecycleManager(launchAgentController: controller)
 
-  #expect(manager.isInCrashLoopPause)
+  #expect(try manager.crashLoopPauseState())
 }
 
 @Test
-func acknowledgeCrashLoopPauseDelegatesToController() {
+func acknowledgeCrashLoopPauseDelegatesToController() throws {
   let controller = RecordingServiceController()
   let manager = DaemonLifecycleManager(launchAgentController: controller)
 
-  manager.acknowledgeCrashLoopPause()
+  try manager.acknowledgeCrashLoopPause()
 
   #expect(controller.operations == ["acknowledge"])
+}
+
+@Test
+func acknowledgeCrashLoopPausePropagatesCLIFailure() {
+  let manager = DaemonLifecycleManager(launchAgentController: ThrowingServiceController())
+
+  #expect(throws: (any Error).self) {
+    try manager.acknowledgeCrashLoopPause()
+  }
+}
+
+@Test
+func crashLoopPauseStatePropagatesCLIFailureInsteadOfReportingHealthy() {
+  let manager = DaemonLifecycleManager(launchAgentController: ThrowingServiceController())
+
+  #expect(throws: (any Error).self) {
+    _ = try manager.crashLoopPauseState()
+  }
 }
 
 @Test

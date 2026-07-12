@@ -96,7 +96,12 @@ impl Default for ThrottleInputs {
             vapor_cpu_load_percent: 2,
             disk_pressure: ResourcePressure::Nominal,
             network_error_rate_percent: 0,
-            network_throughput_kbps: Some(10_000),
+            // No measurement yet: report None so the bandwidth shaper uses
+            // the assumed-link-capacity fallback (~100 Mbps) rather than a
+            // hard-coded 10 Mbps placeholder that capped every transfer at
+            // ~312 KB/s. A real per-OS throughput measurement, when it
+            // lands, will supply a concrete value here.
+            network_throughput_kbps: None,
             user_active: false,
         }
     }

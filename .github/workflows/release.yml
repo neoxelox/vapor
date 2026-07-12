@@ -70,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          git fetch origin main --depth=1
+          git fetch origin main
 
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "[release] tag commit must be reachable from origin/main"
@@ -127,17 +127,13 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache SwiftPM dependencies
         uses: actions/cache@v5
         with:
           path: apps/macos/.build
-          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-spm-
+          key: ${{ runner.os }}-spm-release-${{ hashFiles('**/Package.resolved') }}
 
       - name: Validate signing and notarization configuration
         id: signing_config
@@ -289,6 +285,7 @@ jobs:
           test -f dist/Vapor.zip
           test -x dist/Vapor.app/Contents/MacOS/Vapor
           test -x dist/Vapor.app/Contents/MacOS/vapord
+          test -x dist/Vapor.app/Contents/Helpers/vapor
 
       - name: Generate checksums
         run: |
@@ -325,27 +322,33 @@ jobs:
         run: |
           set -euo pipefail
 
-          prerelease_flag=()
           if [[ "$RELEASE_PRERELEASE" == "true" ]]; then
-            prerelease_flag=(--prerelease)
+            prerelease_reconcile=(--prerelease=true)
+          else
+            prerelease_reconcile=(--prerelease=false)
           fi
 
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            is_draft=$(gh release view "$TAG_NAME" --json isDraft --jq .isDraft)
+            draft_flag=()
+            if [[ "$is_draft" == "true" ]]; then
+              draft_flag=(--draft)
+            fi
             gh release edit "$TAG_NAME" \
-              --draft \
-              "${prerelease_flag[@]}" \
+              "${draft_flag[@]}" \
+              "${prerelease_reconcile[@]}" \
               --notes-file dist/release-notes.md
           else
             gh release create "$TAG_NAME" \
               --verify-tag \
               --draft \
-              "${prerelease_flag[@]}" \
+              "${prerelease_reconcile[@]}" \
               --title "$TAG_NAME" \
               --notes-file dist/release-notes.md
           fi
 
-          echo "[release] created/updated DRAFT release for $TAG_NAME —" \
-            "review the assets and publish manually."
+          echo "[release] created/updated release for $TAG_NAME —" \
+            "a draft is created on first run; review the assets and publish manually."
 
       - name: Upload release assets
         env:

@@ -123,6 +123,12 @@ public final class StructuredLogger: @unchecked Sendable {
         return
       }
 
+      // Recreate the file first: it may have been deleted mid-run (user
+      // cleanup, `./scripts/clean.sh` in dev). `FileHandle(forWritingTo:)`
+      // cannot create a missing file, so without this the write path bails
+      // and every subsequent line is silently dropped until app restart.
+      try? VaporPaths.ensurePrivateFile(at: fileURL, fileManager: self.fileManager)
+
       guard let fresh = try? FileHandle(forWritingTo: fileURL) else {
         self.cachedFileHandle = nil
         return

@@ -172,6 +172,12 @@ impl RemotePoller {
             }
             ChangesPoll::Page(page) => {
                 report.observed_changes = page.changes.len();
+                // A full page means more changes are pending right now.
+                // Keep draining on the next tick (one page per tick stays
+                // interruptible) instead of waiting out the whole cadence,
+                // so a large remote burst enqueues in seconds, not minutes.
+                let page_was_full =
+                    page.changes.len() >= constants::engine::REMOTE_CHANGES_PAGE_MAX;
                 let mut batch = Vec::new();
                 for change in &page.changes {
                     let local_target = change.path.to_local(local_root);
@@ -182,6 +188,12 @@ impl RemotePoller {
                         report.ignored_changes += 1;
                         continue;
                     }
+                    // Enqueue with the change's *observed* time, not the
+                    // poll time: the deletion guard orders a remote delete
+                    // against the last sync via this timestamp, and a lagging
+                    // feed (up to 60s under Throttled) would otherwise let a
+                    // stale Removed delete a freshly re-uploaded local file.
+                    let event_time = change.observed_at;
                     match change.kind {
                         RemoteChangeKind::CreatedOrModified => {
                             if remote_echoes.matches_write(
@@ -189,7 +201,8 @@ impl RemotePoller {
                                 change.op_id.as_deref(),
                                 change.content_hash.as_deref(),
                                 now,
-                            ) {
+                            ) || is_durable_self_write_echo(state_db, &local_target, change)
+                            {
                                 report.suppressed_echoes += 1;
                                 continue;
                             }
@@ -201,15 +214,23 @@ impl RemotePoller {
                                 // counterpart exists, remove cloud-only
                                 // content when it does not.
                                 if local_file_exists(&local_target) {
-                                    batch.push((local_target, PendingIntentKind::Upload, now));
+                                    batch.push((
+                                        local_target,
+                                        PendingIntentKind::Upload,
+                                        event_time,
+                                    ));
                                     report.mirror_reverts += 1;
                                 } else {
-                                    batch.push((local_target, PendingIntentKind::Delete, now));
+                                    batch.push((
+                                        local_target,
+                                        PendingIntentKind::Delete,
+                                        event_time,
+                                    ));
                                     report.mirror_deletes += 1;
                                 }
                                 continue;
                             }
-                            batch.push((local_target, PendingIntentKind::Download, now));
+                            batch.push((local_target, PendingIntentKind::Download, event_time));
                         }
                         RemoteChangeKind::Removed => {
                             if remote_echoes.matches_delete(change.path.as_str(), now) {
@@ -220,12 +241,32 @@ impl RemotePoller {
                                 // A remote deletion of backed-up content is
                                 // divergence too: restore from local.
                                 if local_file_exists(&local_target) {
-                                    batch.push((local_target, PendingIntentKind::Upload, now));
+                                    batch.push((
+                                        local_target,
+                                        PendingIntentKind::Upload,
+                                        event_time,
+                                    ));
+                                    report.mirror_reverts += 1;
+                                } else if local_dir_exists(&local_target) {
+                                    // A trashed remote folder arrives as a
+                                    // single Removed (no per-descendant
+                                    // events). Reconcile the local subtree so
+                                    // push-only re-uploads every file under
+                                    // it, restoring the mirror.
+                                    batch.push((
+                                        local_target,
+                                        PendingIntentKind::ReconcileSubtree,
+                                        event_time,
+                                    ));
                                     report.mirror_reverts += 1;
                                 }
                                 continue;
                             }
-                            batch.push((local_target, PendingIntentKind::ApplyRemoteDelete, now));
+                            batch.push((
+                                local_target,
+                                PendingIntentKind::ApplyRemoteDelete,
+                                event_time,
+                            ));
                         }
                     }
                 }
@@ -236,6 +277,11 @@ impl RemotePoller {
                 if self.cursor.as_deref() != Some(page.next_cursor.as_str()) {
                     state_db.set_state(&self.cursor_state_key, &page.next_cursor, now)?;
                     self.cursor = Some(page.next_cursor);
+                }
+                if page_was_full {
+                    // Re-poll immediately on the next tick to continue
+                    // draining the known backlog.
+                    self.last_poll_inst = None;
                 }
             }
         }
@@ -286,6 +332,36 @@ fn local_file_exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|metadata| metadata.is_file())
         .unwrap_or(false)
+}
+
+/// Whether a real directory exists at `path` (used to restore a
+/// remotely-trashed folder in push-only mirror mode).
+fn local_dir_exists(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.is_dir())
+        .unwrap_or(false)
+}
+
+/// Durable second-line echo correlator that outlives the live-cache TTL.
+/// The self-write cache expires records after ~30s, but the poll cadence
+/// reaches 60s under Throttled (and stops entirely under Suspended), so
+/// the daemon's own upload can be observed in the feed after its live
+/// record expired. The persisted sync index still holds the op-id and
+/// content hash we last wrote for the path: a change carrying either is
+/// our own write reflected back, so it is suppressed rather than
+/// re-downloaded.
+fn is_durable_self_write_echo(
+    state_db: &mut DurableStateDb,
+    local_target: &Path,
+    change: &vapor_providers::RemoteChange,
+) -> bool {
+    match state_db.sync_index(local_target) {
+        Ok(Some(index)) => {
+            change.op_id.as_deref() == Some(index.last_op_id.as_str())
+                || change.content_hash.as_deref() == Some(index.content_hash.as_str())
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

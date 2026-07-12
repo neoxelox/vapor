@@ -64,6 +64,19 @@ impl BandwidthShaper {
         self.tokens -= granted as f64;
         granted
     }
+
+    /// Returns `unused` bytes of a prior grant to the bucket — a transfer
+    /// step routinely spends less than it was granted (chunk-size
+    /// alignment, a short final chunk, or an error that moved zero bytes),
+    /// and without a refund the shaper systematically undershoots the
+    /// configured rate. Clamped to the one-second bucket cap so a refund
+    /// can never bank a burst.
+    pub fn refund(&mut self, unused: u64) {
+        let Some(rate) = self.rate_bytes_per_sec else {
+            return;
+        };
+        self.tokens = (self.tokens + unused as f64).min(rate as f64);
+    }
 }
 
 #[cfg(test)]
@@ -112,6 +125,36 @@ mod tests {
         shaper.set_rate(Some(100));
         let granted = shaper.budget(1_000_000, t0 + Duration::from_secs(1));
         assert!(granted <= 100, "new rate applies immediately: {granted}");
+    }
+
+    #[test]
+    fn refund_returns_unspent_tokens_without_banking_a_burst() {
+        let mut shaper = BandwidthShaper::with_rate(1_000);
+        let t0 = Instant::now();
+        // Grant a full second, then spend only part of it and refund the rest.
+        let granted = shaper.budget(1_000, t0);
+        assert_eq!(granted, 1_000);
+        assert_eq!(shaper.budget(1_000, t0), 0, "bucket emptied by the grant");
+        shaper.refund(600); // sent 400, returning the 600-byte slack
+        assert_eq!(
+            shaper.budget(1_000, t0),
+            600,
+            "the refunded slack is immediately available"
+        );
+
+        // A refund can never push the bucket past its one-second cap.
+        shaper.refund(10_000);
+        assert!(
+            shaper.budget(10_000, t0) <= 1_000,
+            "refund stays under the 1s cap"
+        );
+    }
+
+    #[test]
+    fn refund_is_a_noop_when_unlimited() {
+        let mut shaper = BandwidthShaper::unlimited();
+        shaper.refund(1_000); // must not panic or change unlimited behavior
+        assert_eq!(shaper.budget(5_000, Instant::now()), 5_000);
     }
 
     #[test]

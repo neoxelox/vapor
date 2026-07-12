@@ -29,8 +29,52 @@ pub fn resolve_from_process_environment() -> SyncScope {
 /// are treated as unset at every layer, so an empty env var falls back
 /// to the config file rather than silently disabling sync.
 pub fn resolve_with_config(config: &vapor_shared::config::VaporConfig) -> SyncScope {
-    let env_local = env::var(constants::env::VAPOR_LOCAL_SYNC_DIRECTORY).ok();
-    let env_cloud = env::var(constants::env::VAPOR_CLOUD_SYNC_DIRECTORY).ok();
+    resolve_scope_with_env(config, true, true)
+}
+
+/// Per-profile scope resolution. A process-wide
+/// `VAPOR_LOCAL/CLOUD_SYNC_DIRECTORY` env var must NOT override a
+/// directory the profile set explicitly: doing so would collapse every
+/// profile onto one root, and for a one-way mirror profile that means
+/// strict-mirroring a cloud root over a directory the user never chose.
+/// The env layer therefore applies only to a field the profile did not
+/// set; when an env var is present but overridden by an explicit profile
+/// field, it is ignored with a loud warning rather than silently winning.
+pub fn resolve_profile_scope(
+    config: &vapor_shared::config::VaporConfig,
+    profile_sets_local: bool,
+    profile_sets_cloud: bool,
+) -> SyncScope {
+    if profile_sets_local && env::var_os(constants::env::VAPOR_LOCAL_SYNC_DIRECTORY).is_some() {
+        logging::warning(
+            "Ignoring VAPOR_LOCAL_SYNC_DIRECTORY for a profile that sets localSyncDirectory explicitly",
+            &[],
+        );
+    }
+    if profile_sets_cloud && env::var_os(constants::env::VAPOR_CLOUD_SYNC_DIRECTORY).is_some() {
+        logging::warning(
+            "Ignoring VAPOR_CLOUD_SYNC_DIRECTORY for a profile that sets cloudSyncDirectory explicitly",
+            &[],
+        );
+    }
+    resolve_scope_with_env(config, !profile_sets_local, !profile_sets_cloud)
+}
+
+fn resolve_scope_with_env(
+    config: &vapor_shared::config::VaporConfig,
+    allow_env_local: bool,
+    allow_env_cloud: bool,
+) -> SyncScope {
+    let env_local = if allow_env_local {
+        env::var(constants::env::VAPOR_LOCAL_SYNC_DIRECTORY).ok()
+    } else {
+        None
+    };
+    let env_cloud = if allow_env_cloud {
+        env::var(constants::env::VAPOR_CLOUD_SYNC_DIRECTORY).ok()
+    } else {
+        None
+    };
     let current_directory = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home_directory = home_directory();
 

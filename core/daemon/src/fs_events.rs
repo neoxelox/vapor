@@ -69,6 +69,14 @@ pub enum FsEventsWatcherError {
     WatchRootMissing(PathBuf),
     WatchRootNotDirectory(PathBuf),
     WatchRootCanonicalizeFailed(PathBuf, std::io::Error),
+    /// The shared filter was built for a different root than the watcher's;
+    /// its `strip_prefix` would fail for every event and silently disable
+    /// all ignore rules. A hard error so misuse fails loudly on every
+    /// build profile, not only under `debug_assert`.
+    FilterRootMismatch {
+        watch_root: PathBuf,
+        filter_root: PathBuf,
+    },
     Notify(notify::Error),
 }
 
@@ -89,6 +97,15 @@ impl Display for FsEventsWatcherError {
                     path.display()
                 )
             }
+            Self::FilterRootMismatch {
+                watch_root,
+                filter_root,
+            } => write!(
+                f,
+                "path filter root {} does not match watch root {}",
+                filter_root.display(),
+                watch_root.display()
+            ),
             Self::Notify(error) => write!(f, "notify watcher error: {error}"),
         }
     }
@@ -222,7 +239,12 @@ impl FsEventsWatcher {
         path_filter: Arc<SharedEventPathFilter>,
     ) -> Result<Self, FsEventsWatcherError> {
         let watch_root = normalize_watch_root(watch_root.into())?;
-        debug_assert_eq!(path_filter.watch_root(), watch_root.as_path());
+        if path_filter.watch_root() != watch_root.as_path() {
+            return Err(FsEventsWatcherError::FilterRootMismatch {
+                watch_root: watch_root.clone(),
+                filter_root: path_filter.watch_root().to_path_buf(),
+            });
+        }
         let callback_watch_root = watch_root.clone();
         let callback_recorder = Arc::clone(&recorder);
         let callback_path_filter = Arc::clone(&path_filter);
@@ -291,10 +313,16 @@ fn record_callback_result(
             for (index, path) in event.paths.iter().enumerate() {
                 let kind = per_path_kinds(index);
                 if let Some(path) = normalize_event_path(watch_root, path) {
-                    path_filter.note_observed_path(&path);
                     if path_filter.should_ignore(&path) {
                         continue;
                     }
+                    // Note the observed path (ignore-file reload trigger)
+                    // only for non-ignored paths: an ignore file inside an
+                    // excluded directory is never read during a rebuild, so
+                    // requesting one would be pure waste (and a package
+                    // install writing many such files would rebuild the
+                    // whole filter on nearly every tick).
+                    path_filter.note_observed_path(&path);
 
                     recorder.record_event(FsEventRecord {
                         path,

@@ -163,10 +163,18 @@ pub fn dispatch(
             manager.start_daemon_if_allowed(now)?,
         )),
         ServiceCommand::Stop => {
+            // Probe before the (best-effort, always-attempted) stop so we
+            // report `Stopped` only when something was actually running;
+            // `vapor service stop` on a machine that never installed the
+            // service must not claim it stopped one.
+            let was_running = installer.status()? == ServiceStatus::Running;
             manager.stop_daemon_for_termination(now)?;
-            Ok(ServiceCommandOutcome::Action(
-                DaemonLifecycleActionResult::Stopped,
-            ))
+            let result = if was_running {
+                DaemonLifecycleActionResult::Stopped
+            } else {
+                DaemonLifecycleActionResult::Unchanged
+            };
+            Ok(ServiceCommandOutcome::Action(result))
         }
         ServiceCommand::Restart => {
             manager.stop_daemon_for_termination(now)?;
@@ -567,8 +575,9 @@ mod tests {
     }
 
     #[test]
-    fn stop_invokes_installer_stop() {
+    fn stop_reports_stopped_only_when_the_service_was_running() {
         let installer = fake_installer();
+        installer.set_status_for_testing(ServiceStatus::Running);
         let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
         let manager = DaemonLifecycleManager::new(installer.clone(), settings);
 
@@ -584,6 +593,27 @@ mod tests {
             ServiceCommandOutcome::Action(DaemonLifecycleActionResult::Stopped)
         );
         assert_eq!(installer.operations(), vec!["stop"]);
+    }
+
+    #[test]
+    fn stop_reports_unchanged_when_nothing_was_installed_or_running() {
+        // Default fake status is NotInstalled: `vapor service stop` must not
+        // claim it stopped a daemon that was never there.
+        let installer = fake_installer();
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+
+        let outcome = dispatch(
+            ServiceCommand::Stop,
+            &manager,
+            installer.as_ref(),
+            Instant::now(),
+        )
+        .expect("stop");
+        assert_eq!(
+            outcome,
+            ServiceCommandOutcome::Action(DaemonLifecycleActionResult::Unchanged)
+        );
     }
 
     #[test]

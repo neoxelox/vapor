@@ -46,7 +46,24 @@ use oauth::StoredTokens;
 const API_BASE: &str = "https://www.googleapis.com/drive/v3";
 const UPLOAD_BASE: &str = "https://www.googleapis.com/upload/drive/v3";
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
+const GOOGLE_APPS_MIME_PREFIX: &str = "application/vnd.google-apps.";
 const OP_ID_PROPERTY: &str = "vaporOpId";
+
+/// A changed file's freshly-resolved path, plus the stale cached path it
+/// moved from (a rename/move) when that differs.
+struct ResolvedChangePath {
+    new_path: String,
+    old_path: Option<String>,
+}
+
+/// Google-native objects (Docs, Sheets, Slides, shortcuts, …) other than
+/// folders. They have no byte content or md5, so they cannot sync as
+/// files: enumeration/stat/the changes feed must exclude them, otherwise
+/// each one materializes as a phantom 0-byte local file (and deleting
+/// that phantom would trash the real Doc).
+fn is_google_native_non_folder(mime_type: &str) -> bool {
+    mime_type.starts_with(GOOGLE_APPS_MIME_PREFIX) && mime_type != FOLDER_MIME
+}
 /// Payloads at or under this size upload in one multipart request.
 const SIMPLE_UPLOAD_MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// Resumable chunks must be multiples of 256 KiB per the API contract.
@@ -56,6 +73,15 @@ const CHUNK_MAX: u64 = 64 * 1024 * 1024;
 const CHUNK_START: u64 = 8 * 1024 * 1024;
 /// Refresh this long before the recorded expiry.
 const TOKEN_REFRESH_MARGIN_MS: u64 = 60_000;
+/// How long a file id stays remembered as outside the sync root before
+/// the changes feed re-checks it (in case it was moved into scope). The
+/// changes feed is Drive-wide, so a busy out-of-scope file (a colleague's
+/// doc edited every minute) would otherwise re-walk its whole parent
+/// chain on every poll.
+const OUT_OF_SCOPE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+/// Cap on the out-of-scope negative cache so a churny wider Drive cannot
+/// grow it without bound; oldest entries are pruned first.
+const OUT_OF_SCOPE_MAX_ENTRIES: usize = 4096;
 
 #[derive(Clone)]
 pub struct GdriveConfig {
@@ -236,14 +262,16 @@ const FILE_FIELDS: &str =
 // ---------------------------------------------------------------------
 
 pub struct GoogleDriveProvider {
-    tokens: TokenManager,
-    transport: Arc<dyn HttpTransport>,
+    tokens: Arc<TokenManager>,
     /// Resolved id of the configured cloud root folder.
     root_id: Mutex<Option<String>>,
     /// Path → file-id cache; pruned on deletes/renames.
     id_by_path: Mutex<BTreeMap<String, String>>,
     /// File-id → path cache for changes mapping.
     path_by_id: Mutex<BTreeMap<String, String>>,
+    /// File ids the changes feed has resolved to be outside the sync root,
+    /// with the time they were last confirmed so the entry can expire.
+    out_of_scope: Mutex<BTreeMap<String, SystemTime>>,
     /// Learned resumable chunk size, shared across sessions.
     chunk_hint: Arc<Mutex<u64>>,
 }
@@ -255,16 +283,16 @@ impl GoogleDriveProvider {
         transport: Arc<dyn HttpTransport>,
     ) -> Self {
         Self {
-            tokens: TokenManager {
+            tokens: Arc::new(TokenManager {
                 config,
                 secrets,
-                transport: transport.clone(),
+                transport,
                 cached: Mutex::new(None),
-            },
-            transport,
+            }),
             root_id: Mutex::new(None),
             id_by_path: Mutex::new(BTreeMap::new()),
             path_by_id: Mutex::new(BTreeMap::new()),
+            out_of_scope: Mutex::new(BTreeMap::new()),
             chunk_hint: Arc::new(Mutex::new(CHUNK_START)),
         }
     }
@@ -311,32 +339,12 @@ impl GoogleDriveProvider {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> Result<HttpResponse, ProviderError> {
-        let mut attempt = 0;
-        loop {
-            let token = self.tokens.access_token()?;
-            let mut all_headers = headers.clone();
-            all_headers.push(("Authorization".to_string(), format!("Bearer {token}")));
-            let response = self
-                .transport
-                .execute(HttpRequest {
-                    method,
-                    url: url.clone(),
-                    headers: all_headers,
-                    body: body.clone(),
-                })
-                .map_err(|error| {
-                    ProviderError::transient(format!("Drive API unreachable: {}", error.message))
-                })?;
-            if response.status == 401 && attempt == 0 {
-                // Stale token despite the expiry margin: force one
-                // refresh and retry.
-                attempt += 1;
-                self.tokens.invalidate();
-                let current = self.tokens.load()?;
-                self.tokens.force_refresh(&current)?;
-                continue;
-            }
-            return Ok(response);
+        execute_authed_with(&self.tokens, method, url, headers, body)
+    }
+
+    fn handle(&self) -> ProviderHandle {
+        ProviderHandle {
+            tokens: self.tokens.clone(),
         }
     }
 
@@ -412,7 +420,40 @@ impl GoogleDriveProvider {
             oauth::url_encode(&query)
         );
         let list: GdFileList = self.api_json("GET", url, None)?;
-        Ok(list.files.into_iter().next())
+        // Drive allows multiple children with the same name in one folder.
+        // Pick the smallest id deterministically so the binding cannot flip
+        // across calls/restarts — an unstable binding manufactures endless
+        // keep-both conflicts (two-way) and a never-converging mirror
+        // (push-only).
+        Ok(list
+            .files
+            .into_iter()
+            .min_by(|left, right| left.id.cmp(&right.id)))
+    }
+
+    /// Whether a cache-hit file still names `path`: identical leaf name and
+    /// parent folder. An external rename or move leaves the cached id
+    /// valid but pointing at a different name/parent, so a stale hit would
+    /// otherwise upload local edits onto the wrong file (or one moved
+    /// outside the sync root) and never recreate the original.
+    fn cached_hit_still_matches(
+        &self,
+        path: &RemotePath,
+        file: &GdFile,
+        root_id: &str,
+    ) -> Result<bool, ProviderError> {
+        let leaf = path.as_str().rsplit('/').next().unwrap_or("");
+        if file.name != leaf {
+            return Ok(false);
+        }
+        let expected_parent = match path.parent() {
+            Some(parent) if !parent.is_root() => match self.resolve(&parent)? {
+                Some(parent_file) => parent_file.id,
+                None => return Ok(false),
+            },
+            _ => root_id.to_string(),
+        };
+        Ok(file.parents.iter().any(|parent| parent == &expected_parent))
     }
 
     /// Resolves a remote path to a Drive file, walking (and caching)
@@ -426,26 +467,27 @@ impl GoogleDriveProvider {
                 ..GdFile::default()
             }));
         }
-        if let Some(id) = self
+        let cached_id = self
             .id_by_path
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(path.as_str())
-            .cloned()
-        {
-            // Cached ids may be stale after external deletes; the
-            // caller-facing operations verify via the API where it
-            // matters (stat re-fetches, deletes surface 404s).
+            .cloned();
+        if let Some(id) = cached_id {
             let url = format!("{API_BASE}/files/{id}?fields={FILE_FIELDS}");
             match self.api_json::<GdFile>("GET", url, None) {
-                Ok(file) if !file.trashed => return Ok(Some(file)),
-                Ok(_) => {
-                    self.evict_path(path.as_str());
-                    return Ok(None);
+                Ok(file)
+                    if !file.trashed && self.cached_hit_still_matches(path, &file, &root_id)? =>
+                {
+                    return Ok(Some(file));
                 }
+                // Trashed, renamed/moved away, or 404: the cached mapping is
+                // stale. Evict and fall through to the fresh segment walk so
+                // we never write into (or read) whatever file the id now
+                // names.
+                Ok(_) => self.evict_path(path.as_str()),
                 Err(error) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
                     self.evict_path(path.as_str());
-                    return Ok(None);
                 }
                 Err(error) => return Err(error),
             }
@@ -540,16 +582,23 @@ impl GoogleDriveProvider {
 
     /// Best-effort path for a changed file id: cache first, then a
     /// parent-chain walk toward the ensured root.
-    fn path_for_changed_file(&self, file: &GdFile) -> Option<String> {
-        if let Some(path) = self
+    fn path_for_changed_file(&self, file: &GdFile) -> Option<ResolvedChangePath> {
+        // Zero-request reject for a file already resolved to be outside the
+        // sync root, until its TTL lapses (in case it moved into scope).
+        if self.is_known_out_of_scope(&file.id) {
+            return None;
+        }
+        // Any previously-cached path for this id is the OLD path — it must
+        // NOT be trusted as the current one: a remote rename/move keeps the
+        // id but changes the name/parent. Recompute the fresh path from the
+        // change's own name + parents; the parent short-circuit against
+        // cached parent paths is still fine (parents rarely move).
+        let cached = self
             .path_by_id
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&file.id)
-            .cloned()
-        {
-            return Some(path);
-        }
+            .cloned();
         let root_id = self
             .root_id
             .lock()
@@ -557,13 +606,17 @@ impl GoogleDriveProvider {
             .clone()?;
         // Walk up through parents until the root (bounded depth).
         let mut segments = vec![file.name.clone()];
-        let mut current_parent = file.parents.first().cloned()?;
+        let Some(mut current_parent) = file.parents.first().cloned() else {
+            // A parentless file cannot be under the root.
+            self.mark_out_of_scope(&file.id);
+            return None;
+        };
+        let mut new_path = None;
         for _ in 0..64 {
             if current_parent == root_id {
                 segments.reverse();
-                let path = segments.join("/");
-                self.cache_mapping(&path, &file.id);
-                return Some(path);
+                new_path = Some(segments.join("/"));
+                break;
             }
             // Known parent path short-circuits the walk.
             if let Some(parent_path) = self
@@ -574,16 +627,84 @@ impl GoogleDriveProvider {
                 .cloned()
             {
                 segments.reverse();
-                let path = format!("{parent_path}/{}", segments.join("/"));
-                self.cache_mapping(&path, &file.id);
-                return Some(path);
+                new_path = Some(format!("{parent_path}/{}", segments.join("/")));
+                break;
             }
             let url = format!("{API_BASE}/files/{current_parent}?fields={FILE_FIELDS}");
+            // A transient API error returns `None` without caching a
+            // verdict, so the next poll retries rather than wrongly
+            // remembering the file as out-of-scope.
             let parent: GdFile = self.api_json("GET", url, None).ok()?;
             segments.push(parent.name.clone());
-            current_parent = parent.parents.first().cloned()?;
+            let Some(next) = parent.parents.first().cloned() else {
+                // Walked up to a top-level parent that is not our root.
+                self.mark_out_of_scope(&file.id);
+                return None;
+            };
+            current_parent = next;
         }
-        None
+        let Some(new_path) = new_path else {
+            // Exhausted the depth bound without reaching the root.
+            self.mark_out_of_scope(&file.id);
+            return None;
+        };
+        // Reconcile caches to the fresh path; a stale mapping at a
+        // different path is a rename/move the caller must surface as a
+        // Removed(old) + CreatedOrModified(new) pair so the local side
+        // converges (the old file is removed, the new one downloaded).
+        let old_path = cached.filter(|cached_path| cached_path != &new_path);
+        if let Some(old) = &old_path {
+            self.evict_path(old);
+        }
+        self.cache_mapping(&new_path, &file.id);
+        // It resolved in-scope, so drop any stale out-of-scope verdict
+        // (the file may have just been moved into the sync root).
+        self.out_of_scope
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&file.id);
+        Some(ResolvedChangePath { new_path, old_path })
+    }
+
+    /// Whether `file_id` is remembered as outside the sync root and the
+    /// memory has not yet expired.
+    fn is_known_out_of_scope(&self, file_id: &str) -> bool {
+        let cache = self
+            .out_of_scope
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match cache.get(file_id) {
+            Some(recorded) => recorded
+                .elapsed()
+                .map(|age| age < OUT_OF_SCOPE_TTL)
+                .unwrap_or(false),
+            None => false,
+        }
+    }
+
+    /// Records `file_id` as outside the sync root, pruning expired entries
+    /// (and, if still over the cap, the oldest) so the cache stays bounded.
+    fn mark_out_of_scope(&self, file_id: &str) {
+        let now = SystemTime::now();
+        let mut cache = self
+            .out_of_scope
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.retain(|_, recorded| {
+            recorded
+                .elapsed()
+                .map(|age| age < OUT_OF_SCOPE_TTL)
+                .unwrap_or(false)
+        });
+        if cache.len() >= OUT_OF_SCOPE_MAX_ENTRIES
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, recorded)| **recorded)
+                .map(|(id, _)| id.clone())
+        {
+            cache.remove(&oldest);
+        }
+        cache.insert(file_id.to_string(), now);
     }
 }
 
@@ -657,6 +778,9 @@ impl Provider for GoogleDriveProvider {
             }
             let list: GdFileList = self.api_json("GET", url, None)?;
             for file in list.files {
+                if is_google_native_non_folder(&file.mime_type) {
+                    continue;
+                }
                 let Ok(child) = directory.join(&file.name) else {
                     continue;
                 };
@@ -672,9 +796,15 @@ impl Provider for GoogleDriveProvider {
     }
 
     fn stat(&self, path: &RemotePath) -> Result<Option<RemoteEntry>, ProviderError> {
-        Ok(self
-            .resolve(path)?
-            .map(|file| self.entry_from_file(path, &file)))
+        Ok(self.resolve(path)?.and_then(|file| {
+            // A Google-native object cannot sync as a file; report it as
+            // absent so the engine never plans a transfer for it.
+            if is_google_native_non_folder(&file.mime_type) {
+                None
+            } else {
+                Some(self.entry_from_file(path, &file))
+            }
+        }))
     }
 
     fn content_hash(&self, path: &RemotePath) -> Result<String, ProviderError> {
@@ -742,15 +872,14 @@ impl Provider for GoogleDriveProvider {
 
         Ok(Box::new(GdriveUploadSession {
             state: UploadState::NotStarted,
-            provider_transport: self.transport.clone(),
-            token_manager_config: self.tokens.config.clone(),
-            secrets: self.tokens.secrets.clone(),
+            tokens: self.tokens.clone(),
             file_id: existing.map(|file| file.id),
             metadata,
             source,
             total_bytes,
             sent_bytes: 0,
             chunk_hint: self.chunk_hint.clone(),
+            precondition: request.precondition.clone(),
         }))
     }
 
@@ -778,11 +907,7 @@ impl Provider for GoogleDriveProvider {
             ProviderError::transient(format!("cannot create download destination: {error}"))
         })?;
         Ok(Box::new(GdriveDownloadSession {
-            provider: ProviderHandle {
-                transport: self.transport.clone(),
-                config: self.tokens.config.clone(),
-                secrets: self.tokens.secrets.clone(),
-            },
+            provider: self.handle(),
             file_id: file.id,
             destination: Some(destination),
             destination_path: request.destination,
@@ -906,14 +1031,29 @@ impl Provider for GoogleDriveProvider {
                 continue;
             }
             let Some(file) = &change.file else { continue };
-            if file.mime_type == FOLDER_MIME {
+            if file.mime_type == FOLDER_MIME || is_google_native_non_folder(&file.mime_type) {
                 continue;
             }
-            let Some(path) = self.path_for_changed_file(file) else {
+            let Some(resolved) = self.path_for_changed_file(file) else {
                 // Outside the sync root (or unmappable): not ours.
                 continue;
             };
-            let Ok(remote_path) = RemotePath::new(path) else {
+            // A rename/move surfaces as Removed(old) + CreatedOrModified(new)
+            // so the local side deletes the old path and downloads the new
+            // one (previously the change was reported at the stale cached
+            // path and never converged).
+            if let Some(old_path) = resolved.old_path
+                && let Ok(old_remote) = RemotePath::new(old_path)
+            {
+                changes.push(RemoteChange {
+                    path: old_remote,
+                    kind: RemoteChangeKind::Removed,
+                    observed_at: now,
+                    op_id: None,
+                    content_hash: None,
+                });
+            }
+            let Ok(remote_path) = RemotePath::new(resolved.new_path) else {
                 continue;
             };
             changes.push(RemoteChange {
@@ -929,10 +1069,16 @@ impl Provider for GoogleDriveProvider {
             });
         }
 
-        let next_cursor = list
-            .next_page_token
-            .or(list.new_start_page_token)
-            .unwrap_or_else(|| cursor.to_string());
+        // Drive must return a cursor to advance on: `nextPageToken` for more
+        // pages, else `newStartPageToken` for the next baseline. A parsable
+        // response missing both is not progress — reusing the old cursor
+        // would durably re-poll the identical page forever. Surface it as
+        // transient so the poll retries instead of wedging.
+        let Some(next_cursor) = list.next_page_token.or(list.new_start_page_token) else {
+            return Err(ProviderError::transient(
+                "Drive changes response advanced no cursor (no nextPageToken/newStartPageToken)",
+            ));
+        };
         Ok(ChangesPoll::Page(RemoteChangesPage {
             changes,
             next_cursor,
@@ -940,12 +1086,12 @@ impl Provider for GoogleDriveProvider {
     }
 }
 
-/// Minimal token+transport handle for sessions (they outlive the
-/// borrow of the provider).
+/// A cheap, cloneable handle over the provider's shared `TokenManager`
+/// that upload/download sessions carry for their hot-path requests. It
+/// clones an `Arc`, so it neither re-reads the SecretStore per request
+/// nor loses the token cache (a fresh manager per chunk would do both).
 struct ProviderHandle {
-    transport: Arc<dyn HttpTransport>,
-    config: GdriveConfig,
-    secrets: Arc<dyn SecretStore>,
+    tokens: Arc<TokenManager>,
 }
 
 impl ProviderHandle {
@@ -956,25 +1102,46 @@ impl ProviderHandle {
         headers: Vec<(String, String)>,
         body: Vec<u8>,
     ) -> Result<HttpResponse, ProviderError> {
-        let manager = TokenManager {
-            config: self.config.clone(),
-            secrets: self.secrets.clone(),
-            transport: self.transport.clone(),
-            cached: Mutex::new(None),
-        };
-        let token = manager.access_token()?;
-        let mut all_headers = headers;
+        execute_authed_with(&self.tokens, method, url, headers, body)
+    }
+}
+
+/// The one authenticated-request path, shared by the provider and every
+/// session handle: attach a bearer token from the shared cache and, on a
+/// single `401`, force one refresh and resend. Without the retry a chunk
+/// PUT whose token expired mid-upload would fail the whole intent
+/// terminally instead of refreshing and resending that one chunk.
+fn execute_authed_with(
+    tokens: &TokenManager,
+    method: &'static str,
+    url: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> Result<HttpResponse, ProviderError> {
+    let mut attempt = 0;
+    loop {
+        let token = tokens.access_token()?;
+        let mut all_headers = headers.clone();
         all_headers.push(("Authorization".to_string(), format!("Bearer {token}")));
-        self.transport
+        let response = tokens
+            .transport
             .execute(HttpRequest {
                 method,
-                url,
+                url: url.clone(),
                 headers: all_headers,
-                body,
+                body: body.clone(),
             })
             .map_err(|error| {
                 ProviderError::transient(format!("Drive API unreachable: {}", error.message))
-            })
+            })?;
+        if response.status == 401 && attempt == 0 {
+            attempt += 1;
+            tokens.invalidate();
+            let current = tokens.load()?;
+            tokens.force_refresh(&current)?;
+            continue;
+        }
+        return Ok(response);
     }
 }
 
@@ -990,9 +1157,7 @@ enum UploadState {
 
 struct GdriveUploadSession {
     state: UploadState,
-    provider_transport: Arc<dyn HttpTransport>,
-    token_manager_config: GdriveConfig,
-    secrets: Arc<dyn SecretStore>,
+    tokens: Arc<TokenManager>,
     /// `Some` when updating an existing file.
     file_id: Option<String>,
     metadata: serde_json::Value,
@@ -1000,15 +1165,54 @@ struct GdriveUploadSession {
     total_bytes: u64,
     sent_bytes: u64,
     chunk_hint: Arc<Mutex<u64>>,
+    /// The precondition, retained so it can be re-verified immediately
+    /// before the committing request — begin_upload's one-time check is a
+    /// check-then-act across the whole (possibly long) transfer.
+    precondition: RemotePrecondition,
 }
 
 impl GdriveUploadSession {
     fn handle(&self) -> ProviderHandle {
         ProviderHandle {
-            transport: self.provider_transport.clone(),
-            config: self.token_manager_config.clone(),
-            secrets: self.secrets.clone(),
+            tokens: self.tokens.clone(),
         }
+    }
+
+    /// Re-verifies a `HashEquals` precondition immediately before the
+    /// committing request, shrinking the check-then-act window from the
+    /// whole (possibly hours-long, throttle-paused) transfer to one
+    /// round-trip. A divergence surfaces as PreconditionFailed, which the
+    /// engine resolves as keep-both instead of a silent overwrite.
+    fn reverify_precondition_before_commit(&self) -> Result<(), ProviderError> {
+        let RemotePrecondition::HashEquals(expected) = &self.precondition else {
+            return Ok(());
+        };
+        let Some(file_id) = &self.file_id else {
+            return Ok(());
+        };
+        let url = format!("{API_BASE}/files/{file_id}?fields={FILE_FIELDS}");
+        let response = self
+            .handle()
+            .execute_authed("GET", url, Vec::new(), Vec::new())?;
+        if response.status == 404 {
+            // The file we meant to overwrite vanished mid-transfer. Surface a
+            // conflict rather than resurrecting it with our bytes.
+            return Err(ProviderError::precondition_failed(
+                "upload target was deleted during the transfer; keeping both",
+            ));
+        }
+        if response.status >= 300 {
+            return Err(classify_api_failure(&response));
+        }
+        let current: GdFile = serde_json::from_slice(&response.body).map_err(|error| {
+            ProviderError::transient(format!("unparsable Drive API response: {error}"))
+        })?;
+        if current.trashed || current.md5_checksum.as_ref() != Some(expected) {
+            return Err(ProviderError::precondition_failed(
+                "upload target changed during the transfer; keeping both",
+            ));
+        }
+        Ok(())
     }
 
     fn simple_multipart(&mut self) -> Result<TransferOutcome, ProviderError> {
@@ -1016,7 +1220,11 @@ impl GdriveUploadSession {
         self.source.read_to_end(&mut content).map_err(|error| {
             ProviderError::transient(format!("cannot read upload source: {error}"))
         })?;
-        let boundary = "vapor-multipart-boundary";
+        // A fixed boundary corrupts (or bounces with 400) any file whose
+        // bytes contain the delimiter line. Generate a random per-request
+        // boundary and, defensively, regenerate until it does not occur in
+        // the payload — so no file content can ever collide with it.
+        let boundary = multipart_boundary_absent_in(&content);
         let mut body = Vec::new();
         body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         body.extend_from_slice(b"Content-Type: application/json; charset=UTF-8\r\n\r\n");
@@ -1036,6 +1244,7 @@ impl GdriveUploadSession {
                 format!("{UPLOAD_BASE}/files?uploadType=multipart&fields={FILE_FIELDS}"),
             ),
         };
+        self.reverify_precondition_before_commit()?;
         let response = self.handle().execute_authed(
             method,
             url,
@@ -1144,6 +1353,12 @@ impl TransferSession for GdriveUploadSession {
                     })?;
 
                 let range_end = self.sent_bytes + chunk_len - 1;
+                // The resumable update only materializes when the final chunk
+                // commits, so re-verify the precondition immediately before it
+                // — begin_upload's check could be arbitrarily stale by now.
+                if range_end + 1 == self.total_bytes {
+                    self.reverify_precondition_before_commit()?;
+                }
                 let response = self.handle().execute_authed(
                     "PUT",
                     session_url,
@@ -1157,13 +1372,23 @@ impl TransferSession for GdriveUploadSession {
                     chunk,
                 )?;
                 match response.status {
-                    // 308: chunk accepted, upload incomplete.
+                    // 308: chunk accepted, upload incomplete. Trust the
+                    // server's `Range: bytes=0-N` header (the authoritative
+                    // committed offset) over the local counter: if the
+                    // server acknowledged fewer bytes than we sent, resume
+                    // from there instead of leaving a gap that the next PUT
+                    // would reject.
                     308 => {
-                        self.sent_bytes += chunk_len;
+                        let acked = response
+                            .header("Range")
+                            .and_then(parse_resumable_range_end)
+                            .map(|last| last + 1)
+                            .unwrap_or(self.sent_bytes + chunk_len);
+                        let advanced = acked.min(self.total_bytes);
+                        let bytes_transferred = advanced.saturating_sub(self.sent_bytes);
+                        self.sent_bytes = advanced;
                         self.grow_chunk_hint();
-                        Ok(TransferStep::Progressed {
-                            bytes_transferred: chunk_len,
-                        })
+                        Ok(TransferStep::Progressed { bytes_transferred })
                     }
                     200 | 201 => {
                         self.sent_bytes += chunk_len;
@@ -1242,8 +1467,21 @@ impl TransferSession for GdriveDownloadSession {
         })?;
         self.hasher.update(&response.body);
         self.received_bytes += response.body.len() as u64;
-        // A 200 (full body) or a short remainder completes the payload.
-        if response.status == 200 || self.received_bytes >= self.total_bytes {
+        // A 200 means the server ignored the Range and returned the full
+        // body. Verify it actually delivered the whole file before
+        // finishing — otherwise a truncated/transcoded body (or the
+        // transport's size cap) would complete as a self-consistent but
+        // corrupt local file.
+        if response.status == 200 {
+            if self.received_bytes != self.total_bytes {
+                return Err(ProviderError::transient(format!(
+                    "download returned {} bytes for a {}-byte file (Range ignored or truncated)",
+                    self.received_bytes, self.total_bytes
+                )));
+            }
+            return self.finish();
+        }
+        if self.received_bytes >= self.total_bytes {
             return self.finish();
         }
         Ok(TransferStep::Progressed {
@@ -1292,13 +1530,33 @@ fn classify_api_failure(response: &HttpResponse) -> ProviderError {
         401 => ProviderError::authentication(
             "Google Drive rejected the credentials; run `vapor auth login gdrive`",
         ),
-        403 if body_text.contains("ateLimitExceeded") || body_text.contains("quotaExceeded") => {
-            ProviderError::rate_limited(retry_after, "Drive rate limit exceeded")
-        }
-        403 => ProviderError::permanent(format!(
-            "Drive denied the operation (403): {}",
-            truncate(&body_text, 200)
-        )),
+        403 => match extract_403_reason(&body_text).as_deref() {
+            // Rate/quota limits are transient: back off, do not drop the
+            // intent. `dailyLimitExceeded` and `storageQuotaExceeded` (note
+            // the capital Q) were previously misclassified as permanent.
+            Some(
+                "rateLimitExceeded"
+                | "userRateLimitExceeded"
+                | "sharingRateLimitExceeded"
+                | "dailyLimitExceeded"
+                | "quotaExceeded",
+            ) => ProviderError::rate_limited(retry_after, "Drive rate/quota limit exceeded"),
+            Some("storageQuotaExceeded") => ProviderError::permanent(
+                "Google Drive storage is full; free space or upgrade the account, then sync resumes",
+            ),
+            // Fall back to substring sniffing for bodies that don't parse
+            // to a structured reason.
+            _ if body_text.contains("ateLimitExceeded")
+                || (body_text.contains("quotaExceeded")
+                    && !body_text.contains("storageQuotaExceeded")) =>
+            {
+                ProviderError::rate_limited(retry_after, "Drive rate limit exceeded")
+            }
+            _ => ProviderError::permanent(format!(
+                "Drive denied the operation (403): {}",
+                truncate(&body_text, 200)
+            )),
+        },
         404 => ProviderError::not_found("Drive object not found"),
         410 => ProviderError::precondition_failed("Drive resource is gone (410)"),
         412 => ProviderError::precondition_failed("Drive precondition failed (412)"),
@@ -1311,6 +1569,50 @@ fn classify_api_failure(response: &HttpResponse) -> ProviderError {
             truncate(&body_text, 200)
         )),
     }
+}
+
+/// A random multipart boundary guaranteed not to appear in `payload`.
+fn multipart_boundary_absent_in(payload: &[u8]) -> String {
+    loop {
+        let mut octets = [0_u8; 16];
+        getrandom::fill(&mut octets).expect("OS CSPRNG unavailable");
+        let boundary = format!("vapor-{}", hex_encode(&octets));
+        // The delimiter that could collide is "--<boundary>".
+        if !contains_subslice(payload, format!("--{boundary}").as_bytes()) {
+            return boundary;
+        }
+    }
+}
+
+/// Parses the last committed byte from a resumable-upload `Range` header
+/// of the form `bytes=0-N`. Returns `None` when absent/unparsable.
+fn parse_resumable_range_end(range: &str) -> Option<u64> {
+    range
+        .trim()
+        .strip_prefix("bytes=")
+        .and_then(|value| value.rsplit('-').next())
+        .and_then(|end| end.trim().parse::<u64>().ok())
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// Extracts `error.errors[0].reason` from a Drive JSON error body.
+fn extract_403_reason(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    value
+        .get("error")?
+        .get("errors")?
+        .get(0)?
+        .get("reason")?
+        .as_str()
+        .map(ToString::to_string)
 }
 
 fn escape_query(raw: &str) -> String {

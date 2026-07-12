@@ -199,18 +199,46 @@ impl MultiProfileRuntime {
                     .join(constants::runtime::SQLITE_DATABASE_FILE_NAME),
                 None => vapor_shared::runtime_paths::profile_database_path(&profile.id),
             };
-            let state_db = DurableStateDb::open_with_corruption_recovery(&database_path, now)?;
-            let provider = match vapor_providers::select_provider_for_profile(
+            // Per-profile startup failures degrade to skipping that
+            // profile, never aborting the whole daemon (which would stop
+            // every healthy profile and feed the crash-loop guard).
+            let state_db = match DurableStateDb::open_with_corruption_recovery(&database_path, now)
+            {
+                Ok(state_db) => state_db,
+                Err(error) => {
+                    logging::error(
+                        "Skipping profile whose durable state DB could not be opened",
+                        &[
+                            ("profile_id", profile.id.clone()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    continue;
+                }
+            };
+            // An invalid provider must NOT fall back to a functioning stub:
+            // the stub reports empty enumerations, so a startup reconcile
+            // on a pull-only profile would classify the whole local root as
+            // local-only and strict-mirror-delete it. Suspend the profile
+            // instead — it surfaces in status but performs zero sync work.
+            let (provider, provider_failure) = match vapor_providers::select_provider_for_profile(
                 &profile.provider_kind,
                 &profile.id,
             ) {
-                Ok(provider) => provider,
+                Ok(provider) => (provider, None),
                 Err(error) => {
-                    logging::error(
-                        "Profile has an invalid provider; running it inert until fixed",
-                        &[("profile_id", profile.id.clone()), ("error", error.message)],
+                    let reason = format!(
+                        "invalid provider '{}': {}",
+                        profile.provider_kind, error.message
                     );
-                    vapor_providers::default_provider()
+                    logging::error(
+                        "Profile has an invalid provider; suspending it until the config is fixed",
+                        &[
+                            ("profile_id", profile.id.clone()),
+                            ("reason", reason.clone()),
+                        ],
+                    );
+                    (vapor_providers::default_provider(), Some(reason))
                 }
             };
             let app = DaemonApp::new_with_shared_workgate(
@@ -218,7 +246,7 @@ impl MultiProfileRuntime {
                 clock.clone(),
                 shared_workgate.clone(),
             );
-            let mut runtime = DaemonRuntime::build_with_app(
+            let mut runtime = match DaemonRuntime::build_with_app(
                 profile.scope.clone(),
                 filter_options.clone(),
                 state_db,
@@ -226,7 +254,19 @@ impl MultiProfileRuntime {
                 metrics_sampler.clone(),
                 clock.clone(),
                 false, // watchers are deduplicated at this level
-            )?;
+            ) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    logging::error(
+                        "Skipping profile that could not be composed at startup",
+                        &[
+                            ("profile_id", profile.id.clone()),
+                            ("error", format!("{error:?}")),
+                        ],
+                    );
+                    continue;
+                }
+            };
             if let Some(built_filter) = runtime.shared_path_filter() {
                 let canonical_root = built_filter.watch_root().to_path_buf();
                 match filters_by_root.entry(canonical_root) {
@@ -239,6 +279,7 @@ impl MultiProfileRuntime {
                 }
             }
             runtime.set_device_id(device_id);
+            runtime.set_profile_id(profile.id.clone());
             runtime.attach_timeline(timeline.clone());
             runtime.attach_resource_management(
                 shared_budget.clone(),
@@ -246,7 +287,25 @@ impl MultiProfileRuntime {
                 shared_step.clone(),
                 idle_notifier.clone(),
             );
-            runtime.schedule_startup_reconcile(now)?;
+            // A suspended-at-composition profile never schedules a reconcile
+            // or starts a watcher; it only surfaces its Error state.
+            let mut failed = provider_failure;
+            if failed.is_none()
+                && let Err(error) = runtime.schedule_startup_reconcile(now)
+            {
+                let reason = format!("could not schedule startup reconcile: {error:?}");
+                logging::error(
+                    "Suspending profile whose startup reconcile could not be scheduled",
+                    &[
+                        ("profile_id", profile.id.clone()),
+                        ("reason", reason.clone()),
+                    ],
+                );
+                runtime.set_error_state(reason.clone());
+                failed = Some(reason);
+            } else if let Some(reason) = &failed {
+                runtime.set_error_state(reason.clone());
+            }
             let control = Arc::new(RuntimeControl::new());
             runtime.attach_control(control.clone());
             slots.push(ProfileSlot {
@@ -254,12 +313,12 @@ impl MultiProfileRuntime {
                 runtime,
                 control,
                 consecutive_tick_errors: 0,
-                failed: None,
+                failed,
             });
         }
 
         let watchers = if start_watchers {
-            start_deduplicated_watchers(&slots, &tick_waker)?
+            start_deduplicated_watchers(&mut slots, &tick_waker)
         } else {
             Vec::new()
         };
@@ -369,7 +428,7 @@ impl MultiProfileRuntime {
                             "profile suspended after repeated tick failures",
                             now,
                         );
-                        suspend_profile(slot, format!("repeated tick failures: {error:?}"));
+                        suspend_profile(slot, format!("repeated tick failures: {error:?}"), now);
                         report.failed_profiles += 1;
                     }
                 }
@@ -381,7 +440,7 @@ impl MultiProfileRuntime {
                         format!("profile suspended after panic: {reason}"),
                         now,
                     );
-                    suspend_profile(slot, format!("panicked: {reason}"));
+                    suspend_profile(slot, format!("panicked: {reason}"), now);
                     report.failed_profiles += 1;
                 }
             }
@@ -390,13 +449,19 @@ impl MultiProfileRuntime {
         // Auto-tuning: one small change per cycle, driven by
         // aggregate rate-limit + queue-depth signals, bounded by the
         // ceilings via the bandwidth shaper.
+        // Suspended slots are excluded from the tuning signal: their
+        // never-draining queue and stale state would skew the tuner, and
+        // reading a half-mutated post-panic runtime here (outside the
+        // catch_unwind) is a containment hazard.
         let rate_limited = self
             .slots
             .iter()
+            .filter(|slot| slot.failed.is_none())
             .any(|slot| slot.runtime.app().retry_slowdown_until().is_some());
         let total_queue_depth: u64 = self
             .slots
             .iter()
+            .filter(|slot| slot.failed.is_none())
             .map(|slot| slot.runtime.state_db().queue_depth().unwrap_or(0) as u64)
             .sum();
         self.auto_tuner
@@ -412,9 +477,17 @@ impl MultiProfileRuntime {
     /// error only when EVERY profile has failed — a single broken
     /// profile never takes the daemon down.
     pub fn run_forever(&mut self) -> Result<(), DaemonRuntimeError> {
+        // Let a shutdown signal wake the loop out of its idle sleep so
+        // `vapor stop` / SIGTERM exits promptly instead of waiting out a
+        // full idle interval.
+        crate::runtime::register_shutdown_waker(self.tick_waker.clone());
         while !is_shutdown_requested() {
             let report = self.tick_all(self.clock.now_system());
-            if !self.slots.is_empty() && report.ticked_profiles == 0 && report.failed_profiles > 0 {
+            // Exit only when EVERY profile is durably suspended — not on a
+            // per-tick report where a healthy profile merely hit one
+            // transient error (below the suspension threshold) while
+            // another is already suspended.
+            if !self.slots.is_empty() && self.slots.iter().all(|slot| slot.failed.is_some()) {
                 logging::error("Every profile has failed; exiting the daemon", &[]);
                 return Err(DaemonRuntimeError::StateDb(
                     crate::state_db::StateDbError::InvalidStateValue(
@@ -570,7 +643,7 @@ fn run_state_rank(state: RunState) -> i32 {
     }
 }
 
-fn suspend_profile(slot: &mut ProfileSlot, reason: String) {
+fn suspend_profile(slot: &mut ProfileSlot, reason: String, now: SystemTime) {
     logging::error(
         "Suspending failed profile; other profiles keep running",
         &[
@@ -578,6 +651,11 @@ fn suspend_profile(slot: &mut ProfileSlot, reason: String) {
             ("reason", reason.clone()),
         ],
     );
+    // Reclaim the shared-workgate permits the suspended runtime holds so
+    // healthy profiles are not starved of concurrency for the process
+    // lifetime. Best-effort: guarded against a panic in the post-panic
+    // suspension path (the runtime may be half-mutated).
+    let _ = catch_unwind(AssertUnwindSafe(|| slot.runtime.abort_and_release(now)));
     slot.failed = Some(reason);
 }
 
@@ -601,12 +679,23 @@ fn initial_caps(state: ThrottleState) -> ThrottleCaps {
 /// callback path and the runtimes' reconcile/remote filtering stay one
 /// instance (and reload together).
 fn start_deduplicated_watchers(
-    slots: &[ProfileSlot],
+    slots: &mut [ProfileSlot],
     waker: &Arc<TickWaker>,
-) -> Result<Vec<FsEventsWatcher>, DaemonRuntimeError> {
-    let mut by_root: BTreeMap<PathBuf, (FanOutRecorder, Arc<SharedEventPathFilter>)> =
-        BTreeMap::new();
-    for slot in slots {
+) -> Vec<FsEventsWatcher> {
+    struct RootGroup {
+        recorder: FanOutRecorder,
+        filter: Arc<SharedEventPathFilter>,
+        profile_ids: Vec<String>,
+    }
+    let mut by_root: BTreeMap<PathBuf, RootGroup> = BTreeMap::new();
+    // (profile_id, reason) for profiles whose watcher could not start — a
+    // watcher failure suspends only the affected profiles, never the whole
+    // daemon.
+    let mut suspend: Vec<(String, String)> = Vec::new();
+    for slot in slots.iter() {
+        if slot.failed.is_some() {
+            continue;
+        }
         let Some(root) = slot.profile.scope.local_sync_directory.clone() else {
             continue;
         };
@@ -616,40 +705,70 @@ fn start_deduplicated_watchers(
         let Some(path_filter) = slot.runtime.shared_path_filter() else {
             continue;
         };
-        let canonical = normalize_watch_root(root)?;
-        by_root
+        let canonical = match normalize_watch_root(root) {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                suspend.push((
+                    slot.profile.id.clone(),
+                    format!("watch root unavailable: {error:?}"),
+                ));
+                continue;
+            }
+        };
+        let group = by_root
             .entry(canonical.clone())
-            .or_insert_with(|| {
-                (
-                    FanOutRecorder {
-                        targets: Vec::new(),
-                        waker: waker.clone(),
-                    },
-                    path_filter,
-                )
-            })
-            .0
-            .targets
-            .push((canonical, recorder));
+            .or_insert_with(|| RootGroup {
+                recorder: FanOutRecorder {
+                    targets: Vec::new(),
+                    waker: waker.clone(),
+                },
+                filter: path_filter,
+                profile_ids: Vec::new(),
+            });
+        group.recorder.targets.push((canonical, recorder));
+        group.profile_ids.push(slot.profile.id.clone());
     }
 
     let mut watchers = Vec::new();
-    for (root, (recorder, path_filter)) in by_root {
-        let shared_profiles = recorder.targets.len();
-        watchers.push(FsEventsWatcher::start_with_shared_filter(
+    for (root, group) in by_root {
+        let shared_profiles = group.recorder.targets.len();
+        match FsEventsWatcher::start_with_shared_filter(
             root.clone(),
-            Arc::new(recorder),
-            path_filter,
-        )?);
-        logging::info(
-            "Started deduplicated fs watcher",
-            &[
-                ("watch_root", root.display().to_string()),
-                ("fan_out_profiles", shared_profiles.to_string()),
-            ],
-        );
+            Arc::new(group.recorder),
+            group.filter,
+        ) {
+            Ok(watcher) => {
+                watchers.push(watcher);
+                logging::info(
+                    "Started deduplicated fs watcher",
+                    &[
+                        ("watch_root", root.display().to_string()),
+                        ("fan_out_profiles", shared_profiles.to_string()),
+                    ],
+                );
+            }
+            Err(error) => {
+                for profile_id in group.profile_ids {
+                    suspend.push((profile_id, format!("fs watcher failed to start: {error:?}")));
+                }
+            }
+        }
     }
-    Ok(watchers)
+
+    for (profile_id, reason) in suspend {
+        if let Some(slot) = slots.iter_mut().find(|slot| slot.profile.id == profile_id) {
+            logging::error(
+                "Suspending profile whose fs watcher could not start; others keep running",
+                &[
+                    ("profile_id", profile_id.clone()),
+                    ("reason", reason.clone()),
+                ],
+            );
+            slot.runtime.set_error_state(reason.clone());
+            slot.failed = Some(reason);
+        }
+    }
+    watchers
 }
 
 #[cfg(test)]
@@ -923,6 +1042,80 @@ mod tests {
         let normal = summaries.iter().find(|s| s.id == "normal").expect("normal");
         assert_eq!(normal.mirror_deletes, 0);
         assert_eq!(normal.mirror_reverts, 0);
+    }
+
+    #[test]
+    fn invalid_provider_suspends_the_profile_instead_of_mirror_deleting_its_local_root() {
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+
+        // A pull-only profile with a misspelled provider and a local file
+        // present. The old stub fallback would enumerate an empty remote
+        // and strict-mirror-delete the whole local root; suspension must
+        // prevent any sync work.
+        let bad_local = temp.path().join("bad-local");
+        std::fs::create_dir_all(&bad_local).expect("bad local");
+        std::fs::write(bad_local.join("keep.txt"), b"precious").expect("seed");
+        let bad_cloud = temp.path().join("bad-cloud");
+
+        // A healthy filesystem profile alongside it, to prove isolation.
+        let good_local = temp.path().join("good-local");
+        std::fs::create_dir_all(&good_local).expect("good local");
+        let good_cloud = temp.path().join("good-cloud");
+        std::fs::create_dir_all(&good_cloud).expect("good cloud");
+
+        let profiles = vec![
+            ResolvedProfile {
+                id: "bad".to_string(),
+                display_name: "bad".to_string(),
+                provider_kind: "gdrvie".to_string(),
+                scope: SyncScope {
+                    local_sync_directory: Some(bad_local.clone()),
+                    cloud_sync_directory: bad_cloud.to_string_lossy().into_owned(),
+                    sync_mode: SyncMode::PullOnly,
+                },
+                enabled: true,
+            },
+            ResolvedProfile {
+                id: "good".to_string(),
+                display_name: "good".to_string(),
+                provider_kind: "filesystem".to_string(),
+                scope: SyncScope {
+                    local_sync_directory: Some(good_local.clone()),
+                    cloud_sync_directory: good_cloud.to_string_lossy().into_owned(),
+                    sync_mode: SyncMode::TwoWay,
+                },
+                enabled: true,
+            },
+        ];
+
+        let mut multi = MultiProfileRuntime::start_with_state_root(
+            profiles,
+            EventPathFilterOptions::default(),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            "testdev",
+            false,
+            Some(temp.path().join("state")),
+            crate::resource_budget::EffectiveBudgetConfig::resolve(
+                &vapor_shared::config::VaporConfig::default(),
+            ),
+        )
+        .expect("multi runtime");
+
+        assert_eq!(multi.failed_profile_count(), 1);
+        let mut now_ms = 0;
+        for _ in 0..8 {
+            now_ms += 6_000;
+            clock.advance(Duration::from_millis(6_000));
+            multi.tick_all(timestamp_ms(now_ms));
+        }
+        // The suspended profile performed zero sync work — its local file
+        // is intact.
+        assert!(
+            bad_local.join("keep.txt").exists(),
+            "suspended profile must not touch its local root"
+        );
     }
 
     /// Provider whose changes-feed poll panics: the inducement

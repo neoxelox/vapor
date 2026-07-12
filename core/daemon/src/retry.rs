@@ -65,10 +65,20 @@ impl RetryPolicy {
                 let exponential_delay =
                     self.capped_exponential_delay(self.rate_limit_base_delay, retry_attempt);
                 let delay = match retry_after {
-                    Some(retry_after) => std::cmp::max(exponential_delay, retry_after),
+                    // A server `Retry-After` is honored but clamped to a
+                    // sane ceiling: an absurd value must not overflow the
+                    // time math below or persist a multi-year slowdown.
+                    Some(retry_after) => std::cmp::max(
+                        exponential_delay,
+                        retry_after.min(Duration::from_millis(
+                            constants::engine::RETRY_AFTER_CEILING_MILLIS,
+                        )),
+                    ),
                     None => self.positive_jitter(exponential_delay, intent_id, retry_attempt),
                 };
-                let available_at = now + delay;
+                let available_at = now.checked_add(delay).unwrap_or_else(|| {
+                    now + Duration::from_millis(constants::engine::RETRY_AFTER_CEILING_MILLIS)
+                });
                 RetryDecision {
                     failure_kind,
                     retryable: true,
@@ -241,6 +251,27 @@ mod tests {
             rate_limited.available_at,
             Some(now + Duration::from_secs(3_600))
         );
+    }
+
+    #[test]
+    fn absurd_retry_after_is_clamped_to_the_ceiling() {
+        let policy = RetryPolicy::default();
+        let now = timestamp_ms(1_000);
+        let ceiling = Duration::from_millis(constants::engine::RETRY_AFTER_CEILING_MILLIS);
+
+        // A bogus header (near u64::MAX seconds) must not overflow the time
+        // math or park the intent for years — it clamps to the ceiling.
+        let decision = policy.decide(
+            9,
+            1,
+            RetryFailureKind::RateLimited {
+                retry_after: Some(Duration::from_secs(u64::MAX)),
+            },
+            now,
+        );
+        assert_eq!(decision.delay, Some(ceiling));
+        assert_eq!(decision.available_at, Some(now + ceiling));
+        assert_eq!(decision.slowdown_until, Some(now + ceiling));
     }
 
     #[test]

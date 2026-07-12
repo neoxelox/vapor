@@ -36,9 +36,11 @@ use crate::debounce::DebounceClass;
 #[derive(Debug)]
 struct RollingWindowCounter {
     window: Duration,
-    /// Timestamps are pruned against the tick's wall clock; a rewound
-    /// clock only shrinks the observed rate (fails safe: less
-    /// triggering, never spurious triggering).
+    /// Timestamps are pruned to the `[now - window, now]` band on every
+    /// access. Dropping entries newer than `now` as well as older than the
+    /// window keeps a backward wall-clock step (NTP correction) from
+    /// leaving future-dated events inside the window, which would
+    /// spuriously trip the guard.
     events: VecDeque<SystemTime>,
     cap: usize,
 }
@@ -69,13 +71,12 @@ impl RollingWindowCounter {
         let cutoff = now
             .checked_sub(self.window)
             .unwrap_or(SystemTime::UNIX_EPOCH);
-        while let Some(front) = self.events.front() {
-            if *front < cutoff {
-                self.events.pop_front();
-            } else {
-                break;
-            }
-        }
+        // Keep only the in-window band. `retain` (not a front pop loop)
+        // because after a wall-clock rewind the deque is no longer sorted:
+        // pre-rewind stamps are future-dated relative to `now` and must be
+        // dropped even though they are not at the front.
+        self.events
+            .retain(|stamp| *stamp >= cutoff && *stamp <= now);
     }
 
     fn clear(&mut self) {
@@ -197,8 +198,9 @@ pub fn intent_priority_rank(class: DebounceClass) -> u8 {
     match class {
         DebounceClass::KeyConfig => 0,
         DebounceClass::CodeText => 1,
-        DebounceClass::Other => 2,
-        DebounceClass::Lockfile => 3,
+        DebounceClass::Document => 2,
+        DebounceClass::Other => 3,
+        DebounceClass::Lockfile => 4,
     }
 }
 
@@ -247,6 +249,22 @@ mod tests {
         // Clock rewinds before the window start: recorded events prune
         // (they are "in the future"), which fails safe to inactive.
         assert!(!heuristic.is_active(at(10)));
+    }
+
+    #[test]
+    fn rolling_window_drops_future_dated_events_after_a_wall_clock_rewind() {
+        // Threshold 3: two deletes recorded far in the future would remain
+        // "inside the window" of a rewound clock without the fix, so a lone
+        // post-rewind delete would spuriously trip the guard.
+        let mut guard = MassChangeGuard::new(Duration::from_secs(60), 3);
+        assert!(!guard.record_delete(at(100_000)));
+        assert!(!guard.record_delete(at(100_001)));
+        // NTP steps the clock back well before those events.
+        assert!(
+            !guard.record_delete(at(10)),
+            "future-dated events must be pruned, not counted after a rewind"
+        );
+        assert!(!guard.is_tripped());
     }
 
     #[test]

@@ -17,7 +17,7 @@ func appShellStateInitialIsNotCrashLoopPaused() {
 
 @MainActor
 @Test
-func crashLoopPauseSurfacesOnViewModelAfterRefresh() throws {
+func crashLoopPauseSurfacesOnViewModelAfterRefresh() async throws {
   let controller = StubServiceController()
   controller.crashLoopPaused = true
   let manager = DaemonLifecycleManager(launchAgentController: controller)
@@ -28,13 +28,13 @@ func crashLoopPauseSurfacesOnViewModelAfterRefresh() throws {
   )
   #expect(viewModel.state.crashLoopPaused == false)
 
-  viewModel.refreshCrashLoopPauseState()
+  await viewModel.refreshCrashLoopPauseState()
   #expect(viewModel.state.crashLoopPaused == true)
 }
 
 @MainActor
 @Test
-func acknowledgingCrashLoopPauseClearsViewModelSurface() throws {
+func acknowledgingCrashLoopPauseClearsViewModelSurface() async throws {
   let controller = StubServiceController()
   controller.crashLoopPaused = true
   let manager = DaemonLifecycleManager(launchAgentController: controller)
@@ -43,10 +43,10 @@ func acknowledgingCrashLoopPauseClearsViewModelSurface() throws {
     daemonLifecycleManager: manager,
     configuration: VaporConfiguration()
   )
-  viewModel.refreshCrashLoopPauseState()
+  await viewModel.refreshCrashLoopPauseState()
   #expect(viewModel.state.crashLoopPaused == true)
 
-  viewModel.acknowledgeCrashLoopPause()
+  await viewModel.acknowledgeCrashLoopPause()
   #expect(viewModel.state.crashLoopPaused == false)
   #expect(controller.acknowledged)
 }

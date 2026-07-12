@@ -46,14 +46,13 @@ clone (worktrees included — the hooks directory is resolved through
 git, so `.git`-as-a-file layouts work). The hook runs the full local
 validation pipeline before any commit is allowed to land:
 
-1. `./scripts/clean.sh` — remove stale build/dist artifacts.
-2. `./scripts/lint.sh` — Rust + Swift lint plus `format.sh check`.
-3. `./scripts/test.sh` — Tier 1 test suite for both stacks.
-4. `./scripts/build.sh` — release-mode build of every shipping binary.
+1. `./scripts/lint.sh` — Rust + Swift lint plus `format.sh check`.
+2. `./scripts/test.sh` — Tier 1 test suite for both stacks.
+3. `./scripts/build.sh` — build of every shipping binary.
 
 Any failure aborts the commit. This is the same gate the agent's
 feedback loop uses, which is what makes it suitable for autonomous
-contributors: when a commit lands, `clean → lint → test → build` is
+contributors: when a commit lands, `lint → test → build` is
 known-green on the working tree.
 
 Operational notes:
@@ -67,12 +66,15 @@ Operational notes:
 - Remove the hook with `./scripts/hooks.sh uninstall`; it only deletes
   hooks that carry the `vapor-managed-hook` marker, so unrelated hooks
   are left alone.
-- Because the hook runs `clean.sh`, every commit re-builds the
-  workspace from scratch. That trade-off is intentional: it guarantees
-  no stale artifacts mask a regression. If you need a faster local
-  iteration loop, run `./scripts/lint.sh` and `./scripts/test.sh`
-  manually and skip the hook by passing `--no-verify` only with the
-  project owner's explicit approval (see `AGENTS.md` Bash safety).
+- The hook builds **incrementally** (it does not run `clean.sh`), so a
+  commit is fast and — importantly — it never wipes `.vapor`/`dist`,
+  which would destroy a preserved or running e2e sandbox
+  (`e2e.sh --keep`/`--sandbox`). The from-scratch, empty-cache guarantee
+  lives in CI, which checks out fresh and builds cold on every PR; that
+  is the authoritative gate against stale artifacts masking a
+  regression. To force a clean local build, run `./scripts/clean.sh`
+  yourself before committing. Skip the hook with `--no-verify` only with
+  the project owner's explicit approval (see `AGENTS.md` Bash safety).
 
 ## Notes
 

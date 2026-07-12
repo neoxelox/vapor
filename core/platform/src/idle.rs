@@ -74,19 +74,24 @@ impl IdleNotifier for ManualIdleNotifier {
 /// per-OS HID bridges land; the trait surface is stable and the
 /// native back-ends arrive incrementally.
 #[derive(Debug, Default)]
-pub struct NativeIdleNotifier {
-    fallback: AlwaysIdleNotifier,
-}
+pub struct NativeIdleNotifier;
 
 impl NativeIdleNotifier {
     pub fn for_current_host() -> Self {
-        Self::default()
+        Self
     }
 }
 
 impl IdleNotifier for NativeIdleNotifier {
     fn idle_for(&self) -> Duration {
-        self.fallback.idle_for()
+        // No native HID idle bridge yet. Fail safe for device impact:
+        // report zero idle time so the idle-boost gate is never satisfied
+        // on unmeasured activity. The old always-idle stub ran at boosted
+        // ceilings (50% CPU / 80% bandwidth) regardless of what the user
+        // was doing — the opposite of the product's low-impact priority.
+        // A real per-OS bridge (CGEventSource seconds-since-last-input /
+        // IOHIDSystem HIDIdleTime) replaces this.
+        Duration::ZERO
     }
 }
 

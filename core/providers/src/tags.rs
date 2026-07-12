@@ -104,7 +104,13 @@ impl OpIdTagStore {
         let _ = self
             .caps
             .remove_tag(path, constants::provider::OP_ID_XATTR_NAME);
-        match fs::remove_file(Self::side_file_path(path)) {
+        let side_file = Self::side_file_path(path);
+        // Never delete a real user file that merely shares the reserved
+        // suffix: only remove a path that actually parses as our metadata.
+        if !Self::is_owned_side_file(&side_file) {
+            return Ok(());
+        }
+        match fs::remove_file(&side_file) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
@@ -116,21 +122,74 @@ impl OpIdTagStore {
     /// must relocate it explicitly.
     pub fn relocate_side_file(&self, from: &Path, to: &Path) -> io::Result<()> {
         let source = Self::side_file_path(from);
-        if !source.exists() {
+        if !Self::is_owned_side_file(&source) {
             return Ok(());
         }
-        fs::rename(source, Self::side_file_path(to))
+        let destination = Self::side_file_path(to);
+        // Refuse to clobber a user file that happens to sit at the
+        // destination's reserved-suffix path.
+        if Self::collides_with_user_file(&destination) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "cannot relocate op-id side-file onto existing non-metadata file {}",
+                    destination.display()
+                ),
+            ));
+        }
+        fs::rename(source, destination)
     }
 
     fn write_side_file(&self, path: &Path, op_id: &str) -> io::Result<()> {
+        let side_file = Self::side_file_path(path);
+        // The atomic rename below would overwrite whatever sits here; a
+        // user file that merely shares the reserved suffix must not be
+        // destroyed silently (keep-both / never-silent-overwrite policy).
+        if Self::collides_with_user_file(&side_file) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "op-id side-file path {} is occupied by a non-metadata user file",
+                    side_file.display()
+                ),
+            ));
+        }
         let payload = serde_json::to_string(&SideFilePayload {
             op_id: op_id.to_string(),
         })
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        let side_file = Self::side_file_path(path);
-        let temp = side_file.with_extension("json.tmp");
+        // Stage inside the reserved internal namespace (TEMP_FILE_PREFIX) so
+        // a crash between write and rename leaves an orphan that stays
+        // hidden from sync by the filter's unconditional internal-artifact
+        // check — not a `*.tmp` name that relies on a user-editable rule.
+        let staged_name = side_file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| format!("{}{name}", constants::provider::TEMP_FILE_PREFIX))
+            .unwrap_or_else(|| {
+                format!(
+                    "{}side.vapor-meta.json",
+                    constants::provider::TEMP_FILE_PREFIX
+                )
+            });
+        let temp = side_file.with_file_name(staged_name);
         fs::write(&temp, payload)?;
         fs::rename(&temp, &side_file)
+    }
+
+    /// Whether `path` exists and parses as one of our side-file payloads
+    /// (so it is safe to overwrite/delete as our own tag).
+    fn is_owned_side_file(path: &Path) -> bool {
+        match fs::read_to_string(path) {
+            Ok(contents) => serde_json::from_str::<SideFilePayload>(&contents).is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    /// Whether a real, non-metadata file occupies `path` — i.e. it exists
+    /// but is not one of our side-file payloads.
+    fn collides_with_user_file(path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok() && !Self::is_owned_side_file(path)
     }
 }
 
@@ -236,6 +295,42 @@ mod tests {
 
         assert_eq!(store.read_op_id(&to), Some("op-3".to_string()));
         assert!(!OpIdTagStore::side_file_path(&from).exists());
+    }
+
+    #[test]
+    fn write_refuses_to_clobber_a_user_file_sharing_the_reserved_suffix() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, b"payload").expect("seed");
+        // A real user file legally named notes.txt.vapor-meta.json.
+        let collision = OpIdTagStore::side_file_path(&file);
+        std::fs::write(&collision, b"the user's important notes").expect("seed collision");
+
+        let store = store_with_xattr(false);
+        let error = store
+            .write_op_id(&file, "op")
+            .expect_err("must not overwrite the user's file");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&collision).expect("user file intact"),
+            b"the user's important notes"
+        );
+    }
+
+    #[test]
+    fn remove_leaves_a_user_file_that_only_shares_the_suffix() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, b"payload").expect("seed");
+        let collision = OpIdTagStore::side_file_path(&file);
+        std::fs::write(&collision, b"not our metadata").expect("seed collision");
+
+        let store = store_with_xattr(true);
+        store.remove(&file).expect("remove is best-effort");
+        assert!(
+            collision.exists(),
+            "a non-metadata user file must survive tag removal"
+        );
     }
 
     #[test]

@@ -91,6 +91,12 @@ pub struct ExecutionEnv<'a> {
     /// Stable device identifier: the conflict-suffix component
     /// and the op-id prefix.
     pub device_id: &'a str,
+    /// The provider's content-hash algorithm. Every local hash compared
+    /// against an index/outcome/echo hash must use this algorithm — the
+    /// index and transfer outcomes carry provider-algorithm hashes (MD5
+    /// for Google Drive), so hashing local files with a hard-coded
+    /// SHA-256 would never match.
+    pub hash_algorithm: vapor_providers::HashAlgorithm,
     /// Auto-tuned per-tick transfer step budget.
     pub transfer_step_bytes: u64,
     /// Daemon-wide bandwidth shaper: every transfer step asks
@@ -143,6 +149,16 @@ struct TransferPlan {
     /// compare content hashes at the upload gate — identical content
     /// converges silently, divergent content resolves as a conflict.
     verify_remote_before_upload: bool,
+    /// (size, mtime) captured when the hash stage opened the file. Lets
+    /// the post-upload index write detect a mid-transfer edit and decline
+    /// to record a stale mtime.
+    hashed_local_state: Option<(u64, Option<SystemTime>)>,
+    /// For a download, the op-id tag on the remote object being fetched
+    /// (the id of whichever device wrote it). Recorded as the sync
+    /// index's `last_op_id` so a later upload of this path can correlate
+    /// by op-id instead of falling back to a full-remote-read hash
+    /// comparison. `None` for uploads (they record their own op-id).
+    remote_op_id: Option<String>,
 }
 
 enum ActiveStage {
@@ -232,6 +248,14 @@ impl StagedExecutor {
             }
         }
         snapshot
+    }
+
+    /// Intent ids of every execution currently held in-process. The
+    /// runtime renews their leases before the stale-lease sweep so a long
+    /// transfer (or a Suspended stall past the lease timeout) is not
+    /// reclaimed out from under a live execution.
+    pub fn active_intent_ids(&self) -> Vec<i64> {
+        self.active.keys().copied().collect()
     }
 
     /// Diagnostic view of every active execution: (intent id, path,
@@ -389,7 +413,7 @@ impl StagedExecutor {
                 }
             }
 
-            ActiveStage::WaitingForHash { plan } => {
+            ActiveStage::WaitingForHash { mut plan } => {
                 let Ok(permit) = app.try_acquire_work(WorkClass::Hash) else {
                     execution.stage = ActiveStage::WaitingForHash { plan };
                     return Ok(Some(execution));
@@ -400,6 +424,14 @@ impl StagedExecutor {
                 let algorithm = app.provider().content_hash_algorithm();
                 match StreamingFileHash::open(&plan.local_path, algorithm) {
                     Ok(hasher) => {
+                        // Capture (size, mtime) as the hash begins so a
+                        // mid-transfer edit can be detected at index-write
+                        // time (a same-length edit would otherwise pair a
+                        // post-edit mtime with the pre-edit content hash and
+                        // let the mtime fast-path skip a needed re-hash).
+                        plan.hashed_local_state = fs::symlink_metadata(&plan.local_path)
+                            .map(|metadata| (metadata.len(), metadata.modified().ok()))
+                            .ok();
                         execution.stage = ActiveStage::Hash {
                             permit,
                             plan,
@@ -648,7 +680,11 @@ impl StagedExecutor {
                     return Ok(Some(execution));
                 }
                 match session.step(step_budget) {
-                    Ok(TransferStep::Progressed { .. }) => {
+                    Ok(TransferStep::Progressed { bytes_transferred }) => {
+                        // Return the slack: a step routinely spends less than
+                        // its grant (chunk alignment / short final chunk), and
+                        // keeping it would undershoot the configured rate.
+                        refund_transfer_budget(env, step_budget.saturating_sub(bytes_transferred));
                         execution.stage = ActiveStage::Upload {
                             permit,
                             plan,
@@ -676,6 +712,9 @@ impl StagedExecutor {
                         Ok(None)
                     }
                     Err(error) => {
+                        // A failed step moved zero bytes: refund the whole
+                        // grant so a retry storm cannot burn the shared bucket.
+                        refund_transfer_budget(env, step_budget);
                         session.abort();
                         app.release_work(permit);
                         if error.kind == vapor_shared::ProviderErrorKind::PreconditionFailed
@@ -735,7 +774,12 @@ impl StagedExecutor {
                             // Strict mirror: a pull-only restore that finds
                             // no remote counterpart means the local file is
                             // local-only content — remove it.
-                            match apply_remote_delete_locally(env, &execution.intent.path, now) {
+                            match apply_remote_delete_locally(
+                                env,
+                                state_db,
+                                &execution.intent.path,
+                                now,
+                            ) {
                                 PlanOutcome::AppliedLocally => report.mirror_deletes += 1,
                                 PlanOutcome::Noop(_) => {}
                                 PlanOutcome::Fail { failure, message } => {
@@ -796,7 +840,8 @@ impl StagedExecutor {
                     return Ok(Some(execution));
                 }
                 match session.step(step_budget) {
-                    Ok(TransferStep::Progressed { .. }) => {
+                    Ok(TransferStep::Progressed { bytes_transferred }) => {
+                        refund_transfer_budget(env, step_budget.saturating_sub(bytes_transferred));
                         execution.stage = ActiveStage::Download {
                             permit,
                             plan,
@@ -806,40 +851,34 @@ impl StagedExecutor {
                     }
                     Ok(TransferStep::Completed(outcome)) => {
                         app.release_work(permit);
-                        // Two-way keep-both: applying a download
-                        // over a locally-diverged file must not lose the
-                        // local edit. The loser (local) moves to its
-                        // conflict-copy path first, and the copy uploads
-                        // through a durably enqueued intent.
-                        if env.sync_mode == vapor_shared::SyncMode::TwoWay {
-                            match preserve_diverged_local_before_apply(
+                        // Two-way keep-both must not lose a local edit that
+                        // lands while the download applies. The apply
+                        // captures the current local bytes (rename aside)
+                        // before renaming the payload in, then decides
+                        // divergence on the exact displaced bytes — closing
+                        // the check-then-act window a pre-apply hash left
+                        // open.
+                        let apply_result = if env.sync_mode == vapor_shared::SyncMode::TwoWay {
+                            apply_downloaded_payload_keep_both(
                                 env,
                                 state_db,
                                 &execution.intent,
+                                &plan,
                                 &outcome.content_hash,
                                 now,
-                            ) {
-                                Ok(preserved) => {
-                                    if preserved {
-                                        report.conflicts += 1;
-                                    }
+                            )
+                        } else {
+                            apply_downloaded_payload(env, &plan)
+                                .map(|()| false)
+                                .map_err(|error| {
+                                    format!("local apply of downloaded payload failed: {error}")
+                                })
+                        };
+                        match apply_result {
+                            Ok(conflict_created) => {
+                                if conflict_created {
+                                    report.conflicts += 1;
                                 }
-                                Err(message) => {
-                                    self.resolve_failure(
-                                        app,
-                                        state_db,
-                                        &execution.intent,
-                                        RetryFailureKind::Transient,
-                                        &message,
-                                        now,
-                                        report,
-                                    )?;
-                                    return Ok(None);
-                                }
-                            }
-                        }
-                        match apply_downloaded_payload(env, &plan) {
-                            Ok(()) => {
                                 env.local_echoes.record_write(
                                     path_key(&plan.local_path),
                                     Some(plan.op_id.clone()),
@@ -857,13 +896,13 @@ impl StagedExecutor {
                                 self.complete(state_db, &execution.intent, report)?;
                                 Ok(None)
                             }
-                            Err(error) => {
+                            Err(message) => {
                                 self.resolve_failure(
                                     app,
                                     state_db,
                                     &execution.intent,
                                     RetryFailureKind::Transient,
-                                    &format!("local apply of downloaded payload failed: {error}"),
+                                    &message,
                                     now,
                                     report,
                                 )?;
@@ -872,6 +911,7 @@ impl StagedExecutor {
                         }
                     }
                     Err(error) => {
+                        refund_transfer_budget(env, step_budget);
                         session.abort();
                         app.release_work(permit);
                         if error.kind == vapor_shared::ProviderErrorKind::NotFound {
@@ -939,6 +979,33 @@ impl StagedExecutor {
         report: &mut StagedExecutorReport,
     ) -> Result<(), StateDbError> {
         match failure {
+            // Retry budget exhausted: finalize as a permanent failure
+            // rather than calling schedule_retry (which refuses past the
+            // cap) and letting the stale-lease sweep re-pend it forever.
+            RetryFailureKind::Transient | RetryFailureKind::RateLimited { .. }
+                if intent.attempt_count >= constants::state::MAX_ATTEMPT_COUNT =>
+            {
+                let message = format!(
+                    "{message} (retry budget exhausted after {} attempts)",
+                    intent.attempt_count
+                );
+                app.finalize_failure(
+                    state_db,
+                    intent.id,
+                    RetryFailureKind::Permanent,
+                    &message,
+                    now,
+                )?;
+                report.failed += 1;
+                crate::logging::error(
+                    "Intent failed terminally after exhausting its retry budget",
+                    &[
+                        ("intent_id", intent.id.to_string()),
+                        ("path", intent.path.display().to_string()),
+                        ("attempts", intent.attempt_count.to_string()),
+                    ],
+                );
+            }
             RetryFailureKind::Transient | RetryFailureKind::RateLimited { .. } => {
                 app.schedule_retry(state_db, intent.id, failure, message, now)?;
                 report.retried += 1;
@@ -962,6 +1029,49 @@ impl StagedExecutor {
 
     pub fn admission_capacity(&self, workgate: WorkgateSnapshot) -> usize {
         max_in_flight_items(workgate).saturating_sub(self.active.len())
+    }
+
+    /// Drops every in-flight execution, releasing its shared-workgate
+    /// permit and aborting any transfer session. The leased durable rows
+    /// stay leased and are recovered by the stale-lease sweep; this only
+    /// reclaims the in-memory permits so a suspended/aborted profile does
+    /// not leak daemon-wide concurrency slots to healthy profiles.
+    pub fn abort_all(&mut self, app: &mut DaemonApp) {
+        let active = std::mem::take(&mut self.active);
+        self.active_paths.clear();
+        for (_id, execution) in active {
+            match execution.stage {
+                ActiveStage::Planner { permit }
+                | ActiveStage::Hash { permit, .. }
+                | ActiveStage::Upload {
+                    permit,
+                    work: UploadWork::RemoteDelete,
+                    ..
+                } => {
+                    app.release_work(permit);
+                }
+                ActiveStage::Upload {
+                    permit,
+                    work: UploadWork::Session(mut session),
+                    ..
+                } => {
+                    session.abort();
+                    app.release_work(permit);
+                }
+                ActiveStage::Download {
+                    permit,
+                    mut session,
+                    ..
+                } => {
+                    session.abort();
+                    app.release_work(permit);
+                }
+                // Waiting stages hold a plan but no permit.
+                ActiveStage::WaitingForHash { .. }
+                | ActiveStage::WaitingForUpload { .. }
+                | ActiveStage::WaitingForDownload { .. } => {}
+            }
+        }
     }
 }
 
@@ -1046,7 +1156,7 @@ fn plan_intent(
                     // a permanently-WaitingForHash row).
                     PlanOutcome::Noop("symlinks and special files are outside the sync contract")
                 }
-                Ok(_) => plan_upload(app, env, state_db, intent, remote_path, op_id, now),
+                Ok(_) => plan_upload(app, env, state_db, intent, remote_path, op_id),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     PlanOutcome::Noop("local file vanished before upload")
                 }
@@ -1056,16 +1166,17 @@ fn plan_intent(
                 },
             }
         }
-        PendingIntentKind::Delete => PlanOutcome::RemoteDelete(TransferPlan {
-            remote_path,
-            op_id,
-            local_path: intent.path.clone(),
-            staging_path: None,
-            content_hash: None,
-            precondition: RemotePrecondition::None,
-            verify_remote_before_upload: false,
-        }),
+        PendingIntentKind::Delete => {
+            plan_delete(app, env, state_db, intent, remote_path, op_id, now)
+        }
         PendingIntentKind::Download => {
+            if let Err(reason) = verify_within_local_root(local_root, &intent.path) {
+                return PlanOutcome::Fail {
+                    failure: RetryFailureKind::Permanent,
+                    message: reason,
+                }
+                .tap_provider(app);
+            }
             let staging_name = format!(
                 "{}dl-{}",
                 constants::provider::TEMP_FILE_PREFIX,
@@ -1076,6 +1187,16 @@ fn plan_intent(
                 .parent()
                 .unwrap_or(local_root)
                 .join(staging_name);
+            // Best-effort: capture the remote object's op-id so the sync
+            // index records the writer's id, not this device's download
+            // id. A stat failure just leaves the op-id correlator disabled
+            // for this path (the hash comparison still converges).
+            let remote_op_id = app
+                .provider()
+                .stat(&remote_path)
+                .ok()
+                .flatten()
+                .and_then(|entry| entry.op_id);
             PlanOutcome::Download(TransferPlan {
                 remote_path,
                 op_id,
@@ -1084,9 +1205,18 @@ fn plan_intent(
                 content_hash: None,
                 precondition: RemotePrecondition::None,
                 verify_remote_before_upload: false,
+                hashed_local_state: None,
+                remote_op_id,
             })
         }
         PendingIntentKind::ApplyRemoteDelete => {
+            if let Err(reason) = verify_within_local_root(local_root, &intent.path) {
+                return PlanOutcome::Fail {
+                    failure: RetryFailureKind::Permanent,
+                    message: reason,
+                }
+                .tap_provider(app);
+            }
             // Two-way deletion guard: "data preservation wins
             // over deletion". A remote deletion only applies when the
             // local copy is exactly what was last synced AND the sync
@@ -1095,7 +1225,16 @@ fn plan_intent(
             // upload restores it remotely. One-way pull mirrors delete
             // unconditionally — that is their contract.
             if env.sync_mode == vapor_shared::SyncMode::TwoWay {
-                match deletion_loses_to_local_state(state_db, intent) {
+                // The Removed event may be stale: another device (or our own
+                // re-upload) could have recreated the remote object after
+                // the deletion was observed. If the remote exists again,
+                // this delete is obsolete — completing it would remove a
+                // file that is present remotely. Complete as a no-op.
+                if let Ok(Some(_)) = app.provider().stat(&remote_path) {
+                    return PlanOutcome::Noop("remote object exists again; deletion is stale")
+                        .tap_provider(app);
+                }
+                match deletion_loses_to_local_state(state_db, intent, env.hash_algorithm) {
                     Ok(Some(reason)) => return PlanOutcome::Noop(reason).tap_provider(app),
                     Ok(None) => {}
                     Err(message) => {
@@ -1107,7 +1246,7 @@ fn plan_intent(
                     }
                 }
             }
-            let outcome = apply_remote_delete_locally(env, &intent.path, now);
+            let outcome = apply_remote_delete_locally(env, state_db, &intent.path, now);
             if matches!(outcome, PlanOutcome::AppliedLocally) {
                 record_delete_tombstone(
                     state_db,
@@ -1133,6 +1272,114 @@ impl PlanOutcome {
     }
 }
 
+/// Plans a remote delete with the two-way "modification wins over
+/// deletion" guard. A local delete only propagates when the remote is
+/// still exactly what we last synced (op-id or content hash matches the
+/// sync index). If another writer changed the remote since our last
+/// sync, the delete is refused and a Download is enqueued to bring the
+/// newer remote content back locally — mirroring the upload guard so the
+/// newest version is never silently destroyed. One-way push mirrors
+/// delete unconditionally; that is its contract.
+fn plan_delete(
+    app: &DaemonApp,
+    env: &mut ExecutionEnv<'_>,
+    state_db: &mut DurableStateDb,
+    intent: &DurableIntentRecord,
+    remote_path: RemotePath,
+    op_id: String,
+    now: SystemTime,
+) -> PlanOutcome {
+    let plan = TransferPlan {
+        remote_path,
+        op_id,
+        local_path: intent.path.clone(),
+        staging_path: None,
+        content_hash: None,
+        precondition: RemotePrecondition::None,
+        verify_remote_before_upload: false,
+        hashed_local_state: None,
+        remote_op_id: None,
+    };
+    if env.sync_mode != vapor_shared::SyncMode::TwoWay {
+        return PlanOutcome::RemoteDelete(plan);
+    }
+
+    let index = match state_db.sync_index(&intent.path) {
+        Ok(index) => index,
+        Err(error) => {
+            return PlanOutcome::Fail {
+                failure: RetryFailureKind::Transient,
+                message: format!("cannot read sync index before delete: {error}"),
+            };
+        }
+    };
+    match app.provider().stat(&plan.remote_path) {
+        Ok(None) => {
+            // Remote already gone: the deletion converged. Record the
+            // tombstone and complete as a no-op.
+            record_delete_tombstone(
+                state_db,
+                &intent.path,
+                crate::state_db::TombstoneOrigin::Local,
+                now,
+            );
+            PlanOutcome::Noop("remote already absent; deletion converged")
+        }
+        Ok(Some(remote_entry)) => {
+            let unchanged = match &index {
+                Some(index) => {
+                    if remote_entry.op_id.as_deref() == Some(index.last_op_id.as_str()) {
+                        true
+                    } else {
+                        let remote_hash = remote_entry
+                            .content_hash
+                            .clone()
+                            .or_else(|| app.provider().content_hash(&plan.remote_path).ok());
+                        remote_hash.as_deref() == Some(index.content_hash.as_str())
+                    }
+                }
+                // No index: divergence is only defined relative to a last
+                // sync. Without one there is no baseline to detect a
+                // concurrent remote modification, so fall back to the
+                // unconditional delete (matching pre-guard behavior); a
+                // remote-absent stat already short-circuited above.
+                None => true,
+            };
+            if unchanged {
+                return PlanOutcome::RemoteDelete(plan);
+            }
+            // Another writer changed the remote since our last sync:
+            // modification wins over deletion. Refuse the delete and pull
+            // the newer remote content back locally.
+            if let Err(error) = state_db.enqueue_intents_coalesced(&[(
+                intent.path.clone(),
+                PendingIntentKind::Download,
+                now,
+            )]) {
+                return PlanOutcome::Fail {
+                    failure: RetryFailureKind::Transient,
+                    message: format!("cannot enqueue delete-preservation download: {error}"),
+                };
+            }
+            if let Err(error) = state_db.remove_sync_index(&intent.path) {
+                crate::logging::warning(
+                    "Could not clear stale sync index after refusing a remote delete",
+                    &[("error", error.to_string())],
+                );
+            }
+            crate::logging::warning(
+                "Remote changed since last sync; preserving it over a local deletion",
+                &[("path", intent.path.display().to_string())],
+            );
+            PlanOutcome::Noop("remote changed since last sync; modification wins over deletion")
+        }
+        Err(error) => PlanOutcome::Fail {
+            failure: error.kind.retry_classification(),
+            message: format!("cannot stat remote before delete: {}", error.message),
+        },
+    }
+}
+
 /// Plans an upload with the two-way conflict guard. The
 /// sync index distinguishes "remote unchanged since our last sync"
 /// (safe overwrite, hash-guarded) from "remote changed by another
@@ -1145,7 +1392,6 @@ fn plan_upload(
     intent: &DurableIntentRecord,
     remote_path: RemotePath,
     op_id: String,
-    now: SystemTime,
 ) -> PlanOutcome {
     let mut plan = TransferPlan {
         remote_path,
@@ -1155,6 +1401,8 @@ fn plan_upload(
         content_hash: None,
         precondition: RemotePrecondition::None,
         verify_remote_before_upload: false,
+        hashed_local_state: None,
+        remote_op_id: None,
     };
     if env.sync_mode != vapor_shared::SyncMode::TwoWay {
         return PlanOutcome::Upload(plan);
@@ -1204,9 +1452,18 @@ fn plan_upload(
                     plan.precondition = RemotePrecondition::HashEquals(index.content_hash);
                     PlanOutcome::Upload(plan)
                 } else {
-                    // Another writer genuinely changed the remote since
-                    // our last sync: concurrent divergence — keep both.
-                    resolve_upload_conflict(env, state_db, intent, now)
+                    // The remote no longer matches our last sync. This is
+                    // usually a concurrent writer (keep both), but it is
+                    // also the crash-replay case: an upload that committed
+                    // at the provider but crashed before the durable index
+                    // write leaves the remote holding *our own* new content
+                    // under a fresh op-id, with the index still on the old
+                    // hash. Defer to the upload gate, which compares the
+                    // remote hash against the *local* content hash:
+                    // byte-identical content (crash replay) converges
+                    // silently, genuine divergence still resolves keep-both.
+                    plan.verify_remote_before_upload = true;
+                    PlanOutcome::Upload(plan)
                 }
             }
             None => {
@@ -1225,12 +1482,18 @@ fn plan_upload(
     }
 }
 
-/// Keep-both resolution when the local side lost an upload race
-///: move the local loser to its conflict-copy path (suppressing
-/// the rename's delete echo), enqueue an upload for the copy and a
-/// download for the remote canonical, and let the caller complete the
-/// original intent. Deterministic: the conflict path derives from the
-/// device id and the intent's durable event time.
+/// Keep-both resolution when the local side lost an upload race: move
+/// the local loser to its conflict-copy path (suppressing the rename's
+/// delete echo), enqueue an upload for the copy, and — when the caller
+/// does not itself hold the canonical remote payload — a download for the
+/// remote canonical, letting the caller complete the original intent.
+/// Deterministic: the conflict path derives from the device id and the
+/// intent's durable event time.
+///
+/// Ordering is crash-safe: the Download(original) restore is enqueued
+/// *before* the rename, so a crash between rename and the copy's
+/// Upload-enqueue cannot strand the canonical path with nothing pending
+/// to restore it.
 fn resolve_upload_conflict(
     env: &mut ExecutionEnv<'_>,
     state_db: &mut DurableStateDb,
@@ -1248,6 +1511,16 @@ fn resolve_upload_conflict(
         timestamp_ms,
         |candidate: &Path| candidate.exists(),
     );
+    if let Err(error) = state_db.enqueue_intents_coalesced(&[(
+        intent.path.clone(),
+        PendingIntentKind::Download,
+        now,
+    )]) {
+        return PlanOutcome::Fail {
+            failure: RetryFailureKind::Transient,
+            message: format!("cannot enqueue conflict canonical-restore download: {error}"),
+        };
+    }
     if let Err(error) = fs::rename(&intent.path, &conflict_local) {
         if error.kind() == std::io::ErrorKind::NotFound {
             // The local loser vanished mid-conflict: nothing to keep.
@@ -1269,14 +1542,14 @@ fn resolve_upload_conflict(
             &[("error", error.to_string())],
         );
     }
-    let follow_ups = [
-        (conflict_local.clone(), PendingIntentKind::Upload, now),
-        (intent.path.clone(), PendingIntentKind::Download, now),
-    ];
-    if let Err(error) = state_db.enqueue_intents_coalesced(&follow_ups) {
+    if let Err(error) = state_db.enqueue_intents_coalesced(&[(
+        conflict_local.clone(),
+        PendingIntentKind::Upload,
+        now,
+    )]) {
         return PlanOutcome::Fail {
             failure: RetryFailureKind::Transient,
-            message: format!("cannot enqueue conflict follow-up intents: {error}"),
+            message: format!("cannot enqueue conflict-copy upload: {error}"),
         };
     }
     crate::logging::warning(
@@ -1289,66 +1562,13 @@ fn resolve_upload_conflict(
     PlanOutcome::ConflictResolved
 }
 
-/// Download-side keep-both: before a downloaded payload
-/// replaces a local file, a locally-diverged version moves to its
-/// conflict-copy path (unless its content already equals the incoming
-/// payload). Returns whether a conflict copy was created; errors are
-/// human-readable retry messages.
-fn preserve_diverged_local_before_apply(
-    env: &mut ExecutionEnv<'_>,
-    state_db: &mut DurableStateDb,
-    intent: &DurableIntentRecord,
-    incoming_hash: &str,
-    now: SystemTime,
-) -> Result<bool, String> {
-    let metadata = match fs::symlink_metadata(&intent.path) {
-        Ok(metadata) if metadata.is_file() => metadata,
-        _ => return Ok(false),
-    };
-    let index = state_db
-        .sync_index(&intent.path)
-        .map_err(|error| format!("cannot read sync index: {error}"))?;
-
-    // Quick check first (size, then mtime), full hash only when needed.
-    let locally_diverged = match &index {
-        Some(index) => {
-            if metadata.len() != index.size_bytes {
-                true
-            } else if index.local_modified_at.is_some()
-                && metadata.modified().ok() == index.local_modified_at
-            {
-                false
-            } else {
-                let local_hash = hash_hex_of_file_or_err(&intent.path)?;
-                local_hash != index.content_hash
-            }
-        }
-        // Unknown provenance: treat as diverged unless content matches
-        // the incoming payload (checked below).
-        None => true,
-    };
-    if !locally_diverged {
-        return Ok(false);
-    }
-    let local_hash = hash_hex_of_file_or_err(&intent.path)?;
-    if local_hash == incoming_hash {
-        return Ok(false);
-    }
-
-    match resolve_upload_conflict(env, state_db, intent, now) {
-        PlanOutcome::ConflictResolved => Ok(true),
-        PlanOutcome::Noop(_) => Ok(false),
-        PlanOutcome::Fail { message, .. } => Err(message),
-        _ => unreachable!("conflict resolution has no other outcomes"),
-    }
-}
-
 /// Deletion guard: returns the preservation reason when a remote
 /// deletion must NOT apply to the local file, `None` when the deletion
 /// may proceed.
 fn deletion_loses_to_local_state(
     state_db: &mut DurableStateDb,
     intent: &DurableIntentRecord,
+    algorithm: vapor_providers::HashAlgorithm,
 ) -> Result<Option<&'static str>, String> {
     let metadata = match fs::symlink_metadata(&intent.path) {
         Ok(metadata) if metadata.is_file() => metadata,
@@ -1376,7 +1596,7 @@ fn deletion_loses_to_local_state(
     {
         false
     } else {
-        hash_hex_of_file_or_err(&intent.path)? != index.content_hash
+        hash_hex_of_file_or_err(&intent.path, algorithm)? != index.content_hash
     };
     if diverged {
         return Ok(Some(
@@ -1386,9 +1606,20 @@ fn deletion_loses_to_local_state(
     Ok(None)
 }
 
-fn hash_hex_of_file_or_err(path: &Path) -> Result<String, String> {
-    vapor_providers::filesystem::hash_hex_of_file(path)
+fn hash_hex_of_file_or_err(
+    path: &Path,
+    algorithm: vapor_providers::HashAlgorithm,
+) -> Result<String, String> {
+    hash_hex_of_file_with(path, algorithm)
         .map_err(|error| format!("cannot hash local file for conflict check: {error}"))
+}
+
+/// Hashes a whole file in the provider's algorithm.
+fn hash_hex_of_file_with(
+    path: &Path,
+    algorithm: vapor_providers::HashAlgorithm,
+) -> std::io::Result<String> {
+    vapor_providers::filesystem::hash_hex_of_file_with(path, algorithm)
 }
 
 /// Records the post-upload sync-index entry; failures are logged, not
@@ -1401,28 +1632,36 @@ fn record_upload_index(
     size_bytes: u64,
     now: SystemTime,
 ) {
-    let local_modified_at = fs::symlink_metadata(&plan.local_path)
-        .and_then(|metadata| metadata.modified())
-        .ok();
-    if let Err(error) = state_db.set_sync_index(
-        &plan.local_path,
+    // The recorded content_hash is the bytes we hashed. If the local file
+    // changed since (a mid-transfer edit), recording the current mtime
+    // would pair a post-edit mtime with the pre-edit hash, letting the
+    // mtime fast-path in the divergence checks skip a needed re-hash and
+    // silently overwrite the edit. Detect that and record no mtime, which
+    // forces the hash path next time.
+    let current = fs::symlink_metadata(&plan.local_path).ok();
+    let current_mtime = current
+        .as_ref()
+        .and_then(|metadata| metadata.modified().ok());
+    let current_size = current.as_ref().map(fs::Metadata::len);
+    let local_modified_at = match plan.hashed_local_state {
+        Some((hashed_size, hashed_mtime))
+            if current_size == Some(hashed_size) && current_mtime == hashed_mtime =>
+        {
+            current_mtime
+        }
+        Some(_) => None,
+        None => current_mtime,
+    };
+    write_sync_index_entry(
+        state_db,
+        plan,
         content_hash,
         size_bytes,
         local_modified_at,
+        // An upload records our own op-id (the tag we just wrote remotely).
         &plan.op_id,
         now,
-    ) {
-        crate::logging::warning(
-            "Could not record post-upload sync index entry",
-            &[("error", error.to_string())],
-        );
-    }
-    if let Err(error) = state_db.clear_tombstone(&plan.local_path) {
-        crate::logging::warning(
-            "Could not clear tombstone after upload",
-            &[("error", error.to_string())],
-        );
-    }
+    );
 }
 
 fn record_download_index(
@@ -1432,8 +1671,55 @@ fn record_download_index(
     size_bytes: u64,
     now: SystemTime,
 ) {
-    // Identical bookkeeping; separated for call-site readability.
-    record_upload_index(state_db, plan, content_hash, size_bytes, now);
+    // We just wrote this file; its current mtime describes exactly the
+    // content we applied, so the mtime fast-path is safe to record.
+    let local_modified_at = fs::symlink_metadata(&plan.local_path)
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    // Record the REMOTE object's op-id (whoever wrote it), not this
+    // device's download id — so a later upload of this path correlates by
+    // op-id. An untagged remote records an empty id (never matches), which
+    // correctly falls through to the hash comparison.
+    let last_op_id = plan.remote_op_id.as_deref().unwrap_or("");
+    write_sync_index_entry(
+        state_db,
+        plan,
+        content_hash,
+        size_bytes,
+        local_modified_at,
+        last_op_id,
+        now,
+    );
+}
+
+fn write_sync_index_entry(
+    state_db: &mut DurableStateDb,
+    plan: &TransferPlan,
+    content_hash: &str,
+    size_bytes: u64,
+    local_modified_at: Option<SystemTime>,
+    last_op_id: &str,
+    now: SystemTime,
+) {
+    if let Err(error) = state_db.set_sync_index(
+        &plan.local_path,
+        content_hash,
+        size_bytes,
+        local_modified_at,
+        last_op_id,
+        now,
+    ) {
+        crate::logging::warning(
+            "Could not record post-transfer sync index entry",
+            &[("error", error.to_string())],
+        );
+    }
+    if let Err(error) = state_db.clear_tombstone(&plan.local_path) {
+        crate::logging::warning(
+            "Could not clear tombstone after transfer",
+            &[("error", error.to_string())],
+        );
+    }
 }
 
 fn record_delete_tombstone(
@@ -1460,6 +1746,60 @@ fn local_size(path: &Path) -> u64 {
     fs::symlink_metadata(path)
         .map(|metadata| metadata.len())
         .unwrap_or(0)
+}
+
+/// Verifies that applying a remote-sourced change at `target` cannot
+/// escape the canonical local sync root through a symlinked parent
+/// component. `RemotePath` validation is purely lexical, so a symlink in
+/// an intermediate directory (`root/link -> /elsewhere`) would otherwise
+/// let a remote `link/x` write into — or delete under — `/elsewhere`.
+/// Canonicalizes the deepest existing ancestor of the target's parent and
+/// confirms it is still inside the root.
+fn verify_within_local_root(local_root: &Path, target: &Path) -> Result<(), String> {
+    // Canonicalize the root itself so the containment comparison holds even
+    // when the caller passed a not-yet-canonical root (tests, or a root
+    // reached through a symlinked parent of its own).
+    let root = fs::canonicalize(local_root).unwrap_or_else(|_| local_root.to_path_buf());
+    let mut ancestor = target.parent().unwrap_or(local_root).to_path_buf();
+    loop {
+        match fs::canonicalize(&ancestor) {
+            Ok(real) => {
+                if real == root || real.starts_with(&root) {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "refusing remote apply of {}: parent resolves outside the sync root ({})",
+                    target.display(),
+                    real.display()
+                ));
+            }
+            // The parent does not exist yet; create_dir_all will make
+            // fresh real directories under the deepest existing ancestor.
+            // Keep walking up to find it.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match ancestor.parent() {
+                    Some(parent) if parent.starts_with(local_root) || parent == local_root => {
+                        ancestor = parent.to_path_buf();
+                    }
+                    // Walked above the root without finding an existing
+                    // ancestor inside it: lexically the target claimed to be
+                    // under the root, so this is a malformed path.
+                    _ => {
+                        return Err(format!(
+                            "refusing remote apply of {}: no existing ancestor inside the sync root",
+                            target.display()
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "cannot verify sync-root containment of {}: {error}",
+                    ancestor.display()
+                ));
+            }
+        }
+    }
 }
 
 /// Method-form conflict finisher shared by the upload gate and the
@@ -1491,8 +1831,17 @@ impl StagedExecutor {
 /// ApplyRemoteDelete happens inline in the planner: local deletion is a
 /// metadata operation, and splitting it into more stages would only add
 /// latency to the remote→local pipeline.
+///
+/// Directory deletions are the delicate case. In two-way mode a remote
+/// folder deletion arrives as one `Removed(dir)` change, but the local
+/// subtree may hold unsynced or locally-modified files (data preservation
+/// wins over deletion). Rather than `remove_dir_all` the whole tree, the
+/// two-way path walks it and removes only synced-and-unchanged files,
+/// preserving (and re-uploading) the rest. One-way pull is a strict
+/// mirror and removes the tree unconditionally.
 fn apply_remote_delete_locally(
     env: &mut ExecutionEnv<'_>,
+    state_db: &mut DurableStateDb,
     path: &Path,
     now: SystemTime,
 ) -> PlanOutcome {
@@ -1505,12 +1854,28 @@ fn apply_remote_delete_locally(
             message: format!("cannot stat local file for remote-delete apply: {error}"),
         },
         Ok(metadata) => {
-            let removal = if metadata.is_dir() {
-                fs::remove_dir_all(path)
-            } else {
-                fs::remove_file(path)
-            };
-            match removal {
+            if metadata.is_dir() {
+                if env.sync_mode == vapor_shared::SyncMode::TwoWay {
+                    return guarded_remove_dir(env, state_db, path, now);
+                }
+                return match fs::remove_dir_all(path) {
+                    Ok(()) => {
+                        let _ = env.tags.remove(path);
+                        env.local_echoes.record_delete(path_key(path), now);
+                        PlanOutcome::AppliedLocally
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        PlanOutcome::Noop("local file already gone")
+                    }
+                    Err(error) => PlanOutcome::Fail {
+                        failure: RetryFailureKind::Transient,
+                        message: format!(
+                            "cannot delete local directory for remote-delete apply: {error}"
+                        ),
+                    },
+                };
+            }
+            match fs::remove_file(path) {
                 Ok(()) => {
                     let _ = env.tags.remove(path);
                     env.local_echoes.record_delete(path_key(path), now);
@@ -1526,6 +1891,157 @@ fn apply_remote_delete_locally(
             }
         }
     }
+}
+
+/// Two-way guarded recursive delete of a remotely-removed directory.
+/// Returns `AppliedLocally` when the whole subtree (including the root
+/// directory) was removed, or a `Noop` describing the preservation when
+/// at least one entry was kept.
+fn guarded_remove_dir(
+    env: &mut ExecutionEnv<'_>,
+    state_db: &mut DurableStateDb,
+    dir: &Path,
+    now: SystemTime,
+) -> PlanOutcome {
+    match remove_dir_preserving_unsynced(env, state_db, dir, now) {
+        Ok(true) => match fs::remove_dir(dir) {
+            Ok(()) => {
+                let _ = env.tags.remove(dir);
+                env.local_echoes.record_delete(path_key(dir), now);
+                PlanOutcome::AppliedLocally
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                PlanOutcome::Noop("local directory already gone")
+            }
+            // Something reappeared under the directory between the walk and
+            // this rmdir: leave it, the next reconcile converges.
+            Err(_) => PlanOutcome::Noop(
+                "preserved local content that reappeared under a deleted directory",
+            ),
+        },
+        Ok(false) => {
+            PlanOutcome::Noop("preserved unsynced local content under a remotely-deleted directory")
+        }
+        Err(message) => PlanOutcome::Fail {
+            failure: RetryFailureKind::Transient,
+            message,
+        },
+    }
+}
+
+/// Depth-first guarded delete. Returns `true` when everything inside the
+/// directory was removed, `false` when at least one entry was preserved.
+/// A synced-and-unchanged file is removed; an unsynced, locally-modified,
+/// or unknown-provenance file (or any symlink/special node) is preserved
+/// and its Upload re-enqueued so the remote is restored.
+fn remove_dir_preserving_unsynced(
+    env: &mut ExecutionEnv<'_>,
+    state_db: &mut DurableStateDb,
+    dir: &Path,
+    now: SystemTime,
+) -> Result<bool, String> {
+    let entries = fs::read_dir(dir)
+        .map_err(|error| format!("cannot read directory for remote-delete apply: {error}"))?;
+    let mut all_removed = true;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("cannot read directory entry: {error}"))?;
+        let child = entry.path();
+        let metadata = match fs::symlink_metadata(&child) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("cannot stat {}: {error}", child.display())),
+        };
+        if metadata.is_dir() {
+            if remove_dir_preserving_unsynced(env, state_db, &child, now)? {
+                match fs::remove_dir(&child) {
+                    Ok(()) => {
+                        let _ = env.tags.remove(&child);
+                        env.local_echoes.record_delete(path_key(&child), now);
+                        record_delete_tombstone(
+                            state_db,
+                            &child,
+                            crate::state_db::TombstoneOrigin::Remote,
+                            now,
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => all_removed = false,
+                }
+            } else {
+                all_removed = false;
+            }
+        } else if metadata.is_file() {
+            if child_delete_is_safe(state_db, &child, &metadata, env.hash_algorithm)? {
+                match fs::remove_file(&child) {
+                    Ok(()) => {
+                        let _ = env.tags.remove(&child);
+                        env.local_echoes.record_delete(path_key(&child), now);
+                        record_delete_tombstone(
+                            state_db,
+                            &child,
+                            crate::state_db::TombstoneOrigin::Remote,
+                            now,
+                        );
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("cannot delete {}: {error}", child.display()));
+                    }
+                }
+            } else {
+                all_removed = false;
+                if let Err(error) = state_db.enqueue_intents_coalesced(&[(
+                    child.clone(),
+                    PendingIntentKind::Upload,
+                    now,
+                )]) {
+                    crate::logging::warning(
+                        "Could not enqueue re-upload for preserved file under deleted directory",
+                        &[
+                            ("path", child.display().to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                }
+            }
+        } else {
+            // Symlinks and special files are outside the sync contract;
+            // never follow or delete them.
+            all_removed = false;
+        }
+    }
+    Ok(all_removed)
+}
+
+/// Whether a file under a remotely-deleted directory is safe to remove:
+/// only when the sync index proves it is exactly what was last synced.
+/// Unknown provenance or any divergence (including a hash failure) fails
+/// safe to `false` (preserve).
+fn child_delete_is_safe(
+    state_db: &mut DurableStateDb,
+    path: &Path,
+    metadata: &fs::Metadata,
+    algorithm: vapor_providers::HashAlgorithm,
+) -> Result<bool, String> {
+    let Some(index) = state_db
+        .sync_index(path)
+        .map_err(|error| format!("cannot read sync index for {}: {error}", path.display()))?
+    else {
+        return Ok(false);
+    };
+    let diverged = if metadata.len() != index.size_bytes {
+        true
+    } else if index.local_modified_at.is_some()
+        && metadata.modified().ok() == index.local_modified_at
+    {
+        false
+    } else {
+        match hash_hex_of_file_with(path, algorithm) {
+            Ok(hash) => hash != index.content_hash,
+            Err(_) => true,
+        }
+    };
+    Ok(!diverged)
 }
 
 /// Moves a fully-downloaded staging payload into place atomically and
@@ -1555,6 +2071,113 @@ fn apply_downloaded_payload(
         );
     }
     Ok(())
+}
+
+/// Two-way download apply that closes the check-then-act window. The
+/// existing local file (if any) is renamed aside first — atomically
+/// capturing whatever bytes are present — then the canonical payload is
+/// renamed in, then the displaced bytes are examined and either dropped
+/// (they matched the sync index or the incoming payload) or promoted to a
+/// keep-both conflict copy (they diverged). The divergence decision runs
+/// on the exact displaced bytes, so a local edit present at apply time is
+/// never silently overwritten. Returns whether a conflict copy was made.
+fn apply_downloaded_payload_keep_both(
+    env: &mut ExecutionEnv<'_>,
+    state_db: &mut DurableStateDb,
+    intent: &DurableIntentRecord,
+    plan: &TransferPlan,
+    incoming_hash: &str,
+    now: SystemTime,
+) -> Result<bool, String> {
+    let parent = plan
+        .local_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let aside = parent.join(format!(
+        "{}aside-{}",
+        constants::provider::TEMP_FILE_PREFIX,
+        sanitize_for_file_name(&plan.op_id)
+    ));
+
+    // Read the pre-apply index before renaming; it still keys off the
+    // canonical path and describes the bytes we are about to displace.
+    let index = state_db
+        .sync_index(&plan.local_path)
+        .map_err(|error| format!("cannot read sync index: {error}"))?;
+
+    let displaced = match fs::symlink_metadata(&plan.local_path) {
+        Ok(metadata) if metadata.is_file() => match fs::rename(&plan.local_path, &aside) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(format!("cannot set aside local file before apply: {error}"));
+            }
+        },
+        // Directory or special node at the path: apply_downloaded_payload's
+        // rename will surface an appropriate error. Nothing to preserve.
+        _ => false,
+    };
+
+    if let Err(error) = apply_downloaded_payload(env, plan) {
+        // Restore the displaced file so a failed apply loses nothing.
+        if displaced {
+            let _ = fs::rename(&aside, &plan.local_path);
+        }
+        return Err(format!("local apply of downloaded payload failed: {error}"));
+    }
+
+    if !displaced {
+        return Ok(false);
+    }
+
+    let aside_hash = hash_hex_of_file_with(&aside, env.hash_algorithm)
+        .map_err(|error| format!("cannot hash displaced local file: {error}"))?;
+    let unchanged = aside_hash == incoming_hash
+        || index
+            .as_ref()
+            .map(|index| aside_hash == index.content_hash)
+            .unwrap_or(false);
+    if unchanged {
+        let _ = fs::remove_file(&aside);
+        let _ = env.tags.remove(&aside);
+        return Ok(false);
+    }
+
+    // The displaced bytes diverged from both the last sync and the
+    // incoming payload: keep both.
+    let timestamp_ms = intent
+        .enqueued_at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let conflict_local = crate::conflict::conflict_copy_path(
+        &plan.local_path,
+        env.device_id,
+        timestamp_ms,
+        |candidate: &Path| candidate.exists(),
+    );
+    if let Err(error) = fs::rename(&aside, &conflict_local) {
+        return Err(format!(
+            "cannot stage conflict copy from displaced file: {error}"
+        ));
+    }
+    let _ = env.tags.relocate_side_file(&aside, &conflict_local);
+    if let Err(error) = state_db.enqueue_intents_coalesced(&[(
+        conflict_local.clone(),
+        PendingIntentKind::Upload,
+        now,
+    )]) {
+        return Err(format!("cannot enqueue conflict-copy upload: {error}"));
+    }
+    crate::logging::warning(
+        "Kept both versions on download-apply (local edit diverged from the incoming payload)",
+        &[
+            ("canonical", plan.local_path.display().to_string()),
+            ("conflict_copy", conflict_local.display().to_string()),
+        ],
+    );
+    Ok(true)
 }
 
 fn allocate_op_id(env: &ExecutionEnv<'_>, intent: &DurableIntentRecord, now: SystemTime) -> String {
@@ -1587,6 +2210,19 @@ fn grant_transfer_budget(env: &ExecutionEnv<'_>, clock: &Arc<dyn Clock>) -> u64 
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .budget(env.transfer_step_bytes, clock.now())
+}
+
+/// Returns the unspent portion of a transfer-step grant to the shared
+/// bandwidth bucket, so per-step chunk-alignment slack and failed (zero-
+/// byte) steps do not make the shaper undershoot the configured rate.
+fn refund_transfer_budget(env: &ExecutionEnv<'_>, unused: u64) {
+    if unused == 0 {
+        return;
+    }
+    env.bandwidth
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .refund(unused);
 }
 
 fn path_key(path: &Path) -> String {
@@ -1736,10 +2372,12 @@ mod tests {
             let mut total = StagedExecutorReport::default();
             for _ in 0..max_ticks {
                 self.clock.advance(Duration::from_millis(250));
+                let hash_algorithm = self.app.provider().content_hash_algorithm();
                 let mut env = ExecutionEnv {
                     local_root: Some(&self.local_root),
                     sync_mode: self.sync_mode,
                     device_id: "testdev",
+                    hash_algorithm,
                     transfer_step_bytes: constants::engine::TRANSFER_STAGE_STEP_BYTES,
                     bandwidth: &self.bandwidth,
                     tags: &self.tags,
@@ -1830,6 +2468,246 @@ mod tests {
 
         assert_eq!(report.completed, 1);
         assert_eq!(report.failed, 0);
+    }
+
+    #[test]
+    fn local_delete_refused_when_remote_diverged_and_enqueues_download() {
+        let mut fixture = Fixture::new();
+        let local_file = fixture.local_root.join("shared.txt");
+        // We last synced this path (op-id "op-mine", content "v1").
+        fixture
+            .state_db
+            .set_sync_index(
+                &local_file,
+                &hash_hex_of_bytes(b"v1"),
+                2,
+                None,
+                "op-mine",
+                timestamp_ms(0),
+            )
+            .expect("seed index");
+        // Another device modified the remote since our last sync.
+        std::fs::write(
+            fixture.cloud_root.join("shared.txt"),
+            b"v2-from-other-device",
+        )
+        .expect("seed remote");
+        // The user deleted the file locally (hence the Delete intent).
+        let intent = fixture.enqueue_and_lease(&local_file, PendingIntentKind::Delete);
+        assert!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0))
+        );
+        let report = fixture.run_to_quiescence(8);
+
+        assert_eq!(report.completed, 1);
+        // The newer remote content is preserved, not destroyed.
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("shared.txt")).expect("remote intact"),
+            b"v2-from-other-device"
+        );
+        // A Download was enqueued to restore the newer remote locally.
+        let restored = fixture
+            .state_db
+            .lease_next_ready(timestamp_ms(0))
+            .expect("lease")
+            .expect("download intent enqueued");
+        assert_eq!(restored.kind, PendingIntentKind::Download);
+        assert_eq!(restored.path, local_file);
+    }
+
+    #[test]
+    fn two_way_remote_dir_delete_preserves_unsynced_child() {
+        let mut fixture = Fixture::new();
+        let dir = fixture.local_root.join("project");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let synced = dir.join("synced.txt");
+        let unsynced = dir.join("unsynced.txt");
+        std::fs::write(&synced, b"synced body").expect("synced");
+        std::fs::write(&unsynced, b"brand new local file").expect("unsynced");
+        // Only the synced child has an index entry matching its content.
+        let mtime = std::fs::symlink_metadata(&synced)
+            .and_then(|m| m.modified())
+            .ok();
+        fixture
+            .state_db
+            .set_sync_index(
+                &synced,
+                &hash_hex_of_bytes(b"synced body"),
+                11,
+                mtime,
+                "op-synced",
+                timestamp_ms(0),
+            )
+            .expect("seed index");
+
+        let intent = fixture.enqueue_and_lease(&dir, PendingIntentKind::ApplyRemoteDelete);
+        assert!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0))
+        );
+        let report = fixture.run_to_quiescence(8);
+
+        assert_eq!(report.completed, 1);
+        // The synced-and-unchanged child was removed; the unsynced child
+        // (and thus the directory) survived.
+        assert!(!synced.exists());
+        assert!(unsynced.exists());
+        assert!(dir.exists());
+        // The preserved child has an Upload re-enqueued to restore it.
+        let restore = fixture
+            .state_db
+            .lease_next_ready(timestamp_ms(0))
+            .expect("lease")
+            .expect("upload intent enqueued");
+        assert_eq!(restore.kind, PendingIntentKind::Upload);
+        assert_eq!(restore.path, unsynced);
+    }
+
+    #[test]
+    fn download_apply_keeps_both_when_local_diverged() {
+        let mut fixture = Fixture::new();
+        std::fs::write(fixture.cloud_root.join("doc.txt"), b"remote version").expect("remote");
+        let local = fixture.local_root.join("doc.txt");
+        // A locally-edited file that never matched the incoming payload and
+        // has no index (unknown provenance -> keep both).
+        std::fs::write(&local, b"local edit").expect("local");
+
+        let intent = fixture.enqueue_and_lease(&local, PendingIntentKind::Download);
+        assert!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0))
+        );
+        let report = fixture.run_to_quiescence(16);
+
+        assert_eq!(report.completed, 1);
+        // Canonical payload applied.
+        assert_eq!(std::fs::read(&local).expect("applied"), b"remote version");
+        // The diverged local edit was kept as a conflict copy, not lost.
+        // Skip internal side-files: on a filesystem without xattr support
+        // (Windows), the applied payload's op-id tag lands as a
+        // `doc.txt.vapor-meta.json` side-file, which also starts with
+        // "doc" — the conflict copy is the non-internal `doc~conflict-…`.
+        let conflict = std::fs::read_dir(&fixture.local_root)
+            .expect("read local root")
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("doc")
+                    && name != "doc.txt"
+                    && !vapor_providers::filesystem::is_internal_file_name(&name)
+            });
+        let conflict = conflict.expect("a conflict copy was created");
+        assert_eq!(
+            std::fs::read(conflict.path()).expect("conflict body"),
+            b"local edit"
+        );
+    }
+
+    #[test]
+    fn conflict_copy_lookup_excludes_op_id_side_files() {
+        // Regression guard for the Windows keep-both path. Without xattr
+        // support the applied payload's op-id tag lands as a
+        // `doc.txt.vapor-meta.json` side-file next to the canonical file —
+        // which also starts with "doc" and is not "doc.txt". A conflict-copy
+        // search must exclude internal side-files (order-independently) and
+        // resolve to the real `doc~conflict-…` copy, else it can read the
+        // side-file's JSON instead of the preserved local bytes.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let root = dir.path();
+        std::fs::write(root.join("doc.txt"), b"remote version").expect("canonical");
+        std::fs::write(root.join("doc.txt.vapor-meta.json"), br#"{"opId":"x"}"#)
+            .expect("side-file");
+        std::fs::write(
+            root.join("doc~conflict-devA-1750000000000.txt"),
+            b"local edit",
+        )
+        .expect("conflict copy");
+
+        let matches: Vec<_> = std::fs::read_dir(root)
+            .expect("read root")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("doc")
+                    && name != "doc.txt"
+                    && !vapor_providers::filesystem::is_internal_file_name(&name)
+            })
+            .collect();
+
+        assert_eq!(
+            matches.len(),
+            1,
+            "exactly the conflict copy must match; the side-file must be excluded: {:?}",
+            matches.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            std::fs::read(matches[0].path()).expect("conflict body"),
+            b"local edit"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_download_through_symlinked_parent_is_refused() {
+        use std::os::unix::fs::symlink;
+        let mut fixture = Fixture::new();
+        // A directory outside the sync root, reachable via a symlink inside
+        // it: an attacker-controlled cloud path `link/x` must not write
+        // there.
+        let outside = fixture._temp.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside");
+        symlink(&outside, fixture.local_root.join("link")).expect("symlink");
+
+        let target = fixture.local_root.join("link/payload.txt");
+        std::fs::write(fixture.cloud_root.join("link/payload.txt"), b"x").ok();
+        let intent = fixture.enqueue_and_lease(&target, PendingIntentKind::Download);
+        assert!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0))
+        );
+        let report = fixture.run_to_quiescence(8);
+
+        assert_eq!(report.failed, 1);
+        // Nothing was written outside the sync root.
+        assert!(!outside.join("payload.txt").exists());
+    }
+
+    #[test]
+    fn download_records_the_remote_objects_op_id_in_the_sync_index() {
+        let mut fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.cloud_root.join("docs")).expect("dirs");
+        let cloud_path = fixture.cloud_root.join("docs/new.txt");
+        std::fs::write(&cloud_path, b"from the cloud").expect("seed remote");
+        // The remote object was written by another device; tag it so.
+        fixture
+            .tags
+            .write_op_id(&cloud_path, "remote-writer-op")
+            .expect("tag remote object");
+
+        let local_target = fixture.local_root.join("docs/new.txt");
+        let intent = fixture.enqueue_and_lease(&local_target, PendingIntentKind::Download);
+        assert!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0))
+        );
+        let report = fixture.run_to_quiescence(16);
+        assert_eq!(report.completed, 1);
+
+        let index = fixture
+            .state_db
+            .sync_index(&local_target)
+            .expect("read index")
+            .expect("index present after download");
+        assert_eq!(
+            index.last_op_id, "remote-writer-op",
+            "the sync index must record the remote writer's op-id, not this device's download id"
+        );
     }
 
     #[test]
@@ -2195,10 +3073,12 @@ mod tests {
 
         // One advance cannot complete it (planner only).
         fixture.clock.advance(Duration::from_millis(250));
+        let hash_algorithm = fixture.app.provider().content_hash_algorithm();
         let mut env = ExecutionEnv {
             local_root: Some(&fixture.local_root),
             sync_mode: fixture.sync_mode,
             device_id: "testdev",
+            hash_algorithm,
             transfer_step_bytes: constants::engine::TRANSFER_STAGE_STEP_BYTES,
             bandwidth: &fixture.bandwidth,
             tags: &fixture.tags,

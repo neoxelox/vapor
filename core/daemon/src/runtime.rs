@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use vapor_platform::fs_caps::NativeFilesystemCapabilities;
 use vapor_providers::Provider;
-use vapor_providers::filesystem::hash_hex_of_file;
+use vapor_providers::filesystem::hash_hex_of_file_with;
 use vapor_providers::tags::OpIdTagStore;
 use vapor_shared::{RunState, constants};
 
@@ -52,9 +52,27 @@ impl From<FsEventsWatcherError> for DaemonRuntimeError {
 }
 
 static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Tick waker the shutdown path pings so the loop exits immediately
+/// instead of sleeping out a full idle interval. Set by the running
+/// multi-profile runtime. The shutdown handler runs on a dedicated
+/// thread (not a raw signal context), so taking this lock is safe.
+static SHUTDOWN_WAKER: Mutex<Option<Arc<TickWaker>>> = Mutex::new(None);
+
+pub fn register_shutdown_waker(waker: Arc<TickWaker>) {
+    *SHUTDOWN_WAKER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(waker);
+}
 
 pub fn request_shutdown() {
     SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    if let Some(waker) = SHUTDOWN_WAKER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .as_ref()
+    {
+        waker.notify();
+    }
 }
 
 pub fn is_shutdown_requested() -> bool {
@@ -226,6 +244,13 @@ pub struct DaemonRuntime {
     /// bootstrap; ephemeral (hostname-derived, unpersisted) in ad-hoc
     /// embeddings and tests.
     device_id: String,
+    /// The resolved profile id this runtime serves. Used to attribute
+    /// activity on the shared multi-profile timeline; defaults to the
+    /// implicit `default` profile.
+    profile_id: String,
+    /// Timeline capacity captured before the first memory-pressure
+    /// squeeze, so the configured limit is restored once pressure clears.
+    timeline_default_entries: Option<usize>,
     /// Heuristic active-coding signal; ORs `user_active` into
     /// the throttle inputs when code-class files churn rapidly.
     active_coding: crate::safeguards::ActiveCodingHeuristic,
@@ -448,7 +473,7 @@ impl DaemonRuntime {
         // Requires an ensured cloud root; a paused daemon also skips
         // polling (nothing would be leased anyway) but keeps every
         // already-enqueued intent durable.
-        if self.cloud_root_ready {
+        if self.cloud_root_ready && !paused {
             report.remote_poll = self.remote_poller.poll_if_due(
                 &mut self.app,
                 &mut self.state_db,
@@ -470,6 +495,7 @@ impl DaemonRuntime {
                 local_root: self.sync_scope.local_sync_directory.as_deref(),
                 sync_mode: self.sync_scope.sync_mode,
                 device_id: &self.device_id,
+                hash_algorithm: self.app.provider().content_hash_algorithm(),
                 transfer_step_bytes: self
                     .transfer_step_bytes
                     .load(std::sync::atomic::Ordering::Relaxed),
@@ -607,6 +633,14 @@ impl DaemonRuntime {
         }
 
         self.last_stale_lease_sweep_inst = Some(now_inst);
+        // Renew the leases the executor still holds so an in-flight large
+        // transfer (or a Suspended stall longer than the lease timeout) is
+        // not reclaimed as "orphaned" and duplicated.
+        let mut live_ids = self.staged_executor.active_intent_ids();
+        if let Some(reconcile_id) = self.running_reconcile_intent_id {
+            live_ids.push(reconcile_id);
+        }
+        self.state_db.renew_leases(&live_ids, now)?;
         let recovered = self.state_db.recover_stale_leases(now)?;
         if recovered > 0 {
             logging::warning(
@@ -729,6 +763,17 @@ impl DaemonRuntime {
                 &[("error", error.to_string())],
             ),
         }
+        match state_db.prune_failed_intents(now) {
+            Ok(pruned) if pruned > 0 => logging::info(
+                "Pruned terminally-failed intents past the retention window / cap",
+                &[("pruned", pruned.to_string())],
+            ),
+            Ok(_) => {}
+            Err(error) => logging::warning(
+                "Failed-intent pruning failed; continuing",
+                &[("error", error.to_string())],
+            ),
+        }
         logging::info(
             "Durable queue/state DB is ready",
             &[
@@ -841,6 +886,8 @@ impl DaemonRuntime {
             local_echoes: SelfWriteCache::new(),
             remote_echoes: SelfWriteCache::new(),
             remote_poller: RemotePoller::new(DEFAULT_PROFILE_ID),
+            profile_id: DEFAULT_PROFILE_ID.to_string(),
+            timeline_default_entries: None,
             cloud_root_ready,
             last_cloud_root_attempt_inst: None,
             reconcile_walker: None,
@@ -1037,7 +1084,7 @@ impl DaemonRuntime {
         let Some(timeline) = self.timeline.clone() else {
             return;
         };
-        let profile_id = DEFAULT_PROFILE_ID;
+        let profile_id = self.profile_id.as_str();
 
         let run_state = self.app.snapshot().run_state;
         if self.last_timeline_run_state != Some(run_state) {
@@ -1117,6 +1164,15 @@ impl DaemonRuntime {
         self.device_id = device_id.into();
     }
 
+    /// Sets the resolved profile id (multi-profile shell). Rebuilds the
+    /// remote poller so its durable cursor key is namespaced per profile,
+    /// and re-attributes timeline events to this profile.
+    pub fn set_profile_id(&mut self, profile_id: impl Into<String>) {
+        let profile_id = profile_id.into();
+        self.remote_poller = RemotePoller::new(&profile_id);
+        self.profile_id = profile_id;
+    }
+
     /// Cumulative keep-both conflict copies created since daemon start.
     pub fn conflict_count(&self) -> u64 {
         self.conflict_count
@@ -1152,6 +1208,15 @@ impl DaemonRuntime {
             .is_ok()
         {
             self.cloud_root_ready = true;
+            // Recovering the cloud root must only clear the cloud-root
+            // Error state. If the daemon is Paused — an explicit
+            // `vapor pause`, or the mass-deletion (ransomware) guard — leave
+            // the pause and its reason intact so recovery cannot silently
+            // resume sync (and replicate queued mass deletions) without the
+            // human review the pause exists to force.
+            if self.app.snapshot().run_state == RunState::Paused {
+                return;
+            }
             match self.sync_scope.local_sync_directory.as_ref() {
                 Some(path) => self.app.set_run_state(
                     RunState::Running,
@@ -1193,17 +1258,31 @@ impl DaemonRuntime {
                 self.app
                     .set_run_state(RunState::Paused, "user paused via vapor pause");
             } else {
-                let reason = match self.sync_scope.local_sync_directory.as_ref() {
-                    Some(path) => {
-                        format!("user resumed via vapor resume; watching {}", path.display())
-                    }
-                    None => "user resumed via vapor resume".to_string(),
-                };
-                self.app.set_run_state(RunState::Running, reason);
                 // An explicit resume is the human-in-the-loop reset for
                 // the mass-deletion guard: the operator looked
                 // at the alert and decided the changes are legitimate.
                 self.mass_change_guard.reset();
+                // Re-derive the run state from what can actually admit
+                // work: resuming while the cloud root is unavailable must
+                // not report Running (which would mask the real blocker),
+                // since the tick loop still leases nothing.
+                if !self.cloud_root_ready {
+                    self.app.set_run_state(
+                        RunState::Error,
+                        format!(
+                            "cloud sync directory {} is unavailable; sync work is blocked until it can be ensured",
+                            self.sync_scope.cloud_sync_directory
+                        ),
+                    );
+                } else {
+                    let reason = match self.sync_scope.local_sync_directory.as_ref() {
+                        Some(path) => {
+                            format!("user resumed via vapor resume; watching {}", path.display())
+                        }
+                        None => "user resumed via vapor resume".to_string(),
+                    };
+                    self.app.set_run_state(RunState::Running, reason);
+                }
             }
         }
         if flush_request {
@@ -1218,7 +1297,7 @@ impl DaemonRuntime {
             if let Some(timeline) = &self.timeline {
                 timeline.push(
                     "flush",
-                    DEFAULT_PROFILE_ID,
+                    self.profile_id.as_str(),
                     format!(
                         "flush requested: deferred work released for {}s",
                         constants::engine::FLUSH_BOOST_SECONDS
@@ -1316,6 +1395,11 @@ impl DaemonRuntime {
             self.remote_echoes
                 .set_bounds(squeezed_ttl, squeezed_entries);
             if let Some(timeline) = &self.timeline {
+                // Capture the configured capacity once so it can be
+                // restored when pressure clears (without it, a single
+                // transient squeeze permanently shrank the timeline).
+                self.timeline_default_entries
+                    .get_or_insert(timeline.max_entries());
                 timeline.set_max_entries(budget_entries / 4);
             }
         } else if usage < budget_entries / 2 {
@@ -1325,6 +1409,11 @@ impl DaemonRuntime {
             let default_entries = vapor_shared::constants::self_write_cache::MAX_ENTRIES;
             self.local_echoes.set_bounds(default_ttl, default_entries);
             self.remote_echoes.set_bounds(default_ttl, default_entries);
+            if let (Some(timeline), Some(default)) =
+                (&self.timeline, self.timeline_default_entries.take())
+            {
+                timeline.set_max_entries(default);
+            }
         }
     }
 
@@ -1434,6 +1523,7 @@ impl DaemonRuntime {
         };
 
         let stabilized = self.debounce.run_tick_for_recorder(recorder, now);
+        let hash_algorithm = self.app.provider().content_hash_algorithm();
         let mut accepted = 0;
         let mut suppressed = 0;
         let mut mirror_reverts = 0;
@@ -1448,7 +1538,13 @@ impl DaemonRuntime {
                 );
                 continue;
             }
-            if is_local_self_write_echo(&mut self.local_echoes, &event, now) {
+            if is_local_self_write_echo(
+                &mut self.local_echoes,
+                &self.tags,
+                &event,
+                hash_algorithm,
+                now,
+            ) {
                 suppressed += 1;
                 logging::debug(
                     "Suppressed stabilized event as a self-write echo",
@@ -1478,7 +1574,7 @@ impl DaemonRuntime {
                 );
                 self.app.set_run_state(RunState::Paused, reason.clone());
                 if let Some(timeline) = &self.timeline {
-                    timeline.push("guard", DEFAULT_PROFILE_ID, reason.clone(), now);
+                    timeline.push("guard", self.profile_id.as_str(), reason.clone(), now);
                 }
                 logging::warning(
                     "Mass-deletion guard tripped; pausing sync",
@@ -1712,6 +1808,14 @@ impl DaemonRuntime {
                 self.path_filter.clone(),
             ));
         }
+        // Bound the chunk by a wall-clock slice so a slow provider's
+        // enumerate cannot hold the tick thread for the whole directory
+        // budget; the high directory budget lets a fast provider converge
+        // a large tree quickly under IdleDrain.
+        let clock = self.clock.clone();
+        let deadline =
+            clock.now() + Duration::from_millis(constants::engine::RECONCILE_SLICE_MILLIS);
+        let should_continue = move || clock.now() < deadline;
         let walker = self
             .reconcile_walker
             .as_mut()
@@ -1720,9 +1824,30 @@ impl DaemonRuntime {
             self.app.provider(),
             self.sync_scope.sync_mode,
             &mut self.state_db,
-            constants::engine::RECONCILE_DIRS_PER_CHECKPOINT,
+            constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN,
             now,
+            &should_continue,
         )
+    }
+
+    /// Forces this runtime into the blocking `Error` run state with a
+    /// reason (used by the multi-profile shell to surface a profile that
+    /// cannot run — e.g. an invalid provider — without performing any sync
+    /// work for it).
+    pub fn set_error_state(&mut self, reason: impl Into<String>) {
+        self.app.set_run_state(RunState::Error, reason.into());
+    }
+
+    /// Reclaims every shared-workgate permit this runtime holds when it is
+    /// being suspended (panic or repeated tick failures): the staged
+    /// executor's in-flight sessions and a running reconcile would
+    /// otherwise leak their permits for the process lifetime, starving all
+    /// other profiles' uploads/hashing/reconciles on the shared workgate.
+    pub fn abort_and_release(&mut self, now: SystemTime) {
+        self.staged_executor.abort_all(&mut self.app);
+        if self.running_reconcile_intent_id.take().is_some() {
+            self.app.abort_reconcile(&mut self.scheduler, now);
+        }
     }
 
     fn complete_running_reconcile(&mut self) -> Result<Option<PathBuf>, DaemonRuntimeError> {
@@ -1778,7 +1903,9 @@ fn blocked_intent_requeue_delay() -> Duration {
 /// so the fallback never hashes a file that obviously diverged.
 fn is_local_self_write_echo(
     local_echoes: &mut SelfWriteCache,
+    tags: &OpIdTagStore,
     event: &crate::debounce::StabilizedEvent,
+    algorithm: vapor_providers::HashAlgorithm,
     now: SystemTime,
 ) -> bool {
     let key = event.path.to_string_lossy();
@@ -1807,7 +1934,17 @@ fn is_local_self_write_echo(
     {
         return false;
     }
-    let Ok(content_hash) = hash_hex_of_file(&event.path) else {
+    // Large files: correlate by the op-id tag rather than a full-file
+    // hash. Hashing a multi-GB downloaded file inline here would stall
+    // debounce release, remote polling, and executor advancement — and
+    // would run even under Suspended (stabilization precedes the throttle
+    // gate), violating "under Suspended, hashing stops". The size gate
+    // above already rejects the common divergent-edit case.
+    if metadata.len() > constants::engine::HASH_STAGE_STEP_BYTES {
+        let op_id = tags.read_op_id(&event.path);
+        return local_echoes.matches_write(&key, op_id.as_deref(), None, now);
+    }
+    let Ok(content_hash) = hash_hex_of_file_with(&event.path, algorithm) else {
         return false;
     };
     local_echoes.matches_write(&key, None, Some(&content_hash), now)
@@ -3334,10 +3471,10 @@ mod tests {
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let subtree_root = watch_root.join("project");
         // Enough matched directories on BOTH sides that one walk chunk
-        // (RECONCILE_DIRS_PER_CHECKPOINT) cannot finish the comparison:
-        // a finished walk completes instead of pausing, so observing
-        // pause cycles requires a genuinely in-progress walk.
-        for index in 0..(constants::engine::RECONCILE_DIRS_PER_CHECKPOINT * 4) {
+        // (RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN) cannot finish the
+        // comparison: a finished walk completes instead of pausing, so
+        // observing pause cycles requires a genuinely in-progress walk.
+        for index in 0..(constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN * 2) {
             std::fs::create_dir_all(subtree_root.join(format!("dir-{index}")))
                 .expect("create local walk fodder");
             std::fs::create_dir_all(cloud_root.join(format!("project/dir-{index}")))
@@ -3827,6 +3964,71 @@ mod tests {
             fixture.runtime.app.snapshot().run_state,
             RunState::Running,
             "one delete after resume is normal use, not a storm"
+        );
+    }
+
+    #[test]
+    fn cloud_root_recovery_does_not_override_an_active_pause() {
+        let mut fixture = BidirectionalFixture::new();
+        // Boot state: cloud root was unavailable and a pause (user or the
+        // mass-deletion guard) is active.
+        fixture.runtime.cloud_root_ready = false;
+        fixture.runtime.app.set_run_state(
+            RunState::Paused,
+            "mass-deletion guard: review the changes, then run `vapor resume`",
+        );
+
+        // The cloud root becomes reachable and the retry recovers it.
+        fixture.tick(70_000);
+
+        assert!(
+            fixture.runtime.cloud_root_ready,
+            "the retry must recover the cloud root"
+        );
+        // The key guarantee: recovery does not flip Paused -> Running.
+        // (The human-facing `reason` string is shared with throttle-state
+        // updates and is refreshed every tick, so it is not asserted here.)
+        assert_eq!(
+            fixture.runtime.app.snapshot().run_state,
+            RunState::Paused,
+            "recovery must not silently clear an active pause"
+        );
+    }
+
+    #[test]
+    fn resume_while_cloud_root_unavailable_reports_error_not_running() {
+        let mut fixture = BidirectionalFixture::new();
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+        // Cloud root unavailable → build's Error state, then a user pause.
+        fixture.runtime.cloud_root_ready = false;
+        fixture.runtime.app.set_run_state(
+            RunState::Error,
+            "cloud sync directory /nope is unavailable; sync work is blocked until it can be ensured",
+        );
+
+        // Resume while still unavailable: applied in isolation (retry would
+        // otherwise recover the fixture's real cloud dir) it must re-derive
+        // Error, not report Running.
+        control.request_resume();
+        fixture
+            .runtime
+            .apply_pending_control_requests(timestamp_ms(1_000))
+            .expect("apply control");
+
+        assert_eq!(
+            fixture.runtime.app.snapshot().run_state,
+            RunState::Error,
+            "resume must not report Running while the cloud root is unavailable"
+        );
+        assert!(
+            fixture
+                .runtime
+                .app
+                .snapshot()
+                .reason
+                .contains("cloud sync directory"),
+            "the real blocker must remain visible in the reason"
         );
     }
 

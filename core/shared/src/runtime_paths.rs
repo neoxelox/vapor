@@ -14,13 +14,20 @@ pub fn vapor_directory() -> PathBuf {
         return path;
     }
 
-    if (env::var_os("CI").is_some()
-        || env::var(constants::env::VAPOR_ENV)
-            .ok()
-            .map(|value| value.eq_ignore_ascii_case("dev"))
-            .unwrap_or(false))
-        && let Ok(current_directory) = env::current_dir()
-    {
+    // Dev/CI default (`./.vapor`) selection. An explicit `VAPOR_ENV`
+    // wins over the CI heuristic (so `VAPOR_ENV=prod` uses `~/.vapor`
+    // even under CI), and `CI` is honored only when *truthy* — a leaked
+    // or explicitly-false `CI` (e.g. `CI=false` in a shell) must not
+    // silently redirect `vapor_dir` to a cwd-relative path.
+    let vapor_env = env::var(constants::env::VAPOR_ENV)
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase());
+    let use_dev_directory = match vapor_env.as_deref() {
+        Some("dev") => true,
+        Some("prod") => false,
+        _ => ci_is_truthy(),
+    };
+    if use_dev_directory && let Ok(current_directory) = env::current_dir() {
         return current_directory.join(constants::runtime::VAPOR_DIRECTORY_NAME);
     }
 
@@ -31,6 +38,56 @@ pub fn vapor_directory() -> PathBuf {
     env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(constants::runtime::VAPOR_DIRECTORY_NAME)
+}
+
+/// Whether the `CI` environment variable is set to a truthy value
+/// (`true`/`1`, case-insensitive). Mere presence is not enough — many
+/// tools set `CI=false`, which must not trigger the dev directory.
+fn ci_is_truthy() -> bool {
+    env::var("CI")
+        .map(|value| {
+            let value = value.trim();
+            value.eq_ignore_ascii_case("true") || value == "1"
+        })
+        .unwrap_or(false)
+}
+
+/// Runs `body` while holding an exclusive advisory lock on a sidecar
+/// (`<config_path>.lock`), serializing `vapor.json` read-modify-write
+/// across every surface (CLI, daemon, app) and process. Without it two
+/// writers can each read the same document and the last rename silently
+/// drops the other's change. The lock releases when `body` returns.
+pub fn with_config_lock<T, E>(
+    config_path: &std::path::Path,
+    body: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E>
+where
+    E: From<std::io::Error>,
+{
+    let mut lock_path = config_path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let lock_path = PathBuf::from(lock_path);
+    if let Some(parent) = lock_path.parent() {
+        ensure_private_directory(parent).map_err(E::from)?;
+    }
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(E::from)?;
+    // Blocking exclusive advisory lock (flock on Unix, LockFileEx on
+    // Windows). Released when `lock_file` drops at the end of this fn.
+    lock_file.lock().map_err(E::from)?;
+    body()
+}
+
+/// A unique temp path next to `target` for an atomic write, so concurrent
+/// writers never collide on one shared staging filename.
+pub fn unique_temp_path(target: &std::path::Path) -> PathBuf {
+    let mut name = target.as_os_str().to_owned();
+    name.push(format!(".vapor-tmp-{}", std::process::id()));
+    PathBuf::from(name)
 }
 
 pub fn logs_directory() -> PathBuf {
@@ -302,6 +359,58 @@ fn normalize_absolute_path(path: PathBuf) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn config_lock_serializes_concurrent_read_modify_write() {
+        // Each thread runs read-count → increment → write under the lock. If
+        // the lock did not actually serialize the cycle, interleaved readers
+        // would share a base value and the last writer would clobber the
+        // others, leaving a final count below the thread count.
+        let dir = TempDir::new().expect("tempdir");
+        let path = std::sync::Arc::new(dir.path().join("vapor.json"));
+        fs::write(path.as_path(), b"{\"count\":0}\n").expect("seed");
+
+        const THREADS: u64 = 12;
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    with_config_lock::<(), std::io::Error>(&path, || {
+                        let text = fs::read_to_string(path.as_path())?;
+                        let mut doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+                        let current = doc["count"].as_u64().unwrap();
+                        doc["count"] = serde_json::json!(current + 1);
+                        let tmp = unique_temp_path(&path);
+                        fs::write(&tmp, format!("{doc}\n").as_bytes())?;
+                        fs::rename(&tmp, path.as_path())?;
+                        Ok(())
+                    })
+                    .expect("locked write");
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("thread joins");
+        }
+
+        let final_text = fs::read_to_string(path.as_path()).expect("read back");
+        let doc: serde_json::Value = serde_json::from_str(&final_text).expect("parse");
+        assert_eq!(doc["count"].as_u64(), Some(THREADS));
+    }
+
+    #[test]
+    fn unique_temp_path_sits_next_to_the_target() {
+        let target = PathBuf::from("/tmp/vapor/vapor.json");
+        let temp = unique_temp_path(&target);
+        assert_eq!(temp.parent(), target.parent());
+        assert!(
+            temp.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("vapor.json.vapor-tmp-"),
+            "temp name was {temp:?}"
+        );
+    }
 
     #[test]
     fn tilde_override_expands_against_home_directory() {

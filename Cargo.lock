@@ -1163,6 +1163,7 @@ dependencies = [
 name = "vapor-ipc"
 version = "0.2.0-alpha.3"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -1196,6 +1197,7 @@ dependencies = [
 name = "vapor-providers"
 version = "0.2.0-alpha.3"
 dependencies = [
+ "getrandom 0.4.2",
  "md-5",
  "serde",
  "serde_json",

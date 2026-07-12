@@ -27,6 +27,24 @@ func resolvesVaporDirectoryToCurrentDirectoryForDevEnvironment() {
 }
 
 @Test
+func honorsCIOnlyWhenTruthyAndLetsVaporEnvWin() {
+  let devDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+    .appendingPathComponent(".vapor", isDirectory: true)
+  let homeDir = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent(".vapor", isDirectory: true)
+
+  // A falsey CI must not redirect to the dev directory.
+  #expect(
+    VaporPaths.resolveVaporDirectoryURL(environment: ["CI": "false"]).path == homeDir.path)
+  // A truthy CI does.
+  #expect(VaporPaths.resolveVaporDirectoryURL(environment: ["CI": "true"]).path == devDir.path)
+  // Explicit VAPOR_ENV=prod wins over CI.
+  #expect(
+    VaporPaths.resolveVaporDirectoryURL(environment: ["CI": "true", "VAPOR_ENV": "prod"]).path
+      == homeDir.path)
+}
+
+@Test
 func normalizesRelativeDirectoryPathsAgainstCurrentDirectory() {
   let expected = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
     .appendingPathComponent("nested/.vapor", isDirectory: true)

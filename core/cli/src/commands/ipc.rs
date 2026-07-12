@@ -260,9 +260,26 @@ pub fn tail_logs(tail: Option<usize>) -> io::Result<String> {
     }
 }
 
+/// Streams the whole daemon log to `out` without buffering it in memory,
+/// for the default `vapor logs` (no `--tail`). A long-running install's
+/// log can reach hundreds of MB; reading it into one `String` would spike
+/// CLI memory by the full file size. Returns whether any bytes were
+/// written (so the caller can print a "no log lines yet" placeholder).
+pub fn stream_full_log(out: &mut impl io::Write) -> io::Result<bool> {
+    let path = log_path();
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut reader = io::BufReader::new(file);
+    let copied = io::copy(&mut reader, out)?;
+    Ok(copied > 0)
+}
+
 /// Reads the final `line_count` lines of `path` by scanning backwards in
-/// fixed-size chunks from the end of the file, so tailing a large
-/// unrotated log does not load the whole file into memory.
+/// fixed-size chunks from the end of the file, so tailing a large log
+/// does not load the whole file into memory.
 fn read_last_lines(path: &std::path::Path, line_count: usize) -> io::Result<String> {
     use std::io::{Read, Seek, SeekFrom};
 

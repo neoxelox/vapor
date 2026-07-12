@@ -24,6 +24,12 @@ struct VaporApp: App {
           viewModel.handleMainWindowClosed()
         }
     }
+    // Menubar-first startup (CLAUDE.md §2.1): the main window opens only
+    // via the menubar `openWindow` action, never automatically at launch
+    // or via state restoration. An activation-policy change cannot suppress
+    // window presentation, so this is the declarative fix.
+    .defaultLaunchBehavior(.suppressed)
+    .restorationBehavior(.disabled)
 
     Settings {
       SettingsView(viewModel: viewModel)
@@ -37,7 +43,7 @@ struct VaporApp: App {
           viewModel.handleOpenFromMenuBar()
         },
         quitVaporAction: {
-          viewModel.handleQuitFromMenuBar()
+          Task { @MainActor in await viewModel.handleQuitFromMenuBar() }
         }
       )
     }

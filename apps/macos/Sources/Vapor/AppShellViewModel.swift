@@ -207,14 +207,49 @@ final class AppShellViewModel: ObservableObject {
     logger.info("Daemon health monitoring active")
   }
 
-  func refreshCrashLoopPauseState() {
-    state.crashLoopPaused = daemonLifecycleManager.isInCrashLoopPause
+  /// Reads the crash-loop pause state over the `vapor` CLI. The read is
+  /// a blocking subprocess round-trip, so it runs on `lifecycleQueue`
+  /// (never the main actor) and publishes back after the `await`.
+  func refreshCrashLoopPauseState() async {
+    state.crashLoopPaused = await readCrashLoopPausedOffMain()
   }
 
-  func acknowledgeCrashLoopPause() {
-    daemonLifecycleManager.acknowledgeCrashLoopPause()
-    state.crashLoopPaused = daemonLifecycleManager.isInCrashLoopPause
+  func acknowledgeCrashLoopPause() async {
+    let manager = self.daemonLifecycleManager
+    let logger = self.logger
+    // Keep the current banner on any CLI failure: silently clearing it
+    // would report the app healthy while the daemon is still paused.
+    let previous = state.crashLoopPaused
+    // Acknowledge and re-read in one background hop so the click never
+    // parks the main run loop on two back-to-back subprocess round-trips.
+    let paused: Bool = await withCheckedContinuation { continuation in
+      lifecycleQueue.async {
+        do {
+          try manager.acknowledgeCrashLoopPause()
+          continuation.resume(returning: try manager.crashLoopPauseState())
+        } catch {
+          logger.error(
+            "Failed to acknowledge crash-loop pause; keeping the current state",
+            metadata: ["error": String(describing: error)]
+          )
+          continuation.resume(returning: previous)
+        }
+      }
+    }
+    state.crashLoopPaused = paused
     logger.warning("Acknowledged crash-loop pause from app surface")
+  }
+
+  /// Reads the crash-loop state on `lifecycleQueue` so its CLI subprocess
+  /// never runs on the main actor; keeps the previous state on error.
+  private func readCrashLoopPausedOffMain() async -> Bool {
+    let manager = self.daemonLifecycleManager
+    let previous = state.crashLoopPaused
+    return await withCheckedContinuation { continuation in
+      lifecycleQueue.async {
+        continuation.resume(returning: (try? manager.crashLoopPauseState()) ?? previous)
+      }
+    }
   }
 
   func prepareMenubarOnlyStartupSurface() {
@@ -236,13 +271,29 @@ final class AppShellViewModel: ObservableObject {
     lifecycleCoordinator?.handleOpenFromMenuBar()
   }
 
-  func handleQuitFromMenuBar() {
-    healthMonitor?.stop()
-    lifecycleCoordinator?.handleQuitFromMenuBar()
+  func handleQuitFromMenuBar() async {
+    // Drain the health tick off the main actor first: `stop()` blocks on
+    // the health queue behind any in-flight `vapor service check`, which
+    // could otherwise beachball the main thread and (worse) race a
+    // restart against the stop below. Running it on `lifecycleQueue` also
+    // orders it ahead of the coordinator's stop on the same queue.
+    let monitor = self.healthMonitor
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+      lifecycleQueue.async {
+        monitor?.stop()
+        continuation.resume()
+      }
+    }
+    await lifecycleCoordinator?.handleQuitFromMenuBar(serializingOn: lifecycleQueue)
   }
 
   func toggleAutoLaunch() {
     let nextState = !state.autoLaunchEnabled
+    // Optimistically flip the published value now so a rapid second click
+    // computes its target from this intent (not the pre-op value that only
+    // updates after the full CLI round-trip); the queued operations run
+    // serially and the final completion publishes the persisted truth.
+    state.autoLaunchEnabled = nextState
     logger.info("Toggling auto-launch", metadata: ["next_value": String(nextState)])
 
     let daemonLifecycleManager = self.daemonLifecycleManager

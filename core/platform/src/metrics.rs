@@ -70,6 +70,14 @@ impl NativePlatformMetricsSampler {
     pub fn for_current_host() -> Self {
         Self::default()
     }
+
+    /// Whether real per-OS sampling is wired in. `false` while the sampler
+    /// forwards to the static fallback, so callers can warn that
+    /// throttle inputs are placeholders. Flip to `true` when the native
+    /// bridge lands.
+    pub fn has_native_sampling() -> bool {
+        false
+    }
 }
 
 impl PlatformMetricsSampler for NativePlatformMetricsSampler {
