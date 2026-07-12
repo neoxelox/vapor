@@ -1094,7 +1094,7 @@ repo hygiene (.env.example, .gitignore, locales, agent skills, Cargo metadata).
 | low | perf | `scripts/lint.sh:18` | lint.sh runs the identical Swift lint command twice per invocation |
 | low | bug | `scripts/tests/version.sh:90` | version.sh fixture tests inherit the developer's global git config and fail on gpgsign/hooksPath machines |
 
-### [high] Third-party actions referenced by mutable tags inside the secret-bearing release job
+### [high] Third-party actions referenced by mutable tags inside the secret-bearing release job  ✅ DONE
 
 **Category**: security · **Where**: `.github/workflows/release.yml:112` · **Review group**: ci
 
