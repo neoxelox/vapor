@@ -131,7 +131,17 @@ public struct NoopLaunchAgentController: LaunchAgentControlling {
 public final class DaemonLifecycleManager: @unchecked Sendable {
   private let launchAgentController: any LaunchAgentControlling
   private let loginItemController: (any LoginItemControlling)?
-  private let stateQueue = DispatchQueue(label: "sh.arn.vapor.daemon-lifecycle.state")
+  // Process-shared so that "one lifecycle operation at a time" holds even
+  // when the app swaps in a fresh manager on a config save: the health
+  // monitor keeps a reference to the original manager, so a per-instance
+  // queue would let a periodic `vapor service check` run concurrently with
+  // a user-initiated install/uninstall/stop on a different queue — the
+  // check could then observe the daemon vanishing mid-uninstall and
+  // restart it (or register a spurious crash toward crash-loop pause).
+  private var stateQueue: DispatchQueue { Self.sharedStateQueue }
+  private static let sharedStateQueue = DispatchQueue(
+    label: "sh.arn.vapor.daemon-lifecycle.state"
+  )
   private let logger: StructuredLogger
 
   public init(

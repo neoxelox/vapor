@@ -1564,7 +1564,7 @@ README.md:77 states that matching VAPOR_* env vars override any vapor.json key, 
 
 **Suggested fix**: State explicitly which keys have env-var counterparts (the six filtering/directory keys plus VAPOR_DIR/VAPOR_ENV/VAPOR_LOG_LEVEL/VAPOR_GDRIVE_*), or add the missing env overrides to the loader if per-key override is the intended contract.
 
-### [medium] Config-change manager swap defeats lifecycle-operation serialization and strands the health monitor on a stale manager
+### [medium] Config-change manager swap defeats lifecycle-operation serialization and strands the health monitor on a stale manager  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/Vapor/AppShellViewModel.swift:479`
 
