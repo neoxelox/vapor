@@ -45,5 +45,7 @@
   "sync_state_syncing_detail": "Applying lightweight sync work",
   "sync_state_throttled_detail": "Deferred because system is active",
   "sync_state_suspended_detail": "Paused due to pressure policy",
-  "sync_state_error_detail": "Action required"
+  "sync_state_error_detail": "Action required",
+  "login_item_requires_approval_detail": "macOS is blocking Vapor's login item, so the app will not open at login. Approve Vapor under System Settings › General › Login Items.",
+  "login_item_open_settings": "Open Login Items Settings…"
 }

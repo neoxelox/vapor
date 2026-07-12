@@ -72,6 +72,10 @@ public struct AppShellState: Equatable, Codable, Sendable {
   public var providerName: String
   public var vaporDirectoryPath: String
   public var crashLoopPaused: Bool
+  /// The app is set to start at login but macOS is blocking the login
+  /// item (user disabled it in System Settings, or MDM policy). The UI
+  /// shows a hint with a shortcut to System Settings › Login Items.
+  public var loginItemRequiresApproval: Bool
 
   public init(
     syncState: SyncSurfaceState,
@@ -86,7 +90,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     effectiveLanguageCode: String,
     providerName: String,
     vaporDirectoryPath: String,
-    crashLoopPaused: Bool = false
+    crashLoopPaused: Bool = false,
+    loginItemRequiresApproval: Bool = false
   ) {
     self.syncState = syncState
     self.configurationIssuePath = configurationIssuePath
@@ -101,6 +106,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
     self.providerName = providerName
     self.vaporDirectoryPath = vaporDirectoryPath
     self.crashLoopPaused = crashLoopPaused
+    self.loginItemRequiresApproval = loginItemRequiresApproval
   }
 
   public static let initial = AppShellState(

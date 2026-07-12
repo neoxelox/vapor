@@ -80,17 +80,41 @@ public protocol LaunchAgentControlling {
   func acknowledgeCrashLoopPause() throws
 }
 
+/// Outcome of a login-item registration attempt, surfaced so the UI
+/// can distinguish "will launch at login" from "macOS is blocking it".
+/// Silently reporting success while the app will not actually launch at
+/// login violates the degrade-safely rule for permissioned features.
+public enum LoginItemRegistrationOutcome: Equatable, Sendable {
+  case registered
+  /// macOS deferred or refused the registration — typically the user
+  /// disabled the login item in System Settings, or device management
+  /// policy blocks it. The user must approve it under System Settings
+  /// › General › Login Items.
+  case requiresApproval
+  case failed(String)
+  /// No login-item controller is wired (tests, hosts without
+  /// ServiceManagement).
+  case unavailable
+}
+
 public protocol LoginItemControlling {
-  func register() throws
+  @discardableResult
+  func register() throws -> LoginItemRegistrationOutcome
   func unregister() throws
+  /// Opens System Settings at the Login Items pane so the user can
+  /// approve a blocked registration. No-op where unsupported.
+  func openLoginItemSettings()
 }
 
 public struct NoopLoginItemController: LoginItemControlling {
   public init() {}
 
-  public func register() throws {}
+  @discardableResult
+  public func register() throws -> LoginItemRegistrationOutcome { .unavailable }
 
   public func unregister() throws {}
+
+  public func openLoginItemSettings() {}
 }
 
 public struct NoopLaunchAgentController: LaunchAgentControlling {
@@ -131,6 +155,10 @@ public struct NoopLaunchAgentController: LaunchAgentControlling {
 public final class DaemonLifecycleManager: @unchecked Sendable {
   private let launchAgentController: any LaunchAgentControlling
   private let loginItemController: (any LoginItemControlling)?
+  /// Guarded by `stateQueue`: every mutation happens inside the
+  /// serialized lifecycle operations, and the public accessor reads
+  /// through the same queue.
+  private var loginItemOutcome: LoginItemRegistrationOutcome = .unavailable
   // Process-shared so that "one lifecycle operation at a time" holds even
   // when the app swaps in a fresh manager on a config save: the health
   // monitor keeps a reference to the original manager, so a per-instance
@@ -273,10 +301,34 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
     }
   }
 
+  /// Last login-item registration outcome. Read after
+  /// `setAutoLaunchEnabled` / `bootstrapIfNeeded` so the UI can surface
+  /// a blocked registration instead of showing the toggle ON while the
+  /// app will not actually launch at login.
+  public func lastLoginItemRegistrationOutcome() -> LoginItemRegistrationOutcome {
+    stateQueue.sync { loginItemOutcome }
+  }
+
+  /// Opens System Settings at the Login Items pane.
+  public func openLoginItemSettings() {
+    loginItemController?.openLoginItemSettings()
+  }
+
   private func registerLoginItemIfAvailable() {
+    guard let loginItemController else {
+      loginItemOutcome = .unavailable
+      return
+    }
     do {
-      try loginItemController?.register()
+      let outcome = try loginItemController.register()
+      loginItemOutcome = outcome
+      if outcome == .requiresApproval {
+        logger.warning(
+          "Login item registration requires user approval in System Settings"
+        )
+      }
     } catch {
+      loginItemOutcome = .failed(String(describing: error))
       logger.warning(
         "Failed to register app login item",
         metadata: ["error": String(describing: error)]
@@ -285,6 +337,7 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
   }
 
   private func unregisterLoginItemIfAvailable() {
+    loginItemOutcome = .unavailable
     do {
       try loginItemController?.unregister()
     } catch {
