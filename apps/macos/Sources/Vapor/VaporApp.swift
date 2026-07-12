@@ -43,7 +43,7 @@ struct VaporApp: App {
           viewModel.handleOpenFromMenuBar()
         },
         quitVaporAction: {
-          viewModel.handleQuitFromMenuBar()
+          Task { @MainActor in await viewModel.handleQuitFromMenuBar() }
         }
       )
     }

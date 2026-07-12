@@ -1166,7 +1166,7 @@ All five workflows (lint, test, build, perf, release) compute the identical cach
 
 **Suggested fix**: Include the workflow/job name in the key (e.g. `${{ runner.os }}-cargo-${{ github.workflow }}-${{ hashFiles('**/Cargo.lock') }}`) or switch to `Swatinem/rust-cache` (SHA-pinned), which handles per-job keying and excludes `~/.cargo/bin` correctly.
 
-### [medium] Crash-loop acknowledge spawns two CLI subprocesses synchronously on the main thread
+### [medium] Crash-loop acknowledge spawns two CLI subprocesses synchronously on the main thread  ✅ DONE
 
 **Category**: perf · **Where**: `apps/macos/Sources/Vapor/AppShellViewModel.swift:214` · **Review group**: macos-app-shell
 
@@ -1174,7 +1174,7 @@ acknowledgeCrashLoopPause() (AppShellViewModel.swift:214-218) runs two synchrono
 
 **Suggested fix**: Move both operations onto `lifecycleQueue` like `toggleAutoLaunch()` does, and hop back to the main actor to publish the resulting `crashLoopPaused` value.
 
-### [medium] Quit can leave the daemon running: race between queued auto-launch work on lifecycleQueue and the main-thread quit path
+### [medium] Quit can leave the daemon running: race between queued auto-launch work on lifecycleQueue and the main-thread quit path  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/Vapor/AppShellViewModel.swift:239` · **Review group**: macos-app-shell
 
@@ -1182,7 +1182,7 @@ toggleAutoLaunch()/disableAutoLaunchAndStopNow() (and bootstrapDaemonLifecycleIf
 
 **Suggested fix**: Route the quit-time stop through the same `lifecycleQueue` (serializing behind any pending toggles) and call `terminateApplication()` only from that queue's completion hop back to the main actor, so quit is always the last lifecycle operation.
 
-### [medium] Quit path blocks the main thread on unbounded CLI subprocess waits — Quit Vapor can hang forever
+### [medium] Quit path blocks the main thread on unbounded CLI subprocess waits — Quit Vapor can hang forever  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/Vapor/AppShellViewModel.swift:240` · **Review group**: macos-app-shell
 
@@ -1190,7 +1190,7 @@ toggleAutoLaunch()/disableAutoLaunchAndStopNow() (and bootstrapDaemonLifecycleIf
 
 **Suggested fix**: Run the stop sequence off the main actor with a bounded deadline (e.g. a few seconds), then call `terminateApplication()` regardless of outcome; in `ProcessVaporCLIRunner`, read the pipes concurrently (readability handlers or background reads) before `waitUntilExit()` and add a kill-on-timeout.
 
-### [medium] Main thread blocks on vapor CLI subprocess behind a queue shared with the 30s health tick
+### [medium] Main thread blocks on vapor CLI subprocess behind a queue shared with the 30s health tick  ✅ DONE
 
 **Category**: perf · **Where**: `apps/macos/Sources/VaporCore/DaemonLifecycle.swift:215` · **Review group**: macos-app-core
 
@@ -1318,7 +1318,7 @@ lint.yml, test.yml, and build.yml (each a 3-OS matrix including 30-45-minute mac
 
 **Suggested fix**: Add to each PR workflow: `concurrency: { group: <name>-${{ github.workflow }}-${{ github.ref }}, cancel-in-progress: ${{ github.ref != 'refs/heads/main' }} }` so superseded PR runs are cancelled while main pushes and workflow_call invocations from release are never cancelled.
 
-### [low] toggleAutoLaunch computes the target value from stale UI state, so rapid double-toggle re-applies instead of reverting
+### [low] toggleAutoLaunch computes the target value from stale UI state, so rapid double-toggle re-applies instead of reverting  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/Vapor/AppShellViewModel.swift:245` · **Review group**: macos-app-shell
 
@@ -1326,7 +1326,7 @@ lint.yml, test.yml, and build.yml (each a 3-OS matrix including 30-45-minute mac
 
 **Suggested fix**: Track the pending target (e.g. a `pendingAutoLaunchTarget` optional flipped on each click and used as the base for `!`), or optimistically update `state.autoLaunchEnabled` before enqueuing and roll back on failure; alternatively disable the toggle while an operation is in flight.
 
-### [low] Quit from menubar blocks the main thread on a subprocess with no time bound
+### [low] Quit from menubar blocks the main thread on a subprocess with no time bound  ✅ DONE
 
 **Category**: improvement · **Where**: `apps/macos/Sources/VaporCore/AppLifecycleCoordinator.swift:46` · **Review group**: macos-app-core
 
@@ -1334,7 +1334,7 @@ handleQuitFromMenuBar is @MainActor and synchronously runs stopDaemonForTerminat
 
 **Suggested fix**: Run the stop on a background task with a bounded deadline (e.g. a few seconds), then call terminateApplication() regardless of stop success/failure, logging the outcome — quitting must never be blockable by a wedged subprocess.
 
-### [low] Crash-loop state fails open: CLI errors report 'not paused', letting the UI clear a real pause
+### [low] Crash-loop state fails open: CLI errors report 'not paused', letting the UI clear a real pause  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/VaporCore/DaemonLifecycle.swift:223` · **Review group**: macos-app-core
 

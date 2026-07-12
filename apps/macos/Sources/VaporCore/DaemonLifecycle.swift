@@ -211,31 +211,21 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
     }
   }
 
-  public var isInCrashLoopPause: Bool {
-    stateQueue.sync {
-      do {
-        return try launchAgentController.status().crashLoopPaused
-      } catch {
-        logger.error(
-          "Failed to read crash-loop state from the vapor CLI",
-          metadata: ["error": String(describing: error)]
-        )
-        return false
-      }
+  /// Crash-loop pause state, or the CLI error. Unlike the fail-open
+  /// `autoLaunchEnabled` default, this must NOT default to "not paused":
+  /// a transient read failure that silently reported healthy would let
+  /// the UI clear a real pause banner. Callers keep their previous known
+  /// state on error (the 30s health tick restores the truth regardless).
+  public func crashLoopPauseState() throws -> Bool {
+    try stateQueue.sync {
+      try launchAgentController.status().crashLoopPaused
     }
   }
 
-  public func acknowledgeCrashLoopPause() {
-    stateQueue.sync {
-      do {
-        try launchAgentController.acknowledgeCrashLoopPause()
-        logger.warning("Acknowledged crash-loop pause; auto-restart may proceed again")
-      } catch {
-        logger.error(
-          "Failed to acknowledge crash-loop pause",
-          metadata: ["error": String(describing: error)]
-        )
-      }
+  public func acknowledgeCrashLoopPause() throws {
+    try stateQueue.sync {
+      try launchAgentController.acknowledgeCrashLoopPause()
+      logger.warning("Acknowledged crash-loop pause; auto-restart may proceed again")
     }
   }
 

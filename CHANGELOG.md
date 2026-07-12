@@ -33,6 +33,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The IPC client now verifies socket ownership before connecting (full-repo review): it refuses (typed `ForeignSocket` error) any socket at the resolved path not owned by the current user. Previously, under the deterministic temp-dir relocation for over-long socket paths, a local user on a world-writable `/tmp` (a planned Linux surface) could pre-create the socket and impersonate the daemon — forging `Running`/synced status and acks and receiving `UpdateExcludes` rule contents. The server-side 0700-parent/0600-socket protection is now symmetric on the client side.
 
+### Fixed (macOS app)
+
+- macOS lifecycle seam no longer blocks the main thread on `vapor` CLI subprocesses (full-repo review): acknowledging a crash-loop pause and the menubar Quit path now run their CLI round-trips off the main actor, so clicking the crash-loop banner or Quit can no longer beachball (or, on a wedged CLI/launchctl, hang) the UI. Quit serializes its daemon stop on the same lifecycle queue as auto-launch toggles — so a just-enabled auto-launch can no longer start the daemon *after* the quit-time stop — drains the health tick first, and always proceeds to terminate.
+- The crash-loop pause read no longer fails open (full-repo review): a transient `vapor` CLI failure while acknowledging or reading the pause state keeps the current banner instead of silently reporting the app healthy while the daemon is still paused.
+- Rapid double-toggling "Start at login" now reverts instead of duplicating the first action (full-repo review): the published value flips optimistically so a quick second click computes its target from the intended state rather than the stale pre-round-trip value.
+
 ### Fixed (observability)
 
 - Structured logs are now size-rotated (full-repo review): `StructuredLogger` rolls the live log to `<name>.1` (cascading `.1`→`.2`… up to a kept-generation cap, dropping the oldest) once it passes an 8 MiB cap, and the daemon trims its service-manager stdout/stderr redirect files at startup — so an always-on daemon logging at Debug under storms no longer grows its logs without bound.

@@ -6,6 +6,24 @@ import Testing
 
 @MainActor
 @Test
+func rapidDoubleToggleAutoLaunchRevertsInsteadOfDuplicating() {
+  let viewModel = AppShellViewModel(
+    daemonLifecycleManager: .placeholder(),
+    configuration: VaporConfiguration()
+  )
+  let start = viewModel.state.autoLaunchEnabled
+
+  // Two quick clicks (each computes its target from the published value).
+  // Before the optimistic flip, both read the pre-op value and the second
+  // click duplicated the first instead of reverting it.
+  viewModel.toggleAutoLaunch()
+  #expect(viewModel.state.autoLaunchEnabled == !start)
+  viewModel.toggleAutoLaunch()
+  #expect(viewModel.state.autoLaunchEnabled == start)
+}
+
+@MainActor
+@Test
 func ignoreRuleDraftsStartFromConfigurationAndTrackPendingChanges() throws {
   let fileManager = FileManager.default
   let rootURL = makeTemporaryRoot(fileManager: fileManager)

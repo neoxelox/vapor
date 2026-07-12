@@ -108,7 +108,7 @@ struct MenuBarContentView: View {
       }
       if viewModel.state.crashLoopPaused {
         Button(viewModel.localized("menubar_acknowledge_crash_loop_pause")) {
-          viewModel.acknowledgeCrashLoopPause()
+          Task { @MainActor in await viewModel.acknowledgeCrashLoopPause() }
         }
       } else {
         Button(viewModel.localized("menubar_toggle_auto_launch")) {

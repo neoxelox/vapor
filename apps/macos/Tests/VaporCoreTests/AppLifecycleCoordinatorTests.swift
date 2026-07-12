@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import VaporCore
@@ -38,7 +39,7 @@ func openFromMenubarRestoresDockPresence() {
 
 @MainActor
 @Test
-func quittingFromMenubarStopsDaemonBeforeAppTermination() {
+func quittingFromMenubarStopsDaemonBeforeAppTermination() async {
   let events = EventRecorder()
   let launchAgent = OrderedRecordingServiceController(eventRecorder: events)
   let runtime = RecordingAppRuntimeController(eventRecorder: events)
@@ -48,14 +49,16 @@ func quittingFromMenubarStopsDaemonBeforeAppTermination() {
     runtimeController: runtime
   )
 
-  coordinator.handleQuitFromMenuBar()
+  await coordinator.handleQuitFromMenuBar(
+    serializingOn: DispatchQueue(label: "test.lifecycle")
+  )
 
   #expect(events.events == ["daemon.stop", "app.terminate"])
 }
 
 @MainActor
 @Test
-func cleanShutdownFromMenubarLeavesLaunchAgentPassive() {
+func cleanShutdownFromMenubarLeavesLaunchAgentPassive() async {
   let launchAgent = OrderedRecordingServiceController()
   let runtime = RecordingAppRuntimeController()
   let manager = DaemonLifecycleManager(launchAgentController: launchAgent)
@@ -64,7 +67,9 @@ func cleanShutdownFromMenubarLeavesLaunchAgentPassive() {
     runtimeController: runtime
   )
 
-  coordinator.handleQuitFromMenuBar()
+  await coordinator.handleQuitFromMenuBar(
+    serializingOn: DispatchQueue(label: "test.lifecycle")
+  )
 
   // Menubar quit must only stop the daemon and terminate the app process.
   // It must not bootstrap, install, disable, or start the service —
