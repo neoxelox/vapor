@@ -788,7 +788,7 @@ In the filesystem provider, `FilesystemUploadSession::step()` invokes `finalize(
 
 **Suggested fix**: Verify the precondition incrementally (hash the target in budgeted chunks across step() calls before/while streaming the payload) or record the target's (size, mtime) at begin_upload and re-check cheaply at finalize, reserving full hashing for a chunked path.
 
-### [medium] Changes feed is Drive-wide and each out-of-scope change triggers an uncached N+1 parent-chain walk
+### [medium] Changes feed is Drive-wide and each out-of-scope change triggers an uncached N+1 parent-chain walk  ✅ DONE
 
 **Category**: perf · **Where**: `core/providers/src/gdrive/mod.rs:852` · **Review group**: gdrive
 
@@ -860,7 +860,7 @@ NativeHttpTransport (core/providers/src/http.rs:90) caps body reads with .take(6
 
 **Suggested fix**: Read up to limit+1 bytes and return an HttpTransportError (or a distinct permanent-classifiable error) when the body exceeds the cap, or honor Content-Length and verify received length before returning Ok.
 
-### [medium] Backslash normalization and multi-segment join() silently remap legal filenames containing separators to nested paths
+### [medium] Backslash normalization and multi-segment join() silently remap legal filenames containing separators to nested paths  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/paths.rs:59` · **Review group**: provider-core
 
@@ -868,7 +868,7 @@ RemotePath::new (core/providers/src/paths.rs:59) unconditionally rewrites '\' to
 
 **Suggested fix**: Only translate '\\' to '/' where it is genuinely a separator (i.e. in Windows-origin native paths, at the from_local/OS boundary), not in RemotePath::new; make join() reject segments containing '/' or '\\'; percent-escape or refuse remote names containing the separator until an escaping scheme exists.
 
-### [medium] Op-id side-file namespace collides with real user files: silent overwrite and silent exclusion from sync
+### [medium] Op-id side-file namespace collides with real user files: silent overwrite and silent exclusion from sync  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/tags.rs:45` · **Review group**: provider-core
 

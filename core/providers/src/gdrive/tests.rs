@@ -463,6 +463,56 @@ fn changes_baseline_and_increments_map_paths_and_op_ids() {
 }
 
 #[test]
+fn a_busy_out_of_scope_file_is_walked_once_then_served_from_the_negative_cache() {
+    // The changes feed is Drive-wide, so a file the user edits constantly
+    // outside the sync root must not re-walk its parent chain every poll.
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+
+    // Poll 1: a change to a file whose parent is NOT the sync root.
+    transport.push_response(
+        200,
+        r#"{"newStartPageToken":"token-2","changes":[
+            {"fileId":"f-out","file":{"id":"f-out","name":"colleague.doc","mimeType":"text/plain",
+             "size":"3","md5Checksum":"h","parents":["outside-parent"]}}
+        ]}"#,
+    );
+    // The one parent lookup: a top-level folder that is not our root.
+    transport.push_response(
+        200,
+        r#"{"id":"outside-parent","name":"TheirDrive","mimeType":"application/vnd.google-apps.folder"}"#,
+    );
+    // Poll 2: the same file changes again.
+    transport.push_response(
+        200,
+        r#"{"newStartPageToken":"token-3","changes":[
+            {"fileId":"f-out","file":{"id":"f-out","name":"colleague.doc","mimeType":"text/plain",
+             "size":"4","md5Checksum":"h2","parents":["outside-parent"]}}
+        ]}"#,
+    );
+
+    for cursor in ["token-1", "token-2"] {
+        match provider.poll_changes(Some(cursor), 100).expect("poll") {
+            ChangesPoll::Page(page) => assert!(
+                page.changes.is_empty(),
+                "an out-of-scope change must surface nothing"
+            ),
+            other => panic!("expected page, got {other:?}"),
+        }
+    }
+
+    let parent_walks = transport
+        .recorded_requests()
+        .iter()
+        .filter(|r| r.url.contains("files/outside-parent"))
+        .count();
+    assert_eq!(
+        parent_walks, 1,
+        "the second poll must be served from the negative cache with zero walk requests"
+    );
+}
+
+#[test]
 fn expired_page_token_maps_to_cursor_expired() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = ensured_provider(transport.clone());

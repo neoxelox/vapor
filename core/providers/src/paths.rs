@@ -25,6 +25,12 @@ pub enum RemotePathError {
     Absolute(String),
     Traversal(String),
     EmptySegment(String),
+    /// A literal backslash appears in the path. `/` is the one canonical
+    /// separator; a `\` is ambiguous (a legal filename character on
+    /// macOS/Linux, the separator on Windows) and would round-trip to a
+    /// different file across OSes, so it is refused until an escaping
+    /// scheme exists rather than silently remapped to a nested path.
+    Backslash(String),
 }
 
 impl Display for RemotePathError {
@@ -36,6 +42,9 @@ impl Display for RemotePathError {
                 write!(f, "remote path contains traversal segments: {path}")
             }
             Self::EmptySegment(path) => write!(f, "remote path contains empty segments: {path}"),
+            Self::Backslash(path) => {
+                write!(f, "remote path contains an unsupported backslash: {path}")
+            }
         }
     }
 }
@@ -53,11 +62,16 @@ impl RemotePath {
         if raw.is_empty() {
             return Err(RemotePathError::Empty);
         }
-        if raw.starts_with('/') || raw.starts_with('\\') {
+        if raw.starts_with('/') {
             return Err(RemotePathError::Absolute(raw));
         }
-        let normalized = raw.replace('\\', "/");
-        for segment in normalized.split('/') {
+        // `\` is not a separator here (that translation belongs at the
+        // Windows-native boundary in `from_local`); a literal backslash in
+        // a name is refused rather than remapped into a nested path.
+        if raw.contains('\\') {
+            return Err(RemotePathError::Backslash(raw));
+        }
+        for segment in raw.split('/') {
             if segment.is_empty() {
                 return Err(RemotePathError::EmptySegment(raw));
             }
@@ -65,7 +79,7 @@ impl RemotePath {
                 return Err(RemotePathError::Traversal(raw));
             }
         }
-        Ok(Self(normalized))
+        Ok(Self(raw))
     }
 
     /// Derives the remote path of `absolute` relative to `local_root`.
@@ -114,7 +128,17 @@ impl RemotePath {
         }
     }
 
+    /// Appends exactly one path segment. A `segment` that itself contains
+    /// a separator (`/` or `\`) is rejected rather than silently expanded
+    /// into multiple levels — a Drive object legally named `a/b` must not
+    /// become the nested path `a` → `b`.
     pub fn join(&self, segment: &str) -> Result<Self, RemotePathError> {
+        if segment.contains('/') {
+            return Err(RemotePathError::EmptySegment(segment.to_string()));
+        }
+        if segment.contains('\\') {
+            return Err(RemotePathError::Backslash(segment.to_string()));
+        }
         if self.is_root() {
             Self::new(segment)
         } else {
@@ -189,9 +213,31 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_backslash_separators() {
-        let path = RemotePath::new("docs\\notes\\today.md").expect("valid path");
-        assert_eq!(path.as_str(), "docs/notes/today.md");
+    fn backslash_is_refused_not_remapped_to_a_nested_path() {
+        // A macOS/Linux file legally named `foo\bar.txt` is one segment; it
+        // must not be silently remapped into a nested `foo` → `bar.txt`.
+        assert_eq!(
+            RemotePath::new("foo\\bar.txt"),
+            Err(RemotePathError::Backslash("foo\\bar.txt".to_string()))
+        );
+        assert_eq!(
+            RemotePath::new("docs\\notes\\today.md"),
+            Err(RemotePathError::Backslash(
+                "docs\\notes\\today.md".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn join_refuses_multi_segment_names() {
+        // A Drive object legally named `a/b` must not expand into two levels.
+        let docs = RemotePath::new("docs").expect("valid");
+        assert!(docs.join("a/b").is_err());
+        assert!(docs.join("a\\b").is_err());
+        assert_eq!(
+            docs.join("plain.txt").expect("single").as_str(),
+            "docs/plain.txt"
+        );
     }
 
     #[test]

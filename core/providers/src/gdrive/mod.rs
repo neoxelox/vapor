@@ -73,6 +73,15 @@ const CHUNK_MAX: u64 = 64 * 1024 * 1024;
 const CHUNK_START: u64 = 8 * 1024 * 1024;
 /// Refresh this long before the recorded expiry.
 const TOKEN_REFRESH_MARGIN_MS: u64 = 60_000;
+/// How long a file id stays remembered as outside the sync root before
+/// the changes feed re-checks it (in case it was moved into scope). The
+/// changes feed is Drive-wide, so a busy out-of-scope file (a colleague's
+/// doc edited every minute) would otherwise re-walk its whole parent
+/// chain on every poll.
+const OUT_OF_SCOPE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+/// Cap on the out-of-scope negative cache so a churny wider Drive cannot
+/// grow it without bound; oldest entries are pruned first.
+const OUT_OF_SCOPE_MAX_ENTRIES: usize = 4096;
 
 #[derive(Clone)]
 pub struct GdriveConfig {
@@ -260,6 +269,9 @@ pub struct GoogleDriveProvider {
     id_by_path: Mutex<BTreeMap<String, String>>,
     /// File-id → path cache for changes mapping.
     path_by_id: Mutex<BTreeMap<String, String>>,
+    /// File ids the changes feed has resolved to be outside the sync root,
+    /// with the time they were last confirmed so the entry can expire.
+    out_of_scope: Mutex<BTreeMap<String, SystemTime>>,
     /// Learned resumable chunk size, shared across sessions.
     chunk_hint: Arc<Mutex<u64>>,
 }
@@ -280,6 +292,7 @@ impl GoogleDriveProvider {
             root_id: Mutex::new(None),
             id_by_path: Mutex::new(BTreeMap::new()),
             path_by_id: Mutex::new(BTreeMap::new()),
+            out_of_scope: Mutex::new(BTreeMap::new()),
             chunk_hint: Arc::new(Mutex::new(CHUNK_START)),
         }
     }
@@ -570,6 +583,11 @@ impl GoogleDriveProvider {
     /// Best-effort path for a changed file id: cache first, then a
     /// parent-chain walk toward the ensured root.
     fn path_for_changed_file(&self, file: &GdFile) -> Option<ResolvedChangePath> {
+        // Zero-request reject for a file already resolved to be outside the
+        // sync root, until its TTL lapses (in case it moved into scope).
+        if self.is_known_out_of_scope(&file.id) {
+            return None;
+        }
         // Any previously-cached path for this id is the OLD path — it must
         // NOT be trusted as the current one: a remote rename/move keeps the
         // id but changes the name/parent. Recompute the fresh path from the
@@ -588,7 +606,11 @@ impl GoogleDriveProvider {
             .clone()?;
         // Walk up through parents until the root (bounded depth).
         let mut segments = vec![file.name.clone()];
-        let mut current_parent = file.parents.first().cloned()?;
+        let Some(mut current_parent) = file.parents.first().cloned() else {
+            // A parentless file cannot be under the root.
+            self.mark_out_of_scope(&file.id);
+            return None;
+        };
         let mut new_path = None;
         for _ in 0..64 {
             if current_parent == root_id {
@@ -609,11 +631,23 @@ impl GoogleDriveProvider {
                 break;
             }
             let url = format!("{API_BASE}/files/{current_parent}?fields={FILE_FIELDS}");
+            // A transient API error returns `None` without caching a
+            // verdict, so the next poll retries rather than wrongly
+            // remembering the file as out-of-scope.
             let parent: GdFile = self.api_json("GET", url, None).ok()?;
             segments.push(parent.name.clone());
-            current_parent = parent.parents.first().cloned()?;
+            let Some(next) = parent.parents.first().cloned() else {
+                // Walked up to a top-level parent that is not our root.
+                self.mark_out_of_scope(&file.id);
+                return None;
+            };
+            current_parent = next;
         }
-        let new_path = new_path?;
+        let Some(new_path) = new_path else {
+            // Exhausted the depth bound without reaching the root.
+            self.mark_out_of_scope(&file.id);
+            return None;
+        };
         // Reconcile caches to the fresh path; a stale mapping at a
         // different path is a rename/move the caller must surface as a
         // Removed(old) + CreatedOrModified(new) pair so the local side
@@ -623,7 +657,54 @@ impl GoogleDriveProvider {
             self.evict_path(old);
         }
         self.cache_mapping(&new_path, &file.id);
+        // It resolved in-scope, so drop any stale out-of-scope verdict
+        // (the file may have just been moved into the sync root).
+        self.out_of_scope
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&file.id);
         Some(ResolvedChangePath { new_path, old_path })
+    }
+
+    /// Whether `file_id` is remembered as outside the sync root and the
+    /// memory has not yet expired.
+    fn is_known_out_of_scope(&self, file_id: &str) -> bool {
+        let cache = self
+            .out_of_scope
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match cache.get(file_id) {
+            Some(recorded) => recorded
+                .elapsed()
+                .map(|age| age < OUT_OF_SCOPE_TTL)
+                .unwrap_or(false),
+            None => false,
+        }
+    }
+
+    /// Records `file_id` as outside the sync root, pruning expired entries
+    /// (and, if still over the cap, the oldest) so the cache stays bounded.
+    fn mark_out_of_scope(&self, file_id: &str) {
+        let now = SystemTime::now();
+        let mut cache = self
+            .out_of_scope
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.retain(|_, recorded| {
+            recorded
+                .elapsed()
+                .map(|age| age < OUT_OF_SCOPE_TTL)
+                .unwrap_or(false)
+        });
+        if cache.len() >= OUT_OF_SCOPE_MAX_ENTRIES
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, recorded)| **recorded)
+                .map(|(id, _)| id.clone())
+        {
+            cache.remove(&oldest);
+        }
+        cache.insert(file_id.to_string(), now);
     }
 }
 
@@ -999,8 +1080,6 @@ impl Provider for GoogleDriveProvider {
     }
 }
 
-/// Minimal token+transport handle for sessions (they outlive the
-/// borrow of the provider).
 /// A cheap, cloneable handle over the provider's shared `TokenManager`
 /// that upload/download sessions carry for their hot-path requests. It
 /// clones an `Arc`, so it neither re-reads the SecretStore per request
