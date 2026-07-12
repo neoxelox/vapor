@@ -220,9 +220,10 @@ public final class VaporConfigurationStore {
     let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: vaporDirectoryURL)
 
     guard fileManager.fileExists(atPath: configurationURL.path) else {
-      let defaultConfiguration = VaporConfiguration()
-      try? save(defaultConfiguration)
-      return VaporConfigurationLoadResult(configuration: defaultConfiguration, issue: nil)
+      return persistDefaultConfiguration(
+        at: configurationURL,
+        vaporDirectoryURL: vaporDirectoryURL
+      )
     }
 
     do {
@@ -241,6 +242,50 @@ public final class VaporConfigurationStore {
       )
       return VaporConfigurationLoadResult(
         configuration: VaporConfiguration(),
+        issue: VaporConfigurationLoadIssue(
+          configPath: configurationURL.path,
+          reason: String(describing: error)
+        )
+      )
+    }
+  }
+
+  /// Seeds the default configuration on first launch with an *exclusive*
+  /// create (no fileExists→write TOCTOU): if a concurrently-starting
+  /// daemon wins the create race, adopt the file it wrote rather than
+  /// clobbering its `deviceId`/runtime-owned keys; a genuine write failure
+  /// (read-only, full disk) is surfaced as a load issue instead of being
+  /// swallowed by `try?` and reported as a clean, persisted config.
+  private func persistDefaultConfiguration(
+    at configurationURL: URL,
+    vaporDirectoryURL: URL
+  ) -> VaporConfigurationLoadResult {
+    let defaultConfiguration = VaporConfiguration()
+    do {
+      try VaporPaths.prepareRuntimeDirectories(
+        vaporDirectoryURL: vaporDirectoryURL,
+        fileManager: fileManager
+      )
+      let data = try encoder.encode(defaultConfiguration)
+      try data.write(to: configurationURL, options: .withoutOverwriting)
+      try VaporPaths.ensurePrivateFile(at: configurationURL, fileManager: fileManager)
+      return VaporConfigurationLoadResult(configuration: defaultConfiguration, issue: nil)
+    } catch let error as CocoaError where error.code == .fileWriteFileExists {
+      // Lost the exclusive-create race: adopt the winner's file.
+      if let onDisk = decodeOnDisk(at: configurationURL) {
+        return VaporConfigurationLoadResult(configuration: onDisk, issue: nil)
+      }
+      return VaporConfigurationLoadResult(configuration: defaultConfiguration, issue: nil)
+    } catch {
+      logger.error(
+        "Failed to seed default vapor configuration on first launch",
+        metadata: [
+          "config_path": configurationURL.path,
+          "error": String(describing: error),
+        ]
+      )
+      return VaporConfigurationLoadResult(
+        configuration: defaultConfiguration,
         issue: VaporConfigurationLoadIssue(
           configPath: configurationURL.path,
           reason: String(describing: error)

@@ -38,6 +38,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The IPC client now verifies socket ownership before connecting (full-repo review): it refuses (typed `ForeignSocket` error) any socket at the resolved path not owned by the current user. Previously, under the deterministic temp-dir relocation for over-long socket paths, a local user on a world-writable `/tmp` (a planned Linux surface) could pre-create the socket and impersonate the daemon — forging `Running`/synced status and acks and receiving `UpdateExcludes` rule contents. The server-side 0700-parent/0600-socket protection is now symmetric on the client side.
 
+### Fixed (macOS app & platform)
+
+- The macOS Swift `StructuredLogger` recreates its log file before the fallback open, so logging is no longer silently dropped for the rest of the run after the file is deleted mid-session (user cleanup / `clean.sh`).
+- First-launch default-config seeding uses an exclusive create with re-read on a lost race (adopting the daemon's file instead of clobbering its runtime-owned keys) and surfaces a genuine write failure (read-only / full disk) as a load issue instead of swallowing it.
+- The macOS service installer's `stop_daemon` no longer reports success when `launchctl kill` genuinely fails while the daemon is still running — a real failure now surfaces to the Quit/`vapor service stop` path instead of being swallowed as "already stopped."
+
 ### Fixed (macOS app)
 
 - macOS lifecycle seam no longer blocks the main thread on `vapor` CLI subprocesses (full-repo review): acknowledging a crash-loop pause and the menubar Quit path now run their CLI round-trips off the main actor, so clicking the crash-loop banner or Quit can no longer beachball (or, on a wedged CLI/launchctl, hang) the UI. Quit serializes its daemon stop on the same lifecycle queue as auto-launch toggles — so a just-enabled auto-launch can no longer start the daemon *after* the quit-time stop — drains the health tick first, and always proceeds to terminate.

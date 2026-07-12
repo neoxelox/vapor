@@ -134,6 +134,40 @@ func loggerGracefullyFallsBackWhenConfiguredRuntimeRootIsUnusable() throws {
   #expect(!fileManager.fileExists(atPath: fallbackLogURL.path))
 }
 
+@Test
+func loggerRecreatesTheLogFileAfterItIsDeletedMidRun() throws {
+  let fileManager = FileManager.default
+  let vaporDirectoryURL = fileManager.temporaryDirectory
+    .appendingPathComponent("vapor-logger-tests")
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  defer { try? fileManager.removeItem(at: vaporDirectoryURL) }
+
+  let logger = StructuredLogger(
+    component: "tests",
+    minLevel: .debug,
+    environment: ["VAPOR_DIR": vaporDirectoryURL.path],
+    fileManager: fileManager
+  )
+  let logURL = VaporPaths.logsDirectoryURL(vaporDirectoryURL: vaporDirectoryURL)
+    .appendingPathComponent(VaporPaths.appLogFileName)
+
+  // init prepared the file but cached no handle yet. Delete it (as
+  // `./scripts/clean.sh` / user cleanup would) so the first write takes
+  // the no-cached-handle fallback path against a missing file.
+  #expect(fileManager.fileExists(atPath: logURL.path))
+  try fileManager.removeItem(at: logURL)
+
+  logger.info("after deletion")
+  waitForLogWrites()
+
+  #expect(
+    fileManager.fileExists(atPath: logURL.path),
+    "the log file must be recreated rather than silently dropping every subsequent line"
+  )
+  let recreated = try String(contentsOf: logURL, encoding: .utf8)
+  #expect(recreated.contains("after deletion"))
+}
+
 private func waitForLogWrites() {
   StructuredLogger.writeQueue.sync {}
 }

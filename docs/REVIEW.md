@@ -876,7 +876,7 @@ side_file_path derives `{path}.vapor-meta.json` inside the user's sync root with
 
 **Suggested fix**: Before writing a side-file, stat the target: if a file exists that does not parse as a Vapor SideFilePayload, refuse the fallback (or divert to a shadow directory under vapor_dir keyed by path hash, which also fixes the exclusion problem). At minimum, log a warning and surface excluded suffix-named user files in doctor/status output.
 
-### [low] Client deadline bounds each syscall, not the whole call — a byte-trickling daemon keeps the CLI alive nearly unboundedly
+### [low] Client deadline bounds each syscall, not the whole call — a byte-trickling daemon keeps the CLI alive nearly unboundedly  ✅ DONE
 
 **Category**: improvement · **Where**: `core/ipc/src/client.rs:31` · **Review group**: ipc
 
@@ -1007,7 +1007,7 @@ NativePlatformMetricsSampler::sample() (core/platform/src/metrics.rs:77) is a st
 
 **Suggested fix**: Land the macOS bridge (host_statistics64 for CPU, IOPSCopyPowerSourcesInfo for battery, OSThermalNotification/thermal pressure sysctl, statfs for disk). Until then, at minimum log a prominent startup warning that throttle inputs are static, and bias the static default toward the conservative side (e.g., on_battery=true) so the stub errs toward low impact rather than maximum impact.
 
-### [low] stop_daemon swallows all launchctl failures and returns success before the daemon has exited
+### [low] stop_daemon swallows all launchctl failures and returns success before the daemon has exited  ✅ DONE
 
 **Category**: improvement · **Where**: `core/platform/src/service/macos.rs:230`
 
@@ -1342,7 +1342,7 @@ isInCrashLoopPause (DaemonLifecycle.swift:214-226) returns false when `vapor ser
 
 **Suggested fix**: Propagate the error (or return an explicit .unknown state) instead of defaulting to the healthy value; have the view model keep the previous known state and surface a 'could not reach vapor CLI' condition rather than clearing the crash-loop indicator.
 
-### [low] StructuredLogger silently loses all logging after the log file is deleted
+### [low] StructuredLogger silently loses all logging after the log file is deleted  ✅ DONE
 
 **Category**: improvement · **Where**: `apps/macos/Sources/VaporCore/StructuredLogger.swift:126` · **Review group**: macos-app-core
 
@@ -1350,7 +1350,7 @@ StructuredLogger creates vapor_dir/logs/vapor.logs only in prepareLogFile() at i
 
 **Suggested fix**: In the fallback open path, recreate the file via VaporPaths.ensurePrivateFile before opening; optionally stat-check the cached handle's inode against the path periodically to detect deletion/rotation.
 
-### [low] First-launch default-config write can race the daemon and silently swallows errors
+### [low] First-launch default-config write can race the daemon and silently swallows errors  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/VaporCore/VaporConfiguration.swift:224` · **Review group**: macos-app-core
 

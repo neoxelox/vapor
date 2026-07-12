@@ -7,8 +7,9 @@
 
 use std::error::Error;
 use std::fmt::{self, Display};
+use std::io;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::framing::{FrameError, read_frame, write_frame};
 use crate::protocol::{
@@ -88,6 +89,11 @@ impl From<FrameError> for ClientError {
 /// constructor returns.
 pub struct Client {
     stream: StreamHandle,
+    /// Per-call budget. Applied as an *absolute* deadline that shrinks
+    /// across every read/write of a single call (not a per-syscall
+    /// timeout that re-arms on each partial read), so a peer trickling
+    /// one byte per timeout window cannot keep a call alive unboundedly.
+    timeout: Duration,
 }
 
 impl Client {
@@ -102,9 +108,9 @@ impl Client {
 
     /// Like [`Client::connect`] but uses an explicit per-call timeout.
     /// Pass `Duration::MAX` to opt out (e.g., a long-running streaming
-    /// client). The deadline bounds each individual `read` / `write`
-    /// call rather than the whole session, but for the single-call
-    /// CLI shape that is enough to honor the never-hang goal.
+    /// client). The timeout is an *absolute* deadline over each whole
+    /// request/response, shrinking across every read/write, so a peer
+    /// trickling bytes cannot keep a call alive past the budget.
     pub fn connect_with_timeout(
         socket_path: &Path,
         client_id: &str,
@@ -112,13 +118,18 @@ impl Client {
     ) -> Result<Self, ClientError> {
         let stream = connect_to_socket(socket_path)?;
         apply_stream_timeout(&stream, timeout)?;
-        Self::handshake(stream, client_id)
+        let mut client = Self::handshake(stream, client_id)?;
+        client.timeout = timeout;
+        Ok(client)
     }
 
     /// Lower-level constructor that takes an already-open stream
     /// (useful for in-process tests against an `mpsc`-driven fake).
     pub fn handshake(stream: StreamHandle, client_id: &str) -> Result<Self, ClientError> {
-        let mut client = Self { stream };
+        let mut client = Self {
+            stream,
+            timeout: DEFAULT_CALL_TIMEOUT,
+        };
         let (current, min) = daemon_supported_versions();
         let hello = Hello {
             schema_version: current,
@@ -205,16 +216,73 @@ impl Client {
     fn call(&mut self, method: Method) -> Result<ResponseBody, ClientError> {
         let payload = serde_json::to_vec(&Request::Call { method })
             .map_err(|error| ClientError::Parse(error.to_string()))?;
-        write_frame(&mut self.stream, &payload)?;
+        // One absolute deadline for the whole request/response so a large
+        // (up to MAX_PAYLOAD_BYTES) reply from a byte-trickling daemon
+        // cannot keep the call alive past the budget.
+        let mut framed = DeadlineStream::new(&self.stream, self.timeout);
+        write_frame(&mut framed, &payload)?;
 
         let frame =
-            read_frame(&mut self.stream)?.ok_or(ClientError::Frame(FrameError::UnexpectedEof))?;
+            read_frame(&mut framed)?.ok_or(ClientError::Frame(FrameError::UnexpectedEof))?;
         let response: Response = serde_json::from_slice(&frame)
             .map_err(|error| ClientError::Parse(error.to_string()))?;
         match response {
             Response::Ok(body) => Ok(body),
             Response::Err(error) => Err(ClientError::Server(error)),
         }
+    }
+}
+
+/// Wraps a stream so each `read`/`write` re-applies the *remaining* time
+/// until an absolute deadline as the socket timeout, and fails once the
+/// budget is spent. This turns the per-syscall `SO_RCVTIMEO` (which
+/// re-arms on every partial read) into a bound on the whole call.
+struct DeadlineStream<'a> {
+    stream: &'a StreamHandle,
+    /// `None` opts out of any deadline (`Duration::MAX`).
+    deadline: Option<Instant>,
+}
+
+impl<'a> DeadlineStream<'a> {
+    fn new(stream: &'a StreamHandle, timeout: Duration) -> Self {
+        let deadline = (timeout != Duration::MAX).then(|| Instant::now() + timeout);
+        Self { stream, deadline }
+    }
+
+    /// Arms the socket with the time left, or fails if the deadline passed.
+    fn arm(&self) -> io::Result<()> {
+        let Some(deadline) = self.deadline else {
+            return Ok(());
+        };
+        match deadline.checked_duration_since(Instant::now()) {
+            Some(remaining) if !remaining.is_zero() => {
+                self.stream.set_read_timeout(Some(remaining))?;
+                self.stream.set_write_timeout(Some(remaining))?;
+                Ok(())
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "IPC call exceeded its deadline",
+            )),
+        }
+    }
+}
+
+impl io::Read for DeadlineStream<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.arm()?;
+        (&*self.stream).read(buf)
+    }
+}
+
+impl io::Write for DeadlineStream<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.arm()?;
+        (&*self.stream).write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        (&*self.stream).flush()
     }
 }
 
@@ -248,6 +316,25 @@ fn apply_stream_timeout(_stream: &StreamHandle, _timeout: Duration) -> Result<()
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deadline_stream_fails_once_the_budget_is_spent_instead_of_blocking() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+
+        let (peer, _other_end) = UnixStream::pair().expect("socket pair");
+        // A deadline already in the past: a read must fail TimedOut rather
+        // than block on the (never-written) peer end.
+        let mut framed = DeadlineStream {
+            stream: &peer,
+            deadline: Some(Instant::now() - Duration::from_secs(1)),
+        };
+        let mut buf = [0u8; 4];
+        let error = framed
+            .read(&mut buf)
+            .expect_err("expired deadline must fail");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
 
     #[test]
     fn connect_with_timeout_returns_promptly_against_wedged_peer() {

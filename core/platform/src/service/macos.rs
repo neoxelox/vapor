@@ -225,10 +225,19 @@ impl ServiceInstaller for NativeServiceInstaller {
     }
 
     fn stop_daemon(&self) -> Result<(), ServiceInstallError> {
-        // best-effort: SIGTERM via launchctl. Errors at this layer just
-        // mean the service was already stopped.
-        let _ = self.run_launchctl(&["kill", "TERM", &self.service_target()]);
-        Ok(())
+        // SIGTERM via launchctl. A kill failure is only benign if the
+        // service is in fact no longer running (already stopped, never
+        // loaded); if it still reports Running — or the state cannot be
+        // confirmed — the failure is real and must surface rather than be
+        // reported to the caller (and the user's Quit flow) as a stop.
+        match self.run_launchctl(&["kill", "TERM", &self.service_target()]) {
+            Ok(()) => Ok(()),
+            Err(kill_error) => match self.status() {
+                Ok(ServiceStatus::Running) => Err(kill_error),
+                Ok(_) => Ok(()),
+                Err(_) => Err(kill_error),
+            },
+        }
     }
 
     fn status(&self) -> Result<ServiceStatus, ServiceInstallError> {
