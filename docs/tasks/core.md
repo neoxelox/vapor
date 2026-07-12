@@ -139,7 +139,11 @@ from existing Swift/docs. Windows/Linux impls land later (Phase C6/C7).
       `Renamed` events). Initial macOS implementation wraps the existing
       `notify::RecommendedWatcher` code from `core/daemon/src/fs_events.rs`;
       do not regress callback discipline. Add an in-memory fake for unit
-      tests.
+      tests. Follow-up landed: the daemon's local watch now consumes this
+      trait too (bridge thread in `core/daemon/src/fs_events.rs`), the
+      duplicate direct-`notify` plumbing is gone, and the per-OS mapping
+      (directional renames, paired-rename split, error forwarding) lives
+      only in `core/platform/fs_watch`.
 - [x] C3-3 Define trait `ServiceInstaller` (`install_and_enable`,
       `disable_and_uninstall`, `start_daemon`, `stop_daemon`, `is_installed`,
       `is_running`, `status`). Port the macOS LaunchAgent logic from

@@ -22,7 +22,9 @@ use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::SystemTime;
 
-use vapor_platform::fs_watch::{FsWatcher, WatchEvent, WatchEventKind, start_native_watcher};
+use vapor_platform::fs_watch::{
+    FsWatcher, WatchEvent, WatchEventKind, start_native_watcher_with_error_handler,
+};
 use vapor_shared::constants;
 
 use super::is_internal_file_name;
@@ -133,13 +135,26 @@ impl ChangesFeed {
         if watcher.is_some() {
             return Ok(());
         }
-        let started =
-            start_native_watcher(root.to_path_buf(), self.sender.clone()).map_err(|error| {
-                ProviderError::transient(format!(
-                    "cannot start remote changes watcher on {}: {error}",
-                    root.display()
-                ))
-            })?;
+        // The feed re-derives change kinds by stat, so a lost event only
+        // delays convergence until the next reconcile — but a watcher
+        // backend error should still be visible in the logs.
+        let on_error = std::sync::Arc::new(|description: &str| {
+            logging::warning(
+                "Filesystem changes-feed watcher reported an error",
+                &[("error", description.to_string())],
+            );
+        });
+        let started = start_native_watcher_with_error_handler(
+            root.to_path_buf(),
+            self.sender.clone(),
+            Some(on_error),
+        )
+        .map_err(|error| {
+            ProviderError::transient(format!(
+                "cannot start remote changes watcher on {}: {error}",
+                root.display()
+            ))
+        })?;
         *watcher = Some(started);
         Ok(())
     }

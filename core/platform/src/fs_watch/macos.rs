@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::SystemTime;
 
-use notify::event::{CreateKind, ModifyKind};
+use notify::event::{CreateKind, ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
-use super::{FsWatcher, FsWatcherError, WatchEvent, WatchEventKind};
+use super::{FsWatcher, FsWatcherError, WatchErrorHandler, WatchEvent, WatchEventKind};
 
 pub struct NativeFsWatcher {
     _watcher: RecommendedWatcher,
@@ -29,11 +29,19 @@ impl std::fmt::Debug for NativeFsWatcher {
 
 impl NativeFsWatcher {
     pub fn start(watch_root: PathBuf, sender: Sender<WatchEvent>) -> Result<Self, FsWatcherError> {
+        Self::start_with_error_handler(watch_root, sender, None)
+    }
+
+    pub fn start_with_error_handler(
+        watch_root: PathBuf,
+        sender: Sender<WatchEvent>,
+        on_error: Option<WatchErrorHandler>,
+    ) -> Result<Self, FsWatcherError> {
         let watch_root = canonical_watch_root(watch_root)?;
         let callback_sender = sender;
 
         let mut watcher = notify::recommended_watcher(move |result| {
-            forward_event(&callback_sender, result);
+            forward_event(&callback_sender, on_error.as_ref(), result);
         })
         .map_err(|error| FsWatcherError::Backend(Box::new(error)))?;
 
@@ -82,14 +90,41 @@ fn canonical_watch_root(watch_root: PathBuf) -> Result<PathBuf, FsWatcherError> 
     })
 }
 
-fn forward_event(sender: &Sender<WatchEvent>, result: Result<Event, notify::Error>) {
-    let Ok(event) = result else {
-        return;
+fn forward_event(
+    sender: &Sender<WatchEvent>,
+    on_error: Option<&WatchErrorHandler>,
+    result: Result<Event, notify::Error>,
+) {
+    let event = match result {
+        Ok(event) => event,
+        Err(error) => {
+            if let Some(handler) = on_error {
+                handler(&error.to_string());
+            }
+            return;
+        }
     };
 
-    let kind = map_event_kind(&event.kind);
+    // A paired rename carries `[from, to]` paths; splitting it into a
+    // Removed(from) + Created(to) pair keeps both sides independently
+    // actionable — a bare "Renamed" for a path that no longer exists
+    // cannot be acted on.
+    let is_paired_rename = matches!(
+        event.kind,
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both))
+    ) && event.paths.len() == 2;
+    let uniform_kind = map_event_kind(&event.kind);
     let observed_at = SystemTime::now();
-    for path in event.paths {
+    for (index, path) in event.paths.into_iter().enumerate() {
+        let kind = if is_paired_rename {
+            if index == 0 {
+                WatchEventKind::Removed
+            } else {
+                WatchEventKind::Created
+            }
+        } else {
+            uniform_kind
+        };
         let _ = sender.send(WatchEvent {
             path,
             kind,
@@ -104,6 +139,12 @@ fn map_event_kind(kind: &EventKind) -> WatchEventKind {
         | EventKind::Create(CreateKind::File)
         | EventKind::Create(CreateKind::Folder)
         | EventKind::Create(CreateKind::Other) => WatchEventKind::Created,
+        // Unpaired rename halves are directional and map to the
+        // actionable kind directly. The paired `Both` case is split in
+        // `forward_event`; `Any`/`Other` keep the ambiguous `Renamed`
+        // kind (the source vs destination side is unknown).
+        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => WatchEventKind::Removed,
+        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => WatchEventKind::Created,
         EventKind::Modify(ModifyKind::Name(_)) => WatchEventKind::Renamed,
         EventKind::Modify(_) => WatchEventKind::Modified,
         EventKind::Remove(_) => WatchEventKind::Removed,
@@ -114,6 +155,7 @@ fn map_event_kind(kind: &EventKind) -> WatchEventKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::sync::mpsc;
     use tempfile::TempDir;
 
@@ -142,6 +184,60 @@ mod tests {
             error,
             FsWatcherError::InvalidWatchRoot { reason, .. } if reason.contains("does not exist")
         ));
+    }
+
+    #[test]
+    fn event_mapping_splits_paired_renames_and_maps_directional_halves() {
+        let (tx, rx) = mpsc::channel();
+        forward_event(
+            &tx,
+            None,
+            Ok(Event {
+                kind: EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+                paths: vec![PathBuf::from("/w/old.txt"), PathBuf::from("/w/new.txt")],
+                attrs: Default::default(),
+            }),
+        );
+        let first = rx.try_recv().expect("from half");
+        let second = rx.try_recv().expect("to half");
+        assert_eq!(
+            (first.path.as_path(), first.kind),
+            (Path::new("/w/old.txt"), WatchEventKind::Removed)
+        );
+        assert_eq!(
+            (second.path.as_path(), second.kind),
+            (Path::new("/w/new.txt"), WatchEventKind::Created)
+        );
+
+        assert_eq!(
+            map_event_kind(&EventKind::Modify(ModifyKind::Name(RenameMode::From))),
+            WatchEventKind::Removed
+        );
+        assert_eq!(
+            map_event_kind(&EventKind::Modify(ModifyKind::Name(RenameMode::To))),
+            WatchEventKind::Created
+        );
+        assert_eq!(
+            map_event_kind(&EventKind::Modify(ModifyKind::Name(RenameMode::Any))),
+            WatchEventKind::Renamed
+        );
+    }
+
+    #[test]
+    fn backend_errors_reach_the_error_handler() {
+        use std::sync::Mutex;
+        let (tx, _rx) = mpsc::channel();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let handler: WatchErrorHandler = Arc::new(move |description: &str| {
+            sink.lock().expect("sink").push(description.to_string());
+        });
+        forward_event(
+            &tx,
+            Some(&handler),
+            Err(notify::Error::generic("backend exploded")),
+        );
+        assert_eq!(seen.lock().expect("seen").len(), 1);
     }
 
     #[test]
