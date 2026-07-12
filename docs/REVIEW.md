@@ -1038,7 +1038,6 @@ repo hygiene (.env.example, .gitignore, locales, agent skills, Cargo metadata).
 
 | Sev | Category | Location | Finding |
 |---|---|---|---|
-| high | security | `.github/workflows/release.yml:112` | Third-party actions referenced by mutable tags inside the secret-bearing release job |
 | high | bug | `apps/macos/Sources/Vapor/VaporApp.swift:21` | Main window auto-presents at launch, violating menubar-first startup (CLAUDE.md 2.1) |
 | high | bug | `apps/macos/Sources/VaporCore/VaporConfiguration.swift:252` | App config save clobbers daemon-owned keys with a stale startup snapshot |
 | high | bug | `core/cli/src/commands/auth.rs:216` | OAuth authorization code is never percent-decoded, then re-encoded on exchange — real Google logins fail with invalid_grant |
@@ -1093,14 +1092,6 @@ repo hygiene (.env.example, .gitignore, locales, agent skills, Cargo metadata).
 | low | bug | `scripts/e2e.sh:529` | e2e harness silently aborts and deletes the failure sandbox when a glob/grep assignment matches nothing |
 | low | perf | `scripts/lint.sh:18` | lint.sh runs the identical Swift lint command twice per invocation |
 | low | bug | `scripts/tests/version.sh:90` | version.sh fixture tests inherit the developer's global git config and fail on gpgsign/hooksPath machines |
-
-### [high] Third-party actions referenced by mutable tags inside the secret-bearing release job
-
-**Category**: security · **Where**: `.github/workflows/release.yml:112` · **Review group**: ci
-
-The release job runs `maxim-lobanov/setup-xcode@v1.6.0` (personal-account action) and `actions-rust-lang/setup-rust-toolchain@v1.9.0` by mutable git tag, not commit SHA (same pattern in build.yml, lint.yml, test.yml, perf.yml for checkout/cache/setup actions). Tags can be force-moved. Failure scenario: the `v1.6.0` tag of setup-xcode is retargeted to malicious code (account compromise); on the next `v*` tag push it executes inside the release job, where it can poison PATH/$GITHUB_ENV so later steps leak `APPLE_DEVELOPER_ID_P12_BASE64`, `APPLE_DEVELOPER_ID_P12_PASSWORD`, and the notary API key — enabling the attacker to sign and notarize malware as this Developer ID. The isolated GitHub Environment does not help because the action runs inside the environment-scoped job.
-
-**Suggested fix**: Pin every third-party (and ideally first-party) action to a full commit SHA with a version comment, e.g. `maxim-lobanov/setup-xcode@60606e260d2fc5762a71e64e74b2174e8ea3c8bd # v1.6.0`, and add Dependabot/Renovate for github-actions to keep pins fresh. At minimum do this for the release.yml jobs that can see signing secrets.
 
 ### [high] Main window auto-presents at launch, violating menubar-first startup (CLAUDE.md 2.1)  ✅ DONE
 
