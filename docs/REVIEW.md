@@ -14,13 +14,13 @@ security issues, plus a comment-cleanup pass over the codebase.
   been implemented. 157 were resolved in PR #6 / PR #8 and their entries removed from
   this document; the 12 in "Resolved in the follow-up change set" (the
   architectural/performance remainder) were resolved next and are kept for reference.
-  **8 new findings from the project owner's field testing are OPEN** — see
-  "Open findings — field testing (2026-07-12)" below.
+  The 8 findings from the project owner's field testing (below) were resolved in
+  the same follow-up branch — **nothing is open**.
 
-## Open findings — field testing (2026-07-12)
+## Resolved — field-testing findings (2026-07-12)
 
 Reported by the project owner while exercising the `filesystem` provider on macOS;
-each verified against the code before being recorded.
+each verified against the code before being recorded, then fixed in this branch.
 
 | Sev | Category | Location | Finding |
 |---|---|---|---|
@@ -33,7 +33,7 @@ each verified against the code before being recorded.
 | low | improvement | `core/shared/src/constants.rs:391` | Transfer/hash concurrency caps are compiled constants — not derived from core count and with no direct config knob (only `resourceLimits.cpuPercent` scaling) |
 | low | improvement | `core/shared/src/constants.rs:487` | Storm bursts defer a whole-subtree reconcile by a fixed 30s even when the device goes idle immediately, making bulk operations (repo clone) feel laggy |
 
-### [high] Deleting the cloud sync root mid-run wedges reconcile in an infinite failure loop instead of re-ensuring the root
+### [high] Deleting the cloud sync root mid-run wedges reconcile in an infinite failure loop instead of re-ensuring the root  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/runtime.rs:1229` · **Source**: field testing
 
@@ -41,7 +41,7 @@ each verified against the code before being recorded.
 
 **Suggested fix**: On a Permanent provider error from the walk (or any executor provider call) whose class is root-unavailability, re-run `ensure_cloud_sync_directory`; if it fails, set `cloud_root_ready = false` (entering the existing Error state + 60s ensure-retry loop that recreates the root) and requeue the intent without consuming retry budget. Detect root-unavailability explicitly (e.g. a dedicated `ProviderErrorKind::CloudRootUnavailable` or a root-exists probe) rather than string-matching.
 
-### [high] No overlap validation between localSyncDirectory and cloudSyncDirectory (filesystem provider)
+### [high] No overlap validation between localSyncDirectory and cloudSyncDirectory (filesystem provider)  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/sync_directories.rs:197` · **Source**: field testing
 
@@ -49,7 +49,7 @@ each verified against the code before being recorded.
 
 **Suggested fix**: At scope/profile resolution (and in `vapor doctor`), refuse to compose a profile whose canonicalized local root equals, contains, or is contained by the canonicalized cloud root when the provider is filesystem-backed — suspend the profile with an actionable reason like invalid-provider suspension does today.
 
-### [medium] `~` in cloudSyncDirectory is not expanded
+### [medium] `~` in cloudSyncDirectory is not expanded  ✅ DONE
 
 **Category**: bug · **Where**: `core/daemon/src/sync_directories.rs:197` · **Source**: field testing
 
@@ -57,7 +57,7 @@ each verified against the code before being recorded.
 
 **Suggested fix**: When the profile's provider is filesystem-backed, resolve `cloudSyncDirectory` with the same `resolve_path` used for the local root (tilde expansion + absolutization) and reject non-absolute results with an actionable error instead of silently prefixing `/`. Mirror the same expansion in the Swift config surface if it validates paths.
 
-### [medium] POSIX file mode is not preserved through sync
+### [medium] POSIX file mode is not preserved through sync  ✅ DONE
 
 **Category**: bug · **Where**: `core/providers/src/filesystem/mod.rs` · **Source**: field testing
 
@@ -65,7 +65,7 @@ Uploads and downloads write a `.vapor-tmp-*` staging file (created with the proc
 
 **Suggested fix**: For the filesystem provider, capture the source mode in the transfer metadata and apply it to the staging file before the rename on both directions (at minimum preserve the executable bits). For providers without a native mode concept (gdrive), carry the mode in the op-id side metadata so filesystem↔cloud↔filesystem round trips restore it; document that mode-only changes do not currently propagate.
 
-### [medium] macOS app permanently displays "Filesystem (stub)" as the provider
+### [medium] macOS app permanently displays "Filesystem (stub)" as the provider  ✅ DONE
 
 **Category**: bug · **Where**: `apps/macos/Sources/VaporCore/AppShellState.swift:123` · **Source**: field testing
 
@@ -73,7 +73,7 @@ Uploads and downloads write a `.vapor-tmp-*` staging file (created with the proc
 
 **Suggested fix**: Populate `providerName` from the loaded configuration at startup (config `provider` key → display name) and refresh it from the daemon status (IPC `provider_name`) alongside the other lifecycle-backed values; retire the stale `preGADefaultProviderDisplayName` constant.
 
-### [low] Mass-delete guard threshold is not user-configurable
+### [low] Mass-delete guard threshold is not user-configurable  ✅ DONE
 
 **Category**: improvement · **Where**: `core/shared/src/constants.rs:468` · **Source**: field testing
 
@@ -81,7 +81,7 @@ The guard pauses all sync after 200 locally-observed deletions inside a rolling 
 
 **Suggested fix**: Add a `safeguards` config group (e.g. `massDeleteThreshold`, `massDeleteWindowSeconds`, `enabled`) with the current values as defaults, clamped to sane minimums; surface the trip reason + threshold in `vapor status` so the resume prompt explains itself. Keep the default conservative — the guard is the ransomware backstop.
 
-### [low] Concurrency caps are compiled constants — no core-awareness, no direct knob
+### [low] Concurrency caps are compiled constants — no core-awareness, no direct knob  ✅ DONE
 
 **Category**: improvement · **Where**: `core/shared/src/constants.rs:391` · **Source**: field testing
 
@@ -89,7 +89,7 @@ Upload/download/hash/planner caps come from the fixed throttle ladder (IdleDrain
 
 **Suggested fix**: Derive the ladder's IdleDrain tier (and the provider-job worker cap) from `available_parallelism` with the current values as floor/ceiling, and/or expose explicit per-profile concurrency overrides in the config; keep `resourceLimits.cpuPercent` as the impact-first governor.
 
-### [low] Storm bursts defer reconcile by a fixed 30s even when the device is idle
+### [low] Storm bursts defer reconcile by a fixed 30s even when the device is idle  ✅ DONE
 
 **Category**: improvement · **Where**: `core/shared/src/constants.rs:487` · **Source**: field testing
 
