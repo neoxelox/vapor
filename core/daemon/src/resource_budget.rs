@@ -265,6 +265,30 @@ impl ResourceBudget {
             BoostState::RampingDown { started, from_cpu } => {
                 if throttle_state != ThrottleState::IdleDrain {
                     self.snap_to_base("throttle left IdleDrain; snapped to base ceilings");
+                } else if gates_pass {
+                    // Headroom recovered mid-descent (e.g. a 1s background
+                    // CPU blip). Re-checking the gate here — instead of
+                    // riding the full down-ramp and then a fresh up-ramp —
+                    // avoids ~40s of reduced ceilings for a momentary blip.
+                    // Resume climbing from the *current* level by
+                    // back-dating the up-ramp start to the matching
+                    // progress, so we neither drop to base nor snap up.
+                    let span =
+                        self.config
+                            .boost_cpu_percent
+                            .saturating_sub(self.config.cpu_percent) as f64;
+                    let fraction = if span > 0.0 {
+                        (self.current_cpu.saturating_sub(self.config.cpu_percent) as f64 / span)
+                            .clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    let elapsed_equiv = self.config.ramp_up.mul_f64(fraction);
+                    self.state = BoostState::RampingUp {
+                        started: now_inst.checked_sub(elapsed_equiv).unwrap_or(now_inst),
+                    };
+                    self.last_reason =
+                        "idle-boost headroom recovered mid-ramp-down; resuming ramp up".to_string();
                 } else {
                     let progress = ramp_progress(started, now_inst, self.config.ramp_down);
                     let span = from_cpu.saturating_sub(self.config.cpu_percent) as f64;
@@ -660,6 +684,72 @@ mod tests {
         );
         assert_eq!(done.boost_state, "off");
         assert_eq!(done.cpu_percent, 15);
+    }
+
+    #[test]
+    fn recovered_headroom_mid_ramp_down_resumes_ramping_up() {
+        // A momentary gate break (e.g. a 1s CPU blip) must not cost the
+        // full down-ramp + a fresh up-ramp; the moment headroom returns,
+        // the budget resumes climbing from its current level.
+        let mut budget = ResourceBudget::new(config_with(true));
+        let t0 = Instant::now();
+        budget.tick(ThrottleState::IdleDrain, &idle_inputs(), long_idle(), t0);
+        budget.tick(
+            ThrottleState::IdleDrain,
+            &idle_inputs(),
+            long_idle(),
+            t0 + Duration::from_secs(31),
+        );
+
+        // Break the idle gate: start ramping down.
+        let down_start = t0 + Duration::from_secs(32);
+        assert_eq!(
+            budget
+                .tick(
+                    ThrottleState::IdleDrain,
+                    &idle_inputs(),
+                    Duration::from_secs(0),
+                    down_start,
+                )
+                .boost_state,
+            "ramping-down"
+        );
+        let mid = budget.tick(
+            ThrottleState::IdleDrain,
+            &idle_inputs(),
+            Duration::from_secs(0),
+            down_start + Duration::from_secs(4),
+        );
+        assert_eq!(mid.boost_state, "ramping-down");
+
+        // Headroom recovers (idle again): resume ramping up, holding the
+        // current level this tick rather than continuing to descend.
+        let recovered = budget.tick(
+            ThrottleState::IdleDrain,
+            &idle_inputs(),
+            long_idle(),
+            down_start + Duration::from_secs(5),
+        );
+        assert_eq!(recovered.boost_state, "ramping-up");
+        assert!(
+            recovered.cpu_percent >= mid.cpu_percent,
+            "must not drop below the current level on recovery: {} vs {}",
+            recovered.cpu_percent,
+            mid.cpu_percent
+        );
+        // The next tick climbs back toward boost, not down to base.
+        let climbing = budget.tick(
+            ThrottleState::IdleDrain,
+            &idle_inputs(),
+            long_idle(),
+            down_start + Duration::from_secs(6),
+        );
+        assert!(
+            climbing.cpu_percent >= recovered.cpu_percent,
+            "must climb from the recovered level: {} vs {}",
+            climbing.cpu_percent,
+            recovered.cpu_percent
+        );
     }
 
     #[test]

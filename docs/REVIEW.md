@@ -591,7 +591,7 @@ The comment asserts 'the clearing intent and the re-materializing intents share 
 
 **Suggested fix**: Either enqueue the child downloads only after the clearing intent completes (defer descending into the mismatched directory to the next reconcile pass), or give the executor an explicit parent-path dependency for re-materializing intents; at minimum fix the comment so future changes don't rely on ordering that does not exist.
 
-### [low] A single 1-second headroom blip cancels Active idle boost into a full down-ramp plus a fresh 30s up-ramp; RampingDown never re-checks the gates
+### [low] A single 1-second headroom blip cancels Active idle boost into a full down-ramp plus a fresh 30s up-ramp; RampingDown never re-checks the gates  ✅ DONE
 
 **Category**: improvement · **Where**: `core/daemon/src/resource_budget.rs:257`
 
@@ -1596,7 +1596,7 @@ Line 65 ignores the `.cursor` directory itself; per gitignore semantics, files i
 
 **Suggested fix**: Replace the pair with `.cursor/*` followed by `!.cursor/environment.json` (excluding directory contents rather than the directory allows the negation to work).
 
-### [low] No [workspace.dependencies] inheritance: pinned '=' versions hand-duplicated across seven manifests
+### [low] No [workspace.dependencies] inheritance: pinned '=' versions hand-duplicated across seven manifests  ✅ DONE
 
 **Category**: improvement · **Where**: `Cargo.toml:13`
 

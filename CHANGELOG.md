@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Tooling / CI
 
+- Shared external dependencies are pinned once in a root `[workspace.dependencies]` table and inherited via `{ workspace = true }` across all seven crate manifests (full-repo review), so a version bump no longer risks a missed hand-duplicated copy producing conflicting `=` pins that break workspace resolution.
 - Release & CI pipeline fixes (full-repo review):
   - The tag-reachability preflight uses a full `git fetch` (not `--depth=1`), so a valid release tag is no longer deterministically rejected once `main` advances past it.
   - Re-running the release workflow no longer demotes an already-published release back to draft (it only re-applies `--draft` to a still-draft release) and reconciles the prerelease flag explicitly.
@@ -57,6 +58,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
+- Idle-boost recovers from a momentary headroom blip (full-repo review): the resource budget re-checks its gates while ramping down and, once headroom returns, resumes climbing from the current level instead of riding the full down-ramp and then a fresh up-ramp — so a 1-second background CPU spike no longer costs ~40s of reduced ceilings.
 - The bandwidth shaper now refunds the unspent portion of a transfer-step grant (full-repo review): per-step chunk-size alignment slack and failed (zero-byte) steps are returned to the shared token bucket (clamped to the one-second cap), so sustained upload throughput no longer systematically undershoots the configured rate and a retry storm cannot burn the shared budget.
 - Sync-pipeline latency & device-impact improvements (full-repo review):
   - The remote poller keeps draining while a page is full instead of waiting a full cadence between pages, so a large remote burst (thousands of files) enqueues in seconds rather than minutes.
