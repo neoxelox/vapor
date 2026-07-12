@@ -69,6 +69,10 @@ pub struct DaemonApp {
     /// until the budget runtime publishes; caps then scale relative to
     /// the default ceiling.
     resource_cpu_ceiling_percent: Option<u8>,
+    /// Explicit user ceiling on concurrent uploads / downloads
+    /// (`resourceLimits.maxConcurrentTransfers`); `None` = automatic
+    /// (the core-derived throttle tier decides).
+    max_concurrent_transfers: Option<usize>,
     reconcile_controller: ReconcileController,
     /// Shared behind a mutex so multiple profile runtimes gate against
     /// ONE daemon-level cap set (`data-flow.md §Multi-profile watch
@@ -130,6 +134,7 @@ impl DaemonApp {
             last_throttle_decision: None,
             retry_slowdown_until: None,
             resource_cpu_ceiling_percent: None,
+            max_concurrent_transfers: None,
             reconcile_controller: ReconcileController::with_clock(clock),
             workgate,
         }
@@ -148,6 +153,17 @@ impl DaemonApp {
         }
         self.resource_cpu_ceiling_percent = Some(ceiling_percent);
         self.refresh_workgate_caps(now);
+    }
+
+    /// Applies the explicit `resourceLimits.maxConcurrentTransfers`
+    /// ceiling (already clamped by the budget resolve). A hard user
+    /// limit: it caps every throttle tier, including idle boost.
+    pub fn set_max_concurrent_transfers(&mut self, ceiling: Option<usize>) {
+        if self.max_concurrent_transfers == ceiling {
+            return;
+        }
+        self.max_concurrent_transfers = ceiling;
+        self.refresh_workgate_caps(SystemTime::now());
     }
 
     fn lock_workgate(&self) -> std::sync::MutexGuard<'_, ThrottleWorkgate> {
@@ -453,6 +469,17 @@ impl DaemonApp {
             caps.upload_concurrency = scale_cap(caps.upload_concurrency);
             caps.download_concurrency = scale_cap(caps.download_concurrency);
         }
+        if let Some(ceiling) = self.max_concurrent_transfers {
+            // A hard user ceiling: applied last so neither the CPU
+            // scale nor idle boost can exceed it. A throttle-imposed
+            // zero (Suspended) stays zero.
+            if caps.upload_concurrency > 0 {
+                caps.upload_concurrency = caps.upload_concurrency.min(ceiling);
+            }
+            if caps.download_concurrency > 0 {
+                caps.download_concurrency = caps.download_concurrency.min(ceiling);
+            }
+        }
         // Apply the rate-limit slowdown AFTER scaling so the ceiling factor
         // cannot multiply the clamp back up: a 50% idle-boost ceiling
         // otherwise turned the intended upload_concurrency of 1 into ~3
@@ -503,6 +530,33 @@ mod tests {
     fn daemon_defaults_to_pre_ga_filesystem_stub_provider() {
         let app = DaemonApp::default();
         assert_eq!(app.provider_name(), "filesystem_stub");
+    }
+
+    #[test]
+    fn explicit_transfer_ceiling_caps_every_throttle_tier() {
+        let mut app = DaemonApp::default();
+        // IdleDrain default inputs: the core-derived tier applies.
+        app.apply_throttle_inputs(ThrottleInputs::default());
+        let unlimited = app.workgate_snapshot().caps;
+        assert!(unlimited.upload_concurrency >= 4);
+
+        app.set_max_concurrent_transfers(Some(1));
+        app.apply_throttle_inputs(ThrottleInputs::default());
+        let capped = app.workgate_snapshot().caps;
+        assert_eq!(capped.upload_concurrency, 1);
+        assert_eq!(capped.download_concurrency, 1);
+        // Non-transfer caps are untouched by the transfer ceiling.
+        assert_eq!(capped.planner_workers, unlimited.planner_workers);
+
+        // A throttle-imposed zero (Suspended) stays zero under any
+        // explicit ceiling.
+        app.apply_throttle_inputs(ThrottleInputs {
+            system_cpu_load_percent: 95,
+            ..ThrottleInputs::default()
+        });
+        let suspended = app.workgate_snapshot().caps;
+        assert_eq!(suspended.upload_concurrency, 0);
+        assert_eq!(suspended.download_concurrency, 0);
     }
 
     #[test]

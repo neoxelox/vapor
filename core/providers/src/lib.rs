@@ -64,6 +64,10 @@ impl ProviderError {
         Self::new(ProviderErrorKind::NotFound, message)
     }
 
+    pub fn cloud_root_unavailable(message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::CloudRootUnavailable, message)
+    }
+
     pub fn permanent(message: impl Into<String>) -> Self {
         Self::new(ProviderErrorKind::Permanent, message)
     }

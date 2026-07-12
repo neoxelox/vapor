@@ -142,6 +142,7 @@ impl MultiProfileRuntime {
         device_id: &str,
         start_watchers: bool,
         budget_config: crate::resource_budget::EffectiveBudgetConfig,
+        mass_delete_settings: crate::safeguards::MassDeleteGuardSettings,
     ) -> Result<Self, DaemonRuntimeError> {
         Self::start_with_state_root(
             profiles,
@@ -152,6 +153,7 @@ impl MultiProfileRuntime {
             start_watchers,
             None,
             budget_config,
+            mass_delete_settings,
         )
     }
 
@@ -194,6 +196,7 @@ impl MultiProfileRuntime {
         start_watchers: bool,
         state_root: Option<PathBuf>,
         budget_config: crate::resource_budget::EffectiveBudgetConfig,
+        mass_delete_settings: crate::safeguards::MassDeleteGuardSettings,
     ) -> Result<Self, DaemonRuntimeError> {
         let now = clock.now_system();
         let tick_waker = Arc::new(TickWaker::default());
@@ -207,6 +210,7 @@ impl MultiProfileRuntime {
         )));
         // Daemon-wide resource management: one budget,
         // one bandwidth shaper, one tuned step knob for every profile.
+        let max_concurrent_transfers = budget_config.max_concurrent_transfers;
         let shared_budget = Arc::new(Mutex::new(crate::resource_budget::ResourceBudget::new(
             budget_config,
         )));
@@ -248,29 +252,59 @@ impl MultiProfileRuntime {
                     continue;
                 }
             };
+            // Overlapping roots on a filesystem-backed profile feed the
+            // engine its own provider writes (and can strict-mirror over
+            // content the user never chose). Checked before provider
+            // construction so the suspended profile never even ensures
+            // (creates) the misconfigured cloud root.
+            let overlap_failure = if profile.provider_kind.trim()
+                == vapor_shared::constants::provider::FILESYSTEM
+                && let Some(local_root) = profile.scope.local_sync_directory.as_deref()
+            {
+                crate::sync_directories::filesystem_roots_overlap(
+                    local_root,
+                    profile.scope.cloud_sync_directory.as_str(),
+                )
+                .map(|reason| format!("invalid sync directories: {reason}"))
+            } else {
+                None
+            };
             // An invalid provider must NOT fall back to a functioning stub:
             // the stub reports empty enumerations, so a startup reconcile
             // on a pull-only profile would classify the whole local root as
             // local-only and strict-mirror-delete it. Suspend the profile
             // instead — it surfaces in status but performs zero sync work.
-            let (provider, provider_failure) = match vapor_providers::select_provider_for_profile(
-                &profile.provider_kind,
-                &profile.id,
-            ) {
-                Ok(provider) => (provider, None),
-                Err(error) => {
-                    let reason = format!(
-                        "invalid provider '{}': {}",
-                        profile.provider_kind, error.message
-                    );
-                    logging::error(
-                        "Profile has an invalid provider; suspending it until the config is fixed",
-                        &[
-                            ("profile_id", profile.id.clone()),
-                            ("reason", reason.clone()),
-                        ],
-                    );
-                    (vapor_providers::default_provider(), Some(reason))
+            // Overlapping roots suspend the same way (the inert stub
+            // performs no filesystem work).
+            let (provider, provider_failure) = if let Some(reason) = overlap_failure {
+                logging::error(
+                    "Suspending profile whose local and cloud sync directories overlap",
+                    &[
+                        ("profile_id", profile.id.clone()),
+                        ("reason", reason.clone()),
+                    ],
+                );
+                (vapor_providers::default_provider(), Some(reason))
+            } else {
+                match vapor_providers::select_provider_for_profile(
+                    &profile.provider_kind,
+                    &profile.id,
+                ) {
+                    Ok(provider) => (provider, None),
+                    Err(error) => {
+                        let reason = format!(
+                            "invalid provider '{}': {}",
+                            profile.provider_kind, error.message
+                        );
+                        logging::error(
+                            "Profile has an invalid provider; suspending it until the config is fixed",
+                            &[
+                                ("profile_id", profile.id.clone()),
+                                ("reason", reason.clone()),
+                            ],
+                        );
+                        (vapor_providers::default_provider(), Some(reason))
+                    }
                 }
             };
             let app = DaemonApp::new_with_shared_workgate(
@@ -312,6 +346,8 @@ impl MultiProfileRuntime {
             }
             runtime.set_device_id(device_id);
             runtime.set_profile_id(profile.id.clone());
+            runtime.configure_mass_delete_guard(mass_delete_settings);
+            runtime.set_max_concurrent_transfers(max_concurrent_transfers);
             runtime.attach_timeline(timeline.clone());
             runtime.attach_resource_management(
                 shared_budget.clone(),
@@ -924,6 +960,7 @@ mod tests {
                 crate::resource_budget::EffectiveBudgetConfig::resolve(
                     &vapor_shared::config::VaporConfig::default(),
                 ),
+                crate::safeguards::MassDeleteGuardSettings::default(),
             )
             .expect("multi runtime");
 
@@ -1118,6 +1155,94 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_filesystem_roots_suspend_the_profile_instead_of_syncing_into_itself() {
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+
+        // The "cloud" directory nests inside the watched local root: the
+        // provider would write into the watched tree and the engine would
+        // re-ingest its own output forever.
+        let local = temp.path().join("local");
+        std::fs::create_dir_all(&local).expect("local root");
+        let nested_cloud = local.join("cloud-copy");
+
+        // A healthy disjoint profile alongside, to prove isolation.
+        let good_local = temp.path().join("good-local");
+        std::fs::create_dir_all(&good_local).expect("good local");
+        let good_cloud = temp.path().join("good-cloud");
+        std::fs::create_dir_all(&good_cloud).expect("good cloud");
+
+        let profiles = vec![
+            ResolvedProfile {
+                id: "overlap".to_string(),
+                display_name: "overlap".to_string(),
+                provider_kind: "filesystem".to_string(),
+                scope: SyncScope {
+                    local_sync_directory: Some(local.clone()),
+                    cloud_sync_directory: nested_cloud.to_string_lossy().into_owned(),
+                    sync_mode: SyncMode::TwoWay,
+                },
+                enabled: true,
+            },
+            ResolvedProfile {
+                id: "good".to_string(),
+                display_name: "good".to_string(),
+                provider_kind: "filesystem".to_string(),
+                scope: SyncScope {
+                    local_sync_directory: Some(good_local.clone()),
+                    cloud_sync_directory: good_cloud.to_string_lossy().into_owned(),
+                    sync_mode: SyncMode::TwoWay,
+                },
+                enabled: true,
+            },
+        ];
+
+        let mut multi = MultiProfileRuntime::start_with_state_root(
+            profiles,
+            EventPathFilterOptions::default(),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            "testdev",
+            false,
+            Some(temp.path().join("state")),
+            crate::resource_budget::EffectiveBudgetConfig::resolve(
+                &vapor_shared::config::VaporConfig::default(),
+            ),
+            crate::safeguards::MassDeleteGuardSettings::default(),
+        )
+        .expect("multi runtime");
+
+        let statuses = multi.profile_summaries();
+        let overlap = statuses
+            .iter()
+            .find(|status| status.id == "overlap")
+            .expect("overlap profile present");
+        assert!(
+            overlap
+                .failed_reason
+                .as_deref()
+                .is_some_and(|reason: &str| reason.contains("inside")),
+            "overlapping roots must suspend with an actionable reason, got {:?}",
+            overlap.failed_reason
+        );
+        let good = statuses
+            .iter()
+            .find(|status| status.id == "good")
+            .expect("good profile present");
+        assert!(good.failed_reason.is_none(), "disjoint profile must run");
+
+        // The suspended profile performs zero sync work.
+        use crate::clock::Clock as _;
+        let report = multi.tick_all(clock.now_system());
+        assert_eq!(report.failed_profiles, 1);
+        assert_eq!(report.ticked_profiles, 1);
+        assert!(
+            !nested_cloud.exists(),
+            "a suspended overlap profile must not create or write its cloud root"
+        );
+    }
+
+    #[test]
     fn invalid_provider_suspends_the_profile_instead_of_mirror_deleting_its_local_root() {
         let temp = TempDir::new().expect("temp dir");
         let clock = Arc::new(ManualClock::at_now());
@@ -1173,6 +1298,7 @@ mod tests {
             crate::resource_budget::EffectiveBudgetConfig::resolve(
                 &vapor_shared::config::VaporConfig::default(),
             ),
+            crate::safeguards::MassDeleteGuardSettings::default(),
         )
         .expect("multi runtime");
 

@@ -257,6 +257,9 @@ pub struct DaemonRuntime {
     /// Mass-deletion guard; pauses the daemon and raises a
     /// timeline alert on a local deletion storm.
     mass_change_guard: crate::safeguards::MassChangeGuard,
+    /// Resolved `safeguards` config: threshold/window feeding the guard
+    /// and its user-facing trip reason; `enabled = false` bypasses it.
+    mass_delete_settings: crate::safeguards::MassDeleteGuardSettings,
     /// Flush boost deadline (monotonic). While set and in the
     /// future, deferred reconciles release immediately regardless of
     /// the idle gate.
@@ -512,6 +515,9 @@ impl DaemonRuntime {
         self.mirror_delete_count += staged_report.mirror_deletes as u64;
         report.conflicts += staged_report.conflicts;
         self.conflict_count += staged_report.conflicts as u64;
+        if staged_report.cloud_root_unavailable > 0 {
+            self.mark_cloud_root_unavailable("a provider transfer reported the root missing");
+        }
 
         if let Some(reconcile_intent_id) = self.running_reconcile_intent_id {
             // A running reconcile performs one bounded chunk of real
@@ -520,10 +526,20 @@ impl DaemonRuntime {
             // large tree converges across slices instead of restarting.
             match self.process_reconcile_walk(now) {
                 Err(walk_error) => {
-                    logging::warning(
-                        "Reconcile comparison walk failed; yielding and retrying later",
-                        &[("error", format!("{walk_error:?}"))],
-                    );
+                    if let crate::reconcile_walk::WalkError::Provider(provider_error) = &walk_error
+                        && provider_error.kind
+                            == vapor_shared::ProviderErrorKind::CloudRootUnavailable
+                    {
+                        // Not a walk bug: the cloud root itself vanished.
+                        // Block admission and let the ensure-retry loop
+                        // recreate it instead of retrying the walk forever.
+                        self.mark_cloud_root_unavailable(&provider_error.message);
+                    } else {
+                        logging::warning(
+                            "Reconcile comparison walk failed; yielding and retrying later",
+                            &[("error", format!("{walk_error:?}"))],
+                        );
+                    }
                     self.reconcile_walker = None;
                     self.app.abort_reconcile(&mut self.scheduler, now);
                     self.requeue_runtime_intent(
@@ -626,6 +642,11 @@ impl DaemonRuntime {
                 self.mirror_delete_count += admission_report.mirror_deletes as u64;
                 report.conflicts += admission_report.conflicts;
                 self.conflict_count += admission_report.conflicts as u64;
+                if admission_report.cloud_root_unavailable > 0 {
+                    self.mark_cloud_root_unavailable(
+                        "a provider transfer reported the root missing",
+                    );
+                }
             }
         }
 
@@ -942,6 +963,7 @@ impl DaemonRuntime {
             device_id: vapor_shared::device_id::derive_device_id(),
             active_coding: crate::safeguards::ActiveCodingHeuristic::default(),
             mass_change_guard: crate::safeguards::MassChangeGuard::default(),
+            mass_delete_settings: crate::safeguards::MassDeleteGuardSettings::default(),
             flush_boost_until_inst: None,
         })
     }
@@ -958,6 +980,24 @@ impl DaemonRuntime {
     /// tick loop harvests promptly.
     pub fn enable_transfer_workers(&mut self, waker: Option<Arc<TickWaker>>) {
         self.staged_executor.enable_worker_threads(waker);
+    }
+
+    /// Applies the resolved `safeguards` config group: rebuilds the
+    /// mass-delete guard with the configured window/threshold. Called
+    /// at composition, before any events flow.
+    pub fn configure_mass_delete_guard(
+        &mut self,
+        settings: crate::safeguards::MassDeleteGuardSettings,
+    ) {
+        self.mass_delete_settings = settings;
+        self.mass_change_guard =
+            crate::safeguards::MassChangeGuard::new(settings.window, settings.threshold);
+    }
+
+    /// Passes the explicit transfer-concurrency ceiling to the app (see
+    /// `resourceLimits.maxConcurrentTransfers`).
+    pub fn set_max_concurrent_transfers(&mut self, ceiling: Option<usize>) {
+        self.app.set_max_concurrent_transfers(ceiling);
     }
 
     /// Wires the daemon-wide resource management set in:
@@ -1226,6 +1266,50 @@ impl DaemonRuntime {
     /// Retries ensuring the provider-side sync root while it is
     /// unavailable. Between attempts, sync work stays blocked
     /// and intents accumulate durably — never dropped.
+    /// Flips the daemon into the blocked cloud-root state when the root
+    /// vanishes *mid-run* (deleted, unmounted, remote folder removed).
+    /// Admission stops on the next tick (`paused` derives from
+    /// `cloud_root_ready`), the periodic ensure-retry recreates the root,
+    /// and recovery schedules a whole-scope reconcile — the same
+    /// self-healing path a missing root takes at startup.
+    fn mark_cloud_root_unavailable(&mut self, reason: &str) {
+        if !self.cloud_root_ready {
+            return;
+        }
+        self.cloud_root_ready = false;
+        // Retry immediately on the next tick, then at the ensure cadence.
+        self.last_cloud_root_attempt_inst = None;
+        logging::warning(
+            "Cloud sync directory became unavailable; blocking sync work until it is re-ensured",
+            &[
+                (
+                    "cloud_sync_directory",
+                    self.sync_scope.cloud_sync_directory.clone(),
+                ),
+                ("reason", reason.to_string()),
+            ],
+        );
+        // Preserve an explicit pause (user or mass-deletion guard): the
+        // root recovery path must not silently resume either.
+        if self.app.snapshot().run_state != RunState::Paused {
+            self.app.set_run_state(
+                RunState::Error,
+                format!(
+                    "cloud sync directory {} is unavailable; sync work is blocked until it can be ensured",
+                    self.sync_scope.cloud_sync_directory
+                ),
+            );
+        }
+        if let Some(timeline) = &self.timeline {
+            timeline.push(
+                "cloud-root",
+                self.profile_id.clone(),
+                "cloud sync directory became unavailable; sync blocked until it is restored",
+                self.clock.now_system(),
+            );
+        }
+    }
+
     fn retry_cloud_root_if_needed(&mut self) {
         if self.cloud_root_ready {
             return;
@@ -1247,6 +1331,20 @@ impl DaemonRuntime {
             .is_ok()
         {
             self.cloud_root_ready = true;
+            // A recovered root may be freshly recreated and empty (or
+            // have drifted while unreachable): a whole-scope reconcile
+            // restores it from local content. The two-way walk only
+            // deletes locally behind a remote-origin tombstone, so an
+            // empty recreated root re-uploads instead of mirroring the
+            // emptiness back.
+            if let Err(error) =
+                self.enqueue_startup_reconstruction_reconcile(self.clock.now_system())
+            {
+                logging::warning(
+                    "Could not schedule the post-recovery whole-scope reconcile",
+                    &[("error", format!("{error:?}"))],
+                );
+            }
             // Recovering the cloud root must only clear the cloud-root
             // Error state. If the daemon is Paused — an explicit
             // `vapor pause`, or the mass-deletion (ransomware) guard — leave
@@ -1599,17 +1697,21 @@ impl DaemonRuntime {
             // scheduled intent — the existence probe inside must not
             // run twice with the filesystem moving underneath.
             let intent_kind = crate::scheduler::intent_kind_for_stabilized_event(&event);
-            if intent_kind == PendingIntentKind::Delete && self.mass_change_guard.record_delete(now)
+            if intent_kind == PendingIntentKind::Delete
+                && self.mass_delete_settings.enabled
+                && self.mass_change_guard.record_delete(now)
             {
                 // Mass-change / ransomware guard: stop admitting
                 // work before the deletion storm replicates to the cloud.
                 // Ingest keeps capturing intent state durably; an explicit
-                // `vapor resume` is the human-in-the-loop reset.
+                // `vapor resume` is the human-in-the-loop reset. Threshold
+                // and window come from the `safeguards` config group.
                 let reason = format!(
                     "mass-deletion guard: {} or more local deletions inside {}s; \
-                     sync paused — review the changes, then run `vapor resume`",
-                    constants::engine::MASS_DELETE_THRESHOLD,
-                    constants::engine::MASS_DELETE_WINDOW_SECONDS,
+                     sync paused — review the changes, then run `vapor resume` \
+                     (tunable via the `safeguards` config group)",
+                    self.mass_delete_settings.threshold,
+                    self.mass_delete_settings.window.as_secs(),
                 );
                 self.app.set_run_state(RunState::Paused, reason.clone());
                 if let Some(timeline) = &self.timeline {
@@ -1618,13 +1720,10 @@ impl DaemonRuntime {
                 logging::warning(
                     "Mass-deletion guard tripped; pausing sync",
                     &[
-                        (
-                            "threshold",
-                            constants::engine::MASS_DELETE_THRESHOLD.to_string(),
-                        ),
+                        ("threshold", self.mass_delete_settings.threshold.to_string()),
                         (
                             "window_seconds",
-                            constants::engine::MASS_DELETE_WINDOW_SECONDS.to_string(),
+                            self.mass_delete_settings.window.as_secs().to_string(),
                         ),
                     ],
                 );
@@ -2262,7 +2361,8 @@ mod tests {
         let watch_root = watch_root.canonicalize().expect("canonical watch root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
-        for index in 0..6 {
+        let planner_cap = crate::throttle::idle_drain_concurrency();
+        for index in 0..planner_cap + 2 {
             state_db
                 .enqueue_intent(
                     &watch_root.join(format!("src/file-{index}.rs")),
@@ -2286,12 +2386,13 @@ mod tests {
             .tick_with_inputs(timestamp_ms(250), ThrottleInputs::default())
             .expect("runtime tick");
 
-        // Admission is capped at the planner-worker count (4): only 4 of
-        // the 6 ready intents lease this tick. Stage chaining then runs
-        // the admitted intents through the stub provider within the same
-        // tick, so they complete rather than sit in the planner stage.
-        assert_eq!(first_tick.started_staged_intents, 4);
-        assert_eq!(first_tick.completed_intents, 4);
+        // Admission is capped at the planner-worker tier: two of the
+        // ready intents must wait for the next tick. Stage chaining then
+        // runs the admitted intents through the stub provider within the
+        // same tick, so they complete rather than sit in the planner
+        // stage.
+        assert_eq!(first_tick.started_staged_intents, planner_cap);
+        assert_eq!(first_tick.completed_intents, planner_cap);
         assert_eq!(runtime.state_db().leased_depth().expect("leased depth"), 0);
         assert_eq!(
             runtime.state_db().pending_depth().expect("pending depth"),
@@ -2538,6 +2639,64 @@ mod tests {
                 },
             );
         }
+    }
+
+    #[test]
+    fn deleted_cloud_root_blocks_sync_then_recovers_and_reuploads() {
+        let mut fixture = BidirectionalFixture::new();
+        // Baseline the feed cursor, then sync one file normally.
+        fixture.tick(6_000);
+        let first = fixture.watch_root.join("kept.txt");
+        std::fs::write(&first, b"survives the outage").expect("seed local");
+        fixture.record_local_event(&first, FsEventKind::Created, fixture.now_ms);
+        assert!(fixture.converge(12) >= 1, "baseline upload must complete");
+        assert!(fixture.cloud_root.join("kept.txt").exists());
+
+        // The user deletes the whole cloud sync root out from under the
+        // running daemon.
+        std::fs::remove_dir_all(&fixture.cloud_root).expect("delete cloud root");
+
+        // New local work cannot reach the provider: the daemon must
+        // block (Error state), not finalize failures or spin forever.
+        let second = fixture.watch_root.join("during-outage.txt");
+        std::fs::write(&second, b"written while root is gone").expect("seed local");
+        fixture.record_local_event(&second, FsEventKind::Created, fixture.now_ms);
+        let mut blocked = false;
+        for _ in 0..12 {
+            fixture.tick(1_000);
+            if fixture.runtime.app().snapshot().run_state == RunState::Error {
+                blocked = true;
+                break;
+            }
+        }
+        assert!(blocked, "root loss must surface as the blocked Error state");
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0,
+            "root loss must never finalize intents into failed_intents"
+        );
+
+        // Self-healing: the ensure-retry loop recreates the root, the
+        // daemon returns to Running, and the post-recovery reconcile
+        // re-uploads local content into the recreated (empty) root.
+        let mut recovered = false;
+        for _ in 0..90 {
+            fixture.tick(6_000);
+            if fixture.runtime.app().snapshot().run_state == RunState::Running {
+                recovered = true;
+                break;
+            }
+        }
+        assert!(recovered, "the ensure-retry loop must recreate the root");
+        fixture.converge(60);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("kept.txt")).expect("re-uploaded"),
+            b"survives the outage",
+        );
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("during-outage.txt")).expect("uploaded"),
+            b"written while root is gone",
+        );
     }
 
     #[test]
@@ -3320,11 +3479,10 @@ mod tests {
         }
         let boosted = fixture.runtime.app().workgate_snapshot();
         assert!(
-            boosted.caps.planner_workers
-                > vapor_shared::constants::engine::IDLE_DRAIN_PLANNER_WORKERS,
+            boosted.caps.planner_workers > crate::throttle::idle_drain_concurrency(),
             "boost must raise caps above the base ({} <= {})",
             boosted.caps.planner_workers,
-            vapor_shared::constants::engine::IDLE_DRAIN_PLANNER_WORKERS
+            crate::throttle::idle_drain_concurrency()
         );
         let status = fixture
             .runtime
@@ -3347,8 +3505,7 @@ mod tests {
             .expect("tick");
         let snapped = fixture.runtime.app().workgate_snapshot();
         assert!(
-            snapped.caps.planner_workers
-                <= vapor_shared::constants::engine::IDLE_DRAIN_PLANNER_WORKERS,
+            snapped.caps.planner_workers <= crate::throttle::idle_drain_concurrency(),
             "post-IdleDrain states never run against boosted caps"
         );
         let status = fixture

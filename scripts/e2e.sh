@@ -458,8 +458,17 @@ wait_until 30 "cloud-born file to download into the local root" \
   || fail "S10: cloud-born file did not download"
 cmp -s "$CLOUD_ROOT/e2e-from-cloud.txt" "$LOCAL_ROOT/e2e-from-cloud.txt" \
   || fail "S10: downloaded content diverges from the cloud original"
+# POSIX mode carries over in both directions: an executable script must
+# stay executable on the other replica (0755 must not decay to 0644).
+printf '#!/bin/sh\necho ok\n' >"$LOCAL_ROOT/e2e-script.sh"
+chmod 755 "$LOCAL_ROOT/e2e-script.sh"
+wait_until 30 "executable script to upload" file_exists "$CLOUD_ROOT/e2e-script.sh" \
+  || fail "S10: executable script did not upload"
+uploaded_mode() { [[ "$(stat -f '%Lp' "$CLOUD_ROOT/e2e-script.sh" 2>/dev/null || stat -c '%a' "$CLOUD_ROOT/e2e-script.sh")" == "755" ]]; }
+wait_until 30 "uploaded script to carry mode 755" uploaded_mode \
+  || fail "S10: uploaded script lost its executable mode"
 converge 30 || fail "S10: queue did not drain after bidirectional round-trip"
-log "PASS S10 — local→cloud upload and cloud→local download round-trip byte-for-byte"
+log "PASS S10 — local→cloud upload and cloud→local download round-trip byte-for-byte (modes preserved)"
 
 # S11 — keep-both conflict: the same path diverges on both
 # sides while the daemon is down; the restart reconcile must preserve

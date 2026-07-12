@@ -111,7 +111,7 @@ mechanics and the "why":
 | Symlinks | Never followed and never synced: a link could pull content from outside the sync root into scope, and cloud providers can't represent them faithfully. |
 | Hard links | Synced as an ordinary independent file; the link relationship is not preserved on the other side. |
 | Special files (pipes, sockets, devices) | Ignored entirely — they carry no transferable content and never block the files around them. |
-| Metadata (permissions, extended attributes, timestamps) | Not synced; content only. Vapor's own bookkeeping tags (op-id xattrs / side-files) stay invisible and never appear in listings. |
+| Metadata (permissions, extended attributes, timestamps) | Content is the synced object. POSIX permissions carry over on filesystem-backed transfers (an executable script stays `0755` on the other side), but a permissions-only change does not propagate (sync state compares content hashes), and providers without a native mode concept (Google Drive) do not preserve modes. Extended attributes and timestamps are not synced. Vapor's own bookkeeping tags (op-id xattrs / side-files) stay invisible and never appear in listings. |
 
 **The engine is file-only by decision: directories are implicit
 containers, not synced objects.** They materialize on the other side only

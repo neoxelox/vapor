@@ -82,6 +82,10 @@ pub struct StagedExecutorReport {
     pub mirror_deletes: usize,
     /// Keep-both conflict copies created this advance.
     pub conflicts: usize,
+    /// Provider calls that failed because the cloud sync root itself is
+    /// gone. The runtime reacts by blocking admission and re-ensuring
+    /// the root (self-healing), so these intents retry rather than fail.
+    pub cloud_root_unavailable: usize,
 }
 
 /// Everything stage work needs beyond the app + durable queue. The
@@ -316,10 +320,14 @@ impl StagedExecutor {
     /// harvests promptly. Must be called before any intent starts.
     pub fn enable_worker_threads(&mut self, waker: Option<Arc<crate::runtime::TickWaker>>) {
         debug_assert!(self.active.is_empty());
-        self.jobs = crate::provider_jobs::ProviderJobPool::threaded(
+        // Twice the IdleDrain tier so upload + download can both run at
+        // full width, bounded so a many-core machine cannot spawn an
+        // unreasonable thread count (threads are lazy + parked anyway).
+        let worker_cap = (2 * crate::throttle::idle_drain_concurrency()).clamp(
+            constants::engine::PROVIDER_JOB_WORKERS_MIN,
             constants::engine::PROVIDER_JOB_WORKERS_MAX,
-            waker,
         );
+        self.jobs = crate::provider_jobs::ProviderJobPool::threaded(worker_cap, waker);
     }
 
     pub fn snapshot(&self) -> StagedExecutorSnapshot {
@@ -759,6 +767,12 @@ impl StagedExecutor {
                         report,
                     );
                 };
+                // Probe results carry raw provider errors whose kind the
+                // continuations collapse into a retry classification —
+                // surface root-unavailability before it is lost.
+                if probe_saw_cloud_root_unavailable(&probe) {
+                    report.cloud_root_unavailable += 1;
+                }
                 let plan_outcome = match pending {
                     PendingPlan::Upload { plan, index } => {
                         continue_plan_upload(plan, index, &probe)
@@ -1377,6 +1391,9 @@ impl StagedExecutor {
         now: SystemTime,
         report: &mut StagedExecutorReport,
     ) -> Result<(), StateDbError> {
+        if error.kind == vapor_shared::ProviderErrorKind::CloudRootUnavailable {
+            report.cloud_root_unavailable += 1;
+        }
         let failure = error.kind.retry_classification();
         self.resolve_failure(app, state_db, intent, failure, &error.message, now, report)
     }
@@ -2724,6 +2741,19 @@ fn job_context(app: &DaemonApp, env: &ExecutionEnv<'_>, clock: &Arc<dyn Clock>) 
         transfer_step_bytes: env.transfer_step_bytes.clone(),
         clock: clock.clone(),
     }
+}
+
+fn probe_saw_cloud_root_unavailable(probe: &ProbeResult) -> bool {
+    let unavailable = |result: &Result<_, ProviderError>| {
+        result.as_ref().err().is_some_and(|error| {
+            error.kind == vapor_shared::ProviderErrorKind::CloudRootUnavailable
+        })
+    };
+    probe.stat.as_ref().is_some_and(|stat| {
+        stat.as_ref().err().is_some_and(|error| {
+            error.kind == vapor_shared::ProviderErrorKind::CloudRootUnavailable
+        })
+    }) || probe.content_hash.as_ref().is_some_and(unavailable)
 }
 
 /// Aborts the session inside an outcome that will not be applied

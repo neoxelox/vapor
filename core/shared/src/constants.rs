@@ -106,6 +106,8 @@ pub mod config {
     /// Idle-boost group; object with the `idle_boost::KEY_*`
     /// fields.
     pub const KEY_IDLE_BOOST: &str = "idleBoost";
+    /// Safeguards group; object with the `safeguards::KEY_*` fields.
+    pub const KEY_SAFEGUARDS: &str = "safeguards";
 
     /// Every recognized key in one slice. Kept in lockstep with the
     /// `KEY_*` constants above; the CLI uses this for `validate_key`.
@@ -125,6 +127,7 @@ pub mod config {
         KEY_PROFILES,
         KEY_RESOURCE_LIMITS,
         KEY_IDLE_BOOST,
+        KEY_SAFEGUARDS,
     ];
 
     /// Default values for the config keys whose defaults are not already
@@ -217,11 +220,18 @@ pub mod resource_limits {
     pub const KEY_CPU_PERCENT: &str = "cpuPercent";
     pub const KEY_MEMORY_PERCENT: &str = "memoryPercent";
     pub const KEY_BANDWIDTH_PERCENT: &str = "bandwidthPercent";
+    /// Optional hard ceiling on concurrent uploads and on concurrent
+    /// downloads (each direction separately). Absent means automatic:
+    /// the throttle ladder derives the ceiling from the machine's core
+    /// count. Clamped into `1..=16`.
+    pub const KEY_MAX_CONCURRENT_TRANSFERS: &str = "maxConcurrentTransfers";
     pub const DEFAULT_CPU_PERCENT: u8 = 15;
     pub const DEFAULT_MEMORY_PERCENT: u8 = 10;
     pub const DEFAULT_BANDWIDTH_PERCENT: u8 = 25;
     pub const MIN_PERCENT: u8 = 1;
     pub const MAX_PERCENT: u8 = 100;
+    pub const MIN_CONCURRENT_TRANSFERS: usize = 1;
+    pub const MAX_CONCURRENT_TRANSFERS: usize = 16;
 }
 
 pub mod idle_boost {
@@ -247,6 +257,24 @@ pub mod idle_boost {
     /// Must stay <= ramp-up so activity resumption is non-invasive
     /// (`data-flow.md §User resource budgets`).
     pub const DEFAULT_RAMP_DOWN_SECONDS: u64 = 10;
+}
+
+pub mod safeguards {
+    /// Keys of the `safeguards` config group. The mass-delete guard
+    /// pauses all sync when local deletions inside a rolling window
+    /// exceed the threshold, until an explicit `vapor resume` —
+    /// the ransomware / bulk-mistake backstop. Configurable because a
+    /// workflow that legitimately unlinks many files (`rm -rf` of large
+    /// trees, big build cleans) may need a higher threshold; the
+    /// defaults stay conservative.
+    pub const KEY_MASS_DELETE_ENABLED: &str = "massDeleteEnabled";
+    pub const KEY_MASS_DELETE_THRESHOLD: &str = "massDeleteThreshold";
+    pub const KEY_MASS_DELETE_WINDOW_SECONDS: &str = "massDeleteWindowSeconds";
+    pub const DEFAULT_MASS_DELETE_ENABLED: bool = true;
+    /// Floor clamps: a threshold/window too low would trip the guard on
+    /// ordinary work and train users to blind-resume it.
+    pub const MIN_MASS_DELETE_THRESHOLD: usize = 10;
+    pub const MIN_MASS_DELETE_WINDOW_SECONDS: u64 = 5;
 }
 
 pub mod sync_mode {
@@ -388,11 +416,15 @@ pub mod engine {
     pub const THROTTLED_NETWORK_ERROR_RATE_PERCENT: u8 = 25;
     pub const LIGHT_NETWORK_THROUGHPUT_KBPS: u32 = 512;
     pub const THROTTLED_NETWORK_THROUGHPUT_KBPS: u32 = 128;
-    pub const IDLE_DRAIN_PLANNER_WORKERS: usize = 4;
-    pub const IDLE_DRAIN_HASH_WORKERS: usize = 4;
+    /// IdleDrain concurrency tier bounds. The effective tier derives
+    /// from the machine's available parallelism (half the cores),
+    /// clamped into `[MIN, MAX]` — a 16-core desktop drains faster than
+    /// a 2-core laptop without oversubscribing either. Light/Throttled
+    /// tiers stay fixed: they bound device impact while the user is
+    /// active, where core count is not the limit that matters.
+    pub const IDLE_DRAIN_CONCURRENCY_MIN: usize = 4;
+    pub const IDLE_DRAIN_CONCURRENCY_MAX: usize = 8;
     pub const IDLE_DRAIN_READ_TOKENS: usize = 2;
-    pub const IDLE_DRAIN_UPLOAD_CONCURRENCY: usize = 4;
-    pub const IDLE_DRAIN_DOWNLOAD_CONCURRENCY: usize = 4;
     pub const LIGHT_PLANNER_WORKERS: usize = 2;
     pub const LIGHT_HASH_WORKERS: usize = 2;
     pub const LIGHT_READ_TOKENS: usize = 1;
@@ -413,12 +445,15 @@ pub mod engine {
     /// lowers the effective budget further when a user bandwidth
     /// ceiling applies.
     pub const TRANSFER_STAGE_STEP_BYTES: u64 = 8 * 1024 * 1024;
-    /// Upper bound on worker threads running blocking provider I/O
-    /// (probes, transfer sessions, remote deletes) off the runtime tick
-    /// thread. Threads spawn lazily per in-flight job and sit parked on
-    /// a channel otherwise; the throttle workgate, not this cap, bounds
-    /// how much work is admitted.
-    pub const PROVIDER_JOB_WORKERS_MAX: usize = 8;
+    /// Bounds on worker threads running blocking provider I/O (probes,
+    /// transfer sessions, remote deletes) off the runtime tick thread.
+    /// The effective cap is twice the IdleDrain concurrency tier,
+    /// clamped into `[MIN, MAX]`, so upload + download can both run at
+    /// full width. Threads spawn lazily per in-flight job and sit
+    /// parked on a channel otherwise; the throttle workgate, not this
+    /// cap, bounds how much work is admitted.
+    pub const PROVIDER_JOB_WORKERS_MIN: usize = 8;
+    pub const PROVIDER_JOB_WORKERS_MAX: usize = 16;
     /// Remote changes-feed poll cadence per throttle state; Google
     /// Drive follows the same discipline. Suspended never polls.
     pub const REMOTE_POLL_IDLE_DRAIN_SECONDS: u64 = 5;
@@ -485,6 +520,13 @@ pub mod engine {
     pub const STORM_DIRECTORY_EVENT_COUNT_THRESHOLD: usize = 600;
     pub const STORM_GLOBAL_PENDING_EVENT_COUNT_THRESHOLD: usize = 5_000;
     pub const DEFERRED_RECONCILE_DELAY_MILLIS: u64 = 30_000;
+    /// Early-release path for a storm-deferred reconcile: once the
+    /// device is already idle (`IdleDrain`) and the storm has been
+    /// quiet this long, waiting out the full deferral only delays
+    /// convergence the user is watching for (a repo clone appearing in
+    /// the cloud folder). The full delay still applies while the user
+    /// stays active.
+    pub const DEFERRED_RECONCILE_IDLE_QUIET_RELEASE_MILLIS: u64 = 5_000;
     /// Upper bound on how long a storm-deferred reconcile may keep being
     /// pushed back by continued churn. Measured from the moment the storm
     /// was first detected; once reached, the reconcile becomes releasable
