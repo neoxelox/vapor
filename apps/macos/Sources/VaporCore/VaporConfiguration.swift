@@ -68,6 +68,18 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   /// settings write can never destroy runtime configuration.
   public var additionalKeys: [String: JSONValue]
 
+  /// The configured provider kind. The app does not model `provider`
+  /// as a first-class field (it lives in `additionalKeys` so app-side
+  /// saves preserve it verbatim); this read-only view feeds the UI.
+  public var providerKind: String {
+    if case .string(let value) = additionalKeys[VaporConstants.ConfigKeys.provider],
+      !value.trimmingCharacters(in: .whitespaces).isEmpty
+    {
+      return value
+    }
+    return VaporConstants.Provider.defaultKind
+  }
+
   public static let defaultPreIgnoreRuleLines = VaporConstants.Defaults.preIgnoreRuleLines
   public static let defaultLocalSyncDirectory = VaporConstants.Defaults.localSyncDirectory
   public static let defaultCloudSyncDirectory = VaporConstants.Defaults.cloudSyncDirectory

@@ -120,7 +120,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     postIgnoreRules: VaporConfiguration.defaultPostIgnoreRules,
     languageCode: VaporConfiguration.defaultLanguageCode,
     effectiveLanguageCode: VaporConstants.Localization.defaultLanguageCode,
-    providerName: VaporConstants.Daemon.preGADefaultProviderDisplayName,
+    providerName: VaporConstants.Provider.displayName(
+      forKind: VaporConstants.Provider.defaultKind),
     vaporDirectoryPath: VaporPaths.resolveVaporDirectoryURL().path,
     crashLoopPaused: false
   )

@@ -78,9 +78,29 @@ public enum VaporConstants {
     public static let defaultLanguageCode = "en"
   }
 
+  /// Mirrors `core/shared/src/constants.rs::provider::*` per
+  /// AGENTS.md §8.6.
+  public enum Provider {
+    public static let filesystem = "filesystem"
+    public static let gdrive = "gdrive"
+    public static let defaultKind = filesystem
+
+    /// User-facing display name for a `provider` config value. Unknown
+    /// values render verbatim so a misconfiguration stays visible.
+    public static func displayName(forKind kind: String) -> String {
+      switch kind.trimmingCharacters(in: .whitespaces) {
+      case gdrive:
+        return "Google Drive"
+      case filesystem, "":
+        return "Filesystem"
+      case let other:
+        return other
+      }
+    }
+  }
+
   public enum Daemon {
     public static let launchAgentLabel = "sh.arn.vapor.daemon"
-    public static let preGADefaultProviderDisplayName = "Filesystem (stub)"
     /// Mirrors `core/shared/src/constants.rs::service::HEALTH_TICK_INTERVAL_SECONDS`
     /// per AGENTS.md §8.6.
     public static let healthTickIntervalSeconds: TimeInterval = 30
@@ -104,6 +124,7 @@ public enum VaporConstants {
     public static let profiles = "profiles"
     public static let resourceLimits = "resourceLimits"
     public static let idleBoost = "idleBoost"
+    public static let safeguards = "safeguards"
   }
 
   /// Accepted `syncMode` values. Mirrors

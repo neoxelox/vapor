@@ -3,6 +3,19 @@ import Testing
 @testable import VaporCore
 
 @Test
+func providerKindReadsThePreservedConfigKeyAndMapsDisplayNames() {
+  var config = VaporConfiguration()
+  #expect(config.providerKind == VaporConstants.Provider.filesystem)
+  config.additionalKeys[VaporConstants.ConfigKeys.provider] = .string("gdrive")
+  #expect(config.providerKind == "gdrive")
+  #expect(VaporConstants.Provider.displayName(forKind: "gdrive") == "Google Drive")
+  #expect(VaporConstants.Provider.displayName(forKind: "filesystem") == "Filesystem")
+  #expect(
+    VaporConstants.Provider.displayName(forKind: "gdrvie") == "gdrvie",
+    "unknown provider values must stay visible verbatim")
+}
+
+@Test
 func initialStateUsesSafeDefaults() {
   let state = AppShellState.initial
   #expect(state.syncState == .idle)
@@ -16,7 +29,7 @@ func initialStateUsesSafeDefaults() {
   #expect(state.postIgnoreRules == VaporConfiguration.defaultPostIgnoreRules)
   #expect(state.languageCode == "en")
   #expect(state.effectiveLanguageCode == "en")
-  #expect(state.providerName == VaporConstants.Daemon.preGADefaultProviderDisplayName)
+  #expect(state.providerName == "Filesystem")
   #expect(!state.vaporDirectoryPath.isEmpty)
 }
 

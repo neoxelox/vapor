@@ -64,6 +64,12 @@ final class AppShellViewModel: ObservableObject {
     // `vapor.json` / defaults here and refreshes asynchronously once
     // the bootstrap and health-tick paths report back.
     state.autoLaunchEnabled = self.configuration.autoLaunch
+    // The provider label reflects the loaded configuration; a provider
+    // change requires the daemon (and app) to restart anyway, so a
+    // startup read is accurate. Live provider status over IPC arrives
+    // with the diagnostics work.
+    state.providerName = VaporConstants.Provider.displayName(
+      forKind: self.configuration.providerKind)
     state.useGitIgnore = self.configuration.useGitIgnore
     state.useVaporIgnore = self.configuration.useVaporIgnore
     state.preIgnoreRules = self.configuration.preIgnoreRules
