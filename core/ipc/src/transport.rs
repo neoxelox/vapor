@@ -24,6 +24,16 @@ pub enum TransportError {
         path: PathBuf,
         owner_uid: u32,
     },
+    /// The connect phase itself exceeded the caller's deadline. Happens
+    /// when the daemon's accept loop is wedged and the kernel backlog is
+    /// full: on Linux a blocking `connect(2)` on AF_UNIX then blocks
+    /// indefinitely (macOS fails fast with ECONNREFUSED), which would
+    /// otherwise hang the client before its read/write timeouts even
+    /// arm.
+    ConnectTimeout {
+        path: PathBuf,
+        timeout: std::time::Duration,
+    },
 }
 
 impl Display for TransportError {
@@ -35,6 +45,12 @@ impl Display for TransportError {
                 f,
                 "refusing to connect to IPC socket {} owned by uid {owner_uid}, not the current user",
                 path.display()
+            ),
+            Self::ConnectTimeout { path, timeout } => write!(
+                f,
+                "connecting to IPC socket {} exceeded the {:?} deadline",
+                path.display(),
+                timeout
             ),
         }
     }
@@ -56,10 +72,14 @@ impl From<io::Error> for TransportError {
 }
 
 #[cfg(unix)]
-pub use unix_impl::{ListenerHandle, StreamHandle, bind_listener, connect_to_socket};
+pub use unix_impl::{
+    ListenerHandle, StreamHandle, bind_listener, connect_to_socket, connect_to_socket_with_timeout,
+};
 
 #[cfg(windows)]
-pub use windows_impl::{ListenerHandle, StreamHandle, bind_listener, connect_to_socket};
+pub use windows_impl::{
+    ListenerHandle, StreamHandle, bind_listener, connect_to_socket, connect_to_socket_with_timeout,
+};
 
 #[cfg(unix)]
 mod unix_impl {
@@ -131,6 +151,20 @@ mod unix_impl {
     }
 
     pub fn connect_to_socket(socket_path: &Path) -> Result<UnixStream, TransportError> {
+        connect_to_socket_with_timeout(socket_path, None)
+    }
+
+    /// Like [`connect_to_socket`] but bounds the connect phase itself.
+    /// A blocking AF_UNIX `connect(2)` is unbounded on Linux once the
+    /// listener's accept backlog fills (a wedged daemon accept loop), so
+    /// the deadline the caller applies to reads/writes must also cover
+    /// the connect. The connect runs on a helper thread joined with the
+    /// timeout; on expiry the thread is abandoned (it exits when the
+    /// kernel eventually resolves the connect and the stream drops).
+    pub fn connect_to_socket_with_timeout(
+        socket_path: &Path,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<UnixStream, TransportError> {
         // Verify the socket is ours before connecting. The server side is
         // protected by a 0o700 parent + 0o600 socket, but the client must
         // not blindly trust whatever sits at the resolved path: under the
@@ -140,7 +174,21 @@ mod unix_impl {
         use std::os::unix::fs::MetadataExt;
         let owner_uid = fs::metadata(socket_path)?.uid();
         verify_socket_owner(socket_path, owner_uid, current_euid())?;
-        Ok(UnixStream::connect(socket_path)?)
+        let Some(timeout) = timeout else {
+            return Ok(UnixStream::connect(socket_path)?);
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let connect_path = socket_path.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = sender.send(UnixStream::connect(&connect_path));
+        });
+        match receiver.recv_timeout(timeout) {
+            Ok(result) => Ok(result?),
+            Err(_) => Err(TransportError::ConnectTimeout {
+                path: socket_path.to_path_buf(),
+                timeout,
+            }),
+        }
     }
 
     /// The ownership gate as a pure decision so both branches are
@@ -192,6 +240,15 @@ mod windows_impl {
     pub fn bind_listener(_socket_path: PathBuf) -> Result<ListenerHandle, TransportError> {
         Err(TransportError::Unsupported(
             "Windows IPC named-pipe transport not implemented yet (Wave 12 / C6)",
+        ))
+    }
+
+    pub fn connect_to_socket_with_timeout(
+        _socket_path: &Path,
+        _timeout: Option<std::time::Duration>,
+    ) -> Result<StreamHandle, TransportError> {
+        Err(TransportError::Unsupported(
+            "the Windows named-pipe transport has not shipped yet",
         ))
     }
 
