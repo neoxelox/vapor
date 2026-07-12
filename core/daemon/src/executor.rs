@@ -680,7 +680,11 @@ impl StagedExecutor {
                     return Ok(Some(execution));
                 }
                 match session.step(step_budget) {
-                    Ok(TransferStep::Progressed { .. }) => {
+                    Ok(TransferStep::Progressed { bytes_transferred }) => {
+                        // Return the slack: a step routinely spends less than
+                        // its grant (chunk alignment / short final chunk), and
+                        // keeping it would undershoot the configured rate.
+                        refund_transfer_budget(env, step_budget.saturating_sub(bytes_transferred));
                         execution.stage = ActiveStage::Upload {
                             permit,
                             plan,
@@ -708,6 +712,9 @@ impl StagedExecutor {
                         Ok(None)
                     }
                     Err(error) => {
+                        // A failed step moved zero bytes: refund the whole
+                        // grant so a retry storm cannot burn the shared bucket.
+                        refund_transfer_budget(env, step_budget);
                         session.abort();
                         app.release_work(permit);
                         if error.kind == vapor_shared::ProviderErrorKind::PreconditionFailed
@@ -833,7 +840,8 @@ impl StagedExecutor {
                     return Ok(Some(execution));
                 }
                 match session.step(step_budget) {
-                    Ok(TransferStep::Progressed { .. }) => {
+                    Ok(TransferStep::Progressed { bytes_transferred }) => {
+                        refund_transfer_budget(env, step_budget.saturating_sub(bytes_transferred));
                         execution.stage = ActiveStage::Download {
                             permit,
                             plan,
@@ -903,6 +911,7 @@ impl StagedExecutor {
                         }
                     }
                     Err(error) => {
+                        refund_transfer_budget(env, step_budget);
                         session.abort();
                         app.release_work(permit);
                         if error.kind == vapor_shared::ProviderErrorKind::NotFound {
@@ -2201,6 +2210,19 @@ fn grant_transfer_budget(env: &ExecutionEnv<'_>, clock: &Arc<dyn Clock>) -> u64 
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .budget(env.transfer_step_bytes, clock.now())
+}
+
+/// Returns the unspent portion of a transfer-step grant to the shared
+/// bandwidth bucket, so per-step chunk-alignment slack and failed (zero-
+/// byte) steps do not make the shaper undershoot the configured rate.
+fn refund_transfer_budget(env: &ExecutionEnv<'_>, unused: u64) {
+    if unused == 0 {
+        return;
+    }
+    env.bandwidth
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .refund(unused);
 }
 
 fn path_key(path: &Path) -> String {

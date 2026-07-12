@@ -31,6 +31,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed (CLI)
 
+- `vapor conflicts` safety (full-repo review): resolving with `--keep copy` only deletes the canonical file for the Windows destination-exists collision it was written for (error kind `AlreadyExists`), not on any rename failure — so a read-only remount or I/O error no longer destroys the canonical version inside a failing path. `vapor conflicts list` now records unreadable subdirectories in a new `skippedDirectories` field (surfaced in text and `--json`), so a conflict copy under a `chmod 000` directory is reported instead of invisibly orphaned behind "No unresolved conflicts."
 - CLI hygiene (full-repo review): `vapor logs` (no `--tail`) streams the log file to stdout instead of buffering the whole thing in memory, so it no longer spikes CLI memory by the full file size on a large log; `vapor service stop` reports `unchanged` (not `stopped`) when nothing was installed or running, so it no longer claims to have stopped a daemon that was never there; and the reserved always-on `--foreground` flag on `vapor run` is hidden so its presence no longer implies a background/daemonize mode exists (it still parses).
 
 ### Security
@@ -49,6 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Performance
 
+- The bandwidth shaper now refunds the unspent portion of a transfer-step grant (full-repo review): per-step chunk-size alignment slack and failed (zero-byte) steps are returned to the shared token bucket (clamped to the one-second cap), so sustained upload throughput no longer systematically undershoots the configured rate and a retry storm cannot burn the shared budget.
 - Sync-pipeline latency & device-impact improvements (full-repo review):
   - The remote poller keeps draining while a page is full instead of waiting a full cadence between pages, so a large remote burst (thousands of files) enqueues in seconds rather than minutes.
   - The reconcile walk scales its per-tick directory budget up under IdleDrain and is bounded by a wall-clock slice deadline checked between directories, so a large tree converges fast on the filesystem provider while a slow network provider's `enumerate` can no longer hold the tick thread for a whole chunk.

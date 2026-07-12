@@ -55,8 +55,9 @@ any surface.
 and reports, per conflict: profile, canonical path, copy path, origin
 device, divergence time, both sizes, and whether the canonical file still
 exists. It reads config directly, so it works with the daemon stopped, and
-it reports unreadable roots explicitly rather than returning a silently
-incomplete empty list.
+it reports unreadable roots (`skippedRoots`) and unreadable
+subdirectories encountered mid-walk (`skippedDirectories`) explicitly
+rather than returning a silently incomplete empty list.
 
 The `--json` shape is a locked contract (shape test in
 `core/cli/src/commands/conflicts.rs`); app surfaces consume it instead of

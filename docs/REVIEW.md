@@ -908,7 +908,7 @@ HelloAck.server_id (core/ipc/src/server.rs:171) is built as format!("vapord/{cur
 
 **Suggested fix**: Build `server_id` from the product version (root `VERSION` via the existing build-info plumbing), e.g. `vapord/<product-version>`, keeping the schema version in the dedicated `schema_version` field.
 
-### [low] Bandwidth grant is consumed even when the transfer step uses fewer bytes or fails, systematically undershooting the configured rate
+### [low] Bandwidth grant is consumed even when the transfer step uses fewer bytes or fails, systematically undershooting the configured rate  ✅ DONE
 
 **Category**: perf · **Where**: `core/providers/src/bandwidth.rs:63` · **Review group**: provider-core
 
@@ -1374,7 +1374,7 @@ parse_value_for_key (core/cli/src/commands/config.rs:128-133) accepts any i64 fo
 
 **Suggested fix**: Reject values < 1 (and optionally cap an upper bound) in parse_value_for_key with the same ConfigError::Parse style used for booleans and enums.
 
-### [low] Conflict scan silently skips unreadable subdirectories, contradicting the 'never silently incomplete' contract
+### [low] Conflict scan silently skips unreadable subdirectories, contradicting the 'never silently incomplete' contract  ✅ DONE
 
 **Category**: improvement · **Where**: `core/cli/src/commands/conflicts.rs:96` · **Review group**: cli-commands
 
@@ -1382,7 +1382,7 @@ list_conflicts documents skipped_roots as guaranteeing "an empty result is never
 
 **Suggested fix**: Record unreadable directories (e.g. append them to skipped_roots or a skipped_directories field) instead of continuing silently, and surface them in render_list / the JSON report.
 
-### [low] Keep-copy fallback deletes the canonical file on any rename error, not only the Windows exists-collision it was written for
+### [low] Keep-copy fallback deletes the canonical file on any rename error, not only the Windows exists-collision it was written for  ✅ DONE
 
 **Category**: improvement · **Where**: `core/cli/src/commands/conflicts.rs:198` · **Review group**: cli-commands
 
