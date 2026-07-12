@@ -764,7 +764,7 @@ The IPC protocol doc (core/ipc/src/protocol.rs:53-55) promises that unknown meth
 
 **Suggested fix**: In the per-method loop, on parse failure re-attempt a lenient decode (e.g. parse to `serde_json::Value`, check `kind == "Call"`, extract the method name/tag) and answer `ErrorBody::MethodNotFound(name)` for unknown variants, reserving `Backend`/parse errors for genuinely malformed frames.
 
-### [medium] Client performs no peer verification on the socket; the deterministic shared-temp relocation path enables daemon impersonation on multi-user hosts
+### [medium] Client performs no peer verification on the socket; the deterministic shared-temp relocation path enables daemon impersonation on multi-user hosts  ✅ DONE
 
 **Category**: security · **Where**: `core/ipc/src/transport.rs:120` · **Review group**: ipc
 
@@ -1270,7 +1270,7 @@ resolve_or_persist (core/shared/src/device_id.rs:74-75) writes vapor.json via fs
 
 **Suggested fix**: Create the parent via runtime_paths::ensure_private_directory, and write the temp file with OpenOptionsExt::mode(PRIVATE_FILE_MODE) (or chmod 0600 before rename), mirroring the discipline logging.rs/state_db.rs already use. The CLI's config write path (core/cli/src/commands/config.rs fs::write) has the same gap and should share one helper.
 
-### [medium] No log rotation or size cap: vapor.logs / vapord.logs grow without bound for a long-running daemon
+### [medium] No log rotation or size cap: vapor.logs / vapord.logs grow without bound for a long-running daemon  ✅ DONE
 
 **Category**: improvement · **Where**: `core/shared/src/logging.rs:175` · **Review group**: shared
 

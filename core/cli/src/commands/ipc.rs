@@ -261,8 +261,8 @@ pub fn tail_logs(tail: Option<usize>) -> io::Result<String> {
 }
 
 /// Reads the final `line_count` lines of `path` by scanning backwards in
-/// fixed-size chunks from the end of the file, so tailing a large
-/// unrotated log does not load the whole file into memory.
+/// fixed-size chunks from the end of the file, so tailing a large log
+/// does not load the whole file into memory.
 fn read_last_lines(path: &std::path::Path, line_count: usize) -> io::Result<String> {
     use std::io::{Read, Seek, SeekFrom};
 

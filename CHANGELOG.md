@@ -29,6 +29,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - Google Drive transfer sessions now share the provider's one `TokenManager` (an `Arc` clone per request) instead of constructing a fresh one with an empty cache on every chunk PUT / range GET — no more SecretStore read + token-parse on the hot transfer path — and the session request path inherits the one-shot `401` force-refresh-and-resend, so a token that expires mid-upload resends that one chunk instead of failing the whole multi-gigabyte intent terminally.
   - Google Drive rename/move convergence and overwrite safety: duplicate file names in a folder now resolve deterministically (lowest id) instead of an arbitrary match; a path->id cache hit is validated against the file's current name/parent (and folder invalidations evict the whole subtree) so an edit can no longer be written into a file that was renamed or moved out of the sync root; `path_for_changed_file` derives the current path from the change's own name/parents (emitting a delete-at-old + create-at-new for a remote rename) instead of returning a stale cached path that never converged; and the `HashEquals` upload precondition is re-verified with a single re-stat immediately before the committing request (multipart PATCH/POST and the final resumable chunk), shrinking the check-then-act window from the whole transfer to one round-trip so a concurrent remote edit surfaces as keep-both instead of a silent last-write-wins overwrite.
 
+### Security
+
+- The IPC client now verifies socket ownership before connecting (full-repo review): it refuses (typed `ForeignSocket` error) any socket at the resolved path not owned by the current user. Previously, under the deterministic temp-dir relocation for over-long socket paths, a local user on a world-writable `/tmp` (a planned Linux surface) could pre-create the socket and impersonate the daemon — forging `Running`/synced status and acks and receiving `UpdateExcludes` rule contents. The server-side 0700-parent/0600-socket protection is now symmetric on the client side.
+
+### Fixed (observability)
+
+- Structured logs are now size-rotated (full-repo review): `StructuredLogger` rolls the live log to `<name>.1` (cascading `.1`→`.2`… up to a kept-generation cap, dropping the oldest) once it passes an 8 MiB cap, and the daemon trims its service-manager stdout/stderr redirect files at startup — so an always-on daemon logging at Debug under storms no longer grows its logs without bound.
+
 ### Performance
 
 - Sync-pipeline latency & device-impact improvements (full-repo review):

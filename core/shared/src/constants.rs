@@ -41,6 +41,13 @@ pub mod runtime {
     pub const LIFECYCLE_STATE_FILE_NAME: &str = "lifecycle.json";
     pub const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
     pub const PRIVATE_FILE_MODE: u32 = 0o600;
+    /// Size cap for a single structured-log file before it is rotated.
+    /// An always-on daemon logging at Debug under storms would otherwise
+    /// grow its log without bound, violating the low-device-impact goal.
+    pub const LOG_FILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+    /// How many rotated generations (`<name>.1` … `<name>.N`) are kept
+    /// alongside the live file; older generations are dropped.
+    pub const LOG_FILE_GENERATIONS: u32 = 3;
 }
 
 pub mod state {
