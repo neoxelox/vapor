@@ -1390,7 +1390,7 @@ resolve_conflict's KeepSide::Copy path treats every fs::rename error as the Wind
 
 **Suggested fix**: Gate the remove-then-rename fallback on cfg(windows) (or on the specific error kind, e.g. AlreadyExists/PermissionDenied from a dest-exists collision) and return the original rename error unchanged elsewhere.
 
-### [low] vapor logs without --tail loads the entire log file into memory before printing
+### [low] vapor logs without --tail loads the entire log file into memory before printing  ✅ DONE
 
 **Category**: perf · **Where**: `core/cli/src/commands/ipc.rs:258` · **Review group**: cli-core
 
@@ -1398,7 +1398,7 @@ tail_logs with tail=None (core/cli/src/commands/ipc.rs:258) does fs::read_to_str
 
 **Suggested fix**: Stream the no-tail path: open the file and io::copy it to a locked stdout (also fixing the extra-allocation println), or default --tail to a large-but-bounded line count.
 
-### [low] --foreground is an accepted no-op flag whose presence implies a background default that does not exist
+### [low] --foreground is an accepted no-op flag whose presence implies a background default that does not exist  ✅ DONE
 
 **Category**: improvement · **Where**: `core/cli/src/commands/run.rs:21` · **Review group**: cli-core
 
@@ -1406,7 +1406,7 @@ tail_logs with tail=None (core/cli/src/commands/ipc.rs:258) does fs::read_to_str
 
 **Suggested fix**: Until a real background mode ships, either hide the flag (#[arg(hide = true)]) or state "currently always runs in the foreground; this flag is reserved" in the subcommand and flag help so callers cannot infer a background default.
 
-### [low] vapor service stop unconditionally reports {"result":"stopped"} even when nothing was installed or running
+### [low] vapor service stop unconditionally reports {"result":"stopped"} even when nothing was installed or running  ✅ DONE
 
 **Category**: improvement · **Where**: `core/cli/src/commands/service.rs:166` · **Review group**: cli-commands
 

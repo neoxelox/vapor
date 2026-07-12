@@ -36,7 +36,10 @@ struct Cli {
 enum Command {
     /// Run the daemon in-process (foreground).
     Run {
-        #[arg(long)]
+        // Reserved/always-on: `vapor run` is always foreground. Hidden so
+        // its presence does not imply a background/daemonize mode exists.
+        // Still parses (the e2e harness passes it).
+        #[arg(long, hide = true)]
         foreground: bool,
     },
     /// Read or write a key in `vapor.json`.
@@ -454,11 +457,29 @@ fn dispatch_diagnostics(json: bool) -> Result<ExitCode, String> {
 }
 
 fn dispatch_logs(tail: Option<usize>) -> Result<ExitCode, String> {
-    let contents = ipc_cmd::tail_logs(tail).map_err(|e| e.to_string())?;
-    if contents.is_empty() {
-        println!("(no log lines yet)");
-    } else {
-        println!("{contents}");
+    match tail {
+        // Bounded: the backward chunk-scan returns at most `n` lines.
+        Some(line_count) => {
+            let contents = ipc_cmd::tail_logs(Some(line_count)).map_err(|e| e.to_string())?;
+            if contents.is_empty() {
+                println!("(no log lines yet)");
+            } else {
+                println!("{contents}");
+            }
+        }
+        // Stream the whole file so `vapor logs` on a large log does not
+        // spike CLI memory by the full file size.
+        None => {
+            use std::io::Write;
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            let wrote = ipc_cmd::stream_full_log(&mut lock).map_err(|e| e.to_string())?;
+            if wrote {
+                let _ = lock.flush();
+            } else {
+                let _ = writeln!(lock, "(no log lines yet)");
+            }
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
