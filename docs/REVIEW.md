@@ -1414,7 +1414,7 @@ dispatch(ServiceCommand::Stop) (core/cli/src/commands/service.rs:166-171) hardco
 
 **Suggested fix**: Probe installer.status() before/after the stop and return Unchanged (or a distinct wire value) when the service was not installed or already stopped, keeping the JSON contract change coordinated with the Swift shim.
 
-### [low] Support-bundle directory name collides silently: same-millisecond or pre-epoch timestamps merge two bundles into one directory
+### [low] Support-bundle directory name collides silently: same-millisecond or pre-epoch timestamps merge two bundles into one directory  ✅ DONE
 
 **Category**: improvement · **Where**: `core/cli/src/commands/support.rs:65` · **Review group**: cli-core
 
@@ -1430,7 +1430,7 @@ clap's version attribute in core/cli/src/main.rs:25 is set to vapor_daemon::buil
 
 **Suggested fix**: Set the clap version to the full string, e.g. `version = vapor_cli::version_string()` (clap 4 accepts an owned String), or emit a combined VERSION_WITH_COMMIT constant from the daemon crate's build.rs and use it in both places.
 
-### [low] Support bundle drops all live captures and reports daemonReachable=false if any one of three IPC calls fails
+### [low] Support bundle drops all live captures and reports daemonReachable=false if any one of three IPC calls fails  ✅ DONE
 
 **Category**: improvement · **Where**: `core/cli/src/main.rs:356` · **Review group**: cli-core
 

@@ -364,28 +364,53 @@ fn dispatch_support_bundle(
 ) -> Result<ExitCode, String> {
     use vapor_cli::commands::support;
 
-    // Live captures are best-effort: an unreachable daemon still yields
-    // a useful bundle from the on-disk artifacts.
-    let live = match (
-        ipc_cmd::status(),
-        ipc_cmd::diagnostics(),
-        ipc_cmd::timeline(),
-    ) {
-        (Ok(status), Ok(diagnostics), Ok(timeline)) => Some(support::LiveCaptures {
-            status_json: serde_json::to_string_pretty(&status).map_err(|e| e.to_string())?,
-            diagnostics_json: serde_json::to_string_pretty(&diagnostics)
-                .map_err(|e| e.to_string())?,
-            timeline_json: serde_json::to_string_pretty(&timeline).map_err(|e| e.to_string())?,
-        }),
-        _ => None,
-    };
+    // Live captures are best-effort and independent: a daemon that
+    // answers one endpoint but fails another still contributes what it
+    // could, and the failures are recorded rather than discarding the
+    // successful captures.
+    let mut capture_errors = Vec::new();
+    let capture =
+        |result: Result<String, String>, endpoint: &str, errors: &mut Vec<String>| match result {
+            Ok(value) => Some(value),
+            Err(error) => {
+                errors.push(format!("{endpoint}: {error}"));
+                None
+            }
+        };
+    let status_json = capture(
+        ipc_cmd::status()
+            .map_err(|e| e.to_string())
+            .and_then(|s| serde_json::to_string_pretty(&s).map_err(|e| e.to_string())),
+        "status",
+        &mut capture_errors,
+    );
+    let diagnostics_json = capture(
+        ipc_cmd::diagnostics()
+            .map_err(|e| e.to_string())
+            .and_then(|d| serde_json::to_string_pretty(&d).map_err(|e| e.to_string())),
+        "diagnostics",
+        &mut capture_errors,
+    );
+    let timeline_json = capture(
+        ipc_cmd::timeline()
+            .map_err(|e| e.to_string())
+            .and_then(|t| serde_json::to_string_pretty(&t).map_err(|e| e.to_string())),
+        "timeline",
+        &mut capture_errors,
+    );
+    let live = Some(support::LiveCaptures {
+        status_json,
+        diagnostics_json,
+        timeline_json,
+        capture_errors,
+    });
 
     let vapor_dir = vapor_shared::runtime_paths::vapor_directory();
     let output_root = output.unwrap_or_else(|| vapor_dir.join("support"));
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
-        .unwrap_or(0);
+        .map_err(|_| "system clock is before the Unix epoch".to_string())?;
     let report = support::collect_support_bundle(&vapor_dir, &output_root, live, timestamp_ms)
         .map_err(|e| format!("cannot collect support bundle: {e}"))?;
 
