@@ -865,17 +865,20 @@ impl FilesystemUploadSession {
         })
     }
 
-    /// Move the staged temp into place. `Absent` uses an atomic no-clobber
-    /// create (hard-link then unlink the temp name) so a concurrent writer
-    /// that lands the target between the check and here is not silently
-    /// overwritten; the overwrite modes (`None`/`HashEquals`) rename.
+    /// Move the staged temp into place. `Absent` uses an atomic
+    /// no-clobber *rename* so a concurrent writer that lands the target
+    /// between the check and here is not silently overwritten; the
+    /// overwrite modes (`None`/`HashEquals`) rename unconditionally.
+    /// The no-clobber commit must be a rename, never a hard-link +
+    /// unlink pair: FSEvents tracks file events by node, and a link-
+    /// created target stays bound to the deleted temp name — every
+    /// later external edit or deletion of the uploaded file would then
+    /// be invisible to the changes feed (observed live as a cloud-side
+    /// `rm` that never propagated).
     fn commit(&self) -> Result<(), ProviderError> {
         if self.require_absent {
-            match fs::hard_link(&self.temp_path, &self.target) {
-                Ok(()) => {
-                    let _ = fs::remove_file(&self.temp_path);
-                    Ok(())
-                }
+            match vapor_platform::fs_ops::atomic_noclobber_rename(&self.temp_path, &self.target) {
+                Ok(()) => Ok(()),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     let _ = fs::remove_file(&self.temp_path);
                     Err(ProviderError::precondition_failed(format!(
@@ -884,7 +887,7 @@ impl FilesystemUploadSession {
                     )))
                 }
                 Err(error) => Err(ProviderError::transient(format!(
-                    "cannot link upload into place at {}: {error}",
+                    "cannot move upload into place at {}: {error}",
                     self.remote_path
                 ))),
             }

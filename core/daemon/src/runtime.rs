@@ -2642,6 +2642,65 @@ mod tests {
     }
 
     #[test]
+    fn cloud_deletion_of_a_previously_uploaded_file_propagates_locally() {
+        // Field-testing repro: local create A (uploads), cloud create B
+        // (downloads), local delete B (propagates up), cloud delete A —
+        // the final removal must propagate down. Every feed event the
+        // real cloud-root watcher would emit is reproduced, including
+        // the echoes of Vapor's own provider writes.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+
+        // 1. Local create A -> upload. The cloud watcher then sees our
+        // own write and echoes Created(A).
+        let local_a = fixture.watch_root.join("a.txt");
+        std::fs::write(&local_a, b"file a").expect("seed a");
+        fixture.record_local_event(&local_a, FsEventKind::Created, fixture.now_ms);
+        assert!(fixture.converge(12) >= 1, "A must upload");
+        let cloud_a = fixture.cloud_root.join("a.txt");
+        assert!(cloud_a.exists());
+        fixture
+            .feed
+            .emit_created(cloud_a.clone(), timestamp_ms(fixture.now_ms));
+
+        // 2. Cloud create B -> download.
+        let cloud_b = fixture.cloud_root.join("b.txt");
+        std::fs::write(&cloud_b, b"file b").expect("seed b");
+        fixture
+            .feed
+            .emit_created(cloud_b.clone(), timestamp_ms(fixture.now_ms));
+        assert!(fixture.converge(12) >= 1, "B must download");
+        let local_b = fixture.watch_root.join("b.txt");
+        assert!(local_b.exists());
+
+        // 3. Local delete B -> remote delete. The cloud watcher echoes
+        // Removed(B) for our own provider delete.
+        std::fs::remove_file(&local_b).expect("delete local b");
+        fixture.record_local_event(&local_b, FsEventKind::Removed, fixture.now_ms);
+        assert!(fixture.converge(12) >= 1, "B's deletion must propagate up");
+        assert!(!cloud_b.exists(), "cloud B must be deleted");
+        fixture
+            .feed
+            .emit_removed(cloud_b.clone(), timestamp_ms(fixture.now_ms));
+        fixture.converge(12);
+        assert!(
+            !local_b.exists(),
+            "the echo of our own remote delete must not resurrect B"
+        );
+
+        // 4. Cloud delete A -> the removal must propagate down.
+        std::fs::remove_file(&cloud_a).expect("delete cloud a");
+        fixture
+            .feed
+            .emit_removed(cloud_a.clone(), timestamp_ms(fixture.now_ms));
+        fixture.converge(24);
+        assert!(
+            !local_a.exists(),
+            "a cloud deletion of a previously-uploaded file must propagate locally"
+        );
+    }
+
+    #[test]
     fn deleted_cloud_root_blocks_sync_then_recovers_and_reuploads() {
         let mut fixture = BidirectionalFixture::new();
         // Baseline the feed cursor, then sync one file normally.

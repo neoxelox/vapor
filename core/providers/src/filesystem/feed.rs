@@ -210,6 +210,13 @@ impl ChangesFeed {
             .expect("changes feed receiver mutex poisoned");
         let mut ring = self.ring.lock().expect("changes feed ring mutex poisoned");
         for event in receiver.try_iter() {
+            logging::debug(
+                "Changes-feed watcher event",
+                &[
+                    ("path", event.path.display().to_string()),
+                    ("kind", format!("{:?}", event.kind)),
+                ],
+            );
             if let Some(change) = normalize_watch_event(root, tags, event) {
                 ring.push(change);
             }
