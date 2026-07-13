@@ -357,14 +357,35 @@ pub mod filtering {
     pub const INTERNAL_IGNORE_FILE_SUFFIXES: &[&str] = &[".vapor-meta.json"];
     pub const DEFAULT_LOCAL_SYNC_DIRECTORY: &str = "~/Vapor";
     pub const DEFAULT_CLOUD_SYNC_DIRECTORY: &str = "/Vapor";
+    /// Baseline low-signal exclusions applied before discovered ignore
+    /// files: OS junk, editor temp/partial files, and the common
+    /// build / cache / dependency directories across ecosystems —
+    /// regenerable machine output that would dominate sync traffic.
+    /// Deliberately NOT ignored: `.git/` (repositories sync whole) and
+    /// dotenv files (a personal sync root is exactly where a backup of
+    /// local secrets belongs — project owner decision, 2026-07-13).
     pub const DEFAULT_PRE_IGNORE_RULES: &[&str] = &[
-        ".git/",
+        // OS junk
         ".DS_Store",
+        "Thumbs.db",
+        "desktop.ini",
+        // Editor swap / temp / partial files
         "*.tmp",
         "*.temp",
         "*.swp",
         "*.swo",
         "*~",
+        "*.bak",
+        "*.part",
+        "*.crdownload",
+        "*.log",
+        // Generic build & cache outputs
+        "dist/",
+        "build/",
+        "out/",
+        "coverage/",
+        ".cache/",
+        // JavaScript / TypeScript
         "node_modules/",
         ".pnpm-store/",
         ".yarn/cache/",
@@ -373,18 +394,57 @@ pub mod filtering {
         ".next/",
         ".nuxt/",
         ".svelte-kit/",
-        "dist/",
-        "build/",
-        "out/",
+        ".astro/",
+        ".angular/",
+        ".expo/",
         ".turbo/",
         ".vite/",
         ".parcel-cache/",
-        "coverage/",
         "storybook-static/",
         "*.tsbuildinfo",
         ".eslintcache",
-        "*.log",
-        ".env.local",
+        // Rust / JVM build trees
+        "target/",
+        ".gradle/",
+        "*.class",
+        // Python
+        "__pycache__/",
+        "*.pyc",
+        ".venv/",
+        "venv/",
+        ".tox/",
+        ".mypy_cache/",
+        ".pytest_cache/",
+        ".ruff_cache/",
+        ".ipynb_checkpoints/",
+        "*.egg-info/",
+        ".eggs/",
+        // Vendored dependencies (Go / PHP / Ruby)
+        "vendor/",
+        ".bundle/",
+        // .NET intermediate output
+        "obj/",
+        // Elixir
+        "_build/",
+        "deps/",
+        // Swift / Xcode / CocoaPods
+        "DerivedData/",
+        ".build/",
+        "Pods/",
+        // Haskell
+        ".stack-work/",
+        "dist-newstyle/",
+        // C / C++ objects & CMake trees
+        "*.o",
+        "CMakeFiles/",
+        "cmake-build-*/",
+        // Dart / Flutter
+        ".dart_tool/",
+        // Zig
+        "zig-cache/",
+        "zig-out/",
+        // Terraform
+        ".terraform/",
     ];
 }
 

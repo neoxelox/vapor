@@ -86,7 +86,7 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`; Vapor reads 
 - Ignore rules are symmetric: a name that matches them never syncs in either direction — it is skipped by local ingest, by the remote changes feed, and by reconcile comparison on both sides — so an ignored file (for example `.DS_Store`) can never be pulled down from the cloud or produce a conflict copy.
 - Rule precedence (lowest to highest): `preIgnoreRules` -> `.gitignore` (when enabled, recursive per-directory) -> `.vaporignore` (when enabled, recursive per-directory) -> `postIgnoreRules`.
 - `.vaporignore` supports glob-like rules and `!` unignore rules.
-- `preIgnoreRules` default content covers common low-signal paths such as `.git/`, `node_modules/`, build outputs (`dist/`, `build/`, `out/`), caches, swap/tmp files, logs, and `.env.local`.
+- `preIgnoreRules` default content covers common low-signal, regenerable paths across programming ecosystems: dependency/module directories (`node_modules/`, `vendor/`, `Pods/`, …), build outputs (`dist/`, `build/`, `out/`, `target/`, `_build/`, …), tool caches (`__pycache__/`, `.gradle/`, `.terraform/`, `.cache/`, …), and OS/editor junk (`.DS_Store`, swap/tmp/partial files, logs). Repositories (`.git/`) and dotenv files are deliberately NOT ignored — they sync like any other content.
 
 ## Development
 

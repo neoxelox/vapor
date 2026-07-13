@@ -566,7 +566,16 @@ mod tests {
     fn default_pre_ignore_rules_join_the_constants_list() {
         let rules = default_pre_ignore_rules();
         assert!(rules.contains("node_modules/"));
-        assert!(rules.contains(".git/"));
+        assert!(rules.contains("target/"));
+        assert!(rules.contains("__pycache__/"));
+        assert!(
+            !rules.contains(".git/"),
+            "repositories sync whole by default (owner decision)"
+        );
+        assert!(
+            !rules.contains(".env"),
+            "dotenv files sync by default (owner decision)"
+        );
         assert_eq!(
             rules.lines().count(),
             constants::filtering::DEFAULT_PRE_IGNORE_RULES.len()
