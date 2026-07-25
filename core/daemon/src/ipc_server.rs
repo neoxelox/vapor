@@ -183,6 +183,6 @@ pub fn spawn(service: Arc<dyn Service>) -> std::io::Result<IpcServerHandle> {
 #[cfg(not(unix))]
 pub fn spawn(_service: Arc<dyn Service>) -> std::io::Result<IpcServerHandle> {
     Err(std::io::Error::other(
-        "IPC server is not supported on this OS yet (Wave 12 / C6 named-pipe transport)",
+        "IPC server is not supported on this OS yet; the Windows named-pipe transport has not shipped",
     ))
 }

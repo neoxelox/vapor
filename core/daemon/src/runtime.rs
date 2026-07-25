@@ -2952,8 +2952,8 @@ mod tests {
             "pull-only must never upload"
         );
         let (reverts, deletes) = fixture.runtime.mirror_counters();
-        assert!(reverts >= 1, "the revert must be observable (C8-63)");
-        assert!(deletes >= 1, "the removal must be observable (C8-63)");
+        assert!(reverts >= 1, "the revert must be observable");
+        assert!(deletes >= 1, "the removal must be observable");
     }
 
     #[test]

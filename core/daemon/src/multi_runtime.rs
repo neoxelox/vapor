@@ -1147,7 +1147,7 @@ mod tests {
         assert_eq!(mirror.sync_mode, SyncMode::PullOnly);
         assert!(
             mirror.mirror_deletes >= 1,
-            "mirror actions must be observable (C8-65)"
+            "mirror actions must be observable"
         );
         let normal = summaries.iter().find(|s| s.id == "normal").expect("normal");
         assert_eq!(normal.mirror_deletes, 0);

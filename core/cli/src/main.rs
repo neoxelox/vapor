@@ -301,12 +301,10 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
             action,
         } => {
             if system {
-                return Err(
-                    "--system service install is not implemented yet (Wave 12 / 13 work); \
+                return Err("--system service install is not implemented yet; \
                      pass --user (default) for the per-user LaunchAgent / systemd / Task \
                      Scheduler entry"
-                        .to_string(),
-                );
+                    .to_string());
             }
             dispatch_service(action)
         }
@@ -540,8 +538,7 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
             } else {
                 eprintln!(
                     "vapor: warning: native secret store is not yet wired in on this OS; \
-                     the token was kept in process memory only and will not survive restart \
-                     (see docs/tasks/core.md C4-5 / Waves 12 / 13)."
+                     the token was kept in process memory only and will not survive restart."
                 );
                 println!(
                     "auth login: stored token for {provider} (profile {profile}, process-local only)"
@@ -650,7 +647,7 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (command, json);
-        Err("`vapor service` currently supports macOS only (Wave 6); Linux / Windows land in Waves 12 / 13".to_string())
+        Err("`vapor service` currently supports macOS only; Linux and Windows land with those surfaces".to_string())
     }
 }
 
