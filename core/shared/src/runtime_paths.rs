@@ -290,7 +290,50 @@ fn normalize_override_path(path: PathBuf) -> Option<PathBuf> {
         env::current_dir().ok()?.join(path)
     };
 
-    normalize_absolute_path(candidate)
+    // Resolve through the filesystem so equivalent spellings of the
+    // same directory (symlinked vs real, `..` crossing a symlink)
+    // converge on one canonical path. This is not cosmetic: the IPC
+    // socket relocation hashes the vapor_dir spelling, so a daemon
+    // launched with one spelling (say, a launchd plist) and a CLI with
+    // another would compute different socket paths and never find each
+    // other.
+    if let Ok(canonical) = fs::canonicalize(&candidate) {
+        return Some(canonical);
+    }
+
+    // The directory does not (fully) exist yet: normalize lexically,
+    // then canonicalize the deepest existing ancestor so the directory,
+    // once created, still lands under the canonical spelling. A `..`
+    // crossing a symlinked component inside the not-yet-existing tail
+    // resolves lexically here — the one case where a consistent
+    // VAPOR_DIR spelling across surfaces still matters.
+    let lexical = normalize_absolute_path(candidate)?;
+    Some(canonicalize_deepest_existing_ancestor(lexical))
+}
+
+/// Canonicalizes the deepest existing ancestor of `path` (which must
+/// already be lexically normalized — no `.` / `..` components) and
+/// re-appends the missing tail. Falls back to the input when nothing
+/// on the path can be canonicalized.
+fn canonicalize_deepest_existing_ancestor(path: PathBuf) -> PathBuf {
+    let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut ancestor = path.as_path();
+    loop {
+        if let Ok(canonical) = fs::canonicalize(ancestor) {
+            let mut resolved = canonical;
+            for name in missing_tail.iter().rev() {
+                resolved.push(name);
+            }
+            return resolved;
+        }
+        match (ancestor.parent(), ancestor.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing_tail.push(name.to_os_string());
+                ancestor = parent;
+            }
+            _ => return path,
+        }
+    }
 }
 
 /// Expands a leading `~` / `~/…` against the home directory so
@@ -450,6 +493,29 @@ mod tests {
             normalized,
             env::current_dir().expect("current dir").join("b")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_and_real_spellings_of_the_vapor_dir_converge() {
+        use std::os::unix::fs::symlink;
+        let temp = TempDir::new().expect("tempdir");
+        let base = temp.path().canonicalize().expect("canonical temp");
+        let real = base.join("real-vapor-dir");
+        fs::create_dir_all(&real).expect("real dir");
+        symlink(&real, base.join("vapor-link")).expect("symlink");
+
+        // Both spellings must resolve to the same path, else the daemon
+        // and CLI would hash different socket relocations.
+        let via_link = normalize_override_path(base.join("vapor-link")).expect("via link");
+        let via_real = normalize_override_path(real.clone()).expect("via real");
+        assert_eq!(via_link, via_real);
+
+        // A not-yet-existing directory under a symlinked ancestor also
+        // lands under the canonical spelling.
+        let nested = normalize_override_path(base.join("vapor-link/nested/.vapor"))
+            .expect("nested under link");
+        assert_eq!(nested, real.join("nested/.vapor"));
     }
 
     #[cfg(unix)]

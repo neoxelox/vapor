@@ -163,11 +163,14 @@ impl RemotePoller {
                 // Reconcile reconstructs whatever the gap in the feed
                 // hid; the coalesced enqueue dedupes against a pending
                 // reconcile row.
-                report.enqueued_intents += state_db.enqueue_intents_coalesced(&[(
-                    local_root.to_path_buf(),
-                    PendingIntentKind::ReconcileSubtree,
-                    now,
-                )])?;
+                report.enqueued_intents += state_db.enqueue_intents_coalesced(
+                    &[(
+                        local_root.to_path_buf(),
+                        PendingIntentKind::ReconcileSubtree,
+                        now,
+                    )],
+                    crate::safeguards::IntentSource::Fresh,
+                )?;
                 self.rebaseline(app, state_db, now)?;
             }
             ChangesPoll::Page(page) => {
@@ -203,6 +206,10 @@ impl RemotePoller {
                                 now,
                             ) || is_durable_self_write_echo(state_db, &local_target, change)
                             {
+                                crate::logging::debug(
+                                    "Suppressed remote change as an echo of the daemon's own write",
+                                    &[("remote_path", change.path.as_str().to_string())],
+                                );
                                 report.suppressed_echoes += 1;
                                 continue;
                             }
@@ -234,6 +241,10 @@ impl RemotePoller {
                         }
                         RemoteChangeKind::Removed => {
                             if remote_echoes.matches_delete(change.path.as_str(), now) {
+                                crate::logging::debug(
+                                    "Suppressed remote removal as an echo of the daemon's own delete",
+                                    &[("remote_path", change.path.as_str().to_string())],
+                                );
                                 report.suppressed_echoes += 1;
                                 continue;
                             }
@@ -270,8 +281,20 @@ impl RemotePoller {
                         }
                     }
                 }
+                for (path, kind, _) in &batch {
+                    crate::logging::debug(
+                        "Enqueuing remote change",
+                        &[
+                            ("path", path.display().to_string()),
+                            ("kind", format!("{kind:?}")),
+                        ],
+                    );
+                }
                 if !batch.is_empty() {
-                    report.enqueued_intents += state_db.enqueue_intents_coalesced(&batch)?;
+                    report.enqueued_intents += state_db.enqueue_intents_coalesced(
+                        &batch,
+                        crate::safeguards::IntentSource::Fresh,
+                    )?;
                 }
                 // The intents are durable; only now may the cursor move.
                 if self.cursor.as_deref() != Some(page.next_cursor.as_str()) {

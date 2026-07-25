@@ -369,7 +369,9 @@ fn collect_ignore_files(
 /// discovery. This is intentionally narrow and mirrors the most impactful
 /// entries from `DEFAULT_PRE_IGNORE_RULES`; matched subtrees are still covered
 /// by the default ignore rules, so skipping them here only avoids a multi-minute
-/// directory walk on massive dependency folders, not correctness.
+/// directory walk on massive dependency folders, not correctness. `.git`
+/// is the one exception: it syncs by default (not rule-ignored) but never
+/// carries user ignore files, so discovery still skips walking it.
 fn is_heavy_ignore_discovery_skip_dir(name: Option<&str>) -> bool {
     const SKIP_DIRS: &[&str] = &[
         ".git",
@@ -600,10 +602,14 @@ mod tests {
         let filter =
             EventPathFilter::for_watch_root(&watch_root, &EventPathFilterOptions::default());
 
-        assert!(filter.should_ignore(&watch_root.join(".git/config")));
         assert!(filter.should_ignore(&watch_root.join("node_modules/pkg/index.js")));
         assert!(filter.should_ignore(&watch_root.join("coverage/unit.json")));
+        assert!(filter.should_ignore(&watch_root.join("target/debug/app")));
+        assert!(filter.should_ignore(&watch_root.join("src/__pycache__/mod.pyc")));
         assert!(!filter.should_ignore(&watch_root.join("src/main.rs")));
+        // Repositories and dotenv files sync whole by default.
+        assert!(!filter.should_ignore(&watch_root.join(".git/config")));
+        assert!(!filter.should_ignore(&watch_root.join(".env.local")));
     }
 
     #[test]

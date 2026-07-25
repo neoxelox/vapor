@@ -134,6 +134,7 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     }
 
     let budget_config = crate::resource_budget::EffectiveBudgetConfig::resolve(&config);
+    let mass_delete_settings = crate::safeguards::MassDeleteGuardSettings::resolve(&config);
     let mut runtime = MultiProfileRuntime::start(
         profiles,
         filter_options,
@@ -142,7 +143,12 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
         &device_id,
         true,
         budget_config,
+        mass_delete_settings,
     )?;
+    // Production daemons run provider I/O on worker threads so network
+    // RTT never stalls the tick loop; tests keep the inline mode for
+    // deterministic single-threaded ticks.
+    runtime.enable_transfer_workers();
 
     log_started(&runtime);
 

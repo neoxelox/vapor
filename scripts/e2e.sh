@@ -458,8 +458,17 @@ wait_until 30 "cloud-born file to download into the local root" \
   || fail "S10: cloud-born file did not download"
 cmp -s "$CLOUD_ROOT/e2e-from-cloud.txt" "$LOCAL_ROOT/e2e-from-cloud.txt" \
   || fail "S10: downloaded content diverges from the cloud original"
+# POSIX mode carries over in both directions: an executable script must
+# stay executable on the other replica (0755 must not decay to 0644).
+printf '#!/bin/sh\necho ok\n' >"$LOCAL_ROOT/e2e-script.sh"
+chmod 755 "$LOCAL_ROOT/e2e-script.sh"
+wait_until 30 "executable script to upload" file_exists "$CLOUD_ROOT/e2e-script.sh" \
+  || fail "S10: executable script did not upload"
+uploaded_mode() { [[ "$(stat -f '%Lp' "$CLOUD_ROOT/e2e-script.sh" 2>/dev/null || stat -c '%a' "$CLOUD_ROOT/e2e-script.sh")" == "755" ]]; }
+wait_until 30 "uploaded script to carry mode 755" uploaded_mode \
+  || fail "S10: uploaded script lost its executable mode"
 converge 30 || fail "S10: queue did not drain after bidirectional round-trip"
-log "PASS S10 — local→cloud upload and cloud→local download round-trip byte-for-byte"
+log "PASS S10 — local→cloud upload and cloud→local download round-trip byte-for-byte (modes preserved)"
 
 # S11 — keep-both conflict: the same path diverges on both
 # sides while the daemon is down; the restart reconcile must preserve
@@ -630,6 +639,29 @@ sigpipe_err="$( { "$VAPOR_BIN" logs 2>&1 | head -n 1 >/dev/null; } 2>&1 || true 
 [[ "$sigpipe_err" != *panicked* ]] \
   || fail "S18: vapor logs | head -1 panicked on SIGPIPE: $sigpipe_err"
 log "PASS S18 — early-closed pipe does not panic the CLI"
+
+# S19 — feed-driven cloud deletion of an UPLOADED file. Regression
+# guard: the upload's no-clobber commit once used hard-link + unlink,
+# which detached FSEvents file tracking from the destination — a later
+# cloud-side rm of the uploaded file produced zero watcher events and
+# the deletion never propagated (field-testing find). This scenario
+# must converge through the live changes feed alone: no reconcile.
+echo "uploaded then deleted in the cloud" >"$LOCAL_ROOT/e2e-feed-delete.txt"
+wait_until 30 "file to upload" file_exists "$CLOUD_ROOT/e2e-feed-delete.txt" \
+  || fail "S19: seed file did not upload"
+converge 30 || fail "S19: queue did not drain after the seed upload"
+rm "$CLOUD_ROOT/e2e-feed-delete.txt"
+# A loaded CI host throttles the daemon to a 60s poll cadence. Nudge an
+# immediate poll on every probe (the same nudge a user gets from
+# `vapor flush-now`): the deletion still travels through the live feed,
+# the nudges only defeat the throttled cadence and FSEvents latency.
+feed_delete_propagated() {
+  "$VAPOR_BIN" flush-now >/dev/null 2>&1
+  [[ ! -f "$LOCAL_ROOT/e2e-feed-delete.txt" ]]
+}
+wait_until 45 "cloud deletion to propagate through the changes feed" feed_delete_propagated \
+  || fail "S19: cloud deletion of an uploaded file never propagated locally (feed lost the event)"
+log "PASS S19 — cloud deletion of an uploaded file propagates via the live feed (no reconcile)"
 
 # --- service lifecycle round-trip (--full only) ---
 #

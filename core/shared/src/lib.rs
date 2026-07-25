@@ -150,6 +150,12 @@ pub enum ProviderErrorKind {
     /// planned, but callers may treat it as convergence (deleting a
     /// file that is already gone is success, not failure).
     NotFound,
+    /// The provider's cloud sync root itself is gone or unreachable
+    /// (deleted out from under a running daemon, unmounted volume,
+    /// remote folder removed). Self-healing: the engine blocks new work,
+    /// re-ensures the root, and reconciles — individual intents must
+    /// wait, not fail terminally.
+    CloudRootUnavailable,
     /// Anything that will keep failing no matter how often we retry.
     Permanent,
 }
@@ -162,6 +168,7 @@ impl ProviderErrorKind {
             Self::Authentication => "authentication",
             Self::PreconditionFailed => "precondition_failed",
             Self::NotFound => "not_found",
+            Self::CloudRootUnavailable => "cloud_root_unavailable",
             Self::Permanent => "permanent",
         }
     }
@@ -177,6 +184,10 @@ impl ProviderErrorKind {
             Self::RateLimited { retry_after } => RetryFailureKind::RateLimited { retry_after },
             Self::Authentication => RetryFailureKind::Authentication,
             Self::PreconditionFailed => RetryFailureKind::Transient,
+            // Self-healing condition: the runtime blocks admission and
+            // re-ensures the root, so the intent retries once sync
+            // resumes instead of finalizing into failed_intents.
+            Self::CloudRootUnavailable => RetryFailureKind::Transient,
             Self::NotFound | Self::Permanent => RetryFailureKind::Permanent,
         }
     }

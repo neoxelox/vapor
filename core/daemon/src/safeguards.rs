@@ -129,6 +129,68 @@ impl ActiveCodingHeuristic {
     }
 }
 
+/// Resolved mass-delete guard tuning: the `safeguards` config group
+/// with floors applied. Configurable because a workflow that
+/// legitimately unlinks many files (`rm -rf` of large trees, build
+/// cleans) may need a higher threshold; the defaults stay conservative
+/// — this guard is the ransomware / bulk-mistake backstop.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MassDeleteGuardSettings {
+    pub enabled: bool,
+    pub threshold: usize,
+    pub window: Duration,
+}
+
+impl Default for MassDeleteGuardSettings {
+    fn default() -> Self {
+        Self {
+            enabled: constants::safeguards::DEFAULT_MASS_DELETE_ENABLED,
+            threshold: constants::engine::MASS_DELETE_THRESHOLD,
+            window: Duration::from_secs(constants::engine::MASS_DELETE_WINDOW_SECONDS),
+        }
+    }
+}
+
+impl MassDeleteGuardSettings {
+    /// Resolves the configured values, clamping to the floors with a
+    /// logged warning (a too-low threshold would trip on ordinary work
+    /// and train users to blind-resume the guard).
+    pub fn resolve(config: &vapor_shared::config::VaporConfig) -> Self {
+        let configured = &config.safeguards;
+        let threshold = usize::try_from(configured.mass_delete_threshold).unwrap_or(usize::MAX);
+        let clamped_threshold = threshold.max(constants::safeguards::MIN_MASS_DELETE_THRESHOLD);
+        let clamped_window = configured
+            .mass_delete_window_seconds
+            .max(constants::safeguards::MIN_MASS_DELETE_WINDOW_SECONDS);
+        if clamped_threshold != threshold || clamped_window != configured.mass_delete_window_seconds
+        {
+            crate::logging::warning(
+                "Clamped safeguards.massDelete* values to their floors",
+                &[
+                    ("configured_threshold", threshold.to_string()),
+                    ("effective_threshold", clamped_threshold.to_string()),
+                    (
+                        "configured_window_seconds",
+                        configured.mass_delete_window_seconds.to_string(),
+                    ),
+                    ("effective_window_seconds", clamped_window.to_string()),
+                ],
+            );
+        }
+        if !configured.mass_delete_enabled {
+            crate::logging::warning(
+                "The mass-deletion guard is disabled by configuration; bulk local deletions will replicate without a pause",
+                &[],
+            );
+        }
+        Self {
+            enabled: configured.mass_delete_enabled,
+            threshold: clamped_threshold,
+            window: Duration::from_secs(clamped_window),
+        }
+    }
+}
+
 /// Mass-change / ransomware guard.
 ///
 /// Latches once tripped: the daemon stays paused (and the guard stays
@@ -202,6 +264,55 @@ pub fn intent_priority_rank(class: DebounceClass) -> u8 {
         DebounceClass::Other => 3,
         DebounceClass::Lockfile => 4,
     }
+}
+
+/// Where a durable queue intent came from, for lease-priority
+/// purposes. Reconcile-walk backlog ranks below every fresh intent so
+/// a whole-scope reconcile of a large tree can never starve a file the
+/// user just edited — background convergence yields to foreground
+/// changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntentSource {
+    /// Debounced local edits, remote-change polls, conflict follow-ups.
+    Fresh,
+    /// Comparison-walk output of a whole-scope/subtree reconcile.
+    ReconcileBacklog,
+}
+
+/// Rank for `ReconcileSubtree` control intents: first. Leasing one is
+/// cheap (it only hands the walk to the reconcile controller, which
+/// itself defers until IdleDrain) and the startup reconstruction
+/// barrier depends on the whole-scope reconcile leasing ahead of any
+/// recovered file intents.
+pub const RECONCILE_INTENT_PRIORITY_RANK: u8 = 0;
+
+/// Fresh file intents rank `1 + class` (1..=5), preserving the
+/// key-config-before-lockfile order within fresh work.
+pub const FRESH_INTENT_PRIORITY_RANK_BASE: u8 = 1;
+
+/// Reconcile-backlog file intents rank below every fresh class.
+pub const BACKLOG_INTENT_PRIORITY_RANK: u8 = 6;
+
+/// Durable lease-order priority for one queue row (lower leases
+/// first): reconcile control intents, then fresh file intents by the
+/// path's debounce class, then reconcile-backlog file intents.
+pub fn durable_intent_priority_rank(
+    path: &std::path::Path,
+    kind: crate::event_intents::PendingIntentKind,
+    source: IntentSource,
+) -> u8 {
+    if kind == crate::event_intents::PendingIntentKind::ReconcileSubtree {
+        return RECONCILE_INTENT_PRIORITY_RANK;
+    }
+    if source == IntentSource::ReconcileBacklog {
+        return BACKLOG_INTENT_PRIORITY_RANK;
+    }
+    FRESH_INTENT_PRIORITY_RANK_BASE
+        + intent_priority_rank(
+            crate::debounce::DebounceWindows::default()
+                .classify_path(path)
+                .0,
+        )
 }
 
 #[cfg(test)]
@@ -299,6 +410,40 @@ mod tests {
         assert!(!guard.record_delete(at(102)));
         // But a fresh storm does.
         assert!(guard.record_delete(at(103)));
+    }
+
+    #[test]
+    fn mass_delete_settings_resolve_clamps_floors_and_honors_disable() {
+        let mut config = vapor_shared::config::VaporConfig::default();
+        let resolved = MassDeleteGuardSettings::resolve(&config);
+        assert!(resolved.enabled);
+        assert_eq!(resolved.threshold, constants::engine::MASS_DELETE_THRESHOLD);
+        assert_eq!(
+            resolved.window,
+            Duration::from_secs(constants::engine::MASS_DELETE_WINDOW_SECONDS)
+        );
+
+        // A threshold/window below the floors clamps up: a too-low
+        // threshold would trip the guard on ordinary work.
+        config.safeguards.mass_delete_threshold = 1;
+        config.safeguards.mass_delete_window_seconds = 1;
+        let clamped = MassDeleteGuardSettings::resolve(&config);
+        assert_eq!(
+            clamped.threshold,
+            constants::safeguards::MIN_MASS_DELETE_THRESHOLD
+        );
+        assert_eq!(
+            clamped.window,
+            Duration::from_secs(constants::safeguards::MIN_MASS_DELETE_WINDOW_SECONDS)
+        );
+
+        // Raising the threshold for bulk-deletion workflows passes
+        // through, and the explicit opt-out resolves as disabled.
+        config.safeguards.mass_delete_threshold = 5_000;
+        config.safeguards.mass_delete_enabled = false;
+        let raised = MassDeleteGuardSettings::resolve(&config);
+        assert_eq!(raised.threshold, 5_000);
+        assert!(!raised.enabled);
     }
 
     #[test]

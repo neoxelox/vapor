@@ -39,13 +39,23 @@ expansion).
 ### `FsWatcher`
 
 Recursively watch a canonical root; emit normalized events
-(`Created`/`Modified`/`Removed`/`Renamed`) on a Send channel.
+(`Created`/`Modified`/`Removed`/`Renamed`) on a Send channel. Rename
+directionality is resolved in the per-OS mapping: a rename-away maps to
+`Removed` at the old path, a rename-in to `Created` at the new path, and
+paired rename events are split into that pair; `Renamed` survives only
+for ambiguous OS reports (consumers re-stat to disambiguate). Backend
+errors reach an optional error handler instead of being dropped.
 
-Callback discipline: the OS callback only normalizes path + filters via
-the ignore rules + pushes onto a bounded incoming queue. No DB / hash /
-network work in the callback path. Per-component symlink resolution runs on
-the runtime thread, not in the callback. See `docs/architecture/data-flow.md`
-§"Local to remote".
+Both watch consumers go through this one trait — the daemon's local
+watch (`core/daemon::fs_events` bridges the event channel through path
+normalization, ignore filtering, and the recorder on a dedicated
+thread) and the filesystem provider's changes feed — so there is exactly
+one OS-event→kind mapping to test and fix per OS.
+
+Callback discipline: the OS callback only normalizes the kind and pushes
+onto the channel. No DB / hash / network work in the callback path.
+Per-component symlink resolution runs on the runtime thread, not in the
+callback. See `docs/architecture/data-flow.md` §"Local to remote".
 
 | OS | Native API | MVP |
 |---|---|---|

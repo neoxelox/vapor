@@ -37,6 +37,33 @@ pub struct ThrottleCaps {
     pub allow_downloads: bool,
 }
 
+/// The IdleDrain concurrency tier, derived once from the machine's
+/// available parallelism: half the cores, clamped into
+/// `[IDLE_DRAIN_CONCURRENCY_MIN, IDLE_DRAIN_CONCURRENCY_MAX]`. A
+/// 16-core desktop drains at 8-wide while a small laptop keeps the
+/// classic 4 — the throttle ladder still collapses this whenever the
+/// user is active, and `resourceLimits.maxConcurrentTransfers` caps it
+/// explicitly.
+pub fn idle_drain_concurrency() -> usize {
+    static TIER: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *TIER.get_or_init(|| {
+        let cores = std::thread::available_parallelism()
+            .map(|cores| cores.get())
+            .unwrap_or(constants::engine::IDLE_DRAIN_CONCURRENCY_MIN);
+        (cores / 2).clamp(
+            constants::engine::IDLE_DRAIN_CONCURRENCY_MIN,
+            constants::engine::IDLE_DRAIN_CONCURRENCY_MAX,
+        )
+    })
+}
+
+/// Read tokens scale at half the tier (floor at the classic 2): they
+/// bound concurrent disk reads (hashing + reconcile), which saturate
+/// well before the transfer tier does.
+pub(crate) fn idle_drain_read_tokens() -> usize {
+    (idle_drain_concurrency() / 2).max(constants::engine::IDLE_DRAIN_READ_TOKENS)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThrottleDecision {
     pub state: ThrottleState,
@@ -178,11 +205,11 @@ impl ThrottleController {
     pub fn caps_for(&self, state: ThrottleState) -> ThrottleCaps {
         match state {
             ThrottleState::IdleDrain => ThrottleCaps {
-                planner_workers: constants::engine::IDLE_DRAIN_PLANNER_WORKERS,
-                hash_workers: constants::engine::IDLE_DRAIN_HASH_WORKERS,
-                read_tokens: constants::engine::IDLE_DRAIN_READ_TOKENS,
-                upload_concurrency: constants::engine::IDLE_DRAIN_UPLOAD_CONCURRENCY,
-                download_concurrency: constants::engine::IDLE_DRAIN_DOWNLOAD_CONCURRENCY,
+                planner_workers: idle_drain_concurrency(),
+                hash_workers: idle_drain_concurrency(),
+                read_tokens: idle_drain_read_tokens(),
+                upload_concurrency: idle_drain_concurrency(),
+                download_concurrency: idle_drain_concurrency(),
                 allow_reconcile: true,
                 allow_hashing: true,
                 allow_uploads: true,
@@ -428,10 +455,18 @@ mod tests {
         assert_eq!(decision.state, ThrottleState::IdleDrain);
         assert_eq!(decision.cause, ThrottleCause::IdleReady);
         assert_eq!(decision.reason, "idle, plugged in, and cool");
-        assert_eq!(decision.caps.planner_workers, 4);
-        assert_eq!(decision.caps.hash_workers, 4);
-        assert_eq!(decision.caps.read_tokens, 2);
-        assert_eq!(decision.caps.upload_concurrency, 4);
+        let tier = idle_drain_concurrency();
+        assert!(
+            (constants::engine::IDLE_DRAIN_CONCURRENCY_MIN
+                ..=constants::engine::IDLE_DRAIN_CONCURRENCY_MAX)
+                .contains(&tier),
+            "the derived tier must respect its bounds, got {tier}"
+        );
+        assert_eq!(decision.caps.planner_workers, tier);
+        assert_eq!(decision.caps.hash_workers, tier);
+        assert_eq!(decision.caps.read_tokens, idle_drain_read_tokens());
+        assert_eq!(decision.caps.upload_concurrency, tier);
+        assert_eq!(decision.caps.download_concurrency, tier);
         assert!(decision.caps.allow_reconcile);
         assert!(decision.caps.allow_hashing);
         assert!(decision.caps.allow_uploads);

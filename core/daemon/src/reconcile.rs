@@ -88,7 +88,16 @@ impl ReconcileController {
             return 0;
         }
 
-        let ready = maps.take_ready_deferred_reconcile_intents(now);
+        // Already idle: a storm that has gone quiet releases early
+        // instead of waiting out its full deferral — the deferral exists
+        // to avoid competing with the burst and the user, and both are
+        // gone.
+        let ready = maps.take_deferred_reconcile_intents_ready_by(
+            now,
+            Some(std::time::Duration::from_millis(
+                vapor_shared::constants::engine::DEFERRED_RECONCILE_IDLE_QUIET_RELEASE_MILLIS,
+            )),
+        );
         for intent in &ready {
             scheduler.upsert_pending_intent_record(intent.clone());
         }

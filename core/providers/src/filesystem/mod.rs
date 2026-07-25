@@ -205,16 +205,22 @@ impl FilesystemProvider {
 
         let anchor = deepest_existing_ancestor(&resolved);
         let canonical_anchor = anchor.canonicalize().map_err(|error| {
-            ProviderError::transient(format!(
-                "cannot canonicalize {} while resolving {remote}: {error}",
-                anchor.display()
-            ))
+            classify_scope_failure(
+                &root,
+                format!(
+                    "cannot canonicalize {} while resolving {remote}: {error}",
+                    anchor.display()
+                ),
+            )
         })?;
         if !canonical_anchor.starts_with(&root) {
-            return Err(ProviderError::permanent(format!(
-                "remote path {remote} escapes the cloud sync root (resolves through {})",
-                canonical_anchor.display()
-            )));
+            return Err(classify_scope_failure(
+                &root,
+                format!(
+                    "remote path {remote} escapes the cloud sync root (resolves through {})",
+                    canonical_anchor.display()
+                ),
+            ));
         }
         enforce_same_device(&root, &canonical_anchor, remote)?;
         Ok(resolved)
@@ -658,6 +664,59 @@ fn expand_cloud_directory(raw: &str) -> Result<PathBuf, ProviderError> {
     Ok(path)
 }
 
+/// Best-effort POSIX-mode carry-over from an open source handle onto a
+/// staged file. The handle's metadata stays readable even after the
+/// source path is renamed away mid-transfer. Mode is metadata, not
+/// content: a failure here must never fail the transfer (the bytes are
+/// correct), so it only logs. No-op where the platform has no POSIX
+/// modes.
+#[cfg(unix)]
+fn copy_permissions_from_handle(source: &fs::File, staged: &Path) {
+    match source.metadata() {
+        Ok(metadata) => {
+            if let Err(error) = fs::set_permissions(staged, metadata.permissions()) {
+                crate::logging::warning(
+                    "Could not carry file permissions onto the staged transfer payload",
+                    &[
+                        ("path", staged.display().to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+            }
+        }
+        Err(error) => {
+            crate::logging::warning(
+                "Could not read source file permissions for the staged transfer payload",
+                &[
+                    ("path", staged.display().to_string()),
+                    ("error", error.to_string()),
+                ],
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn copy_permissions_from_handle(_source: &fs::File, _staged: &Path) {}
+
+/// A scope-resolution failure has two very different causes: a genuinely
+/// out-of-scope path (permanent — never retry) and the cloud sync root
+/// itself having vanished under a running daemon (deleted, unmounted).
+/// In the latter case the deepest-existing ancestor of *every* legal
+/// path resolves through the root's parent, so the escape check fires
+/// for paths that are perfectly in scope. Report that as the
+/// self-healing `CloudRootUnavailable` so the engine blocks admission
+/// and re-ensures the root instead of spinning on a permanent error.
+fn classify_scope_failure(root: &Path, message: String) -> ProviderError {
+    if !root.is_dir() {
+        return ProviderError::cloud_root_unavailable(format!(
+            "cloud sync directory {} no longer exists ({message})",
+            root.display()
+        ));
+    }
+    ProviderError::permanent(message)
+}
+
 fn deepest_existing_ancestor(path: &Path) -> PathBuf {
     let mut current = path.to_path_buf();
     while !current.exists() {
@@ -781,6 +840,12 @@ impl FilesystemUploadSession {
             }
         }
 
+        // Carry the source file's permissions onto the object landing
+        // at the target (executable bits especially): the temp was
+        // created with the process umask, and losing the mode turns a
+        // 0755 script into a 0644 file on the other replica.
+        copy_permissions_from_handle(&self.source, &self.temp_path);
+
         self.commit()?;
         if needs_side_file {
             self.tags
@@ -800,17 +865,20 @@ impl FilesystemUploadSession {
         })
     }
 
-    /// Move the staged temp into place. `Absent` uses an atomic no-clobber
-    /// create (hard-link then unlink the temp name) so a concurrent writer
-    /// that lands the target between the check and here is not silently
-    /// overwritten; the overwrite modes (`None`/`HashEquals`) rename.
+    /// Move the staged temp into place. `Absent` uses an atomic
+    /// no-clobber *rename* so a concurrent writer that lands the target
+    /// between the check and here is not silently overwritten; the
+    /// overwrite modes (`None`/`HashEquals`) rename unconditionally.
+    /// The no-clobber commit must be a rename, never a hard-link +
+    /// unlink pair: FSEvents tracks file events by node, and a link-
+    /// created target stays bound to the deleted temp name — every
+    /// later external edit or deletion of the uploaded file would then
+    /// be invisible to the changes feed (observed live as a cloud-side
+    /// `rm` that never propagated).
     fn commit(&self) -> Result<(), ProviderError> {
         if self.require_absent {
-            match fs::hard_link(&self.temp_path, &self.target) {
-                Ok(()) => {
-                    let _ = fs::remove_file(&self.temp_path);
-                    Ok(())
-                }
+            match vapor_platform::fs_ops::atomic_noclobber_rename(&self.temp_path, &self.target) {
+                Ok(()) => Ok(()),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     let _ = fs::remove_file(&self.temp_path);
                     Err(ProviderError::precondition_failed(format!(
@@ -819,7 +887,7 @@ impl FilesystemUploadSession {
                     )))
                 }
                 Err(error) => Err(ProviderError::transient(format!(
-                    "cannot link upload into place at {}: {error}",
+                    "cannot move upload into place at {}: {error}",
                     self.remote_path
                 ))),
             }
@@ -984,6 +1052,9 @@ impl TransferSession for FilesystemDownloadSession {
                         self.remote_path
                     ))
                 })?;
+                // Carry the remote file's permissions onto the staged
+                // payload; the engine's rename into place preserves them.
+                copy_permissions_from_handle(&self.source, &self.destination_path);
                 self.finished = true;
                 return Ok(TransferStep::Completed(TransferOutcome {
                     bytes_total: self.bytes_total,
@@ -1044,6 +1115,78 @@ mod tests {
 
     fn provider_at(dir: &Path) -> FilesystemProvider {
         FilesystemProvider::with_root(dir).expect("provider root")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transfers_preserve_posix_file_modes_in_both_directions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let root = dir.path().join("cloud");
+        std::fs::create_dir_all(&root).expect("root");
+        let provider = provider_at(&root);
+
+        // Upload: a 0755 local script must land 0755 at the target.
+        let local_script = dir.path().join("run.sh");
+        std::fs::write(&local_script, b"#!/bin/sh\necho hi\n").expect("seed script");
+        std::fs::set_permissions(&local_script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod source");
+        let remote = RemotePath::new("run.sh").expect("remote path");
+        let session = provider
+            .begin_upload(UploadRequest {
+                local_source: local_script,
+                remote_path: remote.clone(),
+                op_id: "op-mode".to_string(),
+                precondition: RemotePrecondition::None,
+            })
+            .expect("begin upload");
+        drive_to_completion(session);
+        let uploaded_mode = std::fs::metadata(root.join("run.sh"))
+            .expect("uploaded")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(uploaded_mode, 0o755, "upload must carry the mode");
+
+        // Download: the staged payload must carry the remote's mode so
+        // the engine's rename lands an executable file.
+        let staging = dir.path().join("staged-download");
+        let session = provider
+            .begin_download(DownloadRequest {
+                remote_path: remote,
+                destination: staging.clone(),
+            })
+            .expect("begin download");
+        drive_to_completion(session);
+        let staged_mode = std::fs::metadata(&staging)
+            .expect("staged")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(staged_mode, 0o755, "download must carry the mode");
+    }
+
+    #[test]
+    fn vanished_cloud_root_classifies_as_cloud_root_unavailable() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let root = dir.path().join("cloud");
+        std::fs::create_dir_all(&root).expect("root");
+        let provider = provider_at(&root);
+        let remote = RemotePath::new("docs/file.txt").expect("remote path");
+
+        // Root alive: an in-scope path resolves fine.
+        assert!(provider.stat(&remote).expect("stat").is_none());
+
+        // Root deleted out from under the provider: every scope
+        // resolution must report the self-healing kind, not Permanent.
+        std::fs::remove_dir_all(&root).expect("delete root");
+        let error = provider.stat(&remote).expect_err("stat must fail");
+        assert_eq!(
+            error.kind,
+            vapor_shared::ProviderErrorKind::CloudRootUnavailable,
+            "unexpected classification: {}",
+            error.message
+        );
     }
 
     #[test]

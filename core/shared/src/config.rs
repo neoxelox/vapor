@@ -64,6 +64,9 @@ pub struct VaporConfig {
     /// `resourceLimits` ceiling are clamped up at daemon budget-resolve
     /// time (same place as `resource_limits`), not at config load.
     pub idle_boost: IdleBoostConfig,
+    /// Safeguards group (mass-delete guard tuning). Clamped to floors at
+    /// daemon resolve time, not at config load.
+    pub safeguards: SafeguardsConfig,
 }
 
 /// The `resourceLimits` config group.
@@ -76,6 +79,12 @@ pub struct ResourceLimitsConfig {
     pub memory_percent: u8,
     #[serde(default = "default_bandwidth_percent")]
     pub bandwidth_percent: u8,
+    /// Optional hard ceiling on concurrent uploads and on concurrent
+    /// downloads (each direction separately). `None` means automatic —
+    /// the throttle ladder derives its ceiling from the machine's core
+    /// count. Clamped into `1..=16` at daemon budget-resolve time.
+    #[serde(default)]
+    pub max_concurrent_transfers: Option<u8>,
 }
 
 fn default_cpu_percent() -> u8 {
@@ -94,6 +103,41 @@ impl Default for ResourceLimitsConfig {
             cpu_percent: default_cpu_percent(),
             memory_percent: default_memory_percent(),
             bandwidth_percent: default_bandwidth_percent(),
+            max_concurrent_transfers: None,
+        }
+    }
+}
+
+/// The `safeguards` config group. Values are clamped to their floors at
+/// daemon resolve time (`core/daemon/src/safeguards.rs`), not at load,
+/// so non-daemon consumers see the raw values.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafeguardsConfig {
+    #[serde(default = "default_mass_delete_enabled")]
+    pub mass_delete_enabled: bool,
+    #[serde(default = "default_mass_delete_threshold")]
+    pub mass_delete_threshold: u64,
+    #[serde(default = "default_mass_delete_window_seconds")]
+    pub mass_delete_window_seconds: u64,
+}
+
+fn default_mass_delete_enabled() -> bool {
+    constants::safeguards::DEFAULT_MASS_DELETE_ENABLED
+}
+fn default_mass_delete_threshold() -> u64 {
+    constants::engine::MASS_DELETE_THRESHOLD as u64
+}
+fn default_mass_delete_window_seconds() -> u64 {
+    constants::engine::MASS_DELETE_WINDOW_SECONDS
+}
+
+impl Default for SafeguardsConfig {
+    fn default() -> Self {
+        Self {
+            mass_delete_enabled: default_mass_delete_enabled(),
+            mass_delete_threshold: default_mass_delete_threshold(),
+            mass_delete_window_seconds: default_mass_delete_window_seconds(),
         }
     }
 }
@@ -208,6 +252,7 @@ impl Default for VaporConfig {
             profiles: Vec::new(),
             resource_limits: ResourceLimitsConfig::default(),
             idle_boost: IdleBoostConfig::default(),
+            safeguards: SafeguardsConfig::default(),
         }
     }
 }
@@ -371,6 +416,7 @@ fn config_from_object(map: &serde_json::Map<String, serde_json::Value>) -> Vapor
             &mut issues,
         ),
         idle_boost: field(map, keys::KEY_IDLE_BOOST, defaults.idle_boost, &mut issues),
+        safeguards: field(map, keys::KEY_SAFEGUARDS, defaults.safeguards, &mut issues),
     };
 
     for key in map.keys() {
@@ -389,6 +435,37 @@ fn config_from_object(map: &serde_json::Map<String, serde_json::Value>) -> Vapor
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn safeguards_group_and_transfer_ceiling_parse_with_partial_values() {
+        let temp = TempDir::new().expect("temp dir");
+        let path = temp.path().join("vapor.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "safeguards": { "massDeleteThreshold": 1000 },
+                "resourceLimits": { "maxConcurrentTransfers": 2 }
+            }"#,
+        )
+        .expect("write config");
+
+        let result = load_from(&path);
+        assert!(result.load_issue.is_none(), "{:?}", result.load_issue);
+        assert_eq!(result.config.safeguards.mass_delete_threshold, 1_000);
+        // Unset group members keep their defaults.
+        assert!(result.config.safeguards.mass_delete_enabled);
+        assert_eq!(
+            result.config.resource_limits.max_concurrent_transfers,
+            Some(2)
+        );
+        // Absent means automatic.
+        assert_eq!(
+            VaporConfig::default()
+                .resource_limits
+                .max_concurrent_transfers,
+            None
+        );
+    }
 
     #[test]
     fn missing_file_loads_pure_defaults_without_issue() {
@@ -489,7 +566,16 @@ mod tests {
     fn default_pre_ignore_rules_join_the_constants_list() {
         let rules = default_pre_ignore_rules();
         assert!(rules.contains("node_modules/"));
-        assert!(rules.contains(".git/"));
+        assert!(rules.contains("target/"));
+        assert!(rules.contains("__pycache__/"));
+        assert!(
+            !rules.contains(".git/"),
+            "repositories sync whole by default (owner decision)"
+        );
+        assert!(
+            !rules.contains(".env"),
+            "dotenv files sync by default (owner decision)"
+        );
         assert_eq!(
             rules.lines().count(),
             constants::filtering::DEFAULT_PRE_IGNORE_RULES.len()

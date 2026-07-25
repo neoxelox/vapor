@@ -318,10 +318,27 @@ impl BoundedEventIntentMaps {
         &mut self,
         now: SystemTime,
     ) -> Vec<PendingIntentRecord> {
+        self.take_deferred_reconcile_intents_ready_by(now, None)
+    }
+
+    /// Like [`Self::take_ready_deferred_reconcile_intents`], but a record
+    /// whose storm has been quiet for `quiet_release` also counts as
+    /// ready even before its full deferral elapses. New events on the
+    /// same root refresh `last_observed_at`, so an ongoing storm keeps
+    /// its record deferred.
+    pub fn take_deferred_reconcile_intents_ready_by(
+        &mut self,
+        now: SystemTime,
+        quiet_release: Option<std::time::Duration>,
+    ) -> Vec<PendingIntentRecord> {
+        let ready = |record: &crate::storm::DeferredReconcileRecord| {
+            record.available_at <= now
+                || quiet_release.is_some_and(|quiet| record.last_observed_at + quiet <= now)
+        };
         let ready_roots: Vec<PathBuf> = self
             .deferred_reconciles
             .iter()
-            .filter_map(|(root, record)| (record.available_at <= now).then_some(root.clone()))
+            .filter_map(|(root, record)| ready(record).then_some(root.clone()))
             .collect();
         let mut ready_intents = Vec::with_capacity(ready_roots.len());
         for root in ready_roots {
@@ -1122,6 +1139,58 @@ mod tests {
         assert_eq!(intents[0].kind, PendingIntentKind::Upload);
         assert_eq!(maps.pending_intent_count(), 0);
         assert_eq!(maps.tracked_path_count(), 0);
+    }
+
+    #[test]
+    fn quiet_storm_releases_its_deferred_reconcile_early_but_active_storm_stays_deferred() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let subtree_root = watch_root.join("project/sub");
+        let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
+            watch_root,
+            EventIntentLimits::new(100, 100),
+            StormThresholds {
+                window: Duration::from_secs(2),
+                directory_unique_paths_threshold: 2,
+                directory_event_count_threshold: 99,
+                global_pending_event_count_threshold: 99,
+                deferred_reconcile_delay: Duration::from_secs(30),
+            },
+        );
+        maps.record_event(fs_event(
+            subtree_root.join("a.txt"),
+            FsEventKind::Modified,
+            1,
+        ));
+        maps.record_event(fs_event(
+            subtree_root.join("b.txt"),
+            FsEventKind::Modified,
+            2,
+        ));
+        assert_eq!(maps.deferred_reconcile_count(), 1);
+
+        let quiet = Some(Duration::from_secs(5));
+        // 3s of quiet is not enough; the record stays deferred.
+        assert!(
+            maps.take_deferred_reconcile_intents_ready_by(timestamp(5), quiet)
+                .is_empty()
+        );
+        // A fresh event refreshes the storm: the quiet window restarts.
+        maps.record_event(fs_event(
+            subtree_root.join("c.txt"),
+            FsEventKind::Modified,
+            6,
+        ));
+        assert!(
+            maps.take_deferred_reconcile_intents_ready_by(timestamp(8), quiet)
+                .is_empty(),
+            "an ongoing storm must keep its record deferred"
+        );
+        // Quiet for the full early-release window: released well before
+        // the 30s deferral.
+        let released = maps.take_deferred_reconcile_intents_ready_by(timestamp(11), quiet);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].kind, PendingIntentKind::ReconcileSubtree);
+        assert_eq!(released[0].path, subtree_root);
     }
 
     #[test]

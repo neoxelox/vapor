@@ -109,6 +109,9 @@ fn resolve_scope(
         local_raw.and_then(|raw| resolve_local_directory(raw, current_directory, home_directory));
     let cloud_sync_directory = resolve_cloud_directory(
         cloud_raw.unwrap_or(constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY),
+        &config.provider,
+        current_directory,
+        home_directory,
     );
 
     SyncScope {
@@ -194,10 +197,26 @@ fn resolve_local_directory(
     Some(path)
 }
 
-fn resolve_cloud_directory(raw: &str) -> String {
+fn resolve_cloud_directory(
+    raw: &str,
+    provider_kind: &str,
+    current_directory: &Path,
+    home_directory: Option<&Path>,
+) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY.to_string();
+    }
+
+    // The filesystem provider's "cloud" root is a local directory:
+    // resolve it exactly like the local root (tilde expansion,
+    // cwd-anchored relative paths). Blindly prefixing `/` turned
+    // `~/x` into the unusable literal `/~/x`. Real cloud providers
+    // keep the root-relative remote-path semantics below.
+    if provider_kind.trim() == constants::provider::FILESYSTEM
+        && let Some(path) = resolve_path(trimmed, current_directory, home_directory)
+    {
+        return path.to_string_lossy().into_owned();
     }
 
     if trimmed.starts_with('/') {
@@ -205,6 +224,65 @@ fn resolve_cloud_directory(raw: &str) -> String {
     }
 
     format!("/{trimmed}")
+}
+
+/// Overlap guard for filesystem-backed profiles. The provider's
+/// "cloud" root is a local directory; if it equals — or nests inside
+/// or around — the watched local root, the engine ingests its own
+/// provider writes as fresh local changes (self-sustaining churn, and
+/// potentially destructive under a pull-only strict mirror). Returns
+/// the actionable refusal reason when the roots overlap.
+pub fn filesystem_roots_overlap(
+    local_sync_directory: &Path,
+    cloud_sync_directory: &str,
+) -> Option<String> {
+    let local = canonicalize_for_overlap(local_sync_directory);
+    let cloud = canonicalize_for_overlap(Path::new(cloud_sync_directory));
+    if local == cloud {
+        Some(format!(
+            "localSyncDirectory and cloudSyncDirectory resolve to the same directory ({})",
+            local.display()
+        ))
+    } else if cloud.starts_with(&local) {
+        Some(format!(
+            "cloudSyncDirectory {} is inside localSyncDirectory {}",
+            cloud.display(),
+            local.display()
+        ))
+    } else if local.starts_with(&cloud) {
+        Some(format!(
+            "localSyncDirectory {} is inside cloudSyncDirectory {}",
+            local.display(),
+            cloud.display()
+        ))
+    } else {
+        None
+    }
+}
+
+/// Canonicalizes the deepest existing ancestor and re-appends the
+/// missing tail (the cloud root may not exist yet at composition
+/// time); falls back to the input when nothing canonicalizes. Keeps
+/// symlinked and real spellings from evading the overlap check.
+fn canonicalize_for_overlap(path: &Path) -> PathBuf {
+    let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut ancestor = path;
+    loop {
+        if let Ok(canonical) = fs::canonicalize(ancestor) {
+            let mut resolved = canonical;
+            for name in missing_tail.iter().rev() {
+                resolved.push(name);
+            }
+            return resolved;
+        }
+        match (ancestor.parent(), ancestor.file_name()) {
+            (Some(parent), Some(name)) => {
+                missing_tail.push(name.to_os_string());
+                ancestor = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 fn resolve_path(
@@ -261,6 +339,83 @@ mod tests {
         assert_eq!(scope.local_sync_directory, Some(home.join("Vapor")));
         assert_eq!(scope.cloud_sync_directory, "/Vapor");
         assert!(home.join("Vapor").exists());
+    }
+
+    #[test]
+    fn filesystem_cloud_directory_expands_tilde_like_the_local_root() {
+        let (_guard, home) = create_test_directory();
+        let config = VaporConfig {
+            cloud_sync_directory: "~/Desktop/VaporCloud".to_string(),
+            ..VaporConfig::default()
+        };
+
+        let scope = resolve_scope(None, None, &config, Path::new("/tmp"), Some(home.as_path()));
+
+        assert_eq!(
+            scope.cloud_sync_directory,
+            home.join("Desktop/VaporCloud").to_string_lossy(),
+            "the filesystem provider's cloud root is a local path and must expand ~"
+        );
+    }
+
+    #[test]
+    fn non_filesystem_providers_keep_root_relative_cloud_semantics() {
+        let (_guard, home) = create_test_directory();
+        let config = VaporConfig {
+            provider: "gdrive".to_string(),
+            cloud_sync_directory: "Backups/Vapor".to_string(),
+            ..VaporConfig::default()
+        };
+
+        let scope = resolve_scope(None, None, &config, Path::new("/tmp"), Some(home.as_path()));
+
+        assert_eq!(scope.cloud_sync_directory, "/Backups/Vapor");
+    }
+
+    #[test]
+    fn overlapping_filesystem_roots_are_detected_in_both_nesting_directions() {
+        let temp = TempDir::new().expect("temp dir");
+        let base = temp.path().canonicalize().expect("canonical base");
+        let local = base.join("local");
+        std::fs::create_dir_all(&local).expect("local");
+
+        let same = filesystem_roots_overlap(&local, &local.to_string_lossy());
+        assert!(same.is_some(), "equal roots must be refused");
+
+        let nested_cloud = local.join("cloud");
+        assert!(
+            filesystem_roots_overlap(&local, &nested_cloud.to_string_lossy()).is_some(),
+            "a cloud root inside the local root must be refused"
+        );
+
+        let outer_cloud = base.clone();
+        assert!(
+            filesystem_roots_overlap(&local, &outer_cloud.to_string_lossy()).is_some(),
+            "a cloud root containing the local root must be refused"
+        );
+
+        let sibling = base.join("sibling-cloud");
+        assert!(
+            filesystem_roots_overlap(&local, &sibling.to_string_lossy()).is_none(),
+            "disjoint sibling roots are fine"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlap_detection_sees_through_symlinked_spellings() {
+        use std::os::unix::fs::symlink;
+        let temp = TempDir::new().expect("temp dir");
+        let base = temp.path().canonicalize().expect("canonical base");
+        let local = base.join("local");
+        std::fs::create_dir_all(&local).expect("local");
+        symlink(&local, base.join("local-alias")).expect("symlink");
+
+        let via_alias = base.join("local-alias/cloud");
+        assert!(
+            filesystem_roots_overlap(&local, &via_alias.to_string_lossy()).is_some(),
+            "a symlinked spelling must not evade the overlap guard"
+        );
     }
 
     #[test]
@@ -390,7 +545,13 @@ mod tests {
             None,
         );
         assert_eq!(scope.local_sync_directory, Some(projects));
-        assert_eq!(scope.cloud_sync_directory, "/cloud-folder");
+        // The default provider is filesystem-backed: its cloud root is a
+        // local path and resolves against the current directory like the
+        // local root does.
+        assert_eq!(
+            scope.cloud_sync_directory,
+            root.join("cloud-folder").to_string_lossy()
+        );
     }
 
     #[test]

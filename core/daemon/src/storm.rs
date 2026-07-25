@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -92,29 +93,60 @@ impl StormDetector {
         observed_at: SystemTime,
         pending_event_count: usize,
     ) -> Option<DeferredReconcileRecord> {
+        // This runs once per drained fs event, so it allocates only when
+        // it must: the path is interned as one hash (not cloned into
+        // every ancestor's window), ancestors are iterated in place (no
+        // collected Vec), and a window's key is cloned only the first
+        // time its directory appears.
         let mut candidate: Option<(PathBuf, StormReason)> = None;
-        for directory_root in self.directory_roots_for_path(path) {
-            let window = self
-                .directory_windows
-                .entry(directory_root.clone())
-                .or_default();
-            window.observe(path, observed_at, self.thresholds.window);
+        let path_hash = hash_path(path);
+        let window_duration = self.thresholds.window;
+        let unique_paths_threshold = self.thresholds.directory_unique_paths_threshold;
+        let event_count_threshold = self.thresholds.directory_event_count_threshold;
 
-            let reason =
-                if window.unique_path_count() >= self.thresholds.directory_unique_paths_threshold {
+        // The watch root itself is deliberately excluded: rolled-up
+        // per-directory counts at the root would compact the *entire*
+        // sync scope for any moderately parallel workload (600 events
+        // anywhere in the tree within 2 s), while whole-root compaction
+        // is exactly what the separate — and much higher — global
+        // pending threshold governs.
+        if let Some(start) = path.parent() {
+            for ancestor in start.ancestors() {
+                if ancestor == self.watch_root {
+                    break;
+                }
+                if !ancestor.starts_with(&self.watch_root) {
+                    continue;
+                }
+                if !self.directory_windows.contains_key(ancestor) {
+                    self.directory_windows
+                        .insert(ancestor.to_path_buf(), DirectoryStormWindow::default());
+                }
+                let window = self
+                    .directory_windows
+                    .get_mut(ancestor)
+                    .expect("window inserted above");
+                window.observe(
+                    path_hash,
+                    observed_at,
+                    window_duration,
+                    unique_paths_threshold,
+                );
+
+                let reason = if window.unique_path_count() >= unique_paths_threshold {
                     Some(StormReason::DirectoryUniquePathsThreshold)
-                } else if window.event_count() >= self.thresholds.directory_event_count_threshold {
+                } else if window.event_count() >= event_count_threshold {
                     Some(StormReason::DirectoryEventCountThreshold)
                 } else {
                     None
                 };
 
-            if let Some(reason) = reason {
-                match &candidate {
-                    Some((existing_root, _))
-                        if existing_root.components().count()
-                            >= directory_root.components().count() => {}
-                    _ => candidate = Some((directory_root, reason)),
+                // Ancestors iterate deepest-first, so the first
+                // triggering window is the deepest storm root.
+                if candidate.is_none()
+                    && let Some(reason) = reason
+                {
+                    candidate = Some((ancestor.to_path_buf(), reason));
                 }
             }
         }
@@ -177,41 +209,44 @@ impl StormDetector {
             !state.is_empty()
         });
     }
+}
 
-    /// Ancestor directories whose per-directory windows observe this
-    /// event. The watch root itself is deliberately excluded: rolled-up
-    /// per-directory counts at the root would compact the *entire* sync
-    /// scope for any moderately parallel workload (600 events anywhere in
-    /// the tree within 2 s), while whole-root compaction is exactly what
-    /// the separate — and much higher — global pending threshold governs.
-    fn directory_roots_for_path(&self, path: &Path) -> Vec<PathBuf> {
-        let Some(start) = path.parent() else {
-            return Vec::new();
-        };
-        let mut roots = Vec::new();
-        for ancestor in start.ancestors() {
-            if ancestor == self.watch_root {
-                break;
-            }
-            if ancestor.starts_with(&self.watch_root) {
-                roots.push(ancestor.to_path_buf());
-            }
-        }
-        roots
-    }
+/// One stable 64-bit fingerprint per event path: the unique-path
+/// windows count fingerprints instead of storing full `PathBuf` clones
+/// per ancestor level. A hash collision merely undercounts unique paths
+/// by one — harmless for a storm heuristic.
+fn hash_path(path: &Path) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Debug, Default)]
 struct DirectoryStormWindow {
     event_times: VecDeque<SystemTime>,
-    path_last_seen: BTreeMap<PathBuf, SystemTime>,
+    path_last_seen: BTreeMap<u64, SystemTime>,
 }
 
 impl DirectoryStormWindow {
-    fn observe(&mut self, path: &Path, observed_at: SystemTime, window: Duration) {
+    fn observe(
+        &mut self,
+        path_hash: u64,
+        observed_at: SystemTime,
+        window: Duration,
+        unique_paths_threshold: usize,
+    ) {
         self.event_times.push_back(observed_at);
-        self.path_last_seen.insert(path.to_path_buf(), observed_at);
-        self.prune(observed_at, window);
+        self.path_last_seen.insert(path_hash, observed_at);
+        self.prune_events(observed_at, window);
+        // The unique-path map scan is deferred until its count could
+        // trip the threshold: a burst spread below it never pays a
+        // per-event map walk, and pruning exactly at the boundary keeps
+        // the trigger accurate (a stale over-count is cleaned before the
+        // comparison the caller runs). Memory stays bounded by the
+        // threshold plus the periodic global prune.
+        if self.path_last_seen.len() >= unique_paths_threshold {
+            self.prune_paths(observed_at, window);
+        }
     }
 
     fn event_count(&self) -> usize {
@@ -227,6 +262,11 @@ impl DirectoryStormWindow {
     }
 
     fn prune(&mut self, observed_at: SystemTime, window: Duration) {
+        self.prune_events(observed_at, window);
+        self.prune_paths(observed_at, window);
+    }
+
+    fn prune_events(&mut self, observed_at: SystemTime, window: Duration) {
         while let Some(front) = self.event_times.front() {
             let age = observed_at.duration_since(*front);
             if matches!(age, Ok(age) if age > window) {
@@ -235,7 +275,9 @@ impl DirectoryStormWindow {
                 break;
             }
         }
+    }
 
+    fn prune_paths(&mut self, observed_at: SystemTime, window: Duration) {
         self.path_last_seen.retain(|_, last_seen| {
             observed_at
                 .duration_since(*last_seen)

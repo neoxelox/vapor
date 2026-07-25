@@ -41,13 +41,27 @@ public enum VaporConstants {
     public static let syncMode = "two-way"
 
     public static let preIgnoreRuleLines: [String] = [
-      ".git/",
+      // OS junk
       ".DS_Store",
+      "Thumbs.db",
+      "desktop.ini",
+      // Editor swap / temp / partial files
       "*.tmp",
       "*.temp",
       "*.swp",
       "*.swo",
       "*~",
+      "*.bak",
+      "*.part",
+      "*.crdownload",
+      "*.log",
+      // Generic build & cache outputs
+      "dist/",
+      "build/",
+      "out/",
+      "coverage/",
+      ".cache/",
+      // JavaScript / TypeScript
       "node_modules/",
       ".pnpm-store/",
       ".yarn/cache/",
@@ -56,18 +70,57 @@ public enum VaporConstants {
       ".next/",
       ".nuxt/",
       ".svelte-kit/",
-      "dist/",
-      "build/",
-      "out/",
+      ".astro/",
+      ".angular/",
+      ".expo/",
       ".turbo/",
       ".vite/",
       ".parcel-cache/",
-      "coverage/",
       "storybook-static/",
       "*.tsbuildinfo",
       ".eslintcache",
-      "*.log",
-      ".env.local",
+      // Rust / JVM build trees
+      "target/",
+      ".gradle/",
+      "*.class",
+      // Python
+      "__pycache__/",
+      "*.pyc",
+      ".venv/",
+      "venv/",
+      ".tox/",
+      ".mypy_cache/",
+      ".pytest_cache/",
+      ".ruff_cache/",
+      ".ipynb_checkpoints/",
+      "*.egg-info/",
+      ".eggs/",
+      // Vendored dependencies (Go / PHP / Ruby)
+      "vendor/",
+      ".bundle/",
+      // .NET intermediate output
+      "obj/",
+      // Elixir
+      "_build/",
+      "deps/",
+      // Swift / Xcode / CocoaPods
+      "DerivedData/",
+      ".build/",
+      "Pods/",
+      // Haskell
+      ".stack-work/",
+      "dist-newstyle/",
+      // C / C++ objects & CMake trees
+      "*.o",
+      "CMakeFiles/",
+      "cmake-build-*/",
+      // Dart / Flutter
+      ".dart_tool/",
+      // Zig
+      "zig-cache/",
+      "zig-out/",
+      // Terraform
+      ".terraform/",
     ]
 
     public static let preIgnoreRules = preIgnoreRuleLines.joined(separator: "\n")
@@ -78,9 +131,29 @@ public enum VaporConstants {
     public static let defaultLanguageCode = "en"
   }
 
+  /// Mirrors `core/shared/src/constants.rs::provider::*` per
+  /// AGENTS.md §8.6.
+  public enum Provider {
+    public static let filesystem = "filesystem"
+    public static let gdrive = "gdrive"
+    public static let defaultKind = filesystem
+
+    /// User-facing display name for a `provider` config value. Unknown
+    /// values render verbatim so a misconfiguration stays visible.
+    public static func displayName(forKind kind: String) -> String {
+      switch kind.trimmingCharacters(in: .whitespaces) {
+      case gdrive:
+        return "Google Drive"
+      case filesystem, "":
+        return "Filesystem"
+      case let other:
+        return other
+      }
+    }
+  }
+
   public enum Daemon {
     public static let launchAgentLabel = "sh.arn.vapor.daemon"
-    public static let preGADefaultProviderDisplayName = "Filesystem (stub)"
     /// Mirrors `core/shared/src/constants.rs::service::HEALTH_TICK_INTERVAL_SECONDS`
     /// per AGENTS.md §8.6.
     public static let healthTickIntervalSeconds: TimeInterval = 30
@@ -104,6 +177,7 @@ public enum VaporConstants {
     public static let profiles = "profiles"
     public static let resourceLimits = "resourceLimits"
     public static let idleBoost = "idleBoost"
+    public static let safeguards = "safeguards"
   }
 
   /// Accepted `syncMode` values. Mirrors

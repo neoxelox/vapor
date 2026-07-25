@@ -373,14 +373,15 @@ mod tests {
     #[test]
     fn idle_drain_allows_planner_and_uploads_up_to_cap() {
         let mut gate = idle_drain_gate();
+        let tier = crate::throttle::idle_drain_concurrency();
 
-        let planner_permits: Vec<WorkPermit> = (0..4)
+        let planner_permits: Vec<WorkPermit> = (0..tier)
             .map(|_| {
                 gate.try_acquire(WorkClass::Planner)
                     .expect("planner permit")
             })
             .collect();
-        let upload_permits: Vec<WorkPermit> = (0..4)
+        let upload_permits: Vec<WorkPermit> = (0..tier)
             .map(|_| gate.try_acquire(WorkClass::Upload).expect("upload permit"))
             .collect();
 
@@ -401,8 +402,8 @@ mod tests {
         );
 
         let snapshot = gate.snapshot();
-        assert_eq!(snapshot.active_planner_workers, 4);
-        assert_eq!(snapshot.active_uploads, 4);
+        assert_eq!(snapshot.active_planner_workers, tier);
+        assert_eq!(snapshot.active_uploads, tier);
         assert_eq!(snapshot.available_planner_workers(), 0);
         assert_eq!(snapshot.available_uploads(), 0);
 
@@ -416,36 +417,48 @@ mod tests {
     #[test]
     fn hash_work_is_limited_by_hash_workers_and_read_tokens() {
         let mut gate = idle_drain_gate();
+        let read_tokens = crate::throttle::idle_drain_read_tokens();
+        let hash_workers = crate::throttle::idle_drain_concurrency();
+        assert!(
+            read_tokens < hash_workers,
+            "the read-token pool must be the binding constraint here"
+        );
 
-        let first = gate
-            .try_acquire(WorkClass::Hash)
-            .expect("first hash permit");
-        let second = gate
-            .try_acquire(WorkClass::Hash)
-            .expect("second hash permit");
+        let held: Vec<WorkPermit> = (0..read_tokens)
+            .map(|_| gate.try_acquire(WorkClass::Hash).expect("hash permit"))
+            .collect();
         let denied = gate
             .try_acquire(WorkClass::Hash)
-            .expect_err("read token cap should block third hash permit");
+            .expect_err("read token cap should block the next hash permit");
 
         assert_eq!(denied.reason, WorkPermitDeniedReason::ReadTokensExhausted);
         let snapshot = gate.snapshot();
-        assert_eq!(snapshot.active_hash_workers, 2);
-        assert_eq!(snapshot.active_read_tokens, 2);
-        assert_eq!(snapshot.available_hash_workers(), 2);
+        assert_eq!(snapshot.active_hash_workers, read_tokens);
+        assert_eq!(snapshot.active_read_tokens, read_tokens);
+        assert_eq!(
+            snapshot.available_hash_workers(),
+            hash_workers - read_tokens
+        );
         assert_eq!(snapshot.available_read_tokens(), 0);
 
-        assert!(gate.release(first));
-        assert!(gate.release(second));
+        for permit in held {
+            assert!(gate.release(permit));
+        }
     }
 
     #[test]
     fn reconcile_consumes_planner_capacity_and_read_tokens() {
         let mut gate = idle_drain_gate();
+        let read_tokens = crate::throttle::idle_drain_read_tokens();
 
         let reconcile = gate
             .try_acquire(WorkClass::Reconcile)
             .expect("reconcile permit should be allowed in idle drain");
-        let hash = gate.try_acquire(WorkClass::Hash).expect("hash permit");
+        // The reconcile holds one read token; hashing fills the rest,
+        // and the next hash acquire must be denied by the SHARED pool.
+        let held: Vec<WorkPermit> = (0..read_tokens - 1)
+            .map(|_| gate.try_acquire(WorkClass::Hash).expect("hash permit"))
+            .collect();
         let denied = gate
             .try_acquire(WorkClass::Hash)
             .expect_err("read tokens should be shared with reconcile");
@@ -454,10 +467,12 @@ mod tests {
         let snapshot = gate.snapshot();
         assert_eq!(snapshot.active_reconciles, 1);
         assert_eq!(snapshot.active_planner_workers, 1);
-        assert_eq!(snapshot.active_read_tokens, 2);
+        assert_eq!(snapshot.active_read_tokens, read_tokens);
 
         assert!(gate.release(reconcile));
-        assert!(gate.release(hash));
+        for permit in held {
+            assert!(gate.release(permit));
+        }
     }
 
     #[test]

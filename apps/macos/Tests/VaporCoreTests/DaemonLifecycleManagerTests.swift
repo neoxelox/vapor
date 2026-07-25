@@ -282,26 +282,83 @@ private struct ThrowingServiceController: LaunchAgentControlling {
   func acknowledgeCrashLoopPause() throws { throw ControllerError() }
 }
 
+@Test
+func blockedLoginItemRegistrationSurfacesRequiresApproval() throws {
+  let controller = RecordingServiceController()
+  let loginItem = RecordingLoginItemController()
+  loginItem.registrationOutcome = .requiresApproval
+  let manager = DaemonLifecycleManager(
+    launchAgentController: controller,
+    loginItemController: loginItem
+  )
+
+  try manager.setAutoLaunchEnabled(true)
+
+  #expect(manager.lastLoginItemRegistrationOutcome() == .requiresApproval)
+}
+
+@Test
+func throwingLoginItemRegistrationSurfacesFailureInsteadOfSilentSuccess() throws {
+  let controller = RecordingServiceController()
+  let manager = DaemonLifecycleManager(
+    launchAgentController: controller,
+    loginItemController: ThrowingLoginItemController()
+  )
+
+  try manager.setAutoLaunchEnabled(true)
+
+  guard case .failed = manager.lastLoginItemRegistrationOutcome() else {
+    Issue.record("a throwing registration must surface as .failed")
+    return
+  }
+}
+
+@Test
+func disablingAutoLaunchClearsTheLoginItemOutcome() throws {
+  let controller = RecordingServiceController()
+  let loginItem = RecordingLoginItemController()
+  loginItem.registrationOutcome = .requiresApproval
+  let manager = DaemonLifecycleManager(
+    launchAgentController: controller,
+    loginItemController: loginItem
+  )
+
+  try manager.setAutoLaunchEnabled(true)
+  try manager.setAutoLaunchEnabled(false)
+
+  #expect(manager.lastLoginItemRegistrationOutcome() == .unavailable)
+}
+
 private final class RecordingLoginItemController: LoginItemControlling {
   var operations: [String] = []
+  var registrationOutcome: LoginItemRegistrationOutcome = .registered
 
-  func register() {
+  @discardableResult
+  func register() -> LoginItemRegistrationOutcome {
     operations.append("register")
+    return registrationOutcome
   }
 
   func unregister() {
     operations.append("unregister")
+  }
+
+  func openLoginItemSettings() {
+    operations.append("openSettings")
   }
 }
 
 private final class ThrowingLoginItemController: LoginItemControlling {
   struct LoginItemError: Error {}
 
-  func register() throws {
+  @discardableResult
+  func register() throws -> LoginItemRegistrationOutcome {
     throw LoginItemError()
   }
 
   func unregister() throws {
     throw LoginItemError()
   }
+
+  func openLoginItemSettings() {}
 }

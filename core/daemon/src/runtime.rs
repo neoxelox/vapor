@@ -257,6 +257,9 @@ pub struct DaemonRuntime {
     /// Mass-deletion guard; pauses the daemon and raises a
     /// timeline alert on a local deletion storm.
     mass_change_guard: crate::safeguards::MassChangeGuard,
+    /// Resolved `safeguards` config: threshold/window feeding the guard
+    /// and its user-facing trip reason; `enabled = false` bypasses it.
+    mass_delete_settings: crate::safeguards::MassDeleteGuardSettings,
     /// Flush boost deadline (monotonic). While set and in the
     /// future, deferred reconciles release immediately regardless of
     /// the idle gate.
@@ -496,9 +499,7 @@ impl DaemonRuntime {
                 sync_mode: self.sync_scope.sync_mode,
                 device_id: &self.device_id,
                 hash_algorithm: self.app.provider().content_hash_algorithm(),
-                transfer_step_bytes: self
-                    .transfer_step_bytes
-                    .load(std::sync::atomic::Ordering::Relaxed),
+                transfer_step_bytes: &self.transfer_step_bytes,
                 bandwidth: &self.bandwidth_shaper,
                 tags: &self.tags,
                 local_echoes: &mut self.local_echoes,
@@ -514,6 +515,9 @@ impl DaemonRuntime {
         self.mirror_delete_count += staged_report.mirror_deletes as u64;
         report.conflicts += staged_report.conflicts;
         self.conflict_count += staged_report.conflicts as u64;
+        if staged_report.cloud_root_unavailable > 0 {
+            self.mark_cloud_root_unavailable("a provider transfer reported the root missing");
+        }
 
         if let Some(reconcile_intent_id) = self.running_reconcile_intent_id {
             // A running reconcile performs one bounded chunk of real
@@ -522,10 +526,20 @@ impl DaemonRuntime {
             // large tree converges across slices instead of restarting.
             match self.process_reconcile_walk(now) {
                 Err(walk_error) => {
-                    logging::warning(
-                        "Reconcile comparison walk failed; yielding and retrying later",
-                        &[("error", format!("{walk_error:?}"))],
-                    );
+                    if let crate::reconcile_walk::WalkError::Provider(provider_error) = &walk_error
+                        && provider_error.kind
+                            == vapor_shared::ProviderErrorKind::CloudRootUnavailable
+                    {
+                        // Not a walk bug: the cloud root itself vanished.
+                        // Block admission and let the ensure-retry loop
+                        // recreate it instead of retrying the walk forever.
+                        self.mark_cloud_root_unavailable(&provider_error.message);
+                    } else {
+                        logging::warning(
+                            "Reconcile comparison walk failed; yielding and retrying later",
+                            &[("error", format!("{walk_error:?}"))],
+                        );
+                    }
                     self.reconcile_walker = None;
                     self.app.abort_reconcile(&mut self.scheduler, now);
                     self.requeue_runtime_intent(
@@ -596,7 +610,44 @@ impl DaemonRuntime {
         }
 
         if !paused {
-            self.process_ready_queue(now, &mut report)?;
+            let started_intent_ids = self.process_ready_queue(now, &mut report)?;
+            if !started_intent_ids.is_empty() {
+                // Freshly-leased intents start planning in their lease
+                // tick: without this pass every file would pay one full
+                // tick of dead latency between admission and its planner.
+                let mut env = ExecutionEnv {
+                    local_root: self.sync_scope.local_sync_directory.as_deref(),
+                    sync_mode: self.sync_scope.sync_mode,
+                    device_id: &self.device_id,
+                    hash_algorithm: self.app.provider().content_hash_algorithm(),
+                    transfer_step_bytes: &self.transfer_step_bytes,
+                    bandwidth: &self.bandwidth_shaper,
+                    tags: &self.tags,
+                    local_echoes: &mut self.local_echoes,
+                    remote_echoes: &mut self.remote_echoes,
+                };
+                let mut admission_report = crate::executor::StagedExecutorReport::default();
+                self.staged_executor.advance_intents(
+                    &mut self.app,
+                    &mut self.state_db,
+                    &mut env,
+                    now,
+                    &started_intent_ids,
+                    &mut admission_report,
+                )?;
+                report.completed_intents += admission_report.completed;
+                report.requeued_intents += admission_report.retried;
+                report.failed_intents += admission_report.failed;
+                report.mirror_deletes += admission_report.mirror_deletes;
+                self.mirror_delete_count += admission_report.mirror_deletes as u64;
+                report.conflicts += admission_report.conflicts;
+                self.conflict_count += admission_report.conflicts as u64;
+                if admission_report.cloud_root_unavailable > 0 {
+                    self.mark_cloud_root_unavailable(
+                        "a provider transfer reported the root missing",
+                    );
+                }
+            }
         }
 
         report.staged_executor = self.staged_executor.snapshot();
@@ -912,6 +963,7 @@ impl DaemonRuntime {
             device_id: vapor_shared::device_id::derive_device_id(),
             active_coding: crate::safeguards::ActiveCodingHeuristic::default(),
             mass_change_guard: crate::safeguards::MassChangeGuard::default(),
+            mass_delete_settings: crate::safeguards::MassDeleteGuardSettings::default(),
             flush_boost_until_inst: None,
         })
     }
@@ -919,6 +971,33 @@ impl DaemonRuntime {
     /// Wires the shared daemon activity timeline in.
     pub fn attach_timeline(&mut self, timeline: Arc<crate::timeline::TimelineBuffer>) {
         self.timeline = Some(timeline);
+    }
+
+    /// Switches this runtime's provider I/O (probes, transfer sessions,
+    /// remote deletes) onto worker threads so provider RTT never stalls
+    /// the tick loop. Production only: tests keep the deterministic
+    /// inline mode. `waker` is notified on every completed job so the
+    /// tick loop harvests promptly.
+    pub fn enable_transfer_workers(&mut self, waker: Option<Arc<TickWaker>>) {
+        self.staged_executor.enable_worker_threads(waker);
+    }
+
+    /// Applies the resolved `safeguards` config group: rebuilds the
+    /// mass-delete guard with the configured window/threshold. Called
+    /// at composition, before any events flow.
+    pub fn configure_mass_delete_guard(
+        &mut self,
+        settings: crate::safeguards::MassDeleteGuardSettings,
+    ) {
+        self.mass_delete_settings = settings;
+        self.mass_change_guard =
+            crate::safeguards::MassChangeGuard::new(settings.window, settings.threshold);
+    }
+
+    /// Passes the explicit transfer-concurrency ceiling to the app (see
+    /// `resourceLimits.maxConcurrentTransfers`).
+    pub fn set_max_concurrent_transfers(&mut self, ceiling: Option<usize>) {
+        self.app.set_max_concurrent_transfers(ceiling);
     }
 
     /// Wires the daemon-wide resource management set in:
@@ -1187,6 +1266,50 @@ impl DaemonRuntime {
     /// Retries ensuring the provider-side sync root while it is
     /// unavailable. Between attempts, sync work stays blocked
     /// and intents accumulate durably — never dropped.
+    /// Flips the daemon into the blocked cloud-root state when the root
+    /// vanishes *mid-run* (deleted, unmounted, remote folder removed).
+    /// Admission stops on the next tick (`paused` derives from
+    /// `cloud_root_ready`), the periodic ensure-retry recreates the root,
+    /// and recovery schedules a whole-scope reconcile — the same
+    /// self-healing path a missing root takes at startup.
+    fn mark_cloud_root_unavailable(&mut self, reason: &str) {
+        if !self.cloud_root_ready {
+            return;
+        }
+        self.cloud_root_ready = false;
+        // Retry immediately on the next tick, then at the ensure cadence.
+        self.last_cloud_root_attempt_inst = None;
+        logging::warning(
+            "Cloud sync directory became unavailable; blocking sync work until it is re-ensured",
+            &[
+                (
+                    "cloud_sync_directory",
+                    self.sync_scope.cloud_sync_directory.clone(),
+                ),
+                ("reason", reason.to_string()),
+            ],
+        );
+        // Preserve an explicit pause (user or mass-deletion guard): the
+        // root recovery path must not silently resume either.
+        if self.app.snapshot().run_state != RunState::Paused {
+            self.app.set_run_state(
+                RunState::Error,
+                format!(
+                    "cloud sync directory {} is unavailable; sync work is blocked until it can be ensured",
+                    self.sync_scope.cloud_sync_directory
+                ),
+            );
+        }
+        if let Some(timeline) = &self.timeline {
+            timeline.push(
+                "cloud-root",
+                self.profile_id.clone(),
+                "cloud sync directory became unavailable; sync blocked until it is restored",
+                self.clock.now_system(),
+            );
+        }
+    }
+
     fn retry_cloud_root_if_needed(&mut self) {
         if self.cloud_root_ready {
             return;
@@ -1208,6 +1331,20 @@ impl DaemonRuntime {
             .is_ok()
         {
             self.cloud_root_ready = true;
+            // A recovered root may be freshly recreated and empty (or
+            // have drifted while unreachable): a whole-scope reconcile
+            // restores it from local content. The two-way walk only
+            // deletes locally behind a remote-origin tombstone, so an
+            // empty recreated root re-uploads instead of mirroring the
+            // emptiness back.
+            if let Err(error) =
+                self.enqueue_startup_reconstruction_reconcile(self.clock.now_system())
+            {
+                logging::warning(
+                    "Could not schedule the post-recovery whole-scope reconcile",
+                    &[("error", format!("{error:?}"))],
+                );
+            }
             // Recovering the cloud root must only clear the cloud-root
             // Error state. If the daemon is Paused — an explicit
             // `vapor pause`, or the mass-deletion (ransomware) guard — leave
@@ -1560,17 +1697,21 @@ impl DaemonRuntime {
             // scheduled intent — the existence probe inside must not
             // run twice with the filesystem moving underneath.
             let intent_kind = crate::scheduler::intent_kind_for_stabilized_event(&event);
-            if intent_kind == PendingIntentKind::Delete && self.mass_change_guard.record_delete(now)
+            if intent_kind == PendingIntentKind::Delete
+                && self.mass_delete_settings.enabled
+                && self.mass_change_guard.record_delete(now)
             {
                 // Mass-change / ransomware guard: stop admitting
                 // work before the deletion storm replicates to the cloud.
                 // Ingest keeps capturing intent state durably; an explicit
-                // `vapor resume` is the human-in-the-loop reset.
+                // `vapor resume` is the human-in-the-loop reset. Threshold
+                // and window come from the `safeguards` config group.
                 let reason = format!(
                     "mass-deletion guard: {} or more local deletions inside {}s; \
-                     sync paused — review the changes, then run `vapor resume`",
-                    constants::engine::MASS_DELETE_THRESHOLD,
-                    constants::engine::MASS_DELETE_WINDOW_SECONDS,
+                     sync paused — review the changes, then run `vapor resume` \
+                     (tunable via the `safeguards` config group)",
+                    self.mass_delete_settings.threshold,
+                    self.mass_delete_settings.window.as_secs(),
                 );
                 self.app.set_run_state(RunState::Paused, reason.clone());
                 if let Some(timeline) = &self.timeline {
@@ -1579,13 +1720,10 @@ impl DaemonRuntime {
                 logging::warning(
                     "Mass-deletion guard tripped; pausing sync",
                     &[
-                        (
-                            "threshold",
-                            constants::engine::MASS_DELETE_THRESHOLD.to_string(),
-                        ),
+                        ("threshold", self.mass_delete_settings.threshold.to_string()),
                         (
                             "window_seconds",
-                            constants::engine::MASS_DELETE_WINDOW_SECONDS.to_string(),
+                            self.mass_delete_settings.window.as_secs().to_string(),
                         ),
                     ],
                 );
@@ -1627,10 +1765,10 @@ impl DaemonRuntime {
             return Ok(0);
         }
 
-        // Priority classes: within one flush batch, key config
-        // and code paths enqueue before lockfile noise, so they get the
-        // lower durable ids that break lease-order ties. Stable sort
-        // preserves arrival order inside each class.
+        // Priority classes: the durable priority_rank column orders
+        // leasing across batches; this in-batch stable sort additionally
+        // gives key config and code paths the lower durable ids that
+        // break ties inside one class, preserving arrival order.
         let windows = crate::debounce::DebounceWindows::default();
         claimed.sort_by_key(|intent| {
             crate::safeguards::intent_priority_rank(windows.classify_path(&intent.path).0)
@@ -1640,7 +1778,9 @@ impl DaemonRuntime {
             .iter()
             .map(|intent| (intent.path.clone(), intent.kind, intent.last_observed_at))
             .collect();
-        let enqueued = self.state_db.enqueue_intents_coalesced(&batch)?;
+        let enqueued = self
+            .state_db
+            .enqueue_intents_coalesced(&batch, crate::safeguards::IntentSource::Fresh)?;
 
         for intent in &claimed {
             let disposition = self
@@ -1657,15 +1797,20 @@ impl DaemonRuntime {
         Ok(enqueued)
     }
 
+    /// Leases ready intents and starts them on the staged executor.
+    /// Returns the ids of the executions started this call so the tick
+    /// can immediately advance them (no dead tick between admission and
+    /// planning).
     fn process_ready_queue(
         &mut self,
         now: SystemTime,
         report: &mut RuntimeTickReport,
-    ) -> Result<(), DaemonRuntimeError> {
+    ) -> Result<Vec<i64>, DaemonRuntimeError> {
         self.evaluate_startup_barrier(now);
+        let mut started_intent_ids = Vec::new();
 
         if self.startup_reconstruction_barrier && self.running_reconcile_intent_id.is_some() {
-            return Ok(());
+            return Ok(started_intent_ids);
         }
 
         let batch_limit = if self.startup_reconstruction_barrier {
@@ -1752,16 +1897,33 @@ impl DaemonRuntime {
                     }
 
                     let intent_id = intent.id;
-                    if self.try_start_staged_intent(intent, now) {
-                        report.started_staged_intents += 1;
-                    } else {
-                        self.requeue_runtime_intent(
-                            intent_id,
-                            now + blocked_intent_requeue_delay(),
-                            "waiting for planner permit",
-                        )?;
-                        report.requeued_intents += 1;
-                        break;
+                    match self.try_start_staged_intent(intent, now) {
+                        crate::executor::StartDecision::Started => {
+                            report.started_staged_intents += 1;
+                            started_intent_ids.push(intent_id);
+                        }
+                        crate::executor::StartDecision::PathBusy => {
+                            // Per-path serialization blocks only this
+                            // intent (an execution is in flight for the
+                            // same path); the rest of the batch keeps
+                            // admitting — breaking here would pin every
+                            // later-id intent behind one long transfer.
+                            self.requeue_runtime_intent(
+                                intent_id,
+                                now + blocked_intent_requeue_delay(),
+                                "waiting for in-flight work on the same path",
+                            )?;
+                            report.requeued_intents += 1;
+                        }
+                        crate::executor::StartDecision::AtCapacity => {
+                            self.requeue_runtime_intent(
+                                intent_id,
+                                now + blocked_intent_requeue_delay(),
+                                "waiting for planner permit",
+                            )?;
+                            report.requeued_intents += 1;
+                            break;
+                        }
                     }
                 }
             }
@@ -1776,10 +1938,14 @@ impl DaemonRuntime {
             report.requeued_intents += 1;
         }
 
-        Ok(())
+        Ok(started_intent_ids)
     }
 
-    fn try_start_staged_intent(&mut self, intent: DurableIntentRecord, now: SystemTime) -> bool {
+    fn try_start_staged_intent(
+        &mut self,
+        intent: DurableIntentRecord,
+        now: SystemTime,
+    ) -> crate::executor::StartDecision {
         self.staged_executor.try_start(&mut self.app, intent, now)
     }
 
@@ -2156,10 +2322,11 @@ mod tests {
         assert_eq!(first_tick.stabilized_events, 1);
         assert_eq!(first_tick.durable_enqueues, 1);
         assert_eq!(first_tick.started_staged_intents, 1);
-        assert_eq!(first_tick.completed_intents, 0);
 
         // Drive follow-up ticks until the pipeline completes the upload.
-        let mut completed = 0;
+        // (Stage chaining can complete a small file within its lease
+        // tick, so the first tick may already report the completion.)
+        let mut completed = first_tick.completed_intents;
         for tick_index in 0..8 {
             clock.advance(Duration::from_millis(250));
             let report = runtime
@@ -2189,9 +2356,13 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
+        // Durable intent paths must live under the runtime's *canonical*
+        // watch root, exactly like real watcher events do.
+        let watch_root = watch_root.canonicalize().expect("canonical watch root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
-        for index in 0..6 {
+        let planner_cap = crate::throttle::idle_drain_concurrency();
+        for index in 0..planner_cap + 2 {
             state_db
                 .enqueue_intent(
                     &watch_root.join(format!("src/file-{index}.rs")),
@@ -2215,9 +2386,14 @@ mod tests {
             .tick_with_inputs(timestamp_ms(250), ThrottleInputs::default())
             .expect("runtime tick");
 
-        assert_eq!(first_tick.started_staged_intents, 4);
-        assert_eq!(first_tick.staged_executor.planner_running, 4);
-        assert_eq!(runtime.state_db().leased_depth().expect("leased depth"), 4);
+        // Admission is capped at the planner-worker tier: two of the
+        // ready intents must wait for the next tick. Stage chaining then
+        // runs the admitted intents through the stub provider within the
+        // same tick, so they complete rather than sit in the planner
+        // stage.
+        assert_eq!(first_tick.started_staged_intents, planner_cap);
+        assert_eq!(first_tick.completed_intents, planner_cap);
+        assert_eq!(runtime.state_db().leased_depth().expect("leased depth"), 0);
         assert_eq!(
             runtime.state_db().pending_depth().expect("pending depth"),
             2
@@ -2463,6 +2639,123 @@ mod tests {
                 },
             );
         }
+    }
+
+    #[test]
+    fn cloud_deletion_of_a_previously_uploaded_file_propagates_locally() {
+        // Field-testing repro: local create A (uploads), cloud create B
+        // (downloads), local delete B (propagates up), cloud delete A —
+        // the final removal must propagate down. Every feed event the
+        // real cloud-root watcher would emit is reproduced, including
+        // the echoes of Vapor's own provider writes.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+
+        // 1. Local create A -> upload. The cloud watcher then sees our
+        // own write and echoes Created(A).
+        let local_a = fixture.watch_root.join("a.txt");
+        std::fs::write(&local_a, b"file a").expect("seed a");
+        fixture.record_local_event(&local_a, FsEventKind::Created, fixture.now_ms);
+        assert!(fixture.converge(12) >= 1, "A must upload");
+        let cloud_a = fixture.cloud_root.join("a.txt");
+        assert!(cloud_a.exists());
+        fixture
+            .feed
+            .emit_created(cloud_a.clone(), timestamp_ms(fixture.now_ms));
+
+        // 2. Cloud create B -> download.
+        let cloud_b = fixture.cloud_root.join("b.txt");
+        std::fs::write(&cloud_b, b"file b").expect("seed b");
+        fixture
+            .feed
+            .emit_created(cloud_b.clone(), timestamp_ms(fixture.now_ms));
+        assert!(fixture.converge(12) >= 1, "B must download");
+        let local_b = fixture.watch_root.join("b.txt");
+        assert!(local_b.exists());
+
+        // 3. Local delete B -> remote delete. The cloud watcher echoes
+        // Removed(B) for our own provider delete.
+        std::fs::remove_file(&local_b).expect("delete local b");
+        fixture.record_local_event(&local_b, FsEventKind::Removed, fixture.now_ms);
+        assert!(fixture.converge(12) >= 1, "B's deletion must propagate up");
+        assert!(!cloud_b.exists(), "cloud B must be deleted");
+        fixture
+            .feed
+            .emit_removed(cloud_b.clone(), timestamp_ms(fixture.now_ms));
+        fixture.converge(12);
+        assert!(
+            !local_b.exists(),
+            "the echo of our own remote delete must not resurrect B"
+        );
+
+        // 4. Cloud delete A -> the removal must propagate down.
+        std::fs::remove_file(&cloud_a).expect("delete cloud a");
+        fixture
+            .feed
+            .emit_removed(cloud_a.clone(), timestamp_ms(fixture.now_ms));
+        fixture.converge(24);
+        assert!(
+            !local_a.exists(),
+            "a cloud deletion of a previously-uploaded file must propagate locally"
+        );
+    }
+
+    #[test]
+    fn deleted_cloud_root_blocks_sync_then_recovers_and_reuploads() {
+        let mut fixture = BidirectionalFixture::new();
+        // Baseline the feed cursor, then sync one file normally.
+        fixture.tick(6_000);
+        let first = fixture.watch_root.join("kept.txt");
+        std::fs::write(&first, b"survives the outage").expect("seed local");
+        fixture.record_local_event(&first, FsEventKind::Created, fixture.now_ms);
+        assert!(fixture.converge(12) >= 1, "baseline upload must complete");
+        assert!(fixture.cloud_root.join("kept.txt").exists());
+
+        // The user deletes the whole cloud sync root out from under the
+        // running daemon.
+        std::fs::remove_dir_all(&fixture.cloud_root).expect("delete cloud root");
+
+        // New local work cannot reach the provider: the daemon must
+        // block (Error state), not finalize failures or spin forever.
+        let second = fixture.watch_root.join("during-outage.txt");
+        std::fs::write(&second, b"written while root is gone").expect("seed local");
+        fixture.record_local_event(&second, FsEventKind::Created, fixture.now_ms);
+        let mut blocked = false;
+        for _ in 0..12 {
+            fixture.tick(1_000);
+            if fixture.runtime.app().snapshot().run_state == RunState::Error {
+                blocked = true;
+                break;
+            }
+        }
+        assert!(blocked, "root loss must surface as the blocked Error state");
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0,
+            "root loss must never finalize intents into failed_intents"
+        );
+
+        // Self-healing: the ensure-retry loop recreates the root, the
+        // daemon returns to Running, and the post-recovery reconcile
+        // re-uploads local content into the recreated (empty) root.
+        let mut recovered = false;
+        for _ in 0..90 {
+            fixture.tick(6_000);
+            if fixture.runtime.app().snapshot().run_state == RunState::Running {
+                recovered = true;
+                break;
+            }
+        }
+        assert!(recovered, "the ensure-retry loop must recreate the root");
+        fixture.converge(60);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("kept.txt")).expect("re-uploaded"),
+            b"survives the outage",
+        );
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("during-outage.txt")).expect("uploaded"),
+            b"written while root is gone",
+        );
     }
 
     #[test]
@@ -3245,11 +3538,10 @@ mod tests {
         }
         let boosted = fixture.runtime.app().workgate_snapshot();
         assert!(
-            boosted.caps.planner_workers
-                > vapor_shared::constants::engine::IDLE_DRAIN_PLANNER_WORKERS,
+            boosted.caps.planner_workers > crate::throttle::idle_drain_concurrency(),
             "boost must raise caps above the base ({} <= {})",
             boosted.caps.planner_workers,
-            vapor_shared::constants::engine::IDLE_DRAIN_PLANNER_WORKERS
+            crate::throttle::idle_drain_concurrency()
         );
         let status = fixture
             .runtime
@@ -3272,8 +3564,7 @@ mod tests {
             .expect("tick");
         let snapped = fixture.runtime.app().workgate_snapshot();
         assert!(
-            snapped.caps.planner_workers
-                <= vapor_shared::constants::engine::IDLE_DRAIN_PLANNER_WORKERS,
+            snapped.caps.planner_workers <= crate::throttle::idle_drain_concurrency(),
             "post-IdleDrain states never run against boosted caps"
         );
         let status = fixture
@@ -3305,29 +3596,22 @@ mod tests {
         };
 
         // First daemon: lease the intent into flight, then "crash"
-        // (drop) before completing it.
+        // (drop) before completing it. The lease is taken directly on
+        // the durable DB — exactly the state a daemon that died between
+        // leasing and completing leaves behind. (A ticking runtime can
+        // no longer model this window: stage chaining completes a small
+        // upload within its lease tick.)
         {
             let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
             state_db
                 .enqueue_intent(&local_file, PendingIntentKind::Upload, timestamp_ms(0))
                 .expect("enqueue");
-            let clock = Arc::new(crate::clock::ManualClock::at_now());
-            let mut runtime = DaemonRuntime::build(
-                sync_scope(),
-                EventPathFilterOptions::default(),
-                state_db,
-                Box::new(vapor_providers::FilesystemProvider::new()),
-                Arc::new(StaticMetricsSampler::default()),
-                clock.clone(),
-                false,
-            )
-            .expect("first runtime");
-            clock.advance(Duration::from_millis(250));
-            let report = runtime
-                .tick_with_inputs(timestamp_ms(250), ThrottleInputs::default())
-                .expect("tick");
-            assert_eq!(report.leased_intents, 1, "intent must be in flight");
-            assert_eq!(runtime.state_db().leased_depth().expect("leased"), 1);
+            let leased = state_db
+                .lease_next_ready(timestamp_ms(250))
+                .expect("lease")
+                .expect("intent leased");
+            assert_eq!(leased.path, local_file);
+            assert_eq!(state_db.leased_depth().expect("leased"), 1);
             // Dropped here with the lease still open — simulated crash.
         }
 

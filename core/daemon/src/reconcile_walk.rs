@@ -422,7 +422,10 @@ impl ReconcileWalker {
         }
 
         if !batch.is_empty() {
-            self.stats.intents_enqueued += state_db.enqueue_intents_coalesced(&batch)?;
+            self.stats.intents_enqueued += state_db.enqueue_intents_coalesced(
+                &batch,
+                crate::safeguards::IntentSource::ReconcileBacklog,
+            )?;
         }
         Ok(())
     }

@@ -64,6 +64,12 @@ final class AppShellViewModel: ObservableObject {
     // `vapor.json` / defaults here and refreshes asynchronously once
     // the bootstrap and health-tick paths report back.
     state.autoLaunchEnabled = self.configuration.autoLaunch
+    // The provider label reflects the loaded configuration; a provider
+    // change requires the daemon (and app) to restart anyway, so a
+    // startup read is accurate. Live provider status over IPC arrives
+    // with the diagnostics work.
+    state.providerName = VaporConstants.Provider.displayName(
+      forKind: self.configuration.providerKind)
     state.useGitIgnore = self.configuration.useGitIgnore
     state.useVaporIgnore = self.configuration.useVaporIgnore
     state.preIgnoreRules = self.configuration.preIgnoreRules
@@ -156,6 +162,7 @@ final class AppShellViewModel: ObservableObject {
       do {
         let result = try daemonLifecycleManager.bootstrapIfNeeded()
         let isPaused = result == .relaunchDeferred(.infinity)
+        let loginItemOutcome = daemonLifecycleManager.lastLoginItemRegistrationOutcome()
         Task { @MainActor [weak self] in
           guard let self else {
             return
@@ -163,6 +170,8 @@ final class AppShellViewModel: ObservableObject {
 
           self.state.crashLoopPaused = isPaused
           self.state.autoLaunchEnabled = self.configuration.autoLaunch
+          self.state.loginItemRequiresApproval =
+            self.state.autoLaunchEnabled && Self.loginItemNeedsAttention(loginItemOutcome)
           self.startDaemonHealthMonitoringIfNeeded()
           logger.info(
             "Daemon lifecycle bootstrap completed",
@@ -287,6 +296,22 @@ final class AppShellViewModel: ObservableObject {
     await lifecycleCoordinator?.handleQuitFromMenuBar(serializingOn: lifecycleQueue)
   }
 
+  /// Whether a registration outcome means "the app will not actually
+  /// launch at login despite the preference being ON".
+  static func loginItemNeedsAttention(_ outcome: LoginItemRegistrationOutcome) -> Bool {
+    switch outcome {
+    case .requiresApproval, .failed:
+      return true
+    case .registered, .unavailable:
+      return false
+    }
+  }
+
+  func openLoginItemSettings() {
+    logger.info("Opening System Settings at the Login Items pane")
+    daemonLifecycleManager.openLoginItemSettings()
+  }
+
   func toggleAutoLaunch() {
     let nextState = !state.autoLaunchEnabled
     // Optimistically flip the published value now so a rapid second click
@@ -303,6 +328,7 @@ final class AppShellViewModel: ObservableObject {
       do {
         let result = try daemonLifecycleManager.setAutoLaunchEnabled(nextState)
         let persistedValue = daemonLifecycleManager.autoLaunchEnabled
+        let loginItemOutcome = daemonLifecycleManager.lastLoginItemRegistrationOutcome()
 
         Task { @MainActor [weak self] in
           guard let self else {
@@ -310,6 +336,8 @@ final class AppShellViewModel: ObservableObject {
           }
 
           self.state.autoLaunchEnabled = persistedValue
+          self.state.loginItemRequiresApproval =
+            persistedValue && Self.loginItemNeedsAttention(loginItemOutcome)
           self.configuration.autoLaunch = persistedValue
           self.clearConfigurationIssueIfResolved()
           logger.info(
@@ -317,6 +345,7 @@ final class AppShellViewModel: ObservableObject {
             metadata: [
               "persisted_value": String(persistedValue),
               "result": String(describing: result),
+              "login_item": String(describing: loginItemOutcome),
             ]
           )
         }
@@ -353,6 +382,7 @@ final class AppShellViewModel: ObservableObject {
           }
 
           self.state.autoLaunchEnabled = persistedValue
+          self.state.loginItemRequiresApproval = false
           self.configuration.autoLaunch = persistedValue
           self.clearConfigurationIssueIfResolved()
           logger.warning(

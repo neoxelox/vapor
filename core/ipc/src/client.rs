@@ -16,7 +16,7 @@ use crate::protocol::{
     AckResponse, DiagnosticsResponse, ErrorBody, Hello, IncompatibleVersion, Method, Request,
     Response, ResponseBody, StatusResponse, TimelineResponse, daemon_supported_versions,
 };
-use crate::transport::{StreamHandle, TransportError, connect_to_socket};
+use crate::transport::{StreamHandle, TransportError, connect_to_socket_with_timeout};
 
 /// Default per-call deadline applied by [`Client::connect`]. Bounds the
 /// CLI's "never hang" guarantee from `cli.md` L3-7: even when the
@@ -116,7 +116,12 @@ impl Client {
         client_id: &str,
         timeout: Duration,
     ) -> Result<Self, ClientError> {
-        let stream = connect_to_socket(socket_path)?;
+        // The deadline covers the connect phase too: with a wedged
+        // accept loop and a full kernel backlog, a blocking AF_UNIX
+        // connect never returns on Linux, and the read/write timeouts
+        // below would never get the chance to arm.
+        let connect_timeout = (timeout != Duration::MAX).then_some(timeout);
+        let stream = connect_to_socket_with_timeout(socket_path, connect_timeout)?;
         apply_stream_timeout(&stream, timeout)?;
         let mut client = Self::handshake(stream, client_id)?;
         client.timeout = timeout;

@@ -5,11 +5,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
 use std::time::SystemTime;
 
-use notify::event::{CreateKind, ModifyKind, RenameMode};
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-
+use vapor_platform::fs_watch::{
+    FsWatcher, FsWatcherError, WatchErrorHandler, WatchEvent, WatchEventKind,
+    start_native_watcher_with_error_handler,
+};
 use vapor_shared::constants;
 
 use crate::logging;
@@ -77,7 +79,10 @@ pub enum FsEventsWatcherError {
         watch_root: PathBuf,
         filter_root: PathBuf,
     },
-    Notify(notify::Error),
+    Platform(FsWatcherError),
+    /// The bridge thread that drains platform watch events could not be
+    /// spawned.
+    BridgeSpawn(std::io::Error),
 }
 
 impl Display for FsEventsWatcherError {
@@ -106,7 +111,10 @@ impl Display for FsEventsWatcherError {
                 filter_root.display(),
                 watch_root.display()
             ),
-            Self::Notify(error) => write!(f, "notify watcher error: {error}"),
+            Self::Platform(error) => write!(f, "platform fs-watch error: {error}"),
+            Self::BridgeSpawn(error) => {
+                write!(f, "cannot spawn fs-watch bridge thread: {error}")
+            }
         }
     }
 }
@@ -115,15 +123,16 @@ impl Error for FsEventsWatcherError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::WatchRootCanonicalizeFailed(_, error) => Some(error),
-            Self::Notify(error) => Some(error),
+            Self::Platform(error) => Some(error),
+            Self::BridgeSpawn(error) => Some(error),
             _ => None,
         }
     }
 }
 
-impl From<notify::Error> for FsEventsWatcherError {
-    fn from(value: notify::Error) -> Self {
-        Self::Notify(value)
+impl From<FsWatcherError> for FsEventsWatcherError {
+    fn from(value: FsWatcherError) -> Self {
+        Self::Platform(value)
     }
 }
 
@@ -211,8 +220,18 @@ impl SharedEventPathFilter {
     }
 }
 
+/// The daemon's local watch: the platform [`FsWatcher`] owns the OS
+/// notifier (one OS-event→kind mapping for every surface, contract-
+/// tested in `core/platform`), and a bridge thread drains its channel
+/// through the daemon-side discipline — path normalization, ignore
+/// filtering, ignore-file reload notes, recorder push. The OS callback
+/// itself only normalizes the kind and sends; everything heavier runs
+/// on the bridge.
 pub struct FsEventsWatcher {
-    _watcher: RecommendedWatcher,
+    /// Dropped before the bridge joins so the event channel disconnects
+    /// and the bridge exits.
+    watcher: Option<Box<dyn FsWatcher>>,
+    bridge: Option<std::thread::JoinHandle<()>>,
     watch_root: PathBuf,
     path_filter: Arc<SharedEventPathFilter>,
 }
@@ -245,27 +264,42 @@ impl FsEventsWatcher {
                 filter_root: path_filter.watch_root().to_path_buf(),
             });
         }
-        let callback_watch_root = watch_root.clone();
-        let callback_recorder = Arc::clone(&recorder);
-        let callback_path_filter = Arc::clone(&path_filter);
+        let (event_sender, event_receiver) = std::sync::mpsc::channel();
+        let error_recorder = Arc::clone(&recorder);
+        let on_error: WatchErrorHandler = Arc::new(move |description: &str| {
+            error_recorder.record_error(FsEventErrorRecord {
+                description: description.to_string(),
+            });
+        });
+        let watcher = start_native_watcher_with_error_handler(
+            watch_root.clone(),
+            event_sender,
+            Some(on_error),
+        )?;
 
-        let mut watcher = notify::recommended_watcher(move |result| {
-            record_callback_result(
-                &callback_watch_root,
-                callback_path_filter.as_ref(),
-                result,
-                callback_recorder.as_ref(),
-            );
-        })?;
+        let bridge_watch_root = watch_root.clone();
+        let bridge_recorder = Arc::clone(&recorder);
+        let bridge_path_filter = Arc::clone(&path_filter);
+        let bridge = std::thread::Builder::new()
+            .name("vapor-fswatch-bridge".to_string())
+            .spawn(move || {
+                bridge_watch_events(
+                    event_receiver,
+                    &bridge_watch_root,
+                    bridge_path_filter.as_ref(),
+                    bridge_recorder.as_ref(),
+                );
+            })
+            .map_err(FsEventsWatcherError::BridgeSpawn)?;
 
-        watcher.watch(&watch_root, RecursiveMode::Recursive)?;
         logging::info(
             "Started recursive filesystem watcher",
             &[("watch_root", watch_root.display().to_string())],
         );
 
         Ok(Self {
-            _watcher: watcher,
+            watcher: Some(watcher),
+            bridge: Some(bridge),
             watch_root,
             path_filter,
         })
@@ -277,6 +311,30 @@ impl FsEventsWatcher {
 
     pub fn path_filter(&self) -> &Arc<SharedEventPathFilter> {
         &self.path_filter
+    }
+}
+
+impl Drop for FsEventsWatcher {
+    fn drop(&mut self) {
+        // Drop the platform watcher first: its callback sender closes,
+        // the bridge's recv() disconnects, and the thread exits.
+        self.watcher = None;
+        if let Some(bridge) = self.bridge.take() {
+            let _ = bridge.join();
+        }
+    }
+}
+
+/// Drains platform watch events until the watcher (the only sender) is
+/// dropped.
+fn bridge_watch_events(
+    events: Receiver<WatchEvent>,
+    watch_root: &Path,
+    path_filter: &SharedEventPathFilter,
+    recorder: &dyn FsEventRecording,
+) {
+    while let Ok(event) = events.recv() {
+        record_watch_event(watch_root, path_filter, event, recorder);
     }
 }
 
@@ -297,67 +355,44 @@ pub(crate) fn normalize_watch_root(watch_root: PathBuf) -> Result<PathBuf, FsEve
         .map_err(|error| FsEventsWatcherError::WatchRootCanonicalizeFailed(watch_root, error))
 }
 
-fn record_callback_result(
+fn record_watch_event(
     watch_root: &Path,
     path_filter: &SharedEventPathFilter,
-    result: Result<Event, notify::Error>,
+    event: WatchEvent,
     recorder: &dyn FsEventRecording,
 ) {
-    match result {
-        Ok(event) => {
-            // A paired rename (`RenameMode::Both`) carries `[from, to]`
-            // paths; splitting it into a Removed(from) + Created(to) pair
-            // keeps both sides independently actionable — a bare "Renamed"
-            // record for a path that no longer exists cannot be executed.
-            let per_path_kinds = split_event_kinds(&event);
-            for (index, path) in event.paths.iter().enumerate() {
-                let kind = per_path_kinds(index);
-                if let Some(path) = normalize_event_path(watch_root, path) {
-                    if path_filter.should_ignore(&path) {
-                        continue;
-                    }
-                    // Note the observed path (ignore-file reload trigger)
-                    // only for non-ignored paths: an ignore file inside an
-                    // excluded directory is never read during a rebuild, so
-                    // requesting one would be pure waste (and a package
-                    // install writing many such files would rebuild the
-                    // whole filter on nearly every tick).
-                    path_filter.note_observed_path(&path);
+    let kind = fs_event_kind(event.kind);
+    if let Some(path) = normalize_event_path(watch_root, &event.path) {
+        if path_filter.should_ignore(&path) {
+            return;
+        }
+        // Note the observed path (ignore-file reload trigger)
+        // only for non-ignored paths: an ignore file inside an
+        // excluded directory is never read during a rebuild, so
+        // requesting one would be pure waste (and a package
+        // install writing many such files would rebuild the
+        // whole filter on nearly every tick).
+        path_filter.note_observed_path(&path);
 
-                    recorder.record_event(FsEventRecord {
-                        path,
-                        kind,
-                        observed_at: SystemTime::now(),
-                    });
-                }
-            }
-        }
-        Err(error) => {
-            recorder.record_error(FsEventErrorRecord {
-                description: error.to_string(),
-            });
-        }
+        recorder.record_event(FsEventRecord {
+            path,
+            kind,
+            observed_at: event.observed_at,
+        });
     }
 }
 
-/// Returns a per-path kind selector for the event. Everything except a
-/// paired rename maps every path to the same kind.
-fn split_event_kinds(event: &Event) -> impl Fn(usize) -> FsEventKind {
-    let is_paired_rename = matches!(
-        event.kind,
-        EventKind::Modify(ModifyKind::Name(RenameMode::Both))
-    ) && event.paths.len() == 2;
-    let uniform_kind = map_event_kind(&event.kind);
-    move |index| {
-        if is_paired_rename {
-            if index == 0 {
-                FsEventKind::Removed
-            } else {
-                FsEventKind::Created
-            }
-        } else {
-            uniform_kind
-        }
+/// 1:1 vocabulary mapping. Rename directionality is already resolved by
+/// the platform layer (rename-away → `Removed`, rename-in → `Created`,
+/// paired renames split); only the ambiguous `Renamed` survives here and
+/// resolves via reconcile.
+fn fs_event_kind(kind: WatchEventKind) -> FsEventKind {
+    match kind {
+        WatchEventKind::Created => FsEventKind::Created,
+        WatchEventKind::Modified => FsEventKind::Modified,
+        WatchEventKind::Removed => FsEventKind::Removed,
+        WatchEventKind::Renamed => FsEventKind::Renamed,
+        WatchEventKind::Other => FsEventKind::Other,
     }
 }
 
@@ -468,25 +503,6 @@ fn resolve_path_step(path: &Path, watch_root: &Path) -> Option<PathBuf> {
     None
 }
 
-fn map_event_kind(kind: &EventKind) -> FsEventKind {
-    match kind {
-        EventKind::Create(CreateKind::Any)
-        | EventKind::Create(CreateKind::File)
-        | EventKind::Create(CreateKind::Folder)
-        | EventKind::Create(CreateKind::Other) => FsEventKind::Created,
-        // Unpaired rename halves are directional and can be mapped to an
-        // actionable kind directly. The paired `Both` case is split by
-        // `split_event_kinds`; `Any`/`Other` keep the ambiguous `Renamed`
-        // kind (the source vs destination side is unknown).
-        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => FsEventKind::Removed,
-        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => FsEventKind::Created,
-        EventKind::Modify(ModifyKind::Name(_)) => FsEventKind::Renamed,
-        EventKind::Modify(_) => FsEventKind::Modified,
-        EventKind::Remove(_) => FsEventKind::Removed,
-        _ => FsEventKind::Other,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,13 +545,13 @@ mod tests {
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
-        let event = Event {
-            kind: EventKind::Create(CreateKind::File),
-            paths: vec![PathBuf::from("src/main.rs")],
-            attrs: Default::default(),
+        let event = WatchEvent {
+            path: PathBuf::from("src/main.rs"),
+            kind: WatchEventKind::Created,
+            observed_at: SystemTime::now(),
         };
 
-        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+        record_watch_event(&watch_root, &path_filter, event, &recorder);
 
         let events = recorder.events.lock().expect("events mutex poisoned");
         assert_eq!(events.len(), 1);
@@ -549,18 +565,16 @@ mod tests {
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
-        let event = Event {
-            kind: EventKind::Modify(ModifyKind::Any),
-            paths: vec![
-                watch_root
-                    .parent()
-                    .expect("synthetic watch root has a parent")
-                    .join("other-root/file.txt"),
-            ],
-            attrs: Default::default(),
+        let event = WatchEvent {
+            path: watch_root
+                .parent()
+                .expect("synthetic watch root has a parent")
+                .join("other-root/file.txt"),
+            kind: WatchEventKind::Modified,
+            observed_at: SystemTime::now(),
         };
 
-        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+        record_watch_event(&watch_root, &path_filter, event, &recorder);
 
         let events = recorder.events.lock().expect("events mutex poisoned");
         assert!(events.is_empty());
@@ -572,13 +586,13 @@ mod tests {
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
-        let event = Event {
-            kind: EventKind::Modify(ModifyKind::Any),
-            paths: vec![PathBuf::from("../escape.txt")],
-            attrs: Default::default(),
+        let event = WatchEvent {
+            path: PathBuf::from("../escape.txt"),
+            kind: WatchEventKind::Modified,
+            observed_at: SystemTime::now(),
         };
 
-        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+        record_watch_event(&watch_root, &path_filter, event, &recorder);
 
         let events = recorder.events.lock().expect("events mutex poisoned");
         assert!(events.is_empty());
@@ -649,13 +663,13 @@ mod tests {
 
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
-        let event = Event {
-            kind: EventKind::Modify(ModifyKind::Any),
-            paths: vec![PathBuf::from("escape/file.txt")],
-            attrs: Default::default(),
+        let event = WatchEvent {
+            path: PathBuf::from("escape/file.txt"),
+            kind: WatchEventKind::Modified,
+            observed_at: SystemTime::now(),
         };
 
-        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+        record_watch_event(&watch_root, &path_filter, event, &recorder);
 
         let events = recorder.events.lock().expect("events mutex poisoned");
         assert_eq!(
@@ -688,67 +702,17 @@ mod tests {
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
-        let event = Event {
-            kind: EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Any)),
-            paths: vec![watch_root.join("renamed.txt")],
-            attrs: Default::default(),
+        let event = WatchEvent {
+            path: watch_root.join("renamed.txt"),
+            kind: WatchEventKind::Renamed,
+            observed_at: SystemTime::now(),
         };
 
-        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+        record_watch_event(&watch_root, &path_filter, event, &recorder);
 
         let events = recorder.events.lock().expect("events mutex poisoned");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, FsEventKind::Renamed);
-    }
-
-    #[test]
-    fn callback_splits_paired_rename_into_removed_source_and_created_destination() {
-        // A bare "Renamed" record for the source path (which no longer
-        // exists) is unactionable; the pair maps to a delete + create so
-        // both sides flow through the normal pipeline.
-        let watch_root = synthetic_watch_root();
-        let path_filter = test_path_filter(&watch_root);
-        let recorder = TestRecorder::default();
-
-        let event = Event {
-            kind: EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::Both)),
-            paths: vec![watch_root.join("old.txt"), watch_root.join("new.txt")],
-            attrs: Default::default(),
-        };
-
-        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
-
-        let events = recorder.events.lock().expect("events mutex poisoned");
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].path, watch_root.join("old.txt"));
-        assert_eq!(events[0].kind, FsEventKind::Removed);
-        assert_eq!(events[1].path, watch_root.join("new.txt"));
-        assert_eq!(events[1].kind, FsEventKind::Created);
-    }
-
-    #[test]
-    fn callback_maps_directional_rename_halves_to_removed_and_created() {
-        let watch_root = synthetic_watch_root();
-        let path_filter = test_path_filter(&watch_root);
-        let recorder = TestRecorder::default();
-
-        let from_event = Event {
-            kind: EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::From)),
-            paths: vec![watch_root.join("old.txt")],
-            attrs: Default::default(),
-        };
-        let to_event = Event {
-            kind: EventKind::Modify(ModifyKind::Name(notify::event::RenameMode::To)),
-            paths: vec![watch_root.join("new.txt")],
-            attrs: Default::default(),
-        };
-
-        record_callback_result(&watch_root, &path_filter, Ok(from_event), &recorder);
-        record_callback_result(&watch_root, &path_filter, Ok(to_event), &recorder);
-
-        let events = recorder.events.lock().expect("events mutex poisoned");
-        assert_eq!(events[0].kind, FsEventKind::Removed);
-        assert_eq!(events[1].kind, FsEventKind::Created);
     }
 
     #[test]
@@ -775,12 +739,12 @@ mod tests {
 
         // The .gitignore is written and its own fs event arrives.
         fs::write(watch_root.join(".gitignore"), "generated/\n").expect("write .gitignore");
-        let event = Event {
-            kind: EventKind::Create(CreateKind::File),
-            paths: vec![watch_root.join(".gitignore")],
-            attrs: Default::default(),
+        let event = WatchEvent {
+            path: watch_root.join(".gitignore"),
+            kind: WatchEventKind::Created,
+            observed_at: SystemTime::now(),
         };
-        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+        record_watch_event(&watch_root, &path_filter, event, &recorder);
 
         assert!(
             path_filter.rebuild_if_requested(),
@@ -793,36 +757,18 @@ mod tests {
     }
 
     #[test]
-    fn callback_records_notify_errors() {
-        let watch_root = synthetic_watch_root();
-        let path_filter = test_path_filter(&watch_root);
-        let recorder = TestRecorder::default();
-
-        record_callback_result(
-            &watch_root,
-            &path_filter,
-            Err(notify::Error::generic("watch callback failed")),
-            &recorder,
-        );
-
-        let errors = recorder.errors.lock().expect("errors mutex poisoned");
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].description.contains("watch callback failed"));
-    }
-
-    #[test]
     fn callback_skips_paths_matching_default_ignore_rules() {
         let watch_root = synthetic_watch_root();
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
 
-        let event = Event {
-            kind: EventKind::Modify(ModifyKind::Any),
-            paths: vec![PathBuf::from("node_modules/pkg/index.js")],
-            attrs: Default::default(),
+        let event = WatchEvent {
+            path: PathBuf::from("node_modules/pkg/index.js"),
+            kind: WatchEventKind::Modified,
+            observed_at: SystemTime::now(),
         };
 
-        record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+        record_watch_event(&watch_root, &path_filter, event, &recorder);
 
         let events = recorder.events.lock().expect("events mutex poisoned");
         assert!(events.is_empty());
@@ -836,12 +782,12 @@ mod tests {
 
         let start = Instant::now();
         for index in 0..5_000 {
-            let event = Event {
-                kind: EventKind::Modify(ModifyKind::Any),
-                paths: vec![PathBuf::from(format!("src/file-{index}.rs"))],
-                attrs: Default::default(),
+            let event = WatchEvent {
+                path: PathBuf::from(format!("src/file-{index}.rs")),
+                kind: WatchEventKind::Modified,
+                observed_at: SystemTime::now(),
             };
-            record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+            record_watch_event(&watch_root, &path_filter, event, &recorder);
         }
         let elapsed = start.elapsed();
 
@@ -872,12 +818,12 @@ mod tests {
 
         let start = Instant::now();
         for _ in 0..2_000 {
-            let event = Event {
-                kind: EventKind::Modify(ModifyKind::Any),
-                paths: vec![relative_path.clone()],
-                attrs: Default::default(),
+            let event = WatchEvent {
+                path: relative_path.clone(),
+                kind: WatchEventKind::Modified,
+                observed_at: SystemTime::now(),
             };
-            record_callback_result(&watch_root, &path_filter, Ok(event), &recorder);
+            record_watch_event(&watch_root, &path_filter, event, &recorder);
         }
         let elapsed = start.elapsed();
 
@@ -888,6 +834,45 @@ mod tests {
             "deep callback burst took {:?}, expected < 2s",
             elapsed
         );
+    }
+
+    #[test]
+    fn watcher_bridge_delivers_real_fs_events_to_the_recorder() {
+        struct ChannelRecorder(std::sync::mpsc::Sender<FsEventRecord>);
+        impl FsEventRecording for ChannelRecorder {
+            fn record_event(&self, event: FsEventRecord) {
+                let _ = self.0.send(event);
+            }
+            fn record_error(&self, _error: FsEventErrorRecord) {}
+        }
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        fs::create_dir_all(&watch_root).expect("create watch root");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watcher = FsEventsWatcher::start(
+            watch_root,
+            Arc::new(ChannelRecorder(tx)),
+            EventPathFilterOptions::default(),
+        )
+        .expect("start watcher");
+
+        let file = watcher.watch_root().join("hello.txt");
+        fs::write(&file, b"payload").expect("write file");
+
+        // Blocking receive with a generous ceiling: the event arrives at
+        // FSEvents latency (typically well under a second); only a real
+        // platform-watcher → bridge → recorder wiring bug exhausts it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = rx
+                .recv_timeout(remaining)
+                .expect("watch event must reach the recorder");
+            if event.path == file {
+                break;
+            }
+        }
     }
 
     #[derive(Default)]

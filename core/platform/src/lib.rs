@@ -24,6 +24,7 @@
 #![deny(unsafe_code)]
 
 pub mod fs_caps;
+pub mod fs_ops;
 pub mod fs_watch;
 pub mod idle;
 pub mod metrics;

@@ -9,11 +9,11 @@ use vapor_shared::{constants, logging::sanitize_diagnostic_text, runtime_paths};
 use crate::event_intents::PendingIntentKind;
 use crate::retry::{RetryDecision, RetryFailureKind, RetryPolicy};
 
-const CURRENT_SCHEMA_VERSION: i64 = 4;
-/// The last schema version this build can migrate forward in place.
-/// v3 → v4 widened the intent-kind vocabulary with the remote→local
-/// pipeline kinds (`download`, `apply_remote_delete`), which only
-/// requires recreating the two intent tables with the wider CHECK.
+const CURRENT_SCHEMA_VERSION: i64 = 5;
+/// The oldest schema version this build can migrate forward in place
+/// (v3 → v4 widened the intent-kind vocabulary; v4 → v5 added the
+/// durable lease-priority column). Anything older predates the
+/// migration chain and fails with `SchemaVersionMismatch`.
 const MIGRATABLE_SCHEMA_VERSION: i64 = 3;
 const STATE_PENDING: &str = "pending";
 const STATE_LEASED: &str = "leased";
@@ -90,6 +90,9 @@ pub struct DurableIntentRecord {
     pub id: i64,
     pub path: PathBuf,
     pub kind: PendingIntentKind,
+    /// Durable lease-order class (lower leases first); see
+    /// [`crate::safeguards::durable_intent_priority_rank`].
+    pub priority_rank: u8,
     pub enqueued_at: SystemTime,
     pub available_at: SystemTime,
     pub leased_at: Option<SystemTime>,
@@ -206,47 +209,19 @@ impl DurableStateDb {
         limit: usize,
     ) -> Result<Vec<DurableIntentRecord>, StateDbError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, path_text, kind, enqueued_at_ms, available_at_ms,
+            "SELECT id, path_text, kind, priority_rank, enqueued_at_ms, available_at_ms,
                     leased_at_ms, attempt_count, last_error
              FROM queue_intents
              ORDER BY available_at_ms, id
              LIMIT ?",
         )?;
-        let rows =
-            statement.query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, Option<i64>>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                ))
-            })?;
+        let rows = statement.query_map(
+            params![i64::try_from(limit).unwrap_or(i64::MAX)],
+            intent_from_row,
+        )?;
         let mut records = Vec::new();
         for row in rows {
-            let (
-                id,
-                path_text,
-                kind,
-                enqueued_at_ms,
-                available_at_ms,
-                leased_at_ms,
-                attempt_count,
-                last_error,
-            ) = row?;
-            records.push(DurableIntentRecord {
-                id,
-                path: PathBuf::from(path_text),
-                kind: intent_kind_from_label(&kind)?,
-                enqueued_at: millis_to_system_time(enqueued_at_ms)?,
-                available_at: millis_to_system_time(available_at_ms)?,
-                leased_at: leased_at_ms.map(millis_to_system_time).transpose()?,
-                attempt_count: validate_attempt_count(attempt_count)?,
-                last_error,
-            });
+            records.push(raw_intent_to_record(row?)?);
         }
         Ok(records)
     }
@@ -325,6 +300,7 @@ impl DurableStateDb {
                 PendingIntentKind::ReconcileSubtree,
                 now,
                 UNIX_EPOCH,
+                crate::safeguards::IntentSource::Fresh,
             )?;
             fetch_intent(&transaction, id)?.ok_or(StateDbError::MissingIntentRecord(id))?
         };
@@ -362,7 +338,7 @@ impl DurableStateDb {
                 "SELECT kind
              FROM queue_intents
              WHERE state = ? AND available_at_ms <= ?
-             ORDER BY available_at_ms ASC, id ASC
+             ORDER BY priority_rank ASC, available_at_ms ASC, id ASC
              LIMIT 1",
                 params![STATE_PENDING, now_ms],
                 |row| row.get::<_, String>(0),
@@ -394,11 +370,11 @@ impl DurableStateDb {
              WHERE id IN (
                  SELECT id FROM queue_intents
                  WHERE state = ? AND available_at_ms <= ?
-                 ORDER BY available_at_ms ASC, id ASC
+                 ORDER BY priority_rank ASC, available_at_ms ASC, id ASC
                  LIMIT ?
              )
-             RETURNING id, path_text, kind, enqueued_at_ms, available_at_ms, leased_at_ms,
-                       attempt_count, last_error",
+             RETURNING id, path_text, kind, priority_rank, enqueued_at_ms, available_at_ms,
+                       leased_at_ms, attempt_count, last_error",
         )?;
         let mut leased_intents: Vec<DurableIntentRecord> = statement
             .query_map(
@@ -411,7 +387,7 @@ impl DurableStateDb {
             .collect::<Result<_, _>>()?;
         drop(statement);
 
-        leased_intents.sort_by_key(|intent| (intent.available_at, intent.id));
+        leased_intents.sort_by_key(|intent| (intent.priority_rank, intent.available_at, intent.id));
         Ok(leased_intents)
     }
 
@@ -786,7 +762,14 @@ impl DurableStateDb {
         enqueued_at: SystemTime,
         available_at: SystemTime,
     ) -> Result<DurableIntentRecord, StateDbError> {
-        let id = insert_intent(&self.connection, path, kind, enqueued_at, available_at)?;
+        let id = insert_intent(
+            &self.connection,
+            path,
+            kind,
+            enqueued_at,
+            available_at,
+            crate::safeguards::IntentSource::Fresh,
+        )?;
         self.intent_record(id)?
             .ok_or(StateDbError::MissingIntentRecord(id))
     }
@@ -798,10 +781,17 @@ impl DurableStateDb {
     /// coalesce — work already in flight may have read stale content, so
     /// a fresh pending row is the correct "run again after" signal.
     ///
+    /// `source` sets the durable lease priority: reconcile-walk backlog
+    /// ranks below fresh work. Coalescing keeps the better (lower) rank,
+    /// so a fresh edit landing on a path already queued by a reconcile
+    /// promotes that row out of the backlog class instead of inheriting
+    /// its starvation.
+    ///
     /// Returns the number of rows actually inserted.
     pub fn enqueue_intents_coalesced(
         &mut self,
         intents: &[(PathBuf, PendingIntentKind, SystemTime)],
+        source: crate::safeguards::IntentSource,
     ) -> Result<usize, StateDbError> {
         if intents.is_empty() {
             return Ok(0);
@@ -815,17 +805,33 @@ impl DurableStateDb {
             let path_text = path_to_text(path)?;
             let existing_pending = transaction
                 .query_row(
-                    "SELECT id FROM queue_intents
+                    "SELECT id, priority_rank FROM queue_intents
                      WHERE path_text = ? AND kind = ? AND state = ?
                      LIMIT 1",
                     params![path_text, intent_kind_label(*kind), STATE_PENDING],
-                    |row| row.get::<_, i64>(0),
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
                 )
                 .optional()?;
-            if existing_pending.is_some() {
+            if let Some((existing_id, existing_rank)) = existing_pending {
+                let new_rank = i64::from(crate::safeguards::durable_intent_priority_rank(
+                    path, *kind, source,
+                ));
+                if new_rank < existing_rank {
+                    transaction.execute(
+                        "UPDATE queue_intents SET priority_rank = ? WHERE id = ?",
+                        params![new_rank, existing_id],
+                    )?;
+                }
                 continue;
             }
-            insert_intent(&transaction, path, *kind, *observed_at, *observed_at)?;
+            insert_intent(
+                &transaction,
+                path,
+                *kind,
+                *observed_at,
+                *observed_at,
+                source,
+            )?;
             inserted += 1;
         }
         transaction.commit()?;
@@ -1060,24 +1066,28 @@ fn insert_intent(
     kind: PendingIntentKind,
     enqueued_at: SystemTime,
     available_at: SystemTime,
+    source: crate::safeguards::IntentSource,
 ) -> Result<i64, StateDbError> {
     let enqueued_at_ms = system_time_to_millis(enqueued_at)?;
     let available_at_ms = system_time_to_millis(available_at)?;
+    let priority_rank = crate::safeguards::durable_intent_priority_rank(path, kind, source);
     connection.execute(
         "INSERT INTO queue_intents (
             path_text,
             kind,
             state,
+            priority_rank,
             enqueued_at_ms,
             available_at_ms,
             leased_at_ms,
             attempt_count,
             last_error
-        ) VALUES (?, ?, ?, ?, ?, NULL, 0, NULL)",
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, NULL)",
         params![
             path_to_text(path)?,
             intent_kind_label(kind),
             STATE_PENDING,
+            i64::from(priority_rank),
             enqueued_at_ms,
             available_at_ms
         ],
@@ -1132,6 +1142,10 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
             Some(CURRENT_SCHEMA_VERSION) | None => {}
             Some(MIGRATABLE_SCHEMA_VERSION) => {
                 migrate_v3_to_v4(&transaction)?;
+                migrate_v4_to_v5(&transaction)?;
+            }
+            Some(4) => {
+                migrate_v4_to_v5(&transaction)?;
             }
             Some(found) => {
                 return Err(StateDbError::SchemaVersionMismatch {
@@ -1152,14 +1166,16 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
              path_text TEXT NOT NULL,
              kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
              state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
+             priority_rank INTEGER NOT NULL DEFAULT 4 CHECK(priority_rank >= 0),
              enqueued_at_ms INTEGER NOT NULL,
              available_at_ms INTEGER NOT NULL,
              leased_at_ms INTEGER,
              attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
              last_error TEXT
          );
+         -- Lease order: priority class first, then readiness, then id.
          CREATE INDEX IF NOT EXISTS idx_queue_intents_ready
-             ON queue_intents(state, available_at_ms, id);
+             ON queue_intents(state, priority_rank, available_at_ms, id);
          -- Supports the coalesced-enqueue dedup lookup (path_text + kind +
          -- state) so a large pending queue does not turn every ingest
          -- flush into a full table scan.
@@ -1273,6 +1289,31 @@ fn migrate_v3_to_v4(transaction: &rusqlite::Transaction<'_>) -> Result<(), State
     Ok(())
 }
 
+/// Forward migration v4 → v5: adds the durable `priority_rank` column
+/// so leasing orders by priority class before FIFO order (a reconcile
+/// backlog can no longer starve fresh edits across lease batches).
+/// Existing file rows backfill to the fresh `Other` rank — their paths
+/// are not reclassified — and reconcile control rows to the first
+/// rank; new enqueues carry exact ranks. Rollback story: a v4 build
+/// ignores the extra column but its ready index no longer matches, so
+/// rollback requires dropping the DB (pre-GA policy, AGENTS.md §1.1).
+fn migrate_v4_to_v5(transaction: &rusqlite::Transaction<'_>) -> Result<(), StateDbError> {
+    transaction.execute_batch(
+        "ALTER TABLE queue_intents
+             ADD COLUMN priority_rank INTEGER NOT NULL DEFAULT 4 CHECK(priority_rank >= 0);
+         UPDATE queue_intents SET priority_rank = 0 WHERE kind = 'reconcile_subtree';
+         DROP INDEX IF EXISTS idx_queue_intents_ready;
+         CREATE INDEX idx_queue_intents_ready
+             ON queue_intents(state, priority_rank, available_at_ms, id);
+         UPDATE schema_meta SET schema_version = 5 WHERE singleton = 1;",
+    )?;
+    crate::logging::info(
+        "Migrated durable state schema v4 -> v5 (durable lease-priority column)",
+        &[],
+    );
+    Ok(())
+}
+
 fn read_schema_version(connection: &Connection) -> Result<Option<i64>, StateDbError> {
     let version = connection
         .query_row(
@@ -1314,6 +1355,7 @@ type RawIntentRow = (
     String,
     i64,
     i64,
+    i64,
     Option<i64>,
     i64,
     Option<String>,
@@ -1326,9 +1368,10 @@ fn intent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawIntentRow> {
         row.get::<_, String>(2)?,
         row.get::<_, i64>(3)?,
         row.get::<_, i64>(4)?,
-        row.get::<_, Option<i64>>(5)?,
-        row.get::<_, i64>(6)?,
-        row.get::<_, Option<String>>(7)?,
+        row.get::<_, i64>(5)?,
+        row.get::<_, Option<i64>>(6)?,
+        row.get::<_, i64>(7)?,
+        row.get::<_, Option<String>>(8)?,
     ))
 }
 
@@ -1337,6 +1380,7 @@ fn raw_intent_to_record(raw: RawIntentRow) -> Result<DurableIntentRecord, StateD
         id,
         path_text,
         kind,
+        priority_rank,
         enqueued_at_ms,
         available_at_ms,
         leased_at_ms,
@@ -1347,6 +1391,7 @@ fn raw_intent_to_record(raw: RawIntentRow) -> Result<DurableIntentRecord, StateD
         id,
         path: path_from_text(path_text),
         kind: intent_kind_from_label(&kind)?,
+        priority_rank: u8::try_from(priority_rank).unwrap_or(u8::MAX),
         enqueued_at: millis_to_system_time(enqueued_at_ms)?,
         available_at: millis_to_system_time(available_at_ms)?,
         leased_at: leased_at_ms.map(millis_to_system_time).transpose()?,
@@ -1361,7 +1406,7 @@ fn fetch_intent(
 ) -> Result<Option<DurableIntentRecord>, StateDbError> {
     let raw_intent = connection
         .query_row(
-            "SELECT id, path_text, kind, enqueued_at_ms, available_at_ms, leased_at_ms, attempt_count, last_error
+            "SELECT id, path_text, kind, priority_rank, enqueued_at_ms, available_at_ms, leased_at_ms, attempt_count, last_error
              FROM queue_intents
              WHERE id = ?",
             params![id],
@@ -2347,7 +2392,7 @@ mod tests {
     }
 
     #[test]
-    fn version_three_database_migrates_in_place_to_v4_preserving_rows() {
+    fn version_three_database_migrates_in_place_to_current_preserving_rows() {
         let temp_dir = TempDir::new().expect("temp dir");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         if let Some(parent) = database_path.parent() {
@@ -2420,6 +2465,149 @@ mod tests {
                 timestamp_ms(200),
             )
             .expect("v4 kinds must be storable after migration");
+    }
+
+    #[test]
+    fn version_four_database_migrates_in_place_adding_priority_rank() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        if let Some(parent) = database_path.parent() {
+            fs::create_dir_all(parent).expect("create parent directory");
+        }
+
+        let connection = Connection::open(&database_path).expect("open sqlite connection");
+        configure_connection(&connection).expect("configure connection");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_meta (
+                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                     schema_version INTEGER NOT NULL CHECK(schema_version > 0)
+                 );
+                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 4);
+                 CREATE TABLE queue_intents (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     path_text TEXT NOT NULL,
+                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
+                     state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
+                     enqueued_at_ms INTEGER NOT NULL,
+                     available_at_ms INTEGER NOT NULL,
+                     leased_at_ms INTEGER,
+                     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                     last_error TEXT
+                 );
+                 CREATE INDEX idx_queue_intents_ready
+                     ON queue_intents(state, available_at_ms, id);
+                 CREATE TABLE failed_intents (
+                     id INTEGER PRIMARY KEY,
+                     path_text TEXT NOT NULL,
+                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
+                     failure_kind TEXT NOT NULL CHECK(failure_kind IN ('authentication', 'permanent')),
+                     enqueued_at_ms INTEGER NOT NULL,
+                     failed_at_ms INTEGER NOT NULL,
+                     attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),
+                     last_error TEXT NOT NULL
+                 );
+                 CREATE TABLE state_entries (
+                     key TEXT PRIMARY KEY,
+                     value TEXT NOT NULL,
+                     updated_at_ms INTEGER NOT NULL
+                 );
+                 INSERT INTO queue_intents
+                     (path_text, kind, state, enqueued_at_ms, available_at_ms,
+                      leased_at_ms, attempt_count, last_error)
+                     VALUES ('/tmp/vapor-root/file.txt', 'upload', 'pending', 100, 100, NULL, 0, NULL),
+                            ('/tmp/vapor-root', 'reconcile_subtree', 'pending', 50, 0, NULL, 0, NULL);",
+            )
+            .expect("seed version four schema");
+        drop(connection);
+
+        let mut migrated = DurableStateDb::open(&database_path)
+            .expect("version four database must migrate forward in place");
+        // Reconcile control rows backfill to the first-leased rank; file
+        // rows to the fresh default — the reconcile leases first.
+        let first = migrated
+            .lease_next_ready(timestamp_ms(200))
+            .expect("lease")
+            .expect("row leased");
+        assert_eq!(first.kind, PendingIntentKind::ReconcileSubtree);
+        assert_eq!(
+            first.priority_rank,
+            crate::safeguards::RECONCILE_INTENT_PRIORITY_RANK
+        );
+    }
+
+    #[test]
+    fn reconcile_backlog_leases_after_fresh_edits_even_when_enqueued_first() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut state_db = DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite"))
+            .expect("open durable state db");
+        // A reconcile walk floods the queue first...
+        let backlog: Vec<_> = (0..3)
+            .map(|index| {
+                (
+                    PathBuf::from(format!("/tmp/vapor-root/backlog-{index}.bin")),
+                    PendingIntentKind::Download,
+                    timestamp_ms(100),
+                )
+            })
+            .collect();
+        state_db
+            .enqueue_intents_coalesced(&backlog, crate::safeguards::IntentSource::ReconcileBacklog)
+            .expect("enqueue backlog");
+        // ...then the user edits a file (later timestamp AND later id).
+        state_db
+            .enqueue_intents_coalesced(
+                &[(
+                    PathBuf::from("/tmp/vapor-root/fresh-edit.rs"),
+                    PendingIntentKind::Upload,
+                    timestamp_ms(500),
+                )],
+                crate::safeguards::IntentSource::Fresh,
+            )
+            .expect("enqueue fresh");
+
+        let first = state_db
+            .lease_next_ready(timestamp_ms(1_000))
+            .expect("lease")
+            .expect("row leased");
+        assert_eq!(
+            first.path,
+            PathBuf::from("/tmp/vapor-root/fresh-edit.rs"),
+            "the fresh edit must lease ahead of the earlier reconcile backlog"
+        );
+    }
+
+    #[test]
+    fn fresh_enqueue_promotes_an_existing_backlog_row_out_of_the_backlog_class() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut state_db = DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite"))
+            .expect("open durable state db");
+        let path = PathBuf::from("/tmp/vapor-root/shared.rs");
+        state_db
+            .enqueue_intents_coalesced(
+                &[(path.clone(), PendingIntentKind::Upload, timestamp_ms(100))],
+                crate::safeguards::IntentSource::ReconcileBacklog,
+            )
+            .expect("enqueue backlog row");
+        // The user edits the same path: the coalesced row must adopt the
+        // fresh rank instead of inheriting backlog starvation.
+        let inserted = state_db
+            .enqueue_intents_coalesced(
+                &[(path.clone(), PendingIntentKind::Upload, timestamp_ms(200))],
+                crate::safeguards::IntentSource::Fresh,
+            )
+            .expect("coalesce fresh");
+        assert_eq!(inserted, 0, "the fresh enqueue coalesces, not duplicates");
+
+        let leased = state_db
+            .lease_next_ready(timestamp_ms(1_000))
+            .expect("lease")
+            .expect("row leased");
+        assert_eq!(leased.path, path);
+        assert!(
+            leased.priority_rank < crate::safeguards::BACKLOG_INTENT_PRIORITY_RANK,
+            "coalescing with fresh work must promote the row's rank"
+        );
     }
 
     #[test]
@@ -2663,31 +2851,32 @@ mod tests {
         let path = PathBuf::from("/tmp/vapor-root/project/file.txt");
 
         let inserted = database
-            .enqueue_intents_coalesced(&[
-                (path.clone(), PendingIntentKind::Upload, timestamp_ms(100)),
-                (path.clone(), PendingIntentKind::Upload, timestamp_ms(200)),
-            ])
+            .enqueue_intents_coalesced(
+                &[
+                    (path.clone(), PendingIntentKind::Upload, timestamp_ms(100)),
+                    (path.clone(), PendingIntentKind::Upload, timestamp_ms(200)),
+                ],
+                crate::safeguards::IntentSource::Fresh,
+            )
             .expect("coalesced enqueue");
         assert_eq!(inserted, 1);
         assert_eq!(database.pending_depth().expect("pending depth"), 1);
 
         // A second batch for the same still-pending path coalesces too.
         let inserted = database
-            .enqueue_intents_coalesced(&[(
-                path.clone(),
-                PendingIntentKind::Upload,
-                timestamp_ms(300),
-            )])
+            .enqueue_intents_coalesced(
+                &[(path.clone(), PendingIntentKind::Upload, timestamp_ms(300))],
+                crate::safeguards::IntentSource::Fresh,
+            )
             .expect("coalesced enqueue");
         assert_eq!(inserted, 0);
 
         // A different kind for the same path is separate work.
         let inserted = database
-            .enqueue_intents_coalesced(&[(
-                path.clone(),
-                PendingIntentKind::Delete,
-                timestamp_ms(400),
-            )])
+            .enqueue_intents_coalesced(
+                &[(path.clone(), PendingIntentKind::Delete, timestamp_ms(400))],
+                crate::safeguards::IntentSource::Fresh,
+            )
             .expect("coalesced enqueue");
         assert_eq!(inserted, 1);
         assert_eq!(database.pending_depth().expect("pending depth"), 2);
@@ -2711,11 +2900,10 @@ mod tests {
         // The in-flight lease may have read stale content; the new change
         // must survive as its own pending row.
         let inserted = database
-            .enqueue_intents_coalesced(&[(
-                path.clone(),
-                PendingIntentKind::Upload,
-                timestamp_ms(200),
-            )])
+            .enqueue_intents_coalesced(
+                &[(path.clone(), PendingIntentKind::Upload, timestamp_ms(200))],
+                crate::safeguards::IntentSource::Fresh,
+            )
             .expect("coalesced enqueue");
         assert_eq!(inserted, 1);
         assert_eq!(database.pending_depth().expect("pending depth"), 1);

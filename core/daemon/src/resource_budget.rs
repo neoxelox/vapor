@@ -33,6 +33,9 @@ pub struct EffectiveBudgetConfig {
     pub cpu_percent: u8,
     pub memory_percent: u8,
     pub bandwidth_percent: u8,
+    /// Optional user ceiling on concurrent uploads / downloads (each
+    /// direction). `None` = automatic (core-derived throttle tier).
+    pub max_concurrent_transfers: Option<usize>,
     pub boost_enabled: bool,
     pub min_idle: Duration,
     pub boost_cpu_percent: u8,
@@ -53,6 +56,8 @@ impl EffectiveBudgetConfig {
         let mut limits = clamp_limits(&config.resource_limits, "top-level");
         let mut boost = config.idle_boost.clone();
         let mut boost_enabled = boost.enabled;
+        let mut max_concurrent_transfers =
+            clamp_transfer_ceiling(config.resource_limits.max_concurrent_transfers, "top-level");
 
         for profile in &config.profiles {
             if !profile.enabled.unwrap_or(true) {
@@ -63,6 +68,16 @@ impl EffectiveBudgetConfig {
                 limits.cpu_percent = limits.cpu_percent.min(clamped.cpu_percent);
                 limits.memory_percent = limits.memory_percent.min(clamped.memory_percent);
                 limits.bandwidth_percent = limits.bandwidth_percent.min(clamped.bandwidth_percent);
+                if let Some(profile_ceiling) =
+                    clamp_transfer_ceiling(profile_limits.max_concurrent_transfers, &profile.id)
+                {
+                    // Ceilings are MIN-lowered like the percent limits: a
+                    // profile can only tighten the daemon-wide value.
+                    max_concurrent_transfers = Some(
+                        max_concurrent_transfers
+                            .map_or(profile_ceiling, |current| current.min(profile_ceiling)),
+                    );
+                }
             }
             if let Some(profile_boost) = &profile.idle_boost {
                 if !profile_boost.enabled {
@@ -104,6 +119,7 @@ impl EffectiveBudgetConfig {
             cpu_percent: limits.cpu_percent,
             memory_percent: limits.memory_percent,
             bandwidth_percent: limits.bandwidth_percent,
+            max_concurrent_transfers,
             boost_enabled,
             min_idle: Duration::from_secs(boost.min_idle_seconds),
             boost_cpu_percent: boost_cpu.clamp(1, 100),
@@ -114,6 +130,27 @@ impl EffectiveBudgetConfig {
             ramp_down,
         }
     }
+}
+
+/// Clamps a configured transfer-concurrency ceiling into the accepted
+/// range with a logged warning; `None` passes through (automatic).
+fn clamp_transfer_ceiling(configured: Option<u8>, source: &str) -> Option<usize> {
+    let configured = configured? as usize;
+    let clamped = configured.clamp(
+        constants::resource_limits::MIN_CONCURRENT_TRANSFERS,
+        constants::resource_limits::MAX_CONCURRENT_TRANSFERS,
+    );
+    if clamped != configured {
+        logging::warning(
+            "Clamped resourceLimits.maxConcurrentTransfers into the accepted range",
+            &[
+                ("source", source.to_string()),
+                ("configured", configured.to_string()),
+                ("effective", clamped.to_string()),
+            ],
+        );
+    }
+    Some(clamped)
 }
 
 fn clamp_limits(limits: &ResourceLimitsConfig, origin: &str) -> ResourceLimitsConfig {
@@ -139,6 +176,9 @@ fn clamp_limits(limits: &ResourceLimitsConfig, origin: &str) -> ResourceLimitsCo
         cpu_percent: clamp(limits.cpu_percent, "cpuPercent"),
         memory_percent: clamp(limits.memory_percent, "memoryPercent"),
         bandwidth_percent: clamp(limits.bandwidth_percent, "bandwidthPercent"),
+        // Clamped separately (`clamp_transfer_ceiling`); passed through
+        // here so callers holding the clamped struct keep the raw value.
+        max_concurrent_transfers: limits.max_concurrent_transfers,
     }
 }
 
@@ -482,6 +522,7 @@ mod tests {
                     cpu_percent: 5,
                     memory_percent: 50,
                     bandwidth_percent: 10,
+                    max_concurrent_transfers: None,
                 }),
                 ..ProfileConfig::default()
             },
@@ -511,6 +552,7 @@ mod tests {
                 cpu_percent: 1,
                 memory_percent: 1,
                 bandwidth_percent: 1,
+                max_concurrent_transfers: None,
             }),
             ..ProfileConfig::default()
         }];

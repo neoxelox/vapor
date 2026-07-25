@@ -5,6 +5,7 @@
 use std::error::Error;
 use std::fmt::{self, Display};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::SystemTime;
 
@@ -28,6 +29,13 @@ pub use windows::NativeFsWatcher;
 
 /// Normalized fs-watch event kind. Maps the per-OS event vocabulary onto
 /// a stable cross-platform set.
+///
+/// Rename semantics: directional rename halves are mapped to the
+/// actionable kind directly — a rename-away is `Removed` at the old
+/// path, a rename-in is `Created` at the new path, and a paired rename
+/// event is split into that Removed/Created pair. `Renamed` survives
+/// only for ambiguous OS reports where the source/destination side is
+/// unknown; consumers must re-stat the path to disambiguate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WatchEventKind {
     Created,
@@ -36,6 +44,13 @@ pub enum WatchEventKind {
     Renamed,
     Other,
 }
+
+/// Callback for watcher backend errors. Runs on the OS watcher's
+/// callback thread, so it must stay cheap (log/record only). Without
+/// one, backend errors are silently dropped — acceptable only for
+/// consumers that re-derive state by stat (the filesystem provider's
+/// changes feed); the daemon's local watch records every error.
+pub type WatchErrorHandler = Arc<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WatchEvent {
@@ -102,6 +117,14 @@ pub fn start_native_watcher(
     watch_root: PathBuf,
     sender: Sender<WatchEvent>,
 ) -> Result<Box<dyn FsWatcher>, FsWatcherError> {
-    NativeFsWatcher::start(watch_root, sender)
+    start_native_watcher_with_error_handler(watch_root, sender, None)
+}
+
+pub fn start_native_watcher_with_error_handler(
+    watch_root: PathBuf,
+    sender: Sender<WatchEvent>,
+    on_error: Option<WatchErrorHandler>,
+) -> Result<Box<dyn FsWatcher>, FsWatcherError> {
+    NativeFsWatcher::start_with_error_handler(watch_root, sender, on_error)
         .map(|watcher| Box::new(watcher) as Box<dyn FsWatcher>)
 }

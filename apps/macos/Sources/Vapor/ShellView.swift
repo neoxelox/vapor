@@ -36,6 +36,7 @@ struct ShellView: View {
       }
 
       Toggle(viewModel.localized("settings_start_at_login"), isOn: autoLaunchBinding)
+      loginItemApprovalHint
 
       Text(viewModel.localized("runtime_directory_format", viewModel.state.vaporDirectoryPath))
         .font(.caption)
@@ -43,6 +44,25 @@ struct ShellView: View {
     }
     .padding(24)
     .frame(minWidth: 460, minHeight: 320)
+  }
+
+  /// Shown when macOS blocks the login item: the toggle alone would
+  /// claim "starts at login" while the app never launches. Follows the
+  /// HIG guidance pattern — a short explanation plus a direct path to
+  /// the System Settings pane that resolves it.
+  @ViewBuilder
+  private var loginItemApprovalHint: some View {
+    if viewModel.state.loginItemRequiresApproval {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(viewModel.localized("login_item_requires_approval_detail"))
+          .font(.caption)
+          .foregroundStyle(.orange)
+        Button(viewModel.localized("login_item_open_settings")) {
+          viewModel.openLoginItemSettings()
+        }
+        .controlSize(.small)
+      }
+    }
   }
 
   private var autoLaunchBinding: Binding<Bool> {
@@ -145,6 +165,7 @@ struct SettingsView: View {
       }
 
       Toggle(viewModel.localized("settings_start_at_login"), isOn: autoLaunchBinding)
+      loginItemApprovalHint
       Toggle(viewModel.localized("settings_use_gitignore"), isOn: useGitIgnoreBinding)
       Toggle(viewModel.localized("settings_use_vaporignore"), isOn: useVaporIgnoreBinding)
 
@@ -198,6 +219,25 @@ struct SettingsView: View {
     }
     .padding(24)
     .frame(width: 420)
+  }
+
+  /// Shown when macOS blocks the login item: the toggle alone would
+  /// claim "starts at login" while the app never launches. Follows the
+  /// HIG guidance pattern — a short explanation plus a direct path to
+  /// the System Settings pane that resolves it.
+  @ViewBuilder
+  private var loginItemApprovalHint: some View {
+    if viewModel.state.loginItemRequiresApproval {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(viewModel.localized("login_item_requires_approval_detail"))
+          .font(.caption)
+          .foregroundStyle(.orange)
+        Button(viewModel.localized("login_item_open_settings")) {
+          viewModel.openLoginItemSettings()
+        }
+        .controlSize(.small)
+      }
+    }
   }
 
   private var autoLaunchBinding: Binding<Bool> {

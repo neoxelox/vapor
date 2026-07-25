@@ -1148,7 +1148,6 @@ version = "0.2.0-alpha.3"
 dependencies = [
  "globset",
  "md-5",
- "notify",
  "rusqlite",
  "serde_json",
  "sha2",
