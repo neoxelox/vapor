@@ -148,6 +148,25 @@ must never violate.
   The `vapor` CLI has no environment of its own: CLI artifacts are
   signed and published by each platform's release job under that
   platform's environment (see §7.5).
+- Every platform release environment must be protected **before** its
+  secrets are added, never after — there must be no window in which
+  signing material sits in an unguarded environment. A new environment
+  is created with zero protection rules and nothing warns you, so this
+  is an explicit setup step for each platform:
+  - Deployments are restricted to a custom policy holding one **tag**
+    rule matching the release tag pattern (`v*`) and **no branch rule**,
+    so only a release tag can reach the signing secrets.
+  - A required reviewer gates the job, so producing a signed artifact is
+    a deliberate act rather than an automatic consequence of pushing a
+    tag.
+  - `can_admins_bypass` stays `true` only while a single maintainer
+    holds admin; set it to `false` as soon as a second admin exists.
+  These live in repository settings on purpose. The equivalent checks in
+  workflow YAML (tag-only triggers, preflight ref validation) are
+  defence in depth, not the control: that YAML is part of the ref being
+  released and is editable by anyone with write access, whereas the
+  environment policy is not. Current configuration and status:
+  `docs/operations/release-process.md`.
 - App/daemon version compatibility rules must be maintained and tested
   per OS.
 - Product release version source-of-truth is the repository root `VERSION`
@@ -350,6 +369,30 @@ It does not override the "latest stable" policy above.
   the fact and drop the archaeology.
 - A stale comment is a bug: when a change makes a nearby comment wrong or
   obsolete, update or delete it in the same change set.
+
+## 8.9) Agent knowledge files and skills
+
+Vapor keeps the vendor-neutral filename as the real file and gives each
+agent tool its expected name as a symlink, so one source of truth serves
+every agent.
+
+- Contributor rules live in `AGENTS.md`. `CLAUDE.md` is a symlink to it.
+- Project skills live in `.agents/skills/<skill-name>/SKILL.md`.
+  `.claude/skills/<skill-name>` is a symlink to the matching
+  `.agents/skills/<skill-name>` directory, which is how Claude Code
+  discovers them. **Adding a skill means adding its mirror symlink in the
+  same change set** — otherwise the skill is invisible to Claude Code.
+  `.gitignore` keeps the rest of `.claude/` (machine-local agent state)
+  untracked while tracking `.claude/skills`.
+- `SKILL.md` front matter must stay within the fields every supported
+  agent understands: `name` (required, kebab-case, identical to the
+  directory name), `description` (required), and optionally `license`,
+  `version`, `allowed-tools`, `user-invocable`. Do not add tool-specific
+  keys.
+- The `description` is the only part an agent reads when deciding whether
+  to invoke a skill — the body is loaded afterwards. Write it in the
+  third person and state both what the skill does **and** when to use it;
+  do not leave the trigger conditions only in the body.
 
 ## 9) Required test matrix
 

@@ -239,7 +239,7 @@ mod windows_impl {
 
     pub fn bind_listener(_socket_path: PathBuf) -> Result<ListenerHandle, TransportError> {
         Err(TransportError::Unsupported(
-            "Windows IPC named-pipe transport not implemented yet (Wave 12 / C6)",
+            "the Windows named-pipe transport has not shipped yet",
         ))
     }
 
@@ -254,7 +254,7 @@ mod windows_impl {
 
     pub fn connect_to_socket(_socket_path: &Path) -> Result<StreamHandle, TransportError> {
         Err(TransportError::Unsupported(
-            "Windows IPC named-pipe transport not implemented yet (Wave 12 / C6)",
+            "the Windows named-pipe transport has not shipped yet",
         ))
     }
 }

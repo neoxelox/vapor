@@ -1,11 +1,7 @@
 ---
 name: vapor-debug
-description: Debug Vapor app and vapord daemon by analyzing logs, crash reports, live CLI diagnostics, and durable state to diagnose errors and propose fixes
+description: Diagnoses Vapor app and vapord daemon failures by correlating live CLI diagnostics, daemon logs, macOS crash reports, and the durable state DB against the source, then proposes a fix plan and waits for approval before changing code. Use when the daemon crashed, will not start, or keeps restarting; when sync is stuck or not converging; when `vapor status` or `vapor doctor` reports an unexpected state, reason, or throttle; when a `./scripts/e2e.sh` run left a failed sandbox to investigate; or when daemon log output needs a systematic review. macOS only.
 license: MIT
-compatibility: opencode
-metadata:
-  audience: developers
-  platform: macos
 ---
 
 ## What I do

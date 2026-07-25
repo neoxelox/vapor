@@ -22,8 +22,8 @@ tempfile = { workspace = true }
 # one), so on Windows build SQLite from source via rusqlite's `bundled`
 # feature. With `resolver = "2"` this stays scoped to Windows targets, so the
 # macOS/Linux builds keep linking the native system library unchanged. This
-# keeps the Windows portability-guard CI leg green; Wave 12 revisits when the
-# Windows surface actually ships.
+# keeps the Windows portability-guard CI leg green; revisit when the Windows
+# surface actually ships.
 [target.'cfg(windows)'.dependencies]
 rusqlite = { workspace = true, features = ["bundled"] }
 

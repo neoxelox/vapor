@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(
             profiles[0].scope.sync_mode,
             SyncMode::TwoWay,
-            "a typo must never activate a destructive mode (C8-63)"
+            "a typo must never activate a destructive mode"
         );
     }
 

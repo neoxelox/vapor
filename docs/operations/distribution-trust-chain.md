@@ -22,6 +22,12 @@ concrete policy for each platform lives in the per-platform doc below.
   `release-linux` when those platforms ship). The `vapor` CLI has no
   environment of its own: its artifacts are signed and published by
   each platform's release job under that platform's environment.
+- Each of those environments is protected before its secrets are added:
+  deployments restricted to a `v*` tag rule with no branch rule, and a
+  required reviewer gating the signing job. A new environment starts
+  with no protection at all, so this is a per-platform setup step, not
+  something inherited from the macOS one. Rule: `AGENTS.md` §7.1;
+  procedure and current status: `docs/operations/release-process.md`.
 - Each platform's signing secrets and notarization/signing tools never
   cross-leak into another platform's release job.
 - Rollback artifacts are preserved per platform for every release.

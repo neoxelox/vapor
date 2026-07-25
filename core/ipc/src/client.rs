@@ -19,7 +19,7 @@ use crate::protocol::{
 use crate::transport::{StreamHandle, TransportError, connect_to_socket_with_timeout};
 
 /// Default per-call deadline applied by [`Client::connect`]. Bounds the
-/// CLI's "never hang" guarantee from `cli.md` L3-7: even when the
+/// CLI's "never hang" guarantee: even when the
 /// daemon's accept loop is wedged (e.g., a connection-handler thread
 /// died and the listener is no longer servicing) the client returns
 /// within this window with a `WouldBlock` framing error that the CLI
