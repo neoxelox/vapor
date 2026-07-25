@@ -292,6 +292,12 @@ macOS app + CLI-on-macOS) is blocked by this phase. See
 - [ ] C6-8 Windows distribution trust chain doc:
       `docs/operations/windows/distribution-trust-chain.md` + task-scheduler
       policy in `docs/operations/windows/scheduled-task-policy.md`.
+- [ ] C6-9 Create and protect the `release-windows` GitHub Environment
+      before any Windows signing secret is added to it: `v*` tag-only
+      deployment policy, required reviewer, `prevent_self_review: false`.
+      A new environment starts with zero protection and inherits nothing
+      from `release-macos`. Procedure: `docs/operations/release-process.md`
+      ("GitHub release environment setup"); rule: `AGENTS.md` §7.1.
 
 Exit gate:
 
@@ -332,6 +338,12 @@ macOS app + CLI-on-macOS) is blocked by this phase. See
 - [ ] C7-7 Linux distribution trust chain doc:
       `docs/operations/linux/distribution-trust-chain.md` + systemd unit
       policy in `docs/operations/linux/systemd-unit-policy.md`.
+- [ ] C7-8 Create and protect the `release-linux` GitHub Environment
+      before any Linux signing secret (GPG) is added to it: `v*` tag-only
+      deployment policy, required reviewer, `prevent_self_review: false`.
+      A new environment starts with zero protection and inherits nothing
+      from `release-macos`. Procedure: `docs/operations/release-process.md`
+      ("GitHub release environment setup"); rule: `AGENTS.md` §7.1.
 
 Exit gate:
 

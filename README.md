@@ -163,6 +163,10 @@ file.
 
 Feel free to contribute to this project : ) .
 
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the validation workflow, and what a good pull request looks like — then [AGENTS.md](AGENTS.md) for the full operating rules. Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+Found a security problem? Please report it privately — see [SECURITY.md](SECURITY.md).
+
 ## License
 
 This project is licensed under the [GPL-3.0 License](https://opensource.org/license/gpl-3-0). Read the [LICENSE](LICENSE) file for details.

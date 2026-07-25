@@ -45,7 +45,10 @@ Release invariants:
 - `Cargo.lock` refreshed after the version change so workspace package versions stay aligned.
 - Run release preparation from `main`.
 - Before invoking `./scripts/version.sh`, the worktree must be clean except for `CHANGELOG.md`.
-- GitHub Environment `release-macos` exists and is configured for release jobs.
+- The platform's GitHub Environment (`release-macos`; `release-windows` /
+  `release-linux` when those surfaces ship) exists, and its protections were
+  applied **before** its secrets were added — see "GitHub release environment
+  setup" below.
 - For stable releases:
   - `VAPOR_SIGN_IDENTITY` configured in the `release-macos` environment secrets.
   - `VAPOR_NOTARY_PROFILE` configured in the `release-macos` environment secrets.
@@ -60,13 +63,94 @@ Release invariants:
 
 ## GitHub release environment setup
 
-- Create a GitHub Actions environment named `release-macos` before the first tagged release.
-- Grant the environment required reviewers if you want a human approval gate before signing/notarization starts.
-- Move Apple signing and notarization secrets into that environment instead of leaving them as repository-wide secrets.
+Every shipping platform gets its own environment holding only its release
+secrets — `release-macos` today, `release-windows` and `release-linux` when
+those surfaces ship. The steps below apply to **each** of them. Rule:
+`AGENTS.md` §7.1.
+
+A newly created environment has **zero** protection rules and GitHub does
+not warn you about it, so protecting it is an explicit setup step. Do it
+**before** adding that platform's secrets, never after: there must be no
+window in which signing material sits in an unguarded environment. Nothing
+is inherited from an already-configured platform.
+
+- Move each platform's signing and notarization secrets into its own environment instead of leaving them as repository-wide secrets.
 - Keep workflow permissions least-privilege:
   - `contents: read` for preflight, lint, test, and perf
   - `contents: write` only for the release publish job
 - Release preflight relies on the default authenticated checkout credentials for `git fetch origin main`.
+
+### Required protections
+
+1. **Restrict which refs may deploy.** Use a custom deployment policy with a
+   single **tag** rule, `v*`, and **no branch rule** — so only a release tag
+   can reach the signing secrets, and no branch can.
+
+   This is enforced by repository settings on purpose. The workflow already
+   restricts itself (tag-only trigger, preflight asserting the tag matches
+   `VERSION` and descends from `origin/main`), but that YAML is part of the
+   ref being released and is editable by anyone with write access. The
+   environment policy is not.
+
+2. **Require a reviewer**, so producing a signed artifact is a deliberate
+   act rather than an automatic consequence of pushing a tag.
+
+3. **Leave `can_admins_bypass` at `true`** only while a single maintainer
+   holds admin — the gate is on the same person who would bypass it, and it
+   preserves an escape hatch during a release incident. Set it to `false`
+   as soon as a second admin exists.
+
+A wait timer is not used; a reviewer gate is strictly better.
+
+### Applying them
+
+Replace `release-macos` with the platform environment being set up, and
+`<reviewer-user-id>` with the numeric id from `gh api user -q .id`:
+
+```sh
+gh api -X PUT repos/neoxelox/vapor/environments/release-macos --input - <<'JSON'
+{
+  "wait_timer": 0,
+  "prevent_self_review": false,
+  "reviewers": [{"type": "User", "id": <reviewer-user-id>}],
+  "deployment_branch_policy": {
+    "protected_branches": false,
+    "custom_branch_policies": true
+  }
+}
+JSON
+
+gh api -X POST repos/neoxelox/vapor/environments/release-macos/deployment-branch-policies \
+  -f name='v*' -f type=tag
+```
+
+Keep `prevent_self_review` at `false` while one maintainer holds admin,
+otherwise no one can ever approve a release and the environment deadlocks.
+
+Verify with:
+
+```sh
+gh api repos/neoxelox/vapor/environments/release-macos
+gh api repos/neoxelox/vapor/environments/release-macos/deployment-branch-policies
+```
+
+### Current status
+
+- `release-macos` — tag policy `v*` applied; **required reviewer not yet
+  enabled.** GitHub offers environment required-reviewer and wait-timer
+  rules for free only on public repositories; on a private repository they
+  need a paid plan, and the API rejects them with
+  `422 … billing plan supports the required reviewers protection rule`.
+  Enable it once the repository is public, before the Apple secrets are
+  added.
+- `release-windows` / `release-linux` — not created yet. Apply the full set
+  above when the corresponding surface ships.
+
+Expect the release flow to change once a reviewer gate is active: pushing
+the tag runs preflight, lint, test, and perf, then **pauses** for approval
+in the Actions UI before the release job starts and signing material is
+imported. A release that looks stuck at that point is waiting on a human,
+not broken.
 
 ## Apple secret preparation
 
