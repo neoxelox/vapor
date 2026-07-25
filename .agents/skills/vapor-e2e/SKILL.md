@@ -1,10 +1,7 @@
 ---
 name: vapor-e2e
-description: Verify Vapor end to end by running the real vapor CLI and vapord daemon in a disposable repo-local sandbox — scripted regression scenarios plus a manual sandbox for exploratory feature testing and bug reproduction
+description: Runs Vapor's Tier E2E verification — the real `vapor` and `vapord` binaries, black-box through the CLI, inside a disposable sandbox under the repo-local `.vapor/e2e/` — as either the scripted regression suite or a manual sandbox with a live daemon. Use after a feature or fix that changes daemon- or CLI-observable behaviour, once `./scripts/test.sh` passes and before committing; or to watch a new feature work, or reproduce a bug, in the real product. Not needed for doc-only, UI-only, or test-only changes. macOS only.
 license: MIT
-metadata:
-  audience: developers
-  platform: macos
 ---
 
 ## What I do

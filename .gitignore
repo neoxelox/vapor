@@ -59,8 +59,14 @@ apps/macos/Sources/VaporCore/Resources/locales/*.json
 *.sqlite-shm
 
 # AI tooling
-.claude
+# .claude holds machine-local agent state, but .claude/skills is the
+# committed Claude Code mirror of .agents/skills (symlinks per skill).
+.claude/*
+!.claude/skills
 .codex
 .opencode
 .cursor
 !.cursor/environment.json
+
+# Agent workspace scratch space (notes handed between agents, never shipped)
+.context/
