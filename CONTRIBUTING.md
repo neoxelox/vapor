@@ -135,6 +135,15 @@ release-note grouping stays accurate, and label the PR to match.
 **Before committing anything non-trivial**, add release-note lines to
 the `Unreleased` section of [`CHANGELOG.md`](CHANGELOG.md).
 
+**Push protection is on.** GitHub rejects a push whose commits contain
+anything shaped like a known credential (API keys, OAuth tokens, private
+keys). If the match is real, do not bypass: rotate the credential first,
+then remove it from history before pushing again. If it is a test
+fixture, bypass with *used in tests* and keep the fixture obviously fake
+(`ya29.test`, not a realistic-looking token). Secrets belong in the
+platform `SecretStore`, never in the tree — see
+[`SECURITY.md`](SECURITY.md).
+
 Update docs in the *same* change set: the relevant `docs/` group (plus
 its group `README.md` if you add, rename, or remove a file), the
 per-surface plan and task list you touched, and the root `README.md`
