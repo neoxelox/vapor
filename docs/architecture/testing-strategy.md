@@ -64,6 +64,9 @@ In `core/shared`:
 
 - `runtime_paths.rs` — `VAPOR_DIR` resolution order; permission
   application on Unix; Windows fallback once C1-1/C1-2 land.
+- `paths.rs` — the shared `canonicalize` never returns a Windows verbatim
+  (`\\?\`) path; verbatim disk / UNC prefix simplification. Windows leg
+  only, since no other OS produces such paths.
 - `logging.rs` — log level parsing; sensitive-key redaction; inline-
   secret redaction; graceful fallback on log-file failure.
 

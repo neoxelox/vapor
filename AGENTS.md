@@ -167,6 +167,20 @@ must never violate.
   released and is editable by anyone with write access, whereas the
   environment policy is not. Current configuration and status:
   `docs/operations/release-process.md`.
+- GitHub Actions are allowlisted in repository settings
+  (`allowed_actions: selected`): GitHub-owned actions plus one explicit
+  pattern per third-party action. **Before a workflow references a new
+  third-party action, add it to the allowlist first**, then SHA-pin it
+  in the workflow. An action that is not on the list does not run at
+  all — the job fails at *Set up job* with a policy error — so a
+  workflow change that introduces one cannot be tested until the
+  setting has changed. The policy also covers actions nested inside a
+  composite action, whether or not the nested step is reachable, so
+  read a new action's `action.yml` for its own `uses:` lines and allow
+  those too. The allowlist is a settings-level control for the same
+  reason as the environment rules above: it is not part of the ref
+  being run. Current list and the commands to change it:
+  `docs/ci/overview.md`.
 - App/daemon version compatibility rules must be maintained and tested
   per OS.
 - Product release version source-of-truth is the repository root `VERSION`
@@ -244,6 +258,11 @@ the CLI has no secrets or trust chain of its own.
     shared across surfaces.
 - Rust (runtime + CLI + platform layer)
   - Use explicit error enums and classify transient vs permanent failures.
+  - Canonicalize paths only through `vapor_shared::paths::canonicalize`
+    (clippy's `disallowed-methods` enforces it, tests included). On
+    Windows `std::fs::canonicalize` returns verbatim `\\?\` spellings;
+    one helper keeps every component and every test on the same
+    spelling, so path comparisons never fail on prefix alone.
   - Keep async/task lifetimes bounded and cancellation-aware.
   - Platform-sensitive code lives under `core/platform/<trait>/<os>.rs`
     behind a trait the engine consumes. Do not sprinkle `#[cfg(target_os)]`
@@ -490,7 +509,8 @@ If a test's failure mode is "I typo'd a default value", skip it.
 - **Tier 1** — `./scripts/test.sh` via `lint.yml` / `test.yml` /
   `workflow_call`. Unit + integration + platform-trait contract +
   property + snapshot + guard-rail timing tests. Runs on every PR.
-  Required check on `main`. Budget: under 5 minutes per OS on CI.
+  Required check on `main`, enforced by the `main` ruleset
+  (`docs/ci/required-checks.md`). Budget: under 5 minutes per OS on CI.
 - **Tier 2** — `scripts/perf.sh` via `perf.yml`, which runs only as
   part of the release pipeline (no standalone or scheduled triggers).
   Performance SLO tests, long-running property cases (higher case

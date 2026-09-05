@@ -489,7 +489,8 @@ mod tests {
             let cloud_root = temp.path().join("cloud");
             std::fs::create_dir_all(&local_root).expect("local root");
             std::fs::create_dir_all(&cloud_root).expect("cloud root");
-            let local_root = local_root.canonicalize().expect("canonical local");
+            let local_root =
+                vapor_shared::paths::canonicalize(&local_root).expect("canonical local");
             let caps = Arc::new(InMemoryFilesystemCapabilities::new(
                 true,
                 CaseSensitivity::Sensitive,

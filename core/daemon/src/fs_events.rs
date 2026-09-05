@@ -351,7 +351,7 @@ pub(crate) fn normalize_watch_root(watch_root: PathBuf) -> Result<PathBuf, FsEve
         return Err(FsEventsWatcherError::WatchRootNotDirectory(watch_root));
     }
 
-    fs::canonicalize(&watch_root)
+    vapor_shared::paths::canonicalize(&watch_root)
         .map_err(|error| FsEventsWatcherError::WatchRootCanonicalizeFailed(watch_root, error))
 }
 
@@ -511,6 +511,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
+    use vapor_platform::fs_watch::native_watcher_available;
 
     #[cfg(windows)]
     #[test]
@@ -692,7 +693,7 @@ mod tests {
 
         assert_eq!(
             normalized,
-            fs::canonicalize(&real_root).expect("canonical real root")
+            vapor_shared::paths::canonicalize(&real_root).expect("canonical real root")
         );
     }
 
@@ -850,6 +851,24 @@ mod tests {
         let watch_root = temp_dir.path().join("watch");
         fs::create_dir_all(&watch_root).expect("create watch root");
         let (tx, rx) = std::sync::mpsc::channel();
+        if !native_watcher_available() {
+            // Stub hosts must refuse loudly rather than pretend to watch.
+            let error = FsEventsWatcher::start(
+                watch_root,
+                Arc::new(ChannelRecorder(tx)),
+                EventPathFilterOptions::default(),
+            )
+            .err()
+            .expect("stub native watcher must refuse to start");
+            assert!(
+                matches!(
+                    error,
+                    FsEventsWatcherError::Platform(FsWatcherError::Backend(_))
+                ),
+                "{error:?}"
+            );
+            return;
+        }
         let watcher = FsEventsWatcher::start(
             watch_root,
             Arc::new(ChannelRecorder(tx)),

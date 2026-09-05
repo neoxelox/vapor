@@ -422,7 +422,8 @@ mod tests {
             // The provider canonicalizes its root; the manual feed must
             // emit paths under the same canonical prefix (macOS tempdirs
             // live behind the /var -> /private/var symlink).
-            let cloud_root = cloud_root.canonicalize().expect("canonical cloud root");
+            let cloud_root =
+                vapor_shared::paths::canonicalize(&cloud_root).expect("canonical cloud root");
             let clock = Arc::new(ManualClock::at_now());
             let caps = Arc::new(InMemoryFilesystemCapabilities::new(
                 true,

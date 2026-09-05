@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::constants;
+use crate::paths;
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -297,7 +298,7 @@ fn normalize_override_path(path: PathBuf) -> Option<PathBuf> {
     // launched with one spelling (say, a launchd plist) and a CLI with
     // another would compute different socket paths and never find each
     // other.
-    if let Ok(canonical) = fs::canonicalize(&candidate) {
+    if let Ok(canonical) = paths::canonicalize(&candidate) {
         return Some(canonical);
     }
 
@@ -319,7 +320,7 @@ fn canonicalize_deepest_existing_ancestor(path: PathBuf) -> PathBuf {
     let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
     let mut ancestor = path.as_path();
     loop {
-        if let Ok(canonical) = fs::canonicalize(ancestor) {
+        if let Ok(canonical) = paths::canonicalize(ancestor) {
             let mut resolved = canonical;
             for name in missing_tail.iter().rev() {
                 resolved.push(name);
@@ -500,7 +501,7 @@ mod tests {
     fn symlinked_and_real_spellings_of_the_vapor_dir_converge() {
         use std::os::unix::fs::symlink;
         let temp = TempDir::new().expect("tempdir");
-        let base = temp.path().canonicalize().expect("canonical temp");
+        let base = paths::canonicalize(temp.path()).expect("canonical temp");
         let real = base.join("real-vapor-dir");
         fs::create_dir_all(&real).expect("real dir");
         symlink(&real, base.join("vapor-link")).expect("symlink");

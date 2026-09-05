@@ -6,6 +6,7 @@ pub mod config;
 pub mod constants;
 pub mod device_id;
 pub mod logging;
+pub mod paths;
 pub mod runtime_paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

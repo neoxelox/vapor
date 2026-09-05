@@ -136,21 +136,27 @@ gh api repos/neoxelox/vapor/environments/release-macos/deployment-branch-policie
 
 ### Current status
 
-- `release-macos` — tag policy `v*` applied; **required reviewer not yet
-  enabled.** GitHub offers environment required-reviewer and wait-timer
-  rules for free only on public repositories; on a private repository they
-  need a paid plan, and the API rejects them with
-  `422 … billing plan supports the required reviewers protection rule`.
-  Enable it once the repository is public, before the Apple secrets are
-  added.
+- `release-macos` — fully protected: `v*` tag-only deployment policy,
+  `neoxelox` as required reviewer, `prevent_self_review: false`, no wait
+  timer, `can_admins_bypass: true`. Configured before any Apple secret was
+  added; none is configured yet.
 - `release-windows` / `release-linux` — not created yet. Apply the full set
   above when the corresponding surface ships.
 
-Expect the release flow to change once a reviewer gate is active: pushing
-the tag runs preflight, lint, test, and perf, then **pauses** for approval
-in the Actions UI before the release job starts and signing material is
-imported. A release that looks stuck at that point is waiting on a human,
-not broken.
+Note for whoever sets up the next platform environment: the required-reviewer
+and wait-timer rules are free only on public repositories. On a private
+repository they need a paid plan and the API rejects them with
+`422 … billing plan supports the required reviewers protection rule`. The tag
+policy has no such restriction, so on a private repository apply the tag rule
+immediately and treat the reviewer gate as blocked rather than optional.
+
+With the reviewer gate active, a release no longer runs straight through:
+pushing the tag runs preflight, lint, test, and perf, then **pauses** for
+approval in the Actions UI before the release job starts and signing
+material is imported. A release that looks stuck at that point is waiting on
+a human, not broken. This has not been exercised yet — the environment was
+created after the last release ran, so the next tagged release is the first
+one it gates.
 
 ## Apple secret preparation
 
@@ -251,6 +257,8 @@ not broken.
 - [ ] `./scripts/version.sh ...` created commit `release: v$(cat VERSION)` and tag `v$(cat VERSION)`.
 - [ ] Release push command used: `git push origin "$(git branch --show-current)" --follow-tags`.
 - [ ] Release gates passed (`lint`, `test`, `perf` reusable workflows / local script equivalents).
+- [ ] Deployment to the platform release environment approved in the Actions
+      UI (the run pauses there after the gates pass, before signing).
 - [ ] Release workflow succeeded.
 - [ ] Stable release zip was built from the signed, stapled app bundle.
 - [ ] Checksums present and verified.

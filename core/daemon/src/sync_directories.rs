@@ -268,7 +268,7 @@ fn canonicalize_for_overlap(path: &Path) -> PathBuf {
     let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
     let mut ancestor = path;
     loop {
-        if let Ok(canonical) = fs::canonicalize(ancestor) {
+        if let Ok(canonical) = vapor_shared::paths::canonicalize(ancestor) {
             let mut resolved = canonical;
             for name in missing_tail.iter().rev() {
                 resolved.push(name);
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn overlapping_filesystem_roots_are_detected_in_both_nesting_directions() {
         let temp = TempDir::new().expect("temp dir");
-        let base = temp.path().canonicalize().expect("canonical base");
+        let base = vapor_shared::paths::canonicalize(temp.path()).expect("canonical base");
         let local = base.join("local");
         std::fs::create_dir_all(&local).expect("local");
 
@@ -406,7 +406,7 @@ mod tests {
     fn overlap_detection_sees_through_symlinked_spellings() {
         use std::os::unix::fs::symlink;
         let temp = TempDir::new().expect("temp dir");
-        let base = temp.path().canonicalize().expect("canonical base");
+        let base = vapor_shared::paths::canonicalize(temp.path()).expect("canonical base");
         let local = base.join("local");
         std::fs::create_dir_all(&local).expect("local");
         symlink(&local, base.join("local-alias")).expect("symlink");

@@ -84,9 +84,11 @@ fn canonical_watch_root(watch_root: PathBuf) -> Result<PathBuf, FsWatcherError> 
         });
     }
 
-    std::fs::canonicalize(&watch_root).map_err(|error| FsWatcherError::InvalidWatchRoot {
-        path: watch_root,
-        reason: format!("canonicalize failed: {error}"),
+    vapor_shared::paths::canonicalize(&watch_root).map_err(|error| {
+        FsWatcherError::InvalidWatchRoot {
+            path: watch_root,
+            reason: format!("canonicalize failed: {error}"),
+        }
     })
 }
 
@@ -168,7 +170,7 @@ mod tests {
         let watcher = NativeFsWatcher::start(watch_root.clone(), tx).expect("start watcher");
         assert_eq!(
             watcher.watch_root(),
-            std::fs::canonicalize(&watch_root)
+            vapor_shared::paths::canonicalize(&watch_root)
                 .expect("canonical")
                 .as_path()
         );

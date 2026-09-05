@@ -2291,10 +2291,11 @@ fn verify_within_local_root(local_root: &Path, target: &Path) -> Result<(), Stri
     // Canonicalize the root itself so the containment comparison holds even
     // when the caller passed a not-yet-canonical root (tests, or a root
     // reached through a symlinked parent of its own).
-    let root = fs::canonicalize(local_root).unwrap_or_else(|_| local_root.to_path_buf());
+    let root =
+        vapor_shared::paths::canonicalize(local_root).unwrap_or_else(|_| local_root.to_path_buf());
     let mut ancestor = target.parent().unwrap_or(local_root).to_path_buf();
     loop {
-        match fs::canonicalize(&ancestor) {
+        match vapor_shared::paths::canonicalize(&ancestor) {
             Ok(real) => {
                 if real == root || real.starts_with(&root) {
                     return Ok(());
