@@ -77,6 +77,9 @@ fn emit_git_rerun_markers(root_dir: &Path) {
 /// gitdir contains a `commondir` file pointing (usually relatively) at the
 /// main `.git`; a normal checkout has no such file and is its own common
 /// dir.
+// Build-time git metadata path, never shown to users; build scripts cannot
+// use the workspace's shared canonicalize helper.
+#[allow(clippy::disallowed_methods)]
 fn resolve_common_dir(git_dir: &Path) -> PathBuf {
     let Ok(contents) = fs::read_to_string(git_dir.join("commondir")) else {
         return git_dir.to_path_buf();

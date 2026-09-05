@@ -501,7 +501,7 @@ mod tests {
     fn symlinked_and_real_spellings_of_the_vapor_dir_converge() {
         use std::os::unix::fs::symlink;
         let temp = TempDir::new().expect("tempdir");
-        let base = temp.path().canonicalize().expect("canonical temp");
+        let base = paths::canonicalize(temp.path()).expect("canonical temp");
         let real = base.join("real-vapor-dir");
         fs::create_dir_all(&real).expect("real dir");
         symlink(&real, base.join("vapor-link")).expect("symlink");

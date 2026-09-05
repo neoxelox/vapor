@@ -693,7 +693,7 @@ mod tests {
 
         assert_eq!(
             normalized,
-            fs::canonicalize(&real_root).expect("canonical real root")
+            vapor_shared::paths::canonicalize(&real_root).expect("canonical real root")
         );
     }
 

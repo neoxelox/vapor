@@ -258,6 +258,11 @@ the CLI has no secrets or trust chain of its own.
     shared across surfaces.
 - Rust (runtime + CLI + platform layer)
   - Use explicit error enums and classify transient vs permanent failures.
+  - Canonicalize paths only through `vapor_shared::paths::canonicalize`
+    (clippy's `disallowed-methods` enforces it, tests included). On
+    Windows `std::fs::canonicalize` returns verbatim `\\?\` spellings;
+    one helper keeps every component and every test on the same
+    spelling, so path comparisons never fail on prefix alone.
   - Keep async/task lifetimes bounded and cancellation-aware.
   - Platform-sensitive code lives under `core/platform/<trait>/<os>.rs`
     behind a trait the engine consumes. Do not sprinkle `#[cfg(target_os)]`

@@ -930,11 +930,12 @@ mod tests {
                 };
                 let cloud_root = temp.path().join(format!("cloud-{id}"));
                 std::fs::create_dir_all(&cloud_root).expect("cloud root");
-                let cloud_root = cloud_root.canonicalize().expect("canonical cloud");
+                let cloud_root =
+                    vapor_shared::paths::canonicalize(&cloud_root).expect("canonical cloud");
                 cloud_roots.insert(id.to_string(), cloud_root.clone());
                 local_roots.insert(
                     id.to_string(),
-                    local_root.canonicalize().expect("canonical local"),
+                    vapor_shared::paths::canonicalize(&local_root).expect("canonical local"),
                 );
                 profiles.push(ResolvedProfile {
                     id: id.to_string(),

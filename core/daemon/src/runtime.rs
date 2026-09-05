@@ -2243,7 +2243,9 @@ mod tests {
 
         assert_eq!(
             runtime.sync_scope().local_sync_directory,
-            Some(std::fs::canonicalize(&real_watch_root).expect("canonical watch root"),)
+            Some(
+                vapor_shared::paths::canonicalize(&real_watch_root).expect("canonical watch root"),
+            )
         );
         let leased = runtime
             .state_db()
@@ -2412,7 +2414,8 @@ mod tests {
         std::fs::create_dir_all(&watch_root).expect("create watch root");
         // Durable intent paths must live under the runtime's *canonical*
         // watch root, exactly like real watcher events do.
-        let watch_root = watch_root.canonicalize().expect("canonical watch root");
+        let watch_root =
+            vapor_shared::paths::canonicalize(&watch_root).expect("canonical watch root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let planner_cap = crate::throttle::idle_drain_concurrency();
@@ -2616,7 +2619,8 @@ mod tests {
             let cloud_root = temp.path().join("cloud");
             std::fs::create_dir_all(&watch_root).expect("watch root");
             std::fs::create_dir_all(&cloud_root).expect("cloud root");
-            let cloud_root = cloud_root.canonicalize().expect("canonical cloud root");
+            let cloud_root =
+                vapor_shared::paths::canonicalize(&cloud_root).expect("canonical cloud root");
             let database_path = temp.path().join("state/vapor.sqlite");
             let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
             let clock = Arc::new(crate::clock::ManualClock::at_now());
@@ -3135,7 +3139,8 @@ mod tests {
         let cloud_root = temp.path().join("cloud");
         std::fs::create_dir_all(&watch_root).expect("watch root");
         std::fs::create_dir_all(&cloud_root).expect("cloud root");
-        let watch_root = watch_root.canonicalize().expect("canonical watch root");
+        let watch_root =
+            vapor_shared::paths::canonicalize(&watch_root).expect("canonical watch root");
         let database_path = temp.path().join("state/vapor.sqlite");
         let local_file = watch_root.join("pending-upload.txt");
         std::fs::write(&local_file, b"was queued in two-way").expect("seed local");
@@ -3381,7 +3386,7 @@ mod tests {
         let cloud_root = temp.path().join("cloud");
         std::fs::create_dir_all(&watch_root).expect("watch root");
         std::fs::create_dir_all(&cloud_root).expect("cloud root");
-        let cloud_root = cloud_root.canonicalize().expect("canonical cloud");
+        let cloud_root = vapor_shared::paths::canonicalize(&cloud_root).expect("canonical cloud");
         let state_db = DurableStateDb::open(temp.path().join("state/vapor.sqlite"))
             .expect("open durable state db");
         let clock = Arc::new(crate::clock::ManualClock::at_now());
@@ -3638,7 +3643,8 @@ mod tests {
         std::fs::create_dir_all(&cloud_root).expect("cloud root");
         // Durable intent paths must live under the runtime's *canonical*
         // watch root, exactly like real watcher events do.
-        let watch_root = watch_root.canonicalize().expect("canonical watch root");
+        let watch_root =
+            vapor_shared::paths::canonicalize(&watch_root).expect("canonical watch root");
         let database_path = temp.path().join("state/vapor.sqlite");
         let local_file = watch_root.join("durable.txt");
         std::fs::write(&local_file, b"survives restarts").expect("seed local");
@@ -3801,10 +3807,12 @@ mod tests {
         // Canonical paths throughout: the walker maps local paths under
         // the runtime's canonicalized scope root, so the enqueued
         // subtree intent must live under the same canonical form.
-        let watch_root = watch_root.canonicalize().expect("canonical watch root");
+        let watch_root =
+            vapor_shared::paths::canonicalize(&watch_root).expect("canonical watch root");
         let cloud_root = temp_dir.path().join("cloud");
         std::fs::create_dir_all(&cloud_root).expect("create cloud root");
-        let cloud_root = cloud_root.canonicalize().expect("canonical cloud root");
+        let cloud_root =
+            vapor_shared::paths::canonicalize(&cloud_root).expect("canonical cloud root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let subtree_root = watch_root.join("project");

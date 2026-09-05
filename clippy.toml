@@ -1,0 +1,7 @@
+# Path canonicalization goes through one helper so Windows never yields a
+# verbatim `\\?\` spelling on one side of a comparison and a plain one on
+# the other (see `core/shared/src/paths.rs`).
+disallowed-methods = [
+  { path = "std::fs::canonicalize", reason = "use vapor_shared::paths::canonicalize" },
+  { path = "std::path::Path::canonicalize", reason = "use vapor_shared::paths::canonicalize" },
+]

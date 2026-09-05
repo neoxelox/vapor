@@ -14,7 +14,8 @@ use std::path::{Component, Path, PathBuf, Prefix};
 /// and several Win32 consumers reject them. Every canonicalization of a
 /// visible path goes through here so the whole runtime agrees on one
 /// spelling. Identical to `fs::canonicalize` on every other OS.
-pub fn canonicalize(path: impl AsRef<Path>) -> io::Result<PathBuf> {
+#[allow(clippy::disallowed_methods)] // the one sanctioned call site
+pub fn canonicalize(path: &Path) -> io::Result<PathBuf> {
     fs::canonicalize(path).map(strip_verbatim_prefix)
 }
 
