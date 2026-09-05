@@ -37,6 +37,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Fixed a Windows-only failure in the keep-both download test (full-repo review): on a filesystem without xattr support the applied payload's op-id tag lands as a `doc.txt.vapor-meta.json` side-file, so the test's conflict-copy search must exclude internal side-files (order-independently) rather than reading the side-file's JSON. Added an order-independent regression guard.
 
+### Fixed (portability)
+
+- The Rust workspace compiles again on Linux and Windows. `start_native_watcher_with_error_handler` in `core/platform` called `NativeFsWatcher::start_with_error_handler`, which only the macOS FSEvents watcher defined; the Linux and Windows stubs now expose the same constructor (still returning the explicit not-implemented error), so the `ubuntu-latest` / `windows-latest` CI legs build, lint, and test instead of failing at compile time. This was the first regression the public CI caught: it landed while GitHub Actions was unavailable on the private repository, so no cross-OS job ever ran against it.
+
 ### Fixed (providers & auth)
 
 - Provider & OAuth fixes (full-repo review):
