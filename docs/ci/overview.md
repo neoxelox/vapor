@@ -35,6 +35,8 @@ and the repository enforces `sha_pinning_required`:
 
 `lint.yml`, `test.yml`, and `build.yml` run on pull requests and pushes to `main`, and also expose `workflow_call` so release automation can reuse the same gates. All three workflows fan out via a `strategy.matrix` over `macos-latest`, `ubuntu-latest`, and `windows-latest`; `fail-fast` is disabled so a Linux-only or Windows-only regression is visible even when macOS stays green. The macOS job runs both Rust and Swift; the Linux / Windows jobs run only the Rust workspace (the Swift wrappers detect a non-Darwin `uname -s` and exit cleanly).
 
+Pull requests from forks do not start these workflows until a maintainer approves the run (repository setting *Approval for running fork pull request workflows from contributors* = **all external contributors**). Fork runs already get a read-only token and no secrets, but they still execute the PR's code on the runner, including `./scripts/e2e.sh --full`, which installs a real LaunchAgent; the approval step keeps that a deliberate act. Inspect or change it with `gh api repos/neoxelox/vapor/actions/permissions/fork-pr-contributor-approval`.
+
 `perf.yml` has no standalone triggers; `release.yml` calls it for versioned release runs.
 
 `release.yml` runs on pushed tags matching `v*`, validates that the tag exactly matches `VERSION` and that the tagged commit is on `main`, invokes `lint.yml`, `test.yml`, and `perf.yml` in parallel, and then runs the `release` job only after all three succeed. The publish job targets the GitHub `release-macos` environment, and packaging still uses `./scripts/build.sh package` as the source of truth.
