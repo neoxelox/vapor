@@ -36,6 +36,11 @@ reusable workflows, and these explicit third-party patterns:
 
 - `maxim-lobanov/setup-xcode@*`
 - `actions-rust-lang/setup-rust-toolchain@*`
+- `Swatinem/rust-cache@*` — not referenced by any workflow directly;
+  `setup-rust-toolchain` is a composite action whose `action.yml` uses
+  it, and the policy is evaluated for every nested reference at
+  *Set up job*, even though our call sites pass `cache: false` and the
+  nested step never runs.
 
 Marketplace "verified creators" are **not** allowed as a class; every
 third-party action is listed by name.
@@ -45,9 +50,12 @@ action that is not on the list is refused by GitHub before the step
 starts, with an error like *`owner/repo@sha` is not allowed because all
 actions must be from a repository owned by neoxelox, a GitHub-owned
 action, or match a pattern*. The workflow change cannot go green until
-the setting has changed, so the order is: allow the pattern, SHA-pin
-the `uses:` line, update the list above, then push. Removing an action
-from the workflows should remove its pattern too.
+the setting has changed, so the order is: read the action's
+`action.yml` for nested `uses:` lines, allow every pattern, SHA-pin the
+`uses:` line, update the list above, then push. Removing an action
+from the workflows should remove its pattern (and its nested ones)
+too. Upgrading an action can change its nested references, so check
+the diff of its `action.yml` on every bump.
 
 Inspect and change the list:
 
@@ -57,7 +65,8 @@ gh api -X PUT repos/neoxelox/vapor/actions/permissions/selected-actions --input 
 {"github_owned_allowed": true,
  "verified_allowed": false,
  "patterns_allowed": ["maxim-lobanov/setup-xcode@*",
-                      "actions-rust-lang/setup-rust-toolchain@*"]}
+                      "actions-rust-lang/setup-rust-toolchain@*",
+                      "Swatinem/rust-cache@*"]}
 EOF
 ```
 

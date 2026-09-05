@@ -172,9 +172,12 @@ must never violate.
   pattern per third-party action. **Before a workflow references a new
   third-party action, add it to the allowlist first**, then SHA-pin it
   in the workflow. An action that is not on the list does not run at
-  all — the job fails at that step with a policy error — so a workflow
-  change that introduces one cannot be tested until the setting has
-  changed. The allowlist is a settings-level control for the same
+  all — the job fails at *Set up job* with a policy error — so a
+  workflow change that introduces one cannot be tested until the
+  setting has changed. The policy also covers actions nested inside a
+  composite action, whether or not the nested step is reachable, so
+  read a new action's `action.yml` for its own `uses:` lines and allow
+  those too. The allowlist is a settings-level control for the same
   reason as the environment rules above: it is not part of the ref
   being run. Current list and the commands to change it:
   `docs/ci/overview.md`.
