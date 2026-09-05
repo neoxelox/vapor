@@ -351,7 +351,7 @@ pub(crate) fn normalize_watch_root(watch_root: PathBuf) -> Result<PathBuf, FsEve
         return Err(FsEventsWatcherError::WatchRootNotDirectory(watch_root));
     }
 
-    fs::canonicalize(&watch_root)
+    vapor_shared::paths::canonicalize(&watch_root)
         .map_err(|error| FsEventsWatcherError::WatchRootCanonicalizeFailed(watch_root, error))
 }
 

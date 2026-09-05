@@ -77,7 +77,7 @@ pub fn list_conflicts(config: &VaporConfig) -> ConflictListReport {
         let Some(root) = profile.scope.local_sync_directory else {
             continue;
         };
-        let Ok(root) = root.canonicalize() else {
+        let Ok(root) = vapor_shared::paths::canonicalize(&root) else {
             skipped_roots.push(root);
             continue;
         };

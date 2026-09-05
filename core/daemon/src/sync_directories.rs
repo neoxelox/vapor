@@ -268,7 +268,7 @@ fn canonicalize_for_overlap(path: &Path) -> PathBuf {
     let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
     let mut ancestor = path;
     loop {
-        if let Ok(canonical) = fs::canonicalize(ancestor) {
+        if let Ok(canonical) = vapor_shared::paths::canonicalize(ancestor) {
             let mut resolved = canonical;
             for name in missing_tail.iter().rev() {
                 resolved.push(name);

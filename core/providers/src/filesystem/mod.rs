@@ -204,7 +204,7 @@ impl FilesystemProvider {
         let resolved = remote.resolve_under(&root);
 
         let anchor = deepest_existing_ancestor(&resolved);
-        let canonical_anchor = anchor.canonicalize().map_err(|error| {
+        let canonical_anchor = vapor_shared::paths::canonicalize(&anchor).map_err(|error| {
             classify_scope_failure(
                 &root,
                 format!(
@@ -323,7 +323,7 @@ impl Provider for FilesystemProvider {
                 expanded.display()
             )));
         }
-        let canonical = expanded.canonicalize().map_err(|error| {
+        let canonical = vapor_shared::paths::canonicalize(&expanded).map_err(|error| {
             ProviderError::permanent(format!(
                 "cannot canonicalize filesystem cloud sync directory {}: {error}",
                 expanded.display()

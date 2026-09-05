@@ -43,5 +43,7 @@ fi
 while IFS= read -r manifest; do
   [[ -z "$manifest" ]] && continue
   echo "[rust-test] cargo test for ${manifest}"
-  cargo test --manifest-path "$manifest" --all-targets --all-features
+  # --no-fail-fast: keep running the remaining crates after one fails, so a
+  # single red crate cannot hide failures in the crates tested after it.
+  cargo test --manifest-path "$manifest" --all-targets --all-features --no-fail-fast
 done <<< "$MANIFESTS"

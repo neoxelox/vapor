@@ -1,9 +1,9 @@
 use std::env;
-use std::ffi::OsString;
 use std::fs;
-use std::path::{Component, PathBuf, Prefix};
+use std::path::PathBuf;
 
 use crate::constants;
+use crate::paths;
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -298,8 +298,8 @@ fn normalize_override_path(path: PathBuf) -> Option<PathBuf> {
     // launched with one spelling (say, a launchd plist) and a CLI with
     // another would compute different socket paths and never find each
     // other.
-    if let Ok(canonical) = fs::canonicalize(&candidate) {
-        return Some(strip_verbatim_prefix(canonical));
+    if let Ok(canonical) = paths::canonicalize(&candidate) {
+        return Some(canonical);
     }
 
     // The directory does not (fully) exist yet: normalize lexically,
@@ -312,39 +312,6 @@ fn normalize_override_path(path: PathBuf) -> Option<PathBuf> {
     Some(canonicalize_deepest_existing_ancestor(lexical))
 }
 
-/// Rewrites the verbatim spellings `fs::canonicalize` returns on Windows
-/// (`\\?\C:\…`, `\\?\UNC\server\share\…`) into the plain Win32 form.
-/// The runtime directory surfaces in logs and status output and is hashed
-/// into the IPC socket location, and several Win32 consumers reject
-/// verbatim paths. No-op for every other path and on every other OS.
-fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
-    let mut components = path.components();
-    let Some(Component::Prefix(prefix)) = components.next() else {
-        return path;
-    };
-    let mut simplified = match prefix.kind() {
-        Prefix::VerbatimDisk(letter) => {
-            let letter = letter as char;
-            PathBuf::from(format!("{letter}:\\"))
-        }
-        Prefix::VerbatimUNC(server, share) => {
-            let mut root = OsString::from(r"\\");
-            root.push(server);
-            root.push(r"\");
-            root.push(share);
-            root.push(r"\");
-            PathBuf::from(root)
-        }
-        _ => return path,
-    };
-    for component in components {
-        if !matches!(component, Component::RootDir) {
-            simplified.push(component.as_os_str());
-        }
-    }
-    simplified
-}
-
 /// Canonicalizes the deepest existing ancestor of `path` (which must
 /// already be lexically normalized — no `.` / `..` components) and
 /// re-appends the missing tail. Falls back to the input when nothing
@@ -353,8 +320,8 @@ fn canonicalize_deepest_existing_ancestor(path: PathBuf) -> PathBuf {
     let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
     let mut ancestor = path.as_path();
     loop {
-        if let Ok(canonical) = fs::canonicalize(ancestor) {
-            let mut resolved = strip_verbatim_prefix(canonical);
+        if let Ok(canonical) = paths::canonicalize(ancestor) {
+            let mut resolved = canonical;
             for name in missing_tail.iter().rev() {
                 resolved.push(name);
             }
@@ -486,23 +453,6 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("vapor.json.vapor-tmp-"),
             "temp name was {temp:?}"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn verbatim_prefixes_are_simplified_to_plain_win32_paths() {
-        assert_eq!(
-            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\Users\vapor\.vapor")),
-            PathBuf::from(r"C:\Users\vapor\.vapor")
-        );
-        assert_eq!(
-            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\vapor")),
-            PathBuf::from(r"\\server\share\vapor")
-        );
-        assert_eq!(
-            strip_verbatim_prefix(PathBuf::from(r"C:\plain")),
-            PathBuf::from(r"C:\plain")
         );
     }
 
