@@ -106,9 +106,10 @@ pub trait FsWatcher: Send + 'static {
 /// instead of going through this constructor.
 /// Whether this host has a real native fs-watch implementation.
 /// Consumers that would otherwise advertise watch-backed capabilities
-/// (e.g. the filesystem provider's changes feed) must check this and
-/// degrade honestly on hosts whose native watcher is still a stub
-/// (currently Linux and Windows).
+/// (the filesystem provider's changes feed, the daemon runtime's local
+/// watch) must check this and degrade honestly on hosts whose native
+/// watcher is still a stub (currently Linux and Windows); the stub
+/// constructor itself fails with an `Unsupported` backend error.
 pub fn native_watcher_available() -> bool {
     cfg!(target_os = "macos")
 }

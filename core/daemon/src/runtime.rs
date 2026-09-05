@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use vapor_platform::fs_caps::NativeFilesystemCapabilities;
+use vapor_platform::fs_watch::native_watcher_available;
 use vapor_providers::Provider;
 use vapor_providers::filesystem::hash_hex_of_file_with;
 use vapor_providers::tags::OpIdTagStore;
@@ -867,14 +868,26 @@ impl DaemonRuntime {
         let watcher = if start_watcher {
             match (&sync_scope.local_sync_directory, &recorder, &path_filter) {
                 (Some(watch_root), Some(recorder), Some(path_filter)) => {
-                    Some(FsEventsWatcher::start_with_shared_filter(
-                        watch_root.clone(),
-                        Arc::new(NotifyingRecorder {
-                            inner: recorder.clone(),
-                            waker: tick_waker.clone(),
-                        }),
-                        path_filter.clone(),
-                    )?)
+                    if native_watcher_available() {
+                        Some(FsEventsWatcher::start_with_shared_filter(
+                            watch_root.clone(),
+                            Arc::new(NotifyingRecorder {
+                                inner: recorder.clone(),
+                                waker: tick_waker.clone(),
+                            }),
+                            path_filter.clone(),
+                        )?)
+                    } else {
+                        // A missing capability is not a startup failure: the
+                        // runtime comes up without a watcher and the run
+                        // state below says so. A native watcher that exists
+                        // but fails to start still aborts startup.
+                        logging::warning(
+                            "No native filesystem watcher on this host; local changes are not detected until one ships",
+                            &[("watch_root", watch_root.display().to_string())],
+                        );
+                        None
+                    }
                 }
                 _ => None,
             }
@@ -891,10 +904,20 @@ impl DaemonRuntime {
                 ),
             );
         } else if let Some(local_sync_directory) = &sync_scope.local_sync_directory {
-            app.set_run_state(
-                RunState::Running,
-                format!("watching {}", local_sync_directory.display()),
-            );
+            if start_watcher && watcher.is_none() {
+                app.set_run_state(
+                    RunState::Error,
+                    format!(
+                        "no native filesystem watcher on this host yet; local changes under {} are not detected",
+                        local_sync_directory.display()
+                    ),
+                );
+            } else {
+                app.set_run_state(
+                    RunState::Running,
+                    format!("watching {}", local_sync_directory.display()),
+                );
+            }
         } else {
             app.set_run_state(RunState::Paused, "no local sync directory configured");
         }
@@ -2140,12 +2163,43 @@ mod tests {
             DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
                 .expect("runtime");
 
-        assert!(runtime.has_live_watcher());
+        assert_eq!(
+            runtime.has_live_watcher(),
+            native_watcher_available(),
+            "a live watcher exists exactly where the host has a native one"
+        );
         assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 1);
         assert_eq!(
             runtime.state_db().pending_depth().expect("pending depth"),
             1
         );
+    }
+
+    #[test]
+    fn start_surfaces_missing_native_watcher_instead_of_failing() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        std::fs::create_dir_all(&watch_root).expect("create watch root");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
+
+        let runtime =
+            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
+                .expect("runtime starts on every host");
+
+        let snapshot = runtime.app().snapshot();
+        if native_watcher_available() {
+            assert!(runtime.has_live_watcher());
+            assert_eq!(snapshot.run_state, RunState::Running);
+        } else {
+            assert!(!runtime.has_live_watcher());
+            assert_eq!(snapshot.run_state, RunState::Error);
+            assert!(
+                snapshot.reason.contains("no native filesystem watcher"),
+                "reason must name the missing capability: {}",
+                snapshot.reason
+            );
+        }
     }
 
     #[test]

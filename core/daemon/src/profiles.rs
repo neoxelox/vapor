@@ -260,9 +260,13 @@ mod tests {
             mirror_local.ends_with("tmp/vapor-mirror"),
             "override wins: {mirror_local:?}"
         );
-        assert_eq!(
-            mirror.scope.cloud_sync_directory, "/tmp/vapor-top-cloud",
-            "unset fields inherit the top level"
+        // Same drive-letter caveat for the filesystem provider's cloud root,
+        // which resolves like a local path.
+        let mirror_cloud = std::path::Path::new(mirror.scope.cloud_sync_directory.as_str());
+        assert!(mirror_cloud.is_absolute());
+        assert!(
+            mirror_cloud.ends_with("tmp/vapor-top-cloud"),
+            "unset fields inherit the top level: {mirror_cloud:?}"
         );
         let docs = &profiles[1];
         assert_eq!(docs.scope.sync_mode, SyncMode::TwoWay, "inherits default");

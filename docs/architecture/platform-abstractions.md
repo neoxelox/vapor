@@ -52,6 +52,16 @@ normalization, ignore filtering, and the recorder on a dedicated
 thread) and the filesystem provider's changes feed — so there is exactly
 one OS-event→kind mapping to test and fix per OS.
 
+Hosts whose native watcher is still a stub (Linux and Windows today)
+report `native_watcher_available() == false`, and the stub constructor
+fails with an `Unsupported` backend error. Consumers degrade rather than
+fail: the filesystem provider stops advertising its changes feed, and the
+daemon runtime starts without a live watcher and surfaces an `Error` run
+state whose reason says local changes are not detected (the multi-profile
+runtime suspends the affected profile the same way). Reconcile is the
+only source of local changes on those hosts until the native watcher
+ships.
+
 Callback discipline: the OS callback only normalizes the kind and pushes
 onto the channel. No DB / hash / network work in the callback path.
 Per-component symlink resolution runs on the runtime thread, not in the
