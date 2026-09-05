@@ -28,6 +28,41 @@ and the repository enforces `sha_pinning_required`:
 - `actions-rust-lang/setup-rust-toolchain` v1.17.0
 - `actions/cache` v5.1.0 for Rust (`cargo`) and SwiftPM caches
 
+## Action allowlist
+
+The repository only runs allowlisted actions (`allowed_actions: selected`):
+GitHub-owned actions (`actions/*`, `github/*`), the repository's own
+reusable workflows, and these explicit third-party patterns:
+
+- `maxim-lobanov/setup-xcode@*`
+- `actions-rust-lang/setup-rust-toolchain@*`
+
+Marketplace "verified creators" are **not** allowed as a class; every
+third-party action is listed by name.
+
+**Add the allow rule before the workflow references the action.** An
+action that is not on the list is refused by GitHub before the step
+starts, with an error like *`owner/repo@sha` is not allowed because all
+actions must be from a repository owned by neoxelox, a GitHub-owned
+action, or match a pattern*. The workflow change cannot go green until
+the setting has changed, so the order is: allow the pattern, SHA-pin
+the `uses:` line, update the list above, then push. Removing an action
+from the workflows should remove its pattern too.
+
+Inspect and change the list:
+
+```bash
+gh api repos/neoxelox/vapor/actions/permissions/selected-actions
+gh api -X PUT repos/neoxelox/vapor/actions/permissions/selected-actions --input - <<'EOF'
+{"github_owned_allowed": true,
+ "verified_allowed": false,
+ "patterns_allowed": ["maxim-lobanov/setup-xcode@*",
+                      "actions-rust-lang/setup-rust-toolchain@*"]}
+EOF
+```
+
+The `PUT` replaces the whole list, so send every pattern each time.
+
 ## Dependency source defaults
 
 - Rust crates: `crates.io` via Cargo
