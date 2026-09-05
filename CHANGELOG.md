@@ -41,6 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Fixed (portability)
 
 - The Rust workspace compiles and passes its Tier 1 suite again on Linux and Windows. `start_native_watcher_with_error_handler` in `core/platform` called `NativeFsWatcher::start_with_error_handler`, which only the macOS FSEvents watcher defined; the Linux and Windows stubs now expose the same constructor and fail with the `Unsupported` backend error `docs/architecture/platform-abstractions.md` always described (they previously reported a misleading `InvalidWatchRoot`). The single-profile `DaemonRuntime` no longer refuses to start on a host whose native watcher is a stub: it comes up without a live watcher and surfaces an `Error` run state whose reason says local changes are not detected, matching what the multi-profile runtime already did for a profile whose watcher cannot start. A native watcher that exists but fails to start still aborts startup. These were the first regressions the public CI caught: they landed while GitHub Actions was unavailable on the private repository, so no cross-OS job ever ran against them.
+- On Windows, `VAPOR_DIR` resolution no longer yields the verbatim `\\?\C:\…` spelling that `fs::canonicalize` returns there: canonical paths are rewritten to the plain Win32 form, so the runtime directory shown in logs and status, and hashed into the IPC socket location, is the spelling users and tools recognise.
 
 ### Fixed (providers & auth)
 
