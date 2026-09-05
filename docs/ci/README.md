@@ -8,9 +8,10 @@ triggers them, and which ones gate a release.
 
 - **Adding a new workflow or modifying an existing one?** Read
   `overview.md` first for the trigger policy and toolchain defaults.
-- **Configuring branch protection?** Use `required-checks.md` — it lists
-  exactly which checks must be required on `main` and which are
-  release-only gates.
+- **Touching branch protection or renaming a matrix leg?** Use
+  `required-checks.md` — it records the live `main` ruleset (the nine
+  required checks, bypass policy, and the command to recreate it) and
+  which gates are release-only.
 - **Running the same validation locally?** Every CI workflow runs the
   same `./scripts/*` entry points a contributor would run locally. See
   `docs/development/runbook.md` for the local command set.
@@ -22,17 +23,18 @@ triggers them, and which ones gate a release.
   `workflow_call`, `v*` tags), toolchain defaults (`macos-latest`,
   latest-stable Xcode/Swift, stable Rust), pinned CI action versions,
   dependency caching strategy.
-- `required-checks.md` — branch-protection guidance (`lint`, `test`,
-  and `build` required on `main`; `perf` release-only),
-  workflow-to-script mapping, local-parity command set.
+- `required-checks.md` — the `main` ruleset (`lint`, `test`, and
+  `build` × macOS/Linux/Windows required on `main`; `perf`
+  release-only), how to inspect and recreate it, workflow-to-script
+  mapping, local-parity command set.
 
 ## Test tier model
 
 Testing runs in three tiers. Authoritative definition:
 `docs/architecture/testing-strategy.md §CI tier execution`.
 
-- **Tier 1** — `lint.yml` + `test.yml` (runs on every PR; required
-  checks on `main`). Unit + integration + platform-trait contract +
+- **Tier 1** — `lint.yml` + `test.yml` + `build.yml` (runs on every PR;
+  required checks on `main` via the `main` ruleset). Unit + integration + platform-trait contract +
   property + snapshot + guard-rail timing tests. **Budget: under
   5 minutes per OS on CI.** If a change pushes this past the budget,
   split slow tests out to Tier 2 or make them faster.
@@ -57,13 +59,12 @@ exceeds the 5-minute budget on a matrix runner. The failure message
 points contributors at the testing-strategy doc's discipline rules
 rather than silently accepting a regression.
 
-## Target state (portability work)
+## Platform matrix
 
-As the `core/*` portability fixes land (see `docs/plans/core.md` §4 and
-`docs/tasks/core.md` Phase C1), the Rust jobs in `lint.yml` and
-`test.yml` will grow a matrix of `macos-latest`, `ubuntu-latest`,
-`windows-latest`. Swift jobs stay macOS-only because Swift code is
-macOS-only by policy (`AGENTS.md §8`). Per-platform release jobs
-(macOS, Windows, Linux) each target their own isolated GitHub
-Environment (`release-macos`, `release-windows`, `release-linux`) for
-secret isolation.
+`lint.yml`, `test.yml`, and `build.yml` fan out over `macos-latest`,
+`ubuntu-latest`, and `windows-latest`. Swift runs only on the macOS leg
+because Swift code is macOS-only by policy (`AGENTS.md §8`); the other
+legs verify the Rust workspace. Per-platform release jobs each target
+their own protected GitHub Environment (`release-macos` today,
+`release-windows` / `release-linux` when those surfaces ship) — see
+`docs/operations/release-process.md`.

@@ -490,7 +490,8 @@ If a test's failure mode is "I typo'd a default value", skip it.
 - **Tier 1** — `./scripts/test.sh` via `lint.yml` / `test.yml` /
   `workflow_call`. Unit + integration + platform-trait contract +
   property + snapshot + guard-rail timing tests. Runs on every PR.
-  Required check on `main`. Budget: under 5 minutes per OS on CI.
+  Required check on `main`, enforced by the `main` ruleset
+  (`docs/ci/required-checks.md`). Budget: under 5 minutes per OS on CI.
 - **Tier 2** — `scripts/perf.sh` via `perf.yml`, which runs only as
   part of the release pipeline (no standalone or scheduled triggers).
   Performance SLO tests, long-running property cases (higher case

@@ -27,7 +27,7 @@ jobs:
         # exercise core/* portability for the Rust workspace only; the Swift
         # wrapper scripts skip themselves on non-Darwin hosts.
         include:
-          - os: macos-26
+          - os: macos-latest
             scope: full
           - os: ubuntu-latest
             scope: rust-only
