@@ -239,6 +239,28 @@ impl DurableStateDb {
         count_intents(&self.connection, Some(STATE_LEASED))
     }
 
+    /// Number of queued intents (pending or leased) whose path lies
+    /// strictly under `directory`, excluding `except_id`. A directory
+    /// delete uses it to tell "children still being worked on" from
+    /// "children kept on purpose".
+    pub fn intents_under(&self, directory: &Path, except_id: i64) -> Result<usize, StateDbError> {
+        let mut prefix = path_to_text(directory)?;
+        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
+            prefix.push(std::path::MAIN_SEPARATOR);
+        }
+        // LIKE would treat `_` and `%` in the prefix as wildcards; a
+        // range comparison on the text column is exact.
+        let mut upper = prefix.clone();
+        upper.push(char::MAX);
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM queue_intents
+             WHERE path_text > ? AND path_text < ? AND id != ?",
+            params![prefix, upper, except_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count as usize)
+    }
+
     pub fn failed_depth(&self) -> Result<usize, StateDbError> {
         let count =
             self.connection

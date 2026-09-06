@@ -591,6 +591,11 @@ pub mod engine {
     /// tick while a reconcile slice is active. Bounds per-tick I/O so
     /// the slice checkpoints keep their interruptibility guarantee.
     pub const RECONCILE_DIRS_PER_CHECKPOINT: usize = 8;
+    /// Files a directory that appeared (created, renamed in) is
+    /// reported for, one synthesized watcher event each, before the
+    /// runtime gives up enumerating and leaves a subtree reconcile
+    /// marker instead. Keeps the tick-thread walk bounded.
+    pub const SYNTHESIZED_SUBTREE_EVENT_CAP: usize = 10_000;
     /// Per-tick directory budget for the reconcile walk (runs only under
     /// IdleDrain). Higher than the checkpoint granularity so a large tree
     /// converges quickly on a fast (filesystem) provider; the per-slice

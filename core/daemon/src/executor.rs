@@ -71,12 +71,15 @@ pub struct StagedExecutorSnapshot {
     pub download_running: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StagedExecutorReport {
     pub started: usize,
     pub completed: usize,
     pub retried: usize,
     pub failed: usize,
+    /// Downloads discarded at apply time because their target would
+    /// alias a differently-cased local file (`(target, existing)`).
+    pub name_collisions: Vec<(PathBuf, PathBuf)>,
     /// Strict-mirror local removals performed this advance (pull-only
     /// restore path found no remote counterpart).
     pub mirror_deletes: usize,
@@ -785,7 +788,7 @@ impl StagedExecutor {
                         continue_plan_upload(plan, index, &probe)
                     }
                     PendingPlan::Delete { plan, index } => {
-                        continue_plan_delete(state_db, plan, index, &probe, now)
+                        continue_plan_delete(state_db, intent.id, plan, index, &probe, now)
                     }
                     PendingPlan::Download { plan } => continue_plan_download(plan, &probe),
                     PendingPlan::ApplyRemoteDelete => {
@@ -961,6 +964,31 @@ impl StagedExecutor {
             ActiveStage::DownloadRunning { permit, plan } => match outcome {
                 ProviderJobOutcome::TransferCompleted(outcome) => {
                     app.release_work(permit);
+                    // Last line of defence for name collisions: between
+                    // planning and apply another download may have
+                    // landed a differently-cased sibling this filesystem
+                    // cannot hold next to the target. Applying would
+                    // rewrite that sibling's file and, through its next
+                    // upload, the cloud object it came from.
+                    if let Some(existing) =
+                        crate::name_collision::colliding_local_path(&plan.local_path)
+                    {
+                        if let Some(staging) = &plan.staging_path {
+                            let _ = fs::remove_file(staging);
+                        }
+                        crate::logging::warning(
+                            "Downloaded object would alias a differently-cased local file; discarding the payload",
+                            &[
+                                ("path", plan.local_path.display().to_string()),
+                                ("existing", existing.display().to_string()),
+                            ],
+                        );
+                        report
+                            .name_collisions
+                            .push((plan.local_path.clone(), existing));
+                        self.complete(state_db, &intent, report)?;
+                        return Ok(None);
+                    }
                     // Two-way keep-both must not lose a local edit that
                     // lands while the download applies. The apply
                     // captures the current local bytes (rename aside)
@@ -1326,6 +1354,7 @@ impl StagedExecutor {
                     remote_path: plan.remote_path.clone(),
                     want_stat: false,
                     hash: crate::provider_jobs::ProbeHash::Always,
+                    want_subtree_listing: false,
                 }),
             );
             return Ok(Some(ActiveExecution {
@@ -1687,6 +1716,7 @@ fn plan_intent(
                     remote_path: plan.remote_path.clone(),
                     want_stat: true,
                     hash: ProbeHash::Never,
+                    want_subtree_listing: false,
                 },
                 pending: PendingPlan::Download { plan },
             }
@@ -1715,6 +1745,7 @@ fn plan_intent(
                         remote_path,
                         want_stat: true,
                         hash: ProbeHash::Never,
+                        want_subtree_listing: false,
                     },
                     pending: PendingPlan::ApplyRemoteDelete,
                 };
@@ -1784,6 +1815,9 @@ fn plan_delete(
             remote_path: plan.remote_path.clone(),
             want_stat: true,
             hash,
+            // A deleted local directory arrives as one Delete intent;
+            // the remote subtree tells the continuation what to expand.
+            want_subtree_listing: true,
         },
         pending: PendingPlan::Delete { plan, index },
     }
@@ -1798,6 +1832,7 @@ fn plan_delete(
 /// never silently destroyed.
 fn continue_plan_delete(
     state_db: &mut DurableStateDb,
+    intent_id: i64,
     plan: TransferPlan,
     index: Option<crate::state_db::SyncIndexEntry>,
     probe: &ProbeResult,
@@ -1809,6 +1844,11 @@ fn continue_plan_delete(
             message: "internal error: delete probe carried no remote stat".to_string(),
         };
     };
+    if let Ok(Some(remote_entry)) = stat
+        && remote_entry.kind == vapor_providers::RemoteEntryKind::Directory
+    {
+        return continue_plan_directory_delete(state_db, intent_id, plan, probe, now);
+    }
     match stat {
         Ok(None) => {
             // Remote already gone: the deletion converged. Record the
@@ -1875,6 +1915,132 @@ fn continue_plan_delete(
     }
 }
 
+/// A local directory was deleted and the remote still holds a
+/// directory at that path. The provider never deletes a directory
+/// recursively: that would destroy children the engine never compared
+/// against the index. Instead the deletion expands into one guarded
+/// Delete intent per remote entry, deepest first, so every file goes
+/// through the same "refused when the remote changed since the last
+/// sync" rule, and the directory itself is re-enqueued last. A later
+/// pass that still finds children waits while any of them has queued
+/// work, and keeps the directory once the children that remain are the
+/// ones the rules preserved.
+fn continue_plan_directory_delete(
+    state_db: &mut DurableStateDb,
+    intent_id: i64,
+    plan: TransferPlan,
+    probe: &ProbeResult,
+    now: SystemTime,
+) -> PlanOutcome {
+    let subtree = match probe.subtree.as_ref() {
+        Some(Ok(entries)) => entries,
+        Some(Err(error)) => {
+            return PlanOutcome::Fail {
+                failure: error.kind.retry_classification(),
+                message: format!(
+                    "cannot list remote directory before delete: {}",
+                    error.message
+                ),
+            };
+        }
+        None => {
+            return PlanOutcome::Fail {
+                failure: RetryFailureKind::Transient,
+                message: "internal error: directory delete probe carried no listing".to_string(),
+            };
+        }
+    };
+    if subtree.is_empty() {
+        // Nothing underneath: the provider removes the empty directory.
+        return PlanOutcome::RemoteDelete(plan);
+    }
+    let queued_below = match state_db.intents_under(&plan.local_path, intent_id) {
+        Ok(count) => count,
+        Err(error) => {
+            return PlanOutcome::Fail {
+                failure: RetryFailureKind::Transient,
+                message: format!("cannot inspect queued work under a deleted directory: {error}"),
+            };
+        }
+    };
+    if queued_below > 0 {
+        // Children are still being deleted (or preserved through a
+        // download); come back once they have settled.
+        return PlanOutcome::Fail {
+            failure: RetryFailureKind::Transient,
+            message: format!(
+                "remote directory still holds {} entr{} with {queued_below} queued intent(s) underneath; waiting",
+                subtree.len(),
+                if subtree.len() == 1 { "y" } else { "ies" }
+            ),
+        };
+    }
+    // Only entries that are gone locally are deletions. An entry whose
+    // local counterpart exists (restored by a refused delete, or
+    // recreated by the user) is content to keep, never to expand into
+    // another delete; that is also what stops an expansion loop.
+    // Deepest entries first so the FIFO deletes files before their
+    // directories and inner directories before outer ones.
+    let mut entries: Vec<&vapor_providers::RemoteEntry> = subtree.iter().collect();
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.path.as_str().matches('/').count()));
+    let mut batch: Vec<(PathBuf, PendingIntentKind, SystemTime)> =
+        Vec::with_capacity(entries.len() + 1);
+    let mut kept = 0usize;
+    for entry in entries {
+        let Some(relative) = entry
+            .path
+            .as_str()
+            .strip_prefix(plan.remote_path.as_str())
+            .map(|rest| rest.trim_start_matches('/'))
+        else {
+            continue;
+        };
+        if relative.is_empty() {
+            continue;
+        }
+        let mut local = plan.local_path.clone();
+        for segment in relative.split('/') {
+            local.push(segment);
+        }
+        if fs::symlink_metadata(&local).is_ok() {
+            kept += 1;
+            continue;
+        }
+        batch.push((local, PendingIntentKind::Delete, now));
+    }
+    if batch.is_empty() {
+        crate::logging::info(
+            "Keeping a remote directory: every remaining child exists locally",
+            &[
+                ("path", plan.local_path.display().to_string()),
+                ("children", kept.to_string()),
+            ],
+        );
+        return PlanOutcome::Noop("remote directory kept: its remaining children exist locally");
+    }
+    batch.push((plan.local_path.clone(), PendingIntentKind::Delete, now));
+    let enqueued =
+        match state_db.enqueue_intents_coalesced(&batch, crate::safeguards::IntentSource::Fresh) {
+            Ok(count) => count,
+            Err(error) => {
+                return PlanOutcome::Fail {
+                    failure: RetryFailureKind::Transient,
+                    message: format!("cannot expand a directory delete: {error}"),
+                };
+            }
+        };
+    crate::logging::info(
+        "Expanded a directory delete into per-entry deletes",
+        &[
+            ("path", plan.local_path.display().to_string()),
+            ("entries", subtree.len().to_string()),
+            ("kept", kept.to_string()),
+            ("enqueued", enqueued.to_string()),
+        ],
+    );
+    PlanOutcome::Noop("directory delete expanded into per-entry deletes")
+}
+
 /// Plans an upload with the two-way conflict guard: two-way mode probes
 /// the remote (continuing in [`continue_plan_upload`]); one-way modes
 /// skip the guard entirely — strict mirror overwrites by design.
@@ -1920,6 +2086,7 @@ fn plan_upload(
             remote_path: plan.remote_path.clone(),
             want_stat: true,
             hash,
+            want_subtree_listing: false,
         },
         pending: PendingPlan::Upload { plan, index },
     }
@@ -3177,6 +3344,124 @@ mod tests {
             .expect("upload intent enqueued");
         assert_eq!(restore.kind, PendingIntentKind::Upload);
         assert_eq!(restore.path, unsynced);
+    }
+
+    #[test]
+    fn local_directory_delete_expands_into_per_entry_deletes_deepest_first() {
+        // A deleted local directory still holds files remotely. The
+        // provider never deletes recursively; the planner expands the
+        // delete into one guarded Delete per remote entry (files and
+        // inner directories before outer ones) and re-enqueues the
+        // directory itself last.
+        let mut fixture = Fixture::new();
+        let dir = fixture.local_root.join("folder");
+        let remote_dir = fixture.cloud_root.join("folder");
+        std::fs::create_dir_all(remote_dir.join("sub")).expect("remote dirs");
+        std::fs::write(remote_dir.join("a.txt"), b"a").expect("a");
+        std::fs::write(remote_dir.join("sub/b.txt"), b"b").expect("b");
+        // The local directory is gone (the user renamed or removed it).
+        assert!(!dir.exists());
+
+        let intent = fixture.enqueue_and_lease(&dir, PendingIntentKind::Delete);
+        assert_eq!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0)),
+            StartDecision::Started
+        );
+        let report = fixture.run_to_quiescence(8);
+        assert_eq!(
+            report.completed, 1,
+            "the directory delete completes as an expansion"
+        );
+
+        let mut queued = Vec::new();
+        while let Some(next) = fixture
+            .state_db
+            .lease_next_ready(timestamp_ms(0))
+            .expect("lease")
+        {
+            queued.push((next.path.clone(), next.kind));
+        }
+        let expected: Vec<(PathBuf, PendingIntentKind)> = vec![
+            (dir.join("sub/b.txt"), PendingIntentKind::Delete),
+            (dir.join("a.txt"), PendingIntentKind::Delete),
+            (dir.join("sub"), PendingIntentKind::Delete),
+            (dir.clone(), PendingIntentKind::Delete),
+        ];
+        // Order within one depth is the listing order; assert the depth
+        // discipline and the full set rather than the exact interleave.
+        assert_eq!(queued.len(), expected.len(), "queued: {queued:?}");
+        for entry in &expected {
+            assert!(queued.contains(entry), "missing {entry:?} in {queued:?}");
+        }
+        let position = |path: &PathBuf| queued.iter().position(|(p, _)| p == path).expect("queued");
+        assert!(position(&dir.join("sub/b.txt")) < position(&dir.join("sub")));
+        assert!(position(&dir.join("sub")) < position(&dir));
+        assert!(position(&dir.join("a.txt")) < position(&dir));
+        // Nothing was removed remotely by the expansion itself.
+        assert!(remote_dir.join("a.txt").exists());
+        assert!(remote_dir.join("sub/b.txt").exists());
+    }
+
+    #[test]
+    fn directory_delete_removes_an_empty_remote_directory_and_keeps_a_preserved_child() {
+        let mut fixture = Fixture::new();
+        // Empty remote directory: deleted outright.
+        let empty = fixture.local_root.join("empty");
+        std::fs::create_dir_all(fixture.cloud_root.join("empty")).expect("remote empty dir");
+        let intent = fixture.enqueue_and_lease(&empty, PendingIntentKind::Delete);
+        fixture
+            .executor
+            .try_start(&mut fixture.app, intent, timestamp_ms(0));
+        let report = fixture.run_to_quiescence(8);
+        assert_eq!(report.completed, 1);
+        assert!(
+            !fixture.cloud_root.join("empty").exists(),
+            "empty remote directory removed"
+        );
+
+        // A directory whose only child has no queued work left is kept:
+        // the child is content the rules preserved.
+        let kept = fixture.local_root.join("kept");
+        std::fs::create_dir_all(fixture.cloud_root.join("kept")).expect("remote kept dir");
+        std::fs::write(fixture.cloud_root.join("kept/child.txt"), b"preserved").expect("child");
+        // First pass expands (child delete + directory re-enqueued).
+        let intent = fixture.enqueue_and_lease(&kept, PendingIntentKind::Delete);
+        fixture
+            .executor
+            .try_start(&mut fixture.app, intent, timestamp_ms(1));
+        fixture.run_to_quiescence(8);
+        // The child delete was refused and the child restored locally
+        // (what a preservation download does): drop the child delete
+        // from the queue and put the file back.
+        let child = fixture
+            .state_db
+            .lease_next_ready(timestamp_ms(1))
+            .expect("lease")
+            .expect("child delete");
+        assert_eq!(child.path, kept.join("child.txt"));
+        fixture
+            .state_db
+            .complete_leased(child.id)
+            .expect("complete child");
+        std::fs::create_dir_all(&kept).expect("local dir");
+        std::fs::write(kept.join("child.txt"), b"preserved").expect("restored child");
+        // Second pass: the directory delete finds a child that exists
+        // locally, has nothing to expand, and keeps the directory.
+        let again = fixture
+            .state_db
+            .lease_next_ready(timestamp_ms(2))
+            .expect("lease")
+            .expect("directory delete re-enqueued");
+        assert_eq!(again.path, kept);
+        fixture
+            .executor
+            .try_start(&mut fixture.app, again, timestamp_ms(2));
+        let report = fixture.run_to_quiescence(8);
+        assert_eq!(report.completed, 1);
+        assert!(fixture.cloud_root.join("kept/child.txt").exists());
+        assert_eq!(fixture.state_db.queue_depth().expect("depth"), 0);
     }
 
     #[test]

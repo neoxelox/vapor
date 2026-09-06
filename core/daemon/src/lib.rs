@@ -37,6 +37,7 @@ pub mod ipc_service;
 pub mod logging;
 pub mod metrics;
 pub mod multi_runtime;
+pub mod name_collision;
 pub mod path_filter;
 pub mod profiles;
 pub(crate) mod provider_jobs;

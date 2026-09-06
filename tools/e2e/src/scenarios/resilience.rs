@@ -10,6 +10,7 @@ use vapor_shared::constants;
 
 use crate::daemon::DaemonKind;
 use crate::host::Need;
+use crate::logs;
 use crate::oracle::sha256_of;
 use crate::scenario::{CONVERGE_TIMEOUT, Ctx, Expect, Scenario, write_file};
 use crate::scenarios::sync::start_primary;
@@ -39,14 +40,16 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "state-db-lost",
             proves: "with the state DB deleted, a restart rebuilds the index from both trees without losing a file or inventing a conflict copy for identical content",
             needs: &[Need::NativeWatcher, Need::Filesystem],
-            // Today the reconcile walk takes an equal-size pair with no
-            // index row as converged and never records it, so the index
-            // stays empty after a DB loss and a later same-size offline
-            // edit of those files goes unnoticed.
-            expect: Expect::KnownGap(
-                "reconcile does not rebuild the sync index for equal-size pairs it has no row for",
-            ),
+            expect: Expect::Pass,
             run: state_db_lost,
+        },
+        Scenario {
+            id: "S39",
+            name: "shutdown-flushes-debounce",
+            proves: "a write reported moments before SIGTERM becomes a durable intent at shutdown and uploads right after the restart",
+            needs: &[Need::NativeWatcher, Need::Filesystem, Need::Unix],
+            expect: Expect::Pass,
+            run: shutdown_flushes_debounce,
         },
         Scenario {
             id: "S34",
@@ -224,6 +227,43 @@ fn state_db_lost(ctx: &mut Ctx) -> Result<(), Failure> {
         conflicts.is_empty(),
         "identical content on both sides produced conflict copies: {conflicts:?}"
     );
+    Ok(())
+}
+
+fn shutdown_flushes_debounce(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let first = start_primary(ctx)?;
+    // Let the startup reconcile finish so the queue is idle first.
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    let db = ctx.db();
+    let before = db.enqueue_high_water().unwrap_or(0);
+    // A name without an extension debounces on the longest window
+    // (several seconds). Give the watcher a moment to deliver the
+    // event, then stop the daemon well inside that window.
+    write_file(
+        &home.local.join("late-note"),
+        "written just before shutdown\n",
+    )?;
+    std::thread::sleep(Duration::from_millis(500));
+    ctx.stop_daemon(first)?;
+    let after = db.enqueue_high_water().unwrap_or(0);
+    ensure!(
+        after > before,
+        "the shutdown flush did not enqueue the pending write (high water {before} -> {after})"
+    );
+    ensure!(
+        logs::contains(&home.daemon_log(), "intents_flushed=1"),
+        "the shutdown log line does not report one flushed intent"
+    );
+    // The intent is durable; the next daemon executes it before any
+    // reconcile could have found the file.
+    ctx.start_daemon()?;
+    ctx.wait_same_content(
+        &home.local.join("late-note"),
+        &home.cloud.join("late-note"),
+        CONVERGE_TIMEOUT,
+    )?;
+    ctx.settle_home(&home, Duration::from_secs(6), CONVERGE_TIMEOUT)?;
     Ok(())
 }
 

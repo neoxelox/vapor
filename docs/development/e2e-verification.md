@@ -59,9 +59,10 @@ hold everywhere:
    A scenario whose trees cannot match by construction opts out with
    a reason that shows up in the report.
 3. **Log hygiene.** No `[ERROR]` line in any daemon log, and no
-   warning outside the routine set plus what the scenario declared it
-   expects (a keep-both resolution, a restart-required key). Any
-   `failed_intents` row fails the scenario unless it said otherwise.
+   warning the scenario did not declare it expects (a keep-both
+   resolution, a restart-required key). A healthy run has a warning
+   budget of zero. Any `failed_intents` row fails the scenario unless
+   it said otherwise.
 
 A queue that is empty is not a converged queue. Scenarios wait for the
 intents their changes produce (`mark` then `converge_from`) or for a
@@ -142,9 +143,9 @@ Output is one line per scenario:
 ```
 [e2e] PASS S03 — local writes become durable intents and drain; the cloud root matches byte for byte (1.9s)
 [e2e] SKIP R01 — needs full: run with --full to include it
-[e2e] KNOWN-GAP S32 — the rebuilt index does not cover the synced files: Some(0) (11.1s)
-[e2e] FAIL S25 — timed out after 30s waiting for: .../moved-folder/sub/b.txt to exist (39.5s)
-[e2e] OK — 32 passed, 0 failed, 1 skipped, 5 known gaps, 0 unexpected passes (307.8s)
+[e2e] KNOWN-GAP S33 — both colliding payloads must exist locally (one as a conflict copy); local has: ["Readme.md"] (5.0s)
+[e2e] FAIL S16 — timed out after 30s waiting for: .../cloud/Vapor/gone.txt to be removed (30.1s)
+[e2e] OK — 38 passed, 0 failed, 1 skipped, 1 known gaps, 0 unexpected passes (245.0s)
 [e2e] report: .../.vapor/e2e/run-711543-14708/e2e-result.json
 ```
 
@@ -244,7 +245,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S05 | a second daemon on the same `VAPOR_DIR` exits non-zero saying one is already running |
 | S06 | `vapor doctor` reports no failures inside the sandbox, in text and `--json` |
 | S07 | clean SIGTERM shutdown, restart on the same state DB, post-restart writes converge |
-| S08 | a healthy run across two restarts emits no ERROR line and only routine warnings |
+| S08 | a healthy run across two restarts emits no ERROR line and no warning |
 | S09 | an over-budget `VAPOR_DIR` relocates the IPC socket; status and doctor still work |
 | S10 | uploads land byte for byte, a cloud-born file downloads through reconcile, POSIX modes survive |
 | S11 | a path that diverged on both sides while the daemon was down keeps both payloads |
@@ -261,19 +262,21 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S22 | a resource ceiling reaches the running daemon live; a restart-required key is reported |
 | S23 | SIGKILL mid-upload, restart: the upload completes, trees match, nothing duplicated |
 | S24 | SIGKILL mid-download, restart: the download completes and the local copy matches |
-| S25 | file rename, directory rename with children, move across subtrees (known gap) |
-| S26 | `rm -rf` of a tree, then the name comes back as a file (known gap) |
+| S25 | file rename, directory rename with children, and a move across subtrees converge to the same shape in the cloud |
+| S26 | `rm -rf` of a tree removes it from the cloud; the name coming back as a file converges on both sides |
 | S27 | a file deleted locally while the daemon was down is restored on restart (pins today's rule) |
 | S28 | a file deleted in the cloud while the daemon was down is re-uploaded on restart (pins today's rule) |
 | S29 | push-only uploads, overwrites a divergent cloud edit, removes a cloud-only file, never downloads |
 | S30 | two profiles in one daemon sync their own roots with their own durable state and never cross |
 | S31 | a burst of local deletions pauses sync naming `vapor resume`; resume re-arms and the deletions propagate |
-| S32 | with the state DB deleted, a restart rebuilds the index from both trees (known gap) |
-| S33 | two cloud files differing only by case both survive locally, one as a conflict copy (known gap) |
+| S32 | with the state DB deleted, a restart rebuilds the index from both trees without loss or invented conflicts |
+| S33 | two cloud files differing only by case both materialize locally, the second as a conflict copy (known gap) |
 | S34 | the cloud root disappears mid-run: sync blocks with Error; it returns: work resumes and converges |
 | S35 | the shipped `vapord` binary starts, syncs, and shuts down cleanly like `vapor run` |
 | S36 | nested directories flow up and down; an emptied directory's files are removed |
-| S37 | push-only overwrites a same-size cloud edit with no index row for the pair (known gap) |
+| S37 | push-only overwrites a same-size cloud edit with no index row for the pair |
+| S38 | a cloud name that would alias a differently-cased local file never rewrites either cloud object, never loops, and lands on the timeline |
+| S39 | a write reported moments before SIGTERM becomes a durable intent at shutdown and uploads right after the restart |
 | R01 | install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd (`--full`) |
 
 ## Extending the harness

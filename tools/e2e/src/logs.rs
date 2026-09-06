@@ -1,21 +1,13 @@
 //! Log hygiene. A healthy run emits no `[ERROR]` line and no warning
-//! outside the small set a scenario declares it expects. Routine
-//! transitions that the daemon still logs at WARNING are listed here
-//! until they are demoted; the list is the debt, not the policy.
+//! outside the set a scenario declares it expects.
 
 use std::fs;
 use std::path::Path;
 
-/// Warnings a healthy daemon emits today on routine transitions.
-/// Shrinks as the daemon's log levels are corrected; never grows
-/// without a comment naming the transition.
-pub const ROUTINE_WARNINGS: &[&str] = &[
-    // Clean SIGTERM shutdown of the tick loop.
-    "Received shutdown signal; exiting multi-profile runtime loop cleanly",
-    // The filesystem provider's changes cursor is process-local, so
-    // every restart re-baselines through a whole-scope reconcile.
-    "Remote changes cursor expired; scheduling whole-scope reconcile and re-baselining",
-];
+/// Warnings a healthy daemon may emit on routine transitions. Empty:
+/// a healthy run has a warning budget of zero. Never grows without a
+/// comment naming the transition and the task that demotes it.
+pub const ROUTINE_WARNINGS: &[&str] = &[];
 
 #[derive(Clone, Debug, Default)]
 pub struct LogReport {

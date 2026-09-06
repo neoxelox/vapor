@@ -276,7 +276,8 @@ fn run_one(
         }
     }
 
-    let preserve = keep || result.verdict.is_red();
+    // A known gap is a failure someone will want to look at too.
+    let preserve = keep || result.verdict.is_red() || matches!(result.verdict, Verdict::KnownGap);
     if preserve {
         result.sandbox = Some(scenario_root.display().to_string());
     } else {

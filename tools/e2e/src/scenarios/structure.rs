@@ -17,13 +17,7 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "rename-and-move",
             proves: "renaming a file, renaming a directory with children, and moving a file across subtrees converge to the same shape in the cloud",
             needs: &[Need::NativeWatcher, Need::Filesystem],
-            // A renamed directory arrives as Removed(old) + Created(new):
-            // the new directory's children are never enumerated, and the
-            // remote delete of the old directory is non-recursive and
-            // retries forever on "Directory not empty".
-            expect: Expect::KnownGap(
-                "a local directory rename neither uploads the new subtree nor deletes the old one remotely",
-            ),
+            expect: Expect::Pass,
             run: rename_and_move,
         },
         Scenario {
@@ -31,12 +25,7 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "tree-removal-and-type-flip",
             proves: "rm -rf of a tree removes it from the cloud; recreating the name as a file converges to a file on both sides",
             needs: &[Need::NativeWatcher, Need::Filesystem],
-            // The changes feed emits optimistic events for children of a
-            // path that just became a file; the engine turns them into
-            // downloads, one of which fails permanently.
-            expect: Expect::KnownGap(
-                "stale feed events under a path that became a file produce a permanently failed download",
-            ),
+            expect: Expect::Pass,
             run: tree_removal_and_type_flip,
         },
         Scenario {

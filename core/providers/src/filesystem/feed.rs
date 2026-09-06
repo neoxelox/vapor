@@ -264,13 +264,20 @@ fn normalize_watch_event(
                 content_hash: None,
             })
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(RemoteChange {
-            path: remote_path,
-            kind: RemoteChangeKind::Removed,
-            observed_at: event.observed_at,
-            op_id: None,
-            content_hash: None,
-        }),
+        // `NotADirectory` means an ancestor of the path is now a file, so
+        // the object cannot exist any more than a `NotFound` one can.
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.kind() == io::ErrorKind::NotADirectory =>
+        {
+            Some(RemoteChange {
+                path: remote_path,
+                kind: RemoteChangeKind::Removed,
+                observed_at: event.observed_at,
+                op_id: None,
+                content_hash: None,
+            })
+        }
         // A transient stat failure (EACCES during a permission change,
         // EIO on a network mount) must not silently drop the change — the
         // event is already consumed from the watch channel, so dropping it
@@ -366,6 +373,26 @@ mod tests {
                 .expect("poll"),
         );
         assert_eq!(page.changes.len(), 1);
+        assert_eq!(page.changes[0].kind, RemoteChangeKind::Removed);
+    }
+
+    #[test]
+    fn a_path_under_what_became_a_file_surfaces_as_removed() {
+        // `tree` was a directory and is now a file: a stale event for
+        // `tree/deeper` cannot describe a live object (stat says
+        // NotADirectory), so it is a removal, not an optimistic write.
+        let (dir, feed, handle, tags) = feed_fixture();
+        let root = dir.path();
+        let baseline = expect_page(feed.poll(root, &tags, None, 100).expect("baseline"));
+
+        std::fs::write(root.join("tree"), b"now a file").expect("file");
+        handle.emit_created(root.join("tree/deeper"), ts(10));
+        let page = expect_page(
+            feed.poll(root, &tags, Some(&baseline.next_cursor), 100)
+                .expect("poll"),
+        );
+        assert_eq!(page.changes.len(), 1);
+        assert_eq!(page.changes[0].path.as_str(), "tree/deeper");
         assert_eq!(page.changes[0].kind, RemoteChangeKind::Removed);
     }
 

@@ -120,7 +120,7 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 - Default conflict policy: keep both (never silent overwrite).
 - Maintain tombstones and deletion semantics with durable replay. When the evidence is ambiguous (an unreadable mtime, an unknown provenance), keeping data wins over honouring a deletion.
 - Remote poll/apply pipeline must obey throttle and retry constraints.
-- Equality checks in the reconcile walk are the rsync quick check (size plus the mtime the sync index recorded), never a whole-tree hash; the upload planner hashes and converges identical content silently.
+- Equality checks in the reconcile walk are the rsync quick check (size plus the mtime the sync index recorded), never a whole-tree hash; a pair the index has no row for is verified once, not assumed converged; the upload planner hashes and converges identical content silently.
 - Sync direction is selected by `syncMode` (`two-way` default; one-way
   `pull-only` / `push-only`), resolved per profile with the top-level value as
   the default. Vapor's "never lose data" / keep-both guarantee applies **only

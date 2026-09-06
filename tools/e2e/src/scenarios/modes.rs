@@ -46,12 +46,7 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "push-only-same-size-divergence",
             proves: "push-only overwrites a cloud edit that kept the byte count even when the daemon has no index row for the pair",
             needs: &[Need::NativeWatcher, Need::Filesystem],
-            // Same root cause as the index-rebuild gap: an equal-size
-            // pair with no index row is taken as converged, so a strict
-            // mirror silently leaves the divergence in place.
-            expect: Expect::KnownGap(
-                "a strict mirror takes an index-less equal-size pair as converged and never overwrites it",
-            ),
+            expect: Expect::Pass,
             run: push_only_same_size_divergence,
         },
         Scenario {
@@ -72,18 +67,34 @@ pub fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: "S33",
-            name: "case-collision",
-            proves: "two cloud files whose names differ only by case both survive on a case-insensitive local filesystem, one as a conflict copy",
+            name: "case-collision-conflict-copy",
+            proves: "two cloud files whose names differ only by case both materialize on a case-insensitive local filesystem, the second as a conflict copy",
             needs: &[
                 Need::NativeWatcher,
                 Need::Filesystem,
                 Need::CaseInsensitiveFs,
                 Need::DiskImage,
             ],
+            // Today the colliding name is left untouched and reported
+            // (S38); materializing it as a conflict copy needs a durable
+            // record of which cloud object owns the local name.
             expect: Expect::KnownGap(
-                "the engine has no rule for names that collide on a case-insensitive filesystem",
+                "a colliding cloud name is reported and skipped instead of materializing as a conflict copy",
             ),
             run: case_collision,
+        },
+        Scenario {
+            id: "S38",
+            name: "case-collision-untouched",
+            proves: "a cloud name that would alias a differently-cased local file never rewrites either cloud object, never loops, and is reported on the timeline",
+            needs: &[
+                Need::NativeWatcher,
+                Need::Filesystem,
+                Need::CaseInsensitiveFs,
+                Need::DiskImage,
+            ],
+            expect: Expect::Pass,
+            run: case_collision_untouched,
         },
     ]
 }
@@ -346,6 +357,62 @@ fn mass_delete_guard(ctx: &mut Ctx) -> Result<(), Failure> {
     Ok(())
 }
 
+fn case_collision_untouched(ctx: &mut Ctx) -> Result<(), Failure> {
+    let mut home = ctx.primary.clone();
+    let image = DiskImage::create(
+        &ctx.sandbox.root,
+        "cs-cloud",
+        64,
+        ImageFs::ApfsCaseSensitive,
+    )?;
+    home.cloud = image.mount_point.join("Vapor");
+    ctx.register_home(home.clone());
+    fs::create_dir_all(&home.cloud)?;
+    write_file(&home.cloud.join("Readme.md"), "upper-case readme\n")?;
+    write_file(&home.cloud.join("readme.md"), "lower-case readme\n")?;
+    ctx.configure_scope(&home)?;
+    ctx.start_daemon()?;
+    ctx.settle_home(&home, Duration::from_secs(3), Duration::from_secs(60))?;
+    // A second reconcile must not manufacture anything new.
+    ctx.cli().reconcile()?;
+    ctx.settle_home(&home, Duration::from_secs(3), Duration::from_secs(60))?;
+    ensure!(
+        read_string(&home.cloud.join("Readme.md"))? == "upper-case readme\n"
+            && read_string(&home.cloud.join("readme.md"))? == "lower-case readme\n",
+        "a cloud object was rewritten by the collision"
+    );
+    let cloud_names: Vec<String> = fs::read_dir(&home.cloud)?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    ensure!(
+        cloud_names.len() == 2,
+        "the collision manufactured extra cloud objects: {cloud_names:?}"
+    );
+    let local_names: Vec<String> = fs::read_dir(&home.local)?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    ensure!(
+        local_names.len() == 1,
+        "expected exactly one local file for the colliding pair: {local_names:?}"
+    );
+    let timeline = ctx.cli().json(&["timeline", "--json"])?;
+    ensure!(
+        timeline.to_string().contains("\"collision\""),
+        "the collision did not land on the timeline: {timeline}"
+    );
+    ctx.allow_warning("collides with a differently-cased local file");
+    ctx.allow_warning("differ only by case");
+    ctx.set_oracle(OracleMode::Skip(
+        "cloud root is case-sensitive and the local root is not".to_string(),
+    ));
+    ctx.keep_alive(Box::new(image));
+    Ok(())
+}
+
 fn case_collision(ctx: &mut Ctx) -> Result<(), Failure> {
     let mut home = ctx.primary.clone();
     // The cloud root lives on a case-sensitive volume, like a real
@@ -380,10 +447,18 @@ fn case_collision(ctx: &mut Ctx) -> Result<(), Failure> {
                 .collect::<Vec<_>>())
             .unwrap_or_default()
     );
+    let cloud_listing: Vec<String> = fs::read_dir(&home.cloud)?
+        .flatten()
+        .map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let body = fs::read_to_string(entry.path()).unwrap_or_default();
+            format!("{name}={body:?}")
+        })
+        .collect();
     ensure!(
         read_string(&home.cloud.join("Readme.md"))? == "upper-case readme\n"
             && read_string(&home.cloud.join("readme.md"))? == "lower-case readme\n",
-        "the cloud objects were rewritten by the collision"
+        "the cloud objects were rewritten by the collision; cloud holds {cloud_listing:?}"
     );
     ensure!(
         conflict_copy_exists(&home.local, "Readme") || conflict_copy_exists(&home.local, "readme"),

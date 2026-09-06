@@ -758,9 +758,30 @@ impl MultiProfileRuntime {
             };
             self.tick_waker.wait_timeout(wait);
         }
-        logging::warning(
+        let mut flushed = 0usize;
+        let now = self.clock.now_system();
+        for slot in &mut self.slots {
+            if slot.failed.is_some() {
+                continue;
+            }
+            match catch_unwind(AssertUnwindSafe(|| slot.runtime.flush_for_shutdown(now))) {
+                Ok(Ok(count)) => flushed += count,
+                Ok(Err(error)) => logging::warning(
+                    "Shutdown flush failed for a profile; its pending changes wait for the startup reconcile",
+                    &[
+                        ("profile_id", slot.profile.id.clone()),
+                        ("error", format!("{error:?}")),
+                    ],
+                ),
+                Err(_) => logging::warning(
+                    "Shutdown flush panicked for a profile; its pending changes wait for the startup reconcile",
+                    &[("profile_id", slot.profile.id.clone())],
+                ),
+            }
+        }
+        logging::info(
             "Received shutdown signal; exiting multi-profile runtime loop cleanly",
-            &[],
+            &[("intents_flushed", flushed.to_string())],
         );
         Ok(())
     }

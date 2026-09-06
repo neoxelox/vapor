@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -375,9 +375,10 @@ impl DaemonRuntime {
                 }
             }
         }
-        logging::warning(
+        let flushed = self.flush_for_shutdown(self.clock.now_system())?;
+        logging::info(
             "Received shutdown signal; exiting daemon runtime loop cleanly",
-            &[],
+            &[("intents_flushed", flushed.to_string())],
         );
         Ok(())
     }
@@ -498,6 +499,18 @@ impl DaemonRuntime {
             )?;
             report.mirror_reverts += report.remote_poll.mirror_reverts;
             report.mirror_deletes += report.remote_poll.mirror_deletes;
+            if report.remote_poll.name_collisions > 0
+                && let Some(timeline) = &self.timeline
+            {
+                for (wanted, existing) in self.remote_poller.take_name_collisions() {
+                    timeline.push(
+                        "collision",
+                        self.profile_id.clone(),
+                        name_collision_message(&wanted, &existing),
+                        now,
+                    );
+                }
+            }
             self.mirror_revert_count += report.remote_poll.mirror_reverts as u64;
             self.mirror_delete_count += report.remote_poll.mirror_deletes as u64;
         }
@@ -567,6 +580,7 @@ impl DaemonRuntime {
                         self.mirror_revert_count += mirror_reverts as u64;
                         self.mirror_delete_count += mirror_deletes as u64;
                         let mismatches = walker.take_type_mismatches();
+                        let collisions = walker.take_name_collisions();
                         if let Some(timeline) = &self.timeline {
                             for path in mismatches {
                                 timeline.push(
@@ -577,6 +591,14 @@ impl DaemonRuntime {
                                          two-way sync leaves both untouched until you rename one",
                                         path.display()
                                     ),
+                                    now,
+                                );
+                            }
+                            for (wanted, existing) in collisions {
+                                timeline.push(
+                                    "collision",
+                                    self.profile_id.clone(),
+                                    name_collision_message(&wanted, &existing),
                                     now,
                                 );
                             }
@@ -666,6 +688,16 @@ impl DaemonRuntime {
                 self.mirror_delete_count += admission_report.mirror_deletes as u64;
                 report.conflicts += admission_report.conflicts;
                 self.conflict_count += admission_report.conflicts as u64;
+                if let Some(timeline) = &self.timeline {
+                    for (wanted, existing) in &admission_report.name_collisions {
+                        timeline.push(
+                            "collision",
+                            self.profile_id.clone(),
+                            name_collision_message(wanted, existing),
+                            now,
+                        );
+                    }
+                }
                 if admission_report.cloud_root_unavailable > 0 {
                     self.mark_cloud_root_unavailable(
                         "a provider transfer reported the root missing",
@@ -1741,15 +1773,26 @@ impl DaemonRuntime {
     }
 
     fn stabilize_events(&mut self, now: SystemTime) -> (usize, usize, usize) {
-        let Some(recorder) = &self.recorder else {
+        self.stabilize_events_with(now, false)
+    }
+
+    /// With `force`, every pending event stabilizes now regardless of
+    /// its quiet window (shutdown flush).
+    fn stabilize_events_with(&mut self, now: SystemTime, force: bool) -> (usize, usize, usize) {
+        let Some(recorder) = self.recorder.clone() else {
             return (0, 0, 0);
         };
 
-        let Some(watch_root) = self.sync_scope.local_sync_directory.as_ref() else {
+        let Some(watch_root) = self.sync_scope.local_sync_directory.clone() else {
             return (0, 0, 0);
         };
+        let watch_root = watch_root.as_path();
 
-        let stabilized = self.debounce.run_tick_for_recorder(recorder, now);
+        let stabilized = if force {
+            self.debounce.drain_all_for_recorder(&recorder, now)
+        } else {
+            self.debounce.run_tick_for_recorder(&recorder, now)
+        };
         let hash_algorithm = self.app.provider().content_hash_algorithm();
         let mut accepted = 0;
         let mut suppressed = 0;
@@ -1834,11 +1877,108 @@ impl DaemonRuntime {
                 accepted += 1;
                 continue;
             }
+            if intent_kind != PendingIntentKind::Delete
+                && std::fs::symlink_metadata(&event.path).is_ok_and(|metadata| metadata.is_dir())
+            {
+                // A directory that appeared (created, or renamed in from
+                // elsewhere) carries children the watcher never reported
+                // as events. Report them ourselves, as the events the
+                // watcher would have delivered had the files been created
+                // one by one, so they flow through the same debounce,
+                // storm compaction, filters and guards as a `cp -r`. A
+                // subtree too large to enumerate here becomes a deferred
+                // reconcile marker, exactly as a storm would.
+                let synthesized =
+                    self.synthesize_subtree_events(&event.path, event.last_observed_at);
+                logging::info(
+                    "Directory appeared; reported its children as watcher events",
+                    &[
+                        ("path", event.path.display().to_string()),
+                        ("files", synthesized.to_string()),
+                    ],
+                );
+                accepted += 1;
+                continue;
+            }
             self.scheduler
                 .upsert_stabilized_event_as(event, intent_kind);
             accepted += 1;
         }
         (accepted, suppressed, mirror_reverts)
+    }
+
+    /// Walks a directory that just appeared and records one `Created`
+    /// event per regular file underneath it, pruning ignored names the
+    /// way the watcher bridge would. Stops at
+    /// `SYNTHESIZED_SUBTREE_EVENT_CAP` files and leaves a subtree
+    /// reconcile marker for the rest. Returns the number of files
+    /// reported.
+    fn synthesize_subtree_events(&mut self, directory: &Path, observed_at: SystemTime) -> usize {
+        let Some(recorder) = self.recorder.clone() else {
+            return 0;
+        };
+        let filter = self.path_filter.clone();
+        let ignored = |path: &Path| {
+            filter
+                .as_ref()
+                .is_some_and(|filter| filter.should_ignore(path))
+        };
+        let mut reported = 0usize;
+        let mut pending = vec![directory.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if ignored(&path) {
+                    continue;
+                }
+                if metadata.is_dir() {
+                    pending.push(path);
+                } else if metadata.is_file() {
+                    if reported >= constants::engine::SYNTHESIZED_SUBTREE_EVENT_CAP {
+                        self.scheduler.upsert_intent(
+                            directory.to_path_buf(),
+                            PendingIntentKind::ReconcileSubtree,
+                            observed_at,
+                        );
+                        logging::info(
+                            "Directory too large to report file by file; scheduled a subtree reconcile",
+                            &[
+                                ("path", directory.display().to_string()),
+                                ("reported", reported.to_string()),
+                            ],
+                        );
+                        return reported;
+                    }
+                    FsEventRecording::record_event(
+                        recorder.as_ref(),
+                        FsEventRecord {
+                            path,
+                            kind: FsEventKind::Created,
+                            observed_at,
+                        },
+                    );
+                    reported += 1;
+                }
+            }
+        }
+        reported
+    }
+
+    /// Shutdown flush: stabilizes every pending local event regardless
+    /// of its debounce window and writes the resulting intents to the
+    /// durable queue, so nothing the watcher reported lives only in
+    /// memory when the process exits. Returns the number of intents
+    /// enqueued.
+    pub fn flush_for_shutdown(&mut self, now: SystemTime) -> Result<usize, DaemonRuntimeError> {
+        self.stabilize_events_with(now, true);
+        self.drain_pending_intents();
+        self.flush_scheduler_to_durable_queue()
     }
 
     fn flush_scheduler_to_durable_queue(&mut self) -> Result<usize, DaemonRuntimeError> {
@@ -2146,6 +2286,16 @@ impl DaemonRuntime {
 /// Requeue delay applied when a leased intent cannot start because no
 /// permit / slot is available. Coarser than the tick interval so blocked
 /// intents don't churn a lease+requeue write pair on every tick.
+/// Timeline text for a remote name that would alias a local file.
+fn name_collision_message(wanted: &Path, existing: &Path) -> String {
+    format!(
+        "{} exists in the cloud but this filesystem cannot hold it next to {}; \
+         both are left untouched until you rename one of them",
+        wanted.display(),
+        existing.display()
+    )
+}
+
 fn blocked_intent_requeue_delay() -> Duration {
     Duration::from_millis(constants::engine::BLOCKED_INTENT_REQUEUE_DELAY_MILLIS)
 }
@@ -4412,6 +4562,91 @@ mod tests {
             !fixture.cloud_root.join("doomed.txt").exists(),
             "the local deletion must propagate to the cloud"
         );
+    }
+
+    #[test]
+    fn a_renamed_directory_uploads_its_children_and_removes_the_old_tree_remotely() {
+        // A directory rename reaches the daemon as Removed(old) +
+        // Created(new) with no events for the children. The new
+        // directory's files must upload (reported as synthesized
+        // events) and the old remote tree must go, file by file, through
+        // the guarded delete path.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let old_dir = fixture.watch_root.join("folder");
+        std::fs::create_dir_all(old_dir.join("sub")).expect("dirs");
+        std::fs::write(old_dir.join("a.txt"), b"child a").expect("a");
+        std::fs::write(old_dir.join("sub/b.txt"), b"child b").expect("b");
+        for name in ["a.txt", "sub/b.txt"] {
+            fixture.record_local_event(&old_dir.join(name), FsEventKind::Created, fixture.now_ms);
+        }
+        fixture.converge(12);
+        assert!(
+            fixture.cloud_root.join("folder/sub/b.txt").is_file(),
+            "seed must upload"
+        );
+
+        let new_dir = fixture.watch_root.join("moved");
+        std::fs::rename(&old_dir, &new_dir).expect("rename directory");
+        fixture.record_local_event(&old_dir, FsEventKind::Removed, fixture.now_ms);
+        fixture.record_local_event(&new_dir, FsEventKind::Created, fixture.now_ms);
+        // Directory events debounce like any other; the synthesized
+        // child events then need their own window.
+        fixture.converge(24);
+
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("moved/a.txt")).expect("moved a"),
+            b"child a"
+        );
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("moved/sub/b.txt")).expect("moved b"),
+            b"child b"
+        );
+        assert!(
+            !fixture.cloud_root.join("folder").exists(),
+            "the old remote tree must be removed: {:?}",
+            files_in(&fixture.cloud_root)
+        );
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+    }
+
+    #[test]
+    fn shutdown_flush_persists_events_still_inside_their_debounce_window() {
+        // A write reported by the watcher moments before SIGTERM has not
+        // stabilized yet. The shutdown flush must turn it into a durable
+        // intent instead of leaving it in memory for the process to take
+        // with it.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let file = fixture.watch_root.join("late.txt");
+        std::fs::write(&file, b"written just before shutdown").expect("seed");
+        fixture.record_local_event(&file, FsEventKind::Created, fixture.now_ms);
+        // One immediate tick: the event is inside its quiet window, so
+        // nothing reaches the durable queue yet.
+        let report = fixture.tick(10);
+        assert_eq!(
+            report.durable_enqueues, 0,
+            "the event must still be debouncing"
+        );
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+
+        let flushed = fixture
+            .runtime
+            .flush_for_shutdown(timestamp_ms(fixture.now_ms + 20))
+            .expect("flush");
+        assert_eq!(flushed, 1);
+        assert_eq!(
+            fixture.runtime.state_db().pending_depth().expect("pending"),
+            1,
+            "the write is durable"
+        );
+        let diagnostics =
+            fixture
+                .runtime
+                .intent_diagnostics("default", 10, timestamp_ms(fixture.now_ms + 20));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].path, file.display().to_string());
+        assert_eq!(diagnostics[0].action, "upload");
     }
 
     #[test]

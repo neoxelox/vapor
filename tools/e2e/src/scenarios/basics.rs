@@ -71,7 +71,7 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             id: "S08",
             name: "log-hygiene",
-            proves: "a healthy run across two restarts emits no ERROR line and only routine warnings",
+            proves: "a healthy run across two restarts emits no ERROR line and no warning",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
             run: log_hygiene,
@@ -297,13 +297,10 @@ fn log_hygiene(ctx: &mut Ctx) -> Result<(), Failure> {
     );
     ensure!(
         report.unexpected_warnings.is_empty(),
-        "daemon log contains warnings outside the routine set: {:?}",
+        "daemon log contains warnings: {:?}",
         report.unexpected_warnings
     );
-    ctx.note(format!(
-        "{} log lines, {} routine warnings",
-        report.line_count, report.warning_count
-    ));
+    ctx.note(format!("{} log lines, no warnings", report.line_count));
     Ok(())
 }
 

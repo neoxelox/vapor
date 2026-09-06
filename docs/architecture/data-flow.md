@@ -10,7 +10,7 @@
 6. A keyed latest-wins scheduler keeps one intent per path, supersedes stale actions, and requeues dirty paths after in-flight work finishes.
 7. A throttle controller evaluates 1s power, thermal, load, disk, network, and activity samples to select `IdleDrain`, `Light`, `Throttled`, or `Suspended`.
 8. Planner, hash, upload, and reconcile stages acquire strict throttle-gated work permits before starting; reconcile only starts in `IdleDrain`, yields on slice expiry or throttle changes, and clears compacted subtree boundaries after successful quiet completion.
-9. A live daemon runtime loop wires watcher ingest -> incoming queue drain + symlink resolution -> debounce -> scheduler -> durable queue -> workgate -> reconcile, so the local engine runs as one composed pipeline instead of isolated primitives. The loop is event-nudged: fs-event callbacks and IPC control requests signal a tick waker, and a fully idle daemon relaxes from the 250 ms work cadence to a 1 s cadence. Exactly one daemon may serve a `vapor_dir` (an OS advisory lock on `vapord.lock` enforces it). `Pause` semantics: ingest/debounce/durable-flush keep capturing intent state and in-flight work finishes, but no new work is released or leased until `Resume`.
+9. A live daemon runtime loop wires watcher ingest -> incoming queue drain + symlink resolution -> debounce -> scheduler -> durable queue -> workgate -> reconcile, so the local engine runs as one composed pipeline instead of isolated primitives. The loop is event-nudged: fs-event callbacks and IPC control requests signal a tick waker, and a fully idle daemon relaxes from the 250 ms work cadence to a 1 s cadence. Exactly one daemon may serve a `vapor_dir` (an OS advisory lock on `vapord.lock` enforces it). On a shutdown signal the loop stabilizes every local event still inside its debounce window and writes the resulting intents to the durable queue before exiting (`intents_flushed` in the shutdown log line), so a change reported moments before SIGTERM does not depend on the next startup reconcile to be found. `Pause` semantics: ingest/debounce/durable-flush keep capturing intent state and in-flight work finishes, but no new work is released or leased until `Resume`.
 10. A SQLite durable queue/state DB (WAL, `synchronous = NORMAL`) persists pending and leased intents, recovers interrupted leases on startup (resetting `attempt_count` for leases older than `LEASE_TIMEOUT_MILLIS`) and sweeps stale leases periodically in-run, coalesces scheduler flushes per `(path, kind)` against already-pending rows inside one transaction, requeues retryable failures with exponential backoff/jitter/slower rate-limit delays (with `attempt_count` incremented only by the retry path, not by leasing), durably finalizes terminal failures, and injects a whole-scope startup reconcile (bounded by `STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS` to avoid starving non-reconcile work) so volatile pre-DB intent loss is reconstructed conservatively after restart.
 11. Provider selection is injected at runtime startup per profile, so daemon orchestration uses the provider trait boundary instead of hardcoding any cloud type in core engine state. `provider = "filesystem"` (default) selects the real filesystem provider; `provider = "gdrive"` selects `GoogleDriveProvider`. New backends onboard through the checklist in `provider-onboarding.md`.
 12. Non-reconcile work flows through a staged executor that leases durable intents into bounded planner, hash, transfer (upload/download), and apply-delete stages under workgate/throttle caps instead of finishing one leased intent at a time. Every blocking provider call — remote stats/hash probes during planning, `begin_upload`/`begin_download`, transfer-session steps, remote deletes — runs on a small provider-job worker pool, never on the tick thread: the tick loop dispatches jobs and harvests their outcomes, so provider RTT stalls neither fs-event draining nor debounce nor IPC status, and the upload/download concurrency caps buy real parallel transfers. The calls outside the executor follow the same rule with one thread per call: the changes poll, each directory listing of the reconcile walk, and the cloud-root retry start on one tick and are harvested on a later one (the walk resumes at the directory whose listing landed). Only the initial cloud-root ensure at startup and the rare cursor re-baseline run synchronously. Transfers remain chunked `TransferSession`s: workers re-check the throttle gates and draw a bounded byte grant (bandwidth token bucket × auto-tuned step size) between steps, so a `Suspended` throttle or an empty bucket hands the session back at its checkpoint instead of aborting it. Cheap stage transitions chain within one tick (lease → plan, permit-acquire → first hash chunk, hash-complete → transfer dispatch), so a small file no longer pays a fixed tick of latency per pipeline stage; durable leasing orders by priority class (`state-schema-migrations.md` §Current schema) so reconcile backlog never starves fresh edits.
@@ -128,6 +128,40 @@ sync was evaluated and rejected (project-owner decision, 2026-07-07):
 keeping every synced object content-shaped is what keeps the conflict,
 echo-suppression, and transfer machinery simple — folders cannot
 "conflict", and parent materialization is idempotent by construction.
+
+Two mechanics make the folder rename work with a file-only engine. A
+directory that *appears* locally (created, or renamed in from
+elsewhere) arrives from the watcher as one event with no events for its
+children, so the runtime walks it and reports one `Created` event per
+file underneath, pruning ignored names the way the watcher bridge would;
+those synthesized events then debounce, compact, and upload exactly as
+a `cp -r` would have. A subtree larger than
+`SYNTHESIZED_SUBTREE_EVENT_CAP` files leaves a subtree reconcile marker
+for the rest, the same deferral a storm gets. A local directory that
+*disappears* arrives as one `Delete` intent; the provider never deletes
+a directory recursively (that would destroy children the engine never
+compared against the index), so the delete planner lists the remote
+subtree and expands the intent into one guarded `Delete` per entry,
+deepest first, with the directory itself re-enqueued last. Each child
+delete keeps the usual rule (refused, and the newer remote content
+downloaded, when the remote changed since the last sync). A directory
+delete that still finds children waits while any of them has queued
+work, and keeps the directory once the children that remain exist
+locally again, which is what stops an expansion loop. An empty remote
+directory is removed outright.
+
+**Names that differ only by case are one name on the filesystems Vapor
+ships on today.** A cloud can hold `Readme.md` next to `readme.md`; the
+local root cannot. The engine refuses to map a remote name whose exact
+spelling is absent locally while a differently-cased spelling is
+present (and, among remote-only names that fold to the same key, lets
+the lexically first one through): the reconcile walk, the changes-feed
+mapping, and the download apply all check, the colliding object stays
+untouched in the cloud, the local file stays untouched, a warning is
+logged once per name, and a `collision` timeline event names both
+paths so the user can rename one side. Materializing the second object
+as a conflict copy (the decided end state) waits on a durable record of
+which cloud object owns the local name; see `docs/tasks/core.md`.
 
 **Special files (FIFOs, sockets, device nodes) are inert.** The executor
 refuses them at planning and the reconcile walk skips them — this must

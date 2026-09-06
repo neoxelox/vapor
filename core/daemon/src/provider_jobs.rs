@@ -109,6 +109,11 @@ pub(crate) struct ProbeRequest {
     pub remote_path: RemotePath,
     pub want_stat: bool,
     pub hash: ProbeHash,
+    /// When the stat reports a directory, enumerate its whole subtree
+    /// (files and directories, depth first) so a directory delete can be
+    /// expanded into per-entry intents without provider I/O on the tick
+    /// thread.
+    pub want_subtree_listing: bool,
 }
 
 pub(crate) struct ProbeResult {
@@ -116,7 +121,16 @@ pub(crate) struct ProbeResult {
     pub stat: Option<Result<Option<RemoteEntry>, ProviderError>>,
     /// `Some` only when a hash fetch was attempted.
     pub content_hash: Option<Result<String, ProviderError>>,
+    /// `Some` only when a subtree listing was requested and the stat
+    /// reported a directory. Entries are ordered parents before
+    /// children; the listing is capped at [`SUBTREE_LISTING_CAP`].
+    pub subtree: Option<Result<Vec<RemoteEntry>, ProviderError>>,
 }
+
+/// Upper bound on entries one subtree probe collects. A directory
+/// delete larger than this is expanded in slices: each expansion
+/// re-plans once the first slice has drained.
+pub(crate) const SUBTREE_LISTING_CAP: usize = 10_000;
 
 impl ProbeResult {
     /// The fetched hash, folded to `None` on fetch failure — matching
@@ -563,7 +577,44 @@ fn run_probe(context: &JobContext, request: ProbeRequest) -> ProbeResult {
         },
     };
     let content_hash = fetch_hash.then(|| context.provider.content_hash(&request.remote_path));
-    ProbeResult { stat, content_hash }
+    let subtree = match (&stat, request.want_subtree_listing) {
+        (Some(Ok(Some(entry))), true)
+            if entry.kind == vapor_providers::RemoteEntryKind::Directory =>
+        {
+            Some(list_subtree(
+                context.provider.as_ref(),
+                &request.remote_path,
+            ))
+        }
+        _ => None,
+    };
+    ProbeResult {
+        stat,
+        content_hash,
+        subtree,
+    }
+}
+
+/// Lists every entry under `root`, parents before children, stopping
+/// at [`SUBTREE_LISTING_CAP`] entries.
+fn list_subtree(
+    provider: &dyn vapor_providers::Provider,
+    root: &RemotePath,
+) -> Result<Vec<RemoteEntry>, ProviderError> {
+    let mut collected = Vec::new();
+    let mut pending = std::collections::VecDeque::from([root.clone()]);
+    while let Some(directory) = pending.pop_front() {
+        for entry in provider.enumerate(&directory)? {
+            if entry.kind == vapor_providers::RemoteEntryKind::Directory {
+                pending.push_back(entry.path.clone());
+            }
+            collected.push(entry);
+            if collected.len() >= SUBTREE_LISTING_CAP {
+                return Ok(collected);
+            }
+        }
+    }
+    Ok(collected)
 }
 
 /// Steps a transfer session until it completes, fails, is cancelled, or
@@ -913,6 +964,7 @@ mod tests {
                 remote_path: RemotePath::root().join("b.txt").expect("path"),
                 want_stat: true,
                 hash: ProbeHash::Never,
+                want_subtree_listing: false,
             }),
         );
         let completed = pool.harvest();

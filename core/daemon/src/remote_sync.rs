@@ -13,7 +13,7 @@
 //! re-baselines the cursor, which is exactly the recovery path a real
 //! cloud provider needs when its server-side cursor lapses.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use vapor_providers::{ChangesPoll, ProviderError, RemoteChangeKind};
@@ -45,12 +45,25 @@ pub struct RemotePollReport {
     /// Push-only strict-mirror removals scheduled this poll (cloud-only
     /// content deleted).
     pub mirror_deletes: usize,
+    /// Remote changes left untouched because they would alias a
+    /// differently-cased local file. The paths are kept by the poller
+    /// (`take_name_collisions`) for the timeline.
+    pub name_collisions: usize,
 }
 
 pub struct RemotePoller {
     cursor_state_key: String,
     cursor: Option<String>,
+    /// Collisions found by polls since the last `take_name_collisions`.
+    name_collisions: Vec<(PathBuf, PathBuf)>,
+    /// Colliding remote names already reported once; the feed repeats
+    /// events for the same object and one report per name is enough.
+    reported_collisions: std::collections::BTreeSet<PathBuf>,
     cursor_loaded: bool,
+    /// Whether the first poll after startup has run. A cursor that the
+    /// provider rejects on that poll is a restart re-baseline (the
+    /// filesystem feed's cursor is process-local), not a feed gap.
+    first_poll_done: bool,
     last_poll_inst: Option<Instant>,
     /// A poll started on an earlier tick whose round trip is still in
     /// progress on its own thread.
@@ -66,9 +79,17 @@ impl RemotePoller {
             ),
             cursor: None,
             cursor_loaded: false,
+            first_poll_done: false,
             last_poll_inst: None,
             in_flight: None,
+            name_collisions: Vec::new(),
+            reported_collisions: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Collisions found since the last call, for the timeline.
+    pub fn take_name_collisions(&mut self) -> Vec<(PathBuf, PathBuf)> {
+        std::mem::take(&mut self.name_collisions)
     }
 
     /// Poll cadence for the current throttle state; `None` means the
@@ -235,13 +256,22 @@ impl RemotePoller {
         now: SystemTime,
         report: &mut RemotePollReport,
     ) -> Result<(), StateDbError> {
+        let first_poll = !self.first_poll_done;
+        self.first_poll_done = true;
         match poll {
             ChangesPoll::CursorExpired => {
                 report.cursor_expired = true;
-                logging::warning(
-                    "Remote changes cursor expired; scheduling whole-scope reconcile and re-baselining",
-                    &[("cursor_key", self.cursor_state_key.clone())],
-                );
+                if first_poll {
+                    logging::info(
+                        "Remote changes cursor did not survive the restart; re-baselining behind the startup reconcile",
+                        &[("cursor_key", self.cursor_state_key.clone())],
+                    );
+                } else {
+                    logging::warning(
+                        "Remote changes cursor expired; scheduling whole-scope reconcile and re-baselining",
+                        &[("cursor_key", self.cursor_state_key.clone())],
+                    );
+                }
                 // Reconcile reconstructs whatever the gap in the feed
                 // hid; the coalesced enqueue dedupes against a pending
                 // reconcile row.
@@ -279,6 +309,23 @@ impl RemotePoller {
                     // feed (up to 60s under Throttled) would otherwise let a
                     // stale Removed delete a freshly re-uploaded local file.
                     let event_time = change.observed_at;
+                    if change.kind == RemoteChangeKind::CreatedOrModified
+                        && let Some(existing) =
+                            crate::name_collision::colliding_local_path(&local_target)
+                    {
+                        if self.reported_collisions.insert(local_target.clone()) {
+                            crate::logging::warning(
+                                "Remote change collides with a differently-cased local file; leaving both sides untouched",
+                                &[
+                                    ("remote", change.path.as_str().to_string()),
+                                    ("local", existing.display().to_string()),
+                                ],
+                            );
+                            report.name_collisions += 1;
+                            self.name_collisions.push((local_target, existing));
+                        }
+                        continue;
+                    }
                     match change.kind {
                         RemoteChangeKind::CreatedOrModified => {
                             if remote_echoes.matches_write(

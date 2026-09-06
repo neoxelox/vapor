@@ -887,48 +887,36 @@ Landed:
       the report uploaded as an artifact, fifteen new scenarios
       (S23 to S37). `docs/development/e2e-verification.md`.
 
-Engine gaps the harness found (each names its scenario; fixing one
-means removing the scenario's known-gap marker in the same change):
+Engine gaps the harness found (each names its scenario). Landed:
 
-- [ ] TR-2 A local directory rename neither uploads the new subtree
-      nor deletes the old one remotely: the rename arrives as
-      `Removed(old)` + `Created(new)`, the new directory's children are
-      never enumerated, and the remote delete of the old directory is
-      non-recursive and retries forever on "Directory not empty". A
-      directory `Created` must schedule a subtree reconcile; a
-      directory delete must expand into guarded per-child deletes
-      (each refused when its remote diverged) before the directory
-      itself. Scenario S25.
-- [ ] TR-3 Stale changes-feed events under a path that just became a
-      file (`rm -rf tree` then `tree` as a file) produce downloads for
-      `tree/deeper`, one of which fails permanently with "cannot verify
-      sync-root containment: Not a directory". The feed must treat
-      `ENOTDIR` as proof the object is gone, and a download whose local
-      parent is a file must complete as a no-op when the remote object
-      is absent. Scenario S26.
-- [ ] TR-4 The reconcile walk takes an equal-size pair with no index
-      row as converged and never records it. After a state-DB loss the
-      index stays empty, so a later same-size offline edit of those
-      files goes unnoticed; in push-only a same-size cloud edit present
-      at first start is never overwritten. Index-less pairs must be
-      hashed once (the upload planner already converges silently on
-      equal content) and recorded. Scenarios S32 and S37.
-- [ ] TR-5 Two cloud objects whose names collide on a case-insensitive
-      local filesystem (`Readme.md` and `readme.md`) rewrite each other:
-      one download lands as a conflict copy but the cloud objects end up
-      changed. Decided rule: the second arrival becomes a keep-both
-      conflict copy through the existing conflict naming, listing, and
-      resolve flow; the cloud objects are never touched. Scenario S33.
-- [ ] TR-6 A local change inside its debounce window is lost from
-      memory on SIGTERM and only recovered by the next startup
-      reconcile. Flush the debounced events to the durable queue on
-      shutdown so "never lose intent state" holds without a restart.
-      Found by S08's oracle; no dedicated scenario yet.
-- [ ] TR-7 Two routine transitions log at WARNING on every restart
-      ("Received shutdown signal", "Remote changes cursor expired" for
-      the filesystem provider's process-local cursor). Demote them to
-      INFO and remove them from the harness's routine-warning list, so a
-      healthy run has a warning budget of zero.
+- [x] TR-2 A local directory rename neither uploaded the new subtree
+      nor deleted the old one remotely. A directory that appears is now
+      walked and its files reported as synthesized watcher events; a
+      directory delete expands into guarded per-entry deletes, deepest
+      first, with the directory last. Scenario S25.
+- [x] TR-3 Stale changes-feed events under a path that became a file
+      produced a permanently failed download. `NotADirectory` now reads
+      as a removal in the feed. Scenario S26.
+- [x] TR-4 The reconcile walk took an equal-size pair with no index row
+      as converged and never recorded it. Index-less pairs are verified
+      once through the upload planner and recorded. Scenarios S32, S37.
+- [x] TR-6 A local change inside its debounce window was lost from
+      memory on SIGTERM. The runtime flushes pending events to the
+      durable queue at shutdown. Scenario S39.
+- [x] TR-7 Two routine transitions logged at WARNING on every restart.
+      Demoted to INFO; the harness's routine-warning list is empty.
+
+Still open:
+
+- [ ] TR-5 Case collisions: the guard that keeps two cloud objects
+      whose names differ only by case from rewriting each other landed
+      (the second name is reported on the timeline and left untouched
+      on both sides; scenario S38). The decided end state, the second
+      object materializing locally as a keep-both conflict copy through
+      the existing conflict naming, listing, and resolve flow, needs a
+      durable record of which cloud object owns the local name so a
+      later reconcile does not manufacture another copy. Belongs with
+      the decisions table. Scenario S33 stays a known gap until then.
 - [ ] TR-8 Google Drive mode of the harness: a `CloudSide` the harness
       performs through the provider crate, a per-run `VaporE2E-<run-id>`
       folder created and deleted by the harness, longer wait budgets,
