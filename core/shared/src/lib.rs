@@ -85,6 +85,12 @@ pub struct ThrottleInputs {
     pub network_error_rate_percent: u8,
     pub network_throughput_kbps: Option<u32>,
     pub user_active: bool,
+    /// Resident memory of this process; `None` when the host has no
+    /// sampler for it. Drives the memory ceiling and the utilization
+    /// figure in `vapor status`.
+    pub vapor_memory_bytes: Option<u64>,
+    /// Physical memory of the device; `None` when unmeasured.
+    pub device_memory_bytes: Option<u64>,
 }
 
 impl Default for ThrottleInputs {
@@ -104,6 +110,8 @@ impl Default for ThrottleInputs {
             // lands, will supply a concrete value here.
             network_throughput_kbps: None,
             user_active: false,
+            vapor_memory_bytes: None,
+            device_memory_bytes: None,
         }
     }
 }

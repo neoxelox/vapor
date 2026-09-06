@@ -118,31 +118,33 @@ in-memory store and prints a warning on every `auth` command.
 Returns a `ThrottleInputs` (`on_battery`, `low_power_mode`,
 `thermal_pressure`, `system_cpu_load_percent`, `vapor_cpu_load_percent`,
 `disk_pressure`, `network_error_rate_percent`, `network_throughput_kbps`,
-`user_active`).
+`user_active`, `vapor_memory_bytes`, `device_memory_bytes`). CPU
+percentages are shares of the whole device, so a single busy core on an
+eight-core machine reads as 13%.
 
-| OS | Notes |
+| OS | Status |
 |---|---|
-| macOS | `host_statistics64` + `task_info`; `IOPSCopyPowerSourcesInfo`; `NSProcessInfo.isLowPowerModeEnabled`; `NSProcessInfo.thermalState`; `nw_path_monitor` for expensive links. |
-| Windows | `GetSystemTimes` + `GetProcessTimes` (or PDH); `GetSystemPowerStatus`; `CallNtPowerInformation(SystemPowerInformation)`; `NotifyNetworkConnectivityHintChange` (metered ⇒ auto-throttle). |
-| Linux | `/proc/stat`, `/proc/self/stat`; `/sys/class/power_supply/*`; `/proc/pressure/{cpu,io,memory}` (PSI); `/proc/net/dev`; NetworkManager D-Bus `NM-metered` when present. |
+| macOS | Shipped. `host_statistics64` (system CPU), `getrusage` (daemon CPU), `IOPSGetTimeRemainingEstimate` (battery), `NSProcessInfo.thermalState` and `isLowPowerModeEnabled` through the Objective-C runtime, `proc_pidinfo` and `hw.memsize` (memory), and the HID idle clock for `user_active` (input within the last 30 s). One read per throttle interval; calls inside the interval return the cached reading. `disk_pressure` and the two network fields keep their defaults: macOS has no public disk-pressure signal and link capacity is not measured yet. |
+| Windows | Planned. `GetSystemTimes` + `GetProcessTimes`; `GetSystemPowerStatus`; `CallNtPowerInformation`; `NotifyNetworkConnectivityHintChange` (metered means auto-throttle). Today the native sampler returns the static defaults and `has_native_sampling()` is `false`. |
+| Linux | Planned. `/proc/stat`, `/proc/self/stat`; `/sys/class/power_supply/*`; PSI under `/proc/pressure/`; `/proc/net/dev`; NetworkManager `NM-metered` when present. Static defaults today. |
 
-`StaticMetricsSampler` (config-driven) is the headless/CLI fallback and the
-test fake.
+`StaticPlatformMetricsSampler` (config-driven) is the headless/CLI
+fallback and the test fake.
 
 ### `IdleNotifier`
 
-User-idle duration, event-driven where possible.
+User-idle duration, polled on the throttle cadence.
 
-| OS | Source |
-|---|---|
-| macOS | `CGEventSourceSecondsSinceLastEventType` |
-| Windows | `GetLastInputInfo` polled on the 1s throttle cadence |
-| Linux (X11) | `XScreenSaverQueryInfo` |
-| Linux (Wayland) | `org.freedesktop.ScreenSaver` / `ext-idle-notify-v1` |
-| Headless | Always-idle — CLI/server default |
+| OS | Source | Status |
+|---|---|---|
+| macOS | `CGEventSourceSecondsSinceLastEventType` on the HID system state | Shipped. Without a window-server session (SSH, CI agents) the notifier reports the headless always-idle reading, decided once at construction. |
+| Windows | `GetLastInputInfo` | Planned. Reports zero idle time today so idle boost stays off. |
+| Linux (X11) | `XScreenSaverQueryInfo` | Planned. Zero idle time today. |
+| Linux (Wayland) | `org.freedesktop.ScreenSaver` / `ext-idle-notify-v1` | Planned. |
+| Headless | Always-idle | CLI and server default. |
 
-`--user-activity=always|never|auto` on the `vapor` CLI overrides the
-auto-detect.
+A CLI flag to force always-idle or never-idle is planned and not
+implemented.
 
 ### `FilesystemCapabilities`
 

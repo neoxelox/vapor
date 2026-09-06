@@ -120,15 +120,17 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // the legacy state paths.
     let profiles = crate::profiles::resolve_profiles(&config);
     let filter_options = EventPathFilterOptions::from_environment_and_config(&config);
-    // The native platform sampler (per-OS FFI lands incrementally; it
-    // currently reports static idle inputs) — wired here so the seam is
-    // exercised in production, not just in tests.
     let metrics_sampler = Arc::new(NativePlatformMetricsSampler::for_current_host());
-    if !NativePlatformMetricsSampler::has_native_sampling() {
+    if NativePlatformMetricsSampler::has_native_sampling() {
+        logging::info(
+            "Throttle inputs come from the host: CPU load, power source, thermal state, \
+             Low Power Mode, memory, and keyboard/pointer presence",
+            &[],
+        );
+    } else {
         logging::warning(
-            "Throttle inputs are static placeholders (no native metrics bridge yet): \
-             battery/thermal/CPU pressure will not throttle the daemon, and idle-boost \
-             stays off. Real per-OS sampling lands with the platform metrics bridge.",
+            "Throttle inputs are static placeholders on this OS: battery, thermal and CPU \
+             pressure will not throttle the daemon, and idle boost stays off",
             &[],
         );
     }

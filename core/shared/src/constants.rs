@@ -474,6 +474,11 @@ pub mod engine {
     pub const DOCUMENT_DEBOUNCE_WINDOW_MILLIS: u64 = 1_500;
     pub const DEFAULT_DEBOUNCE_WINDOW_MILLIS: u64 = 4_000;
     pub const THROTTLE_SAMPLE_INTERVAL_MILLIS: u64 = 1_000;
+    /// Keyboard or pointer input inside this window marks the user as
+    /// active, which holds the throttle at `Throttled` so sync never
+    /// competes with someone at the keyboard. Long enough that a pause
+    /// between keystrokes does not flip the state every second.
+    pub const USER_ACTIVE_INPUT_WINDOW_MILLIS: u64 = 30_000;
     pub const STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS: u64 = 60_000;
     pub const LEASE_TIMEOUT_MILLIS: u64 = 15 * 60 * 1_000;
     pub const LIGHT_SYSTEM_CPU_PERCENT: u8 = 35;

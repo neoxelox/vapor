@@ -158,14 +158,16 @@ from existing Swift/docs. Windows/Linux impls land later (Phase C6/C7).
       tests; both run the same contract test.
 - [x] C3-5 Define trait `PlatformMetricsSampler` that returns
       `ThrottleInputs`. Add `StaticMetricsSampler` (config-driven) for the
-      CLI / headless / test case. macOS implementation via `mach2` +
-      `IOKit` / FFI-bridged `NSProcessInfo` signals. *(Wave 4 ships the
-      trait + `StaticPlatformMetricsSampler`; the mach2 / IOKit bridge
-      lands incrementally as Wave 4 follow-ups.)*
+      CLI / headless / test case. macOS implementation reads CPU
+      (`host_statistics64`, `getrusage`), power (`IOPSGetTimeRemainingEstimate`),
+      thermal state and Low Power Mode (`NSProcessInfo`), memory
+      (`proc_pidinfo`, `hw.memsize`) and user presence (HID idle clock).
+      Disk pressure and link capacity still use neutral defaults; see
+      C3-11.
 - [x] C3-6 Define trait `IdleNotifier`. macOS implementation via
-      `CGEventSourceSecondsSinceLastEventType`. Add `AlwaysIdleNotifier` for
-      headless/test case. *(Wave 4 ships the trait + `AlwaysIdleNotifier`;
-      the CGEvent bridge lands with the C8 active-coding-detection work.)*
+      `CGEventSourceSecondsSinceLastEventType`, falling back to always-idle
+      when there is no window-server session. Add `AlwaysIdleNotifier` for
+      headless/test case.
 - [x] C3-7 Define trait `ProcessSupervisor` (`register_shutdown_handler`).
       Port the existing `SIGTERM`/`SIGINT` handlers from
       `core/daemon/src/main.rs` to `signal-hook`-based handlers on Unix.
@@ -184,6 +186,13 @@ from existing Swift/docs. Windows/Linux impls land later (Phase C6/C7).
 - [x] C3-10 Author `docs/architecture/platform-abstractions.md`: trait list,
       contract, expected per-OS native API, test fake, and the parity matrix
       from `docs/plans/core.md §9`.
+- [ ] C3-11 Remaining throttle inputs. macOS: a disk-pressure source
+      (none is public; evaluate free space on the sync-root volume as a
+      proxy) and measured link capacity for `network_throughput_kbps`
+      (`nw_path_monitor` or a transfer-derived estimate). Windows and
+      Linux: the full sampler and idle notifier listed in
+      `docs/architecture/platform-abstractions.md` when those surfaces
+      ship; until then both return static defaults and zero idle time.
 
 Exit gate:
 

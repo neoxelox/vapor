@@ -19,9 +19,11 @@ Tasks: `docs/tasks/core.md` Phase C3.
 - `secrets` — per-provider OAuth tokens and other credentials. Keychain
   Services on macOS (shipped); Credential Manager on Windows and
   libsecret / age-encrypted file on Linux (stubs).
-- `metrics` — `PlatformMetricsSampler` returning a fresh
-  `ThrottleInputsSnapshot` every tick.
-- `idle` — user-idle duration source.
+- `metrics` — `PlatformMetricsSampler` returning fresh `ThrottleInputs`
+  once per throttle interval (host CPU, power, thermal, memory and user
+  presence on macOS; static defaults on Linux and Windows).
+- `idle` — user-idle duration source (HID idle clock on macOS; zero on
+  Linux and Windows so idle boost stays off there).
 - `fs_caps` — filesystem capabilities (xattr / ADS support, case
   sensitivity).
 - `process` — graceful-shutdown signal handler registration.

@@ -1057,7 +1057,9 @@ impl DaemonRuntime {
             effective_memory_percent: ceilings.memory_percent,
             effective_bandwidth_percent: ceilings.bandwidth_percent,
             cpu_utilization_percent: inputs.map(|i| i.vapor_cpu_load_percent).unwrap_or(0),
-            memory_utilization_percent: 0,
+            memory_utilization_percent: inputs
+                .and_then(|i| memory_share_percent(i.vapor_memory_bytes, i.device_memory_bytes))
+                .unwrap_or(0),
             bandwidth_utilization_kbps: bandwidth_rate_kbps,
             idle_boost_state: ceilings.boost_state.to_string(),
             idle_boost_reason: ceilings.reason.clone(),
@@ -1524,19 +1526,23 @@ impl DaemonRuntime {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .set_rate(Some(rate_bytes_per_sec.max(1)));
-            self.apply_memory_ceiling(ceilings.memory_percent);
+            self.apply_memory_ceiling(ceilings.memory_percent, &inputs);
             self.latest_ceilings = Some(ceilings);
             self.last_sampled_inputs = Some(inputs);
         }
     }
 
-    /// Memory-ceiling reactions: bounded caches trim toward
-    /// their documented floors when the entry population outgrows the
-    /// ceiling-derived budget, and restore when clearly under it
-    /// (hysteresis at half the budget). Floors are enforced by the
-    /// caches themselves — loop prevention and observability never
-    /// degrade below their guarantees.
-    fn apply_memory_ceiling(&mut self, memory_percent: u8) {
+    /// Memory-ceiling reactions. The ceiling is a share of device
+    /// memory; when the host reports the daemon's resident size the
+    /// comparison is against that share, and the bounded caches trim
+    /// toward their documented floors while the process sits over it,
+    /// restoring once it is clearly under (hysteresis at half the
+    /// budget). The same trim also fires when the cache population
+    /// alone outgrows an entry budget derived from the ceiling, which is
+    /// the only signal on hosts without a memory sampler. Floors are
+    /// enforced by the caches themselves, so loop prevention and
+    /// observability never degrade below their guarantees.
+    fn apply_memory_ceiling(&mut self, memory_percent: u8, inputs: &ThrottleInputs) {
         const ENTRIES_PER_MEMORY_PERCENT: usize = 400;
         let budget_entries = usize::from(memory_percent) * ENTRIES_PER_MEMORY_PERCENT;
         let usage = self.local_echoes.len()
@@ -1546,8 +1552,16 @@ impl DaemonRuntime {
                 .as_ref()
                 .map(|timeline| timeline.len())
                 .unwrap_or(0);
+        let (over_bytes, under_bytes) =
+            match (inputs.vapor_memory_bytes, inputs.device_memory_bytes) {
+                (Some(resident), Some(device)) if device > 0 => {
+                    let budget = device / 100 * u64::from(memory_percent);
+                    (resident > budget, resident < budget / 2)
+                }
+                _ => (false, true),
+            };
 
-        if usage > budget_entries {
+        if usage > budget_entries || over_bytes {
             let squeezed_ttl =
                 Duration::from_millis(vapor_shared::constants::self_write_cache::MIN_TTL_MILLIS);
             let squeezed_entries = vapor_shared::constants::self_write_cache::MIN_ENTRIES;
@@ -1562,7 +1576,7 @@ impl DaemonRuntime {
                     .get_or_insert(timeline.max_entries());
                 timeline.set_max_entries(budget_entries / 4);
             }
-        } else if usage < budget_entries / 2 {
+        } else if usage < budget_entries / 2 && under_bytes {
             let default_ttl = Duration::from_millis(
                 vapor_shared::constants::self_write_cache::DEFAULT_TTL_MILLIS,
             );
@@ -2137,6 +2151,16 @@ fn is_local_self_write_echo(
         return false;
     };
     local_echoes.matches_write(&key, None, Some(&content_hash), now)
+}
+
+/// Resident size as a whole-number share of device memory, rounded up so
+/// a running daemon never reports 0% while it holds memory.
+fn memory_share_percent(resident: Option<u64>, device: Option<u64>) -> Option<u8> {
+    let (resident, device) = (resident?, device?);
+    if device == 0 {
+        return None;
+    }
+    Some((resident.saturating_mul(100)).div_ceil(device).min(100) as u8)
 }
 
 #[cfg(test)]
