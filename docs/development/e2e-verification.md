@@ -279,6 +279,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S39 | a write reported moments before SIGTERM becomes a durable intent at shutdown and uploads right after the restart |
 | S40 | a burst of cloud deletions is held before it touches this device; `--choose discard` restores the cloud copies from the local ones |
 | S41 | a cloud edit made while the daemon was down that keeps the byte count is found by the startup reconcile and downloaded, with no conflict copy |
+| S42 | a file removed on this device because the cloud deleted it lands in the trash; `vapor trash list` shows it and `vapor trash restore` brings it back and re-uploads it |
 | R01 | install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd (`--full`) |
 
 ## Extending the harness

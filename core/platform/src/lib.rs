@@ -31,6 +31,7 @@ pub mod metrics;
 pub mod process;
 pub mod secrets;
 pub mod service;
+pub mod trash;
 
 pub use fs_caps::{
     CaseSensitivity, FilesystemCapabilities, InMemoryFilesystemCapabilities,
@@ -52,3 +53,4 @@ pub use service::{
     InMemoryServiceInstaller, NativeServiceInstaller, ServiceDescriptor, ServiceInstallError,
     ServiceInstaller, ServiceStatus,
 };
+pub use trash::{InMemoryTrashBin, NativeTrashBin, TrashBin};

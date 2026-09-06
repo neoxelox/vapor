@@ -128,8 +128,12 @@ modes deliberately trade it for a faithful mirror: strict mirror can
 **overwrite and delete user data** on the subordinate side (`pull-only`
 reverts local edits and removes local-only files; `push-only` does the
 symmetric thing to the cloud), permanently, to match the source. That is the
-whole point of the feature, so the protection is *informed opt-in*, not a
-recovery net — there is no quarantine or undo:
+whole point of the feature, so the protection is *informed opt-in*. The
+one net under it is the local trash (`data-flow.md` §Remote to local):
+what `pull-only` removes on this device is kept there for
+`trash.retentionDays`; what `push-only` removes in the cloud depends on
+the provider (Google Drive trashes, the filesystem provider does not).
+Overwrites have no undo on either side:
 
 - **Opt-in, per profile.** A profile is `two-way` unless the user explicitly
   sets `syncMode` to `pull-only` or `push-only`. The mode is never inferred,

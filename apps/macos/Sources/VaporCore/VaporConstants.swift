@@ -180,6 +180,7 @@ public enum VaporConstants {
     public static let resourceLimits = "resourceLimits"
     public static let idleBoost = "idleBoost"
     public static let safeguards = "safeguards"
+    public static let trash = "trash"
   }
 
   /// Accepted `syncMode` values. Mirrors

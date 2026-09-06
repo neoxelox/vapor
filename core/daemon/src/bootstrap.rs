@@ -200,6 +200,7 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     let runtime_control = Arc::new(RuntimeControl::new());
     runtime.attach_control(runtime_control.clone());
     runtime.set_timeline_limit(config.timeline_limit);
+    runtime.configure_trash(crate::trash::TrashSettings::resolve(&config));
     let ipc_service = Arc::new(DaemonIpcService::with_timeline(
         initial_snapshot,
         runtime_control,

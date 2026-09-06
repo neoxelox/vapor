@@ -262,12 +262,16 @@ pub struct DaemonRuntime {
     /// Heuristic active-coding signal; ORs `user_active` into
     /// the throttle inputs when code-class files churn rapidly.
     active_coding: crate::safeguards::ActiveCodingHeuristic,
-    /// Mass-deletion guard; pauses the daemon and raises a
-    /// timeline alert on a local deletion storm.
+    /// Mass-deletion guard; holds a deletion burst in either direction
+    /// behind a decision.
     mass_change_guard: crate::safeguards::MassChangeGuard,
-    /// Resolved `safeguards` config: threshold/window feeding the guard
-    /// and its user-facing trip reason; `enabled = false` bypasses it.
+    /// Resolved `safeguards` config: threshold, window, and ratio
+    /// feeding the guard; `enabled = false` bypasses it.
     mass_delete_settings: crate::safeguards::MassDeleteGuardSettings,
+    /// Where a file Vapor removes on this device goes. `None` until
+    /// the profile runtime attaches one; the bare fixtures unlink.
+    trash: Option<crate::trash::LocalTrash>,
+    last_trash_purge_inst: Option<Instant>,
     /// Flush boost deadline (monotonic). While set and in the
     /// future, deferred reconciles release immediately regardless of
     /// the idle gate.
@@ -452,6 +456,7 @@ impl DaemonRuntime {
         self.sample_throttle_inputs(now, throttle_inputs);
         self.reload_path_filter_if_requested();
         self.sweep_stale_leases_if_due(now)?;
+        self.purge_trash_if_due(now);
         self.retry_cloud_root_if_needed();
         self.apply_resolved_decisions(now)?;
 
@@ -531,6 +536,7 @@ impl DaemonRuntime {
                     .mass_delete_settings
                     .enabled
                     .then_some(&mut self.mass_change_guard),
+                trash: self.trash.as_ref(),
             };
             self.staged_executor
                 .advance(&mut self.app, &mut self.state_db, &mut env, now)?
@@ -681,6 +687,7 @@ impl DaemonRuntime {
                         .mass_delete_settings
                         .enabled
                         .then_some(&mut self.mass_change_guard),
+                    trash: self.trash.as_ref(),
                 };
                 let mut admission_report = crate::executor::StagedExecutorReport::default();
                 self.staged_executor.advance_intents(
@@ -741,6 +748,35 @@ impl DaemonRuntime {
     /// Periodic in-run recovery of leases that exceeded the lease
     /// timeout (an orphaned execution). Startup recovery handles dead
     /// processes; this sweep handles a lease lost *within* a live run.
+    /// Drops managed-trash entries past their retention, at startup and
+    /// then on a slow cadence. A directory scan of the trash, cheap at
+    /// the cadence and only while the daemon is otherwise ticking.
+    fn purge_trash_if_due(&mut self, now: SystemTime) {
+        let Some(trash) = &self.trash else {
+            return;
+        };
+        let now_inst = self.clock.now();
+        let interval = Duration::from_secs(constants::trash::PURGE_INTERVAL_SECONDS);
+        let due = self
+            .last_trash_purge_inst
+            .map(|last| now_inst.saturating_duration_since(last) >= interval)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.last_trash_purge_inst = Some(now_inst);
+        let purged = trash.purge_expired(now);
+        if purged > 0 {
+            logging::info(
+                "Purged expired trash entries",
+                &[
+                    ("profile_id", self.profile_id.clone()),
+                    ("purged", purged.to_string()),
+                ],
+            );
+        }
+    }
+
     fn sweep_stale_leases_if_due(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
         let now_inst = self.clock.now();
         let due = self
@@ -1061,6 +1097,8 @@ impl DaemonRuntime {
             active_coding: crate::safeguards::ActiveCodingHeuristic::default(),
             mass_change_guard: crate::safeguards::MassChangeGuard::default(),
             mass_delete_settings: crate::safeguards::MassDeleteGuardSettings::default(),
+            trash: None,
+            last_trash_purge_inst: None,
             flush_boost_until_inst: None,
         })
     }
@@ -1093,6 +1131,23 @@ impl DaemonRuntime {
             settings.threshold,
             settings.ratio_percent,
         );
+    }
+
+    /// Attaches the profile's trash. Every local removal the engine
+    /// performs from then on goes through it.
+    pub fn attach_trash(&mut self, trash: crate::trash::LocalTrash) {
+        self.trash = Some(trash);
+    }
+
+    /// Applies the `trash` config group to the attached trash.
+    pub fn configure_trash(&mut self, settings: crate::trash::TrashSettings) {
+        if let Some(trash) = &mut self.trash {
+            trash.configure(settings);
+        }
+    }
+
+    pub fn trash(&self) -> Option<&crate::trash::LocalTrash> {
+        self.trash.as_ref()
     }
 
     /// Passes the explicit transfer-concurrency ceiling to the app (see
@@ -5140,6 +5195,82 @@ mod tests {
                 .expect("held"),
             0
         );
+    }
+
+    #[test]
+    fn a_cloud_deletion_applied_locally_lands_in_the_trash_and_restores() {
+        let mut fixture = BidirectionalFixture::new();
+        let trash_root = fixture._temp.path().join("trash/default");
+        fixture.runtime.attach_trash(crate::trash::LocalTrash::new(
+            "default",
+            trash_root,
+            crate::trash::TrashSettings::default(),
+            Arc::new(vapor_platform::InMemoryTrashBin::unsupported()),
+        ));
+        fixture.tick(6_000);
+        let local = fixture.watch_root.join("docs/keep.txt");
+        std::fs::create_dir_all(local.parent().unwrap()).expect("dir");
+        std::fs::write(&local, b"worth keeping").expect("seed");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(20);
+        let cloud = fixture.cloud_root.join("docs/keep.txt");
+        assert!(cloud.exists());
+
+        // Another device deletes it in the cloud.
+        std::fs::remove_file(&cloud).expect("cloud unlink");
+        fixture
+            .feed
+            .emit_removed(cloud.clone(), timestamp_ms(fixture.now_ms));
+        fixture.converge(20);
+        assert!(!local.exists(), "the deletion applies locally");
+        let entries = fixture.runtime.trash().expect("trash").list();
+        assert_eq!(entries.len(), 1, "the removed file is kept in the trash");
+        assert_eq!(entries[0].original_path, local);
+        assert_eq!(entries[0].reason, constants::trash::REASON_CLOUD_DELETION);
+
+        // The user brings it back; it syncs up like any other write.
+        let landed = fixture
+            .runtime
+            .trash()
+            .expect("trash")
+            .restore(&entries[0].id)
+            .expect("restore");
+        assert_eq!(landed, local);
+        assert_eq!(std::fs::read(&local).expect("restored"), b"worth keeping");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(20);
+        assert_eq!(
+            std::fs::read(&cloud).expect("re-uploaded"),
+            b"worth keeping"
+        );
+        assert!(fixture.runtime.trash().expect("trash").list().is_empty());
+    }
+
+    #[test]
+    fn a_pull_only_mirror_removal_lands_in_the_trash() {
+        let mut fixture = BidirectionalFixture::new_with_mode(vapor_shared::SyncMode::PullOnly);
+        let trash_root = fixture._temp.path().join("trash/default");
+        fixture.runtime.attach_trash(crate::trash::LocalTrash::new(
+            "default",
+            trash_root,
+            crate::trash::TrashSettings::default(),
+            Arc::new(vapor_platform::InMemoryTrashBin::unsupported()),
+        ));
+        let local_only = fixture.watch_root.join("only-here.txt");
+        std::fs::write(&local_only, b"not in the cloud").expect("seed");
+        fixture
+            .runtime
+            .enqueue_startup_reconstruction_reconcile(timestamp_ms(fixture.now_ms))
+            .expect("reconcile");
+        fixture.converge(30);
+        assert!(
+            !local_only.exists(),
+            "pull-only removes the local-only file"
+        );
+        let entries = fixture.runtime.trash().expect("trash").list();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].reason, constants::trash::REASON_MIRROR_REMOVAL);
+        assert_eq!(entries[0].original_path, local_only);
     }
 
     #[test]

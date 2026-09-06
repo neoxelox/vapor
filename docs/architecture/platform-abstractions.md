@@ -187,6 +187,25 @@ The unified handler sets the existing `SHUTDOWN_REQUESTED` atomic in
 `core/daemon/src/runtime.rs`. The tick loop observes it and exits cleanly
 at the next tick boundary.
 
+### `TrashBin`
+
+The user's own trash, for a file Vapor removes on this device. The
+daemon's managed trash under `vapor_dir/trash/<profile>/`
+(`core/daemon/src/trash.rs`) is the safety net that works on every OS;
+this trait is the opt-in (`trash.useSystemTrash`) discoverable
+alternative, and the managed trash catches whatever the native bin
+refuses (another volume, no session), so a discard never degrades to an
+unlink.
+
+| OS | Mechanism | Status |
+|---|---|---|
+| macOS | Rename into `~/.Trash`, Finder-style numbered duplicates | Shipped. Cross-volume moves are refused rather than copied. |
+| Windows | `SHFileOperation` / `IFileOperation` with `FOF_ALLOWUNDO` (Recycle Bin) | Planned. Refuses with `Unsupported` today. |
+| Linux | freedesktop trash spec (`~/.local/share/Trash`, per-volume `.Trash-<uid>`) | Planned. Refuses with `Unsupported` today. |
+
+The fake (`InMemoryTrashBin`) moves into a directory the test owns and
+can be told to refuse, which is how the fallback is tested.
+
 ## Parity matrix
 
 See `docs/plans/core.md §9` for the capability-vs-OS matrix. Every trait

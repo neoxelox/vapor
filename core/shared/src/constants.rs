@@ -31,6 +31,11 @@ pub mod runtime {
     pub const VAPOR_DIRECTORY_NAME: &str = ".vapor";
     pub const LOGS_DIRECTORY_NAME: &str = "logs";
     pub const STATE_DIRECTORY_NAME: &str = "state";
+    /// The managed trash: `vapor_dir/trash/<profile>/<entry>/`, one
+    /// directory per discarded item holding the payload under its
+    /// original name and a `meta.json` next to it.
+    pub const TRASH_DIRECTORY_NAME: &str = "trash";
+    pub const TRASH_ENTRY_META_FILE_NAME: &str = "meta.json";
     pub const CONFIGURATION_FILE_NAME: &str = "vapor.json";
     pub const SQLITE_DATABASE_FILE_NAME: &str = "vapor.sqlite";
     pub const APP_LOG_FILE_NAME: &str = "vapor.logs";
@@ -120,6 +125,8 @@ pub mod config {
     pub const KEY_IDLE_BOOST: &str = "idleBoost";
     /// Safeguards group; object with the `safeguards::KEY_*` fields.
     pub const KEY_SAFEGUARDS: &str = "safeguards";
+    /// Trash group; object with the `trash::KEY_*` fields.
+    pub const KEY_TRASH: &str = "trash";
 
     /// Keys a running daemon applies within one poll interval of the
     /// file changing, without a restart. The CLI tells the user which
@@ -133,6 +140,7 @@ pub mod config {
         KEY_RESOURCE_LIMITS,
         KEY_IDLE_BOOST,
         KEY_SAFEGUARDS,
+        KEY_TRASH,
     ];
 
     /// Keys that reshape the pipeline (roots, provider, direction,
@@ -167,6 +175,7 @@ pub mod config {
         KEY_RESOURCE_LIMITS,
         KEY_IDLE_BOOST,
         KEY_SAFEGUARDS,
+        KEY_TRASH,
     ];
 
     /// Default values for the config keys whose defaults are not already
@@ -321,6 +330,28 @@ pub mod safeguards {
     /// The ratio rule never holds fewer deletions than this, so a tree
     /// of three files does not prompt on every second deletion.
     pub const MIN_MASS_DELETE_RATIO_COUNT: usize = 10;
+}
+
+pub mod trash {
+    /// Keys of the `trash` config group. Every file Vapor itself
+    /// removes on this device (a deletion that arrived from the cloud,
+    /// a mirror removal in `pull-only`) goes to a trash instead of
+    /// being unlinked, so a wrong deletion can be undone here without
+    /// the cloud's own trash.
+    pub const KEY_ENABLED: &str = "enabled";
+    /// Days a managed-trash entry is kept before the daemon purges it.
+    pub const KEY_RETENTION_DAYS: &str = "retentionDays";
+    /// Try the user's own trash (the Finder's Trash on macOS) first and
+    /// fall back to the managed trash when that fails.
+    pub const KEY_USE_SYSTEM_TRASH: &str = "useSystemTrash";
+    pub const DEFAULT_ENABLED: bool = true;
+    pub const DEFAULT_RETENTION_DAYS: u32 = 30;
+    pub const DEFAULT_USE_SYSTEM_TRASH: bool = false;
+    /// How often a running daemon looks for expired entries.
+    pub const PURGE_INTERVAL_SECONDS: u64 = 1_800;
+    /// What a discarded item was to Vapor; recorded in `meta.json`.
+    pub const REASON_CLOUD_DELETION: &str = "deleted-in-cloud";
+    pub const REASON_MIRROR_REMOVAL: &str = "mirror-removal";
 }
 
 pub mod sync_mode {

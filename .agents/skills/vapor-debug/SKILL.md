@@ -41,6 +41,7 @@ Inside `VAPOR_DIR`:
 | Durable queue/state DB | `state/vapor.sqlite` for the implicit `default` profile; `state/profiles/<id>/vapor.sqlite` per configured profile (tables: `queue_intents`, `failed_intents`, `pending_decisions`, `name_aliases`, `state_entries`, `sync_index`, `tombstones`, `schema_meta`) |
 | Quarantined DB | `vapor.sqlite.corrupt-<ms>` next to the DB: the daemon moved a corrupt file aside and started fresh; a startup reconcile rebuilt the queue |
 | Lifecycle state | `state/lifecycle.json` (crash-loop bookkeeping shared by the CLI and the app) |
+| Trash | `trash/<profile>/<entry>/` (what Vapor removed on this device: the payload under its original name plus `meta.json`; `vapor trash list` reads it) |
 | IPC socket (framed JSON over UDS — Vapor does not use XPC) | `vapord.sock`, relocated under the OS temp dir when the path exceeds ~104 bytes (`vapor doctor` reports where) |
 | Singleton lock | `vapord.lock` |
 

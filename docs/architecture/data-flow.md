@@ -37,6 +37,18 @@ On macOS the throttle inputs are read from the host every second: system and dae
    downloaded, and can never manufacture a keep-both conflict copy.
 3. Loop prevention filters self-originated writes.
 4. Apply pipeline writes local changes and records conflict/tombstone outcomes.
+5. A file Vapor removes on this device (a deletion that arrived from the
+   cloud in `two-way`, a mirror removal in `pull-only`) is never
+   unlinked: it goes to the profile's managed trash under
+   `vapor_dir/trash/<profile>/<entry>/` with a `meta.json` naming the
+   original path, the time, and the reason, or to the user's own trash
+   when `trash.useSystemTrash` is set and the platform `TrashBin`
+   accepts it. `vapor trash list|restore|empty` work with or without a
+   daemon; a restored file lands in the sync root and syncs like any
+   write. The daemon purges entries older than `trash.retentionDays`
+   at startup and every half hour. `trash.enabled: false` unlinks.
+   What Vapor removes in the cloud follows the provider's own semantics
+   (Google Drive trashes; the filesystem provider removes).
 
 ## Sync modes (directionality)
 

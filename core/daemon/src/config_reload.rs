@@ -74,6 +74,7 @@ pub fn diff(applied: &VaporConfig, fresh: &VaporConfig) -> ConfigChange {
     );
     live(applied.idle_boost != fresh.idle_boost, keys::KEY_IDLE_BOOST);
     live(applied.safeguards != fresh.safeguards, keys::KEY_SAFEGUARDS);
+    live(applied.trash != fresh.trash, keys::KEY_TRASH);
 
     let mut restart = |differs: bool, key: &'static str| {
         if differs {
@@ -169,12 +170,14 @@ mod tests {
         fresh.pre_ignore_rules = "build/".to_string();
         fresh.provider = "gdrive".to_string();
         fresh.language_code = "es".to_string();
+        fresh.trash.retention_days = 7;
         let change = diff(&applied, &fresh);
         assert_eq!(
             change.live,
             vec![
                 constants::config::KEY_PRE_IGNORE_RULES,
-                constants::config::KEY_RESOURCE_LIMITS
+                constants::config::KEY_RESOURCE_LIMITS,
+                constants::config::KEY_TRASH,
             ]
         );
         assert_eq!(change.restart, vec![constants::config::KEY_PROVIDER]);

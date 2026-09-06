@@ -119,6 +119,7 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 - Handle local/remote races deterministically.
 - Default conflict policy: keep both (never silent overwrite).
 - Maintain tombstones and deletion semantics with durable replay. When the evidence is ambiguous (an unreadable mtime, an unknown provenance), keeping data wins over honouring a deletion.
+- A file Vapor removes on this device goes to the trash (`core/daemon/src/trash.rs`, the `TrashBin` platform trait), never straight to an unlink, unless the user turned the trash off.
 - Remote poll/apply pipeline must obey throttle and retry constraints.
 - Equality checks in the reconcile walk are the rsync quick check on both sides (size plus the local mtime and the remote mtime the sync index recorded), never a whole-tree hash; a pair the index has no row for is verified once, not assumed converged; the upload planner hashes and converges identical content silently, and a change on one side only while the other side still equals the last synced hash is a transfer in that direction, never a conflict copy.
 - Sync direction is selected by `syncMode` (`two-way` default; one-way
@@ -129,8 +130,10 @@ Do not move heavy compute into an app process or the fs-watch callback path.
   to exactly match the declared source of truth, permanently overwriting
   divergent edits and removing extra content). They must never be enabled
   silently or inferred, and must surface an up-front data-loss warning before
-  activation. There is no recoverable quarantine; the warning is the
-  safeguard. Full design: `docs/architecture/sync-modes.md`.
+  activation. The local trash keeps what a mirror removes on this device
+  for the retention window; overwrites and cloud-side removals on a
+  provider without a trash have no undo, so the warning is the safeguard.
+  Full design: `docs/architecture/sync-modes.md`.
 
 ## 5) Data durability and migrations
 

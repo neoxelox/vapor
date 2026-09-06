@@ -67,6 +67,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: mass_delete_guard,
         },
         Scenario {
+            id: "S42",
+            name: "trash-keeps-cloud-deletions",
+            proves: "a file removed on this device because the cloud deleted it lands in the trash; vapor trash list shows it and vapor trash restore brings it back and re-uploads it",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: trash_keeps_cloud_deletions,
+        },
+        Scenario {
             id: "S40",
             name: "mass-delete-decision-discard",
             proves: "a burst of cloud deletions is held before it touches this device; --choose discard restores the cloud copies from the local ones",
@@ -411,6 +419,57 @@ fn mass_delete_guard(ctx: &mut Ctx) -> Result<(), Failure> {
         "status still counts a decision"
     );
     ctx.allow_warning("Mass-deletion guard tripped");
+    Ok(())
+}
+
+fn trash_keeps_cloud_deletions(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let local = home.local.join("docs/keep.txt");
+    let cloud = home.cloud.join("docs/keep.txt");
+    let mark = ctx.mark();
+    write_file(&local, "worth keeping\n")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&cloud, CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    fs::remove_file(&cloud)?;
+    ctx.wait_absent(&local, Duration::from_secs(90))?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    let cli = ctx.cli();
+    let listed = cli.json(&["trash", "list", "--json"])?;
+    let entries = listed["entries"].as_array().cloned().unwrap_or_default();
+    ensure!(entries.len() == 1, "expected one trash entry, got {listed}");
+    ensure!(
+        entries[0]["reason"] == "deleted-in-cloud"
+            && entries[0]["originalPath"].as_str() == Some(local.to_str().unwrap_or_default()),
+        "unexpected trash entry: {}",
+        entries[0]
+    );
+    ensure!(
+        home.dir.join("trash/default").is_dir(),
+        "the managed trash lives under the profile's vapor_dir"
+    );
+
+    let id = entries[0]["id"].as_str().unwrap_or_default().to_string();
+    let mark = ctx.mark();
+    let restored = cli.json(&["trash", "restore", &id, "--json"])?;
+    ensure!(
+        restored["restoredTo"].as_str() == Some(local.to_str().unwrap_or_default()),
+        "restored somewhere else: {restored}"
+    );
+    ensure!(
+        read_string(&local)? == "worth keeping\n",
+        "restored content differs"
+    );
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&cloud, CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    let after = cli.json(&["trash", "list", "--json"])?;
+    ensure!(
+        after["entries"].as_array().is_some_and(Vec::is_empty),
+        "a restored entry must leave the trash: {after}"
+    );
     Ok(())
 }
 

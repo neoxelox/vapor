@@ -206,6 +206,13 @@ impl MultiProfileRuntime {
         }
     }
 
+    /// Applies the `trash` config group to every profile's trash.
+    pub fn configure_trash(&mut self, settings: crate::trash::TrashSettings) {
+        for slot in &mut self.slots {
+            slot.runtime.configure_trash(settings);
+        }
+    }
+
     /// Applies the configured `timelineLimit`.
     pub fn set_timeline_limit(&self, limit: i64) {
         if let Ok(limit) = usize::try_from(limit)
@@ -379,6 +386,18 @@ impl MultiProfileRuntime {
             runtime.set_device_id(device_id);
             runtime.set_profile_id(profile.id.clone());
             runtime.configure_mass_delete_guard(mass_delete_settings);
+            let trash_root = match &state_root {
+                Some(root) => root
+                    .join(constants::runtime::TRASH_DIRECTORY_NAME)
+                    .join(&profile.id),
+                None => vapor_shared::runtime_paths::profile_trash_directory(&profile.id),
+            };
+            runtime.attach_trash(crate::trash::LocalTrash::new(
+                &profile.id,
+                trash_root,
+                crate::trash::TrashSettings::default(),
+                Arc::new(vapor_platform::NativeTrashBin::for_current_host()),
+            ));
             runtime.set_max_concurrent_transfers(max_concurrent_transfers);
             runtime.attach_timeline(timeline.clone());
             runtime.attach_resource_management(
@@ -489,6 +508,12 @@ impl MultiProfileRuntime {
             let settings = crate::safeguards::MassDeleteGuardSettings::resolve(&config);
             for slot in &mut self.slots {
                 slot.runtime.configure_mass_delete_guard(settings);
+            }
+        }
+        if change.live.contains(&keys::KEY_TRASH) {
+            let settings = crate::trash::TrashSettings::resolve(&config);
+            for slot in &mut self.slots {
+                slot.runtime.configure_trash(settings);
             }
         }
         if change.live.iter().any(|key| {

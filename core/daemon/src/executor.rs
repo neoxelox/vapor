@@ -133,6 +133,9 @@ pub struct ExecutionEnv<'a> {
     /// The deletion guard, consulted the moment a deletion would become
     /// irreversible; `None` when the guard is disabled by configuration.
     pub deletion_guard: Option<&'a mut crate::safeguards::MassChangeGuard>,
+    /// Where a file Vapor removes on this device goes; `None` unlinks
+    /// (the harness fixtures that have no runtime around them).
+    pub trash: Option<&'a crate::trash::LocalTrash>,
 }
 
 /// One row of [`StagedExecutor::active_stages`].
@@ -2880,7 +2883,7 @@ fn apply_remote_delete_locally(
                 if env.sync_mode == vapor_shared::SyncMode::TwoWay {
                     return guarded_remove_dir(env, state_db, path, now);
                 }
-                return match fs::remove_dir_all(path) {
+                return match discard_local(env, path, now) {
                     Ok(()) => {
                         let _ = env.tags.remove(path);
                         env.local_echoes.record_delete(path_key(path), now);
@@ -2897,7 +2900,7 @@ fn apply_remote_delete_locally(
                     },
                 };
             }
-            match fs::remove_file(path) {
+            match discard_local(env, path, now) {
                 Ok(()) => {
                     let _ = env.tags.remove(path);
                     env.local_echoes.record_delete(path_key(path), now);
@@ -2913,6 +2916,46 @@ fn apply_remote_delete_locally(
             }
         }
     }
+}
+
+/// Removes a local file or directory the way the configuration asks:
+/// into the trash when there is one, else by unlinking. A `pull-only`
+/// mirror removal and a cloud deletion applied in `two-way` are the
+/// two reasons, and the trash entry records which.
+fn discard_local(env: &ExecutionEnv<'_>, path: &Path, now: SystemTime) -> std::io::Result<()> {
+    let Some(trash) = env.trash else {
+        let metadata = fs::symlink_metadata(path)?;
+        return if metadata.is_dir() {
+            fs::remove_dir_all(path)
+        } else {
+            fs::remove_file(path)
+        };
+    };
+    let reason = if env.sync_mode == vapor_shared::SyncMode::TwoWay {
+        constants::trash::REASON_CLOUD_DELETION
+    } else {
+        constants::trash::REASON_MIRROR_REMOVAL
+    };
+    match trash.discard(path, reason, now)? {
+        crate::trash::Disposition::Managed(id) => crate::logging::info(
+            "Moved a file Vapor removed on this device to the trash",
+            &[
+                ("path", path.display().to_string()),
+                ("trash_entry", id),
+                ("reason", reason.to_string()),
+            ],
+        ),
+        crate::trash::Disposition::System(landed) => crate::logging::info(
+            "Moved a file Vapor removed on this device to the user's trash",
+            &[
+                ("path", path.display().to_string()),
+                ("landed", landed.display().to_string()),
+                ("reason", reason.to_string()),
+            ],
+        ),
+        crate::trash::Disposition::Removed => {}
+    }
+    Ok(())
 }
 
 /// Two-way guarded recursive delete of a remotely-removed directory.
@@ -2994,7 +3037,7 @@ fn remove_dir_preserving_unsynced(
             }
         } else if metadata.is_file() {
             if child_delete_is_safe(state_db, &child, &metadata, env.hash_algorithm)? {
-                match fs::remove_file(&child) {
+                match discard_local(env, &child, now) {
                     Ok(()) => {
                         let _ = env.tags.remove(&child);
                         env.local_echoes.record_delete(path_key(&child), now);
@@ -3451,6 +3494,7 @@ mod tests {
                     local_echoes: &mut self.local_echoes,
                     remote_echoes: &mut self.remote_echoes,
                     deletion_guard: None,
+                    trash: None,
                 };
                 let report = self
                     .executor
@@ -4505,6 +4549,7 @@ mod tests {
             local_echoes: &mut fixture.local_echoes,
             remote_echoes: &mut fixture.remote_echoes,
             deletion_guard: None,
+            trash: None,
         };
         let first = fixture
             .executor
@@ -4561,6 +4606,7 @@ mod tests {
                 local_echoes: &mut fixture.local_echoes,
                 remote_echoes: &mut fixture.remote_echoes,
                 deletion_guard: None,
+                trash: None,
             };
             let report = fixture
                 .executor

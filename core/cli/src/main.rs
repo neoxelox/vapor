@@ -15,6 +15,7 @@ use vapor_cli::{
     commands::{
         auth as auth_cmd, config as config_cmd, conflicts as conflicts_cmd,
         decisions as decisions_cmd, doctor as doctor_cmd, ipc as ipc_cmd, run as run_cmd,
+        trash as trash_cmd,
     },
     resolve_configuration_path,
 };
@@ -123,6 +124,40 @@ enum Command {
     Decisions {
         #[command(subcommand)]
         action: DecisionsAction,
+    },
+    /// The files Vapor removed on this device and kept in its trash
+    /// (a deletion that arrived from the cloud, a mirror removal).
+    /// Works with or without a running daemon.
+    Trash {
+        #[command(subcommand)]
+        action: TrashAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TrashAction {
+    /// Every kept item of every enabled profile, newest first.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Put one item back at its original path (or beside it, when the
+    /// path is taken again).
+    Restore {
+        id: String,
+        /// Profile the id belongs to (needed only when several profiles
+        /// hold the same id).
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove every kept item, for good.
+    Empty {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -370,6 +405,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
         Command::SupportBundle { output, json } => dispatch_support_bundle(output, json),
         Command::Conflicts { action } => dispatch_conflicts(action),
         Command::Decisions { action } => dispatch_decisions(action),
+        Command::Trash { action } => dispatch_trash(action),
     }
 }
 
@@ -420,6 +456,51 @@ fn dispatch_decisions(action: DecisionsAction) -> Result<ExitCode, String> {
                 println!(
                     "Recorded {choose} for decision #{id}; the daemon applies it on its next tick (or at its next start)."
                 );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn dispatch_trash(action: TrashAction) -> Result<ExitCode, String> {
+    let loaded = vapor_shared::config::load_from(&resolve_configuration_path());
+    if let Some(issue) = loaded.load_issue {
+        eprintln!("vapor: warning: {issue}");
+    }
+    match action {
+        TrashAction::List { json } => {
+            let report = trash_cmd::list_trash(&loaded.config);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("{}", trash_cmd::render_list(&report));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        TrashAction::Restore { id, profile, json } => {
+            let report = trash_cmd::restore(&loaded.config, &id, profile.as_deref())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("Restored {} to {}", report.id, report.restored_to.display());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        TrashAction::Empty { profile, json } => {
+            let report = trash_cmd::empty(&loaded.config, profile.as_deref());
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("Removed {} item(s) from the trash.", report.removed);
             }
             Ok(ExitCode::SUCCESS)
         }

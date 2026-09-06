@@ -962,17 +962,16 @@ Landed:
       `discard` restores. Scenarios S31 and S40; the soak driver
       answers the decisions its subtree removals provoke.
 
+- [x] SF-2 Local trash: the `TrashBin` platform trait (macOS
+      `~/.Trash`; Windows and Linux refuse until their surfaces ship)
+      and the managed trash under `<vapor_dir>/trash/<profile>/` with
+      retention, fed by every local removal the engine performs
+      (cloud deletions applied in two-way, pull-only mirror removals).
+      `trash` config group, `vapor trash list|restore|empty`. Scenario
+      S42.
+
 Still open, in order:
 
-- [ ] SF-2 Local trash. A `TrashBin` platform trait (macOS `~/.Trash`
-      or the volume's `.Trashes`; Windows Recycle Bin and Linux
-      freedesktop trash when those surfaces ship) plus a managed trash
-      under `<vapor_dir>/trash/<profile>/` with retention, so a file
-      Vapor removes on this device because the cloud deleted it can be
-      brought back without the cloud's own trash. `trash` config group
-      (`enabled`, `retentionDays`), `vapor trash list|restore|empty`.
-      The `discard` answer of a mass-deletion decision restores from
-      the trash first when the other side no longer has the file.
 - [ ] SF-3 Root identity. A `.vapor-root` marker (internal name, never
       synced) written at first sync and checked at every start and
       every reconcile, plus the provider's own root identity where it
