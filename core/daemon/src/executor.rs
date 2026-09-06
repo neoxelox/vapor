@@ -125,6 +125,17 @@ pub struct ExecutionEnv<'a> {
     pub remote_echoes: &'a mut SelfWriteCache,
 }
 
+/// One row of [`StagedExecutor::active_stages`].
+pub type ActiveStageDiagnostic = (
+    i64,
+    PathBuf,
+    PendingIntentKind,
+    ExecutionStage,
+    u64,
+    u32,
+    String,
+);
+
 pub struct StagedExecutor {
     active: BTreeMap<i64, ActiveExecution>,
     active_paths: BTreeSet<PathBuf>,
@@ -356,9 +367,9 @@ impl StagedExecutor {
     }
 
     /// Diagnostic view of every active execution: (intent id, path,
-    /// kind, stage, elapsed-in-stage). Consumed by the IPC diagnostics
-    /// surface.
-    pub fn active_stages(&self) -> Vec<(i64, PathBuf, PendingIntentKind, ExecutionStage, u64)> {
+    /// kind, stage, elapsed-in-stage, attempt count, last error).
+    /// Consumed by the IPC diagnostics surface.
+    pub fn active_stages(&self) -> Vec<ActiveStageDiagnostic> {
         let now_inst = self.clock.now();
         self.active
             .values()
@@ -371,6 +382,8 @@ impl StagedExecutor {
                     now_inst
                         .saturating_duration_since(execution.stage_started_inst)
                         .as_millis() as u64,
+                    execution.intent.attempt_count,
+                    execution.intent.last_error.clone().unwrap_or_default(),
                 )
             })
             .collect()
@@ -756,15 +769,9 @@ impl StagedExecutor {
         match stage {
             ActiveStage::PlannerProbe { permit, pending } => {
                 let ProviderJobOutcome::Probe(probe) = outcome else {
-                    abort_outcome_session(outcome);
                     app.release_work(permit);
-                    return self.fail_internal(
-                        app,
-                        state_db,
-                        &intent,
-                        "provider-job outcome did not match the probing stage",
-                        now,
-                        report,
+                    return self.fail_unexpected_outcome(
+                        app, state_db, &intent, outcome, "probing", now, report,
                     );
                 };
                 // Probe results carry raw provider errors whose kind the
@@ -822,7 +829,10 @@ impl StagedExecutor {
                     }
                     Some(Err(error)) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
                         // Remote vanished since planning: proceed as a
-                        // fresh create.
+                        // fresh create, guarded as such so a concurrent
+                        // re-creation is caught rather than overwritten.
+                        let mut plan = plan;
+                        plan.precondition = RemotePrecondition::Absent;
                         self.dispatch_upload(app, env, intent, permit, plan, now_inst)
                     }
                     Some(Err(error)) => {
@@ -843,13 +853,13 @@ impl StagedExecutor {
                     }
                 },
                 other => {
-                    abort_outcome_session(other);
                     app.release_work(permit);
-                    self.fail_internal(
+                    self.fail_unexpected_outcome(
                         app,
                         state_db,
                         &intent,
-                        "provider-job outcome did not match the preflight stage",
+                        other,
+                        "preflight",
                         now,
                         report,
                     )
@@ -941,15 +951,9 @@ impl StagedExecutor {
                     Ok(None)
                 }
                 other => {
-                    abort_outcome_session(other);
                     app.release_work(permit);
-                    self.fail_internal(
-                        app,
-                        state_db,
-                        &intent,
-                        "provider-job outcome did not match the upload stage",
-                        now,
-                        report,
+                    self.fail_unexpected_outcome(
+                        app, state_db, &intent, other, "upload", now, report,
                     )
                 }
             },
@@ -1058,15 +1062,9 @@ impl StagedExecutor {
                     Ok(None)
                 }
                 other => {
-                    abort_outcome_session(other);
                     app.release_work(permit);
-                    self.fail_internal(
-                        app,
-                        state_db,
-                        &intent,
-                        "provider-job outcome did not match the download stage",
-                        now,
-                        report,
+                    self.fail_unexpected_outcome(
+                        app, state_db, &intent, other, "download", now, report,
                     )
                 }
             },
@@ -1092,6 +1090,48 @@ impl StagedExecutor {
     /// An internal state-machine mismatch (never provider behavior).
     /// Requeue transiently so the intent replans from scratch instead of
     /// wedging.
+    /// An outcome the waiting stage cannot apply. A panic inside the
+    /// provider call fails the intent permanently with the panic message
+    /// (the worker already survived it); anything else is a stage/outcome
+    /// mismatch, which is an engine bug.
+    #[allow(clippy::too_many_arguments)]
+    fn fail_unexpected_outcome(
+        &mut self,
+        app: &mut DaemonApp,
+        state_db: &mut DurableStateDb,
+        intent: &DurableIntentRecord,
+        outcome: ProviderJobOutcome,
+        stage: &str,
+        now: SystemTime,
+        report: &mut StagedExecutorReport,
+    ) -> Result<Option<ActiveExecution>, StateDbError> {
+        match outcome {
+            ProviderJobOutcome::Panicked(message) => {
+                self.resolve_failure(
+                    app,
+                    state_db,
+                    intent,
+                    RetryFailureKind::Permanent,
+                    &format!("provider call panicked during the {stage} stage: {message}"),
+                    now,
+                    report,
+                )?;
+                Ok(None)
+            }
+            other => {
+                abort_outcome_session(other);
+                self.fail_internal(
+                    app,
+                    state_db,
+                    intent,
+                    &format!("provider-job outcome did not match the {stage} stage"),
+                    now,
+                    report,
+                )
+            }
+        }
+    }
+
     fn fail_internal(
         &mut self,
         app: &mut DaemonApp,
@@ -2123,9 +2163,7 @@ fn deletion_loses_to_local_state(
     }
     let diverged = if metadata.len() != index.size_bytes {
         true
-    } else if index.local_modified_at.is_some()
-        && metadata.modified().ok() == index.local_modified_at
-    {
+    } else if index.matches_local(metadata.len(), metadata.modified().ok()) {
         false
     } else {
         hash_hex_of_file_or_err(&intent.path, algorithm)? != index.content_hash
@@ -2563,9 +2601,7 @@ fn child_delete_is_safe(
     };
     let diverged = if metadata.len() != index.size_bytes {
         true
-    } else if index.local_modified_at.is_some()
-        && metadata.modified().ok() == index.local_modified_at
-    {
+    } else if index.matches_local(metadata.len(), metadata.modified().ok()) {
         false
     } else {
         match hash_hex_of_file_with(path, algorithm) {
@@ -2638,38 +2674,60 @@ fn apply_downloaded_payload_keep_both(
         .sync_index(&plan.local_path)
         .map_err(|error| format!("cannot read sync index: {error}"))?;
 
+    // The pre-rename size and mtime describe the displaced bytes; with
+    // the index they answer "unchanged since the last sync" without a
+    // hash for the common case.
     let displaced = match fs::symlink_metadata(&plan.local_path) {
         Ok(metadata) if metadata.is_file() => match fs::rename(&plan.local_path, &aside) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Ok(()) => Some((metadata.len(), metadata.modified().ok())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(format!("cannot set aside local file before apply: {error}"));
             }
         },
         // Directory or special node at the path: apply_downloaded_payload's
         // rename will surface an appropriate error. Nothing to preserve.
-        _ => false,
+        _ => None,
     };
 
     if let Err(error) = apply_downloaded_payload(env, plan) {
         // Restore the displaced file so a failed apply loses nothing.
-        if displaced {
+        if displaced.is_some() {
             let _ = fs::rename(&aside, &plan.local_path);
         }
         return Err(format!("local apply of downloaded payload failed: {error}"));
     }
 
-    if !displaced {
+    let Some((aside_size, aside_modified_at)) = displaced else {
         return Ok(false);
-    }
+    };
 
-    let aside_hash = hash_hex_of_file_with(&aside, env.hash_algorithm)
-        .map_err(|error| format!("cannot hash displaced local file: {error}"))?;
-    let unchanged = aside_hash == incoming_hash
+    // Hash the displaced bytes only when equality is still possible:
+    // the quick check says they were not touched since the last sync,
+    // or their size matches the incoming payload or the indexed content.
+    // Anything else diverged from both without reading the file, which
+    // keeps a multi-gigabyte apply off the tick thread's hash budget.
+    let quick_unchanged = index
+        .as_ref()
+        .is_some_and(|index| index.matches_local(aside_size, aside_modified_at));
+    let incoming_size = fs::metadata(&plan.local_path).map(|m| m.len()).ok();
+    let size_could_match = incoming_size == Some(aside_size)
         || index
             .as_ref()
-            .map(|index| aside_hash == index.content_hash)
-            .unwrap_or(false);
+            .is_some_and(|index| index.size_bytes == aside_size);
+    let unchanged = if quick_unchanged {
+        true
+    } else if !size_could_match {
+        false
+    } else {
+        let aside_hash = hash_hex_of_file_with(&aside, env.hash_algorithm)
+            .map_err(|error| format!("cannot hash displaced local file: {error}"))?;
+        aside_hash == incoming_hash
+            || index
+                .as_ref()
+                .map(|index| aside_hash == index.content_hash)
+                .unwrap_or(false)
+    };
     if unchanged {
         let _ = fs::remove_file(&aside);
         let _ = env.tags.remove(&aside);
@@ -2783,6 +2841,9 @@ fn max_in_flight_items(workgate: WorkgateSnapshot) -> usize {
 struct StreamingFileHash {
     file: fs::File,
     hasher: HashState,
+    /// Reused across steps; a hash execution spans many ticks and must
+    /// not allocate 64 KiB on each.
+    buffer: Vec<u8>,
 }
 
 enum HashState {
@@ -2819,20 +2880,20 @@ impl StreamingFileHash {
                 vapor_providers::HashAlgorithm::Sha256 => HashState::Sha256(Sha256::new()),
                 vapor_providers::HashAlgorithm::Md5 => HashState::Md5(md5::Md5::new()),
             },
+            buffer: vec![0_u8; 64 * 1024],
         })
     }
 
     /// Returns `Some(hex)` once the file is fully hashed.
     fn step(&mut self, max_bytes: u64) -> std::io::Result<Option<String>> {
         let mut remaining = max_bytes;
-        let mut buffer = vec![0_u8; 64 * 1024];
         while remaining > 0 {
-            let chunk = buffer.len().min(remaining as usize);
-            let read = self.file.read(&mut buffer[..chunk])?;
+            let chunk = self.buffer.len().min(remaining as usize);
+            let read = self.file.read(&mut self.buffer[..chunk])?;
             if read == 0 {
                 return Ok(Some(self.hasher.finalize_hex()));
             }
-            self.hasher.update(&buffer[..read]);
+            self.hasher.update(&self.buffer[..read]);
             remaining -= read as u64;
         }
         Ok(None)

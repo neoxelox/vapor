@@ -29,7 +29,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{self, Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use vapor_providers::{
@@ -164,6 +164,93 @@ pub(crate) enum ProviderJobOutcome {
     /// The job's generation was invalidated by `abort_in_flight`; any
     /// session was aborted worker-side. Harvest drops these.
     Cancelled,
+    /// The provider call panicked on the worker. The worker survives and
+    /// the executor fails the intent with the panic message; without
+    /// this the permit and the in-flight slot would leak for the rest of
+    /// the process. (Release builds abort on panic and never see it.)
+    Panicked(String),
+}
+
+/// How one-off provider calls outside the executor (changes poll,
+/// reconcile enumerate, cloud-root retry) run: inline for deterministic
+/// tests, on a thread in production so a network round trip never holds
+/// the tick loop.
+#[derive(Clone, Default)]
+pub(crate) enum ProviderCallMode {
+    #[default]
+    Inline,
+    Threaded {
+        waker: Option<Arc<TickWaker>>,
+    },
+}
+
+/// One provider call polled by the tick loop until its result is in.
+pub(crate) struct ProviderCall<T> {
+    state: ProviderCallState<T>,
+}
+
+enum ProviderCallState<T> {
+    Ready(Option<Result<T, String>>),
+    Pending(Receiver<Result<T, String>>),
+}
+
+impl<T: Send + 'static> ProviderCall<T> {
+    pub fn start(
+        mode: &ProviderCallMode,
+        name: &'static str,
+        call: impl FnOnce() -> T + Send + 'static,
+    ) -> Self {
+        match mode {
+            ProviderCallMode::Inline => Self {
+                state: ProviderCallState::Ready(Some(Ok(call()))),
+            },
+            ProviderCallMode::Threaded { waker } => {
+                let (tx, rx) = mpsc::channel();
+                let waker = waker.clone();
+                let spawned = std::thread::Builder::new()
+                    .name(format!("vapor-provider-{name}"))
+                    .spawn(move || {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call))
+                            .map_err(|payload| panic_message(payload.as_ref()));
+                        let _ = tx.send(result);
+                        if let Some(waker) = waker {
+                            waker.notify();
+                        }
+                    });
+                match spawned {
+                    Ok(_) => Self {
+                        state: ProviderCallState::Pending(rx),
+                    },
+                    Err(error) => Self {
+                        state: ProviderCallState::Ready(Some(Err(format!(
+                            "cannot spawn the {name} thread: {error}"
+                        )))),
+                    },
+                }
+            }
+        }
+    }
+
+    /// `Some` once the call has finished (`Err` carries a panic
+    /// message). Returns the result exactly once.
+    pub fn take(&mut self) -> Option<Result<T, String>> {
+        match &mut self.state {
+            ProviderCallState::Ready(slot) => slot.take(),
+            ProviderCallState::Pending(rx) => match rx.try_recv() {
+                Ok(result) => {
+                    self.state = ProviderCallState::Ready(None);
+                    Some(result)
+                }
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.state = ProviderCallState::Ready(None);
+                    Some(Err(
+                        "provider call thread exited without a result".to_string()
+                    ))
+                }
+            },
+        }
+    }
 }
 
 pub(crate) struct CompletedJob {
@@ -371,13 +458,32 @@ fn worker_main(
         let Ok(job) = job else {
             return;
         };
-        let completed = run_job(job, &gates);
+        let (intent_id, generation) = (job.intent_id, job.generation);
+        let completed =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(job, &gates))) {
+                Ok(completed) => completed,
+                Err(payload) => CompletedJob {
+                    intent_id,
+                    outcome: ProviderJobOutcome::Panicked(panic_message(payload.as_ref())),
+                    generation,
+                },
+            };
         if results_tx.send(completed).is_err() {
             return;
         }
         if let Some(waker) = &waker {
             waker.notify();
         }
+    }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "non-string panic payload".to_string()
     }
 }
 
@@ -471,6 +577,7 @@ fn run_transfer(
     mut session: Box<dyn TransferSession>,
     direction: TransferDirection,
 ) -> ProviderJobOutcome {
+    let mut zero_progress_steps: u32 = 0;
     loop {
         if gates.generation.load(Ordering::SeqCst) != generation {
             session.abort();
@@ -499,6 +606,22 @@ fn run_transfer(
                 // grant (chunk alignment / short final chunk), and keeping
                 // it would undershoot the configured rate.
                 refund(context, grant.saturating_sub(bytes_transferred));
+                if bytes_transferred == 0 {
+                    zero_progress_steps += 1;
+                    if zero_progress_steps
+                        >= vapor_shared::constants::engine::MAX_ZERO_PROGRESS_TRANSFER_STEPS
+                    {
+                        session.abort();
+                        return ProviderJobOutcome::TransferFailed {
+                            error: ProviderError::transient(format!(
+                                "transfer made no progress for {zero_progress_steps} consecutive steps"
+                            )),
+                            phase: TransferPhase::Step,
+                        };
+                    }
+                } else {
+                    zero_progress_steps = 0;
+                }
             }
             Ok(TransferStep::Completed(outcome)) => {
                 return ProviderJobOutcome::TransferCompleted(outcome);
@@ -537,12 +660,21 @@ mod tests {
 
     struct StubProvider {
         delete_calls: AtomicUsize,
+        panic_on_delete: bool,
     }
 
     impl StubProvider {
         fn new() -> Self {
             Self {
                 delete_calls: AtomicUsize::new(0),
+                panic_on_delete: false,
+            }
+        }
+
+        fn panicking() -> Self {
+            Self {
+                delete_calls: AtomicUsize::new(0),
+                panic_on_delete: true,
             }
         }
     }
@@ -580,14 +712,7 @@ mod tests {
         }
         fn delete(&self, _path: &RemotePath, _op_id: &str) -> Result<(), ProviderError> {
             self.delete_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-        fn rename(
-            &self,
-            _from: &RemotePath,
-            _to: &RemotePath,
-            _op_id: &str,
-        ) -> Result<(), ProviderError> {
+            assert!(!self.panic_on_delete, "simulated provider bug");
             Ok(())
         }
         fn poll_changes(
@@ -660,6 +785,119 @@ mod tests {
         assert_eq!(harvested.len(), 1);
         assert_eq!(provider.delete_calls.load(Ordering::SeqCst), 1);
         assert_eq!(pool.in_flight(), 0);
+    }
+
+    #[test]
+    fn threaded_worker_survives_a_panicking_provider_call() {
+        let waker = Arc::new(TickWaker::default());
+        let mut pool = ProviderJobPool::threaded(1, Some(waker.clone()));
+        let harvest_one = |pool: &mut ProviderJobPool| {
+            for _ in 0..1_000 {
+                waker.wait_timeout(Duration::from_millis(50));
+                let harvested = pool.harvest();
+                if !harvested.is_empty() {
+                    return harvested;
+                }
+            }
+            Vec::new()
+        };
+        pool.dispatch(
+            11,
+            context(Arc::new(StubProvider::panicking())),
+            ProviderJobKind::RemoteDelete {
+                remote_path: RemotePath::root().join("a.txt").expect("path"),
+                op_id: "op".to_string(),
+            },
+        );
+        let harvested = harvest_one(&mut pool);
+        assert_eq!(harvested.len(), 1);
+        assert_eq!(harvested[0].intent_id, 11);
+        assert!(matches!(
+            &harvested[0].outcome,
+            ProviderJobOutcome::Panicked(message) if message.contains("simulated provider bug")
+        ));
+        assert_eq!(pool.in_flight(), 0);
+
+        // The single worker is still alive: a healthy job completes.
+        let provider = Arc::new(StubProvider::new());
+        pool.dispatch(
+            12,
+            context(provider.clone()),
+            ProviderJobKind::RemoteDelete {
+                remote_path: RemotePath::root().join("b.txt").expect("path"),
+                op_id: "op".to_string(),
+            },
+        );
+        let harvested = harvest_one(&mut pool);
+        assert_eq!(harvested.len(), 1);
+        assert!(matches!(
+            harvested[0].outcome,
+            ProviderJobOutcome::RemoteDelete(Ok(()))
+        ));
+        assert_eq!(provider.delete_calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct StalledSession;
+
+    impl TransferSession for StalledSession {
+        fn step(&mut self, _max_bytes: u64) -> Result<TransferStep, ProviderError> {
+            Ok(TransferStep::Progressed {
+                bytes_transferred: 0,
+            })
+        }
+        fn abort(&mut self) {}
+    }
+
+    #[test]
+    fn a_session_that_never_moves_a_byte_fails_instead_of_spinning() {
+        let provider: Arc<dyn Provider> = Arc::new(StubProvider::new());
+        let gates = TransferGates::new();
+        let outcome = run_transfer(
+            &context(provider),
+            &gates,
+            gates.generation.load(Ordering::SeqCst),
+            Box::new(StalledSession),
+            TransferDirection::Download,
+        );
+        assert!(matches!(
+            outcome,
+            ProviderJobOutcome::TransferFailed { error, phase: TransferPhase::Step }
+                if error.kind == vapor_shared::ProviderErrorKind::Transient
+                    && error.message.contains("no progress")
+        ));
+    }
+
+    #[test]
+    fn threaded_provider_call_delivers_its_result_and_reports_panics() {
+        let waker = Arc::new(TickWaker::default());
+        let mode = ProviderCallMode::Threaded {
+            waker: Some(waker.clone()),
+        };
+        let mut call = ProviderCall::start(&mode, "test", || 41 + 1);
+        let mut result = None;
+        for _ in 0..1_000 {
+            waker.wait_timeout(Duration::from_millis(50));
+            result = call.take();
+            if result.is_some() {
+                break;
+            }
+        }
+        assert_eq!(result, Some(Ok(42)));
+        assert!(call.take().is_none(), "a result is handed out once");
+
+        let mut call = ProviderCall::start(&mode, "test", || -> u8 { panic!("boom") });
+        let mut result = None;
+        for _ in 0..1_000 {
+            waker.wait_timeout(Duration::from_millis(50));
+            result = call.take();
+            if result.is_some() {
+                break;
+            }
+        }
+        assert!(matches!(result, Some(Err(message)) if message.contains("boom")));
+
+        let mut inline = ProviderCall::start(&ProviderCallMode::Inline, "test", || "now");
+        assert_eq!(inline.take(), Some(Ok("now")));
     }
 
     #[test]

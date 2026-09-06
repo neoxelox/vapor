@@ -244,10 +244,14 @@ pub struct StatusResponse {
     /// Per-profile status rows.
     #[serde(default)]
     pub profiles: Vec<ProfileStatus>,
-    /// Effective resource ceilings + utilization + idle-boost state
-    ///. `None` until the resource-budget runtime publishes.
+    /// Effective resource ceilings, utilization and idle-boost state.
+    /// `None` until the resource-budget runtime publishes.
     #[serde(default)]
     pub resource_budget: Option<ResourceBudgetStatus>,
+    /// Present when a restart-required key of `vapor.json` changed under
+    /// the running daemon; names the keys and the command to run.
+    #[serde(default)]
+    pub config_restart_required: Option<String>,
 }
 
 /// One profile's status row inside [`StatusResponse`] (schema v2).

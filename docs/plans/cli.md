@@ -52,13 +52,17 @@ vapor service acknowledge               # clear a crash-loop pause
 vapor config get|set <key> [value]      # edits vapor.json
 vapor auth login <provider>             # OAuth PKCE via localhost loopback
 vapor auth logout <provider>
+vapor auth status                       # bound / not bound per provider, never the token
 vapor status [--json]                   # queue depth, throttle state, reason
 vapor pause|resume
 vapor flush-now                         # force-flush pending intents
 vapor reconcile                         # request whole-scope reconcile
 vapor timeline [--tail] [--json]        # diagnostics timeline
 vapor logs [--tail] [--level=debug]
-vapor doctor                            # checks inotify watches, permissions, etc.
+vapor diagnostics [--json]              # per-intent "why is this stuck"
+vapor conflicts list|resolve            # keep-both conflict copies
+vapor support-bundle [--output] [--json]# redacted diagnostics archive
+vapor doctor [--json]                   # sanity checks, exit 1 on failure
 vapor version
 ```
 
@@ -88,15 +92,17 @@ vapor version
 - `doctor` — reports platform-specific sanity checks: inotify watch limits on
   Linux, Task Scheduler task presence on Windows, LaunchAgent plist presence
   on macOS, `VAPOR_DIR` permissions, daemon binary location + version.
-- `--user-activity=always|never|auto` — on CLI / server hosts without HID
-  signal, force a specific user-activity interpretation. Default `auto`:
-  always-idle on headless hosts, event-driven on desktop hosts.
+- `--user-activity=always|never|auto` (planned, not implemented) would
+  force a user-activity interpretation on CLI / server hosts. Today the
+  daemon detects the absence of a window-server session and treats such a
+  host as always idle; `VAPOR_THROTTLE_INPUTS=static` pins neutral inputs.
 
 ## 4) Distribution
 
 Aligned with the prioritization in `docs/tasks/README.md`: the CLI ships
 on macOS first as part of the primary deliverable. Linux and Windows
-binaries are deferred and gated on the optional waves 12–14.
+binaries are deferred and gated on the optional Waves 12 to 14 in
+`docs/tasks/README.md`.
 
 ### 4.1 Primary (macOS)
 
@@ -113,7 +119,8 @@ binaries are deferred and gated on the optional waves 12–14.
 
 Only shipped when the project owner opts into a non-macOS surface. Each
 platform's CLI distribution rides the matching platform-impl wave in
-`core.md §10` (Windows ⇒ wave 9; Linux ⇒ wave 10).
+`docs/tasks/README.md` (Windows: Wave 12; Linux: Wave 13; the cross-OS
+CLI distribution itself: Wave 14).
 
 - Linux targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
   (musl variants a stretch goal for Alpine/Docker users). GPG signature
@@ -156,8 +163,9 @@ Logic + snapshot + integration tests. The full policy lives in
 specific scope is:
 
 - **Tested** — argument parsing (`clap`), exit code discipline,
-  `--json` output schema via `insta` snapshots (one snapshot per
-  `--json` command), IPC client correctness against a fake daemon,
+  `--json` output shape via explicit assertion tests (one per `--json`
+  command; `insta` snapshots are an open task), IPC client correctness
+  against a fake daemon,
   `vapor doctor` detection logic, the `vapor service` round-trip
   (install → start → status → crash-loop supervision → acknowledge →
   stop → uninstall) on macOS CI via the `--full` phase of
@@ -168,5 +176,5 @@ specific scope is:
   handling, ncurses or TTY-capability interactions, progress-bar
   rendering timing.
 
-Snapshot review flow: `cargo insta review` after any intentional
-`--json` schema change; CI fails the PR otherwise.
+An intentional `--json` schema change updates the matching shape test in
+the same change set; CI fails the PR otherwise.

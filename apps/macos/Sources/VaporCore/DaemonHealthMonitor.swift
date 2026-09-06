@@ -6,8 +6,9 @@ import Foundation
 /// `DaemonLifecycleManager.checkDaemonHealth()`, which runs
 /// `vapor service check` — detection of unexpected daemon exits, crash
 /// registration, backoff, and restart policy all execute in the Rust
-/// lifecycle core against durable state. The `onOutcome` callback lets
-/// the UI surface the resulting state (e.g. crash-loop pause).
+/// lifecycle core against durable state. When the daemon is running the
+/// tick also reads `vapor status --json`, so the UI can show what the
+/// daemon is doing. The `onOutcome` callback carries both.
 ///
 /// Tests drive `performHealthCheck()` directly; the timer itself is OS
 /// plumbing and is exercised manually per the UI-testing carve-out.
@@ -18,7 +19,7 @@ public final class DaemonHealthMonitor: @unchecked Sendable {
   private let manager: DaemonLifecycleManager
   private let interval: TimeInterval
   private let queue: DispatchQueue
-  private let onOutcome: @Sendable (ServiceHealthOutcome) -> Void
+  private let onOutcome: @Sendable (ServiceHealthOutcome, DaemonStatusSnapshot?) -> Void
   private let logger: StructuredLogger
   private var timer: DispatchSourceTimer?
 
@@ -27,7 +28,7 @@ public final class DaemonHealthMonitor: @unchecked Sendable {
     interval: TimeInterval = DaemonHealthMonitor.defaultInterval,
     queue: DispatchQueue = DispatchQueue(label: "sh.arn.vapor.daemon-health", qos: .utility),
     logger: StructuredLogger = StructuredLogger(component: "daemon-health"),
-    onOutcome: @escaping @Sendable (ServiceHealthOutcome) -> Void
+    onOutcome: @escaping @Sendable (ServiceHealthOutcome, DaemonStatusSnapshot?) -> Void
   ) {
     self.manager = manager
     self.interval = interval
@@ -85,11 +86,28 @@ public final class DaemonHealthMonitor: @unchecked Sendable {
           "Daemon is in crash-loop pause; auto-restart suspended until user acknowledges"
         )
       }
-      onOutcome(outcome)
+      onOutcome(outcome, liveStatus(for: outcome))
       return outcome
     } catch {
       logger.error(
         "Daemon health check failed",
+        metadata: ["error": String(describing: error)]
+      )
+      return nil
+    }
+  }
+
+  /// The daemon's own status when the supervision tick found it running.
+  /// A failed read is logged and reported as `nil`; the next tick retries.
+  private func liveStatus(for outcome: ServiceHealthOutcome) -> DaemonStatusSnapshot? {
+    guard outcome == .running || outcome == .restartedAfterCrash else {
+      return nil
+    }
+    do {
+      return try manager.daemonStatus()
+    } catch {
+      logger.warning(
+        "Daemon reported running but its status endpoint did not answer",
         metadata: ["error": String(describing: error)]
       )
       return nil

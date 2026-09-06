@@ -145,6 +145,17 @@ private final class OrderedRecordingServiceController: LaunchAgentControlling {
   func acknowledgeCrashLoopPause() throws {
     operations.append("acknowledge")
   }
+
+  func restartDaemon() throws -> DaemonLifecycleActionResult {
+    operations.append("restart")
+    return .started
+  }
+
+  func daemonStatus() throws -> DaemonStatusSnapshot {
+    DaemonStatusSnapshot(
+      runState: "Running", throttleState: "IdleDrain", throttleReason: "",
+      providerName: "filesystem", queueDepth: 0, failedIntents: 0)
+  }
 }
 
 @MainActor

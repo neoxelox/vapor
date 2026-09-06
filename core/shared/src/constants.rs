@@ -13,9 +13,19 @@ pub mod env {
     /// binary). See `docs/operations/provider-auth-operations.md`.
     pub const VAPOR_GDRIVE_CLIENT_ID: &str = "VAPOR_GDRIVE_CLIENT_ID";
     pub const VAPOR_GDRIVE_CLIENT_SECRET: &str = "VAPOR_GDRIVE_CLIENT_SECRET";
+    /// Where the daemon's throttle inputs come from: `host` (default)
+    /// reads the native sampler and idle clock; `static` uses the
+    /// neutral defaults and zero idle time. Test harnesses set `static`
+    /// so a run is not shaped by whoever is typing on the machine.
+    pub const VAPOR_THROTTLE_INPUTS: &str = "VAPOR_THROTTLE_INPUTS";
 }
 
 pub mod runtime {
+    /// Executable names. On macOS the CLI ships at
+    /// `Contents/Helpers/vapor` and the daemon at `Contents/MacOS/vapord`;
+    /// in a build directory they sit side by side.
+    pub const CLI_BINARY_NAME: &str = "vapor";
+    pub const DAEMON_BINARY_NAME: &str = "vapord";
     pub const VAPOR_DIRECTORY_NAME: &str = ".vapor";
     pub const LOGS_DIRECTORY_NAME: &str = "logs";
     pub const STATE_DIRECTORY_NAME: &str = "state";
@@ -108,6 +118,33 @@ pub mod config {
     pub const KEY_IDLE_BOOST: &str = "idleBoost";
     /// Safeguards group; object with the `safeguards::KEY_*` fields.
     pub const KEY_SAFEGUARDS: &str = "safeguards";
+
+    /// Keys a running daemon applies within one poll interval of the
+    /// file changing, without a restart. The CLI tells the user which
+    /// class a key falls in after `config set`.
+    pub const LIVE_RELOAD_KEYS: &[&str] = &[
+        KEY_USE_GIT_IGNORE,
+        KEY_USE_VAPOR_IGNORE,
+        KEY_PRE_IGNORE_RULES,
+        KEY_POST_IGNORE_RULES,
+        KEY_TIMELINE_LIMIT,
+        KEY_RESOURCE_LIMITS,
+        KEY_IDLE_BOOST,
+        KEY_SAFEGUARDS,
+    ];
+
+    /// Keys that reshape the pipeline (roots, provider, direction,
+    /// profile set) and therefore take effect on the next daemon start;
+    /// a running daemon reports them as `config_restart_required` in
+    /// status until it is restarted.
+    pub const RESTART_REQUIRED_KEYS: &[&str] = &[
+        KEY_LOCAL_SYNC_DIRECTORY,
+        KEY_CLOUD_SYNC_DIRECTORY,
+        KEY_PROVIDER,
+        KEY_SYNC_MODE,
+        KEY_PROFILES,
+        KEY_DEVICE_ID,
+    ];
 
     /// Every recognized key in one slice. Kept in lockstep with the
     /// `KEY_*` constants above; the CLI uses this for `validate_key`.
@@ -301,6 +338,16 @@ pub mod service {
     pub const HEALTH_TICK_INTERVAL_SECONDS: u64 = 30;
 }
 
+pub mod secrets {
+    /// Namespace under which every native secret store files Vapor's
+    /// entries: the Keychain service name on macOS, the credential
+    /// target prefix on Windows, the Secret Service attribute on Linux.
+    /// Secret names (`auth.<profile>.<provider>.token`) are the account
+    /// inside that namespace, so a user can find and remove every Vapor
+    /// item in the OS keychain UI by this one string.
+    pub const STORE_NAMESPACE: &str = "sh.arn.vapor";
+}
+
 pub mod ipc {
     /// Current schema version emitted by every Vapor surface that
     /// participates in the IPC handshake (`vapor` CLI, future macOS /
@@ -464,6 +511,21 @@ pub mod engine {
     pub const DOCUMENT_DEBOUNCE_WINDOW_MILLIS: u64 = 1_500;
     pub const DEFAULT_DEBOUNCE_WINDOW_MILLIS: u64 = 4_000;
     pub const THROTTLE_SAMPLE_INTERVAL_MILLIS: u64 = 1_000;
+    /// Keyboard or pointer input inside this window marks the user as
+    /// active, which holds the throttle at `Throttled` so sync never
+    /// competes with someone at the keyboard. Long enough that a pause
+    /// between keystrokes does not flip the state every second.
+    pub const USER_ACTIVE_INPUT_WINDOW_MILLIS: u64 = 30_000;
+    /// Accepted values of `VAPOR_THROTTLE_INPUTS`.
+    pub const THROTTLE_INPUTS_HOST: &str = "host";
+    pub const THROTTLE_INPUTS_STATIC: &str = "static";
+    /// A transfer session that reports progress without moving a byte
+    /// this many times in a row is failed as transient, so a misbehaving
+    /// endpoint cannot spin a worker at full speed forever.
+    pub const MAX_ZERO_PROGRESS_TRANSFER_STEPS: u32 = 8;
+    /// How often the daemon stats `vapor.json` for a change. One stat
+    /// per second is the cost of settings that apply without a restart.
+    pub const CONFIG_RELOAD_POLL_MILLIS: u64 = 1_000;
     pub const STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS: u64 = 60_000;
     pub const LEASE_TIMEOUT_MILLIS: u64 = 15 * 60 * 1_000;
     pub const LIGHT_SYSTEM_CPU_PERCENT: u8 = 35;

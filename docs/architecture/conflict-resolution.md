@@ -90,7 +90,7 @@ locally.
 | Surface | Notify | List | Resolve |
 |---|---|---|---|
 | `vapor` CLI (shipped) | `vapor timeline` / `vapor status` counter | `vapor conflicts list [--json]` | `vapor conflicts resolve` |
-| macOS app (Wave 9, M3-7/M3-8) | menubar badge + native notification on `conflict` timeline events | conflicts pane driving `vapor conflicts list --json` | per-row keep-canonical / keep-copy actions driving `vapor conflicts resolve --json` |
+| macOS app (planned, `docs/tasks/macos.md`) | menubar badge + native notification on `conflict` timeline events | conflicts pane driving `vapor conflicts list --json` | per-row keep-canonical / keep-copy actions driving `vapor conflicts resolve --json` |
 | Windows / Linux apps (future waves) | same model over the same CLI | same | same |
 
 App shells never reimplement scan or resolution logic — the CLI is the

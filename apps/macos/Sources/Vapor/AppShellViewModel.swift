@@ -206,9 +206,24 @@ final class AppShellViewModel: ObservableObject {
       return
     }
 
-    let monitor = DaemonHealthMonitor(manager: daemonLifecycleManager) { [weak self] outcome in
+    let monitor = DaemonHealthMonitor(manager: daemonLifecycleManager) {
+      [weak self] outcome, status in
       Task { @MainActor [weak self] in
-        self?.state.crashLoopPaused = outcome == .crashLoopPaused
+        guard let self else {
+          return
+        }
+        self.state.crashLoopPaused = outcome == .crashLoopPaused
+        // A configuration issue owns the Error state until it is fixed;
+        // otherwise the daemon's own status drives the surface.
+        if !self.state.hasConfigurationIssue {
+          self.state.syncState = SyncSurfaceState.from(health: outcome, status: status)
+        }
+        self.state.syncDetail = status.map(\.throttleReason).flatMap { $0.isEmpty ? nil : $0 }
+        self.state.configRestartRequired = status?.configRestartRequired
+        if let status, !status.providerName.isEmpty {
+          self.state.providerName = VaporConstants.Provider.displayName(
+            forKind: status.providerName)
+        }
       }
     }
     healthMonitor = monitor
@@ -360,6 +375,37 @@ final class AppShellViewModel: ObservableObject {
             "Auto-launch toggle failed",
             metadata: ["error": String(describing: error)]
           )
+        }
+      }
+    }
+  }
+
+  /// Stop and start the daemon on the lifecycle queue. Offered whenever
+  /// the daemon reports a restart-required configuration change, and
+  /// always from the menu bar.
+  func restartDaemon() {
+    logger.info("Requesting daemon restart")
+
+    let daemonLifecycleManager = self.daemonLifecycleManager
+    let logger = self.logger
+
+    lifecycleQueue.async { [weak self] in
+      do {
+        let result = try daemonLifecycleManager.restartDaemon()
+        Task { @MainActor [weak self] in
+          guard let self else {
+            return
+          }
+          self.state.configRestartRequired = nil
+          logger.info("Daemon restart completed", metadata: ["result": String(describing: result)])
+        }
+      } catch {
+        Task { @MainActor [weak self] in
+          guard let self else {
+            return
+          }
+          self.state.syncState = .error
+          logger.error("Daemon restart failed", metadata: ["error": String(describing: error)])
         }
       }
     }
@@ -623,11 +669,9 @@ final class AppShellViewModel: ObservableObject {
 
   private static func makeOptionalLoginItemController() -> (any LoginItemControlling)? {
     #if canImport(ServiceManagement)
-      if #available(macOS 13.0, *) {
-        return SMAppServiceLoginItemController()
-      }
+      return SMAppServiceLoginItemController()
+    #else
+      return nil
     #endif
-
-    return nil
   }
 }

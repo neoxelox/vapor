@@ -22,6 +22,12 @@ struct ShellView: View {
           Text(viewModel.localized(viewModel.state.syncState.detailLocalizationKey))
             .font(.subheadline)
             .foregroundStyle(.secondary)
+          if let syncDetail = viewModel.state.syncDetail {
+            Text(syncDetail)
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+          RestartRequiredNotice(viewModel: viewModel)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       }
@@ -135,6 +141,9 @@ struct MenuBarContentView: View {
           viewModel.toggleAutoLaunch()
         }
       }
+      Button(viewModel.localized("menubar_restart_daemon")) {
+        viewModel.restartDaemon()
+      }
       Divider()
       Button(viewModel.localized("menubar_quit_vapor")) {
         quitVaporAction()
@@ -143,6 +152,7 @@ struct MenuBarContentView: View {
     .padding(14)
     .frame(width: 280)
   }
+
 }
 
 struct SettingsView: View {
@@ -212,6 +222,8 @@ struct SettingsView: View {
         .font(.caption)
         .foregroundStyle(.secondary)
 
+      RestartRequiredNotice(viewModel: viewModel)
+
       Button(viewModel.localized("settings_disable_auto_launch_and_stop_now")) {
         viewModel.disableAutoLaunchAndStopNow()
       }
@@ -280,5 +292,25 @@ struct SettingsView: View {
       get: { viewModel.state.languageCode },
       set: { viewModel.setLanguageCode($0) }
     )
+  }
+}
+
+/// Shown while the daemon reports that a setting needing a restart
+/// changed, with the action that applies it. Empty otherwise.
+struct RestartRequiredNotice: View {
+  @ObservedObject var viewModel: AppShellViewModel
+
+  var body: some View {
+    if let notice = viewModel.state.configRestartRequired {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(viewModel.localized("settings_restart_required_format", notice))
+          .font(.caption)
+          .foregroundStyle(.orange)
+        Button(viewModel.localized("settings_restart_daemon")) {
+          viewModel.restartDaemon()
+        }
+        .controlSize(.small)
+      }
+    }
   }
 }

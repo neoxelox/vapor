@@ -3,7 +3,7 @@
 This document defines the concrete `launchd` plist policy for the `vapord`
 per-user LaunchAgent, the expected interaction between the LaunchAgent and
 the Rust-backed crash-loop protection in `core/lifecycle`, and the
-validation expected at milestone M1.
+validation scenarios.
 
 Cross-platform lifecycle logic (including `CrashLoopGuard`) lives in
 `core/lifecycle`; this document covers only the macOS-native integration
@@ -114,9 +114,11 @@ protection. `launchd` is intentionally passive (`KeepAlive = false`):
 
 ## Validation
 
-M1-5 is marked complete as "exponential relaunch delay implemented". The
-follow-up M1-6 task in `docs/tasks/macos.md` owns the validation scenarios
-listed below:
+The exponential relaunch delay is implemented in `core/lifecycle`. The
+scenarios below are the acceptance checks for the policy; the plist
+audit and the crash-loop sequence run automatically in the `--full`
+phase of `./scripts/e2e.sh`, the rest are checked by hand on a release
+candidate:
 
 - **Plist audit**: assert the installed plist at
   `~/Library/LaunchAgents/sh.arn.vapor.daemon.plist` contains exactly
@@ -133,9 +135,6 @@ listed below:
 - **Clean shutdown scenario**: menubar-quit the app, assert both app and
   daemon exit cleanly, assert `launchd` does not relaunch the daemon until
   the next login or explicit app launch.
-
-M1-6 in `docs/tasks/macos.md` is the work item that ships these scenarios
-as automated tests.
 
 The service lifecycle path (install → start → status → crash-loop
 supervision through backoff and pause → acknowledge → stop → uninstall)

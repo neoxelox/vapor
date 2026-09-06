@@ -204,6 +204,15 @@ func loginItemRegistrationFailureDoesNotBlockDaemonLifecycle() throws {
   #expect(controller.operations == ["bootstrap"])
 }
 
+@Test
+func restartDelegatesToTheControllerOnTheLifecycleQueue() throws {
+  let controller = RecordingServiceController()
+  let manager = DaemonLifecycleManager(launchAgentController: controller)
+  let result = try manager.restartDaemon()
+  #expect(result == .started)
+  #expect(controller.operations == ["restart"])
+}
+
 // MARK: - Fakes
 
 final class RecordingServiceController: LaunchAgentControlling {
@@ -213,6 +222,14 @@ final class RecordingServiceController: LaunchAgentControlling {
   var uninstallResult: DaemonLifecycleActionResult = .unchanged
   var startResult: DaemonLifecycleActionResult = .started
   var healthOutcome: ServiceHealthOutcome = .running
+  var liveStatus = DaemonStatusSnapshot(
+    runState: "Running",
+    throttleState: "IdleDrain",
+    throttleReason: "idle and cool",
+    providerName: "filesystem",
+    queueDepth: 0,
+    failedIntents: 0
+  )
   var statusSnapshot = ServiceStatusSnapshot(
     status: "running",
     label: VaporConstants.Daemon.launchAgentLabel,
@@ -258,6 +275,16 @@ final class RecordingServiceController: LaunchAgentControlling {
     operations.append("acknowledge")
     statusSnapshot.crashLoopPaused = false
   }
+
+  func restartDaemon() throws -> DaemonLifecycleActionResult {
+    operations.append("restart")
+    return startResult
+  }
+
+  func daemonStatus() throws -> DaemonStatusSnapshot {
+    operations.append("status")
+    return liveStatus
+  }
 }
 
 private struct ThrowingServiceController: LaunchAgentControlling {
@@ -280,6 +307,10 @@ private struct ThrowingServiceController: LaunchAgentControlling {
   func checkDaemonHealth() throws -> ServiceHealthOutcome { throw ControllerError() }
 
   func acknowledgeCrashLoopPause() throws { throw ControllerError() }
+
+  func restartDaemon() throws -> DaemonLifecycleActionResult { throw ControllerError() }
+
+  func daemonStatus() throws -> DaemonStatusSnapshot { throw ControllerError() }
 }
 
 @Test

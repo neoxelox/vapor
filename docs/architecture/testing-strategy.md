@@ -38,9 +38,9 @@ Target modules with heavy coverage expected in `core/daemon`:
 - `scheduler.rs` — superseding semantics; dirty-while-running;
   completion disposition.
 - `throttle.rs` — input-to-state mapping; per-state caps; hysteresis
-  and min-dwell once C2-4 lands.
+  and min-dwell.
 - `workgate.rs` — permit issuance and release; permit-id allocation
-  (including wrap-around once C2-2 lands); reconfigure semantics.
+  (including wrap-around); reconfigure semantics.
 - `retry.rs` — backoff math; jitter bounds; rate-limit floor honoring.
 - `storm.rs` — threshold detection; defer window; compaction.
 - `state_db.rs` — schema versioning; lease recovery; retry-slowdown
@@ -63,7 +63,7 @@ Target modules with heavy coverage expected in `core/daemon`:
 In `core/shared`:
 
 - `runtime_paths.rs` — `VAPOR_DIR` resolution order; permission
-  application on Unix; Windows fallback once C1-1/C1-2 land.
+  application on Unix; Windows fallback.
 - `paths.rs` — the shared `canonicalize` never returns a Windows verbatim
   (`\\?\`) path; verbatim disk / UNC prefix simplification. Windows leg
   only, since no other OS produces such paths.
@@ -218,10 +218,10 @@ callback 100× slower" before it reaches the release pipeline.
 
 ### Snapshot tests for CLI (Tier 1)
 
-Once `core/cli` lands (wave 6), every `vapor … --json` command gets a
-snapshot test via `insta`. Snapshots live next to the test file. Wire-
-format drift fails the PR; intentional changes are reviewed with
-`cargo insta review`.
+Every `vapor … --json` command has an explicit shape test that asserts
+the serialized output field by field (`insta` snapshots are an open task,
+`docs/tasks/core.md` CT-4). Wire-format drift fails the PR; an
+intentional change updates the test in the same change set.
 
 Commands to snapshot:
 
@@ -304,8 +304,8 @@ value", the test is not worth writing.
    pushes Tier 1 past the budget, split the slow tests out to Tier 2
    or make them faster.
 2. **Deterministic.** No `thread::sleep` for timing-dependent
-   assertions. Use the test-injectable clock abstractions (`Instant`
-   wrapper in C2-3 and the existing `timestamp_ms`-style helpers in
+   assertions. Use the test-injectable clock abstractions (the
+   `ManualClock` wrapper and the `timestamp_ms`-style helpers in
    `state_db.rs` / `runtime.rs` tests). No "run 10×, pass if 9 pass"
    retry decorators.
 3. **Independent.** Tests run in any order and in parallel (`cargo

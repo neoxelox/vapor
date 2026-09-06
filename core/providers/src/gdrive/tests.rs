@@ -346,6 +346,30 @@ fn large_upload_is_resumable_with_content_range_chunks() {
 }
 
 #[test]
+fn download_fails_a_range_that_returns_no_bytes() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"dl","name":"data.bin","mimeType":"application/octet-stream","size":"8"}]}"#,
+    );
+    transport.push_response(206, ""); // a proxy answered the range with nothing
+
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let mut session = provider
+        .begin_download(DownloadRequest {
+            remote_path: RemotePath::new("data.bin").expect("path"),
+            destination: scratch.path().join("data.bin"),
+        })
+        .expect("session");
+    let error = session
+        .step(4)
+        .expect_err("an empty range body must fail the step");
+    assert_eq!(error.kind, vapor_shared::ProviderErrorKind::Transient);
+    assert!(error.message.contains("empty body"), "{}", error.message);
+}
+
+#[test]
 fn download_streams_ranges_and_hashes_with_md5() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = ensured_provider(transport.clone());

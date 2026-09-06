@@ -52,12 +52,12 @@ Config, state, and schema formats may change without migration
 Most valuable to look at:
 
 - **Secret handling** — provider tokens are held through
-  `core/platform/src/secrets.rs` (Keychain on macOS). Anything that
+  `core/platform/src/secrets/` (the login keychain on macOS). Anything that
   writes a token to disk, a log, or an argv is a real finding.
 - **Log redaction** — `core/shared/src/logging.rs` and
   `core/providers/src/logging.rs` must keep tokens, auth headers, and
   sensitive identifiers out of logs and support bundles
-  (`vapor support bundle`).
+  (`vapor support-bundle`).
 - **OAuth flow** — `core/providers/src/gdrive/oauth.rs`: PKCE handling,
   the loopback redirect, state validation, refresh handling.
 - **IPC** — `core/ipc/*`. The daemon listens on a Unix domain socket.

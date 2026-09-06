@@ -152,20 +152,22 @@ from existing Swift/docs. Windows/Linux impls land later (Phase C6/C7).
       `std::process::Command`. Keep the exact plist schema from
       `docs/operations/macos/launchagent-policy.md`.
 - [x] C3-4 Define trait `SecretStore` (`get`, `set`, `delete`, `list`).
-      macOS implementation via `security-framework` (Keychain) or `keyring`
-      crate with macOS backend. Add in-memory fake for tests. *(Wave 4
-      ships the trait + in-memory store; the Keychain bridge lands with
-      Wave 5 / C4-5.)*
+      macOS implementation via Keychain Services (`security-framework-sys`
+      + `core-foundation`, one generic-password item per secret with an
+      access list covering `vapor` and `vapord`). In-memory fake for
+      tests; both run the same contract test.
 - [x] C3-5 Define trait `PlatformMetricsSampler` that returns
       `ThrottleInputs`. Add `StaticMetricsSampler` (config-driven) for the
-      CLI / headless / test case. macOS implementation via `mach2` +
-      `IOKit` / FFI-bridged `NSProcessInfo` signals. *(Wave 4 ships the
-      trait + `StaticPlatformMetricsSampler`; the mach2 / IOKit bridge
-      lands incrementally as Wave 4 follow-ups.)*
+      CLI / headless / test case. macOS implementation reads CPU
+      (`host_statistics64`, `getrusage`), power (`IOPSGetTimeRemainingEstimate`),
+      thermal state and Low Power Mode (`NSProcessInfo`), memory
+      (`proc_pidinfo`, `hw.memsize`) and user presence (HID idle clock).
+      Disk pressure and link capacity still use neutral defaults; see
+      C3-11.
 - [x] C3-6 Define trait `IdleNotifier`. macOS implementation via
-      `CGEventSourceSecondsSinceLastEventType`. Add `AlwaysIdleNotifier` for
-      headless/test case. *(Wave 4 ships the trait + `AlwaysIdleNotifier`;
-      the CGEvent bridge lands with the C8 active-coding-detection work.)*
+      `CGEventSourceSecondsSinceLastEventType`, falling back to always-idle
+      when there is no window-server session. Add `AlwaysIdleNotifier` for
+      headless/test case.
 - [x] C3-7 Define trait `ProcessSupervisor` (`register_shutdown_handler`).
       Port the existing `SIGTERM`/`SIGINT` handlers from
       `core/daemon/src/main.rs` to `signal-hook`-based handlers on Unix.
@@ -184,6 +186,13 @@ from existing Swift/docs. Windows/Linux impls land later (Phase C6/C7).
 - [x] C3-10 Author `docs/architecture/platform-abstractions.md`: trait list,
       contract, expected per-OS native API, test fake, and the parity matrix
       from `docs/plans/core.md §9`.
+- [ ] C3-11 Remaining throttle inputs. macOS: a disk-pressure source
+      (none is public; evaluate free space on the sync-root volume as a
+      proxy) and measured link capacity for `network_throughput_kbps`
+      (`nw_path_monitor` or a transfer-derived estimate). Windows and
+      Linux: the full sampler and idle notifier listed in
+      `docs/architecture/platform-abstractions.md` when those surfaces
+      ship; until then both return static defaults and zero idle time.
 
 Exit gate:
 
@@ -235,8 +244,8 @@ Exit gate:
 
 - [x] C5-1 Pick and document the IPC transport: Unix domain socket at
       `<vapor_dir>/vapord.sock` on Unix; named pipe
-      `\\.\pipe\vapord-<user-sid>` on Windows. Protocol: JSON-RPC 2.0,
-      length-prefixed frames. Finalize `docs/architecture/ipc-contracts.md`
+      `\\.\pipe\vapord-<user-sid>` on Windows. Protocol: tagged JSON
+      envelopes in length-prefixed frames (not JSON-RPC). Finalize `docs/architecture/ipc-contracts.md`
       and the per-OS transport docs.
 - [x] C5-2 Implement the daemon-side IPC server in `core/daemon` with the
       versioning/handshake/skew-matrix discipline already specified (`Hello`
@@ -709,10 +718,9 @@ trivial restatements of code).
       throttle monotonicity, retry backoff monotonicity, ignore-rule
       precedence determinism, durable-queue FIFO. Each property runs
       64–256 cases on CI (fast tier).
-- [ ] CT-2 Add a Tier-1 timing guard to CI that fails if
-      `./scripts/test.sh` exceeds 5 minutes on a matrix runner. Emit a
-      clear message pointing at `docs/architecture/testing-strategy.md
-      §Discipline rules`.
+- [x] CT-2 Tier-1 timing guard: `./scripts/test.sh` fails a green run
+      that exceeds `VAPOR_TEST_MAX_SECONDS` (the `test` workflow sets
+      300) with a message pointing at `docs/architecture/testing-strategy.md`.
 - [ ] CT-3 Audit the current `core/*` test corpus for trivial-test
       smell per `AGENTS.md §9.3` (defaults that mirror constants,
       Debug/Display string equality, serde round-trips of trivial
@@ -801,6 +809,10 @@ snapshot.
       `vapor run` + `vapor status` full round-trip passes on macOS
       (LaunchAgent), Windows (Task Scheduler / SCM), Linux (systemd user /
       system).
+- [ ] T-16 Resource-ceiling integration tests over the cross-product in
+      `docs/performance/acceptance-budgets-and-benchmark-harness.md`
+      (`{default, cpuPercent=5, memoryPercent=5}` x `{idle, active,
+      storm}` x `{boost on, boost off}` x `{global, profile-lowered}`).
 
 ## Deferred tasks
 
@@ -822,3 +834,38 @@ snapshot.
       reconcile backlog non-convergence. Only the release incident
       playbook exists today. Each runbook needs detection, mitigation,
       user-visible state, and recovery verification.
+
+## Full-repository review follow-ups (2026-09-06)
+
+Landed in the review change set (kept here so the roadmap shows why the
+runtime changed shape):
+
+- [x] RV-1 macOS keychain `SecretStore` with an access list covering
+      `vapor` and `vapord`; contract test shared with the fake.
+- [x] RV-2 macOS metrics sampler (CPU, power, thermal, Low Power Mode,
+      memory, user presence) and HID idle notifier; `VAPOR_THROTTLE_INPUTS`
+      override for harnesses.
+- [x] RV-3 One `vapord` resolver for `vapor doctor` and `vapor service`;
+      `doctor --json`, `secret_store` and `throttle_inputs` rows.
+- [x] RV-4 Offline same-size edit detection in the reconcile walk
+      (rsync quick check against the sync index).
+- [x] RV-5 Provider-job panic containment; zero-progress transfer guard.
+- [x] RV-6 Changes poll, reconcile listings and cloud-root retry off the
+      tick thread; keep-both apply skips the hash when size and mtime
+      match the index.
+- [x] RV-7 A fully misconfigured daemon stays up and serves status.
+- [x] RV-8 Live `vapor.json` reload for the safe key subset;
+      `config_restart_required` in status; `vapor config set` hints.
+- [x] RV-9 JSON-typed structured config keys; partial per-profile
+      overrides with per-field merge; `config get` renders defaults.
+- [x] RV-10 `Provider::rename` removed from the contract until move
+      detection exists.
+
+Still open:
+
+- [ ] RV-11 Move detection: turn FSEvents rename pairs into a server-side
+      move on providers that support one (Google Drive does), so a
+      renamed large file is not re-uploaded. Reintroduce the capability
+      on the provider trait together with the engine path that calls it.
+- [ ] RV-12 Adopt `insta` for the `--json` shape locks (see CT-4) and
+      `proptest` for the invariants in CT-1.

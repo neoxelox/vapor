@@ -17,11 +17,15 @@
 //! - `push-only` (strict mirror, local authoritative): local-only and
 //!   divergent entries → upload; remote-only entries → remote delete.
 //!
-//! Fast-path equality is size-based; equal-size same-name files are
-//! treated as converged. Content-hash comparison for equal-size pairs
-//! is deliberately out of the walk's budget (a whole-tree hash pass
-//! would violate the low-impact posture); event-driven intents cover
-//! same-size edits because the editing side observes the change.
+//! Equality is a quick check, never a hash: files whose sizes differ
+//! diverge; files of equal size diverge when the sync index shows the
+//! local copy was touched since the last transfer (a different mtime at
+//! the millisecond the index stores, the rsync quick check). That catches
+//! an edit made while the daemon was not running, which the watcher
+//! cannot see and which a size-only comparison missed. The upload
+//! planner hashes the file and converges silently when the content is
+//! in fact unchanged. A whole-tree hash pass stays out of the walk's
+//! budget on purpose.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -34,6 +38,7 @@ use vapor_shared::{ProviderErrorKind, SyncMode};
 
 use crate::event_intents::PendingIntentKind;
 use crate::fs_events::SharedEventPathFilter;
+use crate::provider_jobs::{ProviderCall, ProviderCallMode};
 use crate::state_db::{DurableStateDb, StateDbError};
 
 #[derive(Debug)]
@@ -73,11 +78,22 @@ struct LocalEntry {
     modified_at: Option<SystemTime>,
 }
 
+/// A remote listing requested on an earlier slice whose round trip is
+/// still in progress.
+struct PendingEnumeration {
+    directory: PathBuf,
+    call: ProviderCall<Result<Vec<RemoteEntry>, ProviderError>>,
+}
+
 pub struct ReconcileWalker {
     /// The scope's local root (remote paths derive relative to it).
     scope_root: PathBuf,
     /// The subtree being reconciled (== scope_root for whole-scope).
     subtree_root: PathBuf,
+    pending_enumeration: Option<PendingEnumeration>,
+    /// Two-way file/directory type mismatches found by this walk; the
+    /// runtime surfaces them on the timeline so the user can act.
+    type_mismatches: Vec<PathBuf>,
     /// Ignore rules, applied symmetrically: local entries and remote
     /// entries (via their local-equivalent path) that match never
     /// produce intents and are never descended into. Without this the
@@ -99,6 +115,8 @@ impl ReconcileWalker {
             scope_root: scope_root.to_path_buf(),
             subtree_root: subtree_root.to_path_buf(),
             path_filter,
+            pending_enumeration: None,
+            type_mismatches: Vec::new(),
             pending_dirs: VecDeque::from([subtree_root.to_path_buf()]),
             stats: WalkStats::default(),
         }
@@ -121,6 +139,11 @@ impl ReconcileWalker {
 
     /// Drains the per-walk stat deltas accumulated since the last call
     /// (the runtime folds them into its cumulative mirror counters).
+    /// Drains the two-way type mismatches found since the last call.
+    pub fn take_type_mismatches(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.type_mismatches)
+    }
+
     pub fn take_mirror_deltas(&mut self) -> (usize, usize) {
         let deltas = (self.stats.mirror_reverts, self.stats.mirror_deletes);
         self.stats.mirror_reverts = 0;
@@ -132,16 +155,17 @@ impl ReconcileWalker {
     /// enqueues the resulting convergence intents. Returns `Ok(true)`
     /// when the walk has no work left.
     ///
-    /// `should_continue` is consulted after each directory so the caller
-    /// can bound the chunk by a wall-clock slice: a provider whose
-    /// `enumerate` is a slow network call must not hold the tick thread
-    /// for the full directory budget (throttle transitions, status
-    /// publishing, and other intents would all stall). The directory
-    /// budget can therefore be set high for fast (filesystem) providers
-    /// while the deadline caps the cost for slow ones.
-    pub fn process(
+    /// Each directory's remote listing is a provider call; in threaded
+    /// mode it runs on its own thread and the walk resumes on the slice
+    /// that finds the listing ready, so a slow `enumerate` never holds
+    /// the tick thread. `should_continue` is consulted after each
+    /// compared directory so the caller can bound the chunk by a
+    /// wall-clock slice as well as by the directory budget.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn process(
         &mut self,
-        provider: &dyn Provider,
+        provider: Arc<dyn Provider>,
+        mode: &ProviderCallMode,
         sync_mode: SyncMode,
         state_db: &mut DurableStateDb,
         max_directories: usize,
@@ -149,41 +173,70 @@ impl ReconcileWalker {
         should_continue: &dyn Fn() -> bool,
     ) -> Result<bool, WalkError> {
         for _ in 0..max_directories {
-            let Some(directory) = self.pending_dirs.pop_front() else {
-                return Ok(true);
+            if self.pending_enumeration.is_none() {
+                let Some(directory) = self.pending_dirs.pop_front() else {
+                    return Ok(true);
+                };
+                let remote_dir = if directory == self.scope_root {
+                    RemotePath::root()
+                } else {
+                    match RemotePath::from_local(&self.scope_root, &directory) {
+                        Some(path) => path,
+                        None => {
+                            crate::logging::warning(
+                                "Reconcile walk skipped a directory outside the scope root",
+                                &[("directory", directory.display().to_string())],
+                            );
+                            continue;
+                        }
+                    }
+                };
+                let provider = provider.clone();
+                let call =
+                    ProviderCall::start(mode, "enumerate", move || provider.enumerate(&remote_dir));
+                self.pending_enumeration = Some(PendingEnumeration { directory, call });
+            }
+            let pending = self
+                .pending_enumeration
+                .as_mut()
+                .expect("a listing was just requested");
+            let Some(result) = pending.call.take() else {
+                // Still listing on the provider thread; nothing else can
+                // progress until it lands.
+                return Ok(false);
             };
-            self.compare_directory(provider, sync_mode, state_db, &directory, now)?;
+            let directory = self
+                .pending_enumeration
+                .take()
+                .expect("pending listing")
+                .directory;
+            let remote_entries = match result {
+                Ok(Ok(entries)) => entries,
+                Ok(Err(error)) if error.kind == ProviderErrorKind::NotFound => Vec::new(),
+                Ok(Err(error)) => return Err(WalkError::Provider(error)),
+                Err(panic) => {
+                    return Err(WalkError::Provider(ProviderError::permanent(format!(
+                        "enumerate panicked: {panic}"
+                    ))));
+                }
+            };
+            self.compare_directory(sync_mode, state_db, &directory, remote_entries, now)?;
             self.stats.directories_compared += 1;
             if !should_continue() {
-                break;
+                return Ok(self.pending_dirs.is_empty());
             }
         }
-        Ok(self.pending_dirs.is_empty())
+        Ok(self.pending_dirs.is_empty() && self.pending_enumeration.is_none())
     }
 
     fn compare_directory(
         &mut self,
-        provider: &dyn Provider,
         sync_mode: SyncMode,
         state_db: &mut DurableStateDb,
         directory: &Path,
+        remote_entries: Vec<RemoteEntry>,
         now: SystemTime,
     ) -> Result<(), WalkError> {
-        let remote_dir = if directory == self.scope_root {
-            RemotePath::root()
-        } else {
-            match RemotePath::from_local(&self.scope_root, directory) {
-                Some(path) => path,
-                None => {
-                    crate::logging::warning(
-                        "Reconcile walk skipped a directory outside the scope root",
-                        &[("directory", directory.display().to_string())],
-                    );
-                    return Ok(());
-                }
-            }
-        };
-
         let mut pairs: BTreeMap<String, EntryPair> = BTreeMap::new();
 
         match fs::read_dir(directory) {
@@ -206,7 +259,7 @@ impl ReconcileWalker {
                         vapor_providers::filesystem::reap_if_stale_temp_file(
                             &entry.path(),
                             &name,
-                            SystemTime::now(),
+                            now,
                         );
                         continue;
                     }
@@ -266,23 +319,16 @@ impl ReconcileWalker {
             }
         }
 
-        match provider.enumerate(&remote_dir) {
-            Ok(entries) => {
-                for entry in entries {
-                    let Some(name) = entry.path.file_name().map(ToOwned::to_owned) else {
-                        continue;
-                    };
-                    // Remote entries are judged by the local path they
-                    // would converge onto, so one rule set governs both
-                    // directions.
-                    if self.ignores(&directory.join(&name)) {
-                        continue;
-                    }
-                    pairs.entry(name).or_default().remote = Some(entry);
-                }
+        for entry in remote_entries {
+            let Some(name) = entry.path.file_name().map(ToOwned::to_owned) else {
+                continue;
+            };
+            // Remote entries are judged by the local path they would
+            // converge onto, so one rule set governs both directions.
+            if self.ignores(&directory.join(&name)) {
+                continue;
             }
-            Err(error) if error.kind == ProviderErrorKind::NotFound => {}
-            Err(error) => return Err(WalkError::Provider(error)),
+            pairs.entry(name).or_default().remote = Some(entry);
         }
 
         let mut batch: Vec<(PathBuf, PendingIntentKind, SystemTime)> = Vec::new();
@@ -294,7 +340,9 @@ impl ReconcileWalker {
                         self.pending_dirs.push_back(local.path);
                     }
                     (false, RemoteEntryKind::File) => {
-                        if local.size_bytes != remote.size_bytes {
+                        let diverged = local.size_bytes != remote.size_bytes
+                            || touched_since_last_sync(state_db, &local_path, &local)?;
+                        if diverged {
                             match sync_mode {
                                 SyncMode::TwoWay => {
                                     // Divergence in two-way routes through
@@ -360,6 +408,7 @@ impl ReconcileWalker {
                                 "Reconcile found a file/directory type mismatch in two-way mode; leaving both sides untouched",
                                 &[("path", local_path.display().to_string())],
                             );
+                            self.type_mismatches.push(local_path.clone());
                         }
                     },
                 },
@@ -431,6 +480,22 @@ impl ReconcileWalker {
     }
 }
 
+/// Equal sizes are not enough: a local edit that kept the byte count
+/// (the common case for config files and source edits) is only visible
+/// through the mtime the sync index recorded at the last transfer. No
+/// index row means the pair was never synced by this daemon, so equal
+/// sizes are taken as converged, as before.
+fn touched_since_last_sync(
+    state_db: &DurableStateDb,
+    local_path: &Path,
+    local: &LocalEntry,
+) -> Result<bool, WalkError> {
+    Ok(state_db.sync_index(local_path)?.is_some_and(|index| {
+        index.local_modified_at.is_some()
+            && !index.matches_local(local.size_bytes, local.modified_at)
+    }))
+}
+
 /// Whether a remote-origin tombstone should win over a surviving local
 /// file: the deletion wins only when the local copy was not modified
 /// after the deletion ("data preservation wins over deletion" — a newer
@@ -442,9 +507,11 @@ fn remote_deletion_wins(
 ) -> bool {
     match state_db.tombstone(local_path) {
         Ok(Some(tombstone)) if tombstone.origin == crate::state_db::TombstoneOrigin::Remote => {
+            // An unreadable mtime cannot prove the file predates the
+            // deletion; keeping data wins over honouring the tombstone.
             match local_modified_at {
                 Some(modified_at) => modified_at <= tombstone.deleted_at,
-                None => true,
+                None => false,
             }
         }
         _ => false,
@@ -478,7 +545,7 @@ mod tests {
         _temp: tempfile::TempDir,
         local_root: PathBuf,
         cloud_root: PathBuf,
-        provider: FilesystemProvider,
+        provider: Arc<dyn Provider>,
         state_db: DurableStateDb,
     }
 
@@ -503,7 +570,7 @@ mod tests {
                 local_root,
                 cloud_root: temp.path().join("cloud"),
                 _temp: temp,
-                provider,
+                provider: Arc::new(provider),
                 state_db,
             }
         }
@@ -512,7 +579,15 @@ mod tests {
             let mut walker = ReconcileWalker::new(&self.local_root, &self.local_root, None);
             for _ in 0..64 {
                 let done = walker
-                    .process(&self.provider, mode, &mut self.state_db, 8, ts(0), &|| true)
+                    .process(
+                        self.provider.clone(),
+                        &ProviderCallMode::Inline,
+                        mode,
+                        &mut self.state_db,
+                        8,
+                        ts(0),
+                        &|| true,
+                    )
                     .expect("walk step");
                 if done {
                     break;
@@ -773,7 +848,8 @@ mod tests {
         for _ in 0..64 {
             done = walker
                 .process(
-                    &fixture.provider,
+                    fixture.provider.clone(),
+                    &ProviderCallMode::Inline,
                     SyncMode::TwoWay,
                     &mut fixture.state_db,
                     8,
@@ -811,7 +887,8 @@ mod tests {
         // Budget of 2 directories per call: the root plus one child.
         let first_done = walker
             .process(
-                &fixture.provider,
+                fixture.provider.clone(),
+                &ProviderCallMode::Inline,
                 SyncMode::TwoWay,
                 &mut fixture.state_db,
                 2,
@@ -825,7 +902,8 @@ mod tests {
         for _ in 0..8 {
             done = walker
                 .process(
-                    &fixture.provider,
+                    fixture.provider.clone(),
+                    &ProviderCallMode::Inline,
                     SyncMode::TwoWay,
                     &mut fixture.state_db,
                     2,

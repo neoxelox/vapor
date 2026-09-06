@@ -89,4 +89,12 @@ private final class StubServiceController: LaunchAgentControlling {
     acknowledged = true
     crashLoopPaused = false
   }
+
+  func restartDaemon() throws -> DaemonLifecycleActionResult { .started }
+
+  func daemonStatus() throws -> DaemonStatusSnapshot {
+    DaemonStatusSnapshot(
+      runState: "Running", throttleState: "IdleDrain", throttleReason: "",
+      providerName: "filesystem", queueDepth: 0, failedIntents: 0)
+  }
 }

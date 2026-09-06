@@ -18,27 +18,37 @@ Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/v
 
 Available now:
 
-- 🔁 Bidirectional cloud sync with durable intent replay and eventual consistency.
-- 🛡 Conflict-safe behavior with deterministic outcomes (keep both copies, never silent overwrite).
-- 🧭 Conflicts stay visible until you settle them: list every kept-both copy and resolve each one with a single command, from any device.
-- 🔀 Choose each folder's sync direction — full two-way, or a one-way mirror for read-only backups and copies.
-- 🧩 Multiple sync profiles let one folder flow to several clouds or keep separate setups neatly isolated.
-- 🪶 Low-impact by design: Vapor defers heavy work under pressure to protect battery and thermals.
-- ⏸️ Pressure-aware throttle modes that adapt sync intensity to real device load.
-- ⚙️ Configurable hard caps on its share of CPU, memory, and network so streaming, browsing, and other apps always have room.
-- 🌙 Smart idle boost: Vapor catches up faster when your device is genuinely idle, and yields the moment you come back.
-- 🌩 Storm-aware scheduling keeps sudden bursts of file changes contained, so one big folder update doesn't snowball.
-- 🛟 Mass-deletion guard pauses sync before a suspicious local wipe can replicate to the cloud.
-- 📈 Clear diagnostics with status reasons, queue visibility, a live activity timeline, and a one-command support bundle.
-- 🔕 Stays out of your way while keeping status and controls one click away.
-- 🚀 Auto-launch at login with resilient crash-loop protection for dependable day-to-day use.
-- 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow.
-- ⏯️ Pause and resume background work on demand; nothing is lost while paused, and Vapor picks up right where it left off.
+- 🔁 Two-way sync between a local folder and a cloud folder. Changes are picked up within seconds while you work.
+- 🧠 Nothing is lost. Every change is written to disk before it moves, so a crash, a reboot, or a dropped connection resumes where it stopped.
+- 🛡 Edits never silently overwrite each other. When two devices change the same file, Vapor keeps both copies.
+- 🧭 Conflicts stay visible until you settle them, and one command resolves each one from any device.
+- 🔂 Your own uploads never bounce back as new changes, so two devices cannot ping-pong a file forever.
+- 🔀 Pick a direction per folder. Full two-way, or a one-way mirror for read-only backups and copies.
+- 🧩 Run several sync profiles at once. One folder can flow to two clouds, or separate setups stay isolated.
+- 📦 Downloads land whole or not at all, and big uploads are chunked so a pause does not restart them.
+- ⏳ Retries back off on their own and respect provider rate limits, so a bad hour of connectivity fixes itself.
+- 🪶 Heavy work waits while your device is busy, protecting battery and thermals.
+- ⚙️ Hard caps on the share of CPU, memory, and network Vapor may use, so streaming and browsing always have room.
+- 🌙 When the device sits idle, Vapor speeds up. It backs off the moment you return.
+- 🌩 A burst of thousands of file changes is absorbed instead of turned into thousands of uploads.
+- 🛟 A sudden mass deletion pauses sync before the wipe can reach the cloud.
+- 🧹 Ignore rules, including your existing gitignore files, keep build output and junk out of the sync.
+- ♻️ Settings apply while it runs. Ceilings, ignore rules, and safeguards change without a restart, and Vapor tells you when one is needed.
+- 🚀 Starts at login, restarts itself after a crash, and stops retrying when something is really broken instead of looping.
+- ⏯️ Pause and resume on demand. Changes made while paused sync when you resume.
+- 📈 Status with a reason, queue depth, a live activity timeline, per-file "why is this stuck", and a one-command support bundle.
+- ⌨️ A full command line for scripts and servers. Everything the app does, the terminal does too.
+- 🔐 Sign-in tokens live in the system keychain, logs never contain secrets, and nothing leaves your device except the files you chose to sync.
+- 🔕 Lives in the menu bar. No windows unless you ask for one.
 
 In flight and coming next:
 
-- ⚡ Fast-feeling background sync designed to stay responsive without stealing your machine.
-- 🌍 Cross-platform parity: one portable runtime powers the macOS, Windows, and Linux apps and the CLI.
+- 🪟 A diagnostics window in the Mac app with throttle reason, queue, conflicts, and timeline, plus live pause and flush controls.
+- 🔔 A notification when a conflict needs you.
+- ✂️ Renames and moves without re-uploading the file.
+- 🖥️ Windows and Linux apps on the same runtime as the Mac app.
+- 📥 Standalone command-line downloads for every OS, with Docker and systemd recipes.
+- 🧾 Signed and notarized releases, verified on a clean machine every cycle.
 
 ## Providers
 
@@ -59,7 +69,7 @@ In flight and coming next:
 
 All user-facing configuration is documented here with meaning and defaults.
 
-All persisted user configuration lives in `<vapor_dir>/vapor.json`; Vapor reads it at startup, so changes apply the next time it starts. Some keys can also be set via a matching `VAPOR_*` environment variable, which takes priority over the file.
+All persisted user configuration lives in `<vapor_dir>/vapor.json`. A running daemon picks up changes to the resource, idle-boost, safeguard, ignore and timeline keys within a few seconds; the keys that reshape the pipeline (`localSyncDirectory`, `cloudSyncDirectory`, `provider`, `syncMode`, `profiles`, `deviceId`) take effect on the next start, and `vapor status` says so until then (`vapor service restart` applies them). `vapor config set` prints which case applies. Some keys can also be set via a matching `VAPOR_*` environment variable, which takes priority over the file.
 
 | Key                  | Type     | Default                                             | Description                                                                              |
 | -------------------- | -------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
@@ -75,8 +85,8 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`; Vapor reads 
 | `languageCode`       | `String` | `"en"`                                              | Selects the UI language catalog to load.                                                 |
 | `timelineLimit` | `Int`    | `1000`                                              | Caps the in-memory timeline length shown in diagnostics.                                 |
 | `deviceId`           | `String` | Derived from the hostname on first run              | Stable per-device identifier used in conflict-copy names (for example `report~conflict-mac-studio-....pdf`). Written by the daemon; never regenerated silently. |
-| `profiles`           | `Array`  | Absent (single implicit profile)                    | Optional named sync profiles. Each entry (`id`, `name`, `enabled`, plus optional `provider`, `localSyncDirectory`, `cloudSyncDirectory`, `syncMode`, `resourceLimits`, `idleBoost` overrides) runs as an isolated pipeline with its own durable state; unset fields inherit the top-level values. |
-| `resourceLimits`     | `Object` | `{ cpuPercent: 15, memoryPercent: 10, bandwidthPercent: 25 }` | Sets hard ceilings on daemon CPU (share of one core), device memory, and measured bandwidth. Honored by the throttle controller and auto-tuner. Profile overrides may only lower these values. The optional `maxConcurrentTransfers` (`1..16`, absent = automatic) additionally caps parallel uploads and downloads; when absent, the idle transfer width derives from the machine's core count (4–8 per direction) and always collapses while you are actively using the device. |
+| `profiles`           | `Array`  | Absent (single implicit profile)                    | Optional named sync profiles. Each entry (`id`, `name`, `enabled`, plus optional `provider`, `localSyncDirectory`, `cloudSyncDirectory`, `syncMode`, `resourceLimits`, `idleBoost` overrides) runs as an isolated pipeline with its own durable state; unset fields inherit the top-level values. The two resource groups merge per field and only toward caution: a `resourceLimits` value can only lower the top-level one, `idleBoost.enabled: false` wins daemon-wide, `boost*Percent`, `headroomCpuPercent` and `rampDownSeconds` can only shrink, `minIdleSeconds` and `rampUpSeconds` can only grow. Fields a profile does not name keep the top-level value. |
+| `resourceLimits`     | `Object` | `{ cpuPercent: 15, memoryPercent: 10, bandwidthPercent: 25 }` | Sets hard ceilings on daemon CPU (share of the whole device), device memory (resident size as a share of physical memory), and measured bandwidth. Honored by the throttle controller and auto-tuner. Profile overrides may only lower these values. The optional `maxConcurrentTransfers` (`1..16`, absent = automatic) additionally caps parallel uploads and downloads; when absent, the idle transfer width derives from the machine's core count (4–8 per direction) and always collapses while you are actively using the device. |
 | `idleBoost`          | `Object` | `{ enabled: true, minIdleSeconds: 300, headroomCpuPercent: 30, boostCpuPercent: 50, boostMemoryPercent: 20, boostBandwidthPercent: 80, rampUpSeconds: 30, rampDownSeconds: 10 }` | Dynamically raises effective ceilings when the device is user-idle with measured resource headroom. Boost requires all of: throttle state `IdleDrain`, user-idle for at least `minIdleSeconds`, and non-Vapor CPU utilization at or below `headroomCpuPercent`. Each `boost*Percent` must be `>=` the matching `resourceLimits.*Percent` (lower values are treated as equal to the base ceiling). Ramp-down is deliberately faster than ramp-up so returning to your device is never met with a busy daemon. Setting `enabled: false` in any enabled profile disables boost daemon-wide. |
 | `safeguards`         | `Object` | `{ massDeleteEnabled: true, massDeleteThreshold: 200, massDeleteWindowSeconds: 60 }` | Tunes the mass-deletion guard: when more than `massDeleteThreshold` local file deletions land within the rolling window, sync pauses until an explicit `vapor resume` (the ransomware / bulk-mistake backstop). Deleting a folder from Finder counts as one deletion; per-file deletion tools (`rm -rf` of large trees) count per file — raise the threshold if that is part of your normal workflow. Values below the floors (`10` deletions / `5` seconds) are clamped up; `massDeleteEnabled: false` turns the guard off entirely. |
 

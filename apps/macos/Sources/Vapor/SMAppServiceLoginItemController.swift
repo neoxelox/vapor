@@ -3,7 +3,6 @@ import VaporCore
 #if canImport(ServiceManagement)
   import ServiceManagement
 
-  @available(macOS 13.0, *)
   final class SMAppServiceLoginItemController: LoginItemControlling {
     private let service: SMAppService
 

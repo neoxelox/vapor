@@ -73,6 +73,10 @@ CLOUD_ROOT="$E2E_ROOT/cloud/VaporE2E"
 export VAPOR_DIR="$E2E_ROOT/home"
 export VAPOR_ENV="dev"
 export VAPOR_LOG_LEVEL="debug"
+# Pin the throttle to neutral inputs: on a developer machine the host
+# sampler would otherwise hold the daemon at Throttled while the
+# developer types, and reconcile only runs in IdleDrain.
+export VAPOR_THROTTLE_INPUTS="static"
 # Never inherit sync-scope overrides from the invoking shell — config
 # must flow through `vapor config set` so the e2e run covers the
 # vapor.json loader path.
@@ -85,6 +89,7 @@ DAEMON_OUT="$E2E_ROOT/daemon.out"
 DAEMON_PID=""
 DEEP_PID=""
 PULL_PID=""
+BAD_PID=""
 FAILED=0
 
 # --full service round-trip phase (host-mutating; see header). The
@@ -132,6 +137,14 @@ dump_diagnostics() {
       echo "[e2e] last 20 service-daemon log lines:"
       tail -n 20 "$SERVICE_HOME/logs/vapord.logs" | sed 's/^/[e2e]   /'
     fi
+    # A daemon that dies before its structured logger starts (lock,
+    # config, a panic in a debug build) only leaves a trace here.
+    for redirect in vapord.stderr.log vapord.stdout.log; do
+      if [[ -s "$SERVICE_HOME/logs/$redirect" ]]; then
+        echo "[e2e] service-daemon $redirect tail:"
+        tail -n 20 "$SERVICE_HOME/logs/$redirect" | sed 's/^/[e2e]   /'
+      fi
+    done
   fi
   echo "[e2e] ---------------------"
 }
@@ -164,6 +177,7 @@ cleanup() {
   stop_daemon "$DAEMON_PID" || true
   stop_daemon "$DEEP_PID" || true
   stop_daemon "$PULL_PID" || true
+  stop_daemon "$BAD_PID" || true
   if [[ "$SERVICE_PHASE_STARTED" -eq 1 ]]; then
     # Best-effort teardown so the host is left clean even on failure:
     # unregister the service, remove the plist, kill any straggler
@@ -293,7 +307,18 @@ fi
 [[ "$("$VAPOR_BIN" config get localSyncDirectory)" == "$LOCAL_ROOT" ]] \
   || fail "S1: config get did not round-trip localSyncDirectory"
 [[ -f "$VAPOR_DIR/vapor.json" ]] || fail "S1: vapor.json was not written under VAPOR_DIR"
-log "PASS S1 — config set/get round-trips through vapor.json"
+# Structured keys are stored as JSON (a string containing JSON would make
+# the daemon ignore the group), and unset keys read back as their default.
+"$VAPOR_BIN" config set safeguards '{"massDeleteThreshold": 500}' >/dev/null \
+  || fail "S1: config set rejected a JSON object for safeguards"
+grep -q '"massDeleteThreshold": 500' "$VAPOR_DIR/vapor.json" \
+  || fail "S1: safeguards was not stored as a JSON object"
+[[ "$("$VAPOR_BIN" config get syncMode)" == "two-way" ]] \
+  || fail "S1: config get did not render the default for an unset key"
+if "$VAPOR_BIN" config set resourceLimits 'cpu=5' >/dev/null 2>&1; then
+  fail "S1: config set accepted a non-JSON value for resourceLimits"
+fi
+log "PASS S1 — config set/get round-trips through vapor.json; structured keys are JSON"
 
 if [[ "$MODE" == "sandbox" ]]; then
   start_daemon
@@ -385,7 +410,12 @@ log "PASS S5 — second daemon on same VAPOR_DIR refused by singleton lock"
 
 # S6 — doctor sanity checks pass inside the sandbox.
 "$VAPOR_BIN" doctor >/dev/null || fail "S6: vapor doctor exited non-zero"
-log "PASS S6 — vapor doctor healthy"
+doctor_json="$("$VAPOR_BIN" doctor --json)" || fail "S6: vapor doctor --json exited non-zero"
+grep -q '"worst_status"' <<<"$doctor_json" && grep -q '"vapord_binary"' <<<"$doctor_json" \
+  || fail "S6: vapor doctor --json lacks the documented shape"
+grep -q '"name": "secret_store"' <<<"$doctor_json" \
+  || fail "S6: vapor doctor --json lacks the secret_store row"
+log "PASS S6 — vapor doctor healthy (text and --json)"
 
 # S7 — restart recovery: clean SIGTERM shutdown, then a fresh daemon
 # reuses the durable state and keeps syncing.
@@ -663,6 +693,77 @@ wait_until 45 "cloud deletion to propagate through the changes feed" feed_delete
   || fail "S19: cloud deletion of an uploaded file never propagated locally (feed lost the event)"
 log "PASS S19 — cloud deletion of an uploaded file propagates via the live feed (no reconcile)"
 
+# S20 — offline same-size edit: a file edited while no daemon runs,
+# keeping its byte count, is invisible to the watcher and to a size-only
+# comparison. The startup reconcile must catch it through the mtime the
+# sync index recorded and upload the new content.
+printf 'offline-edit-AAAA' >"$LOCAL_ROOT/e2e-offline.txt"
+wait_until 30 "seed file to reach the cloud root" file_exists "$CLOUD_ROOT/e2e-offline.txt" \
+  || fail "S20: seed file never reached the cloud root"
+converge 30 || fail "S20: seed file did not converge before the offline edit"
+cmp -s "$LOCAL_ROOT/e2e-offline.txt" "$CLOUD_ROOT/e2e-offline.txt" \
+  || fail "S20: seed file diverged in the cloud root"
+stop_daemon "$DAEMON_PID" || fail "S20: daemon did not shut down cleanly before the offline edit"
+DAEMON_PID=""
+printf 'offline-edit-BBBB' >"$LOCAL_ROOT/e2e-offline.txt"
+# Same byte count, mtime pushed clearly past what the index recorded.
+touch -t "$(date -v+1H +%Y%m%d%H%M.%S 2>/dev/null || date -d '+1 hour' +%Y%m%d%H%M.%S)" "$LOCAL_ROOT/e2e-offline.txt"
+start_daemon
+offline_edit_uploaded() {
+  cmp -s "$LOCAL_ROOT/e2e-offline.txt" "$CLOUD_ROOT/e2e-offline.txt"
+}
+wait_until 60 "offline same-size edit to reach the cloud root" offline_edit_uploaded \
+  || fail "S20: offline same-size edit never reached the cloud (startup reconcile missed it)"
+log "PASS S20 — offline same-size edit detected by the startup reconcile and uploaded"
+
+# S21 — a daemon whose only profile cannot be composed (Google Drive
+# without client credentials) stays up and names the reason in status
+# instead of exiting into the crash-loop guard.
+BAD_HOME="$E2E_ROOT/bad-home"
+mkdir -p "$BAD_HOME"
+VAPOR_DIR="$BAD_HOME" "$VAPOR_BIN" config set localSyncDirectory "$E2E_ROOT/bad-local" >/dev/null
+VAPOR_DIR="$BAD_HOME" "$VAPOR_BIN" config set cloudSyncDirectory "/VaporBad" >/dev/null
+VAPOR_DIR="$BAD_HOME" "$VAPOR_BIN" config set provider gdrive >/dev/null
+env -u VAPOR_GDRIVE_CLIENT_ID VAPOR_DIR="$BAD_HOME" "$VAPOR_BIN" run --foreground >>"$E2E_ROOT/bad-daemon.out" 2>&1 &
+BAD_PID=$!
+bad_status_names_reason() {
+  VAPOR_DIR="$BAD_HOME" "$VAPOR_BIN" status --json 2>/dev/null \
+    | grep -q '"suspended_reason": ".*VAPOR_GDRIVE_CLIENT_ID'
+}
+wait_until 30 "misconfigured daemon to report its suspension reason" bad_status_names_reason \
+  || fail "S21: status never named the missing client id"
+# Still alive well past the first idle ticks.
+sleep 3
+kill -0 "$BAD_PID" 2>/dev/null || fail "S21: misconfigured daemon exited instead of serving status"
+grep -q "serving status" "$BAD_HOME/logs/vapord.logs" \
+  || fail "S21: daemon log does not say it is serving status only"
+kill -TERM "$BAD_PID" 2>/dev/null || true
+wait "$BAD_PID" 2>/dev/null || true
+BAD_PID=""
+log "PASS S21 — a fully misconfigured daemon stays up and names the reason in status"
+
+# S22 — live configuration reload: a resource ceiling written with
+# `vapor config set` reaches the running daemon without a restart, and a
+# key that needs a restart is reported in status until then.
+"$VAPOR_BIN" config set resourceLimits '{"cpuPercent": 7}' | grep -q "within a few seconds" \
+  || fail "S22: config set did not say the key applies live"
+ceiling_is_seven() {
+  "$VAPOR_BIN" status --json 2>/dev/null | grep -q '"effective_cpu_percent": 7'
+}
+wait_until 15 "the running daemon to adopt cpuPercent 7" ceiling_is_seven \
+  || fail "S22: the running daemon never applied the new CPU ceiling"
+"$VAPOR_BIN" config set syncMode push-only | grep -q "restart the daemon" \
+  || fail "S22: config set did not say syncMode needs a restart"
+restart_notice_present() {
+  "$VAPOR_BIN" status --json 2>/dev/null | grep -q '"config_restart_required": ".*syncMode'
+}
+wait_until 15 "status to report the pending restart" restart_notice_present \
+  || fail "S22: status never reported the restart-required key"
+# Put both back so nothing below runs under a mirror mode or a 7% ceiling.
+"$VAPOR_BIN" config set syncMode two-way >/dev/null
+"$VAPOR_BIN" config set resourceLimits '{"cpuPercent": 15}' >/dev/null
+log "PASS S22 — resourceLimits applied live; syncMode change reported as restart-required"
+
 # --- service lifecycle round-trip (--full only) ---
 #
 # Everything below drives `vapor service` against the REAL macOS
@@ -719,6 +820,12 @@ daemon_pid_from_launchd() {
 
 kill_service_daemon() {
   local pid
+  # `launchctl print` reports a pid while the job is still in its
+  # xpcproxy spawn stage, before vapord has exec'd; a SIGKILL aimed at that
+  # moment misses. Wait for the daemon to answer over the sandbox socket
+  # so the crash we simulate is the crash of a running daemon.
+  wait_until 30 "daemon to answer over IPC before the simulated crash" run_state_is "Running" \
+    || fail "daemon never answered over IPC before the simulated crash"
   pid="$(daemon_pid_from_launchd)"
   [[ -n "$pid" ]] || fail "cannot simulate a crash — daemon pid not found via launchctl"
   kill -KILL "$pid" 2>/dev/null || fail "could not SIGKILL daemon pid $pid"

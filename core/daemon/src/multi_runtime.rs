@@ -24,7 +24,7 @@
 
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -86,6 +86,19 @@ struct ProfileSlot {
     /// tick errors). A suspended profile stops ticking; the others and
     /// the watcher keep running.
     failed: Option<String>,
+    /// The suspension happened while composing the daemon (invalid
+    /// provider, overlapping roots, unopenable DB, watcher that could not
+    /// start): a configuration problem the user has to fix, not a
+    /// runtime failure worth restarting for.
+    failed_at_composition: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AllSuspended {
+    /// Every profile was suspended while composing the daemon.
+    AtComposition,
+    /// At least one profile was suspended by a runtime failure.
+    AtRuntime,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -113,6 +126,17 @@ pub struct MultiProfileRuntime {
     /// Whether the previous tick reported pending work — publishes one
     /// trailing snapshot after work quiets so final counts land.
     last_any_pending_work: bool,
+    /// Daemon-wide resource budget shared by every profile runtime; kept
+    /// here so a live configuration change can replace it.
+    shared_budget: Arc<Mutex<crate::resource_budget::ResourceBudget>>,
+    /// Watches `vapor.json` once the daemon asks for live reload.
+    config_reloader: Option<crate::config_reload::ConfigReloader>,
+    /// Restart-required keys that changed since start, for status.
+    restart_required: Vec<&'static str>,
+    /// Bumped on every applied configuration change so the next status
+    /// publish is not skipped as "nothing observable changed".
+    config_generation: u64,
+    last_published_config_generation: u64,
 }
 
 /// The cheap observable state of one profile: enough to detect that a
@@ -171,6 +195,14 @@ impl MultiProfileRuntime {
         let waker = self.tick_waker.clone();
         for slot in &mut self.slots {
             slot.runtime.enable_transfer_workers(Some(waker.clone()));
+        }
+    }
+
+    /// Replaces the idle source every profile runtime consults for idle
+    /// boost. The daemon uses it to honour `VAPOR_THROTTLE_INPUTS=static`.
+    pub fn set_idle_notifier(&mut self, notifier: Arc<dyn vapor_platform::IdleNotifier>) {
+        for slot in &mut self.slots {
+            slot.runtime.set_idle_notifier(notifier.clone());
         }
     }
 
@@ -284,7 +316,7 @@ impl MultiProfileRuntime {
                         ("reason", reason.clone()),
                     ],
                 );
-                (vapor_providers::default_provider(), Some(reason))
+                (vapor_providers::inert_stub_provider(), Some(reason))
             } else {
                 match vapor_providers::select_provider_for_profile(
                     &profile.provider_kind,
@@ -303,7 +335,7 @@ impl MultiProfileRuntime {
                                 ("reason", reason.clone()),
                             ],
                         );
-                        (vapor_providers::default_provider(), Some(reason))
+                        (vapor_providers::inert_stub_provider(), Some(reason))
                     }
                 }
             };
@@ -381,6 +413,7 @@ impl MultiProfileRuntime {
                 runtime,
                 control,
                 consecutive_tick_errors: 0,
+                failed_at_composition: failed.is_some(),
                 failed,
             });
         }
@@ -405,7 +438,107 @@ impl MultiProfileRuntime {
             last_published_slot_states: Vec::new(),
             last_status_publish_inst: None,
             last_any_pending_work: false,
+            shared_budget,
+            config_reloader: None,
+            restart_required: Vec::new(),
+            config_generation: 0,
+            last_published_config_generation: 0,
         })
+    }
+
+    /// Starts watching `path` for changes to the configuration the daemon
+    /// was composed from. Live keys apply on the tick that notices the
+    /// change; the rest are reported as restart-required in status.
+    pub fn watch_config(&mut self, path: &Path, applied: vapor_shared::config::VaporConfig) {
+        self.config_reloader = Some(crate::config_reload::ConfigReloader::new(path, applied));
+    }
+
+    /// Restart-required keys changed since the daemon started.
+    pub fn restart_required(&self) -> &[&'static str] {
+        &self.restart_required
+    }
+
+    fn apply_config_changes(&mut self, now_inst: Instant) {
+        let Some(reloader) = self.config_reloader.as_mut() else {
+            return;
+        };
+        let Some((change, config)) = reloader.poll(now_inst) else {
+            return;
+        };
+        use vapor_shared::constants::config as keys;
+        self.config_generation += 1;
+        let live_keys: Vec<String> = change.live.iter().map(|key| key.to_string()).collect();
+        if change.live.iter().any(|key| {
+            matches!(
+                *key,
+                keys::KEY_RESOURCE_LIMITS | keys::KEY_IDLE_BOOST | keys::KEY_PROFILES
+            )
+        }) || change.restart.contains(&keys::KEY_PROFILES)
+        {
+            let budget = crate::resource_budget::EffectiveBudgetConfig::resolve(&config);
+            let ceiling = budget.max_concurrent_transfers;
+            self.shared_budget
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .replace_config(budget);
+            for slot in &mut self.slots {
+                slot.runtime.set_max_concurrent_transfers(ceiling);
+            }
+        }
+        if change.live.contains(&keys::KEY_SAFEGUARDS) {
+            let settings = crate::safeguards::MassDeleteGuardSettings::resolve(&config);
+            for slot in &mut self.slots {
+                slot.runtime.configure_mass_delete_guard(settings);
+            }
+        }
+        if change.live.iter().any(|key| {
+            matches!(
+                *key,
+                keys::KEY_USE_GIT_IGNORE
+                    | keys::KEY_USE_VAPOR_IGNORE
+                    | keys::KEY_PRE_IGNORE_RULES
+                    | keys::KEY_POST_IGNORE_RULES
+            )
+        }) {
+            let options = EventPathFilterOptions::from_environment_and_config(&config);
+            let mut seen: Vec<*const crate::fs_events::SharedEventPathFilter> = Vec::new();
+            for slot in &self.slots {
+                if let Some(filter) = slot.runtime.shared_path_filter() {
+                    let pointer = Arc::as_ptr(&filter);
+                    if seen.contains(&pointer) {
+                        continue;
+                    }
+                    seen.push(pointer);
+                    filter.replace_options(options.clone());
+                }
+            }
+        }
+        if change.live.contains(&keys::KEY_TIMELINE_LIMIT) {
+            self.set_timeline_limit(config.timeline_limit);
+        }
+        if !live_keys.is_empty() {
+            logging::info(
+                "Applied a live configuration change",
+                &[("keys", live_keys.join(","))],
+            );
+            self.timeline.push(
+                "config",
+                "daemon",
+                format!("applied live settings: {}", live_keys.join(", ")),
+                self.clock.now_system(),
+            );
+        }
+        for key in change.restart {
+            if !self.restart_required.contains(&key) {
+                self.restart_required.push(key);
+            }
+        }
+        if !self.restart_required.is_empty() {
+            logging::warning(
+                "Configuration keys changed that take effect on the next daemon start",
+                &[("keys", self.restart_required.join(","))],
+            );
+        }
     }
 
     /// Daemon-wide control channel (IPC): requests are broadcast to
@@ -465,6 +598,7 @@ impl MultiProfileRuntime {
     /// suspend only the offending profile.
     pub fn tick_all(&mut self, now: SystemTime) -> MultiTickReport {
         let control_forwarded = self.forward_external_control();
+        self.apply_config_changes(self.clock.now());
 
         let mut report = MultiTickReport::default();
         let mut completed_this_tick: u64 = 0;
@@ -569,11 +703,13 @@ impl MultiProfileRuntime {
                 || self.last_any_pending_work
                 || control_forwarded
                 || heartbeat_due
-                || slot_states != self.last_published_slot_states;
+                || slot_states != self.last_published_slot_states
+                || self.config_generation != self.last_published_config_generation;
             if stale {
                 publisher.publish(self.aggregate_status(now));
                 self.last_status_publish_inst = Some(now_inst);
                 self.last_published_slot_states = slot_states;
+                self.last_published_config_generation = self.config_generation;
             }
         }
         self.last_any_pending_work = report.any_pending_work;
@@ -588,19 +724,32 @@ impl MultiProfileRuntime {
         // `vapor stop` / SIGTERM exits promptly instead of waiting out a
         // full idle interval.
         crate::runtime::register_shutdown_waker(self.tick_waker.clone());
+        let mut reported_all_suspended = false;
         while !is_shutdown_requested() {
             let report = self.tick_all(self.clock.now_system());
-            // Exit only when EVERY profile is durably suspended — not on a
-            // per-tick report where a healthy profile merely hit one
-            // transient error (below the suspension threshold) while
-            // another is already suspended.
-            if !self.slots.is_empty() && self.slots.iter().all(|slot| slot.failed.is_some()) {
-                logging::error("Every profile has failed; exiting the daemon", &[]);
-                return Err(DaemonRuntimeError::StateDb(
-                    crate::state_db::StateDbError::InvalidStateValue(
-                        "all profiles suspended".to_string(),
-                    ),
-                ));
+            match self.all_suspended() {
+                // Every profile died at runtime: exit and let the service
+                // manager and the crash-loop guard decide about restarts.
+                Some(AllSuspended::AtRuntime) => {
+                    logging::error("Every profile has failed; exiting the daemon", &[]);
+                    return Err(DaemonRuntimeError::StateDb(
+                        crate::state_db::StateDbError::InvalidStateValue(
+                            "all profiles suspended".to_string(),
+                        ),
+                    ));
+                }
+                // Every profile is misconfigured: exiting would only feed
+                // the crash-loop guard and hide the reason. Stay up on the
+                // idle cadence so `vapor status` can name what to fix.
+                Some(AllSuspended::AtComposition) if !reported_all_suspended => {
+                    reported_all_suspended = true;
+                    logging::error(
+                        "Every profile is suspended by its configuration; serving status \
+                         only until the configuration is fixed and the daemon restarted",
+                        &[],
+                    );
+                }
+                Some(AllSuspended::AtComposition) | None => {}
             }
             let wait = if report.any_pending_work {
                 self.tick_interval
@@ -614,6 +763,20 @@ impl MultiProfileRuntime {
             &[],
         );
         Ok(())
+    }
+
+    /// `Some` when no profile can do any work. Which kind decides whether
+    /// the daemon exits (runtime failures) or keeps serving status
+    /// (configuration failures); a mix counts as runtime.
+    pub fn all_suspended(&self) -> Option<AllSuspended> {
+        if self.slots.is_empty() || self.slots.iter().any(|slot| slot.failed.is_none()) {
+            return None;
+        }
+        if self.slots.iter().all(|slot| slot.failed_at_composition) {
+            Some(AllSuspended::AtComposition)
+        } else {
+            Some(AllSuspended::AtRuntime)
+        }
     }
 
     /// Broadcast pending external control requests to every profile
@@ -672,6 +835,12 @@ impl MultiProfileRuntime {
         };
 
         let mut snapshot = DaemonStatusSnapshot::from_app(worst.runtime.app());
+        snapshot.config_restart_required = (!self.restart_required.is_empty()).then(|| {
+            format!(
+                "{} changed; restart the daemon to apply (vapor service restart)",
+                self.restart_required.join(", ")
+            )
+        });
         snapshot.run_state = format!("{:?}", slot_effective_run_state(worst));
         snapshot.resource_budget = self
             .slots
@@ -875,6 +1044,7 @@ fn start_deduplicated_watchers(
             );
             slot.runtime.set_error_state(reason.clone());
             slot.failed = Some(reason);
+            slot.failed_at_composition = true;
         }
     }
     watchers
@@ -1374,14 +1544,6 @@ mod tests {
         ) -> Result<(), vapor_providers::ProviderError> {
             panic!("provider bug: delete exploded")
         }
-        fn rename(
-            &self,
-            _from: &vapor_providers::RemotePath,
-            _to: &vapor_providers::RemotePath,
-            _op_id: &str,
-        ) -> Result<(), vapor_providers::ProviderError> {
-            panic!("provider bug: rename exploded")
-        }
         fn poll_changes(
             &self,
             _cursor: Option<&str>,
@@ -1389,6 +1551,177 @@ mod tests {
         ) -> Result<vapor_providers::ChangesPoll, vapor_providers::ProviderError> {
             panic!("provider bug: poll_changes exploded")
         }
+    }
+
+    #[test]
+    fn a_live_config_change_applies_mid_work_and_a_restart_key_is_reported() {
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        let local = temp.path().join("local");
+        let cloud = temp.path().join("cloud");
+        std::fs::create_dir_all(&local).expect("local");
+        std::fs::create_dir_all(&cloud).expect("cloud");
+        let config_path = temp.path().join("vapor.json");
+        std::fs::write(&config_path, "{}\n").expect("seed config");
+        let local = vapor_shared::paths::canonicalize(&local).expect("canonical");
+        // Work in flight across the reload: a durable upload queued
+        // before the daemon starts.
+        let keep = local.join("keep.txt");
+        std::fs::write(&keep, b"survives a reload").expect("seed file");
+        {
+            let state_root = temp.path().join("state");
+            let mut db = DurableStateDb::open(
+                state_root
+                    .join("profiles")
+                    .join("default")
+                    .join(constants::runtime::SQLITE_DATABASE_FILE_NAME),
+            )
+            .expect("open profile db");
+            db.enqueue_intent(
+                &keep,
+                crate::event_intents::PendingIntentKind::Upload,
+                SystemTime::now(),
+            )
+            .expect("enqueue");
+        }
+
+        let profiles = vec![ResolvedProfile {
+            id: "default".to_string(),
+            display_name: "default".to_string(),
+            provider_kind: "filesystem".to_string(),
+            scope: SyncScope {
+                local_sync_directory: Some(local.clone()),
+                cloud_sync_directory: cloud.to_string_lossy().into_owned(),
+                sync_mode: SyncMode::TwoWay,
+            },
+            enabled: true,
+        }];
+        let applied = vapor_shared::config::VaporConfig::default();
+        let mut multi = MultiProfileRuntime::start_with_state_root(
+            profiles,
+            EventPathFilterOptions::default(),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            "testdev",
+            false,
+            Some(temp.path().join("state")),
+            crate::resource_budget::EffectiveBudgetConfig::resolve(&applied),
+            crate::safeguards::MassDeleteGuardSettings::default(),
+        )
+        .expect("multi runtime");
+        multi.watch_config(&config_path, applied);
+        use crate::clock::Clock as _;
+        multi.tick_all(clock.now_system());
+
+        // A live key: the ceiling drops without touching the queue.
+        std::fs::write(
+            &config_path,
+            "{\"resourceLimits\": {\"cpuPercent\": 7}, \"provider\": \"gdrive\"}\n",
+        )
+        .expect("edit config");
+        let later = std::fs::metadata(&config_path)
+            .expect("metadata")
+            .modified()
+            .expect("mtime")
+            + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&config_path)
+            .expect("open")
+            .set_modified(later)
+            .expect("set mtime");
+        clock.advance(Duration::from_secs(2));
+        clock.advance_system(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+
+        assert_eq!(
+            multi
+                .shared_budget
+                .lock()
+                .expect("budget")
+                .config()
+                .cpu_percent,
+            7,
+            "resourceLimits applies live"
+        );
+        assert_eq!(multi.restart_required(), &["provider"]);
+        let status = multi.aggregate_status(clock.now_system());
+        assert!(
+            status
+                .config_restart_required
+                .as_deref()
+                .is_some_and(|notice| notice.contains("provider") && notice.contains("restart")),
+            "{:?}",
+            status.config_restart_required
+        );
+        // The queued upload either finished or is still queued; a reload
+        // never fails or drops it.
+        for _ in 0..40 {
+            clock.advance(Duration::from_millis(250));
+            clock.advance_system(Duration::from_millis(250));
+            multi.tick_all(clock.now_system());
+            if cloud.join("keep.txt").exists() {
+                break;
+            }
+        }
+        let db = multi.runtime_for("default").expect("runtime").state_db();
+        assert_eq!(db.failed_depth().expect("failed"), 0);
+        assert!(
+            cloud.join("keep.txt").exists() || db.queue_depth().expect("depth") >= 1,
+            "a reload never drops queued intents"
+        );
+    }
+
+    #[test]
+    fn a_daemon_whose_only_profile_is_misconfigured_keeps_serving_status() {
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        let local = temp.path().join("local");
+        std::fs::create_dir_all(&local).expect("local");
+        let profiles = vec![ResolvedProfile {
+            id: "only".to_string(),
+            display_name: "only".to_string(),
+            provider_kind: "gdrvie".to_string(),
+            scope: SyncScope {
+                local_sync_directory: Some(local),
+                cloud_sync_directory: "/Vapor".to_string(),
+                sync_mode: SyncMode::TwoWay,
+            },
+            enabled: true,
+        }];
+        let mut multi = MultiProfileRuntime::start_with_state_root(
+            profiles,
+            EventPathFilterOptions::default(),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            "testdev",
+            false,
+            Some(temp.path().join("state")),
+            crate::resource_budget::EffectiveBudgetConfig::resolve(
+                &vapor_shared::config::VaporConfig::default(),
+            ),
+            crate::safeguards::MassDeleteGuardSettings::default(),
+        )
+        .expect("multi runtime");
+        assert_eq!(multi.failed_profile_count(), 1);
+        // Ticking is harmless and the loop must not exit: the user needs
+        // `vapor status` to name the reason.
+        use crate::clock::Clock as _;
+        multi.tick_all(clock.now_system());
+        assert_eq!(multi.all_suspended(), Some(AllSuspended::AtComposition));
+        let snapshot = multi.aggregate_status(clock.now_system());
+        let only = snapshot
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "only")
+            .expect("profile row");
+        assert!(
+            only.suspended_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("gdrvie")),
+            "reason must name the bad provider: {:?}",
+            only.suspended_reason
+        );
     }
 
     #[test]
@@ -1410,6 +1743,11 @@ mod tests {
         // the catcher suspends exactly that profile.
         fixture.tick(6_000);
         assert_eq!(fixture.multi.failed_profile_count(), 1);
+        assert_eq!(
+            fixture.multi.all_suspended(),
+            None,
+            "a healthy profile keeps the daemon alive"
+        );
 
         // The healthy profile still syncs.
         let healthy_local = fixture.local_roots["healthy"].clone();

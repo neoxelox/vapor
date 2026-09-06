@@ -207,6 +207,13 @@ pub struct DaemonRuntime {
     /// uploads / remote deletes).
     remote_echoes: SelfWriteCache,
     remote_poller: RemotePoller,
+    /// Inline in tests; threaded once `enable_transfer_workers` runs so
+    /// the changes poll, reconcile enumerate and cloud-root retry never
+    /// hold the tick thread on a network round trip.
+    provider_call_mode: crate::provider_jobs::ProviderCallMode,
+    /// A cloud-root ensure started on an earlier tick.
+    cloud_root_call:
+        Option<crate::provider_jobs::ProviderCall<Result<(), vapor_providers::ProviderError>>>,
     /// Whether the provider-side sync root has been ensured. While
     /// `false`, no work is leased and the remote feed is not polled;
     /// ingest keeps capturing intent state durably.
@@ -487,6 +494,7 @@ impl DaemonRuntime {
                 self.sync_scope.sync_mode,
                 &self.clock,
                 now,
+                &self.provider_call_mode,
             )?;
             report.mirror_reverts += report.remote_poll.mirror_reverts;
             report.mirror_deletes += report.remote_poll.mirror_deletes;
@@ -517,7 +525,7 @@ impl DaemonRuntime {
         report.conflicts += staged_report.conflicts;
         self.conflict_count += staged_report.conflicts as u64;
         if staged_report.cloud_root_unavailable > 0 {
-            self.mark_cloud_root_unavailable("a provider transfer reported the root missing");
+            self.mark_cloud_root_unavailable("a provider transfer reported the root missing", now);
         }
 
         if let Some(reconcile_intent_id) = self.running_reconcile_intent_id {
@@ -534,7 +542,7 @@ impl DaemonRuntime {
                         // Not a walk bug: the cloud root itself vanished.
                         // Block admission and let the ensure-retry loop
                         // recreate it instead of retrying the walk forever.
-                        self.mark_cloud_root_unavailable(&provider_error.message);
+                        self.mark_cloud_root_unavailable(&provider_error.message, now);
                     } else {
                         logging::warning(
                             "Reconcile comparison walk failed; yielding and retrying later",
@@ -558,6 +566,21 @@ impl DaemonRuntime {
                         report.mirror_deletes += mirror_deletes;
                         self.mirror_revert_count += mirror_reverts as u64;
                         self.mirror_delete_count += mirror_deletes as u64;
+                        let mismatches = walker.take_type_mismatches();
+                        if let Some(timeline) = &self.timeline {
+                            for path in mismatches {
+                                timeline.push(
+                                    "reconcile",
+                                    self.profile_id.clone(),
+                                    format!(
+                                        "{} is a file on one side and a directory on the other; \
+                                         two-way sync leaves both untouched until you rename one",
+                                        path.display()
+                                    ),
+                                    now,
+                                );
+                            }
+                        }
                     }
                     if walk_done {
                         // A finished walk completes regardless of the slice
@@ -646,6 +669,7 @@ impl DaemonRuntime {
                 if admission_report.cloud_root_unavailable > 0 {
                     self.mark_cloud_root_unavailable(
                         "a provider transfer reported the root missing",
+                        now,
                     );
                 }
             }
@@ -960,6 +984,8 @@ impl DaemonRuntime {
             local_echoes: SelfWriteCache::new(),
             remote_echoes: SelfWriteCache::new(),
             remote_poller: RemotePoller::new(DEFAULT_PROFILE_ID),
+            provider_call_mode: crate::provider_jobs::ProviderCallMode::Inline,
+            cloud_root_call: None,
             profile_id: DEFAULT_PROFILE_ID.to_string(),
             timeline_default_entries: None,
             cloud_root_ready,
@@ -1002,7 +1028,8 @@ impl DaemonRuntime {
     /// inline mode. `waker` is notified on every completed job so the
     /// tick loop harvests promptly.
     pub fn enable_transfer_workers(&mut self, waker: Option<Arc<TickWaker>>) {
-        self.staged_executor.enable_worker_threads(waker);
+        self.staged_executor.enable_worker_threads(waker.clone());
+        self.provider_call_mode = crate::provider_jobs::ProviderCallMode::Threaded { waker };
     }
 
     /// Applies the resolved `safeguards` config group: rebuilds the
@@ -1040,6 +1067,10 @@ impl DaemonRuntime {
         self.idle_notifier = idle_notifier;
     }
 
+    pub fn set_idle_notifier(&mut self, idle_notifier: Arc<dyn vapor_platform::IdleNotifier>) {
+        self.idle_notifier = idle_notifier;
+    }
+
     /// Latest effective ceilings + utilization for the IPC surface
     ///. `None` until the first 1s sample.
     pub fn resource_budget_status(&self) -> Option<vapor_ipc::ResourceBudgetStatus> {
@@ -1057,7 +1088,9 @@ impl DaemonRuntime {
             effective_memory_percent: ceilings.memory_percent,
             effective_bandwidth_percent: ceilings.bandwidth_percent,
             cpu_utilization_percent: inputs.map(|i| i.vapor_cpu_load_percent).unwrap_or(0),
-            memory_utilization_percent: 0,
+            memory_utilization_percent: inputs
+                .and_then(|i| memory_share_percent(i.vapor_memory_bytes, i.device_memory_bytes))
+                .unwrap_or(0),
             bandwidth_utilization_kbps: bandwidth_rate_kbps,
             idle_boost_state: ceilings.boost_state.to_string(),
             idle_boost_reason: ceilings.reason.clone(),
@@ -1091,7 +1124,9 @@ impl DaemonRuntime {
         let workgate = self.app.workgate_snapshot();
         let paused = self.app.snapshot().run_state == RunState::Paused;
 
-        for (intent_id, path, kind, stage, elapsed_ms) in self.staged_executor.active_stages() {
+        for (intent_id, path, kind, stage, elapsed_ms, attempt_count, last_error) in
+            self.staged_executor.active_stages()
+        {
             active_ids.insert(intent_id);
             let blocker_reason = match stage {
                 crate::executor::ExecutionStage::WaitingForHash => format!(
@@ -1118,8 +1153,8 @@ impl DaemonRuntime {
                 action: format!("{kind:?}").to_lowercase(),
                 stage: format!("{stage:?}"),
                 elapsed_in_stage_ms: elapsed_ms,
-                attempt_count: 0,
-                last_error: String::new(),
+                attempt_count,
+                last_error,
                 blocker_reason,
             });
             if rows.len() >= limit {
@@ -1295,7 +1330,7 @@ impl DaemonRuntime {
     /// `cloud_root_ready`), the periodic ensure-retry recreates the root,
     /// and recovery schedules a whole-scope reconcile — the same
     /// self-healing path a missing root takes at startup.
-    fn mark_cloud_root_unavailable(&mut self, reason: &str) {
+    fn mark_cloud_root_unavailable(&mut self, reason: &str, now: SystemTime) {
         if !self.cloud_root_ready {
             return;
         }
@@ -1328,7 +1363,7 @@ impl DaemonRuntime {
                 "cloud-root",
                 self.profile_id.clone(),
                 "cloud sync directory became unavailable; sync blocked until it is restored",
-                self.clock.now_system(),
+                now,
             );
         }
     }
@@ -1338,21 +1373,41 @@ impl DaemonRuntime {
             return;
         }
         let now_inst = self.clock.now();
-        let retry_interval =
-            Duration::from_secs(constants::engine::CLOUD_ROOT_ENSURE_RETRY_SECONDS);
-        let due = self
-            .last_cloud_root_attempt_inst
-            .map(|last| now_inst.saturating_duration_since(last) >= retry_interval)
-            .unwrap_or(true);
-        if !due {
-            return;
-        }
-        self.last_cloud_root_attempt_inst = Some(now_inst);
-        if self
-            .app
-            .ensure_cloud_sync_directory(self.sync_scope.cloud_sync_directory.as_str())
-            .is_ok()
-        {
+        // Harvest an ensure started on an earlier tick before consulting
+        // the cadence, so a slow round trip is never abandoned.
+        let result = if let Some(call) = self.cloud_root_call.as_mut() {
+            let Some(result) = call.take() else {
+                return;
+            };
+            self.cloud_root_call = None;
+            result
+        } else {
+            let retry_interval =
+                Duration::from_secs(constants::engine::CLOUD_ROOT_ENSURE_RETRY_SECONDS);
+            let due = self
+                .last_cloud_root_attempt_inst
+                .map(|last| now_inst.saturating_duration_since(last) >= retry_interval)
+                .unwrap_or(true);
+            if !due {
+                return;
+            }
+            self.last_cloud_root_attempt_inst = Some(now_inst);
+            let provider = self.app.provider_handle();
+            let cloud_root = self.sync_scope.cloud_sync_directory.clone();
+            let mut call = crate::provider_jobs::ProviderCall::start(
+                &self.provider_call_mode,
+                "ensure-cloud-root",
+                move || provider.ensure_cloud_sync_directory(cloud_root.as_str()),
+            );
+            match call.take() {
+                Some(result) => result,
+                None => {
+                    self.cloud_root_call = Some(call);
+                    return;
+                }
+            }
+        };
+        if matches!(result, Ok(Ok(()))) {
             self.cloud_root_ready = true;
             // A recovered root may be freshly recreated and empty (or
             // have drifted while unreachable): a whole-scope reconcile
@@ -1524,19 +1579,23 @@ impl DaemonRuntime {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .set_rate(Some(rate_bytes_per_sec.max(1)));
-            self.apply_memory_ceiling(ceilings.memory_percent);
+            self.apply_memory_ceiling(ceilings.memory_percent, &inputs);
             self.latest_ceilings = Some(ceilings);
             self.last_sampled_inputs = Some(inputs);
         }
     }
 
-    /// Memory-ceiling reactions: bounded caches trim toward
-    /// their documented floors when the entry population outgrows the
-    /// ceiling-derived budget, and restore when clearly under it
-    /// (hysteresis at half the budget). Floors are enforced by the
-    /// caches themselves — loop prevention and observability never
-    /// degrade below their guarantees.
-    fn apply_memory_ceiling(&mut self, memory_percent: u8) {
+    /// Memory-ceiling reactions. The ceiling is a share of device
+    /// memory; when the host reports the daemon's resident size the
+    /// comparison is against that share, and the bounded caches trim
+    /// toward their documented floors while the process sits over it,
+    /// restoring once it is clearly under (hysteresis at half the
+    /// budget). The same trim also fires when the cache population
+    /// alone outgrows an entry budget derived from the ceiling, which is
+    /// the only signal on hosts without a memory sampler. Floors are
+    /// enforced by the caches themselves, so loop prevention and
+    /// observability never degrade below their guarantees.
+    fn apply_memory_ceiling(&mut self, memory_percent: u8, inputs: &ThrottleInputs) {
         const ENTRIES_PER_MEMORY_PERCENT: usize = 400;
         let budget_entries = usize::from(memory_percent) * ENTRIES_PER_MEMORY_PERCENT;
         let usage = self.local_echoes.len()
@@ -1546,8 +1605,16 @@ impl DaemonRuntime {
                 .as_ref()
                 .map(|timeline| timeline.len())
                 .unwrap_or(0);
+        let (over_bytes, under_bytes) =
+            match (inputs.vapor_memory_bytes, inputs.device_memory_bytes) {
+                (Some(resident), Some(device)) if device > 0 => {
+                    let budget = device / 100 * u64::from(memory_percent);
+                    (resident > budget, resident < budget / 2)
+                }
+                _ => (false, true),
+            };
 
-        if usage > budget_entries {
+        if usage > budget_entries || over_bytes {
             let squeezed_ttl =
                 Duration::from_millis(vapor_shared::constants::self_write_cache::MIN_TTL_MILLIS);
             let squeezed_entries = vapor_shared::constants::self_write_cache::MIN_ENTRIES;
@@ -1562,7 +1629,7 @@ impl DaemonRuntime {
                     .get_or_insert(timeline.max_entries());
                 timeline.set_max_entries(budget_entries / 4);
             }
-        } else if usage < budget_entries / 2 {
+        } else if usage < budget_entries / 2 && under_bytes {
             let default_ttl = Duration::from_millis(
                 vapor_shared::constants::self_write_cache::DEFAULT_TTL_MILLIS,
             );
@@ -2010,7 +2077,8 @@ impl DaemonRuntime {
             .as_mut()
             .expect("walker was just ensured");
         walker.process(
-            self.app.provider(),
+            self.app.provider_handle(),
+            &self.provider_call_mode,
             self.sync_scope.sync_mode,
             &mut self.state_db,
             constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN,
@@ -2139,6 +2207,16 @@ fn is_local_self_write_echo(
     local_echoes.matches_write(&key, None, Some(&content_hash), now)
 }
 
+/// Resident size as a whole-number share of device memory, rounded up so
+/// a running daemon never reports 0% while it holds memory.
+fn memory_share_percent(resident: Option<u64>, device: Option<u64>) -> Option<u8> {
+    let (resident, device) = (resident?, device?);
+    if device == 0 {
+        return None;
+    }
+    Some((resident.saturating_mul(100)).div_ceil(device).min(100) as u8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2149,7 +2227,7 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::time::Instant;
     use tempfile::TempDir;
-    use vapor_providers::default_provider;
+    use vapor_providers::inert_stub_provider;
 
     #[test]
     fn start_queues_whole_scope_reconcile_for_restart_reconstruction() {
@@ -2159,9 +2237,12 @@ mod tests {
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
 
-        let runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
-                .expect("runtime");
+        let runtime = DaemonRuntime::start(
+            test_sync_scope(&watch_root),
+            state_db,
+            inert_stub_provider(),
+        )
+        .expect("runtime");
 
         assert_eq!(
             runtime.has_live_watcher(),
@@ -2183,9 +2264,12 @@ mod tests {
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
 
-        let runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
-                .expect("runtime starts on every host");
+        let runtime = DaemonRuntime::start(
+            test_sync_scope(&watch_root),
+            state_db,
+            inert_stub_provider(),
+        )
+        .expect("runtime starts on every host");
 
         let snapshot = runtime.app().snapshot();
         if native_watcher_available() {
@@ -2215,7 +2299,7 @@ mod tests {
                 sync_mode: vapor_shared::SyncMode::TwoWay,
             },
             state_db,
-            default_provider(),
+            inert_stub_provider(),
         )
         .expect("runtime");
 
@@ -2237,7 +2321,7 @@ mod tests {
         let runtime = DaemonRuntime::start(
             test_sync_scope(&symlink_watch_root),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
         )
         .expect("runtime");
 
@@ -2274,9 +2358,12 @@ mod tests {
             )
             .expect("enqueue existing upload intent");
 
-        let runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
-                .expect("runtime");
+        let runtime = DaemonRuntime::start(
+            test_sync_scope(&watch_root),
+            state_db,
+            inert_stub_provider(),
+        )
+        .expect("runtime");
 
         assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 2);
         assert_eq!(
@@ -2301,9 +2388,12 @@ mod tests {
             )
             .expect("enqueue existing upload intent");
 
-        let mut runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
-                .expect("runtime");
+        let mut runtime = DaemonRuntime::start(
+            test_sync_scope(&watch_root),
+            state_db,
+            inert_stub_provider(),
+        )
+        .expect("runtime");
 
         let first_tick = runtime
             .tick_with_inputs(timestamp_ms(1_000), ThrottleInputs::default())
@@ -2432,7 +2522,7 @@ mod tests {
             test_sync_scope(&watch_root),
             EventPathFilterOptions::default(),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
             Arc::new(StaticMetricsSampler::default()),
             system_clock(),
             false,
@@ -2468,7 +2558,7 @@ mod tests {
             test_sync_scope(&watch_root),
             EventPathFilterOptions::default(),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
             Arc::new(StaticMetricsSampler::default()),
             system_clock(),
             false,
@@ -2526,7 +2616,7 @@ mod tests {
             test_sync_scope(&watch_root),
             EventPathFilterOptions::default(),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
             Arc::new(StaticMetricsSampler::default()),
             clock.clone(),
             false,
@@ -3719,6 +3809,122 @@ mod tests {
     }
 
     #[test]
+    fn offline_same_size_edit_is_uploaded_by_the_startup_reconcile() {
+        // A file synced by one daemon run is edited while no daemon is
+        // running, keeping its byte count. The watcher never sees the
+        // edit; only the startup reconcile can, through the mtime the
+        // sync index recorded.
+        let temp = TempDir::new().expect("temp dir");
+        let watch_root = temp.path().join("watch");
+        let cloud_root = temp.path().join("cloud");
+        std::fs::create_dir_all(&watch_root).expect("watch root");
+        std::fs::create_dir_all(&cloud_root).expect("cloud root");
+        let watch_root =
+            vapor_shared::paths::canonicalize(&watch_root).expect("canonical watch root");
+        let database_path = temp.path().join("state/vapor.sqlite");
+        let local_file = watch_root.join("notes.txt");
+        std::fs::write(&local_file, b"version-A").expect("seed local");
+
+        let sync_scope = || SyncScope {
+            local_sync_directory: Some(watch_root.clone()),
+            cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            sync_mode: vapor_shared::SyncMode::TwoWay,
+        };
+        use crate::clock::Clock as _;
+        let drive = |runtime: &mut DaemonRuntime, clock: &Arc<crate::clock::ManualClock>| {
+            for _ in 0..400 {
+                clock.advance(Duration::from_millis(250));
+                clock.advance_system(Duration::from_millis(250));
+                runtime
+                    .tick_with_inputs(clock.now_system(), ThrottleInputs::default())
+                    .expect("tick");
+                if runtime.state_db().queue_depth().expect("depth") == 0
+                    && runtime.state_db().leased_depth().expect("leased") == 0
+                {
+                    break;
+                }
+            }
+        };
+
+        // First run: upload the file so the sync index records its
+        // size and mtime.
+        {
+            let mut state_db = DurableStateDb::open(&database_path).expect("open state db");
+            state_db
+                .enqueue_intent(&local_file, PendingIntentKind::Upload, timestamp_ms(0))
+                .expect("enqueue");
+            let clock = Arc::new(crate::clock::ManualClock::at_now());
+            let mut runtime = DaemonRuntime::build(
+                sync_scope(),
+                EventPathFilterOptions::default(),
+                state_db,
+                Box::new(vapor_providers::FilesystemProvider::new()),
+                Arc::new(StaticMetricsSampler::default()),
+                clock.clone(),
+                false,
+            )
+            .expect("first runtime");
+            drive(&mut runtime, &clock);
+            assert_eq!(
+                std::fs::read(cloud_root.join("notes.txt")).expect("uploaded"),
+                b"version-A"
+            );
+            let index = runtime
+                .state_db()
+                .sync_index(&local_file)
+                .expect("index")
+                .expect("indexed after upload");
+            assert!(index.local_modified_at.is_some());
+        }
+
+        // Offline edit: same length, new content, mtime clearly later
+        // than what the index recorded.
+        std::fs::write(&local_file, b"version-B").expect("edit offline");
+        let later = std::fs::metadata(&local_file)
+            .expect("metadata")
+            .modified()
+            .expect("mtime")
+            + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&local_file)
+            .expect("open for mtime")
+            .set_modified(later)
+            .expect("set mtime");
+        assert_eq!(
+            std::fs::metadata(cloud_root.join("notes.txt"))
+                .expect("cloud metadata")
+                .len(),
+            9,
+            "the edit must keep the byte count for this test to mean anything"
+        );
+
+        // Second run: the startup whole-scope reconcile must notice the
+        // touched file and upload it.
+        let state_db = DurableStateDb::open(&database_path).expect("reopen state db");
+        let clock = Arc::new(crate::clock::ManualClock::at_now());
+        let mut runtime = DaemonRuntime::build(
+            sync_scope(),
+            EventPathFilterOptions::default(),
+            state_db,
+            Box::new(vapor_providers::FilesystemProvider::new()),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            false,
+        )
+        .expect("second runtime");
+        runtime
+            .enqueue_startup_reconstruction_reconcile(clock.now_system())
+            .expect("queue startup reconcile");
+        drive(&mut runtime, &clock);
+        assert_eq!(
+            std::fs::read(cloud_root.join("notes.txt")).expect("cloud copy"),
+            b"version-B",
+            "the offline same-size edit must reach the cloud"
+        );
+    }
+
+    #[test]
     fn paused_daemon_stops_admitting_new_work_and_resume_restores_it() {
         // Regression for the "pause is cosmetic" bug: `vapor pause` used
         // to flip the status string while the runtime kept leasing and
@@ -3742,7 +3948,7 @@ mod tests {
             test_sync_scope(&watch_root),
             EventPathFilterOptions::default(),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
             Arc::new(StaticMetricsSampler::default()),
             clock.clone(),
             false,
@@ -3924,7 +4130,7 @@ mod tests {
         let mut runtime = DaemonRuntime::start_with_sampler(
             test_sync_scope(&watch_root),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
             sampler,
         )
         .expect("runtime");
@@ -3951,9 +4157,12 @@ mod tests {
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
 
-        let mut runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
-                .expect("runtime");
+        let mut runtime = DaemonRuntime::start(
+            test_sync_scope(&watch_root),
+            state_db,
+            inert_stub_provider(),
+        )
+        .expect("runtime");
         runtime.tick(SystemTime::now()).expect("runtime tick");
 
         let decision = runtime
@@ -3983,7 +4192,7 @@ mod tests {
             test_sync_scope(&watch_root),
             EventPathFilterOptions::default(),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
             Arc::new(StaticMetricsSampler::default()),
             system_clock(),
             false,

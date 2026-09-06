@@ -15,44 +15,12 @@ if [[ "$MODE" != "check" && "$MODE" != "apply" ]]; then
   exit 1
 fi
 
-collect_manifests() {
-  local manifests=""
+MANIFEST="$ROOT_DIR/Cargo.toml"
 
-  if [[ -f "$ROOT_DIR/Cargo.toml" ]]; then
-    manifests="$ROOT_DIR/Cargo.toml"
-  else
-    local candidate
-    for candidate in \
-      "$ROOT_DIR/core/daemon/Cargo.toml" \
-      "$ROOT_DIR/core/providers/Cargo.toml" \
-      "$ROOT_DIR/core/shared/Cargo.toml"
-    do
-      if [[ -f "$candidate" ]]; then
-        if [[ -n "$manifests" ]]; then
-          manifests+=$'\n'
-        fi
-        manifests+="$candidate"
-      fi
-    done
-  fi
-
-  printf '%s\n' "$manifests"
-}
-
-MANIFESTS="$(collect_manifests)"
-
-if [[ -z "$MANIFESTS" ]]; then
-  echo "[rust-format] No Cargo.toml found. Skipping Rust format."
-  exit 0
+if [[ "$MODE" == "check" ]]; then
+  echo "[rust-format] cargo fmt --check for ${MANIFEST}"
+  cargo fmt --manifest-path "$MANIFEST" --all -- --check
+else
+  echo "[rust-format] cargo fmt for ${MANIFEST}"
+  cargo fmt --manifest-path "$MANIFEST" --all
 fi
-
-while IFS= read -r manifest; do
-  [[ -z "$manifest" ]] && continue
-  if [[ "$MODE" == "check" ]]; then
-    echo "[rust-format] cargo fmt --check for ${manifest}"
-    cargo fmt --manifest-path "$manifest" --all -- --check
-  else
-    echo "[rust-format] cargo fmt for ${manifest}"
-    cargo fmt --manifest-path "$manifest" --all
-  fi
-done <<< "$MANIFESTS"

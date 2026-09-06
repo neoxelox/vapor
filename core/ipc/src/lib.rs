@@ -3,8 +3,9 @@
 //!
 //! Authoritative reference: `docs/architecture/ipc-contracts.md`.
 //!
-//! Wire format: JSON-RPC 2.0-style request/response objects framed with
-//! a `u32` little-endian length prefix. The same handshake / skew
+//! Wire format: Vapor's own tagged JSON envelopes (`{kind, payload}`
+//! requests, `{outcome, value}` responses; not JSON-RPC) framed with a
+//! `u32` little-endian length prefix. The same handshake / skew
 //! discipline applies on every transport (UDS on Unix, named pipe on
 //! Windows once it ships). Pre-GA the schema-skew tolerance is
 //! `|app - daemon| <= 1`.

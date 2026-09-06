@@ -10,9 +10,13 @@ on:
 permissions:
   contents: read
 
+# Inside a reusable-workflow call the `github` context is the caller's,
+# so the group carries this workflow's own name to stay distinct from the
+# caller's group, and runs on `main` or on a release tag are never
+# cancelled.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-test-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   test:
@@ -73,6 +77,8 @@ jobs:
 
       - name: Run tests
         shell: bash
+        env:
+          VAPOR_TEST_MAX_SECONDS: "300"
         run: ./scripts/test.sh
 
       # Tier E2E: black-box run of the real vapor + vapord binaries in a

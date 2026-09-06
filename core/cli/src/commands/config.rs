@@ -53,13 +53,35 @@ impl From<io::Error> for ConfigError {
     }
 }
 
-/// Result of a `get`. `None` when the key has never been persisted —
-/// the binary renders that as the documented default value.
+/// Result of a `get`: the persisted value, or the compiled default
+/// when the key has never been persisted. `None` only for keys with no
+/// default (`deviceId`, which the daemon derives at first run).
 pub fn get(path: &Path, key: &str) -> Result<Option<String>, ConfigError> {
     validate_key(key)?;
     let document = read_or_empty_object(path)?;
-    let value = document.get(key);
-    Ok(value.map(format_json_scalar))
+    Ok(document
+        .get(key)
+        .map(format_json_scalar)
+        .or_else(|| default_for_key(key).as_ref().map(format_json_scalar)))
+}
+
+/// One line telling the user when the value takes effect, from the
+/// same key classes the daemon's live reload uses.
+pub fn apply_hint(key: &str) -> String {
+    if constants::config::LIVE_RELOAD_KEYS.contains(&key) {
+        format!("{key} saved; a running daemon applies it within a few seconds")
+    } else if constants::config::RESTART_REQUIRED_KEYS.contains(&key) {
+        format!("{key} saved; restart the daemon to apply it (vapor service restart)")
+    } else {
+        format!("{key} saved")
+    }
+}
+
+/// The compiled default for a key, rendered from the same struct the
+/// daemon starts from so the two can never disagree.
+fn default_for_key(key: &str) -> Option<Value> {
+    let defaults = serde_json::to_value(vapor_shared::config::VaporConfig::default()).ok()?;
+    defaults.get(key).cloned()
 }
 
 /// Updates one key in-place. Preserves every other key so the macOS
@@ -78,42 +100,9 @@ pub fn set(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
             .as_object_mut()
             .expect("read_or_empty_object returns an object");
         object.insert(key.to_string(), new_value);
-
-        if let Some(parent) = path.parent() {
-            // 0700 parent (not umask 0755): config holds sync-root paths.
-            vapor_shared::runtime_paths::ensure_private_directory(parent)?;
-        }
-        let mut serialized = serde_json::to_string_pretty(&document)
-            .map_err(|error| ConfigError::Parse(error.to_string()))?;
-        serialized.push('\n');
-
-        // Unique per-writer temp name so a concurrent write cannot clobber
-        // or ENOENT our staging file.
-        let tmp_path = vapor_shared::runtime_paths::unique_temp_path(path);
-        write_private(&tmp_path, serialized.as_bytes())?;
-        fs::rename(&tmp_path, path)?;
+        vapor_shared::runtime_paths::write_config_document(path, &document)?;
         Ok(())
     })
-}
-
-/// Writes `contents` to `path`, creating it 0600 on Unix.
-fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(constants::runtime::PRIVATE_FILE_MODE)
-            .open(path)?;
-        file.write_all(contents)
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(path, contents)
-    }
 }
 
 fn validate_key(key: &str) -> Result<(), ConfigError> {
@@ -138,7 +127,8 @@ fn read_or_empty_object(path: &Path) -> Result<Value, ConfigError> {
 
 fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
     use constants::config::{
-        KEY_AUTO_LAUNCH, KEY_PROVIDER, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT, KEY_USE_GIT_IGNORE,
+        KEY_AUTO_LAUNCH, KEY_IDLE_BOOST, KEY_PROFILES, KEY_PROVIDER, KEY_RESOURCE_LIMITS,
+        KEY_SAFEGUARDS, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT, KEY_USE_GIT_IGNORE,
         KEY_USE_VAPOR_IGNORE,
     };
     if matches!(
@@ -173,7 +163,54 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
     if key == KEY_SYNC_MODE {
         return parse_enum_value(key, raw, constants::sync_mode::ALL);
     }
+    if key == KEY_PROFILES {
+        return parse_json_value::<Vec<vapor_shared::config::ProfileConfig>>(
+            key,
+            raw,
+            "a JSON array of profile objects",
+        );
+    }
+    if key == KEY_RESOURCE_LIMITS {
+        return parse_json_value::<vapor_shared::config::ResourceLimitsConfig>(
+            key,
+            raw,
+            "a JSON object such as {\"cpuPercent\": 10}",
+        );
+    }
+    if key == KEY_IDLE_BOOST {
+        return parse_json_value::<vapor_shared::config::IdleBoostConfig>(
+            key,
+            raw,
+            "a JSON object such as {\"enabled\": false}",
+        );
+    }
+    if key == KEY_SAFEGUARDS {
+        return parse_json_value::<vapor_shared::config::SafeguardsConfig>(
+            key,
+            raw,
+            "a JSON object such as {\"massDeleteThreshold\": 500}",
+        );
+    }
     Ok(Value::String(raw.to_string()))
+}
+
+/// Structured keys take JSON and must deserialize into the type the
+/// daemon loads, otherwise the daemon would log the value as invalid at
+/// startup and silently run on defaults. The parsed document is stored
+/// as given (unknown fields survive, as the daemon ignores them).
+fn parse_json_value<T: serde::de::DeserializeOwned>(
+    key: &str,
+    raw: &str,
+    shape: &str,
+) -> Result<Value, ConfigError> {
+    let value: Value = serde_json::from_str(raw).map_err(|error| {
+        ConfigError::Parse(format!(
+            "expected {shape} for '{key}', got '{raw}' ({error})"
+        ))
+    })?;
+    serde_json::from_value::<T>(value.clone())
+        .map_err(|error| ConfigError::Parse(format!("'{key}' is not {shape}: {error}")))?;
+    Ok(value)
 }
 
 /// Enum-typed keys reject unknown values with the accepted list —
@@ -207,9 +244,47 @@ mod tests {
     }
 
     #[test]
-    fn get_returns_none_for_missing_file() {
+    fn get_renders_the_compiled_default_for_an_unset_key() {
         let temp = TempDir::new().expect("temp");
-        assert_eq!(get(&config_path(&temp), "autoLaunch").expect("get"), None);
+        assert_eq!(
+            get(&config_path(&temp), "syncMode").expect("get"),
+            Some("two-way".to_string())
+        );
+        assert_eq!(
+            get(&config_path(&temp), "autoLaunch").expect("get"),
+            Some(constants::config::DEFAULT_AUTO_LAUNCH.to_string())
+        );
+        let limits = get(&config_path(&temp), "resourceLimits")
+            .expect("get")
+            .expect("has a default");
+        assert!(limits.contains("\"cpuPercent\":15"), "{limits}");
+        assert_eq!(get(&config_path(&temp), "deviceId").expect("get"), None);
+    }
+
+    #[test]
+    fn structured_keys_take_json_and_round_trip() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        set(&path, "resourceLimits", r#"{"cpuPercent": 5}"#).expect("set");
+        assert_eq!(
+            get(&path, "resourceLimits").expect("get"),
+            Some(r#"{"cpuPercent":5}"#.to_string())
+        );
+        set(
+            &path,
+            "profiles",
+            r#"[{"id": "work", "idleBoost": {"enabled": false}}]"#,
+        )
+        .expect("set profiles");
+        let contents = fs::read_to_string(&path).expect("file");
+        // Stored as JSON, not as a string containing JSON.
+        assert!(contents.contains("\"profiles\": ["), "{contents}");
+        let error = set(&path, "safeguards", "massDeleteThreshold=500").expect_err("not JSON");
+        assert!(matches!(error, ConfigError::Parse(_)));
+        let error = set(&path, "profiles", r#"{"id": "x"}"#).expect_err("wrong shape");
+        assert!(error.to_string().contains("profiles"), "{error}");
+        let error = set(&path, "idleBoost", r#"{"enabled": "yes"}"#).expect_err("wrong type");
+        assert!(matches!(error, ConfigError::Parse(_)));
     }
 
     #[test]

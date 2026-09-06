@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
-use vapor_providers::{ChangesPoll, RemoteChangeKind};
+use vapor_providers::{ChangesPoll, ProviderError, RemoteChangeKind};
 use vapor_shared::{SyncMode, ThrottleState, constants};
 
 use crate::DaemonApp;
@@ -24,6 +24,7 @@ use crate::clock::SharedClock;
 use crate::event_intents::PendingIntentKind;
 use crate::fs_events::SharedEventPathFilter;
 use crate::logging;
+use crate::provider_jobs::{ProviderCall, ProviderCallMode};
 use crate::self_write_cache::SelfWriteCache;
 use crate::state_db::{DurableStateDb, StateDbError};
 
@@ -51,6 +52,9 @@ pub struct RemotePoller {
     cursor: Option<String>,
     cursor_loaded: bool,
     last_poll_inst: Option<Instant>,
+    /// A poll started on an earlier tick whose round trip is still in
+    /// progress on its own thread.
+    in_flight: Option<ProviderCall<Result<ChangesPoll, ProviderError>>>,
 }
 
 impl RemotePoller {
@@ -63,6 +67,7 @@ impl RemotePoller {
             cursor: None,
             cursor_loaded: false,
             last_poll_inst: None,
+            in_flight: None,
         }
     }
 
@@ -91,9 +96,13 @@ impl RemotePoller {
     }
 
     /// Runs one poll when the provider supports a feed, the throttle
-    /// state permits it, and the cadence is due.
+    /// state permits it, and the cadence is due. In threaded mode the
+    /// round trip runs on its own thread: this call starts it and a later
+    /// tick harvests the page, so the tick loop never waits on the
+    /// network. A poll in flight is harvested before any gate is
+    /// consulted, so a throttle change cannot strand it.
     #[allow(clippy::too_many_arguments)]
-    pub fn poll_if_due(
+    pub(crate) fn poll_if_due(
         &mut self,
         app: &mut DaemonApp,
         state_db: &mut DurableStateDb,
@@ -103,11 +112,33 @@ impl RemotePoller {
         sync_mode: SyncMode,
         clock: &SharedClock,
         now: SystemTime,
+        mode: &ProviderCallMode,
     ) -> Result<RemotePollReport, StateDbError> {
         let mut report = RemotePollReport::default();
         let Some(local_root) = local_root else {
             return Ok(report);
         };
+        if let Some(call) = self.in_flight.as_mut() {
+            let Some(result) = call.take() else {
+                return Ok(report);
+            };
+            self.in_flight = None;
+            report.polled = true;
+            if let Some(poll) = Self::unwrap_poll(result) {
+                self.apply_poll(
+                    poll,
+                    app,
+                    state_db,
+                    remote_echoes,
+                    local_root,
+                    path_filter,
+                    sync_mode,
+                    now,
+                    &mut report,
+                )?;
+            }
+            return Ok(report);
+        }
         if !app.provider().capabilities().supports_remote_changes_feed {
             return Ok(report);
         }
@@ -127,7 +158,6 @@ impl RemotePoller {
             return Ok(report);
         }
         self.last_poll_inst = Some(now_inst);
-        report.polled = true;
 
         if !self.cursor_loaded {
             self.cursor = state_db
@@ -136,12 +166,43 @@ impl RemotePoller {
             self.cursor_loaded = true;
         }
 
-        let poll = match app.provider().poll_changes(
-            self.cursor.as_deref(),
-            constants::engine::REMOTE_CHANGES_PAGE_MAX,
-        ) {
-            Ok(poll) => poll,
-            Err(error) => {
+        let provider = app.provider_handle();
+        let cursor = self.cursor.clone();
+        let mut call = ProviderCall::start(mode, "poll-changes", move || {
+            provider.poll_changes(
+                cursor.as_deref(),
+                constants::engine::REMOTE_CHANGES_PAGE_MAX,
+            )
+        });
+        let Some(result) = call.take() else {
+            self.in_flight = Some(call);
+            return Ok(report);
+        };
+        report.polled = true;
+        if let Some(poll) = Self::unwrap_poll(result) {
+            self.apply_poll(
+                poll,
+                app,
+                state_db,
+                remote_echoes,
+                local_root,
+                path_filter,
+                sync_mode,
+                now,
+                &mut report,
+            )?;
+        }
+        Ok(report)
+    }
+
+    /// Logs a failed poll (provider error or a panic on the poll thread)
+    /// and yields `None`; the next cadence retries.
+    fn unwrap_poll(
+        result: Result<Result<ChangesPoll, ProviderError>, String>,
+    ) -> Option<ChangesPoll> {
+        match result {
+            Ok(Ok(poll)) => Some(poll),
+            Ok(Err(error)) => {
                 logging::warning(
                     "Remote changes poll failed; will retry on the next cadence",
                     &[
@@ -149,10 +210,31 @@ impl RemotePoller {
                         ("error", error.message),
                     ],
                 );
-                return Ok(report);
+                None
             }
-        };
+            Err(panic) => {
+                logging::error(
+                    "Remote changes poll panicked; will retry on the next cadence",
+                    &[("panic", panic)],
+                );
+                None
+            }
+        }
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn apply_poll(
+        &mut self,
+        poll: ChangesPoll,
+        app: &mut DaemonApp,
+        state_db: &mut DurableStateDb,
+        remote_echoes: &mut SelfWriteCache,
+        local_root: &Path,
+        path_filter: Option<&SharedEventPathFilter>,
+        sync_mode: SyncMode,
+        now: SystemTime,
+        report: &mut RemotePollReport,
+    ) -> Result<(), StateDbError> {
         match poll {
             ChangesPoll::CursorExpired => {
                 report.cursor_expired = true;
@@ -309,7 +391,7 @@ impl RemotePoller {
             }
         }
 
-        Ok(report)
+        Ok(())
     }
 
     fn rebaseline(
@@ -463,6 +545,7 @@ mod tests {
                     self.sync_mode,
                     &clock,
                     now,
+                    &ProviderCallMode::Inline,
                 )
                 .expect("poll")
         }

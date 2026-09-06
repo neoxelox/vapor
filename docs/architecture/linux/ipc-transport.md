@@ -30,7 +30,8 @@ this document is a short delta on top of `macos/ipc-transport.md`.
 ## Framing
 
 Length-prefixed frames, 32-bit little-endian length header followed by
-a UTF-8 JSON-RPC 2.0 body. Frame length bound by
+a UTF-8 JSON envelope (`{kind, payload}` requests, `{outcome, value}`
+responses; not JSON-RPC). Frame length bound by
 `vapor_shared::constants::ipc::MAX_PAYLOAD_BYTES` (default
 `4 * 1024 * 1024`). Identical to the macOS framing — the codec under
 `core/ipc/src/framing.rs` is shared across every Unix transport.
@@ -49,7 +50,7 @@ When the daemon receives a stop request (`SIGTERM` from
 ## Testing
 
 - The `core/ipc/tests/skew_matrix.rs` integration tests run unchanged
-  on Linux because the UDS path is shared with macOS. Wave 13 adds a
-  full `ubuntu-latest` test job that exercises the suite against the
-  packaged daemon binary; until then the lint-only Linux CI leg keeps
-  cross-OS compilation gated.
+  on Linux because the UDS path is shared with macOS, and the
+  `ubuntu-latest` job already runs the whole Rust test suite on every
+  pull request. Wave 13 adds the `vapor service` round-trip against a
+  packaged daemon binary.

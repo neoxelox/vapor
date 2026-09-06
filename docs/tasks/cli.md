@@ -23,9 +23,10 @@ Binary names are fixed:
       capability detection). Keep the dep list small. *(`indicatif` and
       `crossterm` are deferred — no progress / TTY rendering surface
       ships in Wave 6.)*
-- [x] L0-3 Add workspace-level script entrypoints: `scripts/cli/build.sh`,
-      `scripts/cli/test.sh`, consistent with the existing Rust wrapper
-      discipline.
+- [x] L0-3 Script entrypoints. The CLI is covered by the workspace-wide
+      `scripts/{format,lint,test,build}.sh`; the CLI-only wrappers that
+      briefly existed were thin duplicates of `cargo` commands and were
+      removed in the full-repo review.
 - [x] L0-4 Add `vapor --version` (uses the same build-info macro as
       `vapord`).
 - [x] L0-5 Add `install-from-source` instructions to `core/cli/README.md`
@@ -54,7 +55,7 @@ Depends on: `docs/tasks/core.md` C1–C3.
       - On Windows: Task Scheduler task presence.
       *(macOS-flavor checks ship in Wave 6; Linux + Windows checks land
       with Waves 13 / 12.)*
-- [ ] L1-5 `vapor config get|set syncMode <value>` enum-validates the sync
+- [x] L1-5 `vapor config get|set syncMode <value>` enum-validates the sync
       mode (`two-way` / `pull-only` / `push-only`) the same way the existing
       typed keys validate booleans/ints, rejecting unknown values with an
       actionable error. Ships with the C8-59 config surface; add the `--json`

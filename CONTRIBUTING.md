@@ -166,7 +166,7 @@ say why.
 
 Open an issue with the version (`vapor --version`), platform, what you
 expected, what happened, and repro steps. `vapor doctor` output and a
-redacted `vapor support bundle` help a lot.
+redacted `vapor support-bundle` help a lot.
 
 **For security problems, do not open an issue** — follow
 [`SECURITY.md`](SECURITY.md).

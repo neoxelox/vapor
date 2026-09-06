@@ -13,6 +13,7 @@ public enum VaporConstants {
     public static let postIgnoreRules = "VAPOR_POST_IGNORE_RULES"
     public static let gdriveClientId = "VAPOR_GDRIVE_CLIENT_ID"
     public static let gdriveClientSecret = "VAPOR_GDRIVE_CLIENT_SECRET"
+    public static let throttleInputs = "VAPOR_THROTTLE_INPUTS"
   }
 
   public enum Runtime {
@@ -131,11 +132,12 @@ public enum VaporConstants {
     public static let defaultLanguageCode = "en"
   }
 
-  /// Mirrors `core/shared/src/constants.rs::provider::*` per
-  /// AGENTS.md §8.6.
+  /// Accepted `provider` values. Mirrors
+  /// `core/shared/src/constants.rs::provider::*` per AGENTS.md §8.6.
   public enum Provider {
     public static let filesystem = "filesystem"
     public static let gdrive = "gdrive"
+    public static let all = [filesystem, gdrive]
     public static let defaultKind = filesystem
 
     /// User-facing display name for a `provider` config value. Unknown
@@ -187,13 +189,5 @@ public enum VaporConstants {
     public static let pullOnly = "pull-only"
     public static let pushOnly = "push-only"
     public static let all = [twoWay, pullOnly, pushOnly]
-  }
-
-  /// Accepted `provider` values. Mirrors
-  /// `core/shared/src/constants.rs::provider::*` per AGENTS.md §8.6.
-  public enum Providers {
-    public static let filesystem = "filesystem"
-    public static let gdrive = "gdrive"
-    public static let all = [filesystem, gdrive]
   }
 }

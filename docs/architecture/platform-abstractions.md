@@ -8,14 +8,14 @@ Governing plan: `docs/plans/core.md`
 Tasks: `docs/tasks/core.md` Phase C3 (traits + macOS impls), Phase C6
 (Windows impls), Phase C7 (Linux impls).
 
-Wave 4 status (`core/platform` v0): every trait listed below ships with
-a Rust trait definition, an in-memory fake usable on every OS, a macOS
-native impl scaffolded behind the trait, and Linux / Windows native
-impls stubbed to compile (returning `Unsupported` errors at runtime).
-The runtime currently consumes `ProcessSupervisor` end-to-end; the
-remaining traits are wired progressively as Waves 5–8 land their
-respective consumers (`core/lifecycle`, IPC, the C8 runtime
-expansion).
+Status: every trait below ships with a Rust trait definition, an
+in-memory fake usable on every OS, and a native macOS implementation the
+runtime consumes end to end (fs watch, service install, secret store,
+metrics sampling, idle detection, filesystem capabilities, process
+supervision). Linux and Windows implementations are stubs that compile
+and return `Unsupported` or neutral defaults; they land with the
+optional Waves 12 and 13 in `docs/tasks/README.md`. The per-trait
+tables name what each native implementation reads.
 
 ## Design rules
 
@@ -99,48 +99,54 @@ backoff computed by `core/lifecycle::CrashLoopGuard`:
 
 ### `SecretStore`
 
-Per-provider OAuth tokens and other credentials.
+Per-provider OAuth tokens and other credentials. `get`, `set`,
+`delete`, `list`, plus `is_persistent` so a surface can tell the user
+when a value will not outlive the process.
 
-| OS | Native API | MVP crate |
+| OS | Native API | Status |
 |---|---|---|
-| macOS | Keychain Services | `security-framework` or `keyring` |
-| Windows | Credential Manager | `keyring` (Windows backend) |
-| Linux (desktop) | libsecret / Secret Service (D-Bus) | `secret-service` |
-| Linux (headless) | age-encrypted file or external command shim | `age` + custom |
+| macOS | Keychain Services (`SecItem*` through `security-framework-sys` and `core-foundation`) | Shipped. One generic-password item per secret under the `sh.arn.vapor` service, with an access list covering `vapor` and `vapord` so the daemon reads CLI-stored tokens without a prompt. Details: `docs/operations/provider-auth-operations.md`. |
+| Windows | Credential Manager | Stub. `for_current_user` returns `Unsupported`. |
+| Linux (desktop) | libsecret / Secret Service (D-Bus) | Stub. |
+| Linux (headless) | age-encrypted file or external command shim | Planned. The fallback will be explicit, never a silent fall-through, and selected by a CLI flag. |
 
-The headless-Linux fallback is explicit — no silent fall-through.
-`--secrets-backend=keyring|file|command` on the `vapor` CLI selects.
+On an OS whose native store is a stub, the CLI falls back to the
+in-memory store and prints a warning on every `auth` command.
 
 ### `PlatformMetricsSampler`
 
 Returns a `ThrottleInputs` (`on_battery`, `low_power_mode`,
 `thermal_pressure`, `system_cpu_load_percent`, `vapor_cpu_load_percent`,
 `disk_pressure`, `network_error_rate_percent`, `network_throughput_kbps`,
-`user_active`).
+`user_active`, `vapor_memory_bytes`, `device_memory_bytes`). CPU
+percentages are shares of the whole device, so a single busy core on an
+eight-core machine reads as 13%.
 
-| OS | Notes |
+| OS | Status |
 |---|---|
-| macOS | `host_statistics64` + `task_info`; `IOPSCopyPowerSourcesInfo`; `NSProcessInfo.isLowPowerModeEnabled`; `NSProcessInfo.thermalState`; `nw_path_monitor` for expensive links. |
-| Windows | `GetSystemTimes` + `GetProcessTimes` (or PDH); `GetSystemPowerStatus`; `CallNtPowerInformation(SystemPowerInformation)`; `NotifyNetworkConnectivityHintChange` (metered ⇒ auto-throttle). |
-| Linux | `/proc/stat`, `/proc/self/stat`; `/sys/class/power_supply/*`; `/proc/pressure/{cpu,io,memory}` (PSI); `/proc/net/dev`; NetworkManager D-Bus `NM-metered` when present. |
+| macOS | Shipped. `host_statistics64` (system CPU), `getrusage` (daemon CPU), `IOPSGetTimeRemainingEstimate` (battery), `NSProcessInfo.thermalState` and `isLowPowerModeEnabled` through the Objective-C runtime, `proc_pidinfo` and `hw.memsize` (memory), and the HID idle clock for `user_active` (input within the last 30 s). One read per throttle interval; calls inside the interval return the cached reading. `disk_pressure` and the two network fields keep their defaults: macOS has no public disk-pressure signal and link capacity is not measured yet. |
+| Windows | Planned. `GetSystemTimes` + `GetProcessTimes`; `GetSystemPowerStatus`; `CallNtPowerInformation`; `NotifyNetworkConnectivityHintChange` (metered means auto-throttle). Today the native sampler returns the static defaults and `has_native_sampling()` is `false`. |
+| Linux | Planned. `/proc/stat`, `/proc/self/stat`; `/sys/class/power_supply/*`; PSI under `/proc/pressure/`; `/proc/net/dev`; NetworkManager `NM-metered` when present. Static defaults today. |
 
-`StaticMetricsSampler` (config-driven) is the headless/CLI fallback and the
-test fake.
+`StaticPlatformMetricsSampler` (config-driven) is the headless/CLI
+fallback and the test fake. `VAPOR_THROTTLE_INPUTS=static` makes the
+daemon use it (with zero idle time) on any host; `scripts/e2e.sh` sets
+it so a run is not shaped by whoever is typing on the machine.
 
 ### `IdleNotifier`
 
-User-idle duration, event-driven where possible.
+User-idle duration, polled on the throttle cadence.
 
-| OS | Source |
-|---|---|
-| macOS | `CGEventSourceSecondsSinceLastEventType` |
-| Windows | `GetLastInputInfo` polled on the 1s throttle cadence |
-| Linux (X11) | `XScreenSaverQueryInfo` |
-| Linux (Wayland) | `org.freedesktop.ScreenSaver` / `ext-idle-notify-v1` |
-| Headless | Always-idle — CLI/server default |
+| OS | Source | Status |
+|---|---|---|
+| macOS | `CGEventSourceSecondsSinceLastEventType` on the HID system state | Shipped. Without a window-server session (SSH, CI agents) the notifier reports the headless always-idle reading, decided once at construction. |
+| Windows | `GetLastInputInfo` | Planned. Reports zero idle time today so idle boost stays off. |
+| Linux (X11) | `XScreenSaverQueryInfo` | Planned. Zero idle time today. |
+| Linux (Wayland) | `org.freedesktop.ScreenSaver` / `ext-idle-notify-v1` | Planned. |
+| Headless | Always-idle | CLI and server default. |
 
-`--user-activity=always|never|auto` on the `vapor` CLI overrides the
-auto-detect.
+A CLI flag to force always-idle or never-idle is planned and not
+implemented.
 
 ### `FilesystemCapabilities`
 
@@ -184,8 +190,9 @@ must deliver the same contract on every supported OS before that OS ships.
 
 1. Add the OS target to the Cargo workspace's CI matrix.
 2. Implement every trait in `core/platform/<trait>/<os>.rs`.
-3. Add parity tests under `core/platform/tests/` that run against every
-   platform impl.
+3. Run the contract tests next to each trait (`#[cfg(test)]` modules
+   under `core/platform/src/<trait>/`) against the new native impl; the
+   fake and every native impl share one test body per trait.
 4. Add a platform doc subdirectory under `docs/architecture/<os>/`,
    `docs/operations/<os>/`, and the matching plan + tasks file
    (`docs/plans/<os>.md`, `docs/tasks/<os>.md`).

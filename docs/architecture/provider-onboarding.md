@@ -1,6 +1,6 @@
 # Provider Onboarding
 
-How to add a new cloud backend to Vapor (C8-47). The provider system is
+How to add a new cloud backend to Vapor. The provider system is
 a trait boundary in `core/providers`; the engine never sees a concrete
 provider type, so onboarding is additive — no engine changes, no
 per-provider `#[cfg]`s, no schema changes.
@@ -21,7 +21,7 @@ Reference implementations:
 | `name()` | Stable identifier; also the `provider` config value. |
 | `capabilities()` | Honest `ProviderCapabilities` flags (see below). |
 | `content_hash_algorithm()` | The hash the backend can serve cheaply (`Sha256` default, `Md5` for Drive-style metadata hashes). The engine hashes local files with the same algorithm so comparisons are meaningful. |
-| `ensure_cloud_sync_directory()` | Resolve-or-create the configured cloud root. Required, no silent-Ok default: a failure blocks sync with an actionable error (C8-50). |
+| `ensure_cloud_sync_directory()` | Resolve-or-create the configured cloud root. Required, no silent-Ok default: a failure blocks sync with an actionable error. |
 | `enumerate()` / `stat()` / `content_hash()` | Read-side used by reconcile walks; `enumerate` is non-recursive so walks stay slice-interruptible. |
 | `begin_upload()` / `begin_download()` | Return a `TransferSession` that moves a bounded byte budget per `step()`; the engine grants budgets from the bandwidth shaper + auto-tuned step size. Uploads accept `RemotePrecondition` guards (keep-both safety). |
 | `delete()` / `rename()` | Prefer recoverable semantics (Drive moves to trash; filesystem removes). |
@@ -73,7 +73,7 @@ these flags (`ProviderCapabilities`):
    (`core/providers/tests/provider_contract.rs`) against the new
    provider (with a scripted/in-memory backend). This is the gate for
    making the provider selectable — the Google Drive provider was kept
-   inert until it passed (C8-54).
+   inert until it passed.
 7. **Offline behavior tests.** Scripted-transport tests for: root
    ensure/create, upload (small + chunked/resumable if applicable),
    download, delete, changes mapping, cursor expiry, rate-limit

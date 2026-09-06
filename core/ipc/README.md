@@ -22,25 +22,22 @@ Tasks: `docs/tasks/core.md` Phase C5.
 - `protocol` — wire-format types (`Hello`, `HelloAck`, `Request`,
   `Response`, `ResponseBody`, `ErrorBody`, `StatusResponse`, `Method`).
 - `framing` — length-prefixed frame codec.
-- `transport` — per-OS transport: Unix-domain-socket on Unix, stub on
-  Windows until Wave 12 lands the named-pipe transport.
+- `transport` — per-OS transport: Unix domain socket on Unix; the
+  Windows named pipe is a stub until Wave 12.
 - `server` — `Service` trait + `serve_connection` that drives one
   client session through the handshake-then-RPC loop.
 - `client` — high-level `Client::connect` / `client.status()` API.
 - `tests/skew_matrix.rs` — end-to-end integration tests that spin up a
   real Unix-domain-socket server and exercise every supported version
-  pair plus the documented negative cases (skew of 2 rejected,
-  oversized first frame closes the connection).
+  pair plus the documented negative cases (skew of 2 rejected, an
+  oversized first frame answered with `PayloadTooLarge` and then EOF).
 
-## Wave status
+## Status
 
-- **Done (Wave 6 phase 2):** trait + framing + UDS transport +
-  Status method end-to-end. 18 unit + 5 integration tests cover the
-  handshake, skew matrix, payload bounds, and forward-compat field
-  tolerance.
-- **Pending (Wave 7):** `pause`, `resume`, `flush_now`, `reconcile`,
-  `timeline`, `auto_launch_toggle`, `config_update` methods.
-- **Pending (Wave 12):** Windows named-pipe transport.
+Every method the surfaces use is implemented end to end: `status`,
+`pause`, `resume`, `flush_now`, `reconcile`, `timeline`, `diagnostics`,
+`set_auto_launch`, and `update_excludes`. The Windows named-pipe
+transport is the one open item (Wave 12 in `docs/tasks/README.md`).
 
 ## Daemon-side wiring
 

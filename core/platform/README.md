@@ -16,21 +16,24 @@ Tasks: `docs/tasks/core.md` Phase C3.
 - `service` — install / start / stop the daemon as a platform-native
   background service (LaunchAgent on macOS; Task Scheduler / SCM on
   Windows; systemd on Linux).
-- `secrets` — per-provider OAuth tokens and other credentials (Keychain
-  Services on macOS; Credential Manager on Windows; libsecret /
-  age-encrypted file on Linux).
-- `metrics` — `PlatformMetricsSampler` returning a fresh
-  `ThrottleInputsSnapshot` every tick.
-- `idle` — user-idle duration source.
+- `secrets` — per-provider OAuth tokens and other credentials. Keychain
+  Services on macOS (shipped); Credential Manager on Windows and
+  libsecret / age-encrypted file on Linux (stubs).
+- `metrics` — `PlatformMetricsSampler` returning fresh `ThrottleInputs`
+  once per throttle interval (host CPU, power, thermal, memory and user
+  presence on macOS; static defaults on Linux and Windows).
+- `idle` — user-idle duration source (HID idle clock on macOS; zero on
+  Linux and Windows so idle boost stays off there).
 - `fs_caps` — filesystem capabilities (xattr / ADS support, case
   sensitivity).
 - `process` — graceful-shutdown signal handler registration.
 
 Each module exports the trait, an `InMemory*` test fake that compiles on
 every OS, and a `Native*` per-OS implementation selected at compile time
-via `#[cfg(target_os = "...")]`. Wave 4 (`core/tasks/core.md` C3) ships
-the trait surface plus a macOS skeleton; Linux and Windows native impls
-are intentionally `Unsupported` until Waves 12 / 13 land.
+via `#[cfg(target_os = "...")]`. The macOS implementations are the ones
+the runtime ships with; Linux and Windows native impls are stubs
+(`Unsupported` errors or neutral defaults) until Waves 12 and 13 in
+`docs/tasks/README.md` land.
 
 ## Why this crate exists
 
@@ -52,8 +55,9 @@ Three reasons, in order:
 3. Re-export the public surface from `src/lib.rs`.
 4. Update `docs/architecture/platform-abstractions.md` with the new
    trait, its contract, and the per-OS native APIs.
-5. Add unit tests for the in-memory fake. The macOS native impl gets a
-   parity test once the C3 contract-test harness lands.
+5. Write one contract test body in the module and run it against the
+   fake and every native impl (see `secrets/mod.rs`), so fake-vs-native
+   drift fails the suite.
 
 ## Adding a new OS
 

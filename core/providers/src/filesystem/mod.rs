@@ -579,35 +579,6 @@ impl Provider for FilesystemProvider {
         }
     }
 
-    fn rename(&self, from: &RemotePath, to: &RemotePath, op_id: &str) -> Result<(), ProviderError> {
-        let resolved_from = self.resolve_in_scope(from)?;
-        let resolved_to = self.resolve_in_scope(to)?;
-        if !resolved_from.exists() {
-            return Err(ProviderError::not_found(format!(
-                "rename source {from} does not exist"
-            )));
-        }
-        if let Some(parent) = resolved_to.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                ProviderError::transient(format!(
-                    "cannot create rename destination directory for {to}: {error}"
-                ))
-            })?;
-        }
-        fs::rename(&resolved_from, &resolved_to).map_err(|error| {
-            ProviderError::transient(format!("cannot rename {from} to {to}: {error}"))
-        })?;
-        self.tags
-            .relocate_side_file(&resolved_from, &resolved_to)
-            .map_err(|error| {
-                ProviderError::transient(format!(
-                    "renamed {from} to {to} but could not relocate its tag side-file: {error}"
-                ))
-            })?;
-        let _ = self.tags.write_op_id(&resolved_to, op_id);
-        Ok(())
-    }
-
     fn poll_changes(
         &self,
         cursor: Option<&str>,
@@ -1566,27 +1537,6 @@ mod tests {
             .delete(&RemotePath::new("a.txt").expect("path"), "op-6")
             .expect_err("second delete reports not found");
         assert_eq!(error.kind, vapor_shared::ProviderErrorKind::NotFound);
-    }
-
-    #[test]
-    fn rename_moves_payload_and_retags() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
-        let cloud = dir.path().join("cloud");
-        let provider = provider_at(&cloud);
-        fs::write(cloud.join("old.txt"), b"content").expect("seed");
-
-        provider
-            .rename(
-                &RemotePath::new("old.txt").expect("path"),
-                &RemotePath::new("nested/new.txt").expect("path"),
-                "op-7",
-            )
-            .expect("rename succeeds");
-        assert!(!cloud.join("old.txt").exists());
-        assert_eq!(
-            fs::read(cloud.join("nested/new.txt")).expect("moved payload"),
-            b"content"
-        );
     }
 
     #[test]

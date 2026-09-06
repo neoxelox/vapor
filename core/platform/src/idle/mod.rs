@@ -1,12 +1,28 @@
-//! User-idle notifier trait + per-OS native implementation.
+//! User-idle notifier trait, the fakes, and the per-OS native source.
 //!
-//! See `docs/architecture/platform-abstractions.md` §`IdleNotifier`. The
-//! macOS bridge (`CGEventSourceSecondsSinceLastEventType`) is not
-//! wired up yet; until then `NativeIdleNotifier` forwards to
-//! [`AlwaysIdleNotifier`], which is also what the headless CLI uses.
+//! See `docs/architecture/platform-abstractions.md` §`IdleNotifier`.
+//! macOS reads the HID idle clock (`macos.rs`). Linux and Windows are
+//! not shipping surfaces yet; their `NativeIdleNotifier` reports zero
+//! idle time, which keeps idle boost off rather than running boosted
+//! ceilings on an unmeasured host.
 
 use std::sync::Mutex;
 use std::time::Duration;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::NativeIdleNotifier;
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub use linux::NativeIdleNotifier;
+
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::NativeIdleNotifier;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UserActivity {
@@ -34,9 +50,13 @@ pub trait IdleNotifier: Send + Sync {
 #[derive(Debug, Default)]
 pub struct AlwaysIdleNotifier;
 
+impl AlwaysIdleNotifier {
+    pub const IDLE_FOR: Duration = Duration::from_secs(86_400);
+}
+
 impl IdleNotifier for AlwaysIdleNotifier {
     fn idle_for(&self) -> Duration {
-        Duration::from_secs(86_400)
+        Self::IDLE_FOR
     }
 }
 
@@ -70,31 +90,6 @@ impl IdleNotifier for ManualIdleNotifier {
     }
 }
 
-/// Native idle notifier. Forwards to [`AlwaysIdleNotifier`] until the
-/// per-OS HID bridges land; the trait surface is stable and the
-/// native back-ends arrive incrementally.
-#[derive(Debug, Default)]
-pub struct NativeIdleNotifier;
-
-impl NativeIdleNotifier {
-    pub fn for_current_host() -> Self {
-        Self
-    }
-}
-
-impl IdleNotifier for NativeIdleNotifier {
-    fn idle_for(&self) -> Duration {
-        // No native HID idle bridge yet. Fail safe for device impact:
-        // report zero idle time so the idle-boost gate is never satisfied
-        // on unmeasured activity. The old always-idle stub ran at boosted
-        // ceilings (50% CPU / 80% bandwidth) regardless of what the user
-        // was doing — the opposite of the product's low-impact priority.
-        // A real per-OS bridge (CGEventSource seconds-since-last-input /
-        // IOHIDSystem HIDIdleTime) replaces this.
-        Duration::ZERO
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +115,20 @@ mod tests {
             notifier.user_activity(Duration::from_secs(30)),
             UserActivity::Idle
         );
+    }
+
+    /// With a window-server session the HID clock answers; without one
+    /// (SSH, CI agents) the notifier reports the headless always-idle
+    /// reading. Either way the value is finite and never panics.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_notifier_reports_a_reading_for_the_current_session() {
+        let notifier = NativeIdleNotifier::for_current_host();
+        let idle_for = notifier.idle_for();
+        if notifier.has_gui_session() {
+            assert!(idle_for < AlwaysIdleNotifier::IDLE_FOR);
+        } else {
+            assert_eq!(idle_for, AlwaysIdleNotifier::IDLE_FOR);
+        }
     }
 }

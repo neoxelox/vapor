@@ -108,9 +108,6 @@ pub struct ProviderCapabilities {
     /// [`Provider::poll_changes`]. Without it the engine falls back to
     /// periodic reconcile enumeration.
     pub supports_remote_changes_feed: bool,
-    /// Provider can rename a remote object in place without a
-    /// delete + re-upload round trip.
-    pub supports_server_side_rename: bool,
     /// Provider honors [`RemotePrecondition`] guards on uploads.
     pub supports_write_preconditions: bool,
     /// Provider persists the engine's op-id tag on remote objects and
@@ -125,7 +122,6 @@ pub struct ProviderCapabilities {
 impl ProviderCapabilities {
     pub const FILESYSTEM: Self = Self {
         supports_remote_changes_feed: true,
-        supports_server_side_rename: true,
         supports_write_preconditions: true,
         supports_op_id_tags: true,
         supports_content_hashes_in_metadata: false,
@@ -133,7 +129,6 @@ impl ProviderCapabilities {
 
     pub const GDRIVE_MVP: Self = Self {
         supports_remote_changes_feed: true,
-        supports_server_side_rename: true,
         supports_write_preconditions: true,
         supports_op_id_tags: true,
         supports_content_hashes_in_metadata: true,
@@ -325,10 +320,6 @@ pub trait Provider: Send + Sync {
     /// convergence, not failure.
     fn delete(&self, path: &RemotePath, op_id: &str) -> Result<(), ProviderError>;
 
-    /// Renames a remote file in place. Only meaningful when
-    /// `supports_server_side_rename`.
-    fn rename(&self, from: &RemotePath, to: &RemotePath, op_id: &str) -> Result<(), ProviderError>;
-
     /// Pulls the next page of remote changes after `cursor`.
     /// `cursor = None` baselines the feed: it returns an empty page
     /// whose `next_cursor` marks "now". Only meaningful when
@@ -379,17 +370,15 @@ pub fn select_provider_for_profile(
     }
 }
 
-/// Inert stub provider used by engine composition tests and as the
-/// explicit "no provider configured" placeholder. Every mutation
-/// completes as a successful no-op so pipeline tests can drive intents
-/// end-to-end without a real backend; it is not selectable via the
-/// `provider` config key and must never ship as a production default
-/// beyond the pre-GA bring-up (a later task wires the real
-/// [`FilesystemProvider`] as the default).
+/// Inert provider for engine composition tests and for a profile the
+/// daemon has suspended (it needs a provider value but must never sync).
+/// Every mutation completes as a successful no-op and every read reports
+/// nothing. Not selectable through the `provider` config key; the
+/// runtime picks the real provider with [`select_provider_for_profile`].
 #[derive(Debug, Default)]
 pub struct FilesystemStubProvider;
 
-pub fn default_provider() -> Box<dyn Provider> {
+pub fn inert_stub_provider() -> Box<dyn Provider> {
     Box::new(FilesystemStubProvider)
 }
 
@@ -401,7 +390,6 @@ impl Provider for FilesystemStubProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             supports_remote_changes_feed: false,
-            supports_server_side_rename: false,
             supports_write_preconditions: false,
             supports_op_id_tags: false,
             supports_content_hashes_in_metadata: false,
@@ -453,15 +441,6 @@ impl Provider for FilesystemStubProvider {
         Ok(())
     }
 
-    fn rename(
-        &self,
-        _from: &RemotePath,
-        _to: &RemotePath,
-        _op_id: &str,
-    ) -> Result<(), ProviderError> {
-        Ok(())
-    }
-
     fn poll_changes(
         &self,
         _cursor: Option<&str>,
@@ -495,8 +474,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_provider_returns_filesystem_stub_pre_ga() {
-        let provider = default_provider();
+    fn inert_stub_provider_is_the_filesystem_stub() {
+        let provider = inert_stub_provider();
         assert_eq!(provider.name(), "filesystem_stub");
     }
 
@@ -511,7 +490,6 @@ mod tests {
     fn filesystem_stub_reports_no_capabilities() {
         let capabilities = FilesystemStubProvider.capabilities();
         assert!(!capabilities.supports_remote_changes_feed);
-        assert!(!capabilities.supports_server_side_rename);
         assert!(!capabilities.supports_op_id_tags);
     }
 

@@ -25,8 +25,10 @@ Responsibilities:
   artifacts (where the OS supports them) and non-panicking log fallback.
 - Bounded durable diagnostics/state fields with corruption guards for
   attempt counters, timestamps, and oversized stored values.
-- Pre-GA durable state keeps only the current schema path and rejects older
-  on-disk schemas instead of carrying migration shims.
+- Durable state carries forward migrations from the last two schema
+  versions (`docs/architecture/state-schema-migrations.md`); anything
+  older or newer is rejected, and a corrupt file is quarantined next to
+  the DB before a fresh one is created.
 - Provider choice is injected through the provider trait boundary at
   runtime startup; core engine state stays provider-neutral.
 - Staged planner/hash/upload execution uses work permits to keep multiple
@@ -39,8 +41,8 @@ code lives behind `core/platform` traits, never sprinkled through the
 engine.
 
 Testing expectations (heavy coverage required): every non-trivial module
-ships with unit + integration tests and — where invariants are
-well-defined — property tests via `proptest`. Policy:
+ships with unit and integration tests; property tests are planned once
+`proptest` is adopted (tracked in `docs/tasks/core.md`). Policy:
 `docs/architecture/testing-strategy.md`.
 
 Logging:

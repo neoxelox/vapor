@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use vapor_providers::{Provider, default_provider};
+use vapor_providers::{Provider, inert_stub_provider};
 use vapor_shared::{RunState, StatusSnapshot, ThrottleState};
 
 use crate::clock::{SharedClock, SystemClock};
@@ -26,6 +26,7 @@ pub mod build_info {
 pub mod auto_tune;
 pub mod bootstrap;
 pub mod clock;
+pub mod config_reload;
 pub mod conflict;
 pub mod debounce;
 pub mod event_intents;
@@ -83,7 +84,7 @@ pub struct DaemonApp {
 
 impl Default for DaemonApp {
     fn default() -> Self {
-        Self::new(default_provider())
+        Self::new(inert_stub_provider())
     }
 }
 
@@ -187,6 +188,11 @@ impl DaemonApp {
     /// The injected provider. The staged executor and the remote poller
     /// drive uploads / downloads / deletes / change polls through this
     /// trait boundary — engine code never names a concrete provider.
+    /// Shared handle for provider calls that run on another thread.
+    pub fn provider_handle(&self) -> Arc<dyn Provider> {
+        self.provider.clone()
+    }
+
     pub fn provider(&self) -> &dyn Provider {
         self.provider.as_ref()
     }
@@ -229,13 +235,17 @@ impl DaemonApp {
             return;
         }
 
-        logging::warning(
-            "Updated throttle state",
-            &[
-                ("throttle_state", format!("{:?}", throttle_state)),
-                ("reason", reason.clone()),
-            ],
-        );
+        // Routine transitions are INFO; Suspended stops uploads and
+        // hashing outright, which is worth a WARNING.
+        let fields = [
+            ("throttle_state", format!("{:?}", throttle_state)),
+            ("reason", reason.clone()),
+        ];
+        if throttle_state == ThrottleState::Suspended {
+            logging::warning("Updated throttle state", &fields);
+        } else {
+            logging::info("Updated throttle state", &fields);
+        }
         self.snapshot.throttle_state = throttle_state;
         self.snapshot.reason = reason;
         self.refresh_workgate_caps(SystemTime::now());

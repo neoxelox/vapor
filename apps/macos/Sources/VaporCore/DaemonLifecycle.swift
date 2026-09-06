@@ -43,6 +43,37 @@ public struct ServiceStatusSnapshot: Equatable, Sendable {
   }
 }
 
+/// Decoded `vapor status --json`: the subset the app renders.
+public struct DaemonStatusSnapshot: Equatable, Sendable {
+  public var runState: String
+  public var throttleState: String
+  public var throttleReason: String
+  public var providerName: String
+  public var queueDepth: UInt64
+  public var failedIntents: UInt64
+  /// Set when a restart-required key of `vapor.json` changed under the
+  /// running daemon; the daemon phrases the notice.
+  public var configRestartRequired: String?
+
+  public init(
+    runState: String,
+    throttleState: String,
+    throttleReason: String,
+    providerName: String,
+    queueDepth: UInt64,
+    failedIntents: UInt64,
+    configRestartRequired: String? = nil
+  ) {
+    self.runState = runState
+    self.throttleState = throttleState
+    self.throttleReason = throttleReason
+    self.providerName = providerName
+    self.queueDepth = queueDepth
+    self.failedIntents = failedIntents
+    self.configRestartRequired = configRestartRequired
+  }
+}
+
 /// The app's seam onto daemon lifecycle operations. The
 /// default implementation is `VaporCLIServiceController`, which invokes
 /// the bundled `vapor` CLI as a subprocess — all lifecycle *policy*
@@ -78,6 +109,13 @@ public protocol LaunchAgentControlling {
   func checkDaemonHealth() throws -> ServiceHealthOutcome
   /// Clear a crash-loop pause (`vapor service acknowledge`).
   func acknowledgeCrashLoopPause() throws
+  /// Stop and start the daemon (`vapor service restart`), which is how
+  /// a restart-required configuration change takes effect.
+  @discardableResult
+  func restartDaemon() throws -> DaemonLifecycleActionResult
+  /// Live daemon status over IPC (`vapor status --json`). Throws when
+  /// the daemon is not running.
+  func daemonStatus() throws -> DaemonStatusSnapshot
 }
 
 /// Outcome of a login-item registration attempt, surfaced so the UI
@@ -145,6 +183,13 @@ public struct NoopLaunchAgentController: LaunchAgentControlling {
   public func checkDaemonHealth() throws -> ServiceHealthOutcome { .notInstalled }
 
   public func acknowledgeCrashLoopPause() throws {}
+
+  public func restartDaemon() throws -> DaemonLifecycleActionResult { .unchanged }
+
+  public func daemonStatus() throws -> DaemonStatusSnapshot {
+    struct NotRunning: Error {}
+    throw NotRunning()
+  }
 }
 
 /// Thin coordinator over the `LaunchAgentControlling` seam. Owns
@@ -298,6 +343,23 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
   public func checkDaemonHealth() throws -> ServiceHealthOutcome {
     try stateQueue.sync {
       try launchAgentController.checkDaemonHealth()
+    }
+  }
+
+  /// Live daemon status over IPC. Read-only, so it does not need the
+  /// lifecycle queue; a daemon that is not running throws.
+  public func daemonStatus() throws -> DaemonStatusSnapshot {
+    try launchAgentController.daemonStatus()
+  }
+
+  /// Stop and start the daemon; the way a restart-required
+  /// configuration change is applied.
+  @discardableResult
+  public func restartDaemon() throws -> DaemonLifecycleActionResult {
+    try stateQueue.sync {
+      let result = try launchAgentController.restartDaemon()
+      logger.info("Requested daemon restart", metadata: ["result": String(describing: result)])
+      return result
     }
   }
 

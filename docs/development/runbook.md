@@ -74,11 +74,10 @@ Operational notes:
   is the authoritative gate against stale artifacts masking a
   regression. To force a clean local build, run `./scripts/clean.sh`
   yourself before committing. Skip the hook with `--no-verify` only with
-  the project owner's explicit approval (see `AGENTS.md` Bash safety).
+  the project owner's explicit approval (see the commit policy in `AGENTS.md` §10).
 
 ## Notes
 
-- Scripts intentionally skip missing stack artifacts during early bootstrap (for example, no `Cargo.toml` yet or no `apps/macos` project yet).
 - Scripts default `VAPOR_DIR` to repo-local `./.vapor` for local dev and test ergonomics.
 - Scripts default `VAPOR_ENV` to `dev` (and `prod` for `./scripts/build.sh package`).
 - `VERSION` is the release version source-of-truth; wrapper scripts fail fast when `Cargo.toml` is out of sync with it.
@@ -108,10 +107,10 @@ Fast facts for local dev:
   filesystem work and never contact the real Internet.
 - **No sleeps for timing.** Use test-injectable clock abstractions;
   retry decorators are banned.
-- **Snapshot updates:** when an intentional `--json` schema change
-  lands on the CLI (once it ships), run `cargo insta review` to
-  approve the new snapshot. CI fails the PR if there is an
-  unapproved drift.
+- **`--json` shape locks:** every `--json` command has an explicit
+  assertion test on its serialized shape (`insta` snapshots are still
+  an open task). An intentional schema change updates that test in the
+  same change set; CI fails the PR otherwise.
 - **Flaky test?** Fix it or remove it in the same PR. We do not carry
   flaky tests forward — the agent's feedback loop depends on
   determinism.

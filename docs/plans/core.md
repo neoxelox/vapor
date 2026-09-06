@@ -49,9 +49,9 @@ core/
   daemon/     Rust sync engine (portable; no OS-specific calls)
   providers/  cloud provider adapters (portable; network code)
   shared/     contracts, constants, types used across the workspace
-  platform/   traits + per-OS native implementations (NEW)
-  lifecycle/  daemon lifecycle + crash-loop guard (NEW; moved from Swift)
-  cli/        the `vapor` CLI binary (NEW)
+  platform/   traits + per-OS native implementations
+  lifecycle/  daemon lifecycle + crash-loop guard (moved from Swift)
+  cli/        the `vapor` CLI binary
 
 apps/
   macos/      SwiftUI/AppKit shell (unchanged)
@@ -71,9 +71,9 @@ apps/
 
 ### 2.2 Platform abstraction layer (`core/platform`)
 
-A new crate (or module inside `core/shared`) that defines the traits the
-daemon consumes, with one native implementation per supported OS, selected
-via `#[cfg(target_os = "...")]`. Traits listed in §3.
+The crate that defines the traits the daemon consumes, with one native
+implementation per supported OS selected via `#[cfg(target_os = "...")]`.
+Traits listed in §3.
 
 ### 2.3 Daemon lifecycle (`core/lifecycle`)
 
@@ -262,18 +262,19 @@ they must land before `core/daemon` compiles on Windows or Linux.
 
 ## 5) IPC between apps and daemon
 
-No IPC code exists yet. The existing `docs/architecture/ipc-contracts.md`
-(formerly `xpc-contracts.md`) keeps its versioning, handshake, and skew-matrix
-discipline; the transport is swapped per OS:
+`core/ipc` implements the channel. `docs/architecture/ipc-contracts.md`
+holds the versioning, handshake, and skew-matrix discipline; the transport
+is swapped per OS:
 
 - macOS — Unix domain socket at `<vapor_dir>/vapord.sock` (default) with
   optional NSXPC wrapping if sandboxing capability delegation is ever needed.
 - Linux — Unix domain socket at `<vapor_dir>/vapord.sock`.
 - Windows — named pipe `\\.\pipe\vapord-<user-sid>`.
 
-Protocol: **JSON-RPC 2.0** over the transport, length-prefixed frames.
-Debuggable with `nc` / pipe tools, easy from every language, zero-ceremony in
-Rust. Migrate to gRPC/`tonic` over the same transports only if typed
+Protocol: Vapor's own tagged JSON envelopes (`{kind, payload}` requests,
+`{outcome, value}` responses) in length-prefixed frames; not JSON-RPC.
+Debuggable with `nc` / pipe tools, easy from every language, zero-ceremony
+in Rust. Migrate to gRPC/`tonic` over the same transports only if typed
 multi-language clients become a requirement.
 
 ## 6) Distribution trust chain (per platform)
@@ -435,8 +436,9 @@ non-macOS surface. Nothing in the primary path is blocked by any of
 these.
 
 9. **Land Windows platform implementations** for every trait in
-   `core/platform`. Real Windows CI jobs (not lint-only) run the full
-   `core/*` test suite. Add the named-pipe IPC transport.
+   `core/platform`. The `windows-latest` job already runs the full
+   `core/*` test suite; add the named-pipe IPC transport and the service
+   round-trip.
 10. **Land Linux platform implementations** for every trait in
     `core/platform`. Real Linux CI jobs run the full `core/*` test
     suite.

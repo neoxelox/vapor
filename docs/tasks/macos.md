@@ -160,6 +160,12 @@ surface).
       backing endpoint.
 - [ ] M3-2 Implement full menubar state model + reasoned status messages
       consumed via IPC.
+      *(Partly landed in the full-repo review: the health tick reads
+      `vapor status --json` and maps run state, throttle state, queue
+      depth and failed count onto the surface state with the daemon's
+      throttle reason; the Dashboard and menu bar show it. Remaining:
+      the per-state copy and controls this task specifies beyond that.)*
+
 - [ ] M3-3 Implement diagnostics panel (throttle reason, queue depth,
       conflicts, failures, effective ceilings, utilization, idle-boost
       reason).

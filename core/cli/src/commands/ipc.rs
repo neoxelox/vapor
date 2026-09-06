@@ -183,6 +183,9 @@ pub fn render_status(status: &StatusResponse) -> String {
             status.mirror_reverts, status.mirror_deletes
         ));
     }
+    if let Some(notice) = &status.config_restart_required {
+        rendered.push_str(&format!("\nRestart required: {notice}"));
+    }
     for profile in &status.profiles {
         rendered.push_str(&format!(
             "\nProfile {}: {} ({}, {}) queue {} failed {}{}",
@@ -489,7 +492,8 @@ mod tests {
   "mirror_reverts": 0,
   "mirror_deletes": 0,
   "profiles": [],
-  "resource_budget": null
+  "resource_budget": null,
+  "config_restart_required": null
 }"#
         );
     }
