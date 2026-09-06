@@ -1489,6 +1489,24 @@ impl DurableStateDb {
             .ok_or_else(|| StateDbError::InvalidStateValue(format!("decision {id} vanished")))
     }
 
+    /// Whether a decision of `kind` for `path` was applied after `since`:
+    /// the walk uses it to give an answer time to land before asking
+    /// the same question again.
+    pub fn decision_applied_since(
+        &self,
+        kind: &str,
+        path: &Path,
+        since: SystemTime,
+    ) -> Result<bool, StateDbError> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM pending_decisions
+             WHERE kind = ? AND path_text = ? AND applied_at_ms >= ?",
+            params![kind, path_to_text(path)?, system_time_to_millis(since)?],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Closes an open decision the daemon no longer needs an answer to
     /// (the condition it asked about went away). Recorded as resolved
     /// and applied with the choice `withdrawn`, so the history says

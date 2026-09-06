@@ -983,11 +983,9 @@ Still open, in order:
       deletion to finish (into the trash here, a delete in the cloud),
       still guarded; a changed survivor is kept; a merge after
       `reattach` or `recreate` propagates nothing. S27 and S28 flipped.
-- [ ] SF-5 Type mismatch decision. A path that is a file on one side
-      and a directory on the other opens a path-scope `type-mismatch`
-      decision (`keep-both`: the file becomes a conflict copy and the
-      directory syncs; `prefer-local`; `prefer-cloud`) instead of the
-      timeline warning that repeats every reconcile pass.
+- [x] SF-5 Type mismatch decision: `type-mismatch` with `keep-both`,
+      `prefer-local`, `prefer-cloud`; asked once, both sides untouched
+      until answered. Scenario S46.
 - [ ] SF-6 Case and normalization collisions materialize as conflict
       copies (TR-5) through `name_aliases` and `enqueue_download_from`;
       S33 flips from known gap to pass.

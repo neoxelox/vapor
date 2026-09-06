@@ -647,6 +647,10 @@ pub mod engine {
     /// How often a running daemon re-checks both sync roots (present,
     /// and carrying the identity the profile adopted).
     pub const ROOT_CHECK_INTERVAL_SECONDS: u64 = 15;
+    /// After a path-scoped decision is applied, the reconcile walk gives
+    /// the answer this long to land before it may ask about the same
+    /// path again.
+    pub const DECISION_APPLY_GRACE_SECONDS: u64 = 600;
     /// Directories the reconcile comparison walk processes per runtime
     /// tick while a reconcile slice is active. Bounds per-tick I/O so
     /// the slice checkpoints keep their interruptibility guarantee.

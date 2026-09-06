@@ -954,6 +954,7 @@ impl StagedExecutor {
                                 crate::state_db::TombstoneOrigin::Local,
                                 now,
                             );
+                            reconcile_local_directory_left_behind(state_db, &plan.local_path, now);
                             self.complete(state_db, &intent, report)?;
                             Ok(None)
                         }
@@ -967,6 +968,7 @@ impl StagedExecutor {
                                 crate::state_db::TombstoneOrigin::Local,
                                 now,
                             );
+                            reconcile_local_directory_left_behind(state_db, &plan.local_path, now);
                             self.complete(state_db, &intent, report)?;
                             Ok(None)
                         }
@@ -1958,7 +1960,12 @@ fn continue_plan_delete(
         Ok(Some(remote_entry)) => {
             let unchanged = match &index {
                 Some(index) => {
-                    if remote_entry.op_id.as_deref() == Some(index.last_op_id.as_str()) {
+                    // The op-id tag alone is not proof (an in-place write
+                    // keeps it); the size-and-mtime quick check has to
+                    // agree, else the hash decides.
+                    if remote_entry.op_id.as_deref() == Some(index.last_op_id.as_str())
+                        && remote_quick_check_passes(index, remote_entry)
+                    {
                         true
                     } else {
                         let remote_hash = remote_entry
@@ -2746,6 +2753,36 @@ fn write_sync_index_entry(
     }
 }
 
+/// A remote delete that completed while a directory stands at the
+/// local path (a type-mismatch answered in favour of the local folder)
+/// leaves that folder's content to upload; a subtree reconcile picks
+/// it up now that the remote name is free.
+fn reconcile_local_directory_left_behind(
+    state_db: &mut DurableStateDb,
+    local_path: &Path,
+    now: SystemTime,
+) {
+    if !fs::symlink_metadata(local_path).is_ok_and(|metadata| metadata.is_dir()) {
+        return;
+    }
+    if let Err(error) = state_db.enqueue_intents_coalesced(
+        &[(
+            local_path.to_path_buf(),
+            PendingIntentKind::ReconcileSubtree,
+            now,
+        )],
+        crate::safeguards::IntentSource::Fresh,
+    ) {
+        crate::logging::warning(
+            "Could not schedule the subtree reconcile after a remote delete",
+            &[
+                ("path", local_path.display().to_string()),
+                ("error", error.to_string()),
+            ],
+        );
+    }
+}
+
 fn record_delete_tombstone(
     state_db: &mut DurableStateDb,
     local_path: &Path,
@@ -3318,7 +3355,7 @@ fn abort_outcome_session(outcome: ProviderJobOutcome) {
     }
 }
 
-fn path_key(path: &Path) -> String {
+pub(crate) fn path_key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
@@ -4143,6 +4180,51 @@ mod tests {
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].kind, PendingIntentKind::Download);
         assert_eq!(queued[0].path, local_file);
+    }
+
+    #[test]
+    fn local_delete_is_refused_when_the_remote_was_edited_in_place_keeping_its_tag() {
+        let mut fixture = Fixture::new();
+        let local_file = fixture.local_root.join("doc.txt");
+        let cloud_file = fixture.cloud_root.join("doc.txt");
+        std::fs::write(&cloud_file, b"last synced").expect("seed remote");
+        fixture
+            .state_db
+            .set_sync_index(
+                &local_file,
+                &hash_hex_of_bytes(b"last synced"),
+                11,
+                None,
+                Some(timestamp_ms(1_000)),
+                "op-ours",
+                timestamp_ms(0),
+            )
+            .expect("seed sync index");
+        std::fs::write(&cloud_file, b"cloud  edit").expect("edit remote in place");
+        let caps: Arc<dyn vapor_platform::fs_caps::FilesystemCapabilities> =
+            Arc::new(vapor_platform::fs_caps::NativeFilesystemCapabilities::for_current_host());
+        vapor_providers::tags::OpIdTagStore::new(caps)
+            .write_op_id(&cloud_file, "op-ours")
+            .expect("tag");
+
+        // The local file is gone; its Delete must not take the tag's word.
+        let intent = fixture.enqueue_and_lease(&local_file, PendingIntentKind::Delete);
+        assert_eq!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0)),
+            StartDecision::Started
+        );
+        let report = fixture.run_to_quiescence(32);
+        assert_eq!(report.completed, 1);
+        assert_eq!(
+            std::fs::read(&cloud_file).expect("remote bytes"),
+            b"cloud  edit",
+            "the edited remote survives the stale delete"
+        );
+        let queued = fixture.state_db.list_queue_intents(4).expect("queue");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].kind, PendingIntentKind::Download);
     }
 
     #[test]

@@ -67,6 +67,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: mass_delete_guard,
         },
         Scenario {
+            id: "S46",
+            name: "type-mismatch-decision",
+            proves: "a name that is a file here and a folder in the cloud opens a type-mismatch decision and touches nothing; keep-both moves the file to a conflict name and brings the folder down",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: type_mismatch_decision,
+        },
+        Scenario {
             id: "S42",
             name: "trash-keeps-cloud-deletions",
             proves: "a file removed on this device because the cloud deleted it lands in the trash; vapor trash list shows it and vapor trash restore brings it back and re-uploads it",
@@ -461,6 +469,65 @@ fn mass_delete_guard(ctx: &mut Ctx) -> Result<(), Failure> {
         "status still counts a decision"
     );
     ctx.allow_warning("Mass-deletion guard tripped");
+    Ok(())
+}
+
+fn type_mismatch_decision(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    fs::create_dir_all(&home.local)?;
+    fs::create_dir_all(home.cloud.join("notes"))?;
+    write_file(&home.local.join("notes"), "the local file\n")?;
+    write_file(
+        &home.cloud.join("notes/inner.txt"),
+        "inside the cloud folder\n",
+    )?;
+    ctx.configure_scope(&home)?;
+    ctx.start_daemon()?;
+    let cli = ctx.cli();
+    let mut found = None;
+    wait::wait_until(Duration::from_secs(60), "a type-mismatch decision", || {
+        let Ok(report) = cli.json(&["decisions", "list", "--json"]) else {
+            return false;
+        };
+        found = report["decisions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|decision| decision["kind"] == "type-mismatch" && decision["choice"].is_null())
+            .cloned();
+        found.is_some()
+    })?;
+    let decision = found.ok_or_else(|| Failure::new("no decision"))?;
+    ensure!(
+        decision["evidence"]["local"] == "file" && decision["evidence"]["cloud"] == "directory",
+        "unexpected evidence: {decision}"
+    );
+    ensure!(
+        decision["options"]
+            .as_array()
+            .is_some_and(|options| options.len() == 3),
+        "three answers are offered: {decision}"
+    );
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ensure!(
+        read_string(&home.local.join("notes"))? == "the local file\n"
+            && home.cloud.join("notes/inner.txt").is_file(),
+        "both sides stay untouched while the question is open"
+    );
+
+    let id = decision["id"].as_i64().unwrap_or_default().to_string();
+    cli.ok(&["decisions", "resolve", &id, "--choose", "keep-both"])?;
+    ctx.wait_exists(&home.local.join("notes/inner.txt"), Duration::from_secs(60))?;
+    ctx.settle(Duration::from_secs(60))?;
+    ensure!(
+        conflict_copy_exists(&home.local, "notes") && conflict_copy_exists(&home.cloud, "notes"),
+        "the local file lives on as a conflict copy on both sides"
+    );
+    ensure!(
+        read_string(&home.local.join("notes/inner.txt"))? == "inside the cloud folder\n",
+        "the cloud folder came down under the original name"
+    );
+    ctx.allow_warning("type mismatch");
     Ok(())
 }
 

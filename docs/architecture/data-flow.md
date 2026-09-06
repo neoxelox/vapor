@@ -250,8 +250,17 @@ say which reading is right. The rules:
 - **Kinds today.** `mass-deletion` (batch scope, options `apply` and
   `discard`; see the guard under Local safeguards); `root-missing`
   (profile scope, option `recreate`) and `root-replaced` (profile
-  scope, option `reattach`), both under Root identity below. Further
-  kinds land with the feature that needs them and are listed here.
+  scope, option `reattach`), both under Root identity below;
+  `type-mismatch` (path scope) for a name that is a file on one side
+  and a directory on the other, with `keep-both` (the local side moves
+  to a conflict name and the cloud side comes down under the original
+  name), `prefer-local` (the cloud side is removed, guarded, and the
+  local side goes up), and `prefer-cloud` (the local side goes to the
+  trash and the cloud side comes down). Both sides stay untouched while
+  it is open, the question is asked once, and an applied answer gets
+  `DECISION_APPLY_GRACE_SECONDS` to land before the walk may ask about
+  the path again. Further kinds land with the feature that needs them
+  and are listed here.
 
 ### What stops a whole profile
 

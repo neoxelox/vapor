@@ -677,19 +677,10 @@ impl DaemonRuntime {
                         self.mirror_delete_count += mirror_deletes as u64;
                         let mismatches = walker.take_type_mismatches();
                         let collisions = walker.take_name_collisions();
+                        for path in mismatches {
+                            self.open_type_mismatch_decision(&path, now)?;
+                        }
                         if let Some(timeline) = &self.timeline {
-                            for path in mismatches {
-                                timeline.push(
-                                    "reconcile",
-                                    self.profile_id.clone(),
-                                    format!(
-                                        "{} is a file on one side and a directory on the other; \
-                                         two-way sync leaves both untouched until you rename one",
-                                        path.display()
-                                    ),
-                                    now,
-                                );
-                            }
                             for (wanted, existing) in collisions {
                                 timeline.push(
                                     "collision",
@@ -2643,6 +2634,18 @@ impl DaemonRuntime {
                         "discarded: {dropped} deletion(s) dropped, {enqueued} restore(s) enqueued"
                     )
                 }
+                (crate::type_mismatch::DECISION_KIND, choice) => {
+                    match self.apply_type_mismatch(&decision, choice, now) {
+                        Ok(summary) => summary,
+                        Err(message) => {
+                            logging::warning(
+                                "Could not apply the type-mismatch answer; will retry",
+                                &[("decision_id", decision.id.to_string()), ("error", message)],
+                            );
+                            continue;
+                        }
+                    }
+                }
                 (
                     crate::root_identity::MISSING_DECISION_KIND,
                     crate::root_identity::OPTION_RECREATE,
@@ -2696,6 +2699,136 @@ impl DaemonRuntime {
             }
         }
         Ok(())
+    }
+
+    /// A path that is a file on one side and a directory on the other
+    /// gets a `type-mismatch` decision, once; both sides stay untouched
+    /// until it is answered.
+    fn open_type_mismatch_decision(
+        &mut self,
+        path: &Path,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        use crate::type_mismatch::{DECISION_KIND, options, question};
+        if self
+            .state_db
+            .open_decision(DECISION_KIND, Some(path))?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let grace = Duration::from_secs(constants::engine::DECISION_APPLY_GRACE_SECONDS);
+        if self.state_db.decision_applied_since(
+            DECISION_KIND,
+            path,
+            now.checked_sub(grace).unwrap_or(SystemTime::UNIX_EPOCH),
+        )? {
+            // An answer is still landing (a delete in flight); asking
+            // again would be noise.
+            return Ok(());
+        }
+        let local_is_dir = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+        let id = self.state_db.create_decision(
+            DECISION_KIND,
+            crate::state_db::DecisionScope::Path,
+            Some(path),
+            &question(path, local_is_dir),
+            &options(local_is_dir),
+            &serde_json::json!({
+                "local": if local_is_dir { "directory" } else { "file" },
+                "cloud": if local_is_dir { "file" } else { "directory" },
+            }),
+            now,
+        )?;
+        logging::warning(
+            "Reconcile found a file/directory type mismatch; asking which side wins",
+            &[
+                ("path", path.display().to_string()),
+                ("decision_id", id.to_string()),
+            ],
+        );
+        self.announce_decisions(&[id], now);
+        Ok(())
+    }
+
+    /// Applies a `type-mismatch` answer. `keep-both` and `prefer-cloud`
+    /// move the local side out of the way (to a conflict name, or into
+    /// the trash) and let the cloud side come down; `prefer-local`
+    /// removes the cloud side and lets the local side go up. The
+    /// local move is echo-suppressed so the watcher's `Removed` never
+    /// turns into a delete of the cloud side.
+    fn apply_type_mismatch(
+        &mut self,
+        decision: &crate::state_db::DecisionRecord,
+        choice: &str,
+        now: SystemTime,
+    ) -> Result<String, String> {
+        use crate::type_mismatch::{OPTION_KEEP_BOTH, OPTION_PREFER_CLOUD, OPTION_PREFER_LOCAL};
+        let path = decision
+            .path
+            .clone()
+            .ok_or_else(|| "decision has no path".to_string())?;
+        let summary = match choice {
+            OPTION_KEEP_BOTH => {
+                let copy = crate::conflict::conflict_copy_path(
+                    &path,
+                    &self.device_id,
+                    now.duration_since(SystemTime::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0),
+                    |candidate| candidate.exists(),
+                );
+                std::fs::rename(&path, &copy)
+                    .map_err(|error| format!("cannot rename {} aside: {error}", path.display()))?;
+                self.local_echoes
+                    .record_delete(crate::executor::path_key(&path), now);
+                self.state_db
+                    .enqueue_intents_coalesced(
+                        &[(copy.clone(), PendingIntentKind::Upload, now)],
+                        crate::safeguards::IntentSource::Fresh,
+                    )
+                    .map_err(|error| error.to_string())?;
+                format!(
+                    "kept both: the local side moved to {}; the cloud side comes down under the original name",
+                    copy.display()
+                )
+            }
+            OPTION_PREFER_CLOUD => {
+                let trash = self
+                    .trash
+                    .as_ref()
+                    .ok_or_else(|| "no trash attached".to_string())?;
+                trash
+                    .discard(&path, constants::trash::REASON_CLOUD_DELETION, now)
+                    .map_err(|error| {
+                        format!("cannot move {} to the trash: {error}", path.display())
+                    })?;
+                self.local_echoes
+                    .record_delete(crate::executor::path_key(&path), now);
+                "preferred the cloud side: the local side is in the trash; the cloud side comes down"
+                    .to_string()
+            }
+            OPTION_PREFER_LOCAL => {
+                // A Delete for the path removes the cloud side whatever
+                // it is (a directory expands into guarded per-entry
+                // deletes); a local file then uploads through the
+                // reconcile below, and a local directory through the
+                // subtree reconcile the completed delete enqueues.
+                self.state_db
+                    .enqueue_intents_coalesced(
+                        &[(path.clone(), PendingIntentKind::Delete, now)],
+                        crate::safeguards::IntentSource::Fresh,
+                    )
+                    .map_err(|error| error.to_string())?;
+                "preferred the local side: the cloud side is being removed; the local side goes up"
+                    .to_string()
+            }
+            other => return Err(format!("no applier for choice {other:?}")),
+        };
+        // The reconcile that follows materializes the winning side.
+        self.enqueue_startup_reconstruction_reconcile(now)
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(summary)
     }
 
     /// Applies a `reattach` answer: the folder now at the root becomes
@@ -5236,6 +5369,171 @@ mod tests {
                 .expect("read")
                 .is_none(),
             "the flag covers one whole-scope walk"
+        );
+    }
+
+    /// A local file and a cloud directory under one name, or the
+    /// reverse: the pair the walk cannot decide on its own.
+    fn mismatched_pair(fixture: &OfflineFixture, local_is_dir: bool) -> PathBuf {
+        let local = fixture.watch_root.join("notes");
+        let cloud = fixture.cloud_root.join("notes");
+        if local_is_dir {
+            std::fs::create_dir_all(&local).expect("local dir");
+            std::fs::write(local.join("inner.txt"), b"inside the local folder").expect("inner");
+            std::fs::write(&cloud, b"the cloud file").expect("cloud file");
+        } else {
+            std::fs::write(&local, b"the local file").expect("local file");
+            std::fs::create_dir_all(&cloud).expect("cloud dir");
+            std::fs::write(cloud.join("inner.txt"), b"inside the cloud folder").expect("inner");
+        }
+        local
+    }
+
+    fn open_mismatch(runtime: &DaemonRuntime) -> crate::state_db::DecisionRecord {
+        runtime
+            .state_db()
+            .decisions(false)
+            .expect("decisions")
+            .into_iter()
+            .find(|decision| decision.kind == crate::type_mismatch::DECISION_KIND)
+            .expect("a type-mismatch decision is open")
+    }
+
+    #[test]
+    fn a_type_mismatch_asks_once_and_touches_nothing() {
+        let fixture = OfflineFixture::new();
+        let local = mismatched_pair(&fixture, false);
+        let runtime = fixture.run(&[]);
+        let decision = open_mismatch(&runtime);
+        assert_eq!(decision.path.as_deref(), Some(local.as_path()));
+        assert_eq!(decision.evidence["local"], "file");
+        assert_eq!(decision.evidence["cloud"], "directory");
+        assert_eq!(std::fs::read(&local).expect("local"), b"the local file");
+        assert!(fixture.cloud_root.join("notes/inner.txt").is_file());
+        drop(runtime);
+        // A second reconcile finds the question already open.
+        let runtime = fixture.run(&[]);
+        let open: Vec<_> = runtime
+            .state_db()
+            .decisions(false)
+            .expect("decisions")
+            .into_iter()
+            .filter(|decision| decision.kind == crate::type_mismatch::DECISION_KIND)
+            .collect();
+        assert_eq!(open.len(), 1, "asked once");
+    }
+
+    #[test]
+    fn keep_both_moves_the_local_side_aside_and_brings_the_cloud_side_down() {
+        let fixture = OfflineFixture::new();
+        let local = mismatched_pair(&fixture, false);
+        let runtime = fixture.run(&[]);
+        let decision = open_mismatch(&runtime);
+        drop(runtime);
+        {
+            let mut db = DurableStateDb::open(&fixture.database_path).expect("open");
+            db.resolve_decision(decision.id, "keep-both", timestamp_ms(1))
+                .expect("resolve");
+        }
+        let runtime = fixture.run(&[]);
+        // The local file lives on under a conflict name, on both sides.
+        let copies: Vec<PathBuf> = std::fs::read_dir(&fixture.watch_root)
+            .expect("list")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("notes~conflict-"))
+            })
+            .collect();
+        assert_eq!(copies.len(), 1, "one conflict copy: {copies:?}");
+        assert_eq!(std::fs::read(&copies[0]).expect("copy"), b"the local file");
+        let copy_name = copies[0].file_name().unwrap().to_owned();
+        assert!(
+            fixture.cloud_root.join(&copy_name).is_file(),
+            "the copy uploaded"
+        );
+        // The cloud folder came down under the original name.
+        assert!(local.is_dir(), "the cloud directory materialized locally");
+        assert_eq!(
+            std::fs::read(local.join("inner.txt")).expect("inner"),
+            b"inside the cloud folder"
+        );
+        assert!(fixture.cloud_root.join("notes/inner.txt").is_file());
+        assert!(
+            runtime
+                .state_db()
+                .decisions(false)
+                .expect("open")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn prefer_cloud_trashes_the_local_side() {
+        let fixture = OfflineFixture::new();
+        let local = mismatched_pair(&fixture, true);
+        let runtime = fixture.run(&[]);
+        let decision = open_mismatch(&runtime);
+        assert_eq!(decision.evidence["local"], "directory");
+        drop(runtime);
+        {
+            let mut db = DurableStateDb::open(&fixture.database_path).expect("open");
+            db.resolve_decision(decision.id, "prefer-cloud", timestamp_ms(1))
+                .expect("resolve");
+        }
+        let runtime = fixture.run(&[]);
+        assert!(local.is_file(), "the cloud file took the name");
+        assert_eq!(std::fs::read(&local).expect("file"), b"the cloud file");
+        let trashed = runtime.trash().expect("trash").list();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0].kind, "directory");
+        assert!(
+            runtime
+                .trash()
+                .expect("trash")
+                .root()
+                .join(&trashed[0].id)
+                .join("notes/inner.txt")
+                .is_file(),
+            "the local folder is whole in the trash"
+        );
+        assert!(
+            !fixture.cloud_root.join("notes/inner.txt").exists(),
+            "nothing of the local folder went up"
+        );
+    }
+
+    #[test]
+    fn prefer_local_removes_the_cloud_side_and_uploads_the_local_folder() {
+        let fixture = OfflineFixture::new();
+        let local = mismatched_pair(&fixture, true);
+        let runtime = fixture.run(&[]);
+        let decision = open_mismatch(&runtime);
+        drop(runtime);
+        {
+            let mut db = DurableStateDb::open(&fixture.database_path).expect("open");
+            db.resolve_decision(decision.id, "prefer-local", timestamp_ms(1))
+                .expect("resolve");
+        }
+        let runtime = fixture.run(&[]);
+        assert!(local.is_dir(), "the local folder stays");
+        assert!(
+            fixture.cloud_root.join("notes").is_dir(),
+            "the cloud file is gone and the folder went up"
+        );
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("notes/inner.txt")).expect("uploaded"),
+            b"inside the local folder"
+        );
+        assert!(
+            runtime
+                .state_db()
+                .decisions(false)
+                .expect("open")
+                .is_empty(),
+            "no second question while the answer lands"
         );
     }
 
