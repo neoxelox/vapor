@@ -244,8 +244,8 @@ Exit gate:
 
 - [x] C5-1 Pick and document the IPC transport: Unix domain socket at
       `<vapor_dir>/vapord.sock` on Unix; named pipe
-      `\\.\pipe\vapord-<user-sid>` on Windows. Protocol: JSON-RPC 2.0,
-      length-prefixed frames. Finalize `docs/architecture/ipc-contracts.md`
+      `\\.\pipe\vapord-<user-sid>` on Windows. Protocol: tagged JSON
+      envelopes in length-prefixed frames (not JSON-RPC). Finalize `docs/architecture/ipc-contracts.md`
       and the per-OS transport docs.
 - [x] C5-2 Implement the daemon-side IPC server in `core/daemon` with the
       versioning/handshake/skew-matrix discipline already specified (`Hello`
@@ -718,10 +718,9 @@ trivial restatements of code).
       throttle monotonicity, retry backoff monotonicity, ignore-rule
       precedence determinism, durable-queue FIFO. Each property runs
       64–256 cases on CI (fast tier).
-- [ ] CT-2 Add a Tier-1 timing guard to CI that fails if
-      `./scripts/test.sh` exceeds 5 minutes on a matrix runner. Emit a
-      clear message pointing at `docs/architecture/testing-strategy.md
-      §Discipline rules`.
+- [x] CT-2 Tier-1 timing guard: `./scripts/test.sh` fails a green run
+      that exceeds `VAPOR_TEST_MAX_SECONDS` (the `test` workflow sets
+      300) with a message pointing at `docs/architecture/testing-strategy.md`.
 - [ ] CT-3 Audit the current `core/*` test corpus for trivial-test
       smell per `AGENTS.md §9.3` (defaults that mirror constants,
       Debug/Display string equality, serde round-trips of trivial
@@ -810,6 +809,10 @@ snapshot.
       `vapor run` + `vapor status` full round-trip passes on macOS
       (LaunchAgent), Windows (Task Scheduler / SCM), Linux (systemd user /
       system).
+- [ ] T-16 Resource-ceiling integration tests over the cross-product in
+      `docs/performance/acceptance-budgets-and-benchmark-harness.md`
+      (`{default, cpuPercent=5, memoryPercent=5}` x `{idle, active,
+      storm}` x `{boost on, boost off}` x `{global, profile-lowered}`).
 
 ## Deferred tasks
 
@@ -831,3 +834,38 @@ snapshot.
       reconcile backlog non-convergence. Only the release incident
       playbook exists today. Each runbook needs detection, mitigation,
       user-visible state, and recovery verification.
+
+## Full-repository review follow-ups (2026-09-06)
+
+Landed in the review change set (kept here so the roadmap shows why the
+runtime changed shape):
+
+- [x] RV-1 macOS keychain `SecretStore` with an access list covering
+      `vapor` and `vapord`; contract test shared with the fake.
+- [x] RV-2 macOS metrics sampler (CPU, power, thermal, Low Power Mode,
+      memory, user presence) and HID idle notifier; `VAPOR_THROTTLE_INPUTS`
+      override for harnesses.
+- [x] RV-3 One `vapord` resolver for `vapor doctor` and `vapor service`;
+      `doctor --json`, `secret_store` and `throttle_inputs` rows.
+- [x] RV-4 Offline same-size edit detection in the reconcile walk
+      (rsync quick check against the sync index).
+- [x] RV-5 Provider-job panic containment; zero-progress transfer guard.
+- [x] RV-6 Changes poll, reconcile listings and cloud-root retry off the
+      tick thread; keep-both apply skips the hash when size and mtime
+      match the index.
+- [x] RV-7 A fully misconfigured daemon stays up and serves status.
+- [x] RV-8 Live `vapor.json` reload for the safe key subset;
+      `config_restart_required` in status; `vapor config set` hints.
+- [x] RV-9 JSON-typed structured config keys; partial per-profile
+      overrides with per-field merge; `config get` renders defaults.
+- [x] RV-10 `Provider::rename` removed from the contract until move
+      detection exists.
+
+Still open:
+
+- [ ] RV-11 Move detection: turn FSEvents rename pairs into a server-side
+      move on providers that support one (Google Drive does), so a
+      renamed large file is not re-uploaded. Reintroduce the capability
+      on the provider trait together with the engine path that calls it.
+- [ ] RV-12 Adopt `insta` for the `--json` shape locks (see CT-4) and
+      `proptest` for the invariants in CT-1.

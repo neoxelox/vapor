@@ -8,8 +8,8 @@ surface. Concrete step-by-step execution lives next door in
 
 ## How to use this group
 
-- **Deciding where to contribute?** Start with `original.md` for product
-  intent. Then read `core.md` to understand the portable runtime strategy.
+- **Deciding where to contribute?** Start with `docs/product/status-and-goals.md` for
+  product intent. Then read `core.md` to understand the portable runtime strategy.
   Then pick a surface plan (`macos.md`, `cli.md`, future `windows.md` /
   `linux.md`) matching what you want to work on.
 - **Writing code?** Plans give you the *why*; jump to

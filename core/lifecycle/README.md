@@ -15,7 +15,7 @@ Tasks: `docs/tasks/core.md` Phase C4.
 - `CrashLoopGuard` — pure-logic backoff policy. `baseDelay=2s`,
   `maxDelay=120s`, `maxConsecutiveFailuresBeforePause=5`,
   `failureWindow=600s` by default; matches the Swift implementation
-  one-to-one (`apps/macos/Sources/VaporCore/DaemonLifecycle.swift`).
+  one-to-one.
 - `AutoLaunchSettingStore` — trait + JSON-file impl that reads / writes
   the `autoLaunch` key in `vapor.json`. Atomic-on-disk via
   temp-file-then-rename so the Swift `VaporConfigurationStore` and the
@@ -27,17 +27,15 @@ Tasks: `docs/tasks/core.md` Phase C4.
 
 ## Why this crate exists
 
-Three surfaces (the macOS Swift app today; the `vapor` CLI in Wave 6;
-the Windows / Linux apps if they ship) need identical autolaunch and
-crash-loop behavior. Keeping that logic in Rust and consuming it from
-Swift via the `vapor` CLI subprocess (per `core.md` C4-5) keeps the
-contract single-sourced.
+Three surfaces (the macOS app today; the `vapor` CLI; the Windows and
+Linux apps if they ship) need identical autolaunch and crash-loop
+behavior. Keeping that logic in Rust and consuming it from Swift through
+the `vapor` CLI subprocess keeps the contract single-sourced: the app
+never reimplements a lifecycle decision.
 
-## Wave status
+## Status
 
-- **Done (Wave 5):** crate + trait + manager + parity tests.
-- **Pending (Wave 6):** `vapor service install / start / stop / status`
-  CLI commands consume `DaemonLifecycleManager`.
-- **Pending (Wave 6 / M2):** macOS Swift app delegates to the CLI
-  subprocess; the duplicate Swift `CrashLoopGuard` /
-  `DaemonLifecycleManager` retire once parity is verified end-to-end.
+`vapor service install | uninstall | bootstrap | start | stop | restart |
+status | check | acknowledge` all drive `DaemonLifecycleManager`, and the
+macOS app calls those commands with `--json`; the Swift crash-loop guard
+is gone. Durable crash-loop state lives at `<vapor_dir>/state/lifecycle.json`.

@@ -65,7 +65,7 @@ are provider-neutral unless a section says otherwise.
   - Token-endpoint 5xx or transport failure → `Transient` (bounded
     retries with backoff through the normal retry policy).
 - Missing client credentials surface as an actionable `Authentication`
-  error at cloud-root ensure time; the engine blocks sync (C8-50) while
+  error at cloud-root ensure time; the engine blocks sync while
   continuing to capture intent state durably.
 
 ## Failure behavior

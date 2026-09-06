@@ -8,8 +8,7 @@ apps) only reads and displays it.
 
 This document is the authoritative design for the feature. The pipeline
 mechanics are cross-referenced from `data-flow.md`; the intent and priority
-are in `docs/plans/core.md §2.5`; the execution checklist is
-`docs/tasks/core.md` C8-59…C8-66.
+are in `docs/plans/core.md §2.5`.
 
 ## The three modes
 
@@ -78,15 +77,14 @@ the default mode and *keep-both* remains its policy, exactly as
   given observed change is an echo of Vapor's own write.
 - **Tombstones / deletion replay** stay durable in every mode. Strict
   mirror *uses* deletion propagation as a first-class outcome (that is the
-  point), so the durable tombstone machinery from C8-16 is exercised, not
-  bypassed.
+  point), so the durable tombstone machinery is exercised, not bypassed.
 
 ## Where it lives in the pipeline
 
-`syncMode` will be carried on the sync scope
-(`core/daemon/src/sync_directories.rs` `SyncScope` — the field lands with
-C8-59) and, once profiles land, on the per-profile resolved settings.
-The engine consults it at these points (see `data-flow.md`):
+`syncMode` is carried on the sync scope
+(`core/daemon/src/sync_directories.rs` `SyncScope`) and on each
+profile's resolved settings. The engine consults it at these points (see
+`data-flow.md`):
 
 - **Local→remote suppression** (`pull-only`): local watcher events do not
   produce upload / remote-delete / remote-rename intents. A local edit
@@ -121,8 +119,7 @@ mode check — there is no operation that can bypass it.
   canonical local root, per-profile queues, shared workgate/throttle. A
   profile's mode only affects that profile's queue.
 
-Classification (per C8-19 / C8-21): `syncMode` is **profile-override-capable**,
-not app-global.
+Classification: `syncMode` is **profile-override-capable**, not app-global.
 
 ## Safety
 
@@ -141,10 +138,11 @@ recovery net — there is no quarantine or undo:
   app and the CLI must state, in plain language, that the subordinate side
   will be made to exactly match the source — divergent local (or cloud) edits
   are overwritten and local (or cloud)-only content is removed, permanently.
-  (macOS: M4-5.) The warning is the safeguard; there is no recoverable copy.
+  The CLI enum-validates the value; the macOS app's warning ships with its
+  settings surface (`docs/tasks/macos.md`). The warning is the safeguard;
+  there is no recoverable copy.
 - **Observability.** Diagnostics/IPC expose each profile's `syncMode` and a
-  count of mirror-driven reverts/deletes so the behavior is never silent
-  (C8-65).
+  count of mirror-driven reverts/deletes so the behavior is never silent.
 
 ## Config surface
 
@@ -160,25 +158,23 @@ recovery net — there is no quarantine or undo:
 - **Docs.** Documented in root `README.md` **Configuration**, this file, and
   `data-flow.md`.
 
-## Build / rollout order
+## Build order
 
-The feature ships in Wave 8 (runtime capability completion), **before** the
-macOS app UX (Wave 9), matching the priority that the core runtime must be
-proven before any app surface exposes the toggle. Within the sub-wave the
-build order is deliberately:
+The modes were built in a deliberate order, which is also the order in
+which they are easiest to reason about:
 
-1. **`pull-only` first** — exercises and validates the remote→local
-   download/apply pipeline (C8-1…C8-13) in isolation, with no upload risk.
-   This is the cleanest way to confirm Vapor downloads and mirrors cloud
-   content correctly.
-2. **`two-way` second** — binds `syncMode = two-way` to the bidirectional
-   keep-both pipeline (C8-14…C8-18) and asserts the one-way gates are inert.
-3. **`push-only` third** — validates local→cloud strict mirror (remote
-   overwrite + remote-only deletion).
+1. **`pull-only` first**: exercises the remote-to-local download/apply
+   pipeline in isolation, with no upload risk. The cleanest way to
+   confirm Vapor downloads and mirrors cloud content correctly.
+2. **`two-way` second**: binds `syncMode = two-way` to the bidirectional
+   keep-both pipeline and asserts the one-way gates are inert.
+3. **`push-only` third**: local-to-cloud strict mirror (remote overwrite
+   plus remote-only deletion).
 
 ## Testing
 
-Covered by C8-66 and the standing bidirectional coverage in CT-7:
+Covered by the daemon's integration tests and the e2e harness (S12 runs a
+pull-only daemon end to end):
 
 - `pull-only`: a local edit is reverted to the cloud canonical; a local-only
   file is removed; a cloud deletion removes the local copy; no upload ever
@@ -197,6 +193,4 @@ Covered by C8-66 and the standing bidirectional coverage in CT-7:
 
 - Intent + priority: `docs/plans/core.md §2.5`.
 - Pipeline mechanics + conflict/loop-prevention detail: `data-flow.md`.
-- Execution checklist: `docs/tasks/core.md` C8-59…C8-66.
-- Roadmap placement: `docs/tasks/README.md` Wave 8.
 - Safety invariant: `AGENTS.md §4`.

@@ -158,7 +158,7 @@ Required Waves 4 and 5.
 
 - `core.md` C5-1 … C5-5 — transport decision (UDS on Unix, named pipe
   on Windows — the Windows transport choice is made now even though
-  its implementation waits for Wave 12), JSON-RPC 2.0 framing,
+  its implementation waits for Wave 12), length-prefixed JSON framing,
   server-side implementation, client library, status/control
   endpoints, skew-matrix tests.
 - `cli.md` L0-1 … L0-5 — `vapor` crate skeleton and `--version`.
@@ -293,7 +293,8 @@ already-stable trait surface, not a rewrite.
   pipe IPC transport implementation on the Windows side.
 - `cli.md` L2-7 — `vapor service install` round-trip automated on
   Windows CI.
-- Add `windows-latest` as a real (not lint-only) CI job for `core/*`.
+- Extend the existing `windows-latest` Rust job (it already runs the
+  whole test suite) with the `vapor service` round-trip.
 
 ### Wave 13 — Linux platform implementations (optional)
 
@@ -303,7 +304,8 @@ already-stable trait surface, not a rewrite.
   doc).
 - `cli.md` L2-6 — `vapor service install` round-trip automated on
   Linux CI.
-- Add `ubuntu-latest` as a real (not lint-only) CI job for `core/*`.
+- Extend the existing `ubuntu-latest` Rust job (it already runs the
+  whole test suite) with the `vapor service` round-trip.
 
 ### Wave 14 — Cross-OS CLI distribution (optional)
 

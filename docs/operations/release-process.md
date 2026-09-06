@@ -229,6 +229,7 @@ one it gates.
     - Confirm package contents include:
       - `Vapor.app/Contents/MacOS/Vapor`
       - `Vapor.app/Contents/MacOS/vapord`
+      - `Vapor.app/Contents/Helpers/vapor`
     - Confirm release notes match `CHANGELOG.md` section for the tag.
 
 ## Deterministic rerun policy

@@ -26,7 +26,7 @@ exactly like a headless user would — against a disposable sandbox:
 <repo>/.vapor/e2e/run-<timestamp>-<pid>/
 ├── home/    ← VAPOR_DIR: vapor.json, logs/, state/, vapord.sock, vapord.lock
 ├── local/   ← the watched local sync root (created by the daemon itself)
-└── cloud/   ← the configured cloud-root path (a label for the stub provider today)
+└── cloud/   ← the cloud root the filesystem provider treats as the cloud side
 ```
 
 Observation channels are the product's own observable surfaces, never
@@ -46,9 +46,9 @@ contributor machine or CI:
   host state; that is fine.)
 - Never launch the macOS app (`AGENTS.md §7.1`: agents do not open
   packaged apps). Runtime behavior is verified through the CLI.
-- No network. Today's provider is the filesystem stub; the future live
-  provider tier is explicitly gated (see below) and is never part of
-  the default run.
+- No network. The scripted scenarios run the filesystem provider; the
+  live cloud-provider tier is explicitly gated (see below) and is never
+  part of the default run.
 - A failed run preserves its sandbox and prints the path; a green run
   deletes it (keep it with `--keep`).
 

@@ -23,7 +23,7 @@ macOS-specific signing, notarization, and `launchd` policy are recorded.
 
 - `launchagent-policy.md` — `launchd` plist policy for the `vapord`
   per-user LaunchAgent (`sh.arn.vapor.daemon`), interaction contract
-  with the Rust-backed `CrashLoopGuard`, validation scenarios for M1-6.
+  with the Rust-backed `CrashLoopGuard`, and the validation scenarios.
 - `distribution-trust-chain.md` — required controls for macOS release
   artifacts: code signing (Developer ID), hardened runtime,
   notarization, entitlement review; `release-macos` GitHub Environment

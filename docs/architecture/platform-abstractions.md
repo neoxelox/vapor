@@ -8,14 +8,14 @@ Governing plan: `docs/plans/core.md`
 Tasks: `docs/tasks/core.md` Phase C3 (traits + macOS impls), Phase C6
 (Windows impls), Phase C7 (Linux impls).
 
-Wave 4 status (`core/platform` v0): every trait listed below ships with
-a Rust trait definition, an in-memory fake usable on every OS, a macOS
-native impl scaffolded behind the trait, and Linux / Windows native
-impls stubbed to compile (returning `Unsupported` errors at runtime).
-The runtime currently consumes `ProcessSupervisor` end-to-end; the
-remaining traits are wired progressively as Waves 5–8 land their
-respective consumers (`core/lifecycle`, IPC, the C8 runtime
-expansion).
+Status: every trait below ships with a Rust trait definition, an
+in-memory fake usable on every OS, and a native macOS implementation the
+runtime consumes end to end (fs watch, service install, secret store,
+metrics sampling, idle detection, filesystem capabilities, process
+supervision). Linux and Windows implementations are stubs that compile
+and return `Unsupported` or neutral defaults; they land with the
+optional Waves 12 and 13 in `docs/tasks/README.md`. The per-trait
+tables name what each native implementation reads.
 
 ## Design rules
 
@@ -190,8 +190,9 @@ must deliver the same contract on every supported OS before that OS ships.
 
 1. Add the OS target to the Cargo workspace's CI matrix.
 2. Implement every trait in `core/platform/<trait>/<os>.rs`.
-3. Add parity tests under `core/platform/tests/` that run against every
-   platform impl.
+3. Run the contract tests next to each trait (`#[cfg(test)]` modules
+   under `core/platform/src/<trait>/`) against the new native impl; the
+   fake and every native impl share one test body per trait.
 4. Add a platform doc subdirectory under `docs/architecture/<os>/`,
    `docs/operations/<os>/`, and the matching plan + tasks file
    (`docs/plans/<os>.md`, `docs/tasks/<os>.md`).

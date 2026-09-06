@@ -35,7 +35,8 @@ transport choice. The native implementation lands with Wave 12
 ## Framing
 
 Length-prefixed frames, 32-bit little-endian length header followed by
-a UTF-8 JSON-RPC 2.0 body. Frame length bound by
+a UTF-8 JSON envelope (`{kind, payload}` requests, `{outcome, value}`
+responses; not JSON-RPC). Frame length bound by
 `vapor_shared::constants::ipc::MAX_PAYLOAD_BYTES` (default
 `4 * 1024 * 1024`). The exact same framing applies on UDS (macOS /
 Linux) so cross-platform clients reuse one codec.
@@ -54,10 +55,11 @@ When the daemon receives a service-stop request (Wave 12 wires
 
 ## Testing
 
-- Wave 12 introduces a `windows-latest` test job that runs the same
-  IPC integration suite as macOS / Linux against the named-pipe
-  transport. The skew matrix, payload-bounds rejection, and
-  field-omission tolerance are transport-agnostic.
+- The `windows-latest` job already runs the Rust test suite on every
+  pull request; the UDS-bound skew-matrix tests are `cfg(unix)`. Wave 12
+  runs them against the named-pipe transport. The skew matrix,
+  payload-bounds rejection, and field-omission tolerance are
+  transport-agnostic.
 - Until that wave lands, the in-process IPC unit tests in
   `core/ipc/src/{framing,protocol,server}.rs` continue to give
   cross-OS coverage.

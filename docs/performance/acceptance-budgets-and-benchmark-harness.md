@@ -49,7 +49,7 @@ SLO-1 through SLO-5 above are measured against default `resourceLimits` (`cpuPer
 - **Idle-boost engaged.** Under an active idle boost, CPU/memory/bandwidth may transiently approach `boost*Percent` while the machine is genuinely idle. SLOs are evaluated over representative workload windows that explicitly include idle-boost-eligible periods; boost-driven transient headroom consumption does not count as an SLO violation as long as the throttle state is `IdleDrain` and all idle-boost gating conditions hold.
 - **Profile overrides.** Effective daemon ceilings resolve by MIN-lowering across global and enabled-profile values (see `docs/architecture/data-flow.md`). SLO runs must cover representative profile configurations: global-only, single profile with override, and two profiles with divergent overrides.
 
-Phase 7 (P7-16) integration tests must cover the following cross-product: `{default, cpuPercent=5, memoryPercent=5}` x `{idle, active, storm}` x `{boost-enabled, boost-disabled}` x `{global-only, profile-override-lowered}`. Each cell asserts the relevant SLOs above.
+The resource-ceiling integration tests (open work, `docs/tasks/core.md` T-16) must cover the following cross-product: `{default, cpuPercent=5, memoryPercent=5}` x `{idle, active, storm}` x `{boost-enabled, boost-disabled}` x `{global-only, profile-override-lowered}`. Each cell asserts the relevant SLOs above.
 
 ## Benchmark scenarios
 

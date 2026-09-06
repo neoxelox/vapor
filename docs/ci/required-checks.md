@@ -115,32 +115,9 @@ EOF
 
 ## Workflow to script mapping
 
-Execution environment defaults:
-
-- GitHub runners: `macos-latest` (full Rust + Swift), `ubuntu-latest` and
-  `windows-latest` (Rust workspace only). The `-latest` aliases follow
-  GitHub's newest stable image (`AGENTS.md` §8.2); `macos-latest` is the
-  macOS 26 arm64 image at the time of writing.
-- Xcode/Swift toolchain: `latest-stable` via `setup-xcode` (macOS leg only)
-- Rust toolchain: `stable` (every leg)
-
-Pinned CI actions (every `uses:` is pinned to a commit SHA with a trailing
-`# vX.Y.Z` comment, and the repository enforces `sha_pinning_required`):
-
-- `actions/checkout` v7.0.1
-- `maxim-lobanov/setup-xcode` v1.7.0
-- `actions-rust-lang/setup-rust-toolchain` v1.17.0
-- `actions/cache` v5.1.0
-
-Dependency caches used in CI:
-
-- Rust: `~/.cargo/bin`, `~/.cargo/registry/index`, `~/.cargo/registry/cache`, `~/.cargo/git/db`, `target`
-- SwiftPM: `.build`
-
-Dependency source defaults:
-
-- Rust crates: `crates.io` via Cargo
-- Swift packages: SwiftPM
+Runners, toolchains, pinned action versions, caches, and dependency
+sources are listed once in `overview.md`; this file only maps workflows
+to scripts.
 
 - Lint workflow (`.github/workflows/lint.yml`)
   - triggers: `pull_request`, `push` to `main`, `workflow_call`

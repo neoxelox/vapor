@@ -77,6 +77,8 @@ jobs:
 
       - name: Run tests
         shell: bash
+        env:
+          VAPOR_TEST_MAX_SECONDS: "300"
         run: ./scripts/test.sh
 
       # Tier E2E: black-box run of the real vapor + vapord binaries in a

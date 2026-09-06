@@ -10,7 +10,7 @@ transport choice.
   restrictive owner-only permissions (`0o600`).
 - **Optional wrapping:** If sandboxing or cross-process capability delegation
   becomes a requirement, an NSXPC wrapper can be layered on top of the same
-  JSON-RPC contract. NSXPC is not required for MVP; the Unix domain socket
+  JSON envelope contract. NSXPC is not required for MVP; the Unix domain socket
   is sufficient.
 
 ## Permissions and discovery
@@ -37,7 +37,8 @@ transport choice.
 ## Framing
 
 Length-prefixed frames, 32-bit little-endian length header followed by
-a UTF-8 JSON-RPC 2.0 body. Frame length bound by
+a UTF-8 JSON envelope (`{kind, payload}` requests, `{outcome, value}`
+responses; not JSON-RPC). Frame length bound by
 `vapor_shared::constants::ipc::MAX_PAYLOAD_BYTES` (default
 `4 * 1024 * 1024`). Oversized frames are rejected before
 deserialization. Endianness matches the implementation in

@@ -54,10 +54,12 @@ Testing runs in three tiers. Authoritative definition:
   which installs a real LaunchAgent and is therefore meant for
   disposable CI runners only.
 
-A CI timing guard (tracked as `core.md` CT-2) fails the job if Tier 1
-exceeds the 5-minute budget on a matrix runner. The failure message
-points contributors at the testing-strategy doc's discipline rules
-rather than silently accepting a regression.
+`./scripts/test.sh` enforces the Tier 1 budget itself: when
+`VAPOR_TEST_MAX_SECONDS` is set (the `test` workflow sets `300`), the
+script fails after a green run that took longer, and the message points
+at the testing-strategy doc's discipline rules rather than silently
+accepting a regression. Locally the variable is unset, so a slow
+machine never fails the suite.
 
 ## Platform matrix
 

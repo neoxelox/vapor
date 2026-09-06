@@ -19,18 +19,19 @@
     (CGEventSource), `FilesystemCapabilities` (xattr), `ProcessSupervisor`
     (SIGTERM/SIGINT).
 - Provider modules (`core/providers`)
-  - Pre-GA default is `FilesystemStubProvider` (inert; reports no
-    remote-changes-feed and no server-side-rename).
-  - `provider_filesystem` (loopback local) is the Phase C8 reference
-    provider used to validate every provider-neutral mechanic before any
-    external provider ships.
-  - `provider_gdrive` integrates on top of the runtime already validated
-    against the filesystem provider.
+  - The filesystem provider (a local directory playing the cloud side)
+    is the default and the reference implementation every
+    provider-neutral mechanic was validated against.
+  - The Google Drive provider is selected by `provider = "gdrive"` and
+    keeps its tokens in the login keychain through the platform
+    `SecretStore`.
+  - An inert stub provider exists for tests and for a profile the daemon
+    has suspended; it is not selectable from configuration.
   - Additional adapters (for example iCloud, S3, R2, Proton Drive) come
     through extensibility hardening and are not part of the first release.
 - IPC boundary
   - Transport-agnostic status/control API between app and daemon with
-    shared contracts in `docs/architecture/ipc-contracts.md`. Macintosh
+    shared contracts in `docs/architecture/ipc-contracts.md`. The macOS
     transport is a Unix domain socket by default (see
     `docs/architecture/macos/ipc-transport.md`).
 

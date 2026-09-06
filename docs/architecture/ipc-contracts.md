@@ -160,9 +160,9 @@ Concretely:
   - `WaitingForUpload` — finished hashing (or skipped hashing for
     non-content-bearing actions), blocked acquiring an upload permit.
   - `Upload` — currently uploading.
-  - `WaitingForDownload` — Phase C8 onward; remote-apply intent waiting for
-    a download permit.
-  - `Download` — Phase C8 onward; currently downloading remote content.
+  - `WaitingForDownload` — remote-apply intent waiting for a download
+    permit.
+  - `Download` — currently downloading remote content.
   - `Retrying` — leased intent that hit a transient/rate-limited failure
     and was requeued with backoff; resurfaces as `Queued` once
     `available_at` elapses.

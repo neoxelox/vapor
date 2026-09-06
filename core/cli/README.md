@@ -7,20 +7,14 @@ each command without spawning the binary.
 Authoritative reference: `docs/plans/cli.md`.
 Tasks: `docs/tasks/cli.md`.
 
-## Wave status
+## Commands
 
-- **Done (Wave 6, phase 1):** crate skeleton, `clap` wiring,
-  `vapor --version`, `vapor run`, `vapor config get|set`,
-  `vapor version`, `vapor doctor`, and
-  `vapor service install|uninstall|start|stop|restart|status`
-  (`cli.md` L0-1 … L0-4, L1-1 … L1-4, L2-1 … L2-4). The macOS service
-  surface drives `core/lifecycle::DaemonLifecycleManager` over
-  `core/platform::NativeServiceInstaller`.
-- **Pending (Wave 6, phase 2):** IPC channel + skew matrix tests
-  (`cli.md` C5 / `core.md` C5-1 … C5-5).
-- **Pending (Wave 7):** `vapor status / pause / resume / flush-now /
-  reconcile / timeline / logs` and `vapor auth login|logout|status`
-  (`cli.md` L3, L4).
+`run`, `service install|uninstall|bootstrap|start|stop|restart|status|check|acknowledge`,
+`config get|set`, `auth login|logout|status`, `status`, `pause`, `resume`,
+`flush-now`, `reconcile`, `timeline`, `logs`, `diagnostics`,
+`conflicts list|resolve`, `support-bundle`, `doctor`, `version`. Every
+command that reports state takes `--json`; the shapes are locked by
+assertion tests in each command module. `vapor --help` is the reference.
 
 ## Install from source
 

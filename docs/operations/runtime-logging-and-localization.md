@@ -8,8 +8,15 @@
   - local dev plus tests/CI via repository scripts: `./.vapor`
 - Runtime layout:
   - config: `<vapor_dir>/vapor.json`
-  - logs: `<vapor_dir>/logs/vapor.logs`, `<vapor_dir>/logs/vapord.logs`
-  - state/db reserved path: `<vapor_dir>/state/vapor.sqlite`
+  - logs: `<vapor_dir>/logs/vapor.logs` (app), `<vapor_dir>/logs/vapord.logs`
+    (daemon), plus the service manager's `vapord.stdout.log` /
+    `vapord.stderr.log` redirects; each rotates at 8 MiB keeping three
+    generations
+  - durable state: `<vapor_dir>/state/vapor.sqlite` for the implicit
+    `default` profile, `<vapor_dir>/state/profiles/<id>/vapor.sqlite`
+    per configured profile, and `<vapor_dir>/state/lifecycle.json` for
+    crash-loop bookkeeping; a corrupt database is quarantined next to
+    itself as `vapor.sqlite.corrupt-<ms>` before a fresh one is created
 
 Runtime directory is not a `vapor.json` option and is resolved by precedence:
 
