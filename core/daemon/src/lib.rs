@@ -187,6 +187,11 @@ impl DaemonApp {
     /// The injected provider. The staged executor and the remote poller
     /// drive uploads / downloads / deletes / change polls through this
     /// trait boundary — engine code never names a concrete provider.
+    /// Shared handle for provider calls that run on another thread.
+    pub fn provider_handle(&self) -> Arc<dyn Provider> {
+        self.provider.clone()
+    }
+
     pub fn provider(&self) -> &dyn Provider {
         self.provider.as_ref()
     }

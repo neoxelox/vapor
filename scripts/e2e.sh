@@ -89,6 +89,7 @@ DAEMON_OUT="$E2E_ROOT/daemon.out"
 DAEMON_PID=""
 DEEP_PID=""
 PULL_PID=""
+BAD_PID=""
 FAILED=0
 
 # --full service round-trip phase (host-mutating; see header). The
@@ -168,6 +169,7 @@ cleanup() {
   stop_daemon "$DAEMON_PID" || true
   stop_daemon "$DEEP_PID" || true
   stop_daemon "$PULL_PID" || true
+  stop_daemon "$BAD_PID" || true
   if [[ "$SERVICE_PHASE_STARTED" -eq 1 ]]; then
     # Best-effort teardown so the host is left clean even on failure:
     # unregister the service, remove the plist, kill any straggler
@@ -677,9 +679,11 @@ log "PASS S19 — cloud deletion of an uploaded file propagates via the live fee
 # comparison. The startup reconcile must catch it through the mtime the
 # sync index recorded and upload the new content.
 printf 'offline-edit-AAAA' >"$LOCAL_ROOT/e2e-offline.txt"
+wait_until 30 "seed file to reach the cloud root" file_exists "$CLOUD_ROOT/e2e-offline.txt" \
+  || fail "S20: seed file never reached the cloud root"
 converge 30 || fail "S20: seed file did not converge before the offline edit"
 cmp -s "$LOCAL_ROOT/e2e-offline.txt" "$CLOUD_ROOT/e2e-offline.txt" \
-  || fail "S20: seed file missing or diverged in the cloud root"
+  || fail "S20: seed file diverged in the cloud root"
 stop_daemon "$DAEMON_PID" || fail "S20: daemon did not shut down cleanly before the offline edit"
 DAEMON_PID=""
 printf 'offline-edit-BBBB' >"$LOCAL_ROOT/e2e-offline.txt"
@@ -692,6 +696,32 @@ offline_edit_uploaded() {
 wait_until 60 "offline same-size edit to reach the cloud root" offline_edit_uploaded \
   || fail "S20: offline same-size edit never reached the cloud (startup reconcile missed it)"
 log "PASS S20 — offline same-size edit detected by the startup reconcile and uploaded"
+
+# S21 — a daemon whose only profile cannot be composed (Google Drive
+# without client credentials) stays up and names the reason in status
+# instead of exiting into the crash-loop guard.
+BAD_HOME="$E2E_ROOT/bad-home"
+mkdir -p "$BAD_HOME"
+VAPOR_DIR="$BAD_HOME" "$VAPOR_BIN" config set localSyncDirectory "$E2E_ROOT/bad-local" >/dev/null
+VAPOR_DIR="$BAD_HOME" "$VAPOR_BIN" config set cloudSyncDirectory "/VaporBad" >/dev/null
+VAPOR_DIR="$BAD_HOME" "$VAPOR_BIN" config set provider gdrive >/dev/null
+env -u VAPOR_GDRIVE_CLIENT_ID VAPOR_DIR="$BAD_HOME" "$VAPOR_BIN" run --foreground >>"$E2E_ROOT/bad-daemon.out" 2>&1 &
+BAD_PID=$!
+bad_status_names_reason() {
+  VAPOR_DIR="$BAD_HOME" "$VAPOR_BIN" status --json 2>/dev/null \
+    | grep -q '"suspended_reason": ".*VAPOR_GDRIVE_CLIENT_ID'
+}
+wait_until 30 "misconfigured daemon to report its suspension reason" bad_status_names_reason \
+  || fail "S21: status never named the missing client id"
+# Still alive well past the first idle ticks.
+sleep 3
+kill -0 "$BAD_PID" 2>/dev/null || fail "S21: misconfigured daemon exited instead of serving status"
+grep -q "serving status" "$BAD_HOME/logs/vapord.logs" \
+  || fail "S21: daemon log does not say it is serving status only"
+kill -TERM "$BAD_PID" 2>/dev/null || true
+wait "$BAD_PID" 2>/dev/null || true
+BAD_PID=""
+log "PASS S21 — a fully misconfigured daemon stays up and names the reason in status"
 
 # --- service lifecycle round-trip (--full only) ---
 #

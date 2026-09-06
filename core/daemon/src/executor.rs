@@ -2658,38 +2658,60 @@ fn apply_downloaded_payload_keep_both(
         .sync_index(&plan.local_path)
         .map_err(|error| format!("cannot read sync index: {error}"))?;
 
+    // The pre-rename size and mtime describe the displaced bytes; with
+    // the index they answer "unchanged since the last sync" without a
+    // hash for the common case.
     let displaced = match fs::symlink_metadata(&plan.local_path) {
         Ok(metadata) if metadata.is_file() => match fs::rename(&plan.local_path, &aside) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Ok(()) => Some((metadata.len(), metadata.modified().ok())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(format!("cannot set aside local file before apply: {error}"));
             }
         },
         // Directory or special node at the path: apply_downloaded_payload's
         // rename will surface an appropriate error. Nothing to preserve.
-        _ => false,
+        _ => None,
     };
 
     if let Err(error) = apply_downloaded_payload(env, plan) {
         // Restore the displaced file so a failed apply loses nothing.
-        if displaced {
+        if displaced.is_some() {
             let _ = fs::rename(&aside, &plan.local_path);
         }
         return Err(format!("local apply of downloaded payload failed: {error}"));
     }
 
-    if !displaced {
+    let Some((aside_size, aside_modified_at)) = displaced else {
         return Ok(false);
-    }
+    };
 
-    let aside_hash = hash_hex_of_file_with(&aside, env.hash_algorithm)
-        .map_err(|error| format!("cannot hash displaced local file: {error}"))?;
-    let unchanged = aside_hash == incoming_hash
+    // Hash the displaced bytes only when equality is still possible:
+    // the quick check says they were not touched since the last sync,
+    // or their size matches the incoming payload or the indexed content.
+    // Anything else diverged from both without reading the file, which
+    // keeps a multi-gigabyte apply off the tick thread's hash budget.
+    let quick_unchanged = index
+        .as_ref()
+        .is_some_and(|index| index.matches_local(aside_size, aside_modified_at));
+    let incoming_size = fs::metadata(&plan.local_path).map(|m| m.len()).ok();
+    let size_could_match = incoming_size == Some(aside_size)
         || index
             .as_ref()
-            .map(|index| aside_hash == index.content_hash)
-            .unwrap_or(false);
+            .is_some_and(|index| index.size_bytes == aside_size);
+    let unchanged = if quick_unchanged {
+        true
+    } else if !size_could_match {
+        false
+    } else {
+        let aside_hash = hash_hex_of_file_with(&aside, env.hash_algorithm)
+            .map_err(|error| format!("cannot hash displaced local file: {error}"))?;
+        aside_hash == incoming_hash
+            || index
+                .as_ref()
+                .map(|index| aside_hash == index.content_hash)
+                .unwrap_or(false)
+    };
     if unchanged {
         let _ = fs::remove_file(&aside);
         let _ = env.tags.remove(&aside);

@@ -207,6 +207,13 @@ pub struct DaemonRuntime {
     /// uploads / remote deletes).
     remote_echoes: SelfWriteCache,
     remote_poller: RemotePoller,
+    /// Inline in tests; threaded once `enable_transfer_workers` runs so
+    /// the changes poll, reconcile enumerate and cloud-root retry never
+    /// hold the tick thread on a network round trip.
+    provider_call_mode: crate::provider_jobs::ProviderCallMode,
+    /// A cloud-root ensure started on an earlier tick.
+    cloud_root_call:
+        Option<crate::provider_jobs::ProviderCall<Result<(), vapor_providers::ProviderError>>>,
     /// Whether the provider-side sync root has been ensured. While
     /// `false`, no work is leased and the remote feed is not polled;
     /// ingest keeps capturing intent state durably.
@@ -487,6 +494,7 @@ impl DaemonRuntime {
                 self.sync_scope.sync_mode,
                 &self.clock,
                 now,
+                &self.provider_call_mode,
             )?;
             report.mirror_reverts += report.remote_poll.mirror_reverts;
             report.mirror_deletes += report.remote_poll.mirror_deletes;
@@ -960,6 +968,8 @@ impl DaemonRuntime {
             local_echoes: SelfWriteCache::new(),
             remote_echoes: SelfWriteCache::new(),
             remote_poller: RemotePoller::new(DEFAULT_PROFILE_ID),
+            provider_call_mode: crate::provider_jobs::ProviderCallMode::Inline,
+            cloud_root_call: None,
             profile_id: DEFAULT_PROFILE_ID.to_string(),
             timeline_default_entries: None,
             cloud_root_ready,
@@ -1002,7 +1012,8 @@ impl DaemonRuntime {
     /// inline mode. `waker` is notified on every completed job so the
     /// tick loop harvests promptly.
     pub fn enable_transfer_workers(&mut self, waker: Option<Arc<TickWaker>>) {
-        self.staged_executor.enable_worker_threads(waker);
+        self.staged_executor.enable_worker_threads(waker.clone());
+        self.provider_call_mode = crate::provider_jobs::ProviderCallMode::Threaded { waker };
     }
 
     /// Applies the resolved `safeguards` config group: rebuilds the
@@ -1344,21 +1355,41 @@ impl DaemonRuntime {
             return;
         }
         let now_inst = self.clock.now();
-        let retry_interval =
-            Duration::from_secs(constants::engine::CLOUD_ROOT_ENSURE_RETRY_SECONDS);
-        let due = self
-            .last_cloud_root_attempt_inst
-            .map(|last| now_inst.saturating_duration_since(last) >= retry_interval)
-            .unwrap_or(true);
-        if !due {
-            return;
-        }
-        self.last_cloud_root_attempt_inst = Some(now_inst);
-        if self
-            .app
-            .ensure_cloud_sync_directory(self.sync_scope.cloud_sync_directory.as_str())
-            .is_ok()
-        {
+        // Harvest an ensure started on an earlier tick before consulting
+        // the cadence, so a slow round trip is never abandoned.
+        let result = if let Some(call) = self.cloud_root_call.as_mut() {
+            let Some(result) = call.take() else {
+                return;
+            };
+            self.cloud_root_call = None;
+            result
+        } else {
+            let retry_interval =
+                Duration::from_secs(constants::engine::CLOUD_ROOT_ENSURE_RETRY_SECONDS);
+            let due = self
+                .last_cloud_root_attempt_inst
+                .map(|last| now_inst.saturating_duration_since(last) >= retry_interval)
+                .unwrap_or(true);
+            if !due {
+                return;
+            }
+            self.last_cloud_root_attempt_inst = Some(now_inst);
+            let provider = self.app.provider_handle();
+            let cloud_root = self.sync_scope.cloud_sync_directory.clone();
+            let mut call = crate::provider_jobs::ProviderCall::start(
+                &self.provider_call_mode,
+                "ensure-cloud-root",
+                move || provider.ensure_cloud_sync_directory(cloud_root.as_str()),
+            );
+            match call.take() {
+                Some(result) => result,
+                None => {
+                    self.cloud_root_call = Some(call);
+                    return;
+                }
+            }
+        };
+        if matches!(result, Ok(Ok(()))) {
             self.cloud_root_ready = true;
             // A recovered root may be freshly recreated and empty (or
             // have drifted while unreachable): a whole-scope reconcile
@@ -2028,7 +2059,8 @@ impl DaemonRuntime {
             .as_mut()
             .expect("walker was just ensured");
         walker.process(
-            self.app.provider(),
+            self.app.provider_handle(),
+            &self.provider_call_mode,
             self.sync_scope.sync_mode,
             &mut self.state_db,
             constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN,

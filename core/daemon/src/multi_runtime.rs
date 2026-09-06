@@ -86,6 +86,19 @@ struct ProfileSlot {
     /// tick errors). A suspended profile stops ticking; the others and
     /// the watcher keep running.
     failed: Option<String>,
+    /// The suspension happened while composing the daemon (invalid
+    /// provider, overlapping roots, unopenable DB, watcher that could not
+    /// start): a configuration problem the user has to fix, not a
+    /// runtime failure worth restarting for.
+    failed_at_composition: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AllSuspended {
+    /// Every profile was suspended while composing the daemon.
+    AtComposition,
+    /// At least one profile was suspended by a runtime failure.
+    AtRuntime,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -389,6 +402,7 @@ impl MultiProfileRuntime {
                 runtime,
                 control,
                 consecutive_tick_errors: 0,
+                failed_at_composition: failed.is_some(),
                 failed,
             });
         }
@@ -596,19 +610,34 @@ impl MultiProfileRuntime {
         // `vapor stop` / SIGTERM exits promptly instead of waiting out a
         // full idle interval.
         crate::runtime::register_shutdown_waker(self.tick_waker.clone());
+        let mut reported_all_suspended = false;
         while !is_shutdown_requested() {
             let report = self.tick_all(self.clock.now_system());
-            // Exit only when EVERY profile is durably suspended — not on a
-            // per-tick report where a healthy profile merely hit one
-            // transient error (below the suspension threshold) while
-            // another is already suspended.
-            if !self.slots.is_empty() && self.slots.iter().all(|slot| slot.failed.is_some()) {
-                logging::error("Every profile has failed; exiting the daemon", &[]);
-                return Err(DaemonRuntimeError::StateDb(
-                    crate::state_db::StateDbError::InvalidStateValue(
-                        "all profiles suspended".to_string(),
-                    ),
-                ));
+            match self.all_suspended() {
+                // Every profile died at runtime: exit and let the service
+                // manager and the crash-loop guard decide about restarts.
+                Some(AllSuspended::AtRuntime) => {
+                    logging::error("Every profile has failed; exiting the daemon", &[]);
+                    return Err(DaemonRuntimeError::StateDb(
+                        crate::state_db::StateDbError::InvalidStateValue(
+                            "all profiles suspended".to_string(),
+                        ),
+                    ));
+                }
+                // Every profile is misconfigured: exiting would only feed
+                // the crash-loop guard and hide the reason. Stay up on the
+                // idle cadence so `vapor status` can name what to fix.
+                Some(AllSuspended::AtComposition) => {
+                    if !reported_all_suspended {
+                        reported_all_suspended = true;
+                        logging::error(
+                            "Every profile is suspended by its configuration; serving status \
+                             only until the configuration is fixed and the daemon restarted",
+                            &[],
+                        );
+                    }
+                }
+                None => {}
             }
             let wait = if report.any_pending_work {
                 self.tick_interval
@@ -622,6 +651,20 @@ impl MultiProfileRuntime {
             &[],
         );
         Ok(())
+    }
+
+    /// `Some` when no profile can do any work. Which kind decides whether
+    /// the daemon exits (runtime failures) or keeps serving status
+    /// (configuration failures); a mix counts as runtime.
+    pub fn all_suspended(&self) -> Option<AllSuspended> {
+        if self.slots.is_empty() || self.slots.iter().any(|slot| slot.failed.is_none()) {
+            return None;
+        }
+        if self.slots.iter().all(|slot| slot.failed_at_composition) {
+            Some(AllSuspended::AtComposition)
+        } else {
+            Some(AllSuspended::AtRuntime)
+        }
     }
 
     /// Broadcast pending external control requests to every profile
@@ -883,6 +926,7 @@ fn start_deduplicated_watchers(
             );
             slot.runtime.set_error_state(reason.clone());
             slot.failed = Some(reason);
+            slot.failed_at_composition = true;
         }
     }
     watchers
@@ -1400,6 +1444,58 @@ mod tests {
     }
 
     #[test]
+    fn a_daemon_whose_only_profile_is_misconfigured_keeps_serving_status() {
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        let local = temp.path().join("local");
+        std::fs::create_dir_all(&local).expect("local");
+        let profiles = vec![ResolvedProfile {
+            id: "only".to_string(),
+            display_name: "only".to_string(),
+            provider_kind: "gdrvie".to_string(),
+            scope: SyncScope {
+                local_sync_directory: Some(local),
+                cloud_sync_directory: "/Vapor".to_string(),
+                sync_mode: SyncMode::TwoWay,
+            },
+            enabled: true,
+        }];
+        let mut multi = MultiProfileRuntime::start_with_state_root(
+            profiles,
+            EventPathFilterOptions::default(),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            "testdev",
+            false,
+            Some(temp.path().join("state")),
+            crate::resource_budget::EffectiveBudgetConfig::resolve(
+                &vapor_shared::config::VaporConfig::default(),
+            ),
+            crate::safeguards::MassDeleteGuardSettings::default(),
+        )
+        .expect("multi runtime");
+        assert_eq!(multi.failed_profile_count(), 1);
+        // Ticking is harmless and the loop must not exit: the user needs
+        // `vapor status` to name the reason.
+        use crate::clock::Clock as _;
+        multi.tick_all(clock.now_system());
+        assert_eq!(multi.all_suspended(), Some(AllSuspended::AtComposition));
+        let snapshot = multi.aggregate_status(clock.now_system());
+        let only = snapshot
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "only")
+            .expect("profile row");
+        assert!(
+            only.suspended_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("gdrvie")),
+            "reason must name the bad provider: {:?}",
+            only.suspended_reason
+        );
+    }
+
+    #[test]
     fn a_failing_profile_suspends_alone_and_the_rest_keep_running() {
         // Blast radius: one profile's provider panicking must not
         // stop the healthy profile (or poison the shared workgate).
@@ -1418,6 +1514,11 @@ mod tests {
         // the catcher suspends exactly that profile.
         fixture.tick(6_000);
         assert_eq!(fixture.multi.failed_profile_count(), 1);
+        assert_eq!(
+            fixture.multi.all_suspended(),
+            None,
+            "a healthy profile keeps the daemon alive"
+        );
 
         // The healthy profile still syncs.
         let healthy_local = fixture.local_roots["healthy"].clone();

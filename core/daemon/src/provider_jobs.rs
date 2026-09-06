@@ -29,7 +29,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{self, Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use vapor_providers::{
@@ -169,6 +169,88 @@ pub(crate) enum ProviderJobOutcome {
     /// this the permit and the in-flight slot would leak for the rest of
     /// the process. (Release builds abort on panic and never see it.)
     Panicked(String),
+}
+
+/// How one-off provider calls outside the executor (changes poll,
+/// reconcile enumerate, cloud-root retry) run: inline for deterministic
+/// tests, on a thread in production so a network round trip never holds
+/// the tick loop.
+#[derive(Clone, Default)]
+pub(crate) enum ProviderCallMode {
+    #[default]
+    Inline,
+    Threaded {
+        waker: Option<Arc<TickWaker>>,
+    },
+}
+
+/// One provider call polled by the tick loop until its result is in.
+pub(crate) struct ProviderCall<T> {
+    state: ProviderCallState<T>,
+}
+
+enum ProviderCallState<T> {
+    Ready(Option<Result<T, String>>),
+    Pending(Receiver<Result<T, String>>),
+}
+
+impl<T: Send + 'static> ProviderCall<T> {
+    pub fn start(
+        mode: &ProviderCallMode,
+        name: &'static str,
+        call: impl FnOnce() -> T + Send + 'static,
+    ) -> Self {
+        match mode {
+            ProviderCallMode::Inline => Self {
+                state: ProviderCallState::Ready(Some(Ok(call()))),
+            },
+            ProviderCallMode::Threaded { waker } => {
+                let (tx, rx) = mpsc::channel();
+                let waker = waker.clone();
+                let spawned = std::thread::Builder::new()
+                    .name(format!("vapor-provider-{name}"))
+                    .spawn(move || {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call))
+                            .map_err(|payload| panic_message(payload.as_ref()));
+                        let _ = tx.send(result);
+                        if let Some(waker) = waker {
+                            waker.notify();
+                        }
+                    });
+                match spawned {
+                    Ok(_) => Self {
+                        state: ProviderCallState::Pending(rx),
+                    },
+                    Err(error) => Self {
+                        state: ProviderCallState::Ready(Some(Err(format!(
+                            "cannot spawn the {name} thread: {error}"
+                        )))),
+                    },
+                }
+            }
+        }
+    }
+
+    /// `Some` once the call has finished (`Err` carries a panic
+    /// message). Returns the result exactly once.
+    pub fn take(&mut self) -> Option<Result<T, String>> {
+        match &mut self.state {
+            ProviderCallState::Ready(slot) => slot.take(),
+            ProviderCallState::Pending(rx) => match rx.try_recv() {
+                Ok(result) => {
+                    self.state = ProviderCallState::Ready(None);
+                    Some(result)
+                }
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.state = ProviderCallState::Ready(None);
+                    Some(Err(
+                        "provider call thread exited without a result".to_string()
+                    ))
+                }
+            },
+        }
+    }
 }
 
 pub(crate) struct CompletedJob {
@@ -744,6 +826,39 @@ mod tests {
             ProviderJobOutcome::RemoteDelete(Ok(()))
         ));
         assert_eq!(provider.delete_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn threaded_provider_call_delivers_its_result_and_reports_panics() {
+        let waker = Arc::new(TickWaker::default());
+        let mode = ProviderCallMode::Threaded {
+            waker: Some(waker.clone()),
+        };
+        let mut call = ProviderCall::start(&mode, "test", || 41 + 1);
+        let mut result = None;
+        for _ in 0..1_000 {
+            waker.wait_timeout(Duration::from_millis(50));
+            result = call.take();
+            if result.is_some() {
+                break;
+            }
+        }
+        assert_eq!(result, Some(Ok(42)));
+        assert!(call.take().is_none(), "a result is handed out once");
+
+        let mut call = ProviderCall::start(&mode, "test", || -> u8 { panic!("boom") });
+        let mut result = None;
+        for _ in 0..1_000 {
+            waker.wait_timeout(Duration::from_millis(50));
+            result = call.take();
+            if result.is_some() {
+                break;
+            }
+        }
+        assert!(matches!(result, Some(Err(message)) if message.contains("boom")));
+
+        let mut inline = ProviderCall::start(&ProviderCallMode::Inline, "test", || "now");
+        assert_eq!(inline.take(), Some(Ok("now")));
     }
 
     #[test]
