@@ -110,6 +110,10 @@ pub struct ReconcileWalker {
     path_filter: Option<Arc<SharedEventPathFilter>>,
     pending_dirs: VecDeque<PathBuf>,
     stats: WalkStats,
+    /// A reattached or re-created root is merged: a file present on
+    /// one side only is transferred, never treated as a deletion to
+    /// propagate, whatever the index says.
+    merge_without_deletions: bool,
 }
 
 impl ReconcileWalker {
@@ -127,7 +131,13 @@ impl ReconcileWalker {
             name_collisions: Vec::new(),
             pending_dirs: VecDeque::from([subtree_root.to_path_buf()]),
             stats: WalkStats::default(),
+            merge_without_deletions: false,
         }
+    }
+
+    pub fn with_merge_without_deletions(mut self, merge: bool) -> Self {
+        self.merge_without_deletions = merge;
+        self
     }
 
     fn ignores(&self, local_path: &Path) -> bool {
@@ -469,12 +479,18 @@ impl ReconcileWalker {
                         if local.is_dir {
                             self.pending_dirs.push_back(local.path);
                         } else if sync_mode == SyncMode::TwoWay
-                            && remote_deletion_wins(state_db, &local_path, local.modified_at)
+                            && !self.merge_without_deletions
+                            && (remote_deletion_wins(state_db, &local_path, local.modified_at)
+                                || deleted_in_cloud_while_away(state_db, &local_path, &local)?)
                         {
-                            // Restart-safe deletion replay: the
-                            // remote deleted this path and the local copy
-                            // has not been modified since — finish the
-                            // apply instead of resurrecting the file.
+                            // A deletion to finish, not a file to
+                            // resurrect: either a remote-origin tombstone
+                            // the local copy predates, or a synced file the
+                            // cloud no longer has while the local copy is
+                            // exactly what was last synced (the cloud side
+                            // deleted it while no daemon was running).
+                            // The executor's own guard and the
+                            // mass-deletion guard still get their say.
                             batch.push((local_path, PendingIntentKind::ApplyRemoteDelete, now));
                         } else {
                             batch.push((local_path, PendingIntentKind::Upload, now));
@@ -510,17 +526,23 @@ impl ReconcileWalker {
                             }
                             RemoteEntryKind::File => {
                                 if sync_mode == SyncMode::TwoWay
-                                    && local_deletion_wins(
+                                    && !self.merge_without_deletions
+                                    && (local_deletion_wins(
                                         state_db,
                                         &local_path,
                                         remote.modified_at,
-                                    )
+                                    ) || deleted_here_while_away(
+                                        state_db,
+                                        &local_path,
+                                        &remote,
+                                    )?)
                                 {
-                                    // Restart-safe deletion replay:
-                                    // we deleted this path locally and the
-                                    // remote copy has not changed since —
-                                    // finish propagating the delete instead
-                                    // of re-downloading.
+                                    // The mirror image: a local-origin
+                                    // tombstone the remote copy predates,
+                                    // or a synced file this device no
+                                    // longer has while the cloud copy is
+                                    // exactly what was last synced (deleted
+                                    // here while no daemon was running).
                                     batch.push((local_path, PendingIntentKind::Delete, now));
                                 } else {
                                     batch.push((local_path, PendingIntentKind::Download, now));
@@ -586,6 +608,41 @@ fn remote_touched_since_last_sync(
             index.remote_modified_at.is_some()
                 && !index.matches_remote(remote.size_bytes, remote.modified_at)
         }
+    })
+}
+
+/// A synced file the cloud no longer has, while the local copy is
+/// exactly what was last synced: the cloud side deleted it while no
+/// daemon was watching. A local copy that changed since, or a pair the
+/// index cannot vouch for (no row, no recorded mtime), keeps the file.
+fn deleted_in_cloud_while_away(
+    state_db: &DurableStateDb,
+    local_path: &Path,
+    local: &LocalEntry,
+) -> Result<bool, WalkError> {
+    Ok(match state_db.sync_index(local_path)? {
+        Some(index) => index.matches_local(local.size_bytes, local.modified_at),
+        None => false,
+    })
+}
+
+/// The mirror image: a synced file this device no longer has, while the
+/// cloud copy is exactly what was last synced (the remote mtime the
+/// index recorded, or its hash when the provider carries one).
+fn deleted_here_while_away(
+    state_db: &DurableStateDb,
+    local_path: &Path,
+    remote: &RemoteEntry,
+) -> Result<bool, WalkError> {
+    Ok(match state_db.sync_index(local_path)? {
+        Some(index) => {
+            index.matches_remote(remote.size_bytes, remote.modified_at)
+                || remote
+                    .content_hash
+                    .as_deref()
+                    .is_some_and(|hash| hash == index.content_hash)
+        }
+        None => false,
     })
 }
 

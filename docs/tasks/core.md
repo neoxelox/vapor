@@ -978,12 +978,11 @@ Still open, in order:
       `root-replaced` (`reattach`) decisions, holds that lift on their
       own when the original root returns, and a parked profile that is
       composed again without a restart. Scenarios S43, S44, S45.
-- [ ] SF-4 Offline deletions propagate through the index. A file in the
-      sync index that is gone from one side at startup, with the other
-      side's copy unchanged since the last sync (rsync quick check), is
-      a deletion to propagate, not a file to restore; a changed copy is
-      still kept. Runs through the mass-deletion guard like any other
-      deletion. Flips S27 and S28 from restore to propagate.
+- [x] SF-4 Offline deletions propagate through the index: a one-sided
+      file whose surviving copy is exactly what was last synced is a
+      deletion to finish (into the trash here, a delete in the cloud),
+      still guarded; a changed survivor is kept; a merge after
+      `reattach` or `recreate` propagates nothing. S27 and S28 flipped.
 - [ ] SF-5 Type mismatch decision. A path that is a file on one side
       and a directory on the other opens a path-scope `type-mismatch`
       decision (`keep-both`: the file becomes a conflict copy and the

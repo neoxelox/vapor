@@ -711,12 +711,16 @@ impl DaemonRuntime {
                             self.reconcile_walker = None;
                             self.state_db.complete_leased(reconcile_intent_id)?;
                             self.running_reconcile_intent_id = None;
-                            if self.startup_reconstruction_barrier
-                                && self.sync_scope.local_sync_directory.as_ref()
-                                    == Some(&completed_root)
+                            if self.sync_scope.local_sync_directory.as_ref()
+                                == Some(&completed_root)
                             {
-                                self.startup_reconstruction_barrier = false;
-                                self.startup_barrier_expires_inst = None;
+                                // The merge flag covers one whole-scope walk.
+                                self.state_db
+                                    .delete_state(constants::state::MERGE_WITHOUT_DELETIONS_KEY)?;
+                                if self.startup_reconstruction_barrier {
+                                    self.startup_reconstruction_barrier = false;
+                                    self.startup_barrier_expires_inst = None;
+                                }
                             }
                             report.completed_intents += 1;
                             report.completed_reconcile_root = Some(completed_root);
@@ -2989,11 +2993,29 @@ impl DaemonRuntime {
             .map(|walker| walker.subtree_root() != running_root.as_path())
             .unwrap_or(true);
         if needs_new_walker {
-            self.reconcile_walker = Some(crate::reconcile_walk::ReconcileWalker::new(
-                &scope_root,
-                &running_root,
-                self.path_filter.clone(),
-            ));
+            // A whole-scope walk after a reattached or re-created root
+            // merges the two sides and propagates no deletion.
+            let merge = running_root == scope_root
+                && self
+                    .state_db
+                    .state(constants::state::MERGE_WITHOUT_DELETIONS_KEY)
+                    .ok()
+                    .flatten()
+                    .is_some();
+            if merge {
+                logging::info(
+                    "Whole-scope reconcile merges without propagating deletions",
+                    &[("root", scope_root.display().to_string())],
+                );
+            }
+            self.reconcile_walker = Some(
+                crate::reconcile_walk::ReconcileWalker::new(
+                    &scope_root,
+                    &running_root,
+                    self.path_filter.clone(),
+                )
+                .with_merge_without_deletions(merge),
+            );
         }
         // Bound the chunk by a wall-clock slice so a slow provider's
         // enumerate cannot hold the tick thread for the whole directory
@@ -5008,6 +5030,212 @@ mod tests {
             std::fs::read(cloud_root.join("notes.txt")).expect("cloud copy"),
             b"version-B",
             "the offline same-size edit must reach the cloud"
+        );
+    }
+
+    /// Two daemon runs over one state DB with a gap between them where
+    /// no daemon watches either side.
+    struct OfflineFixture {
+        temp: TempDir,
+        watch_root: PathBuf,
+        cloud_root: PathBuf,
+        database_path: PathBuf,
+    }
+
+    impl OfflineFixture {
+        fn new() -> Self {
+            let temp = TempDir::new().expect("temp dir");
+            let watch_root = temp.path().join("watch");
+            let cloud_root = temp.path().join("cloud");
+            std::fs::create_dir_all(&watch_root).expect("watch root");
+            std::fs::create_dir_all(&cloud_root).expect("cloud root");
+            let watch_root =
+                vapor_shared::paths::canonicalize(&watch_root).expect("canonical watch root");
+            let database_path = temp.path().join("state/vapor.sqlite");
+            Self {
+                temp,
+                watch_root,
+                cloud_root,
+                database_path,
+            }
+        }
+
+        fn scope(&self) -> SyncScope {
+            SyncScope {
+                local_sync_directory: Some(self.watch_root.clone()),
+                cloud_sync_directory: self.cloud_root.to_string_lossy().into_owned(),
+                sync_mode: vapor_shared::SyncMode::TwoWay,
+            }
+        }
+
+        /// Builds a runtime on the shared DB, schedules the startup
+        /// reconcile, and drives it to quiescence.
+        fn run(&self, seed_uploads: &[&Path]) -> DaemonRuntime {
+            use crate::clock::Clock as _;
+            let mut state_db = DurableStateDb::open(&self.database_path).expect("open state db");
+            for path in seed_uploads {
+                state_db
+                    .enqueue_intent(path, PendingIntentKind::Upload, timestamp_ms(0))
+                    .expect("enqueue");
+            }
+            let clock = Arc::new(crate::clock::ManualClock::at_now());
+            let mut runtime = DaemonRuntime::build(
+                self.scope(),
+                EventPathFilterOptions::default(),
+                state_db,
+                Box::new(vapor_providers::FilesystemProvider::new()),
+                Arc::new(StaticMetricsSampler::default()),
+                clock.clone(),
+                false,
+            )
+            .expect("runtime");
+            runtime.attach_trash(crate::trash::LocalTrash::new(
+                "default",
+                self.temp.path().join("trash/default"),
+                crate::trash::TrashSettings::default(),
+                Arc::new(vapor_platform::InMemoryTrashBin::unsupported()),
+            ));
+            runtime
+                .enqueue_startup_reconstruction_reconcile(clock.now_system())
+                .expect("queue startup reconcile");
+            for _ in 0..400 {
+                clock.advance(Duration::from_millis(250));
+                clock.advance_system(Duration::from_millis(250));
+                runtime
+                    .tick_with_inputs(clock.now_system(), ThrottleInputs::default())
+                    .expect("tick");
+                if runtime.state_db().queue_depth().expect("depth") == 0
+                    && runtime.state_db().leased_depth().expect("leased") == 0
+                    && runtime.state_db().held_intent_count().expect("held") == 0
+                {
+                    break;
+                }
+            }
+            runtime
+        }
+
+        /// Pushes a file's mtime clearly past whatever the index saw.
+        fn touch_later(path: &Path) {
+            let later = std::fs::metadata(path)
+                .expect("metadata")
+                .modified()
+                .expect("mtime")
+                + Duration::from_secs(5);
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .expect("open for mtime")
+                .set_modified(later)
+                .expect("set mtime");
+        }
+    }
+
+    #[test]
+    fn a_file_deleted_here_while_no_daemon_ran_is_deleted_in_the_cloud() {
+        let fixture = OfflineFixture::new();
+        let local = fixture.watch_root.join("gone.txt");
+        std::fs::write(&local, b"deleted offline").expect("seed");
+        let first = fixture.run(&[&local]);
+        assert!(fixture.cloud_root.join("gone.txt").exists());
+        drop(first);
+
+        std::fs::remove_file(&local).expect("delete while away");
+        let second = fixture.run(&[]);
+        assert!(
+            !fixture.cloud_root.join("gone.txt").exists(),
+            "the offline deletion propagates to an unchanged cloud copy"
+        );
+        assert!(!local.exists(), "and is not resurrected");
+        assert_eq!(second.state_db().failed_depth().expect("failed"), 0);
+    }
+
+    #[test]
+    fn a_file_deleted_here_while_away_is_restored_when_the_cloud_copy_changed() {
+        let fixture = OfflineFixture::new();
+        let local = fixture.watch_root.join("gone.txt");
+        std::fs::write(&local, b"deleted offline").expect("seed");
+        drop(fixture.run(&[&local]));
+
+        std::fs::remove_file(&local).expect("delete while away");
+        let cloud = fixture.cloud_root.join("gone.txt");
+        std::fs::write(&cloud, b"but edited in the cloud meanwhile").expect("cloud edit");
+        OfflineFixture::touch_later(&cloud);
+        drop(fixture.run(&[]));
+        assert_eq!(
+            std::fs::read(&local).expect("restored"),
+            b"but edited in the cloud meanwhile",
+            "data preservation wins over a deletion the other side outran"
+        );
+        assert!(cloud.exists());
+    }
+
+    #[test]
+    fn a_file_deleted_in_the_cloud_while_no_daemon_ran_is_removed_here_into_the_trash() {
+        let fixture = OfflineFixture::new();
+        let local = fixture.watch_root.join("gone.txt");
+        std::fs::write(&local, b"deleted in the cloud offline").expect("seed");
+        drop(fixture.run(&[&local]));
+
+        std::fs::remove_file(fixture.cloud_root.join("gone.txt")).expect("cloud delete");
+        let second = fixture.run(&[]);
+        assert!(!local.exists(), "the offline cloud deletion applies here");
+        assert!(
+            !fixture.cloud_root.join("gone.txt").exists(),
+            "and the file is not re-uploaded"
+        );
+        let trashed = second.trash().expect("trash").list();
+        assert_eq!(trashed.len(), 1, "kept in the trash");
+        assert_eq!(trashed[0].original_path, local);
+    }
+
+    #[test]
+    fn a_file_deleted_in_the_cloud_while_away_is_reuploaded_when_the_local_copy_changed() {
+        let fixture = OfflineFixture::new();
+        let local = fixture.watch_root.join("gone.txt");
+        std::fs::write(&local, b"deleted in the cloud offline").expect("seed");
+        drop(fixture.run(&[&local]));
+
+        std::fs::remove_file(fixture.cloud_root.join("gone.txt")).expect("cloud delete");
+        std::fs::write(&local, b"edited here meanwhile, longer").expect("local edit");
+        OfflineFixture::touch_later(&local);
+        drop(fixture.run(&[]));
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("gone.txt")).expect("re-uploaded"),
+            b"edited here meanwhile, longer"
+        );
+        assert!(local.exists());
+    }
+
+    #[test]
+    fn a_merge_after_reattach_restores_instead_of_deleting() {
+        let fixture = OfflineFixture::new();
+        let local = fixture.watch_root.join("kept.txt");
+        std::fs::write(&local, b"kept").expect("seed");
+        drop(fixture.run(&[&local]));
+
+        std::fs::remove_file(&local).expect("delete while away");
+        {
+            let mut db = DurableStateDb::open(&fixture.database_path).expect("open");
+            db.set_state(
+                constants::state::MERGE_WITHOUT_DELETIONS_KEY,
+                "1",
+                timestamp_ms(0),
+            )
+            .expect("flag");
+        }
+        let second = fixture.run(&[]);
+        assert_eq!(
+            std::fs::read(&local).expect("restored by the merge"),
+            b"kept"
+        );
+        assert!(fixture.cloud_root.join("kept.txt").exists());
+        assert!(
+            second
+                .state_db()
+                .state(constants::state::MERGE_WITHOUT_DELETIONS_KEY)
+                .expect("read")
+                .is_none(),
+            "the flag covers one whole-scope walk"
         );
     }
 

@@ -21,7 +21,7 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             id: "S27",
             name: "offline-local-delete",
-            proves: "a file deleted locally while the daemon was down is restored from the cloud on restart (ambiguous evidence keeps data)",
+            proves: "a file deleted locally while the daemon was down is deleted in the cloud on restart when the cloud copy is unchanged, and restored when the cloud copy changed meanwhile",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
             run: offline_local_delete,
@@ -29,7 +29,7 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             id: "S28",
             name: "offline-cloud-delete",
-            proves: "a file deleted in the cloud while the daemon was down is re-uploaded from the local copy on restart (ambiguous evidence keeps data)",
+            proves: "a file deleted in the cloud while the daemon was down is removed here into the trash on restart when the local copy is unchanged, and re-uploaded when the local copy changed meanwhile",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
             run: offline_cloud_delete,
@@ -122,18 +122,37 @@ fn offline_local_delete(ctx: &mut Ctx) -> Result<(), Failure> {
     let mark = ctx.mark();
     write_file(&home.local.join("keep.txt"), "kept\n")?;
     write_file(&home.local.join("gone.txt"), "deleted offline\n")?;
-    ctx.converge_from(&mark, 2, CONVERGE_TIMEOUT)?;
-    ctx.wait_exists(&home.cloud.join("gone.txt"), CONVERGE_TIMEOUT)?;
+    write_file(
+        &home.local.join("outran.txt"),
+        "deleted offline, edited in the cloud\n",
+    )?;
+    ctx.converge_from(&mark, 3, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("outran.txt"), CONVERGE_TIMEOUT)?;
     ctx.settle(CONVERGE_TIMEOUT)?;
     ctx.stop_daemon(first)?;
     fs::remove_file(home.local.join("gone.txt"))?;
+    fs::remove_file(home.local.join("outran.txt"))?;
+    // The cloud side edits one of them meanwhile.
+    write_file(
+        &home.cloud.join("outran.txt"),
+        "the cloud edited this one after the device deleted it\n",
+    )?;
     ctx.start_daemon()?;
+    ctx.wait_absent(&home.cloud.join("gone.txt"), Duration::from_secs(60))?;
+    ctx.wait_exists(&home.local.join("outran.txt"), Duration::from_secs(60))?;
     ctx.settle(Duration::from_secs(60))?;
     ensure!(
-        home.local.join("gone.txt").is_file() && home.cloud.join("gone.txt").is_file(),
-        "expected the offline-deleted file to be restored on both sides; local: {}, cloud: {}",
-        home.local.join("gone.txt").exists(),
-        home.cloud.join("gone.txt").exists()
+        !home.local.join("gone.txt").exists() && !home.cloud.join("gone.txt").exists(),
+        "an offline deletion of an unchanged file propagates instead of resurrecting it"
+    );
+    ensure!(
+        read_string(&home.local.join("outran.txt"))?
+            == "the cloud edited this one after the device deleted it\n",
+        "a cloud copy that changed since the last sync is kept and restored"
+    );
+    ensure!(
+        home.cloud.join("keep.txt").is_file(),
+        "untouched files stay"
     );
     Ok(())
 }
@@ -146,18 +165,41 @@ fn offline_cloud_delete(ctx: &mut Ctx) -> Result<(), Failure> {
         &home.local.join("gone.txt"),
         "deleted in the cloud offline\n",
     )?;
-    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
-    ctx.wait_exists(&home.cloud.join("gone.txt"), CONVERGE_TIMEOUT)?;
+    write_file(
+        &home.local.join("outran.txt"),
+        "deleted in the cloud, edited here\n",
+    )?;
+    ctx.converge_from(&mark, 2, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("outran.txt"), CONVERGE_TIMEOUT)?;
     ctx.settle(CONVERGE_TIMEOUT)?;
     ctx.stop_daemon(first)?;
     fs::remove_file(home.cloud.join("gone.txt"))?;
+    fs::remove_file(home.cloud.join("outran.txt"))?;
+    write_file(
+        &home.local.join("outran.txt"),
+        "this device edited it after the cloud deleted it\n",
+    )?;
     ctx.start_daemon()?;
+    ctx.wait_absent(&home.local.join("gone.txt"), Duration::from_secs(60))?;
+    ctx.wait_exists(&home.cloud.join("outran.txt"), Duration::from_secs(60))?;
     ctx.settle(Duration::from_secs(60))?;
     ensure!(
-        home.local.join("gone.txt").is_file() && home.cloud.join("gone.txt").is_file(),
-        "expected the cloud-deleted file to be re-uploaded; local: {}, cloud: {}",
-        home.local.join("gone.txt").exists(),
-        home.cloud.join("gone.txt").exists()
+        !home.cloud.join("gone.txt").exists(),
+        "an offline cloud deletion is not undone by a re-upload"
+    );
+    let trash = ctx.cli().json(&["trash", "list", "--json"])?;
+    ensure!(
+        trash["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| entry["originalPath"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("gone.txt")))),
+        "the removed file is kept in the trash: {trash}"
+    );
+    ensure!(
+        read_string(&home.cloud.join("outran.txt"))?
+            == "this device edited it after the cloud deleted it\n",
+        "a local copy that changed since the last sync is kept and re-uploaded"
     );
     Ok(())
 }

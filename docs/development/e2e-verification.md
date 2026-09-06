@@ -264,8 +264,8 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S24 | SIGKILL mid-download, restart: the download completes and the local copy matches |
 | S25 | file rename, directory rename with children, and a move across subtrees converge to the same shape in the cloud |
 | S26 | `rm -rf` of a tree removes it from the cloud; the name coming back as a file converges on both sides |
-| S27 | a file deleted locally while the daemon was down is restored on restart (pins today's rule) |
-| S28 | a file deleted in the cloud while the daemon was down is re-uploaded on restart (pins today's rule) |
+| S27 | a file deleted locally while the daemon was down is deleted in the cloud on restart when the cloud copy is unchanged, and restored when the cloud copy changed meanwhile |
+| S28 | a file deleted in the cloud while the daemon was down is removed here into the trash on restart when the local copy is unchanged, and re-uploaded when the local copy changed meanwhile |
 | S29 | push-only uploads, overwrites a divergent cloud edit, removes a cloud-only file, never downloads |
 | S30 | two profiles in one daemon sync their own roots with their own durable state and never cross |
 | S31 | a burst of local deletions is held whole behind a `mass-deletion` decision while other work continues; `vapor decisions resolve --choose apply` releases it |
