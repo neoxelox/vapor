@@ -8,6 +8,7 @@
 pub mod auth;
 pub mod config;
 pub mod conflicts;
+pub mod daemon_binary;
 pub mod doctor;
 pub mod ipc;
 pub mod run;

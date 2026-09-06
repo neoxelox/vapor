@@ -1,40 +1,58 @@
-//! `vapor doctor` — platform-aware sanity checks.
+//! `vapor doctor`: platform-aware sanity checks.
 //!
-//! Linux / Windows checks land alongside their platform support.
-//! The current macOS check set:
+//! Every row names what it probed and what it found, so the output reads
+//! the same in a sandbox (`VAPOR_DIR` under `.vapor/e2e`) and on a real
+//! host. Rows that read host-global state carry a `host_` prefix so a
+//! sandboxed run is never mistaken for sandbox state. Linux and Windows
+//! checks land alongside their platform support. The current set:
 //!
 //! - `vapor_dir` exists, is writable, and (Unix) has private permissions.
-//! - The IPC socket path fits the Unix socket-address budget, with an
+//! - `ipc_socket_path` fits the Unix socket-address budget, with an
 //!   explanation when it was relocated under the OS temp directory.
-//! - The daemon binary `vapord` is discoverable via `PATH` or as a
-//!   sibling of the running CLI binary.
-//! - The LaunchAgent plist is present at the documented path.
+//! - `vapord_binary` is discoverable next to the CLI, inside the app
+//!   bundle, or on `PATH` (one resolver shared with `vapor service`).
+//! - `secret_store` reports whether provider tokens persist on this OS.
+//! - `throttle_inputs` reports where the daemon's throttle signals come
+//!   from on this host.
+//! - `host_launch_agent_plist` (macOS) is present at the documented path.
 //!
-//! The report is rendered as a list of `DoctorCheck` rows so the binary
-//! can format them either as human-readable text or as `--json`.
+//! The report renders as text rows or, with `--json`, as
+//! `{"checks": [...], "worst_status": "..."}`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use vapor_shared::constants;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+use super::daemon_binary;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DoctorCheckStatus {
     Ok,
     Warning,
     Failure,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DoctorCheck {
     pub name: String,
     pub status: DoctorCheckStatus,
     pub detail: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DoctorReport {
     pub checks: Vec<DoctorCheck>,
+}
+
+/// The `--json` shape: the rows plus the aggregate the exit code is
+/// derived from, so scripts do not have to recompute it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct DoctorReportJson<'a> {
+    pub checks: &'a [DoctorCheck],
+    pub worst_status: DoctorCheckStatus,
 }
 
 impl DoctorReport {
@@ -50,17 +68,36 @@ impl DoctorReport {
         }
         worst
     }
+
+    pub fn render_json(&self) -> DoctorReportJson<'_> {
+        DoctorReportJson {
+            checks: &self.checks,
+            worst_status: self.worst_status(),
+        }
+    }
+
+    pub fn render_text(&self) -> String {
+        let mut out = String::new();
+        for check in &self.checks {
+            let badge = match check.status {
+                DoctorCheckStatus::Ok => "OK",
+                DoctorCheckStatus::Warning => "WARN",
+                DoctorCheckStatus::Failure => "FAIL",
+            };
+            out.push_str(&format!("[{badge}] {}: {}\n", check.name, check.detail));
+        }
+        out
+    }
 }
 
 pub fn run() -> DoctorReport {
-    let mut checks = Vec::new();
-    checks.push(check_vapor_directory(
-        &vapor_shared::runtime_paths::vapor_directory(),
-    ));
-    checks.push(check_ipc_socket_path(
-        &vapor_shared::runtime_paths::ipc_socket_location(),
-    ));
-    checks.push(check_daemon_binary());
+    let mut checks = vec![
+        check_vapor_directory(&vapor_shared::runtime_paths::vapor_directory()),
+        check_ipc_socket_path(&vapor_shared::runtime_paths::ipc_socket_location()),
+        check_daemon_binary(daemon_binary::locate()),
+        check_secret_store(),
+        check_throttle_inputs(std::env::var(constants::env::VAPOR_THROTTLE_INPUTS).ok()),
+    ];
     if cfg!(target_os = "macos") {
         checks.push(check_macos_launch_agent_plist());
     }
@@ -167,26 +204,93 @@ fn check_ipc_socket_path(location: &vapor_shared::runtime_paths::IpcSocketLocati
     }
 }
 
-fn check_daemon_binary() -> DoctorCheck {
+fn check_daemon_binary(found: Option<daemon_binary::DaemonBinary>) -> DoctorCheck {
     let name = "vapord_binary".to_string();
-    if let Some(path) = locate_daemon_binary() {
+    match found {
+        Some(daemon) => DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Ok,
+            detail: format!(
+                "found at {} ({})",
+                daemon.path.display(),
+                daemon.source.label()
+            ),
+        },
+        None => DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Failure,
+            detail: "vapord not found next to this CLI, inside the app bundle, or on PATH"
+                .to_string(),
+        },
+    }
+}
+
+/// Whether `vapor auth login` tokens outlive the process on this OS.
+/// Constructing the store touches nothing, so this never prompts.
+fn check_secret_store() -> DoctorCheck {
+    use vapor_platform::SecretStore;
+    let name = "secret_store".to_string();
+    match vapor_platform::NativeSecretStore::for_current_user() {
+        Ok(store) if store.is_persistent() => DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Ok,
+            detail: if cfg!(target_os = "macos") {
+                "login keychain; tokens persist across restarts".to_string()
+            } else {
+                "native store; tokens persist across restarts".to_string()
+            },
+        },
+        Ok(_) => DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Warning,
+            detail: "store is not persistent; tokens are lost when the process exits".to_string(),
+        },
+        Err(error) => DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Warning,
+            detail: format!(
+                "no native secret store on this OS ({error}); `vapor auth login` keeps tokens in memory only"
+            ),
+        },
+    }
+}
+
+/// Where the daemon's throttle inputs would come from if started here.
+fn check_throttle_inputs(override_value: Option<String>) -> DoctorCheck {
+    let name = "throttle_inputs".to_string();
+    let requested_static = override_value
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| value == constants::engine::THROTTLE_INPUTS_STATIC);
+    if requested_static {
+        return DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Ok,
+            detail: format!(
+                "pinned to neutral inputs by {}; the throttle will not see load, battery or user presence",
+                constants::env::VAPOR_THROTTLE_INPUTS
+            ),
+        };
+    }
+    if vapor_platform::NativePlatformMetricsSampler::has_native_sampling() {
         DoctorCheck {
             name,
             status: DoctorCheckStatus::Ok,
-            detail: format!("found at {}", path.display()),
+            detail: "host signals: CPU load, power source, thermal state, memory, user presence"
+                .to_string(),
         }
     } else {
         DoctorCheck {
             name,
-            status: DoctorCheckStatus::Failure,
-            detail: "vapord not found on PATH or as a sibling of the running CLI binary"
+            status: DoctorCheckStatus::Warning,
+            detail: "static placeholders on this OS; load, battery and thermal pressure will not throttle the daemon"
                 .to_string(),
         }
     }
 }
 
 fn check_macos_launch_agent_plist() -> DoctorCheck {
-    let name = "launch_agent_plist".to_string();
+    let name = "host_launch_agent_plist".to_string();
     let Some(home) = std::env::var_os("HOME") else {
         return DoctorCheck {
             name,
@@ -224,26 +328,6 @@ fn is_writable(path: &Path) -> bool {
         }
         Err(_) => false,
     }
-}
-
-fn locate_daemon_binary() -> Option<PathBuf> {
-    if let Ok(current_exe) = std::env::current_exe()
-        && let Some(parent) = current_exe.parent()
-    {
-        let sibling = parent.join("vapord");
-        if sibling.is_file() {
-            return Some(sibling);
-        }
-    }
-    if let Some(path_var) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join("vapord");
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -323,6 +407,55 @@ mod tests {
         };
         let check = check_ipc_socket_path(&location);
         assert_eq!(check.status, DoctorCheckStatus::Failure);
+    }
+
+    #[test]
+    fn daemon_binary_check_names_the_source_or_fails() {
+        let found = check_daemon_binary(Some(daemon_binary::DaemonBinary {
+            path: PathBuf::from("/Applications/Vapor.app/Contents/MacOS/vapord"),
+            source: daemon_binary::DaemonBinarySource::Bundled,
+        }));
+        assert_eq!(found.status, DoctorCheckStatus::Ok);
+        assert!(found.detail.contains("bundled in the app"));
+        let missing = check_daemon_binary(None);
+        assert_eq!(missing.status, DoctorCheckStatus::Failure);
+    }
+
+    #[test]
+    fn throttle_inputs_check_reports_the_static_override() {
+        let pinned = check_throttle_inputs(Some(" static ".to_string()));
+        assert_eq!(pinned.status, DoctorCheckStatus::Ok);
+        assert!(pinned.detail.contains("pinned"));
+        let host = check_throttle_inputs(None);
+        assert!(!host.detail.contains("pinned"));
+    }
+
+    #[test]
+    fn json_shape_carries_rows_and_the_aggregate_status() {
+        let report = DoctorReport {
+            checks: vec![
+                DoctorCheck {
+                    name: "a".to_string(),
+                    status: DoctorCheckStatus::Ok,
+                    detail: "fine".to_string(),
+                },
+                DoctorCheck {
+                    name: "b".to_string(),
+                    status: DoctorCheckStatus::Warning,
+                    detail: "hmm".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_value(report.render_json()).expect("serialize");
+        assert_eq!(json["worst_status"], "warning");
+        assert_eq!(json["checks"][0]["name"], "a");
+        assert_eq!(json["checks"][0]["status"], "ok");
+        assert_eq!(json["checks"][1]["detail"], "hmm");
+        assert_eq!(
+            json.as_object().expect("object").keys().collect::<Vec<_>>(),
+            vec!["checks", "worst_status"]
+        );
+        assert!(report.render_text().contains("[WARN] b: hmm"));
     }
 
     #[test]

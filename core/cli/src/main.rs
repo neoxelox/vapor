@@ -50,7 +50,11 @@ enum Command {
     /// Print version + git commit short.
     Version,
     /// Run platform-aware sanity checks.
-    Doctor,
+    Doctor {
+        /// Emit the report as JSON (`{"checks": [...], "worst_status": ...}`).
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage the platform-native service installation.
     Service {
         /// Install / drive the per-user service definition (default).
@@ -280,15 +284,16 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
                 }
             }
         }
-        Command::Doctor => {
+        Command::Doctor { json } => {
             let report = doctor_cmd::run();
-            for check in &report.checks {
-                let badge = match check.status {
-                    doctor_cmd::DoctorCheckStatus::Ok => "OK",
-                    doctor_cmd::DoctorCheckStatus::Warning => "WARN",
-                    doctor_cmd::DoctorCheckStatus::Failure => "FAIL",
-                };
-                println!("[{badge}] {} — {}", check.name, check.detail);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report.render_json())
+                        .map_err(|e| e.to_string())?
+                );
+            } else {
+                print!("{}", report.render_text());
             }
             match report.worst_status() {
                 doctor_cmd::DoctorCheckStatus::Failure => Ok(ExitCode::from(1)),
@@ -653,36 +658,14 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
 
 #[cfg(target_os = "macos")]
 fn locate_daemon_binary() -> Option<PathBuf> {
-    if let Ok(current_exe) = std::env::current_exe()
-        && let Some(parent) = current_exe.parent()
-    {
-        let sibling = parent.join("vapord");
-        if sibling.is_file() {
-            return Some(sibling);
-        }
-        // Bundled layout: the CLI ships at `Vapor.app/Contents/Helpers/vapor`
-        // (it cannot sit next to the `Vapor` app binary — the default macOS
-        // filesystem is case-insensitive), while `vapord` lives at
-        // `Contents/MacOS/vapord`.
-        if let Some(contents) = parent.parent() {
-            let bundled = contents.join("MacOS").join("vapord");
-            if bundled.is_file() {
-                return Some(bundled);
-            }
-        }
+    use vapor_cli::commands::daemon_binary::{self, DaemonBinarySource};
+    let daemon = daemon_binary::locate()?;
+    if daemon.source == DaemonBinarySource::SearchPath {
+        eprintln!(
+            "vapor: warning: using vapord from PATH ({}) instead of a sibling of this \
+             binary; the service definition will pin this path.",
+            daemon.path.display()
+        );
     }
-    if let Some(path_var) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join("vapord");
-            if candidate.is_file() {
-                eprintln!(
-                    "vapor: warning: using vapord from PATH ({}) instead of a sibling of this \
-                     binary; the service definition will pin this path.",
-                    candidate.display()
-                );
-                return Some(candidate);
-            }
-        }
-    }
-    None
+    Some(daemon.path)
 }

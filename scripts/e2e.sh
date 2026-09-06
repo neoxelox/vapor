@@ -389,7 +389,12 @@ log "PASS S5 — second daemon on same VAPOR_DIR refused by singleton lock"
 
 # S6 — doctor sanity checks pass inside the sandbox.
 "$VAPOR_BIN" doctor >/dev/null || fail "S6: vapor doctor exited non-zero"
-log "PASS S6 — vapor doctor healthy"
+doctor_json="$("$VAPOR_BIN" doctor --json)" || fail "S6: vapor doctor --json exited non-zero"
+grep -q '"worst_status"' <<<"$doctor_json" && grep -q '"vapord_binary"' <<<"$doctor_json" \
+  || fail "S6: vapor doctor --json lacks the documented shape"
+grep -q '"name": "secret_store"' <<<"$doctor_json" \
+  || fail "S6: vapor doctor --json lacks the secret_store row"
+log "PASS S6 — vapor doctor healthy (text and --json)"
 
 # S7 — restart recovery: clean SIGTERM shutdown, then a fresh daemon
 # reuses the durable state and keeps syncing.

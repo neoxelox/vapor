@@ -49,7 +49,7 @@ Inside `VAPOR_DIR`:
 The `vapor` CLI is the fastest signal — use it before reading raw files:
 
 - `vapor status --json` — run state, throttle state + reason, provider, daemon id. "daemon not running" vs "daemon is not responding" are different failures (no socket vs wedged process).
-- `vapor doctor` — sanity probes (vapor_dir writable/private, `vapord` binary discoverable, LaunchAgent plist present).
+- `vapor doctor` (add `--json` for scripts) — sanity probes: `vapor_dir` writable/private, `ipc_socket_path` budget and relocation, `vapord_binary` discoverable (sibling, bundle, PATH), `secret_store` persistence, `throttle_inputs` source, and `host_launch_agent_plist` (host state, not the sandbox).
 - `vapor logs --tail 100` — recent daemon log lines, already redacted.
 - `vapor timeline --json` — diagnostics activity timeline (real events; an empty list means nothing has been recorded yet, not that the feature is missing).
 - `launchctl list | grep sh.arn.vapor` and `ps aux | grep vapord` — is the service loaded / process alive? (The LaunchAgent label is `sh.arn.vapor.daemon`.)

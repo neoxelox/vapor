@@ -351,10 +351,12 @@ fn companion_binaries() -> Vec<PathBuf> {
     let Some(parent) = current.parent() else {
         return Vec::new();
     };
-    let mut candidates = vec![parent.join("vapor"), parent.join("vapord")];
+    let cli = constants::runtime::CLI_BINARY_NAME;
+    let daemon = constants::runtime::DAEMON_BINARY_NAME;
+    let mut candidates = vec![parent.join(cli), parent.join(daemon)];
     if let Some(contents) = parent.parent() {
-        candidates.push(contents.join("Helpers").join("vapor"));
-        candidates.push(contents.join("MacOS").join("vapord"));
+        candidates.push(contents.join("Helpers").join(cli));
+        candidates.push(contents.join("MacOS").join(daemon));
     }
     let mut found = Vec::new();
     for candidate in candidates {

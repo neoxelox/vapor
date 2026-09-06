@@ -21,6 +21,11 @@ pub mod env {
 }
 
 pub mod runtime {
+    /// Executable names. On macOS the CLI ships at
+    /// `Contents/Helpers/vapor` and the daemon at `Contents/MacOS/vapord`;
+    /// in a build directory they sit side by side.
+    pub const CLI_BINARY_NAME: &str = "vapor";
+    pub const DAEMON_BINARY_NAME: &str = "vapord";
     pub const VAPOR_DIRECTORY_NAME: &str = ".vapor";
     pub const LOGS_DIRECTORY_NAME: &str = "logs";
     pub const STATE_DIRECTORY_NAME: &str = "state";
