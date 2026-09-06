@@ -561,12 +561,15 @@ impl Provider for FilesystemProvider {
             Err(error) if resolved.is_dir() => {
                 // Non-recursive on purpose: `remove_dir` fails on a
                 // non-empty directory. A recursive `remove_dir_all` here
-                // would destroy children the engine never observed (a
-                // delete intent is planned with no remote stat), violating
-                // the never-silent-overwrite guarantee. When the directory
-                // still holds content, the transient error retries and the
-                // walk converges once the changes feed surfaces and removes
-                // the children, emptying the directory.
+                // would destroy children the engine never observed,
+                // violating the never-silent-overwrite guarantee. The one
+                // exception is Vapor's own bookkeeping: a staging temp an
+                // aborted transfer left behind, or the op-id side-file of
+                // a file that is already gone. Those are invisible to
+                // listings, so the engine can never delete them itself,
+                // and a directory holding nothing else is empty as far as
+                // the user is concerned.
+                reap_internal_files(&resolved);
                 fs::remove_dir(&resolved).map_err(|dir_error| {
                     ProviderError::transient(format!(
                         "cannot delete remote directory {path}: {dir_error} (file path error: {error})"
@@ -587,6 +590,24 @@ impl Provider for FilesystemProvider {
         self.ensure_feed_started()?;
         let root = self.canonical_root()?;
         self.feed.poll(&root, &self.tags, cursor, max_changes)
+    }
+}
+
+/// Removes Vapor's internal files (staging temps, op-id side-files)
+/// directly inside `directory` and nothing else. Used before deleting
+/// a directory the engine believes is empty.
+fn reap_internal_files(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if is_internal_file_name(name) && entry.path().is_file() {
+            let _ = fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -646,13 +667,25 @@ fn copy_permissions_from_handle(source: &fs::File, staged: &Path) {
     match source.metadata() {
         Ok(metadata) => {
             if let Err(error) = fs::set_permissions(staged, metadata.permissions()) {
-                crate::logging::warning(
-                    "Could not carry file permissions onto the staged transfer payload",
-                    &[
-                        ("path", staged.display().to_string()),
-                        ("error", error.to_string()),
-                    ],
-                );
+                let fields = [
+                    ("path", staged.display().to_string()),
+                    ("error", error.to_string()),
+                ];
+                if error.kind() == io::ErrorKind::NotFound {
+                    // The staging file's directory was removed underneath
+                    // the transfer (a concurrent remote delete); the
+                    // commit that follows fails and the intent retries
+                    // against fresh remote state. Nothing to act on here.
+                    crate::logging::debug(
+                        "Staged transfer payload vanished before its permissions could be set",
+                        &fields,
+                    );
+                } else {
+                    crate::logging::warning(
+                        "Could not carry file permissions onto the staged transfer payload",
+                        &fields,
+                    );
+                }
             }
         }
         Err(error) => {
@@ -1537,6 +1570,33 @@ mod tests {
             .delete(&RemotePath::new("a.txt").expect("path"), "op-6")
             .expect_err("second delete reports not found");
         assert_eq!(error.kind, vapor_shared::ProviderErrorKind::NotFound);
+    }
+
+    #[test]
+    fn deleting_a_directory_reaps_only_vapor_internal_leftovers() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cloud = dir.path().join("cloud");
+        let provider = provider_at(&cloud);
+        // A crash mid-upload left a staging temp; a deleted file left its
+        // side-file. Neither shows in listings, so the engine cannot
+        // delete them, and neither is user content.
+        fs::create_dir_all(cloud.join("gone")).expect("dirs");
+        fs::write(cloud.join("gone/.vapor-tmp-orphan"), b"partial").expect("temp");
+        fs::write(cloud.join("gone/old.txt.vapor-meta.json"), b"{}").expect("side");
+        provider
+            .delete(&RemotePath::new("gone").expect("path"), "op-1")
+            .expect("an empty-but-for-internals directory deletes");
+        assert!(!cloud.join("gone").exists());
+
+        // User content is never reaped.
+        fs::create_dir_all(cloud.join("kept")).expect("dirs");
+        fs::write(cloud.join("kept/.vapor-tmp-orphan"), b"partial").expect("temp");
+        fs::write(cloud.join("kept/user.txt"), b"mine").expect("user");
+        let error = provider
+            .delete(&RemotePath::new("kept").expect("path"), "op-2")
+            .expect_err("a directory with user content stays");
+        assert_eq!(error.kind, vapor_shared::ProviderErrorKind::Transient);
+        assert!(cloud.join("kept/user.txt").exists());
     }
 
     #[test]

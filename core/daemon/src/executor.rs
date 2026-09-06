@@ -950,6 +950,22 @@ impl StagedExecutor {
                         self.finish_as_conflict(app, state_db, env, &intent, now, report)?;
                         return Ok(None);
                     }
+                    if intent.kind != PendingIntentKind::Delete
+                        && error.kind == vapor_shared::ProviderErrorKind::NotFound
+                        && fs::symlink_metadata(&intent.path).is_err()
+                    {
+                        // The local source went away between planning
+                        // and the transfer (a save followed by a rename or
+                        // delete). The watcher has already reported the
+                        // new state of that path; this upload has nothing
+                        // left to carry.
+                        crate::logging::debug(
+                            "Local file vanished before its upload could start; completing as a no-op",
+                            &[("path", intent.path.display().to_string())],
+                        );
+                        self.complete(state_db, &intent, report)?;
+                        return Ok(None);
+                    }
                     self.resolve_provider_failure(app, state_db, &intent, error, now, report)?;
                     Ok(None)
                 }
@@ -3096,14 +3112,22 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_provider(|cloud_root| {
+                Box::new(FilesystemProvider::with_root(cloud_root).expect("provider"))
+            })
+        }
+
+        /// A fixture whose provider is built by `make` over the cloud
+        /// root, for tests that wrap the filesystem provider.
+        fn with_provider(make: impl FnOnce(&Path) -> Box<dyn vapor_providers::Provider>) -> Self {
             let temp = tempfile::TempDir::new().expect("temp dir");
             let local_root = temp.path().join("local");
             let cloud_root = temp.path().join("cloud");
             std::fs::create_dir_all(&local_root).expect("local root");
             std::fs::create_dir_all(&cloud_root).expect("cloud root");
             let clock = Arc::new(ManualClock::at_now());
-            let provider = FilesystemProvider::with_root(&cloud_root).expect("provider");
-            let app = DaemonApp::new_with_clock(Box::new(provider), clock.clone());
+            let provider = make(&cloud_root);
+            let app = DaemonApp::new_with_clock(provider, clock.clone());
             let state_db = DurableStateDb::open(temp.path().join("state/vapor.sqlite"))
                 .expect("open state db");
             Self {
@@ -3809,6 +3833,106 @@ mod tests {
         assert_eq!(report.completed, 1);
         assert_eq!(report.failed, 0);
         assert!(!fixture.cloud_root.join("ephemeral.txt").exists());
+    }
+
+    /// Wraps the filesystem provider and removes the upload source the
+    /// moment the transfer opens it: the exact window between planning
+    /// and the transfer that a save-then-rename hits.
+    struct VanishingSourceProvider {
+        inner: FilesystemProvider,
+    }
+
+    impl vapor_providers::Provider for VanishingSourceProvider {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+        fn capabilities(&self) -> vapor_providers::ProviderCapabilities {
+            self.inner.capabilities()
+        }
+        fn ensure_cloud_sync_directory(
+            &self,
+            dir: &str,
+        ) -> Result<(), vapor_providers::ProviderError> {
+            self.inner.ensure_cloud_sync_directory(dir)
+        }
+        fn enumerate(
+            &self,
+            directory: &RemotePath,
+        ) -> Result<Vec<vapor_providers::RemoteEntry>, vapor_providers::ProviderError> {
+            self.inner.enumerate(directory)
+        }
+        fn stat(
+            &self,
+            path: &RemotePath,
+        ) -> Result<Option<vapor_providers::RemoteEntry>, vapor_providers::ProviderError> {
+            self.inner.stat(path)
+        }
+        fn content_hash(
+            &self,
+            path: &RemotePath,
+        ) -> Result<String, vapor_providers::ProviderError> {
+            self.inner.content_hash(path)
+        }
+        fn begin_upload(
+            &self,
+            request: vapor_providers::UploadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, vapor_providers::ProviderError>
+        {
+            let _ = std::fs::remove_file(&request.local_source);
+            self.inner.begin_upload(request)
+        }
+        fn begin_download(
+            &self,
+            request: vapor_providers::DownloadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, vapor_providers::ProviderError>
+        {
+            self.inner.begin_download(request)
+        }
+        fn delete(
+            &self,
+            path: &RemotePath,
+            op_id: &str,
+        ) -> Result<(), vapor_providers::ProviderError> {
+            self.inner.delete(path, op_id)
+        }
+        fn poll_changes(
+            &self,
+            cursor: Option<&str>,
+            max: usize,
+        ) -> Result<vapor_providers::ChangesPoll, vapor_providers::ProviderError> {
+            self.inner.poll_changes(cursor, max)
+        }
+    }
+
+    #[test]
+    fn upload_whose_source_vanishes_after_planning_completes_as_noop() {
+        // A save followed by a rename: the file exists through planning
+        // and hashing and is gone when the transfer opens it. That is a
+        // race the watcher has already reported (the rename produced
+        // its own intents), never a terminal failure.
+        let mut fixture = Fixture::with_provider(|cloud_root| {
+            Box::new(VanishingSourceProvider {
+                inner: FilesystemProvider::with_root(cloud_root).expect("provider"),
+            })
+        });
+        let local_file = fixture.local_root.join("moving.txt");
+        std::fs::write(&local_file, b"about to be renamed").expect("seed");
+
+        let intent = fixture.enqueue_and_lease(&local_file, PendingIntentKind::Upload);
+        assert_eq!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0)),
+            StartDecision::Started
+        );
+        let report = fixture.run_to_quiescence(8);
+        assert_eq!(
+            report.failed, 0,
+            "a vanished source must not fail the intent"
+        );
+        assert_eq!(report.completed, 1);
+        assert_eq!(fixture.state_db.failed_depth().expect("failed"), 0);
+        assert!(!fixture.cloud_root.join("moving.txt").exists());
     }
 
     #[test]
