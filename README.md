@@ -128,7 +128,7 @@ See `.env.example` for the available `VAPOR_*` environment variables used by app
 - Format both stacks: `./scripts/format.sh`
 - Format check both stacks (included in lint): `./scripts/format.sh check`
 - Test both stacks: `./scripts/test.sh`
-- End-to-end verification in a disposable repo-local sandbox: `./scripts/e2e.sh` (manual sandbox: `--sandbox`; see `docs/development/e2e-verification.md`)
+- End-to-end verification in disposable repo-local sandboxes: `./scripts/e2e.sh` (one scenario: `--only Sxx`; manual sandbox: `--sandbox`; see `docs/development/e2e-verification.md`)
 - Sync locale catalogs into every app surface: `./scripts/locales.sh`
 - Install git pre-commit hook (clean → lint → test → build): `./scripts/hooks.sh`
 - Remove the installed pre-commit hook: `./scripts/hooks.sh uninstall`

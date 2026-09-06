@@ -236,10 +236,14 @@ Commands to snapshot:
 ### End-to-end tests (Tier E2E; runtime-affecting changes)
 
 `./scripts/e2e.sh` runs the real `vapor` + `vapord` binaries black-box
-through the CLI against a disposable sandbox under the repo-local
-`.vapor/e2e/` directory — real process boundaries, real FSEvents, real
-durable DB, real IPC socket, real signals. It is how an autonomous
-agent verifies "the product actually works", not just "the modules are
+through the CLI, one disposable sandbox per scenario under the
+repo-local `.vapor/e2e/` directory — real process boundaries, real
+FSEvents, real durable DB, real IPC socket, real signals. The harness
+is a Rust dev crate (`tools/e2e`, `vapor-e2e`) so the same scenarios
+run on every OS job once its native traits exist; scenarios declare
+what they need and skip by name elsewhere. Every scenario ends with the
+tree oracle and the log-hygiene check. It is how an autonomous agent
+verifies "the product actually works", not just "the modules are
 correct". Fully sandboxed: never `~/.vapor`, never a host service
 install, never the macOS app, no network.
 
@@ -347,18 +351,21 @@ value", the test is not worth writing.
   counts), fuzz corpora, and any `loom`-backed tests. Release gate
   only: `perf.yml` has no standalone triggers and is invoked solely by
   `release.yml`.
-- **Tier E2E** — `scripts/e2e.sh`, at the end of `test.yml`'s
-  macOS job (every PR; part of the required `test` check on `main`).
+- **Tier E2E** — `scripts/e2e.sh`, at the end of every `test.yml`
+  OS job (every PR; part of the required `test` check on `main`).
   Also part of the local contributor validation loop for
   runtime-affecting changes (`AGENTS.md §9.8`). Runs the shipped
-  binaries sandboxed under `.vapor/e2e/`; budget ~60 s after the
-  build. macOS only — it exercises the native FSEvents watcher on the
-  shipping surface. CI invokes it with `--full`, which appends the
-  black-box `vapor service` round-trip (install → start → status →
-  crash-loop supervision → acknowledge → stop → uninstall) against
-  real `launchd`. That phase installs a real LaunchAgent —
-  host-mutating by design — so it is opt-in: contributors run the
+  binaries sandboxed under `.vapor/e2e/`; the default suite takes a
+  few minutes, most of it in scenarios that wait out a known gap. The
+  daemon scenarios run on macOS today (the native FSEvents watcher on
+  the shipping surface) and skip by name on Linux and Windows until
+  their native traits ship. The macOS job passes `--full`, which adds
+  the black-box `vapor service` round-trip (install → start → status
+  → crash-loop supervision → acknowledge → stop → uninstall) against
+  real `launchd`. That phase installs a real LaunchAgent,
+  host-mutating by design, so it is opt-in: contributors run the
   default (host-safe) suite; only disposable CI runners pass `--full`.
+  The JSON report is uploaded as a workflow artifact.
 
 ## Per-surface scope
 

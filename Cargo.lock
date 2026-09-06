@@ -1185,6 +1185,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "vapor-e2e"
+version = "0.2.0-alpha.3"
+dependencies = [
+ "clap",
+ "globset",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "vapor-ipc",
+ "vapor-shared",
+]
+
+[[package]]
 name = "vapor-ipc"
 version = "0.2.0-alpha.3"
 dependencies = [

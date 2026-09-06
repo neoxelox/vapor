@@ -34,10 +34,12 @@ workspace.
   reference, not a hard pin; the project targets latest stable by
   default.
 - `e2e-verification.md` — the Tier E2E process: black-box verification
-  of the real `vapor`/`vapord` binaries inside a disposable
-  `.vapor/e2e/` sandbox (`./scripts/e2e.sh`). Covers the safety
-  contract, when a change requires an E2E run, the scenario catalog,
-  and the discipline rules for adding scenarios.
+  of the real `vapor`/`vapord` binaries by the `tools/e2e` harness,
+  one disposable `.vapor/e2e/` sandbox per scenario
+  (`./scripts/e2e.sh`). Covers the safety contract, the shared tree
+  oracle and log-hygiene checks, verdicts and known gaps, when a
+  change requires an E2E run, the scenario catalog, and the discipline
+  rules for adding scenarios.
 
 ## Related references
 

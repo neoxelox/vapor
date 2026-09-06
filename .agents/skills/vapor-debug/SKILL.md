@@ -30,7 +30,7 @@ Everything runtime lives under one directory root, `VAPOR_DIR`. Resolve it first
 2. `./.vapor` (repo-local) when running via repository scripts / `VAPOR_ENV=dev` — this is what dev, test, CI, and e2e workflows use
 3. `~/.vapor` — the real user install (the project owner's machine)
 
-E2E sandboxes live under `<repo>/.vapor/e2e/<run-id>/home`. When debugging a failed `./scripts/e2e.sh` run, that preserved sandbox is your `VAPOR_DIR`.
+E2E sandboxes live under `<repo>/.vapor/e2e/<run-id>/<scenario id>/`: `home/` is that scenario's `VAPOR_DIR`, `local/` and `cloud/Vapor/` are its two trees, `<label>-daemon.out` is the daemon's stdout/stderr, and a scenario with several daemons has `<label>-home/` siblings. A failed run keeps the sandbox, prints its path, and has already printed `vapor status --json`, `vapor diagnostics --json`, the queue rows, and the log tail for every daemon; start from that output, then open the directory. The run's `e2e-result.json` next to the scenario directories carries every verdict and note.
 
 Inside `VAPOR_DIR`:
 
@@ -85,7 +85,7 @@ To reproduce a bug hands-on, use the sandboxed manual environment instead of the
 ./scripts/e2e.sh --sandbox
 ```
 
-It provisions a disposable `VAPOR_DIR` under `<repo>/.vapor/e2e/`, starts a daemon, and prints a command cheat-sheet (see the `vapor-e2e` skill). Do not guess either — if you need missing context (repro steps, the user action right before the crash, recent code changes, whether vapord is running), ask. A precise diagnosis beats a fast wrong one.
+It provisions a disposable `VAPOR_DIR` under `<repo>/.vapor/e2e/sbx-<id>/`, starts a daemon, and prints a command cheat-sheet (see the `vapor-e2e` skill); `./scripts/e2e.sh --sandbox-stop` removes it. To reproduce a scripted scenario's failure by hand, run it alone with `./scripts/e2e.sh --only Sxx --keep` and work inside the preserved sandbox. Do not guess either — if you need missing context (repro steps, the user action right before the crash, recent code changes, whether vapord is running), ask. A precise diagnosis beats a fast wrong one.
 
 ### Step 5 — Write a diagnostic report
 
@@ -115,7 +115,9 @@ and why each change addresses the root cause.
 
 ### Risks & Side Effects
 Note anything the fix might affect, any edge cases to watch for,
-and which e2e scenario (scripts/e2e.sh) should cover the regression.
+and which e2e scenario (`tools/e2e/src/scenarios/`, run with
+`./scripts/e2e.sh --only Sxx`) should cover the regression: an
+existing one, or a new one written per the `vapor-e2e` skill.
 ```
 
 ### Step 6 — Wait for confirmation

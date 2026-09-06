@@ -3,7 +3,14 @@
 GitHub Actions workflows are defined in `.github/workflows/`:
 
 - `lint.yml`: runs lint and format checks via repository scripts.
-- `test.yml`: runs test suites via repository scripts.
+- `test.yml`: runs the Tier 1 suites via repository scripts, then the
+  Tier E2E harness (`./scripts/e2e.sh`) on every OS job; the macOS job
+  passes `--full` (the launchd round-trip on a disposable runner) and
+  every job uploads the harness's JSON report as the
+  `e2e-report-<os>` artifact. Scenarios whose needs the host cannot
+  meet skip by name, so the Linux and Windows jobs run the harness
+  and `S01` today and pick up the daemon scenarios once their native
+  traits ship.
 - `build.yml`: runs distribution builds via repository scripts.
 - `perf.yml`: reusable performance gate workflow invoked by the release pipeline.
 - `release.yml`: runs tag-driven package and GitHub Release publication flow.
@@ -27,6 +34,7 @@ and the repository enforces `sha_pinning_required`:
 - `maxim-lobanov/setup-xcode` v1.7.0
 - `actions-rust-lang/setup-rust-toolchain` v1.17.0
 - `actions/cache` v5.1.0 for Rust (`cargo`) and SwiftPM caches
+- `actions/upload-artifact` v4.6.2 for the Tier E2E report
 
 ## Action allowlist
 

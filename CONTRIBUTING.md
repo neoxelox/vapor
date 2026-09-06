@@ -79,11 +79,13 @@ or CLI, also run the end-to-end suite:
 ./scripts/e2e.sh
 ```
 
-This drives the real `vapor` and `vapord` binaries black-box inside a
-disposable sandbox under `.vapor/e2e/`. It never touches `~/.vapor`,
-installs no host services, and uses no network. Run the plain form
-locally; CI runs `--full`, which additionally installs a real
-LaunchAgent and is meant for disposable runners. Full process:
+This drives the real `vapor` and `vapord` binaries black-box, one
+disposable sandbox per scenario under `.vapor/e2e/`, and ends every
+scenario by comparing the two trees. It never touches `~/.vapor`,
+installs no host services, and uses no network. `--only Sxx` runs one
+scenario. Run the plain form locally; the macOS CI job runs `--full`,
+which additionally installs a real LaunchAgent and is meant for
+disposable runners. Full process:
 [`docs/development/e2e-verification.md`](docs/development/e2e-verification.md).
 
 `./scripts/test.sh` must stay under **2 minutes locally, 5 on CI**. If

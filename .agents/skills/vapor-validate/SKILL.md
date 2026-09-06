@@ -16,7 +16,7 @@ relies on.
 ./scripts/format.sh   # applies rustfmt and swift-format
 ./scripts/lint.sh     # clippy -D warnings, swift-format lint, format check, version sync
 ./scripts/test.sh     # Tier 1: Rust + Swift + version checks
-./scripts/e2e.sh      # Tier E2E: real vapor + vapord in a sandbox (see below)
+./scripts/e2e.sh      # Tier E2E: real vapor + vapord, one sandbox per scenario (see below)
 ```
 
 `format` first because `lint` fails on unformatted code. Run all of them
@@ -52,10 +52,17 @@ nothing.
   `.vapor/e2e/`, no service install, no app launch, no network.
 - Never run `--full` locally: it installs a real LaunchAgent and is for
   disposable CI runners.
-- A change that adds e2e-observable behaviour extends
-  `scripts/e2e.sh` with a scenario in the same change set. A green run
+- A change that adds e2e-observable behaviour adds a scenario under
+  `tools/e2e/src/scenarios/` in the same change set, run once against
+  the base commit (must fail) and once after (must pass). A green run
   of old scenarios proves non-regression, not the new feature.
-- The harness exports `VAPOR_THROTTLE_INPUTS=static` so a developer at
+- Every scenario ends with the tree oracle (local root equals cloud
+  root) and log hygiene (no ERROR, only declared warnings, no failed
+  intents); a change that makes either fail is a finding, not noise.
+- `--only Sxx` runs one scenario; `--json` writes the report; a
+  `KNOWN-GAP` line is an expected failure, a `FIXED?` line means a
+  marker must be removed and makes the run red.
+- The harness sets `VAPOR_THROTTLE_INPUTS=static` so a developer at
   the keyboard does not hold the daemon at `Throttled`.
 - Details and the manual sandbox: the `vapor-e2e` skill.
 
@@ -70,9 +77,11 @@ nothing.
 - `version.sh check-sync`: `VERSION`, `[workspace.package] version` and
   every member's lockfile entry disagree; run `./scripts/version.sh sync`
   only as part of a release, otherwise fix the stray edit.
-- e2e `FAIL Sx`: the script keeps the sandbox and prints its path; read
-  `home/logs/vapord.logs` and `vapor status --json` from there, then use
-  the `vapor-debug` skill.
+- e2e `FAIL Sxx`: the harness prints status, diagnostics, queue rows,
+  and log tails for every daemon in the scenario and keeps the sandbox
+  (`.vapor/e2e/run-<id>/Sxx/`); read that output, then use the
+  `vapor-debug` skill on the preserved directory. `FIXED?` means a
+  known-gap marker is stale: remove it in the same change.
 
 ## Report
 

@@ -7,6 +7,7 @@ members = [
   "core/platform",
   "core/providers",
   "core/shared",
+  "tools/e2e",
 ]
 resolver = "2"
 

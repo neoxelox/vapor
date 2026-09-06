@@ -501,10 +501,12 @@ If a test's failure mode is "I typo'd a default value", skip it.
 - **Tier 2**: `scripts/perf.sh` via `perf.yml`, release pipeline only.
   Performance SLO tests, long-running property cases, fuzz corpora,
   `loom`-backed concurrency tests. Not a PR gate.
-- **Tier E2E**: `./scripts/e2e.sh`, on every PR in `test.yml`'s macOS
-  job (with `--full`, which installs a real LaunchAgent and is for
-  disposable runners only) and locally by the contributor (host-safe
-  default). Contract in §9.8; procedure in the `vapor-e2e` skill.
+- **Tier E2E**: `./scripts/e2e.sh` (the `tools/e2e` harness), on
+  every PR in every `test.yml` OS job (macOS adds `--full`, which
+  installs a real LaunchAgent and is for disposable runners only;
+  scenarios whose needs the host cannot meet skip by name) and locally
+  by the contributor (host-safe default). Contract in §9.8; procedure
+  in the `vapor-e2e` skill.
 
 ### 9.6) Flaky-test policy
 
@@ -536,10 +538,17 @@ that ships a runtime-affecting change must also watch the real product
 work once, end to end. Procedure: the `vapor-e2e` skill and
 `docs/development/e2e-verification.md`. The invariants:
 
-- `./scripts/e2e.sh` builds the shipping binaries (`vapor`, `vapord`)
-  and drives the daemon black-box through the CLI only, never the
-  macOS app, asserting via `vapor status --json`, `vapor doctor`,
-  exit codes, daemon logs, and read-only durable-DB queries.
+- `./scripts/e2e.sh` builds the harness (`tools/e2e`, crate
+  `vapor-e2e`, a dev tool that never ships) and the shipping binaries
+  (`vapor`, `vapord`), then drives the daemon black-box through the
+  CLI only, never the macOS app, asserting via the `--json` commands,
+  exit codes, daemon logs, the two trees on disk, and read-only
+  durable-DB queries. It runs on the host it is built on; there is no
+  container target.
+- Every scenario runs in its own sandbox and ends with the tree
+  oracle (the local root and the cloud root hold the same files) and
+  log hygiene (no ERROR line, no warning it did not declare, no failed
+  intent). A scenario opts out of the oracle only with a stated reason.
 - Sandbox discipline is absolute: everything runs under the repo-local
   `.vapor/e2e/` directory (removed by `./scripts/clean.sh`). Tier E2E
   must never touch `~/.vapor`, install host services (LaunchAgents,
@@ -548,15 +557,23 @@ work once, end to end. Procedure: the `vapor-e2e` skill and
   change daemon/CLI-observable behavior, startup/shutdown/IPC/schema
   changes, and build changes to the shipping binaries. Not required
   for doc-only, UI-only, or test-only changes.
-- When a change adds e2e-observable behavior, extend the harness with
-  a scenario for it in the same change set. A green run of old
-  scenarios proves non-regression, not the new feature.
+- When a change adds e2e-observable behavior, add a scenario for it
+  under `tools/e2e/src/scenarios/` in the same change set, and run it
+  once against the base commit: it must fail before the change and
+  pass after. A green run of old scenarios proves non-regression, not
+  the new feature.
+- A scenario that asserts behavior the product does not have yet is a
+  known gap: it stays in the suite marked as such, with the gap named
+  in words and a task in `docs/tasks/core.md`. Weakening an assertion
+  to make a run green is never acceptable. A known-gap scenario that
+  passes makes the run red until its marker is removed.
 - UI-affecting changes additionally get a short manual-verification
   handoff checklist for the project owner, since agents never verify
   UI.
-- Live cloud-provider E2E (real Google Drive, dedicated test account)
-  is a future, explicitly gated tier: never part of the default run,
-  never a PR gate, never run implicitly by an agent.
+- The filesystem provider is the default. Google Drive is an opt-in
+  mode (`--provider gdrive`) that needs real credentials for a
+  dedicated test account: never part of the default run, never run
+  implicitly by an agent, never against the project owner's account.
 
 ## 10) Pull requests, commits, and documentation
 

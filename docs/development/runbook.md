@@ -2,7 +2,7 @@
 
 ## Repository bootstrap
 
-- Rust workspace: root `Cargo.toml` with crates in `core/daemon`, `core/providers`, `core/shared`, `core/ipc`, `core/platform`, `core/lifecycle`, and `core/cli`.
+- Rust workspace: root `Cargo.toml` with crates in `core/daemon`, `core/providers`, `core/shared`, `core/ipc`, `core/platform`, `core/lifecycle`, and `core/cli`, plus the development tools under `tools/` (`tools/e2e`, never shipped; see `tools/README.md`).
 - Daemon binary: `vapord`.
 - CLI binary: `vapor` (`core/cli`).
 - Swift package: `apps/macos/Package.swift` (`Vapor`, `VaporCore`) — macOS-only.
@@ -24,7 +24,7 @@
 - Install git pre-commit hook: `./scripts/hooks.sh` (uninstall: `./scripts/hooks.sh uninstall`)
 - Version helper: `./scripts/version.sh`
 - Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
-- End-to-end verification of the real binaries in a disposable sandbox: `./scripts/e2e.sh` (`--keep`, `--skip-build`; see `docs/development/e2e-verification.md`)
+- End-to-end verification of the real binaries in disposable sandboxes: `./scripts/e2e.sh` (`--only Sxx`, `--keep`, `--skip-build`, `--json`, `--list`, `--sandbox`, `--sandbox-stop`; see `docs/development/e2e-verification.md`)
 
 ## Stack helpers
 
@@ -120,10 +120,11 @@ Fast facts for local dev:
   `AGENTS.md §9.3` and `docs/architecture/testing-strategy.md`.
 - **Performance SLO tests** run via `./scripts/perf.sh` (Tier 2;
   release gate only, not a PR gate).
-- **End-to-end verification** runs via `./scripts/e2e.sh` (Tier E2E)
-  after Tier 1 passes, whenever a change alters runtime behavior a
-  user would observe through the daemon or CLI. Fully sandboxed under
-  `.vapor/e2e/`; see `docs/development/e2e-verification.md`.
+- **End-to-end verification** runs via `./scripts/e2e.sh` (Tier E2E,
+  the `tools/e2e` harness) after Tier 1 passes, whenever a change
+  alters runtime behavior a user would observe through the daemon or
+  CLI. One sandbox per scenario under `.vapor/e2e/`; `--only Sxx`
+  runs one scenario; see `docs/development/e2e-verification.md`.
 
 ## Release build policy
 

@@ -1,0 +1,292 @@
+//! What the machine running the suite can do. Scenarios declare needs;
+//! the runner skips a scenario whose need the host cannot meet and says
+//! which one, so a skip is never silent.
+
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+/// A capability a scenario requires from the host or the run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Need {
+    /// A real fs-watch implementation exists for this OS (the daemon
+    /// cannot start without one).
+    NativeWatcher,
+    /// Unix signals, `mkfifo`, POSIX modes.
+    Unix,
+    /// FIFOs can be created in the sandbox.
+    Fifo,
+    /// The executable bit survives on the sandbox filesystem.
+    PosixMode,
+    /// Extended attributes work in the sandbox (op-id tags).
+    Xattr,
+    /// `launchctl` is usable and no Vapor LaunchAgent exists. Host
+    /// mutating: only honored together with [`Need::Full`].
+    Launchd,
+    /// The run was started with `--full`.
+    Full,
+    /// The filesystem provider is the run's provider (the scenario
+    /// manipulates the cloud root directly).
+    Filesystem,
+    /// The Google Drive provider is the run's provider.
+    Gdrive,
+    /// The sandbox sits on a case-insensitive filesystem.
+    CaseInsensitiveFs,
+    /// The sandbox sits on a case-sensitive filesystem.
+    CaseSensitiveFs,
+    /// Throwaway disk images can be created and mounted (macOS `hdiutil`).
+    DiskImage,
+}
+
+impl Need {
+    pub fn label(self) -> &'static str {
+        match self {
+            Need::NativeWatcher => "native-watcher",
+            Need::Unix => "unix",
+            Need::Fifo => "fifo",
+            Need::PosixMode => "posix-mode",
+            Need::Xattr => "xattr",
+            Need::Launchd => "launchd",
+            Need::Full => "full",
+            Need::Filesystem => "filesystem-provider",
+            Need::Gdrive => "gdrive-provider",
+            Need::CaseInsensitiveFs => "case-insensitive-fs",
+            Need::CaseSensitiveFs => "case-sensitive-fs",
+            Need::DiskImage => "disk-image",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Provider {
+    Filesystem,
+    Gdrive,
+}
+
+impl Provider {
+    pub fn label(self) -> &'static str {
+        match self {
+            Provider::Filesystem => "filesystem",
+            Provider::Gdrive => "gdrive",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Host {
+    pub os: &'static str,
+    pub arch: &'static str,
+    pub native_watcher: bool,
+    pub unix: bool,
+    pub fifo: bool,
+    pub posix_mode: bool,
+    pub xattr: bool,
+    pub launchd: bool,
+    pub launchd_blocker: Option<String>,
+    pub case_insensitive_fs: bool,
+    pub disk_image: bool,
+    pub full: bool,
+    pub provider: Provider,
+}
+
+impl Host {
+    /// Probes the host against `sandbox_root` (capabilities of the
+    /// filesystem the sandbox lives on) with the run's flags.
+    pub fn detect(sandbox_root: &Path, full: bool, provider: Provider) -> Self {
+        let unix = cfg!(unix);
+        let (launchd, launchd_blocker) = detect_launchd(full);
+        Self {
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            // The native watcher ships on macOS only; Linux and Windows
+            // stubs refuse to start until their implementations land.
+            native_watcher: cfg!(target_os = "macos"),
+            unix,
+            fifo: unix && probe_fifo(sandbox_root),
+            posix_mode: unix && probe_posix_mode(sandbox_root),
+            xattr: probe_xattr(sandbox_root),
+            launchd,
+            launchd_blocker,
+            case_insensitive_fs: probe_case_insensitive(sandbox_root),
+            disk_image: crate::diskimage::DiskImage::available(),
+            full,
+            provider,
+        }
+    }
+
+    /// `Err(reason)` when the host cannot meet `need`.
+    pub fn check(&self, need: Need) -> Result<(), String> {
+        let ok = match need {
+            Need::NativeWatcher => self.native_watcher,
+            Need::Unix => self.unix,
+            Need::Fifo => self.fifo,
+            Need::PosixMode => self.posix_mode,
+            Need::Xattr => self.xattr,
+            Need::Launchd => self.launchd,
+            Need::Full => self.full,
+            Need::Filesystem => self.provider == Provider::Filesystem,
+            Need::Gdrive => self.provider == Provider::Gdrive,
+            Need::CaseInsensitiveFs => self.case_insensitive_fs,
+            Need::CaseSensitiveFs => !self.case_insensitive_fs,
+            Need::DiskImage => self.disk_image,
+        };
+        if ok {
+            Ok(())
+        } else {
+            let detail = match need {
+                Need::Launchd => self
+                    .launchd_blocker
+                    .clone()
+                    .unwrap_or_else(|| "launchd unavailable".to_string()),
+                Need::Full => "run with --full to include it".to_string(),
+                Need::NativeWatcher => format!("no native fs-watch on {}", self.os),
+                _ => format!("host lacks {}", need.label()),
+            };
+            Err(format!("needs {}: {detail}", need.label()))
+        }
+    }
+}
+
+fn probe_fifo(root: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        let path = root.join(".probe.fifo");
+        let _ = fs::remove_file(&path);
+        let ok = Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        let _ = fs::remove_file(&path);
+        ok
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        false
+    }
+}
+
+fn probe_posix_mode(root: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = root.join(".probe.mode");
+        if fs::write(&path, b"x").is_err() {
+            return false;
+        }
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o755));
+        let mode = fs::metadata(&path)
+            .map(|metadata| metadata.permissions().mode() & 0o777)
+            .unwrap_or(0);
+        let _ = fs::remove_file(&path);
+        mode == 0o755
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        false
+    }
+}
+
+fn probe_xattr(root: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let path = root.join(".probe.xattr");
+        if fs::write(&path, b"x").is_err() {
+            return false;
+        }
+        let ok = Command::new("xattr")
+            .args(["-w", "sh.arn.vapor.probe", "1"])
+            .arg(&path)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        let _ = fs::remove_file(&path);
+        ok
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = root;
+        false
+    }
+}
+
+fn probe_case_insensitive(root: &Path) -> bool {
+    let lower = root.join(".probe-case");
+    let upper = root.join(".PROBE-CASE");
+    let _ = fs::remove_file(&lower);
+    let _ = fs::remove_file(&upper);
+    if fs::write(&lower, b"x").is_err() {
+        return false;
+    }
+    let insensitive = upper.exists();
+    let _ = fs::remove_file(&lower);
+    let _ = fs::remove_file(&upper);
+    insensitive
+}
+
+fn detect_launchd(full: bool) -> (bool, Option<String>) {
+    if !full {
+        return (false, Some("run with --full to include it".to_string()));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let plist = launch_agent_plist_path();
+        if plist.exists() {
+            return (
+                false,
+                Some(format!(
+                    "{} already exists (a real Vapor install?); the round-trip would uninstall it",
+                    plist.display()
+                )),
+            );
+        }
+        let domain = launchd_domain_target();
+        let available = Command::new("launchctl")
+            .args(["print", &domain])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !available {
+            return (
+                false,
+                Some(format!(
+                    "launchctl domain {domain} is unavailable in this session"
+                )),
+            );
+        }
+        (true, None)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        (false, Some("service round-trip is macOS-only".to_string()))
+    }
+}
+
+/// `~/Library/LaunchAgents/sh.arn.vapor.daemon.plist`.
+pub fn launch_agent_plist_path() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    home.join("Library").join("LaunchAgents").join(format!(
+        "{}.plist",
+        vapor_shared::constants::service::DAEMON_LABEL
+    ))
+}
+
+/// `gui/<uid>`.
+pub fn launchd_domain_target() -> String {
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        format!("gui/{uid}")
+    }
+    #[cfg(not(unix))]
+    {
+        "gui/0".to_string()
+    }
+}
