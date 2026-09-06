@@ -577,6 +577,7 @@ fn run_transfer(
     mut session: Box<dyn TransferSession>,
     direction: TransferDirection,
 ) -> ProviderJobOutcome {
+    let mut zero_progress_steps: u32 = 0;
     loop {
         if gates.generation.load(Ordering::SeqCst) != generation {
             session.abort();
@@ -605,6 +606,22 @@ fn run_transfer(
                 // grant (chunk alignment / short final chunk), and keeping
                 // it would undershoot the configured rate.
                 refund(context, grant.saturating_sub(bytes_transferred));
+                if bytes_transferred == 0 {
+                    zero_progress_steps += 1;
+                    if zero_progress_steps
+                        >= vapor_shared::constants::engine::MAX_ZERO_PROGRESS_TRANSFER_STEPS
+                    {
+                        session.abort();
+                        return ProviderJobOutcome::TransferFailed {
+                            error: ProviderError::transient(format!(
+                                "transfer made no progress for {zero_progress_steps} consecutive steps"
+                            )),
+                            phase: TransferPhase::Step,
+                        };
+                    }
+                } else {
+                    zero_progress_steps = 0;
+                }
             }
             Ok(TransferStep::Completed(outcome)) => {
                 return ProviderJobOutcome::TransferCompleted(outcome);
@@ -696,14 +713,6 @@ mod tests {
         fn delete(&self, _path: &RemotePath, _op_id: &str) -> Result<(), ProviderError> {
             self.delete_calls.fetch_add(1, Ordering::SeqCst);
             assert!(!self.panic_on_delete, "simulated provider bug");
-            Ok(())
-        }
-        fn rename(
-            &self,
-            _from: &RemotePath,
-            _to: &RemotePath,
-            _op_id: &str,
-        ) -> Result<(), ProviderError> {
             Ok(())
         }
         fn poll_changes(
@@ -826,6 +835,36 @@ mod tests {
             ProviderJobOutcome::RemoteDelete(Ok(()))
         ));
         assert_eq!(provider.delete_calls.load(Ordering::SeqCst), 1);
+    }
+
+    struct StalledSession;
+
+    impl TransferSession for StalledSession {
+        fn step(&mut self, _max_bytes: u64) -> Result<TransferStep, ProviderError> {
+            Ok(TransferStep::Progressed {
+                bytes_transferred: 0,
+            })
+        }
+        fn abort(&mut self) {}
+    }
+
+    #[test]
+    fn a_session_that_never_moves_a_byte_fails_instead_of_spinning() {
+        let provider: Arc<dyn Provider> = Arc::new(StubProvider::new());
+        let gates = TransferGates::new();
+        let outcome = run_transfer(
+            &context(provider),
+            &gates,
+            gates.generation.load(Ordering::SeqCst),
+            Box::new(StalledSession),
+            TransferDirection::Download,
+        );
+        assert!(matches!(
+            outcome,
+            ProviderJobOutcome::TransferFailed { error, phase: TransferPhase::Step }
+                if error.kind == vapor_shared::ProviderErrorKind::Transient
+                    && error.message.contains("no progress")
+        ));
     }
 
     #[test]

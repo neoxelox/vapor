@@ -299,7 +299,18 @@ fi
 [[ "$("$VAPOR_BIN" config get localSyncDirectory)" == "$LOCAL_ROOT" ]] \
   || fail "S1: config get did not round-trip localSyncDirectory"
 [[ -f "$VAPOR_DIR/vapor.json" ]] || fail "S1: vapor.json was not written under VAPOR_DIR"
-log "PASS S1 — config set/get round-trips through vapor.json"
+# Structured keys are stored as JSON (a string containing JSON would make
+# the daemon ignore the group), and unset keys read back as their default.
+"$VAPOR_BIN" config set safeguards '{"massDeleteThreshold": 500}' >/dev/null \
+  || fail "S1: config set rejected a JSON object for safeguards"
+grep -q '"massDeleteThreshold": 500' "$VAPOR_DIR/vapor.json" \
+  || fail "S1: safeguards was not stored as a JSON object"
+[[ "$("$VAPOR_BIN" config get syncMode)" == "two-way" ]] \
+  || fail "S1: config get did not render the default for an unset key"
+if "$VAPOR_BIN" config set resourceLimits 'cpu=5' >/dev/null 2>&1; then
+  fail "S1: config set accepted a non-JSON value for resourceLimits"
+fi
+log "PASS S1 — config set/get round-trips through vapor.json; structured keys are JSON"
 
 if [[ "$MODE" == "sandbox" ]]; then
   start_daemon

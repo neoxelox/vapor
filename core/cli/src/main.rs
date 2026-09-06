@@ -58,12 +58,11 @@ enum Command {
     /// Manage the platform-native service installation.
     Service {
         /// Install / drive the per-user service definition (default).
-        /// `--system` is reserved for a future system-wide install
-        /// flow; today it is rejected with an actionable error so
-        /// scripts that want to opt in to the future surface fail
-        /// loudly rather than silently treating the flag as unknown.
         #[arg(long, conflicts_with = "system")]
         user: bool,
+        /// Reserved for a future system-wide install flow; rejected
+        /// today with an actionable error so scripts that opt in early
+        /// fail loudly instead of being treated as unknown.
         #[arg(long, conflicts_with = "user")]
         system: bool,
         #[command(subcommand)]
@@ -209,18 +208,24 @@ enum ServiceAction {
         #[arg(long)]
         keep_running: bool,
     },
+    /// Start the installed daemon through the service manager.
     Start {
         #[arg(long)]
         json: bool,
     },
+    /// Stop the daemon; the service definition stays installed.
     Stop {
         #[arg(long)]
         json: bool,
     },
+    /// Stop and start the daemon, which is how a changed `vapor.json`
+    /// takes effect.
     Restart {
         #[arg(long)]
         json: bool,
     },
+    /// Report whether the service is installed, running, or paused by
+    /// the crash-loop guard.
     Status {
         #[arg(long)]
         json: bool,

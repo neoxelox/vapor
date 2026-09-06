@@ -305,7 +305,7 @@ impl MultiProfileRuntime {
                         ("reason", reason.clone()),
                     ],
                 );
-                (vapor_providers::default_provider(), Some(reason))
+                (vapor_providers::inert_stub_provider(), Some(reason))
             } else {
                 match vapor_providers::select_provider_for_profile(
                     &profile.provider_kind,
@@ -324,7 +324,7 @@ impl MultiProfileRuntime {
                                 ("reason", reason.clone()),
                             ],
                         );
-                        (vapor_providers::default_provider(), Some(reason))
+                        (vapor_providers::inert_stub_provider(), Some(reason))
                     }
                 }
             };
@@ -1425,14 +1425,6 @@ mod tests {
             _op_id: &str,
         ) -> Result<(), vapor_providers::ProviderError> {
             panic!("provider bug: delete exploded")
-        }
-        fn rename(
-            &self,
-            _from: &vapor_providers::RemotePath,
-            _to: &vapor_providers::RemotePath,
-            _op_id: &str,
-        ) -> Result<(), vapor_providers::ProviderError> {
-            panic!("provider bug: rename exploded")
         }
         fn poll_changes(
             &self,

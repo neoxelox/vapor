@@ -20,14 +20,15 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::constants;
 
 /// Fully-resolved configuration with every field defaulted. Field names
 /// follow Rust conventions; the on-disk keys are the camelCase names in
 /// [`constants::config`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VaporConfig {
     pub auto_launch: bool,
     pub use_git_ignore: bool,
@@ -70,7 +71,7 @@ pub struct VaporConfig {
 }
 
 /// The `resourceLimits` config group.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceLimitsConfig {
     #[serde(default = "default_cpu_percent")]
@@ -111,7 +112,7 @@ impl Default for ResourceLimitsConfig {
 /// The `safeguards` config group. Values are clamped to their floors at
 /// daemon resolve time (`core/daemon/src/safeguards.rs`), not at load,
 /// so non-daemon consumers see the raw values.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SafeguardsConfig {
     #[serde(default = "default_mass_delete_enabled")]
@@ -143,7 +144,7 @@ impl Default for SafeguardsConfig {
 }
 
 /// The `idleBoost` config group.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdleBoostConfig {
     #[serde(default = "default_boost_enabled")]
@@ -204,11 +205,41 @@ impl Default for IdleBoostConfig {
     }
 }
 
+/// Per-profile `resourceLimits`. Every field is optional so a profile
+/// tightens only what it names; the daemon MIN-lowers each named value
+/// against the top-level group.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ResourceLimitsOverride {
+    pub cpu_percent: Option<u8>,
+    pub memory_percent: Option<u8>,
+    pub bandwidth_percent: Option<u8>,
+    pub max_concurrent_transfers: Option<u8>,
+}
+
+/// Per-profile `idleBoost`. Every field is optional; the daemon merges
+/// each named value in the direction that makes boost more cautious:
+/// `enabled: false` wins daemon-wide, `boost*Percent`, `headroomCpuPercent`
+/// and `rampDownSeconds` are MIN-lowered, `minIdleSeconds` and
+/// `rampUpSeconds` are MAX-raised.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct IdleBoostOverride {
+    pub enabled: Option<bool>,
+    pub min_idle_seconds: Option<u64>,
+    pub boost_cpu_percent: Option<u8>,
+    pub boost_memory_percent: Option<u8>,
+    pub boost_bandwidth_percent: Option<u8>,
+    pub headroom_cpu_percent: Option<u8>,
+    pub ramp_up_seconds: Option<u64>,
+    pub ramp_down_seconds: Option<u64>,
+}
+
 /// One entry of the `profiles` array. Every field except `id` is
-/// optional on the wire; unset fields inherit the top-level defaults
-/// (categorical override semantics — a profile value wins
-/// outright, no merging).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+/// optional on the wire; unset fields inherit the top-level values. The
+/// scalar fields override outright; the two resource groups merge per
+/// field as their types describe.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfileConfig {
     #[serde(default)]
@@ -225,14 +256,14 @@ pub struct ProfileConfig {
     pub sync_mode: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
-    /// Optional per-profile ceilings; resolved by MIN-lowering against
-    /// the top-level group — a profile can only tighten.
+    /// Optional per-profile ceilings; each named value is MIN-lowered
+    /// against the top-level group, so a profile can only tighten.
     #[serde(default)]
-    pub resource_limits: Option<ResourceLimitsConfig>,
-    /// Optional per-profile idle-boost override. Any enabled profile
-    /// with `enabled = false` disables boost daemon-wide.
+    pub resource_limits: Option<ResourceLimitsOverride>,
+    /// Optional per-profile idle-boost override; see
+    /// [`IdleBoostOverride`] for the merge direction of each field.
     #[serde(default)]
-    pub idle_boost: Option<IdleBoostConfig>,
+    pub idle_boost: Option<IdleBoostOverride>,
 }
 
 impl Default for VaporConfig {

@@ -63,11 +63,29 @@ impl EffectiveBudgetConfig {
             if !profile.enabled.unwrap_or(true) {
                 continue;
             }
+            // Only the values a profile names take part: a profile that
+            // sets one ceiling must not drag the others down to defaults.
             if let Some(profile_limits) = &profile.resource_limits {
-                let clamped = clamp_limits(profile_limits, &profile.id);
-                limits.cpu_percent = limits.cpu_percent.min(clamped.cpu_percent);
-                limits.memory_percent = limits.memory_percent.min(clamped.memory_percent);
-                limits.bandwidth_percent = limits.bandwidth_percent.min(clamped.bandwidth_percent);
+                if let Some(cpu) = profile_limits.cpu_percent {
+                    limits.cpu_percent =
+                        limits
+                            .cpu_percent
+                            .min(clamp_percent(cpu, "cpuPercent", &profile.id));
+                }
+                if let Some(memory) = profile_limits.memory_percent {
+                    limits.memory_percent = limits.memory_percent.min(clamp_percent(
+                        memory,
+                        "memoryPercent",
+                        &profile.id,
+                    ));
+                }
+                if let Some(bandwidth) = profile_limits.bandwidth_percent {
+                    limits.bandwidth_percent = limits.bandwidth_percent.min(clamp_percent(
+                        bandwidth,
+                        "bandwidthPercent",
+                        &profile.id,
+                    ));
+                }
                 if let Some(profile_ceiling) =
                     clamp_transfer_ceiling(profile_limits.max_concurrent_transfers, &profile.id)
                 {
@@ -79,18 +97,34 @@ impl EffectiveBudgetConfig {
                     );
                 }
             }
+            // Each boost field merges toward caution: ceilings, headroom
+            // and the down-ramp can only shrink; the idle requirement and
+            // the up-ramp can only grow.
             if let Some(profile_boost) = &profile.idle_boost {
-                if !profile_boost.enabled {
+                if profile_boost.enabled == Some(false) {
                     boost_enabled = false;
                 }
-                boost.boost_cpu_percent =
-                    boost.boost_cpu_percent.min(profile_boost.boost_cpu_percent);
-                boost.boost_memory_percent = boost
-                    .boost_memory_percent
-                    .min(profile_boost.boost_memory_percent);
-                boost.boost_bandwidth_percent = boost
-                    .boost_bandwidth_percent
-                    .min(profile_boost.boost_bandwidth_percent);
+                if let Some(value) = profile_boost.boost_cpu_percent {
+                    boost.boost_cpu_percent = boost.boost_cpu_percent.min(value);
+                }
+                if let Some(value) = profile_boost.boost_memory_percent {
+                    boost.boost_memory_percent = boost.boost_memory_percent.min(value);
+                }
+                if let Some(value) = profile_boost.boost_bandwidth_percent {
+                    boost.boost_bandwidth_percent = boost.boost_bandwidth_percent.min(value);
+                }
+                if let Some(value) = profile_boost.headroom_cpu_percent {
+                    boost.headroom_cpu_percent = boost.headroom_cpu_percent.min(value);
+                }
+                if let Some(value) = profile_boost.min_idle_seconds {
+                    boost.min_idle_seconds = boost.min_idle_seconds.max(value);
+                }
+                if let Some(value) = profile_boost.ramp_up_seconds {
+                    boost.ramp_up_seconds = boost.ramp_up_seconds.max(value);
+                }
+                if let Some(value) = profile_boost.ramp_down_seconds {
+                    boost.ramp_down_seconds = boost.ramp_down_seconds.min(value);
+                }
             }
         }
 
@@ -151,6 +185,25 @@ fn clamp_transfer_ceiling(configured: Option<u8>, source: &str) -> Option<usize>
         );
     }
     Some(clamped)
+}
+
+fn clamp_percent(value: u8, key: &str, origin: &str) -> u8 {
+    let clamped = value.clamp(
+        constants::resource_limits::MIN_PERCENT,
+        constants::resource_limits::MAX_PERCENT,
+    );
+    if clamped != value {
+        logging::warning(
+            "resourceLimits value out of range; clamped",
+            &[
+                ("origin", origin.to_string()),
+                ("key", key.to_string()),
+                ("configured", value.to_string()),
+                ("effective", clamped.to_string()),
+            ],
+        );
+    }
+    clamped
 }
 
 fn clamp_limits(limits: &ResourceLimitsConfig, origin: &str) -> ResourceLimitsConfig {
@@ -518,19 +571,19 @@ mod tests {
         config.profiles = vec![
             ProfileConfig {
                 id: "tight".to_string(),
-                resource_limits: Some(vapor_shared::config::ResourceLimitsConfig {
-                    cpu_percent: 5,
-                    memory_percent: 50,
-                    bandwidth_percent: 10,
+                resource_limits: Some(vapor_shared::config::ResourceLimitsOverride {
+                    cpu_percent: Some(5),
+                    memory_percent: Some(50),
+                    bandwidth_percent: Some(10),
                     max_concurrent_transfers: None,
                 }),
                 ..ProfileConfig::default()
             },
             ProfileConfig {
                 id: "no-boost".to_string(),
-                idle_boost: Some(vapor_shared::config::IdleBoostConfig {
-                    enabled: false,
-                    ..vapor_shared::config::IdleBoostConfig::default()
+                idle_boost: Some(vapor_shared::config::IdleBoostOverride {
+                    enabled: Some(false),
+                    ..vapor_shared::config::IdleBoostOverride::default()
                 }),
                 ..ProfileConfig::default()
             },
@@ -548,16 +601,58 @@ mod tests {
         config.profiles = vec![ProfileConfig {
             id: "disabled".to_string(),
             enabled: Some(false),
-            resource_limits: Some(vapor_shared::config::ResourceLimitsConfig {
-                cpu_percent: 1,
-                memory_percent: 1,
-                bandwidth_percent: 1,
+            resource_limits: Some(vapor_shared::config::ResourceLimitsOverride {
+                cpu_percent: Some(1),
+                memory_percent: Some(1),
+                bandwidth_percent: Some(1),
                 max_concurrent_transfers: None,
             }),
             ..ProfileConfig::default()
         }];
         let resolved = EffectiveBudgetConfig::resolve(&config);
         assert_eq!(resolved.cpu_percent, 15);
+    }
+
+    #[test]
+    fn partial_profile_overrides_touch_only_the_fields_they_name() {
+        // A raised top-level memory ceiling must survive a profile that
+        // only tightens CPU, and every idle-boost field merges toward
+        // caution in its own direction.
+        let mut config = VaporConfig::default();
+        config.resource_limits.memory_percent = 40;
+        config.idle_boost.headroom_cpu_percent = 50;
+        config.idle_boost.min_idle_seconds = 120;
+        config.idle_boost.ramp_up_seconds = 30;
+        config.idle_boost.ramp_down_seconds = 10;
+        config.profiles = vec![ProfileConfig {
+            id: "partial".to_string(),
+            resource_limits: Some(vapor_shared::config::ResourceLimitsOverride {
+                cpu_percent: Some(5),
+                ..Default::default()
+            }),
+            idle_boost: Some(vapor_shared::config::IdleBoostOverride {
+                headroom_cpu_percent: Some(20),
+                min_idle_seconds: Some(600),
+                ramp_up_seconds: Some(60),
+                ramp_down_seconds: Some(5),
+                ..Default::default()
+            }),
+            ..ProfileConfig::default()
+        }];
+        let resolved = EffectiveBudgetConfig::resolve(&config);
+        assert_eq!(resolved.cpu_percent, 5);
+        assert_eq!(
+            resolved.memory_percent, 40,
+            "unnamed field keeps the top-level value"
+        );
+        assert!(
+            resolved.boost_enabled,
+            "an unnamed `enabled` does not disable boost"
+        );
+        assert_eq!(resolved.headroom_cpu_percent, 20);
+        assert_eq!(resolved.min_idle, Duration::from_secs(600));
+        assert_eq!(resolved.ramp_up, Duration::from_secs(60));
+        assert_eq!(resolved.ramp_down, Duration::from_secs(5));
     }
 
     #[test]

@@ -7,9 +7,8 @@
 //! - the real [`FilesystemProvider`] (the reference implementation),
 //! - the same provider on a filesystem WITHOUT xattr support (the
 //!   side-file constraint mode of FAT/network mounts),
-//! - an in-memory mock with object-store-style constraints (no
-//!   server-side rename, no op-id tags, no changes feed — the
-//!   S3/R2-shaped capability profile).
+//! - an in-memory mock with object-store-style constraints (no op-id
+//!   tags, no changes feed — the S3/R2-shaped capability profile).
 //!
 //! Capability honesty is the core rule: a provider must implement what
 //! it advertises and error loudly on what it does not — never silently
@@ -238,51 +237,6 @@ fn contract_write_preconditions_are_honored_when_advertised() {
 }
 
 #[test]
-fn contract_rename_is_real_or_absent_never_silent() {
-    for under_test in providers_under_test() {
-        let provider = under_test.provider.as_ref();
-        let scratch = tempfile::TempDir::new().expect("scratch");
-        let name = under_test.name;
-
-        upload(
-            provider,
-            scratch.path(),
-            "from.txt",
-            b"movable",
-            RemotePrecondition::None,
-        )
-        .unwrap_or_else(|error| panic!("{name}: upload failed: {error}"));
-
-        let result = provider.rename(
-            &RemotePath::new("from.txt").expect("path"),
-            &RemotePath::new("to.txt").expect("path"),
-            "op-rename",
-        );
-        if provider.capabilities().supports_server_side_rename {
-            result.unwrap_or_else(|error| panic!("{name}: rename failed: {error}"));
-            assert!(
-                provider
-                    .stat(&RemotePath::new("to.txt").expect("path"))
-                    .expect("stat")
-                    .is_some(),
-                "{name}: renamed object must exist at the destination"
-            );
-            assert!(
-                provider
-                    .stat(&RemotePath::new("from.txt").expect("path"))
-                    .expect("stat")
-                    .is_none(),
-                "{name}: renamed object must vanish from the source"
-            );
-        } else {
-            // Capability honesty: unadvertised rename must error, not
-            // silently succeed or silently no-op.
-            assert!(result.is_err(), "{name}: unadvertised rename must error");
-        }
-    }
-}
-
-#[test]
 fn contract_changes_feed_reports_new_writes_or_is_unadvertised() {
     for under_test in providers_under_test() {
         let provider = under_test.provider.as_ref();
@@ -378,7 +332,6 @@ impl Provider for MockObjectStoreProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             supports_remote_changes_feed: false,
-            supports_server_side_rename: false,
             supports_write_preconditions: true,
             supports_op_id_tags: false,
             supports_content_hashes_in_metadata: true,
@@ -509,17 +462,6 @@ impl Provider for MockObjectStoreProvider {
             return Err(ProviderError::not_found(format!("no object at {path}")));
         }
         Ok(())
-    }
-
-    fn rename(
-        &self,
-        _from: &RemotePath,
-        _to: &RemotePath,
-        _op_id: &str,
-    ) -> Result<(), ProviderError> {
-        Err(ProviderError::permanent(
-            "object stores have no server-side rename",
-        ))
     }
 
     fn poll_changes(

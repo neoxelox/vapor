@@ -2209,7 +2209,7 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::time::Instant;
     use tempfile::TempDir;
-    use vapor_providers::default_provider;
+    use vapor_providers::inert_stub_provider;
 
     #[test]
     fn start_queues_whole_scope_reconcile_for_restart_reconstruction() {
@@ -2219,9 +2219,12 @@ mod tests {
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
 
-        let runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
-                .expect("runtime");
+        let runtime = DaemonRuntime::start(
+            test_sync_scope(&watch_root),
+            state_db,
+            inert_stub_provider(),
+        )
+        .expect("runtime");
 
         assert_eq!(
             runtime.has_live_watcher(),
@@ -2243,9 +2246,12 @@ mod tests {
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
 
-        let runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
-                .expect("runtime starts on every host");
+        let runtime = DaemonRuntime::start(
+            test_sync_scope(&watch_root),
+            state_db,
+            inert_stub_provider(),
+        )
+        .expect("runtime starts on every host");
 
         let snapshot = runtime.app().snapshot();
         if native_watcher_available() {
@@ -2275,7 +2281,7 @@ mod tests {
                 sync_mode: vapor_shared::SyncMode::TwoWay,
             },
             state_db,
-            default_provider(),
+            inert_stub_provider(),
         )
         .expect("runtime");
 
@@ -2297,7 +2303,7 @@ mod tests {
         let runtime = DaemonRuntime::start(
             test_sync_scope(&symlink_watch_root),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
         )
         .expect("runtime");
 
@@ -2334,9 +2340,12 @@ mod tests {
             )
             .expect("enqueue existing upload intent");
 
-        let runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
-                .expect("runtime");
+        let runtime = DaemonRuntime::start(
+            test_sync_scope(&watch_root),
+            state_db,
+            inert_stub_provider(),
+        )
+        .expect("runtime");
 
         assert_eq!(runtime.state_db().queue_depth().expect("queue depth"), 2);
         assert_eq!(
@@ -2361,9 +2370,12 @@ mod tests {
             )
             .expect("enqueue existing upload intent");
 
-        let mut runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
-                .expect("runtime");
+        let mut runtime = DaemonRuntime::start(
+            test_sync_scope(&watch_root),
+            state_db,
+            inert_stub_provider(),
+        )
+        .expect("runtime");
 
         let first_tick = runtime
             .tick_with_inputs(timestamp_ms(1_000), ThrottleInputs::default())
@@ -2492,7 +2504,7 @@ mod tests {
             test_sync_scope(&watch_root),
             EventPathFilterOptions::default(),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
             Arc::new(StaticMetricsSampler::default()),
             system_clock(),
             false,
@@ -2528,7 +2540,7 @@ mod tests {
             test_sync_scope(&watch_root),
             EventPathFilterOptions::default(),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
             Arc::new(StaticMetricsSampler::default()),
             system_clock(),
             false,
@@ -2586,7 +2598,7 @@ mod tests {
             test_sync_scope(&watch_root),
             EventPathFilterOptions::default(),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
             Arc::new(StaticMetricsSampler::default()),
             clock.clone(),
             false,
@@ -3918,7 +3930,7 @@ mod tests {
             test_sync_scope(&watch_root),
             EventPathFilterOptions::default(),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
             Arc::new(StaticMetricsSampler::default()),
             clock.clone(),
             false,
@@ -4100,7 +4112,7 @@ mod tests {
         let mut runtime = DaemonRuntime::start_with_sampler(
             test_sync_scope(&watch_root),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
             sampler,
         )
         .expect("runtime");
@@ -4127,9 +4139,12 @@ mod tests {
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
 
-        let mut runtime =
-            DaemonRuntime::start(test_sync_scope(&watch_root), state_db, default_provider())
-                .expect("runtime");
+        let mut runtime = DaemonRuntime::start(
+            test_sync_scope(&watch_root),
+            state_db,
+            inert_stub_provider(),
+        )
+        .expect("runtime");
         runtime.tick(SystemTime::now()).expect("runtime tick");
 
         let decision = runtime
@@ -4159,7 +4174,7 @@ mod tests {
             test_sync_scope(&watch_root),
             EventPathFilterOptions::default(),
             state_db,
-            default_provider(),
+            inert_stub_provider(),
             Arc::new(StaticMetricsSampler::default()),
             system_clock(),
             false,

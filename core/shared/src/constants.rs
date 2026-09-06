@@ -492,6 +492,10 @@ pub mod engine {
     /// Accepted values of `VAPOR_THROTTLE_INPUTS`.
     pub const THROTTLE_INPUTS_HOST: &str = "host";
     pub const THROTTLE_INPUTS_STATIC: &str = "static";
+    /// A transfer session that reports progress without moving a byte
+    /// this many times in a row is failed as transient, so a misbehaving
+    /// endpoint cannot spin a worker at full speed forever.
+    pub const MAX_ZERO_PROGRESS_TRANSFER_STEPS: u32 = 8;
     pub const STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS: u64 = 60_000;
     pub const LEASE_TIMEOUT_MILLIS: u64 = 15 * 60 * 1_000;
     pub const LIGHT_SYSTEM_CPU_PERCENT: u8 = 35;

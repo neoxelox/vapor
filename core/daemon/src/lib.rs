@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use vapor_providers::{Provider, default_provider};
+use vapor_providers::{Provider, inert_stub_provider};
 use vapor_shared::{RunState, StatusSnapshot, ThrottleState};
 
 use crate::clock::{SharedClock, SystemClock};
@@ -83,7 +83,7 @@ pub struct DaemonApp {
 
 impl Default for DaemonApp {
     fn default() -> Self {
-        Self::new(default_provider())
+        Self::new(inert_stub_provider())
     }
 }
 

@@ -782,6 +782,16 @@ impl Provider for GoogleDriveProvider {
                     continue;
                 }
                 let Ok(child) = directory.join(&file.name) else {
+                    // A Drive name may contain `/`, which the sync path
+                    // model cannot represent; say so, or the file would
+                    // simply never sync with no trace of why.
+                    logging::warning(
+                        "Skipping a Drive entry whose name cannot be a sync path",
+                        &[
+                            ("directory", directory.as_str().to_string()),
+                            ("name", file.name.clone()),
+                        ],
+                    );
                     continue;
                 };
                 entries.push(self.entry_from_file(&child, &file));
@@ -930,33 +940,6 @@ impl Provider for GoogleDriveProvider {
             Some(serde_json::json!({ "trashed": true })),
         )?;
         self.evict_path(path.as_str());
-        Ok(())
-    }
-
-    fn rename(&self, from: &RemotePath, to: &RemotePath, op_id: &str) -> Result<(), ProviderError> {
-        let file = self.resolve(from)?.ok_or_else(|| {
-            ProviderError::not_found(format!("rename source {from} does not exist"))
-        })?;
-        let new_parent = self.ensure_parent_id(to)?;
-        let old_parent = file.parents.first().cloned().unwrap_or_default();
-        let mut url = format!("{API_BASE}/files/{}?fields=id", file.id);
-        if new_parent != old_parent {
-            url.push_str(&format!(
-                "&addParents={}&removeParents={}",
-                oauth::url_encode(&new_parent),
-                oauth::url_encode(&old_parent)
-            ));
-        }
-        let _: GdFile = self.api_json(
-            "PATCH",
-            url,
-            Some(serde_json::json!({
-                "name": to.file_name().unwrap_or_default(),
-                "appProperties": { OP_ID_PROPERTY: op_id },
-            })),
-        )?;
-        self.evict_path(from.as_str());
-        self.cache_mapping(to.as_str(), &file.id);
         Ok(())
     }
 
@@ -1456,6 +1439,15 @@ impl TransferSession for GdriveDownloadSession {
         )?;
         if response.status >= 300 {
             return Err(classify_api_failure(&response));
+        }
+        if response.body.is_empty() {
+            // The range asked for at least one byte; an empty success
+            // body would report zero progress forever instead of failing
+            // the transfer into retry backoff.
+            return Err(ProviderError::transient(format!(
+                "download range {}-{end} returned an empty body",
+                self.received_bytes
+            )));
         }
         use std::io::Write;
         let destination = self
