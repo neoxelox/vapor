@@ -1,7 +1,7 @@
 ---
 name: vapor-e2e
 description: Runs Vapor's Tier E2E verification — the real `vapor` and `vapord` binaries, black-box through the CLI, inside a disposable sandbox under the repo-local `.vapor/e2e/` — as either the scripted regression suite or a manual sandbox with a live daemon. Use after a feature or fix that changes daemon- or CLI-observable behaviour, once `./scripts/test.sh` passes and before committing; or to watch a new feature work, or reproduce a bug, in the real product. Not needed for doc-only, UI-only, or test-only changes. macOS only.
-license: MIT
+license: GPL-3.0-only
 ---
 
 ## What I do
@@ -11,8 +11,10 @@ binaries, black-box, driven only through the CLI, inside a disposable
 sandbox under the repo-local `.vapor/e2e/` directory. Two modes:
 
 1. **Scenario suite** (`./scripts/e2e.sh`) — the scripted regression
-   pass: startup, config, ingest→converge, pause/resume, singleton
-   lock, doctor, restart recovery, log hygiene.
+   pass. The scenario list (S1 onwards, plus the `--full`-only R
+   scenarios) lives in the script's header comment and the `log "PASS
+   Sn"` lines; that file is the source of truth, this skill does not
+   repeat it.
 2. **Manual sandbox** (`./scripts/e2e.sh --sandbox`) — a provisioned,
    running daemon I can poke at interactively to exercise a new
    feature or reproduce a bug.
@@ -44,6 +46,13 @@ Full process doc: `docs/development/e2e-verification.md`. Policy:
 - Residue is removed by `rm -rf` of the run directory or
   `./scripts/clean.sh`. Stop any daemon you started (`kill -TERM
   <pid>`) before finishing.
+- Never pass `--full` on a developer machine: it appends the service
+  round-trip against real `launchd` and refuses when a
+  `sh.arn.vapor.daemon` LaunchAgent already exists. CI runs it.
+- The harness exports `VAPOR_THROTTLE_INPUTS=static` for every daemon it
+  starts, so a developer typing at the keyboard does not hold the
+  daemon at `Throttled` (reconcile only runs in `IdleDrain`). Unset it
+  in a manual sandbox when the point is to watch the real throttle.
 
 ## Mode 1 — scenario suite
 
@@ -91,7 +100,9 @@ Finish by stopping the daemon (`kill -TERM <pid>`, verify with
 
 1. **Feature coverage.** If your change added e2e-observable behavior
    (new CLI command, new daemon state, new convergence path), add or
-   extend a scenario in `scripts/e2e.sh` in the same change set.
+   extend a scenario in `scripts/e2e.sh` in the same change set, with
+   the next free `Sn` number and a one-line `PASS` message that states
+   the invariant it proves.
    Discipline rules (bounded `wait_until` polls, product-surface
    observation only, ~60 s budget, agent-friendly failures) are in
    `docs/development/e2e-verification.md`.

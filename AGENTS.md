@@ -1,6 +1,23 @@
 # AGENTS.md
 
-This file defines the operating rules for contributors (human and AI) working on `vapor`.
+Operating rules for contributors, human and AI, working on `vapor`. This
+file holds the durable rules: what the product is, where the boundaries
+are, which invariants never move, and what "done" means. Step-by-step
+procedures live in skills under `.agents/skills/` (index in §13); each
+section below that used to spell out a procedure now points at its skill.
+
+## 0) Start here
+
+Reading order for a new session:
+
+1. §1 to §6 of this file: intent, boundaries, invariants.
+2. `docs/product/status-and-goals.md`, then `docs/architecture/README.md`
+   and `docs/architecture/data-flow.md` for how the runtime works.
+3. `docs/tasks/README.md` for what is next; the surface task file
+   (`docs/tasks/{core,macos,cli}.md`) for the item you are touching.
+4. The skill for the job (§13). `vapor-validate` before every commit;
+   `unslop` for every sentence you write.
+5. `docs/development/runbook.md` for the scripts and the local loop.
 
 ## 1) Product intent and non-negotiables
 
@@ -10,7 +27,7 @@ This file defines the operating rules for contributors (human and AI) working on
 - Primary priority is user device impact, not strict real-time sync.
 - Vapor sync scope is a user-selected local directory replicated bidirectionally with a user-selected cloud directory.
 - Vapor is not a full-device backup product and must never broaden scope beyond configured sync roots.
-- If configured sync roots are missing, Vapor should create the local root on-device and ensure the cloud root exists provider-side before regular sync work proceeds.
+- If configured sync roots are missing, Vapor creates the local root on-device and ensures the cloud root exists provider-side before regular sync work proceeds.
 - Core guarantees:
   - Never lose intent state.
   - Recover safely after crash/restart.
@@ -20,25 +37,26 @@ This file defines the operating rules for contributors (human and AI) working on
 
 ## 1.1) Project maturity and compatibility policy
 
-- Vapor is pre-GA and under heavy active development.
-- Backward compatibility is not guaranteed yet for local config/state/schema formats, app/daemon internal contracts, or developer-facing interfaces.
-- Prefer clear, simple implementations over temporary legacy/migration shims unless the project owner explicitly requests compatibility preservation.
+- Vapor is pre-GA and under heavy active development with no users yet.
+- Backward compatibility is not guaranteed for local config/state/schema formats, app/daemon internal contracts, or developer-facing interfaces.
+- Prefer clear, simple implementations over temporary legacy/migration shims unless the project owner explicitly requests compatibility preservation. Document a breaking change in `CHANGELOG.md` in the same change set.
 
 ## 2) System boundaries
 
 - Rust daemon (`core/daemon`)
   - Fs-watch ingest, debounce/coalescing, scheduler, throttle controller.
-  - Durable queue/state, retry/backoff, reconcile, provider execution.
+  - Durable queue/state, retry/backoff, reconcile, provider execution, live configuration reload.
 - Providers (`core/providers`)
   - Cloud API integration via provider trait/capabilities.
   - No provider-specific assumptions in core engine.
 - Shared contracts (`core/shared`)
-  - IPC schemas, error taxonomies, settings models, version contracts.
+  - Constants source of truth, configuration model, error taxonomies, runtime paths, logging.
 - IPC channel (`core/ipc`)
-  - Framed JSON-RPC transport between the daemon and every surface —
-    UDS on Unix today, named pipe on Windows when that surface ships.
-    Schemas live in `core/shared`; this crate owns framing and the
-    client/server plumbing.
+  - Length-prefixed frames carrying Vapor's own tagged JSON envelopes
+    (`{kind, payload}` requests, `{outcome, value}` responses; not
+    JSON-RPC) between the daemon and every surface. Unix domain socket
+    today; named pipe on Windows when that surface ships. Contract:
+    `docs/architecture/ipc-contracts.md`.
 - Platform layer (`core/platform`)
   - Traits + per-OS native implementations for fs-watch, service install,
     secret store, metrics sampling, idle detection, filesystem capabilities,
@@ -51,11 +69,10 @@ This file defines the operating rules for contributors (human and AI) working on
   - Headless-first binary that exposes the full runtime on every OS.
 - SwiftUI app (`apps/macos`)
   - UX, onboarding, settings, diagnostics, menubar state.
-  - Delegates autolaunch, crash-loop, and daemon control to
-    `core/lifecycle` by invoking the bundled `vapor` CLI
-    (`Contents/Helpers/vapor`) as a subprocess with `--json` output;
-    no lifecycle policy is implemented in Swift.
-  - Calls the macOS-native `SecretStore` implementation for Keychain access.
+  - Delegates autolaunch, crash-loop, daemon control, and live status to
+    `core/lifecycle` and the daemon by invoking the bundled `vapor` CLI
+    (`Contents/Helpers/vapor`) as a subprocess with `--json` output; no
+    lifecycle policy is implemented in Swift.
 - Future apps (`apps/windows`, `apps/linux`) consume the same `core/*`
   stack; no business logic in UI code.
 
@@ -89,18 +106,21 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 
 - The fs-watch callback (FSEvents on macOS, ReadDirectoryChangesW on Windows, inotify on Linux) may only normalize/filter/record event metadata.
 - No DB/hash/network work in callback.
+- No provider I/O on the tick thread: transfers, probes, deletes, the changes poll, reconcile directory listings, and the cloud-root retry all run on worker threads and are harvested by a later tick.
 - All expensive work must be throttle-state gated.
 - Throttle states: `IdleDrain`, `Light`, `Throttled`, `Suspended`.
 - Under `Suspended`, uploads/hashing stop; only lightweight intent coalescing continues.
 - Reconcile scans are deferred and interruptible; run only when policy permits.
+- Throttle inputs come from the host on macOS (CPU, power source, thermal state, Low Power Mode, memory, keyboard presence). Test harnesses pin neutral inputs with `VAPOR_THROTTLE_INPUTS=static`; never make that the production default.
 
 ## 4) Bidirectional sync safety requirements
 
 - Implement loop prevention (`self_write_cache`, operation IDs, TTL discipline).
 - Handle local/remote races deterministically.
 - Default conflict policy: keep both (never silent overwrite).
-- Maintain tombstones and deletion semantics with durable replay.
+- Maintain tombstones and deletion semantics with durable replay. When the evidence is ambiguous (an unreadable mtime, an unknown provenance), keeping data wins over honouring a deletion.
 - Remote poll/apply pipeline must obey throttle and retry constraints.
+- Equality checks in the reconcile walk are the rsync quick check (size plus the mtime the sync index recorded), never a whole-tree hash; the upload planner hashes and converges identical content silently.
 - Sync direction is selected by `syncMode` (`two-way` default; one-way
   `pull-only` / `push-only`), resolved per profile with the top-level value as
   the default. Vapor's "never lose data" / keep-both guarantee applies **only
@@ -109,7 +129,7 @@ Do not move heavy compute into an app process or the fs-watch callback path.
   to exactly match the declared source of truth, permanently overwriting
   divergent edits and removing extra content). They must never be enabled
   silently or inferred, and must surface an up-front data-loss warning before
-  activation. There is no recoverable quarantine — the warning is the
+  activation. There is no recoverable quarantine; the warning is the
   safeguard. Full design: `docs/architecture/sync-modes.md`.
 
 ## 5) Data durability and migrations
@@ -122,7 +142,7 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 
 ## 6) Security and privacy
 
-- Secrets/tokens only via `core/platform/secrets::SecretStore` — Keychain on macOS, Credential Manager on Windows, Secret Service on desktop Linux, age-encrypted file or external command shim on headless Linux. Tests use the in-memory fake.
+- Secrets/tokens only via `core/platform/secrets::SecretStore`: the login keychain on macOS (one generic-password item per secret under the `sh.arn.vapor` service, with an access list covering `vapor` and `vapord`), Credential Manager on Windows, Secret Service on desktop Linux, age-encrypted file or external command shim on headless Linux. Tests use the in-memory fake; the fake and the native store run the same contract test.
 - Logs must redact secrets, tokens, auth headers, and sensitive identifiers.
 - Telemetry is local-only unless explicitly designed otherwise.
 - Any permissioned feature must degrade safely when denied.
@@ -131,13 +151,10 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 
 Each platform owns its own trust chain. Cross-platform principles live here;
 concrete per-platform policy lives under `docs/operations/<platform>/`.
+The release procedure itself is the `vapor-release` skill and
+`docs/operations/release-process.md`.
 
 ### 7.1) Shared principles
-
-The end-to-end release flow (validation, tagging, CI gates, publication)
-is the runbook `docs/operations/release-process.md`; start there when
-cutting a release. The principles below are the invariants that runbook
-must never violate.
 
 - Release artifacts are produced from a script-first pipeline, not an IDE
   archive flow. Every platform packaging script is CI-runnable.
@@ -145,51 +162,23 @@ must never violate.
   its release secrets (`release-macos` today; `release-windows` /
   `release-linux` when those platforms ship), never repository-wide
   secrets. Secrets never cross-leak between platform release jobs.
-  The `vapor` CLI has no environment of its own: CLI artifacts are
-  signed and published by each platform's release job under that
-  platform's environment (see §7.5).
+  The `vapor` CLI has no environment of its own (§7.5).
 - Every platform release environment must be protected **before** its
-  secrets are added, never after — there must be no window in which
-  signing material sits in an unguarded environment. A new environment
-  is created with zero protection rules and nothing warns you, so this
-  is an explicit setup step for each platform:
-  - Deployments are restricted to a custom policy holding one **tag**
-    rule matching the release tag pattern (`v*`) and **no branch rule**,
-    so only a release tag can reach the signing secrets.
-  - A required reviewer gates the job, so producing a signed artifact is
-    a deliberate act rather than an automatic consequence of pushing a
-    tag.
-  - `can_admins_bypass` stays `true` only while a single maintainer
-    holds admin; set it to `false` as soon as a second admin exists.
-  These live in repository settings on purpose. The equivalent checks in
-  workflow YAML (tag-only triggers, preflight ref validation) are
-  defence in depth, not the control: that YAML is part of the ref being
-  released and is editable by anyone with write access, whereas the
-  environment policy is not. Current configuration and status:
-  `docs/operations/release-process.md`.
+  secrets are added: deployments restricted to one `v*` tag rule with no
+  branch rule, a required reviewer, and `can_admins_bypass` set to
+  `false` as soon as a second admin exists. These live in repository
+  settings on purpose; the equivalent checks in workflow YAML are
+  defence in depth, because that YAML is part of the ref being released.
 - GitHub Actions are allowlisted in repository settings
-  (`allowed_actions: selected`): GitHub-owned actions plus one explicit
-  pattern per third-party action. **Before a workflow references a new
-  third-party action, add it to the allowlist first**, then SHA-pin it
-  in the workflow. An action that is not on the list does not run at
-  all — the job fails at *Set up job* with a policy error — so a
-  workflow change that introduces one cannot be tested until the
-  setting has changed. The policy also covers actions nested inside a
-  composite action, whether or not the nested step is reachable, so
-  read a new action's `action.yml` for its own `uses:` lines and allow
-  those too. The allowlist is a settings-level control for the same
-  reason as the environment rules above: it is not part of the ref
-  being run. Current list and the commands to change it:
-  `docs/ci/overview.md`.
+  (`allowed_actions: selected`). Add a new third-party action to the
+  allowlist **before** a workflow references it (nested actions inside
+  a composite action included), then SHA-pin it. Current list and the
+  commands: `docs/ci/overview.md`.
 - App/daemon version compatibility rules must be maintained and tested
   per OS.
 - Product release version source-of-truth is the repository root `VERSION`
-  file.
-- `scripts/version.sh` is the supported entrypoint for version bumps,
-  Cargo workspace version sync, and release-prep commit/tag creation.
-- Release tags must exactly match `v$(cat VERSION)`.
-- Release preparation via `scripts/version.sh` must run from a clean `main`
-  branch with only `CHANGELOG.md` allowed to be dirty beforehand.
+  file; `scripts/version.sh` is the only entrypoint for bumps and sync;
+  release tags must equal `v$(cat VERSION)`.
 - Build provenance must keep semantic version and git commit SHA separate.
 - AI contributors must never auto-open packaged apps (for example `open
   dist/Vapor.app`); app launch verification is performed manually by the
@@ -208,7 +197,7 @@ Full policy: `docs/operations/macos/distribution-trust-chain.md`.
   - `Contents/Helpers/vapor` (the CLI the app shim drives; it lives in
     `Helpers/` because the default macOS filesystem is case-insensitive
     and `vapor` would collide with `Vapor` inside `MacOS/`)
-- GitHub Releases must publish file assets, so release uploads should use a
+- GitHub Releases must publish file assets, so release uploads use a
   zip that contains `Vapor.app`; the raw `.app` bundle directory remains a
   local packaging/validation artifact rather than a direct release asset.
 - Runtime daemon launch must target only the bundled sibling binary
@@ -239,9 +228,8 @@ Pure Rust binaries per supported target triple, zstd-compressed, checksummed.
 Signing follows the host-OS policy (Developer ID on macOS, EV cert on
 Windows, GPG signature on Linux). Published alongside platform installers
 under the same GitHub Release tag. CLI release jobs run under the owning
-platform's GitHub Environment (`release-macos`, `release-windows`,
-`release-linux`); there is no separate `release-cli` environment because
-the CLI has no secrets or trust chain of its own.
+platform's GitHub Environment; there is no separate `release-cli`
+environment because the CLI has no secrets or trust chain of its own.
 
 ## 8) Engineering standards
 
@@ -266,7 +254,8 @@ the CLI has no secrets or trust chain of its own.
   - Keep async/task lifetimes bounded and cancellation-aware.
   - Platform-sensitive code lives under `core/platform/<trait>/<os>.rs`
     behind a trait the engine consumes. Do not sprinkle `#[cfg(target_os)]`
-    through engine code.
+    through engine code. `unsafe` is allowed only in `core/platform` FFI,
+    one `SAFETY:` comment per block.
   - Native-optimal per OS is encouraged; portable-but-slow is not an
     acceptable final state.
 - Future app shells (Windows, Linux)
@@ -275,14 +264,16 @@ the CLI has no secrets or trust chain of its own.
 - API/contracts
   - Version IPC payloads; pre-GA breaking changes are allowed with
     coordinated updates.
-  - Provider trait changes require capability and behavior review.
+  - Provider trait changes require capability and behavior review
+    (`vapor-add-provider` skill).
   - Platform-trait changes require a parity review so every supported OS
     either adopts the change or has a tracked task to do so.
 
 ## 8.1) Observability and diagnostics
 
 - Contributors may add structured file logging when needed to diagnose reliability or lifecycle issues.
-- Logging should favor actionable context (state, reason, identifiers) and avoid secrets or tokens.
+- Logging favours actionable context (state, reason, identifiers) and never contains secrets or tokens.
+- Log levels mean something: routine transitions are INFO, WARNING is reserved for conditions a user may need to act on, ERROR for failures. A healthy run should not accumulate warnings.
 - Temporary debug-heavy logging should be easy to dial down via log levels and should not violate low-impact goals.
 
 ## 8.2) Toolchain and platform version policy
@@ -290,8 +281,7 @@ the CLI has no secrets or trust chain of its own.
 - Target latest stable versions by default for every supported host:
   - macOS runner/image in CI + Xcode and Swift toolchain (macOS app).
   - Ubuntu (`ubuntu-latest`) and Windows (`windows-latest`) runners in CI
-    for every `core/*` Rust crate as soon as the engine portability fixes
-    land.
+    for every `core/*` Rust crate.
   - Rust toolchain and required components on every runner.
 - Avoid pinning old versions unless there is a documented blocker.
 - If temporary pinning/downgrade is required, document the reason, owner,
@@ -311,24 +301,20 @@ Current verified contributor baseline (Mar 2026):
 This section is informational and should be updated when contributor baseline shifts materially.
 It does not override the "latest stable" policy above.
 
-## 8.4) Script-first validation command policy
+## 8.4) Script-first validation
 
-- Contributors must run repository wrapper scripts under `scripts/` instead of invoking raw tool commands directly for routine validation.
-- Required validation order is:
-  1. `./scripts/format.sh`
-  2. `./scripts/lint.sh`
-  3. `./scripts/test.sh`
-- For changes that alter runtime behavior a user would observe through
-  the daemon or CLI, additionally run `./scripts/e2e.sh` after the
-  steps above (Tier E2E; see §9.8).
-- Rationale: wrapper scripts set required project environment (for example log routing and other workflow invariants).
+Contributors run the repository wrapper scripts under `scripts/`, never
+raw tool commands, in the order `format`, `lint`, `test`, then `e2e` for
+runtime-affecting changes. The wrappers set the project environment
+(`VAPOR_DIR`, `VAPOR_ENV`, log routing). Which tier a change needs and
+how to read a red run: the `vapor-validate` skill.
 
 ## 8.5) Runtime data directory policy
 
 - Runtime artifacts must live under a single vapor directory root (`vapor_dir`): config, logs, and durable state.
 - Configuration file path is `vapor_dir/vapor.json`.
-- Logs should be written under `vapor_dir/logs/`.
-- Durable queue/state DB paths should live under `vapor_dir/state/`.
+- Logs are written under `vapor_dir/logs/`.
+- Durable queue/state DB paths live under `vapor_dir/state/` (`vapor.sqlite` for the implicit profile, `profiles/<id>/vapor.sqlite` per configured profile, `lifecycle.json` for crash-loop state).
 - Runtime directory selection is code-defined and env-overridable only; it is not a user-configurable `vapor.json` field.
 - Runtime directory resolution order is:
   1. `VAPOR_DIR` environment variable (explicit override)
@@ -339,22 +325,11 @@ It does not override the "latest stable" policy above.
 
 ## 8.6) Shared constants policy
 
-- Runtime/config/environment constants must be centralized in language-level constants modules and treated as source-of-truth.
-- Current source-of-truth files are:
-  - Rust shared constants: `core/shared/src/constants.rs` (authoritative for
-    the portable runtime and every Rust-side consumer, including the
-    `vapor` CLI and future Windows/Linux apps).
-  - Swift app constants: `apps/macos/Sources/VaporCore/VaporConstants.swift`
-    (macOS app mirror; must stay in sync with the Rust source of truth).
-- Product version source-of-truth is the root `VERSION` file; Cargo workspace version must be synced from it via `./scripts/version.sh`.
-- When adding or changing any config keys, environment variables, default values, runtime path names, launch labels, or filtering defaults, contributors must:
-  1. update the Rust source-of-truth (`core/shared/src/constants.rs`),
-  2. mirror into any platform-specific constants mirror (e.g., the Swift
-     mirror for the macOS app),
-  3. consume the constant from call sites (avoid re-defining string
-     literals), and
-  4. update docs/tests in the same change set.
-- Avoid duplicated hardcoded literals for `VAPOR_*` keys and shared defaults outside the constants modules unless there is a documented, temporary exception.
+- Runtime/config/environment constants are centralized and treated as source of truth: `core/shared/src/constants.rs` for the portable runtime and every Rust consumer, mirrored for the macOS app in `apps/macos/Sources/VaporCore/VaporConstants.swift`.
+- Product version source of truth is the root `VERSION` file; the Cargo workspace version is synced from it via `./scripts/version.sh`.
+- No duplicated literals for `VAPOR_*` keys or shared defaults outside the constants modules.
+- Every config key is classified as live-reload or restart-required in `constants::config`; the daemon and the CLI read that classification.
+- Adding or changing a key, variable, default, path name, or launch label follows the `vapor-config-key` skill (constants, mirror, call sites, CLI typing, reload, docs, tests).
 
 ## 8.7) Localization and user-facing copy policy
 
@@ -374,9 +349,10 @@ It does not override the "latest stable" policy above.
   numbers, and no pointers to `docs/tasks/*`. Task tracking lives in
   `docs/tasks/`; a code comment must stand on its own for a reader who has
   never seen the task lists. The same applies to strings that surface to
-  users or logs (e.g. `unimplemented!()` messages).
+  users or logs (e.g. `unimplemented!()` messages), and to prose in
+  architecture, operations, development, and CI docs.
 - Referencing stable documentation (`docs/architecture/*`, `docs/plans/*`,
-  `AGENTS.md` sections) is fine — those documents describe the system, not
+  `AGENTS.md` sections) is fine; those documents describe the system, not
   the work schedule.
 - Keep comments short and direct. A comment earns its place by stating a
   constraint, invariant, or non-obvious "why" that the code cannot express;
@@ -393,25 +369,30 @@ It does not override the "latest stable" policy above.
 
 Vapor keeps the vendor-neutral filename as the real file and gives each
 agent tool its expected name as a symlink, so one source of truth serves
-every agent.
+every agent. Layout and the add-a-skill checklist: `.agents/README.md`.
 
 - Contributor rules live in `AGENTS.md`. `CLAUDE.md` is a symlink to it.
+  Edit `AGENTS.md` and `.agents/` only; never the symlinks.
 - Project skills live in `.agents/skills/<skill-name>/SKILL.md`.
   `.claude/skills/<skill-name>` is a symlink to the matching
   `.agents/skills/<skill-name>` directory, which is how Claude Code
   discovers them. **Adding a skill means adding its mirror symlink in the
-  same change set** — otherwise the skill is invisible to Claude Code.
+  same change set**, otherwise the skill is invisible to Claude Code.
   `.gitignore` keeps the rest of `.claude/` (machine-local agent state)
   untracked while tracking `.claude/skills`.
 - `SKILL.md` front matter must stay within the fields every supported
   agent understands: `name` (required, kebab-case, identical to the
   directory name), `description` (required), and optionally `license`,
   `version`, `allowed-tools`, `user-invocable`. Do not add tool-specific
-  keys.
+  keys. `license` matches the repository (`GPL-3.0-only`).
 - The `description` is the only part an agent reads when deciding whether
-  to invoke a skill — the body is loaded afterwards. Write it in the
-  third person and state both what the skill does **and** when to use it;
-  do not leave the trigger conditions only in the body.
+  to invoke a skill; the body is loaded afterwards. Write it in the
+  third person and state both what the skill does **and** when to use it.
+- A skill change is verified as loadable before commit: the symlink
+  resolves to a `SKILL.md`, the front matter parses, and the skill shows
+  up in the agent's skill list and can be invoked.
+- Writing rules for every document, comment, and message: the `unslop`
+  skill. It always applies.
 
 ## 9) Required test matrix
 
@@ -419,7 +400,8 @@ Testing is a non-negotiable part of every change. Vapor is coded
 autonomously, so the coding agent's feedback loop is whatever
 `./scripts/test.sh` tells it. The full taxonomy, per-module
 expectations, and adding-a-test checklist live in
-`docs/architecture/testing-strategy.md`. This section is the contract.
+`docs/architecture/testing-strategy.md`. This section is the contract;
+the procedure is the `vapor-validate` skill.
 
 ### 9.1) Testing philosophy
 
@@ -427,15 +409,17 @@ expectations, and adding-a-test checklist live in
   thousand trivial tests are worse than a hundred well-chosen ones. A
   failing test must catch a real bug.
 - **Fast.** `./scripts/test.sh` (Tier 1) must finish in under 2 minutes
-  on a contemporary dev machine and under 5 minutes on CI. If a change
-  pushes the suite past the budget, split slow tests out to Tier 2.
+  on a contemporary dev machine and under 5 minutes on CI, where
+  `VAPOR_TEST_MAX_SECONDS` enforces it. If a change pushes the suite
+  past the budget, split slow tests out to Tier 2.
 - **Deterministic.** No `thread::sleep` for timing-dependent
   assertions; use test-injectable clocks. No retry decorators.
 - **Independent.** Tests run in any order and in parallel. Each
   integration test uses its own `tempfile::TempDir`. No shared mutable
   state.
 - **No network, no `~/.vapor`.** Never contact the real Internet;
-  never touch the user's runtime dir.
+  never touch the user's runtime dir. The macOS keychain contract test
+  uses a throwaway service name and cleans up after itself.
 
 ### 9.2) What must be tested
 
@@ -444,33 +428,33 @@ of the following:
 
 - **Unit tests** for pure logic (debounce, scheduler, throttle,
   workgate, retry, storm, state_db, reconcile, executor, path_filter,
-  event_intents, fs_events, runtime_paths, logging).
-- **Integration tests** composed through the `DaemonRuntime` tick
-  harness for multi-module behavior (local→remote / remote→local
-  propagation, restart recovery, throttle transitions during real
+  event_intents, fs_events, runtime_paths, logging, config reload).
+- **Integration tests** composed through the `DaemonRuntime` and
+  `MultiProfileRuntime` tick harnesses for multi-module behavior
+  (local→remote / remote→local propagation, restart recovery, offline
+  edits found by the startup reconcile, throttle transitions during real
   work, storm bursts, self-write-cache suppression, multi-profile
   isolation, config reload mid-work).
-- **Property tests** via `proptest` for well-defined invariants where
-  random inputs add value (path normalization, scheduler superseding,
-  throttle monotonicity, retry backoff monotonicity, conflict-suffix
-  determinism, durable-queue FIFO, ignore-rule precedence, IPC
-  handshake skew matrix). Each property runs 64–256 cases on CI.
-- **Platform-trait contract tests.** Every trait in `core/platform`
-  runs a parameterized contract suite against both the in-memory
-  fake and the real native impl on each shipping OS. Catches
-  fake-vs-native drift.
-- **Bidirectional race tests** — simultaneous local/remote edits,
+- **Property tests** for well-defined invariants where random inputs add
+  value (path normalization, scheduler superseding, throttle
+  monotonicity, retry backoff monotonicity, conflict-suffix determinism,
+  durable-queue FIFO, ignore-rule precedence, IPC handshake skew
+  matrix). `proptest` adoption is open work (`docs/tasks/core.md` CT-1);
+  until it lands these invariants are covered by explicit cases.
+- **Platform-trait contract tests.** Each trait's test body runs against
+  the in-memory fake and the native impl on the shipping OS (the secret
+  store does this today; extending it to every trait is
+  `docs/tasks/core.md` CT-5). Catches fake-vs-native drift.
+- **Bidirectional race tests**: simultaneous local/remote edits,
   rename+modify, delete/restore, loop-prevention verification.
-- **Crash / restart / recovery tests** — pre/post-restart durable
+- **Crash / restart / recovery tests**: pre/post-restart durable
   intent count delta = 0 (excluding completed), retry slowdown
   restored, leases recovered.
-- **Performance guard-rails** (Tier 1) — cheap "someone accidentally
+- **Performance guard-rails** (Tier 1): cheap "someone accidentally
   made the callback 100× slower" checks. Distinct from the SLO perf
   suite (Tier 2).
-- **Snapshot tests** (`insta`) for every `vapor … --json` command.
-  `insta` adoption is still an open task (tracked in
-  `docs/tasks/core.md` and `docs/tasks/cli.md`); until it lands, every
-  `--json` contract must be locked by explicit assertion tests instead.
+- **`--json` shape locks** for every `vapor … --json` command: explicit
+  assertion tests today; `insta` snapshots are open work (CT-4).
 
 ### 9.3) What must NOT be tested
 
@@ -482,10 +466,10 @@ As important as §9.2. Refuse tests for:
 - `Debug` / `Display` impls unless the output is a wire format.
 - `serde` derive round-trips of trivial structs.
 - Generated code from `build.rs`.
-- **UI rendering on any app surface** — SwiftUI views, menubar layout,
+- **UI rendering on any app surface**: SwiftUI views, menubar layout,
   Dock transitions, and the equivalent on future Windows/Linux apps.
   UI correctness is verified by the project owner manually.
-- **Interactive TTY behavior** on the `vapor` CLI — color codes, cursor
+- **Interactive TTY behavior** on the `vapor` CLI: color codes, cursor
   positioning, terminal resize, ncurses interactions.
 - Third-party crate internals.
 - Code that just restates a policy from `constants.rs`.
@@ -494,37 +478,28 @@ If a test's failure mode is "I typo'd a default value", skip it.
 
 ### 9.4) Per-surface scope
 
-- `core/*` (Rust runtime, CLI, platform layer) — heavy testing. No UI,
+- `core/*` (Rust runtime, CLI, platform layer): heavy testing. No UI,
   so nothing is carved out.
-- `apps/macos` (Swift) — logic tests only (configuration, lifecycle
+- `apps/macos` (Swift): logic tests only (configuration, lifecycle
   coordinator state transitions, view-model state mapping, localization
   fallback, logger redaction). **No UI tests.**
-- `core/cli` (`vapor` binary) — logic + snapshot + integration tests.
+- `core/cli` (`vapor` binary): logic + shape-lock + integration tests.
   `vapor service install` / `run` / `status` round-trip in CI. **No
   interactive TTY tests.**
-- Future GUI apps (Windows, Linux) — same rule: logic yes, UI no.
+- Future GUI apps (Windows, Linux): same rule: logic yes, UI no.
 
 ### 9.5) Test tiers
 
-- **Tier 1** — `./scripts/test.sh` via `lint.yml` / `test.yml` /
-  `workflow_call`. Unit + integration + platform-trait contract +
-  property + snapshot + guard-rail timing tests. Runs on every PR.
-  Required check on `main`, enforced by the `main` ruleset
+- **Tier 1**: `./scripts/test.sh` via `lint.yml` / `test.yml` /
+  `workflow_call`. Runs on every PR; required check on `main`
   (`docs/ci/required-checks.md`). Budget: under 5 minutes per OS on CI.
-- **Tier 2** — `scripts/perf.sh` via `perf.yml`, which runs only as
-  part of the release pipeline (no standalone or scheduled triggers).
-  Performance SLO tests, long-running property cases (higher case
-  counts), fuzz corpora, `loom`-backed concurrency tests.
-  Not a PR gate.
-- **Tier E2E** — `./scripts/e2e.sh`, run on every PR in `test.yml`'s
-  macOS job and locally by the contributor.
-  Black-box verification of the real `vapor` + `vapord` binaries in a
-  disposable sandbox. Required locally for runtime-affecting features
-  and fixes; contract in §9.8. CI runs it with `--full`, which appends
-  the L2-5 service lifecycle round-trip: that phase installs a real
-  LaunchAgent, so it is opt-in, meant for disposable CI runners, and
-  refuses outright when a `sh.arn.vapor.daemon` LaunchAgent already
-  exists. Contributors run the default (host-safe) suite locally.
+- **Tier 2**: `scripts/perf.sh` via `perf.yml`, release pipeline only.
+  Performance SLO tests, long-running property cases, fuzz corpora,
+  `loom`-backed concurrency tests. Not a PR gate.
+- **Tier E2E**: `./scripts/e2e.sh`, on every PR in `test.yml`'s macOS
+  job (with `--full`, which installs a real LaunchAgent and is for
+  disposable runners only) and locally by the contributor (host-safe
+  default). Contract in §9.8; procedure in the `vapor-e2e` skill.
 
 ### 9.6) Flaky-test policy
 
@@ -539,14 +514,12 @@ If a test's failure mode is "I typo'd a default value", skip it.
 
 - Every trait in `core/platform` must have (a) an in-memory fake used
   by cross-OS unit tests, and (b) a native implementation on every OS
-  that currently ships a surface, exercised by the trait contract
-  suite in the matching OS-specific CI job (`macos-latest` today;
-  `ubuntu-latest` / `windows-latest` once their optional waves in
-  `docs/tasks/README.md` land).
+  that currently ships a surface, exercised by the trait's contract
+  test in the matching OS-specific CI job (`macos-latest` today).
 - For OSes that do not currently ship a surface, a trait may be
-  `unimplemented!()` on that OS. The stub must compile (so
-  `cargo build --workspace` keeps succeeding on every OS in the CI
-  matrix) and must be tracked in `docs/tasks/core.md`.
+  `unimplemented!()` or return neutral defaults on that OS. The stub
+  must compile (so `cargo build --workspace` keeps succeeding on every
+  OS in the CI matrix) and must be tracked in `docs/tasks/core.md`.
 - `vapor service install` + `vapor run` + `vapor status` round-trip
   must pass on every OS that currently ships a surface before that OS
   is considered shipped.
@@ -555,12 +528,12 @@ If a test's failure mode is "I typo'd a default value", skip it.
 
 Unit and integration tests are not the whole feedback loop. An agent
 that ships a runtime-affecting change must also watch the real product
-work once, end to end. Full process:
-`docs/development/e2e-verification.md`.
+work once, end to end. Procedure: the `vapor-e2e` skill and
+`docs/development/e2e-verification.md`. The invariants:
 
 - `./scripts/e2e.sh` builds the shipping binaries (`vapor`, `vapord`)
-  and drives the daemon black-box through the CLI only — never the
-  macOS app — asserting via `vapor status --json`, `vapor doctor`,
+  and drives the daemon black-box through the CLI only, never the
+  macOS app, asserting via `vapor status --json`, `vapor doctor`,
   exit codes, daemon logs, and read-only durable-DB queries.
 - Sandbox discipline is absolute: everything runs under the repo-local
   `.vapor/e2e/` directory (removed by `./scripts/clean.sh`). Tier E2E
@@ -571,105 +544,48 @@ work once, end to end. Full process:
   changes, and build changes to the shipping binaries. Not required
   for doc-only, UI-only, or test-only changes.
 - When a change adds e2e-observable behavior, extend the harness with
-  a scenario for it in the same change set — a green run of old
+  a scenario for it in the same change set. A green run of old
   scenarios proves non-regression, not the new feature.
 - UI-affecting changes additionally get a short manual-verification
   handoff checklist for the project owner, since agents never verify
   UI.
 - Live cloud-provider E2E (real Google Drive, dedicated test account)
-  is a future, explicitly gated tier — never part of the default run,
+  is a future, explicitly gated tier: never part of the default run,
   never a PR gate, never run implicitly by an agent.
 
-## 10) Pull request checklist
+## 10) Pull requests, commits, and documentation
 
-PRs should answer:
+- Commit shape, message convention, labels, the no-push rule, and the
+  PR description template: the `vapor-commit` skill.
+- Documentation duties for every change (CHANGELOG line, root README
+  Features and Configuration, the owning `docs/` file, group READMEs,
+  plans and tasks, this file when a rule changes): the `vapor-docs-sync`
+  skill.
 
-1. What user or reliability problem does this solve?
-2. How does it preserve low-impact behavior?
-3. What durability or failure paths were validated?
-4. What tests were added/updated?
-5. What docs/contracts were updated?
+The invariants behind both:
 
-Documentation update policy:
-
-- Non-trivial feature/logic changes must update required documentation in the same change set.
-- Before creating a commit for a non-trivial feature, fix, refactor, build/release change, or other user/reliability-impacting work, contributors must add concise release-note lines to the root `CHANGELOG.md` `Unreleased` section so the next release can roll them up.
-- Root `README.md` is intentionally concise and acts as a product-facing index; detailed operational and engineering content belongs under `docs/` in topic-specific files.
-- Contributors must preserve and keep current the `README.md` **Features** section whenever capabilities, guarantees, or supported behavior change.
-- Contributors must preserve and keep current the `README.md` **Configuration** section (including `vapor.json` keys, defaults, and `VAPOR_*` environment variables) whenever config/env behavior changes.
-- When README content is shortened or reorganized, no critical information may be dropped: move it into the corresponding `docs/` file (or create a new one) in the same change set.
-- `README.md` should be updated when behavior, setup, operational workflow, or developer commands change.
-- Non-trivial macOS UI/UX changes must document the intended user experience and note alignment with Apple design conventions. Equivalent rule applies per OS: Windows changes follow Fluent / WinUI conventions, Linux changes follow GNOME HIG or KDE HIG per the chosen toolkit.
-- `AGENTS.md` should be updated when a new durable engineering rule, safety invariant, or contributor policy should be remembered for future work.
-- Plans and tasks live under `docs/plans/{core,macos,cli,...}.md` and
-  `docs/tasks/{core,macos,cli,...}.md`. Keep the file for the surface you
-  touched up to date in the same change set.
-- Platform-specific documentation belongs under
-  `docs/<group>/<platform>/…`. Common, cross-platform documentation stays
-  at the top of each group directory.
-- Every documentation group directory (`docs/<group>/` and every
-  per-platform subdirectory `docs/<group>/<platform>/`) must contain a
-  `README.md` that serves as the entrypoint for that group. The group
-  README must: (a) describe what the group covers, (b) describe each
-  file inside the group (what it is, what to expect, how to use it),
-  (c) link to any adjacent group READMEs that are directly related, and
-  (d) be kept current in the same change set as any addition, removal,
-  or rename of files in the group. New docs do not land without the
-  matching group README update.
-- `docs/tasks/README.md` additionally serves as the cross-surface
-  roadmap orchestrator — the "what should be done next" guide across
-  every surface (`core`, `macos`, `cli`, future `windows`, `linux`).
-  When a wave opens, closes, or changes dependencies, update this README
-  in the same change set.
-- If docs are intentionally not updated, PR description must explain why no documentation changes were needed.
-
-### README style and Features section policy
-
-- The rules in this subsection apply only to the root `README.md` (the product-facing README).
-- Other markdown docs (including nested/module `README.md` files under `docs/`, `apps/`, or `core/`) may use a more technical style appropriate to their audience.
-- Keep root `README.md` user-facing: concise, attractive, and easy to scan.
-- Use short, direct one-liners in root `README.md` **Features** with one emoji per bullet.
-- Prioritize user outcomes and reliability promises (speed feel, low impact, safety, visibility) over implementation internals in root `README.md` **Features**.
-- Avoid specific config key names, file names, env vars, or packaging mechanics in root `README.md` **Features** unless absolutely necessary for user understanding.
-- Avoid naming specific cloud providers inside root `README.md` **Features**; keep wording provider-agnostic (for example, "cloud sync").
-- Avoid device-specific wording such as "laptop" in root `README.md` **Features`; use "device".
-- Keep root `README.md` **Features** aligned with real product status:
-  - "Available now" for shipped behavior.
-  - "In flight and coming next" for planned roadmap items.
-- Do not duplicate nearby root `README.md` section content (for example provider lists in **Cloud Providers**) inside **Features**.
-- When changing root `README.md` feature tone/style, preserve factual accuracy and do not overpromise.
-
-Required in PR description:
-
-- Scope and non-goals.
-- Risk assessment and rollback plan.
-- Any migration/compatibility implications.
-
-Commit and push policy:
-
-- Create one git commit per feature or per tightly related change group.
-- Keep commits small, cohesive, and rollback-friendly.
-- Use commit messages that explain why the change exists.
 - Do not push commits to GitHub unless the project owner explicitly asks.
-  An explicit release request from the project owner counts as asking
-  for the one push the release flow requires (the release commit + tag
-  via `git push … --follow-tags`); it does not authorize any other push.
-
-Commit message convention:
-
-- Use Conventional Commit-style subjects: `<type>: <why-focused summary>`.
-- Prefer these types and keep PR labels aligned with the same dominant category for GitHub release notes:
-  - `feat`: user-visible capability or additive behavior -> label `feat`/`feature` -> release category `Features`
-  - `fix`: bug or reliability correction -> label `fix`/`bug`/`bugfix` -> release category `Fixes`
-  - `perf`: performance, battery, thermal, or throughput improvement -> label `perf` -> release category `Performance`
-  - `refactor`: internal restructuring without intended behavior change -> label `refactor` -> release category `Refactors`
-  - `docs`: documentation-only change -> label `docs` -> release category `Docs`
-  - `test`: behavior-preserving test-only change -> label `test` -> release category `Testing`
-  - `ci`: GitHub Actions or CI pipeline change -> label `ci` -> release category `Tooling`
-  - `build`: build, packaging, signing, or release automation change -> label `build` -> release category `Tooling`
-  - `chore`: repository maintenance that does not fit another type -> label `chore` -> release category `Tooling`
-  - `release`: changelog/version/release-prep only -> label `release` -> release category `Tooling`
-- Use one dominant type per commit; split mixed changes when practical so changelog grouping stays accurate.
+  An explicit release request counts as asking for the one push the
+  release flow requires; it does not authorize any other push.
+- Non-trivial feature/logic changes update the required documentation
+  in the same change set, and add a `CHANGELOG.md` `Unreleased` line
+  before the commit.
+- Root `README.md` is product-facing and concise; detailed content
+  belongs under `docs/`. Its **Features** section stays complete and
+  honest (`Available now` vs `In flight and coming next`), one emoji
+  per bullet, user outcomes over internals, provider-agnostic wording,
+  "device" not "laptop", no duplicated section content. Its
+  **Configuration** section stays current for every key, default, and
+  `VAPOR_*` variable. Shortened README content moves to `docs/`, never
+  disappears.
+- Every `docs/<group>/` and per-platform subdirectory has a `README.md`
+  entrypoint kept current in the same change set as any file added,
+  removed, or renamed there. `docs/tasks/README.md` is also the
+  cross-surface roadmap orchestrator.
+- Non-trivial macOS UI/UX changes document the intended experience and
+  its alignment with Apple design conventions; Windows follows Fluent /
+  WinUI, Linux follows GNOME HIG or KDE HIG per the chosen toolkit.
+- If docs are intentionally not updated, the PR description says why.
 
 ## 11) Definition of done
 
@@ -691,6 +607,8 @@ A change is done when:
   `docs/tasks/core.md`.
 - Docs and contracts are updated (common docs at the top level,
   platform-specific docs under the matching `docs/<group>/<platform>/`).
+- The validation ladder is green and quoted in the report
+  (`vapor-validate`).
 
 ## 12) Incident playbooks (minimum)
 
@@ -706,5 +624,23 @@ Each runbook must include detection, mitigation, user-visible state, and recover
 
 Current status: only the release incident playbook exists
 (`docs/operations/release-incident-playbook.md`). The five runbooks
-above are open work, tracked in `docs/tasks/core.md`; when one lands,
+above are open work, tracked in `docs/tasks/core.md` R-1; when one lands,
 remove it from that tracking entry.
+
+## 13) Skills index
+
+Real files under `.agents/skills/<name>/SKILL.md`, mirrored at
+`.claude/skills/<name>`. Invoke the one that matches the job; each
+carries its own trigger conditions in its description.
+
+| Skill | Invoke when |
+|---|---|
+| `unslop` | Writing anything a human reads: docs, comments, commit messages, replies. Always. |
+| `vapor-validate` | Before committing a change under `core/*`, `apps/*`, or `scripts/*`; when a script run is red. |
+| `vapor-e2e` | A change alters daemon- or CLI-observable behaviour and Tier 1 is green; to watch a feature in the real product. |
+| `vapor-debug` | The daemon crashed, will not start, sync is stuck, or a status looks wrong. |
+| `vapor-config-key` | Adding or changing a `vapor.json` key, `VAPOR_*` variable, default, path name, or launch label. |
+| `vapor-add-provider` | Touching `core/providers` or adding a provider kind. |
+| `vapor-docs-sync` | Any non-trivial change; any file added, removed, or renamed under `docs/`. |
+| `vapor-commit` | Creating commits or a pull request. |
+| `vapor-release` | The owner asks to cut or rehearse a release, or `release.yml` changes. |

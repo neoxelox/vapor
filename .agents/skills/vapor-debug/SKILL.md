@@ -1,7 +1,7 @@
 ---
 name: vapor-debug
 description: Diagnoses Vapor app and vapord daemon failures by correlating live CLI diagnostics, daemon logs, macOS crash reports, and the durable state DB against the source, then proposes a fix plan and waits for approval before changing code. Use when the daemon crashed, will not start, or keeps restarting; when sync is stuck or not converging; when `vapor status` or `vapor doctor` reports an unexpected state, reason, or throttle; when a `./scripts/e2e.sh` run left a failed sandbox to investigate; or when daemon log output needs a systematic review. macOS only.
-license: MIT
+license: GPL-3.0-only
 ---
 
 ## What I do
@@ -36,10 +36,12 @@ Inside `VAPOR_DIR`:
 
 | Artifact | Path |
 |----------|------|
-| Config | `vapor.json` |
-| Daemon log | `logs/vapord.logs` |
-| Durable queue/state DB | `state/vapor.sqlite` (tables: `queue_intents`, `failed_intents`, `state_entries`, `sync_index`, `tombstones`, `schema_meta`) |
-| IPC socket (framed JSON over UDS — Vapor does not use XPC) | `vapord.sock` |
+| Config | `vapor.json` (a running daemon applies the live keys within seconds; roots, provider, profiles and sync mode need a restart and show up in `vapor status` as `config_restart_required`) |
+| Daemon log | `logs/vapord.logs` (rotates at 8 MiB, three generations); `logs/vapord.stdout.log` / `.stderr.log` are the service manager's redirects |
+| Durable queue/state DB | `state/vapor.sqlite` for the implicit `default` profile; `state/profiles/<id>/vapor.sqlite` per configured profile (tables: `queue_intents`, `failed_intents`, `state_entries`, `sync_index`, `tombstones`, `schema_meta`) |
+| Quarantined DB | `vapor.sqlite.corrupt-<ms>` next to the DB: the daemon moved a corrupt file aside and started fresh; a startup reconcile rebuilt the queue |
+| Lifecycle state | `state/lifecycle.json` (crash-loop bookkeeping shared by the CLI and the app) |
+| IPC socket (framed JSON over UDS — Vapor does not use XPC) | `vapord.sock`, relocated under the OS temp dir when the path exceeds ~104 bytes (`vapor doctor` reports where) |
 | Singleton lock | `vapord.lock` |
 
 ## How I work
@@ -50,6 +52,8 @@ The `vapor` CLI is the fastest signal — use it before reading raw files:
 
 - `vapor status --json` — run state, throttle state + reason, provider, daemon id. "daemon not running" vs "daemon is not responding" are different failures (no socket vs wedged process).
 - `vapor doctor` (add `--json` for scripts) — sanity probes: `vapor_dir` writable/private, `ipc_socket_path` budget and relocation, `vapord_binary` discoverable (sibling, bundle, PATH), `secret_store` persistence, `throttle_inputs` source, and `host_launch_agent_plist` (host state, not the sandbox).
+- `vapor diagnostics --json` — every queued or in-flight intent with its stage, attempt count, last error, and blocker reason ("why is this stuck"), in lease order.
+- `vapor support-bundle` — one redacted archive with status, diagnostics, timeline, config, and log tail; the first thing to ask a user for.
 - `vapor logs --tail 100` — recent daemon log lines, already redacted.
 - `vapor timeline --json` — diagnostics activity timeline (real events; an empty list means nothing has been recorded yet, not that the feature is missing).
 - `launchctl list | grep sh.arn.vapor` and `ps aux | grep vapord` — is the service loaded / process alive? (The LaunchAgent label is `sh.arn.vapor.daemon`.)
@@ -68,7 +72,8 @@ Once you have the error sites (symbols, component names, file paths) from logs a
 
 - Read the corresponding sources: the Rust runtime lives in `core/daemon` (tick loop, scheduler, throttle, executor, state DB), `core/ipc` (framed-JSON UDS server/client), `core/lifecycle` (crash-loop guard, daemon lifecycle), `core/shared` (config, runtime paths, logging), `core/platform` (fs-watch, secrets, metrics); the macOS app is `apps/macos`.
 - Trace the call path that led to the failure; classify transient vs permanent per the retry taxonomy.
-- Daemon-exit context: the tick loop tolerates up to 5 consecutive tick failures before exiting; a second daemon on the same `VAPOR_DIR` exits with "daemon already running" (singleton lock).
+- Daemon-exit context: a profile is suspended after 5 consecutive tick failures or a panic; the daemon exits only when every profile failed at runtime. A daemon whose every profile is misconfigured (bad provider, overlapping roots, missing Google Drive client id) stays up serving status with the per-profile `suspended_reason`, and logs "serving status only". A second daemon on the same `VAPOR_DIR` exits with "daemon already running" (singleton lock).
+- Throttle context: on macOS the inputs are real (CPU, power, thermal, memory, keyboard presence); "user activity is active" means someone typed within 30 s. `VAPOR_THROTTLE_INPUTS=static` pins neutral inputs (the e2e harness sets it); `vapor doctor`'s `throttle_inputs` row says which is in force.
 - Repeated-crash context: the crash-loop guard schedule is crash 1 → restart immediately, crash 2 → 2s, crash 3 → 4s, crash 4 → 8s, paused on the 5th. "Daemon won't come back" may be the guard doing its job.
 - Path-length context: macOS caps UDS paths at ~104 bytes. With a deep `VAPOR_DIR`, daemon and CLI relocate the socket to a deterministic `vapor-<hash>` directory under the OS temp dir (INFO log line "relocated under the OS temp directory"; `vapor doctor`'s `ipc_socket_path` probe reports it). If `vapor status` cannot reach a running daemon, check that both processes resolve the same `VAPOR_DIR` — the socket location is derived from it.
 
