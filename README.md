@@ -18,27 +18,37 @@ Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/v
 
 Available now:
 
-- 🔁 Bidirectional cloud sync with durable intent replay and eventual consistency.
-- 🛡 Conflict-safe behavior with deterministic outcomes (keep both copies, never silent overwrite).
-- 🧭 Conflicts stay visible until you settle them: list every kept-both copy and resolve each one with a single command, from any device.
-- 🔀 Choose each folder's sync direction — full two-way, or a one-way mirror for read-only backups and copies.
-- 🧩 Multiple sync profiles let one folder flow to several clouds or keep separate setups neatly isolated.
-- 🪶 Low-impact by design: Vapor defers heavy work under pressure to protect battery and thermals.
-- ⏸️ Pressure-aware throttle modes that adapt sync intensity to real device load.
-- ⚙️ Configurable hard caps on its share of CPU, memory, and network so streaming, browsing, and other apps always have room.
-- 🌙 Smart idle boost: Vapor catches up faster when your device is genuinely idle, and yields the moment you come back.
-- 🌩 Storm-aware scheduling keeps sudden bursts of file changes contained, so one big folder update doesn't snowball.
-- 🛟 Mass-deletion guard pauses sync before a suspicious local wipe can replicate to the cloud.
-- 📈 Clear diagnostics with status reasons, queue visibility, a live activity timeline, and a one-command support bundle.
-- 🔕 Stays out of your way while keeping status and controls one click away.
-- 🚀 Auto-launch at login with resilient crash-loop protection for dependable day-to-day use.
-- 🧹 Fine-grained ignore rules keep low-signal files out of your sync flow.
-- ⏯️ Pause and resume background work on demand; nothing is lost while paused, and Vapor picks up right where it left off.
+- 🔁 Two-way sync between a local folder and a cloud folder. Changes are picked up within seconds while you work.
+- 🧠 Nothing is lost. Every change is written to disk before it moves, so a crash, a reboot, or a dropped connection resumes where it stopped.
+- 🛡 Edits never silently overwrite each other. When two devices change the same file, Vapor keeps both copies.
+- 🧭 Conflicts stay visible until you settle them, and one command resolves each one from any device.
+- 🔂 Your own uploads never bounce back as new changes, so two devices cannot ping-pong a file forever.
+- 🔀 Pick a direction per folder. Full two-way, or a one-way mirror for read-only backups and copies.
+- 🧩 Run several sync profiles at once. One folder can flow to two clouds, or separate setups stay isolated.
+- 📦 Downloads land whole or not at all, and big uploads are chunked so a pause does not restart them.
+- ⏳ Retries back off on their own and respect provider rate limits, so a bad hour of connectivity fixes itself.
+- 🪶 Heavy work waits while your device is busy, protecting battery and thermals.
+- ⚙️ Hard caps on the share of CPU, memory, and network Vapor may use, so streaming and browsing always have room.
+- 🌙 When the device sits idle, Vapor speeds up. It backs off the moment you return.
+- 🌩 A burst of thousands of file changes is absorbed instead of turned into thousands of uploads.
+- 🛟 A sudden mass deletion pauses sync before the wipe can reach the cloud.
+- 🧹 Ignore rules, including your existing gitignore files, keep build output and junk out of the sync.
+- ♻️ Settings apply while it runs. Ceilings, ignore rules, and safeguards change without a restart, and Vapor tells you when one is needed.
+- 🚀 Starts at login, restarts itself after a crash, and stops retrying when something is really broken instead of looping.
+- ⏯️ Pause and resume on demand. Changes made while paused sync when you resume.
+- 📈 Status with a reason, queue depth, a live activity timeline, per-file "why is this stuck", and a one-command support bundle.
+- ⌨️ A full command line for scripts and servers. Everything the app does, the terminal does too.
+- 🔐 Sign-in tokens live in the system keychain, logs never contain secrets, and nothing leaves your device except the files you chose to sync.
+- 🔕 Lives in the menu bar. No windows unless you ask for one.
 
 In flight and coming next:
 
-- ⚡ Fast-feeling background sync designed to stay responsive without stealing your machine.
-- 🌍 Cross-platform parity: one portable runtime powers the macOS, Windows, and Linux apps and the CLI.
+- 🪟 A diagnostics window in the Mac app with throttle reason, queue, conflicts, and timeline, plus live pause and flush controls.
+- 🔔 A notification when a conflict needs you.
+- ✂️ Renames and moves without re-uploading the file.
+- 🖥️ Windows and Linux apps on the same runtime as the Mac app.
+- 📥 Standalone command-line downloads for every OS, with Docker and systemd recipes.
+- 🧾 Signed and notarized releases, verified on a clean machine every cycle.
 
 ## Providers
 
