@@ -741,17 +741,15 @@ impl MultiProfileRuntime {
                 // Every profile is misconfigured: exiting would only feed
                 // the crash-loop guard and hide the reason. Stay up on the
                 // idle cadence so `vapor status` can name what to fix.
-                Some(AllSuspended::AtComposition) => {
-                    if !reported_all_suspended {
-                        reported_all_suspended = true;
-                        logging::error(
-                            "Every profile is suspended by its configuration; serving status \
-                             only until the configuration is fixed and the daemon restarted",
-                            &[],
-                        );
-                    }
+                Some(AllSuspended::AtComposition) if !reported_all_suspended => {
+                    reported_all_suspended = true;
+                    logging::error(
+                        "Every profile is suspended by its configuration; serving status \
+                         only until the configuration is fixed and the daemon restarted",
+                        &[],
+                    );
                 }
-                None => {}
+                Some(AllSuspended::AtComposition) | None => {}
             }
             let wait = if report.any_pending_work {
                 self.tick_interval
