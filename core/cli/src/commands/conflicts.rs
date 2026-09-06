@@ -77,6 +77,11 @@ pub fn list_conflicts(config: &VaporConfig) -> ConflictListReport {
         let Some(root) = profile.scope.local_sync_directory else {
             continue;
         };
+        if !root.exists() {
+            // A root the daemon has not created yet (or is waiting for)
+            // holds no conflicts; only an unreadable one is skipped.
+            continue;
+        }
         let Ok(root) = vapor_shared::paths::canonicalize(&root) else {
             skipped_roots.push(root);
             continue;
@@ -362,16 +367,16 @@ mod tests {
     }
 
     #[test]
-    fn list_on_a_fresh_config_creates_the_root_and_reports_clean() {
-        // Profile resolution creates a missing local root (product
-        // policy §1), so a fresh config lists zero conflicts against
-        // the just-created empty root — nothing is skipped.
+    fn list_on_a_fresh_config_reports_clean_without_creating_the_root() {
+        // Creating the local root is the daemon's call (it knows
+        // whether the profile synced there before); a listing never
+        // creates anything, and an absent root holds no conflicts.
         let temp = TempDir::new().expect("temp");
         let root = temp.path().join("never-created");
         let report = list_conflicts(&config_for(&root));
         assert!(report.conflicts.is_empty());
         assert!(report.skipped_roots.is_empty());
-        assert!(root.is_dir(), "resolution must have created the root");
+        assert!(!root.exists(), "a listing must not create the root");
     }
 
     #[test]

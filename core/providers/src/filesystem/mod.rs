@@ -105,6 +105,7 @@ fn hex_encode(digest: &[u8]) -> String {
 pub fn is_internal_file_name(name: &str) -> bool {
     name.starts_with(constants::provider::TEMP_FILE_PREFIX)
         || name.ends_with(constants::provider::OP_ID_SIDE_FILE_SUFFIX)
+        || name == constants::provider::ROOT_MARKER_FILE_NAME
 }
 
 /// Best-effort reap of an orphaned staging temp file. A `TEMP_FILE_PREFIX`
@@ -338,6 +339,55 @@ impl Provider for FilesystemProvider {
             .lock()
             .expect("filesystem provider root mutex poisoned") = Some(canonical);
         Ok(())
+    }
+
+    fn root_identity(&self, cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
+        let expanded = expand_cloud_directory(cloud_sync_directory)?;
+        match fs::symlink_metadata(&expanded) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(ProviderError::permanent(format!(
+                    "filesystem cloud sync directory {} is not a directory",
+                    expanded.display()
+                )));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(ProviderError::not_found(format!(
+                    "filesystem cloud sync directory {} is missing",
+                    expanded.display()
+                )));
+            }
+            Err(error) => {
+                return Err(ProviderError::transient(format!(
+                    "cannot stat filesystem cloud sync directory {}: {error}",
+                    expanded.display()
+                )));
+            }
+        }
+        crate::root_marker::read_marker(&expanded)
+            .map(|marker| marker.map(|marker| marker.root_id))
+            .map_err(|error| {
+                ProviderError::transient(format!(
+                    "cannot read the root marker in {}: {error}",
+                    expanded.display()
+                ))
+            })
+    }
+
+    fn adopt_root(
+        &self,
+        cloud_sync_directory: &str,
+        device_id: &str,
+    ) -> Result<Option<String>, ProviderError> {
+        let expanded = expand_cloud_directory(cloud_sync_directory)?;
+        crate::root_marker::adopt(&expanded, device_id, SystemTime::now())
+            .map(|marker| Some(marker.root_id))
+            .map_err(|error| {
+                ProviderError::transient(format!(
+                    "cannot write the root marker in {}: {error}",
+                    expanded.display()
+                ))
+            })
     }
 
     fn enumerate(&self, directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {

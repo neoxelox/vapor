@@ -259,7 +259,11 @@ impl SyncMode {
 pub struct StatusSnapshot {
     pub run_state: RunState,
     pub throttle_state: ThrottleState,
+    /// Why the run state is what it is (what is watched, what blocks
+    /// sync, which decision is waited on).
     pub reason: String,
+    /// Why the throttle state is what it is.
+    pub throttle_reason: String,
 }
 
 impl Default for StatusSnapshot {
@@ -268,6 +272,7 @@ impl Default for StatusSnapshot {
             run_state: RunState::Starting,
             throttle_state: ThrottleState::Light,
             reason: "starting up".to_string(),
+            throttle_reason: String::new(),
         }
     }
 }

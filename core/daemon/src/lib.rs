@@ -46,6 +46,7 @@ pub mod reconcile_walk;
 pub mod remote_sync;
 pub mod resource_budget;
 pub mod retry;
+pub mod root_identity;
 pub mod runtime;
 pub mod runtime_control;
 pub mod safeguards;
@@ -233,7 +234,8 @@ impl DaemonApp {
 
     pub fn set_throttle_state(&mut self, throttle_state: ThrottleState, reason: impl Into<String>) {
         let reason = reason.into();
-        if self.snapshot.throttle_state == throttle_state && self.snapshot.reason == reason {
+        if self.snapshot.throttle_state == throttle_state && self.snapshot.throttle_reason == reason
+        {
             return;
         }
 
@@ -249,7 +251,7 @@ impl DaemonApp {
             logging::info("Updated throttle state", &fields);
         }
         self.snapshot.throttle_state = throttle_state;
-        self.snapshot.reason = reason;
+        self.snapshot.throttle_reason = reason;
         self.refresh_workgate_caps(SystemTime::now());
     }
 
@@ -597,7 +599,7 @@ mod tests {
         assert_eq!(decision.state, ThrottleState::Throttled);
         assert_eq!(decision.cause, crate::throttle::ThrottleCause::UserActivity);
         assert_eq!(app.snapshot().throttle_state, ThrottleState::Throttled);
-        assert_eq!(app.snapshot().reason, "user activity is active");
+        assert_eq!(app.snapshot().throttle_reason, "user activity is active");
         assert_eq!(app.throttle_decision().unwrap().cause, decision.cause);
 
         let caps = app.throttle_caps();

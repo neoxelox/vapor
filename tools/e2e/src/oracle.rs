@@ -256,8 +256,12 @@ impl TreeOracle {
 }
 
 pub fn is_internal_name(name: &str) -> bool {
-    name.starts_with(constants::provider::TEMP_FILE_PREFIX)
-        || name.ends_with(constants::provider::OP_ID_SIDE_FILE_SUFFIX)
+    constants::filtering::INTERNAL_IGNORE_FILE_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || constants::filtering::INTERNAL_IGNORE_FILE_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
 }
 
 fn file_facts(path: &Path, metadata: &fs::Metadata) -> Result<FileFacts, Failure> {

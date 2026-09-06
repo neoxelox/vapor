@@ -93,9 +93,13 @@ one-writer rule holds through a fault. After a crash the driver
 restarts the daemon itself (a CLI-only install has no supervisor); the
 mass-deletion guard holding a subtree removal is answered with `vapor
 decisions resolve <id> --choose apply` and recorded as a `guard-trip`,
-since that is the product working as designed. Any other decision the
-daemon opens fails the run: the driver does not know the right answer
-and never guesses.
+since that is the product working as designed. While the driver has
+the cloud root parked, the daemon holds the profile with a
+`root-missing` question; the driver expects that state, leaves the
+question alone, and after restoring the root waits for the daemon to
+lift the hold on its own. Any other decision the daemon opens fails
+the run: the driver does not know the right answer and never guesses.
+A daemon that re-creates the parked root is a finding.
 
 ## Throttle walk
 

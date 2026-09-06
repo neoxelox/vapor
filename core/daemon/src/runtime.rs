@@ -44,11 +44,88 @@ const MAX_CONSECUTIVE_TICK_ERRORS: u32 = 5;
 pub enum DaemonRuntimeError {
     Watcher(FsEventsWatcherError),
     StateDb(StateDbError),
+    /// The local root the profile adopted is not there. Waited for by
+    /// the caller; never re-created.
+    LocalRootMissing(PathBuf),
 }
 
 impl From<FsEventsWatcherError> for DaemonRuntimeError {
     fn from(value: FsEventsWatcherError) -> Self {
         Self::Watcher(value)
+    }
+}
+
+/// What a cloud-root ensure or identity probe found, computed on the
+/// worker so the tick thread never waits on the provider.
+#[derive(Debug)]
+enum CloudRootOutcome {
+    /// Present, ensured, and carrying the recorded identity (or just
+    /// adopted: the identity to record is carried along).
+    Ready {
+        adopted: Option<String>,
+    },
+    Missing,
+    Unreachable(String),
+    Replaced {
+        found: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct RootHold {
+    side: crate::root_identity::RootSide,
+    reason: String,
+    /// The open decision the hold waits on (`root-missing` or
+    /// `root-replaced`).
+    decision_id: Option<i64>,
+    /// An absence rather than a replacement.
+    missing: bool,
+}
+
+/// Ensures or checks the cloud root, on whichever thread calls it.
+/// With no recorded identity the root is ensured (created when the
+/// backend allows) and adopted; with one it is only checked, never
+/// created, and ensured when it matches so the provider's root cache
+/// is primed.
+fn probe_cloud_root(
+    provider: Arc<dyn Provider>,
+    cloud_root: &str,
+    recorded: Option<String>,
+    device_id: &str,
+) -> CloudRootOutcome {
+    use crate::root_identity::{RootStatus, classify_cloud_probe};
+    match recorded {
+        None => match provider.ensure_cloud_sync_directory(cloud_root) {
+            Ok(()) => match provider.adopt_root(cloud_root, device_id) {
+                Ok(identity) => {
+                    logging::info(
+                        "Adopted the cloud sync directory",
+                        &[
+                            ("cloud_sync_directory", cloud_root.to_string()),
+                            (
+                                "identity",
+                                identity.clone().unwrap_or_else(|| "none".to_string()),
+                            ),
+                        ],
+                    );
+                    CloudRootOutcome::Ready {
+                        adopted: Some(identity.unwrap_or_default()),
+                    }
+                }
+                Err(error) => CloudRootOutcome::Unreachable(error.message),
+            },
+            Err(error) => CloudRootOutcome::Unreachable(error.message),
+        },
+        Some(recorded) => match classify_cloud_probe(&recorded, provider.root_identity(cloud_root))
+        {
+            RootStatus::Ready => match provider.ensure_cloud_sync_directory(cloud_root) {
+                Ok(()) => CloudRootOutcome::Ready { adopted: None },
+                Err(error) => CloudRootOutcome::Unreachable(error.message),
+            },
+            RootStatus::Missing => CloudRootOutcome::Missing,
+            RootStatus::Unreachable(message) => CloudRootOutcome::Unreachable(message),
+            RootStatus::Replaced { found, .. } => CloudRootOutcome::Replaced { found },
+        },
     }
 }
 
@@ -211,9 +288,13 @@ pub struct DaemonRuntime {
     /// the changes poll, reconcile enumerate and cloud-root retry never
     /// hold the tick thread on a network round trip.
     provider_call_mode: crate::provider_jobs::ProviderCallMode,
-    /// A cloud-root ensure started on an earlier tick.
-    cloud_root_call:
-        Option<crate::provider_jobs::ProviderCall<Result<(), vapor_providers::ProviderError>>>,
+    /// A cloud-root ensure or identity probe started on an earlier tick.
+    cloud_root_call: Option<crate::provider_jobs::ProviderCall<CloudRootOutcome>>,
+    /// A replaced or missing root holds the profile: nothing is leased
+    /// and the status names why, until the root returns or a
+    /// `root-replaced` decision is answered.
+    root_hold: Option<RootHold>,
+    last_root_check_inst: Option<Instant>,
     /// Whether the provider-side sync root has been ensured. While
     /// `false`, no work is leased and the remote feed is not polled;
     /// ingest keeps capturing intent state durably.
@@ -457,7 +538,8 @@ impl DaemonRuntime {
         self.reload_path_filter_if_requested();
         self.sweep_stale_leases_if_due(now)?;
         self.purge_trash_if_due(now);
-        self.retry_cloud_root_if_needed();
+        self.retry_cloud_root_if_needed()?;
+        self.check_roots_if_due(now)?;
         self.apply_resolved_decisions(now)?;
 
         let (stabilized_events, suppressed_local_echoes, stabilize_mirror_reverts) =
@@ -470,7 +552,9 @@ impl DaemonRuntime {
         // cloud root blocks the same way. Evaluated *after*
         // stabilization so a mass-deletion guard trip stops
         // admission in the same tick that detected the storm.
-        let paused = self.app.snapshot().run_state == RunState::Paused || !self.cloud_root_ready;
+        let paused = self.app.snapshot().run_state == RunState::Paused
+            || !self.cloud_root_ready
+            || self.root_hold.is_some();
         self.mirror_revert_count += stabilize_mirror_reverts as u64;
         let mut report = RuntimeTickReport {
             released_deferred_reconciles: if paused {
@@ -949,15 +1033,74 @@ impl DaemonRuntime {
             );
         }
 
+        let device_id = vapor_shared::device_id::derive_device_id();
+        let mut local_replacement: Option<Option<String>> = None;
+        if let Some(local_root) = sync_scope.local_sync_directory.as_deref() {
+            match crate::root_identity::check_local_root(
+                &mut state_db,
+                local_root,
+                &device_id,
+                now,
+            )? {
+                crate::root_identity::RootStatus::Ready => {}
+                crate::root_identity::RootStatus::Missing => {
+                    return Err(DaemonRuntimeError::LocalRootMissing(
+                        local_root.to_path_buf(),
+                    ));
+                }
+                crate::root_identity::RootStatus::Replaced { found, .. } => {
+                    local_replacement = Some(found);
+                }
+                crate::root_identity::RootStatus::Unreachable(_) => {}
+            }
+        }
         sync_scope.local_sync_directory = sync_scope
             .local_sync_directory
             .take()
             .map(normalize_watch_root)
             .transpose()?;
 
-        let cloud_root_ready = app
-            .ensure_cloud_sync_directory(sync_scope.cloud_sync_directory.as_str())
-            .is_ok();
+        // The cloud root: adopted on first contact, checked against the
+        // recorded identity afterwards. Synchronous only here, at
+        // startup; every later probe runs on a worker. A runtime with
+        // no local root (a parked profile) never touches the cloud.
+        let cloud_outcome = if sync_scope.local_sync_directory.is_some() {
+            probe_cloud_root(
+                app.provider_handle(),
+                sync_scope.cloud_sync_directory.as_str(),
+                crate::root_identity::recorded_identity(
+                    &state_db,
+                    crate::root_identity::RootSide::Cloud,
+                )?,
+                &device_id,
+            )
+        } else {
+            CloudRootOutcome::Missing
+        };
+        let mut cloud_replacement: Option<Option<String>> = None;
+        let mut cloud_missing = false;
+        let cloud_root_ready = match cloud_outcome {
+            CloudRootOutcome::Ready { adopted } => {
+                if let Some(identity) = adopted {
+                    crate::root_identity::record_identity(
+                        &mut state_db,
+                        crate::root_identity::RootSide::Cloud,
+                        &identity,
+                        now,
+                    )?;
+                }
+                true
+            }
+            CloudRootOutcome::Replaced { found } => {
+                cloud_replacement = Some(found);
+                true
+            }
+            CloudRootOutcome::Missing => {
+                cloud_missing = sync_scope.local_sync_directory.is_some();
+                false
+            }
+            CloudRootOutcome::Unreachable(_) => false,
+        };
 
         let tick_waker = Arc::new(TickWaker::default());
         let recorder = sync_scope
@@ -1033,7 +1176,7 @@ impl DaemonRuntime {
         let debounce =
             DebounceLoop::with_windows_and_clock(DebounceWindows::default(), clock.clone());
         let tick_interval = debounce.tick_interval();
-        Ok(Self {
+        let mut runtime = Self {
             app,
             sync_scope,
             state_db,
@@ -1070,6 +1213,8 @@ impl DaemonRuntime {
             remote_poller: RemotePoller::new(DEFAULT_PROFILE_ID),
             provider_call_mode: crate::provider_jobs::ProviderCallMode::Inline,
             cloud_root_call: None,
+            root_hold: None,
+            last_root_check_inst: None,
             profile_id: DEFAULT_PROFILE_ID.to_string(),
             timeline_default_entries: None,
             cloud_root_ready,
@@ -1100,7 +1245,18 @@ impl DaemonRuntime {
             trash: None,
             last_trash_purge_inst: None,
             flush_boost_until_inst: None,
-        })
+        };
+        if let Some(found) = local_replacement {
+            runtime.hold_for_replaced_root(crate::root_identity::RootSide::Local, found, now)?;
+        } else if let Some(found) = cloud_replacement {
+            runtime.hold_for_replaced_root(crate::root_identity::RootSide::Cloud, found, now)?;
+        } else if cloud_missing {
+            runtime.hold_for_missing_root(crate::root_identity::RootSide::Cloud, now)?;
+        }
+        if !cloud_root_ready {
+            runtime.last_cloud_root_attempt_inst = Some(runtime.clock.now());
+        }
+        Ok(runtime)
     }
 
     /// Wires the shared daemon activity timeline in.
@@ -1482,83 +1638,474 @@ impl DaemonRuntime {
         }
     }
 
-    fn retry_cloud_root_if_needed(&mut self) {
+    fn retry_cloud_root_if_needed(&mut self) -> Result<(), DaemonRuntimeError> {
         if self.cloud_root_ready {
-            return;
+            return Ok(());
         }
         let now_inst = self.clock.now();
-        // Harvest an ensure started on an earlier tick before consulting
-        // the cadence, so a slow round trip is never abandoned.
-        let result = if let Some(call) = self.cloud_root_call.as_mut() {
-            let Some(result) = call.take() else {
-                return;
-            };
-            self.cloud_root_call = None;
-            result
+        // A root that was adopted is probed at the root-check cadence
+        // (a stat, cheap); creating one that never existed retries at
+        // the slower ensure cadence.
+        let interval = if self.root_hold.is_some() {
+            Duration::from_secs(constants::engine::ROOT_CHECK_INTERVAL_SECONDS)
         } else {
-            let retry_interval =
-                Duration::from_secs(constants::engine::CLOUD_ROOT_ENSURE_RETRY_SECONDS);
-            let due = self
-                .last_cloud_root_attempt_inst
-                .map(|last| now_inst.saturating_duration_since(last) >= retry_interval)
-                .unwrap_or(true);
-            if !due {
-                return;
+            Duration::from_secs(constants::engine::CLOUD_ROOT_ENSURE_RETRY_SECONDS)
+        };
+        let Some(outcome) = self.harvest_or_start_cloud_probe(now_inst, interval) else {
+            return Ok(());
+        };
+        let now = self.clock.now_system();
+        match outcome {
+            CloudRootOutcome::Ready { adopted } => {
+                if let Some(identity) = adopted
+                    && let Err(error) = crate::root_identity::record_identity(
+                        &mut self.state_db,
+                        crate::root_identity::RootSide::Cloud,
+                        &identity,
+                        now,
+                    )
+                {
+                    logging::warning(
+                        "Could not record the adopted cloud root identity",
+                        &[("error", error.to_string())],
+                    );
+                }
+                self.cloud_root_ready = true;
+                self.release_root_hold(crate::root_identity::RootSide::Cloud, now);
+                // A recovered root may have drifted while unreachable: a
+                // whole-scope reconcile converges it. The two-way walk
+                // only deletes locally behind a remote-origin tombstone,
+                // so a root that came back emptier re-uploads instead of
+                // mirroring the emptiness back.
+                if let Err(error) = self.enqueue_startup_reconstruction_reconcile(now) {
+                    logging::warning(
+                        "Could not schedule the post-recovery whole-scope reconcile",
+                        &[("error", format!("{error:?}"))],
+                    );
+                }
+                self.restore_run_state_after_root_recovery("cloud sync directory recovered");
             }
-            self.last_cloud_root_attempt_inst = Some(now_inst);
-            let provider = self.app.provider_handle();
-            let cloud_root = self.sync_scope.cloud_sync_directory.clone();
-            let mut call = crate::provider_jobs::ProviderCall::start(
-                &self.provider_call_mode,
-                "ensure-cloud-root",
-                move || provider.ensure_cloud_sync_directory(cloud_root.as_str()),
-            );
-            match call.take() {
-                Some(result) => result,
-                None => {
-                    self.cloud_root_call = Some(call);
-                    return;
+            CloudRootOutcome::Replaced { found } => {
+                self.cloud_root_ready = true;
+                if let Err(error) =
+                    self.hold_for_replaced_root(crate::root_identity::RootSide::Cloud, found, now)
+                {
+                    logging::warning(
+                        "Could not open the root-replaced decision",
+                        &[("error", format!("{error:?}"))],
+                    );
                 }
             }
-        };
-        if matches!(result, Ok(Ok(()))) {
-            self.cloud_root_ready = true;
-            // A recovered root may be freshly recreated and empty (or
-            // have drifted while unreachable): a whole-scope reconcile
-            // restores it from local content. The two-way walk only
-            // deletes locally behind a remote-origin tombstone, so an
-            // empty recreated root re-uploads instead of mirroring the
-            // emptiness back.
-            if let Err(error) =
-                self.enqueue_startup_reconstruction_reconcile(self.clock.now_system())
-            {
+            CloudRootOutcome::Missing => {
+                self.hold_for_missing_root(crate::root_identity::RootSide::Cloud, now)?;
+            }
+            CloudRootOutcome::Unreachable(message) => logging::debug(
+                "Cloud root probe failed; retrying at the ensure cadence",
+                &[("error", message)],
+            ),
+        }
+        Ok(())
+    }
+
+    /// Harvests a cloud probe started on an earlier tick, or starts one
+    /// when the cadence allows. `None` while nothing has landed.
+    fn harvest_or_start_cloud_probe(
+        &mut self,
+        now_inst: Instant,
+        interval: Duration,
+    ) -> Option<CloudRootOutcome> {
+        if let Some(call) = self.cloud_root_call.as_mut() {
+            let outcome = call.take()?;
+            self.cloud_root_call = None;
+            return match outcome {
+                Ok(outcome) => Some(outcome),
+                Err(panic) => Some(CloudRootOutcome::Unreachable(panic)),
+            };
+        }
+        let due = self
+            .last_cloud_root_attempt_inst
+            .map(|last| now_inst.saturating_duration_since(last) >= interval)
+            .unwrap_or(true);
+        if !due {
+            return None;
+        }
+        self.last_cloud_root_attempt_inst = Some(now_inst);
+        let recorded = match crate::root_identity::recorded_identity(
+            &self.state_db,
+            crate::root_identity::RootSide::Cloud,
+        ) {
+            Ok(recorded) => recorded,
+            Err(error) => {
                 logging::warning(
-                    "Could not schedule the post-recovery whole-scope reconcile",
-                    &[("error", format!("{error:?}"))],
+                    "Could not read the recorded cloud root identity",
+                    &[("error", error.to_string())],
                 );
+                return None;
             }
-            // Recovering the cloud root must only clear the cloud-root
-            // Error state. If the daemon is Paused — an explicit
-            // `vapor pause`, or the mass-deletion (ransomware) guard — leave
-            // the pause and its reason intact so recovery cannot silently
-            // resume sync (and replicate queued mass deletions) without the
-            // human review the pause exists to force.
-            if self.app.snapshot().run_state == RunState::Paused {
-                return;
-            }
-            match self.sync_scope.local_sync_directory.as_ref() {
-                Some(path) => self.app.set_run_state(
-                    RunState::Running,
-                    format!(
-                        "cloud sync directory recovered; watching {}",
-                        path.display()
-                    ),
-                ),
-                None => self
-                    .app
-                    .set_run_state(RunState::Paused, "no local sync directory configured"),
+        };
+        let provider = self.app.provider_handle();
+        let cloud_root = self.sync_scope.cloud_sync_directory.clone();
+        let device_id = self.device_id.clone();
+        let mut call = crate::provider_jobs::ProviderCall::start(
+            &self.provider_call_mode,
+            "probe-cloud-root",
+            move || probe_cloud_root(provider, cloud_root.as_str(), recorded, &device_id),
+        );
+        match call.take() {
+            Some(Ok(outcome)) => Some(outcome),
+            Some(Err(panic)) => Some(CloudRootOutcome::Unreachable(panic)),
+            None => {
+                self.cloud_root_call = Some(call);
+                None
             }
         }
+    }
+
+    /// Re-derives the run state once a root is back. An explicit pause
+    /// (the user's) stays a pause: recovery never resumes silently.
+    fn restore_run_state_after_root_recovery(&mut self, what: &str) {
+        if self.root_hold.is_some() {
+            let reason = self
+                .root_hold
+                .as_ref()
+                .map(|hold| hold.reason.clone())
+                .unwrap_or_default();
+            self.app.set_run_state(RunState::Error, reason);
+            return;
+        }
+        if !self.cloud_root_ready {
+            self.app.set_run_state(
+                RunState::Error,
+                format!(
+                    "cloud sync directory {} is unavailable; sync work is blocked until it comes back",
+                    self.sync_scope.cloud_sync_directory
+                ),
+            );
+            return;
+        }
+        if self.app.snapshot().run_state == RunState::Paused {
+            return;
+        }
+        match self.sync_scope.local_sync_directory.as_ref() {
+            Some(path) => self.app.set_run_state(
+                RunState::Running,
+                format!("{what}; watching {}", path.display()),
+            ),
+            None => self
+                .app
+                .set_run_state(RunState::Paused, "no local sync directory configured"),
+        }
+    }
+
+    /// Opens (or finds) the `root-replaced` decision for `side` and holds
+    /// the profile behind it.
+    fn hold_for_replaced_root(
+        &mut self,
+        side: crate::root_identity::RootSide,
+        found: Option<String>,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        use crate::root_identity::{DECISION_KIND, OPTION_REATTACH, RootSide, question};
+        if self
+            .root_hold
+            .as_ref()
+            .is_some_and(|hold| hold.side == side && !hold.missing)
+        {
+            return Ok(());
+        }
+        self.withdraw_root_decisions(side, crate::root_identity::MISSING_DECISION_KIND, now)?;
+        let root = match side {
+            RootSide::Local => self
+                .sync_scope
+                .local_sync_directory
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            RootSide::Cloud => self.sync_scope.cloud_sync_directory.clone(),
+        };
+        let path = match side {
+            RootSide::Local => self.sync_scope.local_sync_directory.clone(),
+            RootSide::Cloud => None,
+        };
+        let decision_id = match self
+            .state_db
+            .open_decision(DECISION_KIND, path.as_deref())?
+        {
+            Some(decision) => decision.id,
+            None => {
+                let question = question(side, &root, found.as_deref());
+                let options = [crate::state_db::DecisionOption {
+                    key: OPTION_REATTACH.to_string(),
+                    label: "Reattach this folder and merge, deleting nothing".to_string(),
+                }];
+                let evidence = serde_json::json!({
+                    "side": side.label(),
+                    "root": root,
+                    "found_identity": found,
+                });
+                let id = self.state_db.create_decision(
+                    DECISION_KIND,
+                    crate::state_db::DecisionScope::Profile,
+                    path.as_deref(),
+                    &question,
+                    &options,
+                    &evidence,
+                    now,
+                )?;
+                logging::warning(
+                    "Sync root replaced; holding the profile behind a decision",
+                    &[
+                        ("side", side.label().to_string()),
+                        ("root", root.clone()),
+                        ("decision_id", id.to_string()),
+                    ],
+                );
+                self.announce_decisions(&[id], now);
+                id
+            }
+        };
+        let reason = format!(
+            "{} sync directory {root} is not the folder this profile adopted; answer decision #{decision_id} (vapor decisions list) or put the original folder back",
+            side.label()
+        );
+        self.root_hold = Some(RootHold {
+            side,
+            reason: reason.clone(),
+            decision_id: Some(decision_id),
+            missing: false,
+        });
+        if self.app.snapshot().run_state != RunState::Paused {
+            self.app.set_run_state(RunState::Error, reason);
+        }
+        Ok(())
+    }
+
+    /// Holds the profile because a root went away, with a `root-missing`
+    /// decision so the user can ask for it to be re-created instead of
+    /// waiting.
+    fn hold_for_missing_root(
+        &mut self,
+        side: crate::root_identity::RootSide,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        use crate::root_identity::{
+            MISSING_DECISION_KIND, OPTION_RECREATE, RootSide, missing_question,
+        };
+        if self
+            .root_hold
+            .as_ref()
+            .is_some_and(|hold| hold.side == side && hold.missing)
+        {
+            return Ok(());
+        }
+        self.withdraw_root_decisions(side, crate::root_identity::DECISION_KIND, now)?;
+        let root = match side {
+            RootSide::Local => self
+                .sync_scope
+                .local_sync_directory
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            RootSide::Cloud => self.sync_scope.cloud_sync_directory.clone(),
+        };
+        let path = match side {
+            RootSide::Local => self.sync_scope.local_sync_directory.clone(),
+            RootSide::Cloud => None,
+        };
+        let decision_id = match self
+            .state_db
+            .open_decision(MISSING_DECISION_KIND, path.as_deref())?
+        {
+            Some(decision) => decision.id,
+            None => {
+                let question = missing_question(side, &root);
+                let options = [crate::state_db::DecisionOption {
+                    key: OPTION_RECREATE.to_string(),
+                    label: format!(
+                        "Re-create the folder empty and let the {} fill it",
+                        match side {
+                            RootSide::Local => "cloud",
+                            RootSide::Cloud => "device",
+                        }
+                    ),
+                }];
+                let evidence = serde_json::json!({
+                    "side": side.label(),
+                    "root": root,
+                });
+                let id = self.state_db.create_decision(
+                    MISSING_DECISION_KIND,
+                    crate::state_db::DecisionScope::Profile,
+                    path.as_deref(),
+                    &question,
+                    &options,
+                    &evidence,
+                    now,
+                )?;
+                logging::warning(
+                    "Sync root is missing; holding the profile until it returns",
+                    &[
+                        ("side", side.label().to_string()),
+                        ("root", root.clone()),
+                        ("decision_id", id.to_string()),
+                    ],
+                );
+                self.announce_decisions(&[id], now);
+                id
+            }
+        };
+        let reason = format!(
+            "{} sync directory {root} is missing; Vapor waits for it and never re-creates a folder it synced before (decision #{decision_id}: vapor decisions list)",
+            side.label()
+        );
+        self.root_hold = Some(RootHold {
+            side,
+            reason: reason.clone(),
+            decision_id: Some(decision_id),
+            missing: true,
+        });
+        if self.app.snapshot().run_state != RunState::Paused {
+            self.app.set_run_state(RunState::Error, reason);
+        }
+        Ok(())
+    }
+
+    /// Withdraws every open decision of `kind` about `side`: the
+    /// condition it asked about is gone.
+    fn withdraw_root_decisions(
+        &mut self,
+        side: crate::root_identity::RootSide,
+        kind: &str,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        for decision in self.state_db.decisions(false)? {
+            if decision.kind == kind && decision.evidence["side"] == side.label() {
+                self.state_db.withdraw_decision(decision.id, now)?;
+                if let Some(timeline) = &self.timeline {
+                    timeline.push(
+                        "decision",
+                        self.profile_id.clone(),
+                        format!(
+                            "Decision {} ({kind}) withdrawn: the {} root changed state",
+                            decision.id,
+                            side.label()
+                        ),
+                        now,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Clears a hold on `side` once its root is back or reattached,
+    /// withdrawing the decision the hold was waiting on.
+    fn release_root_hold(&mut self, side: crate::root_identity::RootSide, now: SystemTime) {
+        let Some(hold) = self.root_hold.clone() else {
+            return;
+        };
+        if hold.side != side {
+            return;
+        }
+        if let Some(decision_id) = hold.decision_id
+            && let Ok(Some(decision)) = self.state_db.decision(decision_id)
+            && decision.is_open()
+        {
+            if let Err(error) = self.state_db.withdraw_decision(decision_id, now) {
+                logging::warning(
+                    "Could not withdraw the root-replaced decision",
+                    &[("error", error.to_string())],
+                );
+            }
+            if let Some(timeline) = &self.timeline {
+                timeline.push(
+                    "decision",
+                    self.profile_id.clone(),
+                    format!(
+                        "Decision {decision_id} ({}) withdrawn: the original {} root is back",
+                        decision.kind,
+                        side.label()
+                    ),
+                    now,
+                );
+            }
+        }
+        self.root_hold = None;
+        logging::info(
+            "Sync root is back; releasing the profile",
+            &[("side", side.label().to_string())],
+        );
+    }
+
+    /// Checks both roots on a cadence: the local one inline (a stat and
+    /// a small read), the cloud one through a worker probe.
+    fn check_roots_if_due(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
+        let now_inst = self.clock.now();
+        let interval = Duration::from_secs(constants::engine::ROOT_CHECK_INTERVAL_SECONDS);
+        let due = self
+            .last_root_check_inst
+            .map(|last| now_inst.saturating_duration_since(last) >= interval)
+            .unwrap_or(true);
+        if !due {
+            return Ok(());
+        }
+        self.last_root_check_inst = Some(now_inst);
+        if let Some(local_root) = self.sync_scope.local_sync_directory.clone() {
+            use crate::root_identity::{RootSide, RootStatus};
+            match crate::root_identity::check_local_root(
+                &mut self.state_db,
+                &local_root,
+                &self.device_id,
+                now,
+            )? {
+                RootStatus::Ready => {
+                    if self
+                        .root_hold
+                        .as_ref()
+                        .is_some_and(|hold| hold.side == RootSide::Local)
+                    {
+                        self.release_root_hold(RootSide::Local, now);
+                        self.enqueue_startup_reconstruction_reconcile(now)?;
+                        self.restore_run_state_after_root_recovery("local sync directory is back");
+                    }
+                    // A `root-missing` question left by a start that found
+                    // no folder is moot now that the folder is here.
+                    self.withdraw_root_decisions(
+                        RootSide::Local,
+                        crate::root_identity::MISSING_DECISION_KIND,
+                        now,
+                    )?;
+                }
+                RootStatus::Missing => self.hold_for_missing_root(RootSide::Local, now)?,
+                RootStatus::Replaced { found, .. } => {
+                    self.hold_for_replaced_root(RootSide::Local, found, now)?;
+                }
+                RootStatus::Unreachable(_) => {}
+            }
+        }
+        if self.cloud_root_ready
+            && self
+                .root_hold
+                .as_ref()
+                .is_none_or(|hold| hold.side != crate::root_identity::RootSide::Cloud)
+            && let Some(outcome) = self.harvest_or_start_cloud_probe(now_inst, interval)
+        {
+            match outcome {
+                CloudRootOutcome::Ready { .. } => {}
+                CloudRootOutcome::Unreachable(message) => logging::debug(
+                    "Cloud root check failed; keeping the last known state",
+                    &[("error", message)],
+                ),
+                CloudRootOutcome::Missing => {
+                    self.mark_cloud_root_unavailable("the cloud sync directory is missing", now);
+                    self.hold_for_missing_root(crate::root_identity::RootSide::Cloud, now)?;
+                }
+                CloudRootOutcome::Replaced { found } => {
+                    self.hold_for_replaced_root(crate::root_identity::RootSide::Cloud, found, now)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Drains any pause / resume / flush / reconcile requests recorded
@@ -2092,6 +2639,24 @@ impl DaemonRuntime {
                         "discarded: {dropped} deletion(s) dropped, {enqueued} restore(s) enqueued"
                     )
                 }
+                (
+                    crate::root_identity::MISSING_DECISION_KIND,
+                    crate::root_identity::OPTION_RECREATE,
+                )
+                | (crate::root_identity::DECISION_KIND, crate::root_identity::OPTION_REATTACH) => {
+                    match self.reattach_root(&decision, now) {
+                        Ok(summary) => summary,
+                        Err(message) => {
+                            // Left answered-but-unapplied: the next tick
+                            // tries again, and the log says why.
+                            logging::warning(
+                                "Could not reattach the sync root; will retry",
+                                &[("decision_id", decision.id.to_string()), ("error", message)],
+                            );
+                            continue;
+                        }
+                    }
+                }
                 (kind, choice) => {
                     // A kind this runtime does not know how to apply is
                     // left answered-but-unapplied for a build that does;
@@ -2127,6 +2692,84 @@ impl DaemonRuntime {
             }
         }
         Ok(())
+    }
+
+    /// Applies a `reattach` answer: the folder now at the root becomes
+    /// the profile's root, the next whole-scope reconcile merges the
+    /// two sides without propagating any deletion, and the hold lifts.
+    fn reattach_root(
+        &mut self,
+        decision: &crate::state_db::DecisionRecord,
+        now: SystemTime,
+    ) -> Result<String, String> {
+        use crate::root_identity::RootSide;
+        let side = match decision.evidence["side"].as_str() {
+            Some("cloud") => RootSide::Cloud,
+            _ => RootSide::Local,
+        };
+        match side {
+            RootSide::Local => {
+                let root = self
+                    .sync_scope
+                    .local_sync_directory
+                    .clone()
+                    .ok_or_else(|| "no local sync directory configured".to_string())?;
+                if decision.kind == crate::root_identity::MISSING_DECISION_KIND {
+                    std::fs::create_dir_all(&root)
+                        .map_err(|error| format!("cannot re-create {}: {error}", root.display()))?;
+                }
+                if !root.is_dir() {
+                    return Err(format!("{} is not there", root.display()));
+                }
+                crate::root_identity::reattach_local(
+                    &mut self.state_db,
+                    &root,
+                    &self.device_id,
+                    now,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            RootSide::Cloud => {
+                // Rare and user-triggered: the one provider call the
+                // tick thread makes outside startup.
+                let cloud_root = self.sync_scope.cloud_sync_directory.clone();
+                if decision.kind == crate::root_identity::MISSING_DECISION_KIND {
+                    self.app
+                        .provider()
+                        .ensure_cloud_sync_directory(cloud_root.as_str())
+                        .map_err(|error| error.message)?;
+                }
+                let identity = self
+                    .app
+                    .provider()
+                    .adopt_root(cloud_root.as_str(), &self.device_id)
+                    .map_err(|error| error.message)?;
+                crate::root_identity::record_identity(
+                    &mut self.state_db,
+                    RootSide::Cloud,
+                    identity.as_deref().unwrap_or(""),
+                    now,
+                )
+                .map_err(|error| error.to_string())?;
+                self.cloud_root_ready = true;
+            }
+        }
+        self.state_db
+            .set_state(constants::state::MERGE_WITHOUT_DELETIONS_KEY, "1", now)
+            .map_err(|error| error.to_string())?;
+        self.root_hold = None;
+        self.enqueue_startup_reconstruction_reconcile(now)
+            .map_err(|error| format!("{error:?}"))?;
+        self.restore_run_state_after_root_recovery("sync root reattached");
+        Ok(format!(
+            "{} the {} sync directory; merging without deletions",
+            if decision.kind == crate::root_identity::MISSING_DECISION_KIND {
+                "re-created"
+            } else {
+                "reattached"
+            },
+            side.label()
+        ))
     }
 
     fn flush_scheduler_to_durable_queue(&mut self) -> Result<usize, DaemonRuntimeError> {
@@ -3147,7 +3790,7 @@ mod tests {
     }
 
     #[test]
-    fn deleted_cloud_root_blocks_sync_then_recovers_and_reuploads() {
+    fn deleted_cloud_root_holds_the_profile_and_recreate_reuploads() {
         let mut fixture = BidirectionalFixture::new();
         // Baseline the feed cursor, then sync one file normally.
         fixture.tick(6_000);
@@ -3156,6 +3799,13 @@ mod tests {
         fixture.record_local_event(&first, FsEventKind::Created, fixture.now_ms);
         assert!(fixture.converge(12) >= 1, "baseline upload must complete");
         assert!(fixture.cloud_root.join("kept.txt").exists());
+        assert!(
+            fixture
+                .cloud_root
+                .join(constants::provider::ROOT_MARKER_FILE_NAME)
+                .is_file(),
+            "adoption wrote the cloud root marker"
+        );
 
         // The user deletes the whole cloud sync root out from under the
         // running daemon.
@@ -3181,18 +3831,49 @@ mod tests {
             "root loss must never finalize intents into failed_intents"
         );
 
-        // Self-healing: the ensure-retry loop recreates the root, the
-        // daemon returns to Running, and the post-recovery reconcile
-        // re-uploads local content into the recreated (empty) root.
+        // The root is never re-created on Vapor's own: the profile waits
+        // and asks. The reason names the decision.
+        for _ in 0..30 {
+            fixture.tick(6_000);
+        }
+        assert!(
+            !fixture.cloud_root.exists(),
+            "an adopted root is never re-created silently"
+        );
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision(crate::root_identity::MISSING_DECISION_KIND, None)
+            .expect("query")
+            .expect("a root-missing decision is open");
+        assert_eq!(decision.evidence["side"], "cloud");
+        assert!(
+            fixture
+                .runtime
+                .app()
+                .snapshot()
+                .reason
+                .contains(&format!("decision #{}", decision.id)),
+            "reason: {}",
+            fixture.runtime.app().snapshot().reason
+        );
+
+        // The user asks for it back: the root is re-created, adopted
+        // afresh, and the reconcile re-uploads local content into it.
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "recreate", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
         let mut recovered = false;
-        for _ in 0..90 {
+        for _ in 0..30 {
             fixture.tick(6_000);
             if fixture.runtime.app().snapshot().run_state == RunState::Running {
                 recovered = true;
                 break;
             }
         }
-        assert!(recovered, "the ensure-retry loop must recreate the root");
+        assert!(recovered, "recreate must bring the profile back to Running");
         fixture.converge(60);
         assert_eq!(
             std::fs::read(fixture.cloud_root.join("kept.txt")).expect("re-uploaded"),
@@ -3201,6 +3882,114 @@ mod tests {
         assert_eq!(
             std::fs::read(fixture.cloud_root.join("during-outage.txt")).expect("uploaded"),
             b"written while root is gone",
+        );
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .open_decision(crate::root_identity::MISSING_DECISION_KIND, None)
+                .expect("query")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_cloud_root_that_returns_on_its_own_releases_the_hold_without_an_answer() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let first = fixture.watch_root.join("kept.txt");
+        std::fs::write(&first, b"kept").expect("seed local");
+        fixture.record_local_event(&first, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(12);
+        // The volume goes away and comes back with the same marker.
+        let parked = fixture._temp.path().join("parked");
+        std::fs::rename(&fixture.cloud_root, &parked).expect("unmount");
+        for _ in 0..12 {
+            fixture.tick(6_000);
+        }
+        assert_eq!(fixture.runtime.app().snapshot().run_state, RunState::Error);
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .open_decision(crate::root_identity::MISSING_DECISION_KIND, None)
+                .expect("query")
+                .is_some()
+        );
+        std::fs::rename(&parked, &fixture.cloud_root).expect("mount again");
+        let mut recovered = false;
+        for _ in 0..30 {
+            fixture.tick(6_000);
+            if fixture.runtime.app().snapshot().run_state == RunState::Running {
+                recovered = true;
+                break;
+            }
+        }
+        assert!(
+            recovered,
+            "the original root returning resumes sync on its own"
+        );
+        let closed = fixture
+            .runtime
+            .state_db()
+            .decisions(true)
+            .expect("decisions")
+            .into_iter()
+            .find(|decision| decision.kind == crate::root_identity::MISSING_DECISION_KIND)
+            .expect("the decision is kept in history");
+        assert_eq!(closed.choice.as_deref(), Some("withdrawn"));
+    }
+
+    #[test]
+    fn a_cloud_root_replaced_by_an_empty_folder_asks_before_syncing() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let first = fixture.watch_root.join("kept.txt");
+        std::fs::write(&first, b"kept").expect("seed local");
+        fixture.record_local_event(&first, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(12);
+        // A fresh, empty folder appears where the cloud root was.
+        std::fs::remove_dir_all(&fixture.cloud_root).expect("delete");
+        std::fs::create_dir_all(&fixture.cloud_root).expect("empty folder");
+        for _ in 0..12 {
+            fixture.tick(6_000);
+        }
+        assert_eq!(fixture.runtime.app().snapshot().run_state, RunState::Error);
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision(crate::root_identity::DECISION_KIND, None)
+            .expect("query")
+            .expect("a root-replaced decision is open");
+        assert_eq!(decision.evidence["side"], "cloud");
+        assert!(
+            !fixture.cloud_root.join("kept.txt").exists(),
+            "nothing is synced into a folder that was not adopted"
+        );
+        assert!(first.exists(), "and nothing is deleted on this device");
+
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "reattach", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
+        for _ in 0..30 {
+            fixture.tick(6_000);
+            if fixture.runtime.app().snapshot().run_state == RunState::Running {
+                break;
+            }
+        }
+        fixture.converge(60);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("kept.txt")).expect("merged up"),
+            b"kept"
+        );
+        assert!(
+            fixture
+                .cloud_root
+                .join(constants::provider::ROOT_MARKER_FILE_NAME)
+                .is_file(),
+            "the reattached folder carries a marker now"
         );
     }
 
@@ -4336,6 +5125,7 @@ mod tests {
             .expect("list")
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| !vapor_providers::filesystem::is_internal_file_name(name))
             .collect();
         assert_eq!(entries, vec!["notes.txt".to_string()], "no conflict copy");
     }

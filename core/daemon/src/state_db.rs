@@ -206,6 +206,18 @@ impl DurableStateDb {
         Ok(Self { path, connection })
     }
 
+    /// A private, process-local database: the inert runtime a parked
+    /// profile is composed with when its own state DB cannot be read.
+    pub fn open_in_memory() -> Result<Self, StateDbError> {
+        let mut connection = Connection::open_in_memory()?;
+        configure_connection(&connection)?;
+        migrate_schema(&mut connection)?;
+        Ok(Self {
+            path: PathBuf::from(":memory:"),
+            connection,
+        })
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -1475,6 +1487,21 @@ impl DurableStateDb {
         )?;
         self.decision(id)?
             .ok_or_else(|| StateDbError::InvalidStateValue(format!("decision {id} vanished")))
+    }
+
+    /// Closes an open decision the daemon no longer needs an answer to
+    /// (the condition it asked about went away). Recorded as resolved
+    /// and applied with the choice `withdrawn`, so the history says
+    /// why it closed.
+    pub fn withdraw_decision(&mut self, id: i64, now: SystemTime) -> Result<(), StateDbError> {
+        let now_ms = system_time_to_millis(now)?;
+        self.connection.execute(
+            "UPDATE pending_decisions
+             SET resolved_at_ms = ?, choice = 'withdrawn', applied_at_ms = ?
+             WHERE id = ? AND resolved_at_ms IS NULL",
+            params![now_ms, now_ms, id],
+        )?;
+        Ok(())
     }
 
     /// Adds a path to the decision's evidence (`paths` array, capped

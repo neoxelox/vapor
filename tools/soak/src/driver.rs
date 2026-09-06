@@ -40,6 +40,7 @@ const EXPECTED_WARNINGS: &[&str] = &[
     "Remote changed since last sync; preserving it over a local deletion",
     "Mass-deletion guard tripped",
     "Cloud sync directory became unavailable",
+    "Sync root is missing",
     "Cloud sync directory",
     "Configuration keys changed",
     "collides with a differently-cased local file",
@@ -268,7 +269,14 @@ impl Driver {
         )?;
         self.daemon = Some(daemon);
         self.health.reset_process();
-        self.cli.wait_run_state("Running", STARTUP_TIMEOUT)?;
+        // A daemon started while the cloud root is parked holds the
+        // profile (Error) until the root is back.
+        let expected = if self.cloud_parked.is_some() {
+            "Error"
+        } else {
+            "Running"
+        };
+        self.cli.wait_run_state(expected, STARTUP_TIMEOUT)?;
         Ok(())
     }
 
@@ -917,12 +925,20 @@ impl Driver {
             self.note("daemon is not running; restarting it");
             self.start_daemon()?;
         }
-        self.answer_mass_deletion_decisions()?;
+        self.answer_decisions()?;
+        // While the cloud root is parked the daemon holds the profile
+        // (Error, with a root-missing decision open); that is the
+        // product working as designed, not a daemon to wait on.
+        let expected = if self.cloud_parked.is_some() {
+            "Error"
+        } else {
+            "Running"
+        };
         let started = Instant::now();
-        while self.cli.run_state().as_deref() != Some("Running") {
+        while self.cli.run_state().as_deref() != Some(expected) {
             if Instant::now() >= deadline || started.elapsed() > STARTUP_TIMEOUT {
                 return Err(Failure::new(format!(
-                    "daemon never returned to Running (state {:?})",
+                    "daemon never returned to {expected} (state {:?})",
                     self.cli.run_state()
                 )));
             }
@@ -933,10 +949,13 @@ impl Driver {
 
     /// The workload's subtree removals are deliberate, so every open
     /// mass-deletion decision is answered `apply`; each one is recorded
-    /// as a `guard-trip`, the product working as designed. Any other
-    /// open decision kind is a finding: the driver does not know the
-    /// right answer, and the run must not guess.
-    fn answer_mass_deletion_decisions(&mut self) -> Result<(), Failure> {
+    /// as a `guard-trip`, the product working as designed. A
+    /// `root-missing` question about the cloud root while the driver
+    /// has it parked is expected and left open: it withdraws itself when
+    /// the root is restored. Any other open decision is a finding: the
+    /// driver does not know the right answer, and the run must not
+    /// guess.
+    fn answer_decisions(&mut self) -> Result<(), Failure> {
         let Ok(report) = self.cli.json(&["decisions", "list", "--json"]) else {
             return Ok(());
         };
@@ -950,6 +969,12 @@ impl Driver {
         for decision in open {
             let id = decision["id"].as_i64().unwrap_or_default();
             let kind = decision["kind"].as_str().unwrap_or_default().to_string();
+            if kind == "root-missing"
+                && decision["evidence"]["side"] == "cloud"
+                && self.cloud_parked.is_some()
+            {
+                continue;
+            }
             if kind != "mass-deletion" {
                 return Err(Failure::new(format!(
                     "the daemon opened a {kind} decision (#{id}) the driver cannot answer: {}",
@@ -1156,14 +1181,23 @@ impl Driver {
         match fault {
             FaultKind::CloudRootVanish => {
                 if let Some(parked) = self.cloud_parked.take() {
-                    // The daemon may have recreated an empty root while
-                    // the real one was parked; the real one wins.
                     if self.home.cloud.exists() {
-                        let _ = fs::remove_dir_all(&self.home.cloud);
+                        // An adopted root is never re-created on Vapor's
+                        // own; anything here is a finding.
+                        return Err(Failure::new(format!(
+                            "the daemon re-created the parked cloud root at {}",
+                            self.home.cloud.display()
+                        )));
                     }
                     fs::rename(&parked, &self.home.cloud)?;
                     self.note("cloud-root-vanish: cloud root restored");
                     self.record_fault_event("cloud-root-vanish", "restored".to_string());
+                    // The daemon notices on its root-check cadence and
+                    // lifts the hold on its own; give it that long.
+                    if self.daemon_pid().is_some() {
+                        self.cli
+                            .wait_run_state("Running", Duration::from_secs(90))?;
+                    }
                 }
             }
             FaultKind::ThrottleWalk => {

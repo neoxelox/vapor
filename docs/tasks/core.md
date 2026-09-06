@@ -972,14 +972,12 @@ Landed:
 
 Still open, in order:
 
-- [ ] SF-3 Root identity. A `.vapor-root` marker (internal name, never
-      synced) written at first sync and checked at every start and
-      every reconcile, plus the provider's own root identity where it
-      has one (Google Drive folder id). A root that is missing, empty
-      where it was populated, or carries another marker opens a
-      profile-scope `root-replaced` decision (`reattach`: adopt the new
-      root and merge without deletions; `wait`: keep the profile
-      stopped) instead of mirroring an empty volume into the cloud.
+- [x] SF-3 Root identity: the `.vapor-root` marker and the provider's
+      `root_identity` / `adopt_root`, adoption on first contact, checks
+      at start and every 15 seconds, `root-missing` (`recreate`) and
+      `root-replaced` (`reattach`) decisions, holds that lift on their
+      own when the original root returns, and a parked profile that is
+      composed again without a restart. Scenarios S43, S44, S45.
 - [ ] SF-4 Offline deletions propagate through the index. A file in the
       sync index that is gone from one side at startup, with the other
       side's copy unchanged since the last sync (rsync quick check), is

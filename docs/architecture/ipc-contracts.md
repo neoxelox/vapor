@@ -130,7 +130,10 @@ Concretely:
 - Running state, throttle state, throttle reason, queue depth (total +
   per-profile), last sync markers, effective resource ceilings
   (cpu/memory/bandwidth), current utilization, idle-boost state and reason,
-  open decisions (total + per-profile).
+  open decisions (total + per-profile). Each profile's `reason` is its
+  run-state reason (what is watched, what blocks sync, which decision is
+  waited on); the throttle reason is a separate field and never
+  overwrites it.
 
 ### Provider / auth
 

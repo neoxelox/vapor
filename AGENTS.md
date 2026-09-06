@@ -27,7 +27,7 @@ Reading order for a new session:
 - Primary priority is user device impact, not strict real-time sync.
 - Vapor sync scope is a user-selected local directory replicated bidirectionally with a user-selected cloud directory.
 - Vapor is not a full-device backup product and must never broaden scope beyond configured sync roots.
-- If configured sync roots are missing, Vapor creates the local root on-device and ensures the cloud root exists provider-side before regular sync work proceeds.
+- On a profile's first contact with its sync roots, Vapor creates the local root on-device, ensures the cloud root exists provider-side, and adopts both (`docs/architecture/data-flow.md` §Root identity). After that a missing root is waited for and never re-created on Vapor's own, and a root that is present without the adopted identity is put to the user as a decision; neither is ever mirrored as deletions.
 - Core guarantees:
   - Never lose intent state.
   - Recover safely after crash/restart.

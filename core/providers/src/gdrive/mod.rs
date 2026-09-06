@@ -722,17 +722,7 @@ impl Provider for GoogleDriveProvider {
     }
 
     fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), ProviderError> {
-        let segments: Vec<&str> = cloud_sync_directory
-            .trim()
-            .trim_matches('/')
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .collect();
-        if segments.is_empty() {
-            return Err(ProviderError::permanent(
-                "cloudSyncDirectory must name a folder inside Google Drive (for example \"/Vapor\")",
-            ));
-        }
+        let segments = cloud_root_segments(cloud_sync_directory)?;
         let mut parent_id = "root".to_string();
         for segment in &segments {
             parent_id = match self.find_child(&parent_id, segment)? {
@@ -754,6 +744,28 @@ impl Provider for GoogleDriveProvider {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(parent_id);
         Ok(())
+    }
+
+    fn root_identity(&self, cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
+        // The folder id is the identity: a folder re-created at the
+        // same path gets a new id, and a renamed folder keeps its own.
+        let mut parent_id = "root".to_string();
+        for segment in cloud_root_segments(cloud_sync_directory)? {
+            parent_id = match self.find_child(&parent_id, segment)? {
+                Some(existing) if existing.mime_type == FOLDER_MIME => existing.id,
+                Some(_) => {
+                    return Err(ProviderError::permanent(format!(
+                        "cloudSyncDirectory component '{segment}' exists in Drive but is not a folder"
+                    )));
+                }
+                None => {
+                    return Err(ProviderError::not_found(format!(
+                        "Google Drive folder {cloud_sync_directory} is missing"
+                    )));
+                }
+            };
+        }
+        Ok(Some(parent_id))
     }
 
     fn enumerate(&self, directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {
@@ -1512,6 +1524,22 @@ impl GdriveDownloadSession {
             remote_modified_at: self.remote_modified_at,
         }))
     }
+}
+
+/// The path components of the configured Drive root.
+fn cloud_root_segments(cloud_sync_directory: &str) -> Result<Vec<&str>, ProviderError> {
+    let segments: Vec<&str> = cloud_sync_directory
+        .trim()
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.is_empty() {
+        return Err(ProviderError::permanent(
+            "cloudSyncDirectory must name a folder inside Google Drive (for example \"/Vapor\")",
+        ));
+    }
+    Ok(segments)
 }
 
 // ---------------------------------------------------------------------

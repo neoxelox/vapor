@@ -69,6 +69,13 @@ pub mod runtime {
 
 pub mod state {
     pub const RETRY_SLOWDOWN_UNTIL_KEY: &str = "queue.retry_slowdown_until_ms";
+    /// The root identities a profile adopted, checked at every start
+    /// and on a cadence so a replaced root is never mirrored blindly.
+    pub const LOCAL_ROOT_IDENTITY_KEY: &str = "root_identity.local";
+    pub const CLOUD_ROOT_IDENTITY_KEY: &str = "root_identity.cloud";
+    /// Set by a `reattach` answer: the next whole-scope reconcile merges
+    /// the two roots without propagating any deletion.
+    pub const MERGE_WITHOUT_DELETIONS_KEY: &str = "reconcile.merge_without_deletions";
     /// Tombstones older than this are pruned at daemon startup: after a
     /// month, a divergent replica reconciles through content comparison
     /// anyway, and unbounded tombstone growth would violate the memory
@@ -217,6 +224,11 @@ pub mod provider {
     /// enumeration and every changes feed hide these; the local ingest
     /// path filter drops them unconditionally.
     pub const TEMP_FILE_PREFIX: &str = ".vapor-tmp-";
+    /// The root identity marker written once into a sync root when a
+    /// profile adopts it (`docs/architecture/data-flow.md` §Root
+    /// identity). Hidden from enumeration, feeds, and local ingest
+    /// like the other internal names; never synced.
+    pub const ROOT_MARKER_FILE_NAME: &str = ".vapor-root";
     /// A hidden `TEMP_FILE_PREFIX` staging file older than this is
     /// orphaned crash residue (an interrupted upload/download stage), not
     /// an in-flight transfer, and is reaped so it cannot accumulate in the
@@ -440,7 +452,7 @@ pub mod filtering {
     /// prevention depends on these never becoming intents, so they are
     /// enforced in the path filter itself rather than the editable
     /// rule set.
-    pub const INTERNAL_IGNORE_FILE_PREFIXES: &[&str] = &[".vapor-tmp-"];
+    pub const INTERNAL_IGNORE_FILE_PREFIXES: &[&str] = &[".vapor-tmp-", ".vapor-root"];
     pub const INTERNAL_IGNORE_FILE_SUFFIXES: &[&str] = &[".vapor-meta.json"];
     pub const DEFAULT_LOCAL_SYNC_DIRECTORY: &str = "~/Vapor";
     pub const DEFAULT_CLOUD_SYNC_DIRECTORY: &str = "/Vapor";
@@ -632,6 +644,9 @@ pub mod engine {
     /// initial attempt failed. Sync work stays blocked (and
     /// intents accumulate durably) between attempts.
     pub const CLOUD_ROOT_ENSURE_RETRY_SECONDS: u64 = 60;
+    /// How often a running daemon re-checks both sync roots (present,
+    /// and carrying the identity the profile adopted).
+    pub const ROOT_CHECK_INTERVAL_SECONDS: u64 = 15;
     /// Directories the reconcile comparison walk processes per runtime
     /// tick while a reconcile slice is active. Bounds per-tick I/O so
     /// the slice checkpoints keep their interruptibility guarantee.

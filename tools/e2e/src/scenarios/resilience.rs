@@ -60,6 +60,30 @@ pub fn scenarios() -> Vec<Scenario> {
             run: cloud_root_vanishes,
         },
         Scenario {
+            id: "S43",
+            name: "local-root-replaced",
+            proves: "an empty folder appearing where the adopted local root was opens a root-replaced decision and syncs nothing; reattach merges the cloud into it with no deletion anywhere",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: local_root_replaced,
+        },
+        Scenario {
+            id: "S44",
+            name: "local-root-missing-at-start",
+            proves: "a daemon started while the adopted local root is missing parks the profile with a root-missing decision, never re-creates the folder, and resumes on its own when the volume returns",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: local_root_missing_at_start,
+        },
+        Scenario {
+            id: "S45",
+            name: "cloud-root-deleted-recreate",
+            proves: "a deleted cloud root is never re-created on Vapor's own; the root-missing decision answered recreate re-creates it and re-uploads this device's files",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: cloud_root_deleted_recreate,
+        },
+        Scenario {
             id: "S35",
             name: "vapord-binary",
             proves: "the shipped vapord binary starts, syncs, and shuts down cleanly like vapor run",
@@ -296,6 +320,191 @@ fn cloud_root_vanishes(ctx: &mut Ctx) -> Result<(), Failure> {
     ctx.wait_exists(&home.cloud.join("during.txt"), Duration::from_secs(60))?;
     ctx.settle(CONVERGE_TIMEOUT)?;
     ctx.allow_warning("Cloud sync directory became unavailable");
+    ctx.allow_warning("cloud sync directory");
+    Ok(())
+}
+
+/// The open decision of `kind`, once the daemon has opened it.
+fn wait_open_decision(
+    cli: &crate::cli::Cli,
+    kind: &str,
+    timeout: Duration,
+) -> Result<serde_json::Value, Failure> {
+    let mut found = None;
+    wait::wait_until(timeout, &format!("a {kind} decision to open"), || {
+        let Ok(report) = cli.json(&["decisions", "list", "--json"]) else {
+            return false;
+        };
+        found = report["decisions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|decision| decision["kind"] == kind && decision["choice"].is_null())
+            .cloned();
+        found.is_some()
+    })?;
+    found.ok_or_else(|| Failure::new(format!("no open {kind} decision")))
+}
+
+fn local_root_replaced(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("kept.txt"), "kept\n")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("kept.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ensure!(
+        home.local.join(".vapor-root").is_file() && home.cloud.join(".vapor-root").is_file(),
+        "adoption writes a marker into both roots"
+    );
+
+    // The volume is swapped for an empty folder at the same path.
+    let parked = ctx.sandbox.root.join("parked-local");
+    fs::rename(&home.local, &parked)?;
+    fs::create_dir_all(&home.local)?;
+    let cli = ctx.cli();
+    let decision = wait_open_decision(&cli, "root-replaced", Duration::from_secs(60))?;
+    ensure!(
+        decision["evidence"]["side"] == "local",
+        "wrong side: {decision}"
+    );
+    cli.wait_run_state("Error", Duration::from_secs(30))?;
+    let status = cli
+        .status()
+        .ok_or_else(|| Failure::new("status did not answer"))?;
+    ensure!(
+        status.decisions_pending == 1,
+        "status must count the open decision"
+    );
+    // Nothing moves while the question is open.
+    std::thread::sleep(Duration::from_secs(5));
+    ensure!(
+        home.cloud.join("kept.txt").is_file(),
+        "the empty folder must not be mirrored into the cloud"
+    );
+    ensure!(
+        !home.local.join("kept.txt").exists(),
+        "nothing is synced into a folder that was not adopted"
+    );
+
+    let id = decision["id"].as_i64().unwrap_or_default().to_string();
+    cli.ok(&["decisions", "resolve", &id, "--choose", "reattach"])?;
+    cli.wait_run_state("Running", Duration::from_secs(60))?;
+    ctx.wait_exists(&home.local.join("kept.txt"), Duration::from_secs(60))?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ensure!(
+        home.local.join(".vapor-root").is_file(),
+        "the reattached folder carries a marker"
+    );
+    ensure!(
+        parked.join("kept.txt").is_file(),
+        "the parked volume is untouched"
+    );
+    ctx.allow_warning("Sync root replaced");
+    Ok(())
+}
+
+fn local_root_missing_at_start(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let first = start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("kept.txt"), "kept\n")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("kept.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ctx.stop_daemon(first)?;
+
+    // The volume is not plugged in when the daemon starts.
+    let parked = ctx.sandbox.root.join("parked-local");
+    fs::rename(&home.local, &parked)?;
+    // The daemon comes up serving status with the profile parked, so
+    // Running is not what to wait for here.
+    ctx.start_daemon_in(&home, DaemonKind::CliRun, false)?;
+    let cli = ctx.cli();
+    cli.wait_run_state("Error", Duration::from_secs(30))?;
+    let decision = wait_open_decision(&cli, "root-missing", Duration::from_secs(60))?;
+    ensure!(
+        decision["evidence"]["side"] == "local",
+        "wrong side: {decision}"
+    );
+    let status = cli
+        .status()
+        .ok_or_else(|| Failure::new("status did not answer"))?;
+    let reason = status
+        .profiles
+        .first()
+        .map(|profile| profile.suspended_reason.clone().unwrap_or_default())
+        .unwrap_or_default();
+    ensure!(
+        reason.contains("is missing"),
+        "the profile must say why it is parked: {reason:?}"
+    );
+    std::thread::sleep(Duration::from_secs(3));
+    ensure!(
+        !home.local.exists(),
+        "an adopted root is never re-created on Vapor's own"
+    );
+    ensure!(
+        home.cloud.join("kept.txt").is_file(),
+        "the cloud is untouched"
+    );
+
+    // The volume returns: the profile is composed again and syncs.
+    fs::rename(&parked, &home.local)?;
+    cli.wait_run_state("Running", Duration::from_secs(60))?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("after.txt"), "after the volume returned\n")?;
+    ctx.converge_from(&mark, 1, Duration::from_secs(60))?;
+    ctx.wait_exists(&home.cloud.join("after.txt"), Duration::from_secs(60))?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    let open = cli.json(&["decisions", "list", "--json"])?;
+    ensure!(
+        open["decisions"].as_array().is_some_and(Vec::is_empty),
+        "the question is withdrawn once the root is back: {open}"
+    );
+    ctx.allow_warning("Local sync directory is missing");
+    Ok(())
+}
+
+fn cloud_root_deleted_recreate(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("kept.txt"), "kept\n")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("kept.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    fs::remove_dir_all(&home.cloud)?;
+    let cli = ctx.cli();
+    let decision = wait_open_decision(&cli, "root-missing", Duration::from_secs(60))?;
+    ensure!(
+        decision["evidence"]["side"] == "cloud",
+        "wrong side: {decision}"
+    );
+    cli.wait_run_state("Error", Duration::from_secs(30))?;
+    std::thread::sleep(Duration::from_secs(3));
+    ensure!(
+        !home.cloud.exists(),
+        "an adopted cloud root is never re-created on Vapor's own"
+    );
+    ensure!(
+        home.local.join("kept.txt").is_file(),
+        "this device is untouched"
+    );
+
+    let id = decision["id"].as_i64().unwrap_or_default().to_string();
+    cli.ok(&["decisions", "resolve", &id, "--choose", "recreate"])?;
+    cli.wait_run_state("Running", Duration::from_secs(60))?;
+    ctx.wait_exists(&home.cloud.join("kept.txt"), Duration::from_secs(60))?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ensure!(
+        home.cloud.join(".vapor-root").is_file(),
+        "the re-created root is adopted afresh"
+    );
+    ctx.allow_warning("Cloud sync directory became unavailable");
+    ctx.allow_warning("Sync root is missing");
     ctx.allow_warning("cloud sync directory");
     Ok(())
 }

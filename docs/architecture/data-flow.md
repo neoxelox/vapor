@@ -247,8 +247,10 @@ say which reading is right. The rules:
   never silently consumed. Released intents carry `approved`, which the
   guard that held them respects.
 - **Kinds today.** `mass-deletion` (batch scope, options `apply` and
-  `discard`; see the guard under Local safeguards). Further kinds land
-  with the feature that needs them and are listed here.
+  `discard`; see the guard under Local safeguards); `root-missing`
+  (profile scope, option `recreate`) and `root-replaced` (profile
+  scope, option `reattach`), both under Root identity below. Further
+  kinds land with the feature that needs them and are listed here.
 
 ### What stops a whole profile
 
@@ -258,7 +260,8 @@ the sync running.
 
 | Condition | Effect | Way out |
 |---|---|---|
-| The local root is missing or replaced (another volume, an empty folder where a populated one was) | profile stops; nothing is deleted anywhere | the root comes back, or a profile-scope decision |
+| A sync root is missing (a volume unplugged, a folder deleted or moved) | profile holds; nothing is created or deleted anywhere; a `root-missing` decision is open | the root comes back (the hold lifts on its own), or `recreate` |
+| A sync root is replaced (a different folder at the same path, an emptied one) | profile holds; nothing is synced into the stranger; a `root-replaced` decision is open | the original root comes back, or `reattach` (merge, no deletions) |
 | The cloud is unreachable, refuses the credentials, or is out of quota | profile waits and retries with backoff; intents keep accumulating durably | connectivity, `vapor auth login`, freeing space |
 | The configuration is invalid | the daemon keeps the last valid configuration and reports the error | `vapor config` fixes it; live reload picks it up |
 | The daemon crash-loops | the lifecycle guard stops restarting it | `vapor service` after the cause is fixed |
@@ -267,6 +270,46 @@ the sync running.
 Never a whole-profile stop: a conflict, a name collision, a type
 mismatch, a deletion burst, a single failed transfer. Those hold their
 own path or batch and, when a person has to choose, open a decision.
+
+## Root identity
+
+The folders a profile syncs are the folders it adopted, not whatever
+sits at the configured paths. Without that check an unplugged volume
+reads as "every file was deleted", an empty folder at a mount point
+gets mirrored into the cloud, and a re-created cloud folder swallows a
+re-upload of everything. The mechanism (`core/daemon/src/root_identity.rs`,
+`core/providers/src/root_marker.rs`):
+
+- **Identity.** The local root carries a hidden `.vapor-root` marker
+  (an internal name: never synced, hidden from listings and feeds,
+  dropped by ingest). The cloud root carries whatever the provider
+  offers through `Provider::root_identity`: the same marker on a
+  filesystem-backed root, the folder id on Google Drive. A backend
+  without one records an empty identity and is only checked for
+  presence.
+- **Adoption.** On a profile's first contact with a root (nothing
+  recorded in `state_entries` under `root_identity.local` /
+  `root_identity.cloud`), the root is created when missing, the marker
+  is read or written (`Provider::adopt_root` on the cloud side), and
+  the identity is recorded. This is the only time Vapor creates a sync
+  root on its own.
+- **Checks.** At every start and every 15 seconds afterwards
+  (`ROOT_CHECK_INTERVAL_SECONDS`), the local root inline and the cloud
+  root through a worker probe. A missing root holds the profile and
+  opens a `root-missing` decision; a present root without the recorded
+  identity holds the profile and opens a `root-replaced` decision.
+  While held, nothing is leased, the status reason names the decision,
+  and ingest keeps capturing intent durably.
+- **Return.** The original root coming back (the marker matches again)
+  lifts the hold on its own, withdraws the decision, and runs a
+  whole-scope reconcile. A local root missing at daemon start parks the
+  profile as a placeholder that the multi-profile runtime composes
+  again when the folder returns, with no restart.
+- **Answers.** `reattach` adopts the folder now at the root (a fresh
+  marker where there was none) and `recreate` creates the folder empty
+  and adopts it. Both set `reconcile.merge_without_deletions` so the
+  reconcile that follows merges the two sides and propagates no
+  deletion in either direction, then lift the hold.
 
 ## Loop prevention (self-write cache)
 

@@ -22,6 +22,7 @@ pub mod gdrive;
 pub mod http;
 pub mod logging;
 mod paths;
+pub mod root_marker;
 pub mod tags;
 
 pub use bandwidth::BandwidthShaper;
@@ -299,6 +300,33 @@ pub trait Provider: Send + Sync {
     /// with an actionable configuration error.
     fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), ProviderError>;
 
+    /// A stable identity for the cloud root, so a folder that merely
+    /// has the same path (a fresh mount, a re-created folder, an
+    /// emptied share) is told apart from the one the profile adopted.
+    /// Filesystem-backed roots read the `.vapor-root` marker
+    /// [`adopt_root`](Self::adopt_root) wrote; Drive-style backends
+    /// answer with the folder id. `Ok(None)` when the root exists but
+    /// carries no identity (no marker yet, or a backend without one);
+    /// `NotFound` when the root is missing. Never creates the root.
+    fn root_identity(&self, cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
+        let _ = cloud_sync_directory;
+        Ok(None)
+    }
+
+    /// Adopts the current root as the profile's root: writes the
+    /// marker where the backend needs one and returns the identity
+    /// [`root_identity`](Self::root_identity) will report from then on
+    /// (`None` for a backend without one). Called once, after
+    /// [`ensure_cloud_sync_directory`](Self::ensure_cloud_sync_directory).
+    fn adopt_root(
+        &self,
+        cloud_sync_directory: &str,
+        device_id: &str,
+    ) -> Result<Option<String>, ProviderError> {
+        let _ = device_id;
+        self.root_identity(cloud_sync_directory)
+    }
+
     /// Lists the immediate children of `directory` (non-recursive, so
     /// reconcile walks stay slice-interruptible). `directory` may be
     /// [`RemotePath::root`].
@@ -411,6 +439,12 @@ impl Provider for FilesystemStubProvider {
             &[("cloud_sync_directory", cloud_sync_directory.to_string())],
         );
         Ok(())
+    }
+
+    fn root_identity(&self, _cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
+        // Always present, never identified: the stub has no cloud side
+        // to tell apart from another.
+        Ok(None)
     }
 
     fn enumerate(&self, _directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {
