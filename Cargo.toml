@@ -8,6 +8,7 @@ members = [
   "core/providers",
   "core/shared",
   "tools/e2e",
+  "tools/soak",
 ]
 resolver = "2"
 

@@ -11,7 +11,7 @@ permissions:
 jobs:
   perf:
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout
@@ -48,8 +48,20 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-spm-
 
-      - name: Run performance smoke checks
+      # One bounded soak cell against the release profile; the SLO checks
+      # are asserted on its report. See docs/development/soak-testing.md.
+      - name: Run performance gate
         env:
-          VAPOR_PERF_SMOKE_RUST_MAX_SECONDS: "600"
-          VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS: "900"
+          VAPOR_PERF_SOAK_DURATION: "12m"
         run: ./scripts/perf.sh
+
+      - name: Upload soak report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: perf-soak-report
+          path: |
+            .vapor/e2e/soak-last-report.json
+            .vapor/e2e/soak-*/soak-report.json
+            .vapor/e2e/soak-*/ops.jsonl
+          if-no-files-found: ignore

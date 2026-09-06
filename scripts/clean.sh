@@ -29,6 +29,16 @@ paths=(
   "$ROOT_DIR/apps/macos/dist"
 )
 
+# A preserved soak or e2e sandbox may still have a throwaway disk image
+# mounted; detach it before the directory goes.
+for mount in "$ROOT_DIR"/.vapor/e2e/*/*-mnt; do
+  [[ -d "$mount" ]] || continue
+  if mount | grep -q " on $mount "; then
+    echo "[clean] detaching disk image at $mount"
+    hdiutil detach -quiet "$mount" 2>/dev/null || hdiutil detach -quiet -force "$mount" 2>/dev/null || true
+  fi
+done
+
 for path in "${paths[@]}"; do
   if [[ -e "$path" ]]; then
     echo "[clean] removing $path"

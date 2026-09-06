@@ -132,6 +132,12 @@ eight-core machine reads as 13%.
 fallback and the test fake. `VAPOR_THROTTLE_INPUTS=static` makes the
 daemon use it (with zero idle time) on any host; `scripts/e2e.sh` sets
 it so a run is not shaped by whoever is typing on the machine.
+`VAPOR_THROTTLE_INPUTS=file:<path>` selects the daemon's
+`FileMetricsSampler` and `FileIdleNotifier`, which re-read a JSON
+document (`{"inputs": <ThrottleInputs>, "idle_seconds": N}`) on every
+sample and fall back to the static defaults while the file is missing
+or half-written; the soak driver uses it to walk the daemon through
+every throttle state.
 
 ### `IdleNotifier`
 

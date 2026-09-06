@@ -272,6 +272,21 @@ fn check_throttle_inputs(override_value: Option<String>) -> DoctorCheck {
             ),
         };
     }
+    let scripted_file = override_value
+        .as_deref()
+        .map(str::trim)
+        .and_then(|value| value.strip_prefix(constants::engine::THROTTLE_INPUTS_FILE_PREFIX))
+        .filter(|path| !path.is_empty());
+    if let Some(path) = scripted_file {
+        return DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Ok,
+            detail: format!(
+                "scripted by {}: every sample re-reads {path}; a missing file samples as neutral inputs",
+                constants::env::VAPOR_THROTTLE_INPUTS
+            ),
+        };
+    }
     if vapor_platform::NativePlatformMetricsSampler::has_native_sampling() {
         DoctorCheck {
             name,
@@ -428,6 +443,9 @@ mod tests {
         assert!(pinned.detail.contains("pinned"));
         let host = check_throttle_inputs(None);
         assert!(!host.detail.contains("pinned"));
+        let scripted = check_throttle_inputs(Some("file:/tmp/inputs.json".to_string()));
+        assert_eq!(scripted.status, DoctorCheckStatus::Ok);
+        assert!(scripted.detail.contains("/tmp/inputs.json"));
     }
 
     #[test]

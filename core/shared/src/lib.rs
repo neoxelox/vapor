@@ -28,7 +28,8 @@ pub enum RunState {
 /// Thermal pressure tiers reported by the platform metrics sampler and
 /// consumed by the throttle controller. Lives in `vapor-shared` so the
 /// platform layer and the engine speak one type instead of mirroring it.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ThermalPressure {
     #[default]
     Nominal,
@@ -50,7 +51,8 @@ impl ThermalPressure {
 
 /// Generic resource-pressure tiers (disk today; extendable) shared between
 /// the platform sampler and the throttle controller.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResourcePressure {
     #[default]
     Nominal,
@@ -74,7 +76,8 @@ impl ResourcePressure {
 /// by `core/platform`'s `PlatformMetricsSampler` implementations and
 /// consumed by `core/daemon`'s throttle controller — a single shared type
 /// so the two layers can never drift structurally.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ThrottleInputs {
     pub on_battery: bool,
     pub low_power_mode: bool,

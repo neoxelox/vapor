@@ -15,8 +15,10 @@ pub mod env {
     pub const VAPOR_GDRIVE_CLIENT_SECRET: &str = "VAPOR_GDRIVE_CLIENT_SECRET";
     /// Where the daemon's throttle inputs come from: `host` (default)
     /// reads the native sampler and idle clock; `static` uses the
-    /// neutral defaults and zero idle time. Test harnesses set `static`
-    /// so a run is not shaped by whoever is typing on the machine.
+    /// neutral defaults and zero idle time; `file:<path>` re-reads a
+    /// JSON document every sample so a driver can script the inputs.
+    /// Test harnesses set `static` so a run is not shaped by whoever is
+    /// typing on the machine; the soak driver uses `file:`.
     pub const VAPOR_THROTTLE_INPUTS: &str = "VAPOR_THROTTLE_INPUTS";
 }
 
@@ -519,6 +521,11 @@ pub mod engine {
     /// Accepted values of `VAPOR_THROTTLE_INPUTS`.
     pub const THROTTLE_INPUTS_HOST: &str = "host";
     pub const THROTTLE_INPUTS_STATIC: &str = "static";
+    /// `file:<path>`: every sample re-reads a JSON document at the path
+    /// (a `ThrottleInputs` object under `inputs`, plus `idle_seconds`),
+    /// so a test driver can walk the daemon through every throttle
+    /// state. Unreadable or missing files sample as the static defaults.
+    pub const THROTTLE_INPUTS_FILE_PREFIX: &str = "file:";
     /// A transfer session that reports progress without moving a byte
     /// this many times in a row is failed as transient, so a misbehaving
     /// endpoint cannot spin a worker at full speed forever.

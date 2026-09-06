@@ -1,0 +1,99 @@
+name: soak
+
+# Tier S: the real vapor + vapord under hours of seeded file churn with
+# faults, on the shipping OS, checked by the model-based oracle after
+# every phase. Never a PR gate. Runs nightly and on demand; each cell is
+# one (mode, load, faults, throttle) combination from
+# docs/development/soak-testing.md.
+on:
+  schedule:
+    # 03:17 UTC, when the macOS runner pool is quiet.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Planned length per cell (e.g. 45m, 2h)"
+        default: "45m"
+      seed:
+        description: "Workload seed (0 = derive from the run number)"
+        default: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak
+  cancel-in-progress: false
+
+jobs:
+  soak:
+    name: soak (${{ matrix.cell.name }})
+    runs-on: macos-latest
+    # A cell runs for its duration plus build, provisioning, and up to
+    # one converge deadline per phase.
+    timeout-minutes: 300
+
+    strategy:
+      fail-fast: false
+      matrix:
+        cell:
+          - name: two-way-mixed-all-faults
+            args: --mode two-way --load mixed --faults all --throttle walk --cloud-image-mb 512
+          - name: two-way-coding-crash
+            args: --mode two-way --load coding --faults crash
+          - name: two-way-large-crash
+            args: --mode two-way --load large --faults crash-mid-transfer,freeze
+          - name: pull-only-bulk
+            args: --mode pull-only --load bulk --faults pause-resume,config-reload
+          - name: push-only-mixed
+            args: --mode push-only --load mixed --faults crash,cloud-root-vanish
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          cache: false
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-soak-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-soak-
+
+      - name: Run soak cell
+        shell: bash
+        env:
+          DURATION: ${{ github.event.inputs.duration || '45m' }}
+          SEED_INPUT: ${{ github.event.inputs.seed || '0' }}
+        run: |
+          set -euo pipefail
+          seed="$SEED_INPUT"
+          if [[ "$seed" == "0" ]]; then
+            seed="$GITHUB_RUN_NUMBER"
+          fi
+          ./scripts/soak.sh --duration "$DURATION" --seed "$seed" --release --keep \
+            ${{ matrix.cell.args }}
+
+      - name: Upload soak artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: soak-${{ matrix.cell.name }}
+          path: |
+            .vapor/e2e/soak-*/soak-report.json
+            .vapor/e2e/soak-*/soak-status.json
+            .vapor/e2e/soak-*/ops.jsonl
+            .vapor/e2e/soak-*/model.json
+            .vapor/e2e/soak-*/home/logs/vapord.logs
+            .vapor/e2e/soak-last-report.json
+          if-no-files-found: ignore

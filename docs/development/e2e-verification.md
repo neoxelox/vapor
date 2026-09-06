@@ -319,7 +319,7 @@ Discipline rules:
 
 - **Load and duration.** Hours of churn, fault injection at random
   points, and the model-checked no-loss oracle belong to the soak
-  driver (`tools/soak`, open work in `docs/tasks/core.md`).
+  driver (`tools/soak`, `docs/development/soak-testing.md`).
 - **Live Google Drive.** The mode exists as a flag; the Drive-side
   operations and the credentials wait on the project owner (above).
 - **macOS app UI.** Owner-verified manually, per the standing test
@@ -334,7 +334,8 @@ Discipline rules:
 |---|---|---|---|
 | Tier 1 | `./scripts/test.sh` | every PR | module + composed correctness, in-process |
 | Tier E2E | `./scripts/e2e.sh` | every PR (all three OS jobs; `--full` on macOS) + locally for runtime-affecting changes | the shipped binaries work black-box, end to end |
-| Tier 2 | `./scripts/perf.sh` | release pipeline | performance SLOs; to be replaced by the soak report |
+| Tier 2 | `./scripts/perf.sh` | release pipeline | one soak cell with the SLO checks asserted on its report |
+| Tier S | `./scripts/soak.sh` | nightly + on demand | hours of churn with faults; nothing lost, both trees converged (`soak-testing.md`) |
 
 Tier E2E complements Tier 1; it never replaces the Tier 1 tests that
 `AGENTS.md §9.2` requires.

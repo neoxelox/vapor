@@ -68,22 +68,30 @@ The resource-ceiling integration tests (open work, `docs/tasks/core.md` T-16) mu
 - Current Rust micro-regression coverage includes callback burst, debounce tick, and scheduler superseding hot-path guards inside the daemon test suite.
 - Current Rust stress coverage also exercises large per-subtree caps, large global caps, and multi-subtree deferred-storm markers so bounded in-memory behavior stays regression-tested.
 
-## CI smoke gate thresholds (initial proxy gate)
+## Release gate: one soak cell (Tier 2)
 
-The `perf` workflow currently enforces a coarse proxy gate while the full benchmark harness is being expanded. It is invoked by `release.yml` for versioned release runs only:
+`scripts/perf.sh`, invoked by `release.yml` through `perf.yml`, runs
+one soak cell against the release profile (`./scripts/soak.sh
+--release --mode two-way --load mixed --faults crash --throttle walk`,
+twelve minutes by default, `VAPOR_PERF_SOAK_DURATION` overrides) and
+asserts on its report:
 
-- CI-SMOKE-1: `./scripts/rust/test.sh` elapsed time <= 600 seconds.
-- CI-SMOKE-2: `./scripts/swift/test.sh` elapsed time <= 900 seconds.
+- zero oracle violations (nothing lost, nothing invented, both trees
+  converged after every phase);
+- every phase converged inside its deadline and every injected crash
+  was followed by a clean phase (SLO-5);
+- daemon RSS p95 under 350 MB (SLO-3);
+- daemon CPU average under 5% across the cell, throttle walk included
+  (SLO-2; the idle figure of SLO-1 is read from the cell's `quiet`
+  phases in the report, not gated yet).
 
-Override knobs (for controlled CI tuning):
-
-- `VAPOR_PERF_SMOKE_RUST_MAX_SECONDS` (default `600`)
-- `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS` (default `900`)
-
-These smoke thresholds are intentionally conservative and serve as early regression tripwires, not full performance certification.
+The soak driver, its model, and how to read its report are in
+`docs/development/soak-testing.md`. SLO-4 (rate-limit resilience) has
+no live measurement until the Google Drive soak mode exists; the
+scripted-transport unit tests remain its coverage.
 
 ## Reporting policy
 
 - Record baseline results for each release line.
 - Track regressions by scenario and metric.
-- Include benchmark or smoke-run references in PRs that change daemon hot paths, throttling, scheduler behavior, or provider execution flow.
+- Include a soak report reference (`soak-last-report.json` or the CI artifact) in PRs that change daemon hot paths, throttling, scheduler behavior, deletion, or provider execution flow.

@@ -499,8 +499,19 @@ If a test's failure mode is "I typo'd a default value", skip it.
   `workflow_call`. Runs on every PR; required check on `main`
   (`docs/ci/required-checks.md`). Budget: under 5 minutes per OS on CI.
 - **Tier 2**: `scripts/perf.sh` via `perf.yml`, release pipeline only.
-  Performance SLO tests, long-running property cases, fuzz corpora,
-  `loom`-backed concurrency tests. Not a PR gate.
+  One bounded soak cell against the release profile with the SLO
+  checks asserted on its report; long-running property cases, fuzz
+  corpora, and `loom`-backed concurrency tests as they land. Not a PR
+  gate.
+- **Tier S**: `./scripts/soak.sh` (the `tools/soak` driver), on a
+  schedule in `soak.yml` and on demand. Hours of seeded file churn on
+  both sides of a real daemon, fault injection, and a model-checked
+  oracle after every phase (nothing lost, nothing invented, both trees
+  converged, one-way reverts honoured). The first violation freezes the
+  run with the sandbox intact. Contract in
+  `docs/development/soak-testing.md`; procedure in the `vapor-soak`
+  skill. Never a PR gate; the workload and the model are never edited
+  to make a run green.
 - **Tier E2E**: `./scripts/e2e.sh` (the `tools/e2e` harness), on
   every PR in every `test.yml` OS job (macOS adds `--full`, which
   installs a real LaunchAgent and is for disposable runners only;
@@ -660,6 +671,7 @@ carries its own trigger conditions in its description.
 | `unslop` | Writing anything a human reads: docs, comments, commit messages, replies. Always. |
 | `vapor-validate` | Before committing a change under `core/*`, `apps/*`, or `scripts/*`; when a script run is red. |
 | `vapor-e2e` | A change alters daemon- or CLI-observable behaviour and Tier 1 is green; to watch a feature in the real product. |
+| `vapor-soak` | Proving the product is safe for real data: hours of seeded churn with faults and a no-loss oracle, watched on a loop and triaged at the first violation. |
 | `vapor-debug` | The daemon crashed, will not start, sync is stuck, or a status looks wrong. |
 | `vapor-config` | Adding or changing a `vapor.json` key, `VAPOR_*` variable, default, path name, or launch label. |
 | `vapor-provider` | Touching `core/providers` or adding a provider kind. |

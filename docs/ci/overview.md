@@ -12,7 +12,14 @@ GitHub Actions workflows are defined in `.github/workflows/`:
   and `S01` today and pick up the daemon scenarios once their native
   traits ship.
 - `build.yml`: runs distribution builds via repository scripts.
-- `perf.yml`: reusable performance gate workflow invoked by the release pipeline.
+- `perf.yml`: reusable performance gate workflow invoked by the release
+  pipeline; runs one soak cell against the release profile and asserts
+  the SLO checks on its report (`scripts/perf.sh`).
+- `soak.yml`: Tier S, nightly and on demand, never a PR gate: a matrix
+  of soak cells (mode, load, faults, throttle) on the macOS runner, each
+  uploading its report, status, op log, model, and daemon log as the
+  `soak-<cell>` artifact. `workflow_dispatch` takes a duration and a
+  seed.
 - `release.yml`: runs tag-driven package and GitHub Release publication flow.
 
 ## Toolchain defaults in CI

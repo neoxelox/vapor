@@ -9,5 +9,8 @@ and `test` cover them, but never ship in a release artifact.
   `docs/development/e2e-verification.md`; procedure the `vapor-e2e`
   skill.
 
-Planned: `soak/` (`vapor-soak`), the long-run workload and model-checked
-oracle that reuses the harness library (`docs/tasks/core.md` TR-9).
+- `soak/` — `vapor-soak`, the Tier S driver: hours of seeded file
+  churn on both sides of a real daemon, fault injection, and a
+  model-checked no-loss oracle after every phase. Reuses the harness
+  library. Entry point `./scripts/soak.sh`; process doc
+  `docs/development/soak-testing.md`; procedure the `vapor-soak` skill.

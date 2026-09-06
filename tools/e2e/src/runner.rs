@@ -13,7 +13,9 @@ use crate::daemon::DaemonKind;
 use crate::host::{Host, Provider};
 use crate::report::{HostSummary, RunReport, ScenarioResult, Summary, Verdict, console_line};
 use crate::sandbox::{self, Sandbox};
-use crate::scenario::{Ctx, Expect, RunPaths, Scenario};
+pub use crate::scenario::RunPaths;
+
+use crate::scenario::{Ctx, Expect, Scenario};
 use crate::{Failure, scenarios};
 
 #[derive(Clone, Debug)]
@@ -50,9 +52,23 @@ pub fn new_run_id(prefix: &str) -> String {
 
 /// Builds `vapor` and `vapord` in debug mode.
 pub fn build_product(repo_root: &Path) -> Result<(), Failure> {
-    println!("[e2e] building vapor + vapord (cargo build -p vapor-cli -p vapor-daemon)");
-    let status = Command::new("cargo")
-        .args(["build", "--quiet", "-p", "vapor-cli", "-p", "vapor-daemon"])
+    build_product_profile(repo_root, false)
+}
+
+/// Builds `vapor` and `vapord`; `release` selects the optimized
+/// profile the shipped binaries use (the soak's SLO cells need it,
+/// since a debug daemon burns CPU no user would see).
+pub fn build_product_profile(repo_root: &Path, release: bool) -> Result<(), Failure> {
+    println!(
+        "[e2e] building vapor + vapord (cargo build{} -p vapor-cli -p vapor-daemon)",
+        if release { " --release" } else { "" }
+    );
+    let mut command = Command::new("cargo");
+    command.args(["build", "--quiet", "-p", "vapor-cli", "-p", "vapor-daemon"]);
+    if release {
+        command.arg("--release");
+    }
+    let status = command
         .arg("--manifest-path")
         .arg(repo_root.join("Cargo.toml"))
         .status()
@@ -64,7 +80,17 @@ pub fn build_product(repo_root: &Path) -> Result<(), Failure> {
 }
 
 pub fn product_paths(repo_root: &Path, daemon_kind: DaemonKind) -> Result<RunPaths, Failure> {
-    let debug = repo_root.join("target").join("debug");
+    product_paths_profile(repo_root, daemon_kind, false)
+}
+
+pub fn product_paths_profile(
+    repo_root: &Path,
+    daemon_kind: DaemonKind,
+    release: bool,
+) -> Result<RunPaths, Failure> {
+    let debug = repo_root
+        .join("target")
+        .join(if release { "release" } else { "debug" });
     let exe = |name: &str| {
         if cfg!(windows) {
             debug.join(format!("{name}.exe"))
@@ -76,7 +102,7 @@ pub fn product_paths(repo_root: &Path, daemon_kind: DaemonKind) -> Result<RunPat
     let vapord_bin = exe("vapord");
     if !cli_bin.is_file() {
         return Err(Failure::new(format!(
-            "vapor binary missing at {} (run without --skip-build)",
+            "vapor binary missing at {} (run without --skip-build, or build that profile)",
             cli_bin.display()
         )));
     }

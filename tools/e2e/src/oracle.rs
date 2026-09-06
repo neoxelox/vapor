@@ -67,11 +67,12 @@ impl OracleReport {
     }
 }
 
+/// What the oracle knows about one regular file.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct FileFacts {
-    size: u64,
-    executable: bool,
-    sha256: String,
+pub struct FileFacts {
+    pub size: u64,
+    pub executable: bool,
+    pub sha256: String,
 }
 
 struct IgnoreRule {
@@ -140,6 +141,13 @@ impl TreeOracle {
 
     /// Walks `root`, returning every regular file keyed by its
     /// slash-separated relative path, plus the special files skipped.
+    pub fn snapshot(
+        &self,
+        root: &Path,
+    ) -> Result<(BTreeMap<String, FileFacts>, Vec<String>), Failure> {
+        self.collect(root)
+    }
+
     fn collect(&self, root: &Path) -> Result<(BTreeMap<String, FileFacts>, Vec<String>), Failure> {
         let mut files = BTreeMap::new();
         let mut skipped = Vec::new();

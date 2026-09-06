@@ -120,7 +120,8 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // the legacy state paths.
     let profiles = crate::profiles::resolve_profiles(&config);
     let filter_options = EventPathFilterOptions::from_environment_and_config(&config);
-    let static_inputs = throttle_inputs_are_static();
+    let inputs_source = throttle_inputs_source();
+    let static_inputs = matches!(inputs_source, ThrottleInputsSource::Static);
     let metrics_sampler: Arc<dyn crate::metrics::MetricsSampler> = if static_inputs {
         logging::info(
             "Throttle inputs are static by request: neutral defaults and zero idle time",
@@ -130,6 +131,12 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
             )],
         );
         Arc::new(crate::metrics::StaticMetricsSampler::default())
+    } else if let ThrottleInputsSource::File(path) = &inputs_source {
+        logging::info(
+            "Throttle inputs are read from a file on every sample",
+            &[("path", path.display().to_string())],
+        );
+        Arc::new(crate::metrics::FileMetricsSampler::new(path.clone()))
     } else if NativePlatformMetricsSampler::has_native_sampling() {
         logging::info(
             "Throttle inputs come from the host: CPU load, power source, thermal state, \
@@ -163,10 +170,18 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // deterministic single-threaded ticks.
     runtime.enable_transfer_workers();
     runtime.watch_config(&config_path, config.clone());
-    if static_inputs {
-        runtime.set_idle_notifier(Arc::new(vapor_platform::ManualIdleNotifier::new(
-            std::time::Duration::ZERO,
-        )));
+    match &inputs_source {
+        ThrottleInputsSource::Static => {
+            runtime.set_idle_notifier(Arc::new(vapor_platform::ManualIdleNotifier::new(
+                std::time::Duration::ZERO,
+            )));
+        }
+        ThrottleInputsSource::File(path) => {
+            runtime.set_idle_notifier(Arc::new(crate::metrics::FileIdleNotifier::new(
+                path.clone(),
+            )));
+        }
+        ThrottleInputsSource::Host => {}
     }
 
     log_started(&runtime);
@@ -260,16 +275,34 @@ fn log_started(runtime: &MultiProfileRuntime) {
     );
 }
 
-/// `VAPOR_THROTTLE_INPUTS=static` pins the throttle to neutral inputs.
-/// Any other value (or none) reads the host. An unknown value is logged
-/// and treated as `host` so a typo never silently disables sampling.
-fn throttle_inputs_are_static() -> bool {
+enum ThrottleInputsSource {
+    Host,
+    Static,
+    File(std::path::PathBuf),
+}
+
+/// `VAPOR_THROTTLE_INPUTS=static` pins the throttle to neutral inputs;
+/// `file:<path>` re-reads a JSON document every sample. Any other value
+/// (or none) reads the host. An unknown value is logged and treated as
+/// `host` so a typo never silently disables sampling.
+fn throttle_inputs_source() -> ThrottleInputsSource {
     use vapor_shared::constants::{engine, env};
-    match std::env::var(env::VAPOR_THROTTLE_INPUTS) {
-        Ok(value) if value.trim() == engine::THROTTLE_INPUTS_STATIC => true,
-        Ok(value) if value.trim().is_empty() || value.trim() == engine::THROTTLE_INPUTS_HOST => {
-            false
-        }
+    let Ok(value) = std::env::var(env::VAPOR_THROTTLE_INPUTS) else {
+        return ThrottleInputsSource::Host;
+    };
+    let trimmed = value.trim();
+    if trimmed == engine::THROTTLE_INPUTS_STATIC {
+        return ThrottleInputsSource::Static;
+    }
+    if trimmed.is_empty() || trimmed == engine::THROTTLE_INPUTS_HOST {
+        return ThrottleInputsSource::Host;
+    }
+    if let Some(path) = trimmed.strip_prefix(engine::THROTTLE_INPUTS_FILE_PREFIX)
+        && !path.is_empty()
+    {
+        return ThrottleInputsSource::File(std::path::PathBuf::from(path));
+    }
+    match Ok::<String, ()>(value) {
         Ok(value) => {
             logging::warning(
                 "Unknown throttle-input source; reading the host instead",
@@ -278,8 +311,8 @@ fn throttle_inputs_are_static() -> bool {
                     ("value", value),
                 ],
             );
-            false
+            ThrottleInputsSource::Host
         }
-        Err(_) => false,
+        Err(()) => ThrottleInputsSource::Host,
     }
 }

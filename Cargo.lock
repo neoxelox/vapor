@@ -1175,6 +1175,7 @@ dependencies = [
  "globset",
  "md-5",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
@@ -1258,6 +1259,21 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "vapor-soak"
+version = "0.2.0-alpha.3"
+dependencies = [
+ "clap",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "vapor-e2e",
+ "vapor-ipc",
+ "vapor-shared",
 ]
 
 [[package]]

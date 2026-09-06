@@ -207,8 +207,9 @@ Loom tests are slow. Keep them small, keep them few, and run them in
 
 ### Performance regression tests (Tier 2; release gate)
 
-The SLO suite in `docs/performance/acceptance-budgets-and-benchmark-harness.md`
-runs via `scripts/perf.sh`. Release gate only; not a PR gate.
+The SLO checks in `docs/performance/acceptance-budgets-and-benchmark-harness.md`
+are asserted on the report of one soak cell that `scripts/perf.sh`
+runs against the release profile. Release gate only; not a PR gate.
 
 Tier 1 keeps a small number of cheap **guard-rail** timing tests
 — the kind already present in `fs_events.rs` (5 000-event callback
@@ -253,6 +254,21 @@ adds e2e-observable behavior, the harness gains a scenario for it in
 the same change set. Full process, scenario catalog, and extension
 discipline: `docs/development/e2e-verification.md`; policy summary:
 `AGENTS.md §9.8`.
+
+### Soak tests (Tier S; scheduled and on demand)
+
+`./scripts/soak.sh` runs the real binaries under hours of seeded file
+churn on both sides of the sync, with faults (crash, freeze, pause,
+vanished cloud root, full disk, throttle walk), and after every phase
+asks a model what both trees must hold: nothing lost, nothing
+invented, both trees converged, one-way reverts honoured, contested
+payloads both surviving. The first violation freezes the run with the
+sandbox intact; `ops.jsonl` and the daemon log carry the evidence. The
+driver (`tools/soak`) reuses the e2e harness library. Nightly matrix in
+`soak.yml`; one bounded cell is the Tier 2 release gate. Full process:
+`docs/development/soak-testing.md`. Never a PR gate: a soak is
+evidence for the cells it ran, and the model is never edited to make a
+run green.
 
 ### Fuzz tests (Tier 2; release gate)
 
@@ -346,11 +362,13 @@ value", the test is not worth writing.
   integration + platform-trait contract + property + snapshot tests.
   Runs on every PR. Required check on `main`. Target budget: under
   **5 minutes** per OS in the matrix.
-- **Tier 2** — `perf.yml`. Runs performance SLO tests
-  (`scripts/perf.sh`), long-running property cases (higher case
-  counts), fuzz corpora, and any `loom`-backed tests. Release gate
-  only: `perf.yml` has no standalone triggers and is invoked solely by
-  `release.yml`.
+- **Tier 2** — `perf.yml`. Runs one soak cell with the SLO checks
+  (`scripts/perf.sh`), and, as they land, long-running property cases
+  (higher case counts), fuzz corpora, and `loom`-backed tests. Release
+  gate only: `perf.yml` has no standalone triggers and is invoked
+  solely by `release.yml`.
+- **Tier S** — `soak.yml`, nightly and on demand, never a PR gate.
+  Long soak cells across modes, loads, faults, and throttle walks.
 - **Tier E2E** — `scripts/e2e.sh`, at the end of every `test.yml`
   OS job (every PR; part of the required `test` check on `main`).
   Also part of the local contributor validation loop for

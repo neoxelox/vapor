@@ -23,7 +23,8 @@
 - Sync locale catalogs into every app surface: `./scripts/locales.sh`
 - Install git pre-commit hook: `./scripts/hooks.sh` (uninstall: `./scripts/hooks.sh uninstall`)
 - Version helper: `./scripts/version.sh`
-- Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
+- Performance gate (one release-profile soak cell with SLO assertions): `./scripts/perf.sh` (`VAPOR_PERF_SOAK_DURATION`, `VAPOR_PERF_SOAK_SEED`)
+- Soak verification (Tier S): `./scripts/soak.sh` (`--duration`, `--seed`, `--mode`, `--load`, `--faults`, `--throttle`, `--release`, `--status`, `--verify`; see `docs/development/soak-testing.md`)
 - End-to-end verification of the real binaries in disposable sandboxes: `./scripts/e2e.sh` (`--only Sxx`, `--keep`, `--skip-build`, `--json`, `--list`, `--sandbox`, `--sandbox-stop`; see `docs/development/e2e-verification.md`)
 
 ## Stack helpers
@@ -118,8 +119,12 @@ Fast facts for local dev:
   constants, UI rendering (SwiftUI, menubar, Dock, future GUI
   surfaces), interactive TTY behavior on the `vapor` CLI. See
   `AGENTS.md §9.3` and `docs/architecture/testing-strategy.md`.
-- **Performance SLO tests** run via `./scripts/perf.sh` (Tier 2;
-  release gate only, not a PR gate).
+- **Performance SLO checks** run via `./scripts/perf.sh` (Tier 2;
+  release gate only, not a PR gate): one soak cell against the release
+  profile, its report asserted against the budgets.
+- **Soak verification** runs via `./scripts/soak.sh` (Tier S): hours
+  of seeded churn with faults and a model-checked oracle; nightly in
+  `soak.yml` and on demand; see `docs/development/soak-testing.md`.
 - **End-to-end verification** runs via `./scripts/e2e.sh` (Tier E2E,
   the `tools/e2e` harness) after Tier 1 passes, whenever a change
   alters runtime behavior a user would observe through the daemon or

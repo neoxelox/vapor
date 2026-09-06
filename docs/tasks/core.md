@@ -816,8 +816,9 @@ snapshot.
 
 ## Deferred tasks
 
-- [ ] PT-1 Tune `./scripts/perf.sh` smoke thresholds using real CI/release
-      baseline history once per-OS baselines exist.
+- [ ] PT-1 Tune the soak cell `scripts/perf.sh` gates on (duration,
+      seed, load) using release baseline history once per-OS baselines
+      exist; gate SLO-1 on the `quiet` phases.
 - [ ] PT-2 Tier-2 perf fixtures carved out of C8-11 / C8-46: 10k-file
       provider-backed fixture within engine budgets, remote-apply
       linear-scaling measurement, and provider-adapter overhead
@@ -924,11 +925,16 @@ Still open:
       scheduled CI job under a `gdrive-e2e` GitHub Environment that
       never runs on fork PRs. Waits on a dedicated test account from the
       project owner.
-- [ ] TR-9 The soak driver (`tools/soak`, `vapor-soak`): seeded
-      workload on both sides, model with the no-loss and convergence
-      oracles, fault injection (SIGKILL, SIGSTOP, pause/resume, cloud
-      root vanish, disk-full through a disk image, config reload), a
-      `VAPOR_THROTTLE_INPUTS=file:<path>` sampler, daemon supervision
-      after injected crashes, `soak-status.json` for agent oversight,
-      freeze on first violation, a scheduled workflow, and the Tier 2
-      SLO assertions on its report replacing the `perf.sh` placeholder.
+- [x] TR-9 The soak driver (`tools/soak`, `vapor-soak`): seeded
+      workload on both sides, model with the no-loss, no-invention,
+      convergence, revert, and contested oracles, fault injection
+      (SIGKILL between ops and mid-transfer, SIGSTOP, pause/resume,
+      cloud root vanish, disk-full through a disk image, config reload,
+      throttle walk through `VAPOR_THROTTLE_INPUTS=file:`), daemon
+      supervision after injected crashes, `soak-status.json` for agent
+      oversight, `ops.jsonl`, freeze on first violation, `soak.yml`,
+      and the Tier 2 SLO assertions in `scripts/perf.sh`.
+      `docs/development/soak-testing.md`; the `vapor-soak` skill.
+- [ ] TR-10 Soak cells on Linux once the native Linux traits ship
+      (`tmpfs` size limits for disk-full, cgroup CPU and memory limits),
+      and the Google Drive soak mode once TR-8 lands.
