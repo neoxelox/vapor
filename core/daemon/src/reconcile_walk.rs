@@ -392,7 +392,8 @@ impl ReconcileWalker {
                     }
                     (false, RemoteEntryKind::File) => {
                         let diverged = local.size_bytes != remote.size_bytes
-                            || touched_since_last_sync(state_db, &local_path, &local)?;
+                            || touched_since_last_sync(state_db, &local_path, &local)?
+                            || remote_touched_since_last_sync(state_db, &local_path, &remote)?;
                         if diverged {
                             match sync_mode {
                                 SyncMode::TwoWay => {
@@ -565,6 +566,25 @@ fn touched_since_last_sync(
         Some(index) => {
             index.local_modified_at.is_some()
                 && !index.matches_local(local.size_bytes, local.modified_at)
+        }
+    })
+}
+
+/// The cloud-side twin of [`touched_since_last_sync`]: a remote edit
+/// that kept the byte count is only visible through the remote mtime
+/// the index recorded at the last transfer. A row without one (written
+/// before the provider reported it) cannot claim divergence here; the
+/// local check and the size comparison still apply.
+fn remote_touched_since_last_sync(
+    state_db: &DurableStateDb,
+    local_path: &Path,
+    remote: &RemoteEntry,
+) -> Result<bool, WalkError> {
+    Ok(match state_db.sync_index(local_path)? {
+        None => true,
+        Some(index) => {
+            index.remote_modified_at.is_some()
+                && !index.matches_remote(remote.size_bytes, remote.modified_at)
         }
     })
 }
@@ -902,7 +922,7 @@ mod tests {
             .ok();
         fixture
             .state_db
-            .set_sync_index(&local, "hash-of-12345", 5, mtime, "op-1", ts(1))
+            .set_sync_index(&local, "hash-of-12345", 5, mtime, None, "op-1", ts(1))
             .expect("index row");
         fixture.run_walk(SyncMode::TwoWay);
         assert!(fixture.queued_kinds().is_empty());

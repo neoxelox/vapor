@@ -224,6 +224,17 @@ are opt-in per profile and destructive to the subordinate side — see
 `docs/architecture/sync-modes.md`. (The high task numbers only keep existing
 IDs stable; they do not imply low priority.)
 
+### Sync safety before users (cross-cutting, in progress)
+
+Status: SF-1 (decisions and the two-direction mass-deletion guard)
+landed 2026-09-06; SF-2 … SF-9 in `core.md` "Sync safety follow-ups"
+are next, before Wave 9 exposes any of it in the app: local trash,
+root identity, offline deletions through the index, type-mismatch and
+collision decisions, headless supervision, hash-based move detection,
+and the knowledge base for each. The testing tiers that prove them
+(`core.md` TR-1 … TR-10) are in place; TR-5, TR-8 and TR-10 wait on
+SF-6, the Google Drive test account, and the native Linux traits.
+
 ### Wave 9 — macOS app UX polish
 
 Status: pending — **now unblocked** (every Wave 8 dependency below has

@@ -79,6 +79,14 @@ pub fn scenarios() -> Vec<Scenario> {
             expect: Expect::Pass,
             run: offline_same_size_edit,
         },
+        Scenario {
+            id: "S41",
+            name: "offline-same-size-cloud-edit",
+            proves: "a cloud edit made while the daemon was down that keeps the byte count is found by the startup reconcile and downloaded, with no conflict copy",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: offline_same_size_cloud_edit,
+        },
     ]
 }
 
@@ -302,6 +310,40 @@ fn offline_same_size_edit(ctx: &mut Ctx) -> Result<(), Failure> {
         "the cloud copy does not carry the offline edit"
     );
     ctx.settle(CONVERGE_TIMEOUT)?;
+    Ok(())
+}
+
+fn offline_same_size_cloud_edit(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let first = start_primary(ctx)?;
+    let target = home.local.join("offline.txt");
+    let cloud = home.cloud.join("offline.txt");
+    let mark = ctx.mark();
+    write_file(&target, "offline-edit-AAAA")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_same_content(&target, &cloud, CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ctx.stop_daemon(first)?;
+    // The cloud side rewrites the file in place (the op-id tag survives),
+    // same byte count, mtime clearly past what the index recorded.
+    write_file(&cloud, "offline-edit-CCCC")?;
+    let future = std::time::SystemTime::now() + Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(&cloud)?
+        .set_modified(future)?;
+    ctx.start_daemon()?;
+    ctx.wait_same_content(&target, &cloud, Duration::from_secs(60))?;
+    ensure!(
+        read_string(&target)? == "offline-edit-CCCC",
+        "the local copy does not carry the cloud edit"
+    );
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ensure!(
+        !conflict_copy_exists(&home.local, "offline")
+            && !conflict_copy_exists(&home.cloud, "offline"),
+        "an unchanged local copy must not become a conflict copy"
+    );
     Ok(())
 }
 

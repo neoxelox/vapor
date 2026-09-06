@@ -91,9 +91,11 @@ touch those files too.
 fault performs stay on the phase's side and path subset, so the
 one-writer rule holds through a fault. After a crash the driver
 restarts the daemon itself (a CLI-only install has no supervisor); the
-mass-deletion guard tripping on a subtree removal is answered with
-`vapor resume` and recorded as a `guard-trip`, since that is the
-product working as designed.
+mass-deletion guard holding a subtree removal is answered with `vapor
+decisions resolve <id> --choose apply` and recorded as a `guard-trip`,
+since that is the product working as designed. Any other decision the
+daemon opens fails the run: the driver does not know the right answer
+and never guesses.
 
 ## Throttle walk
 

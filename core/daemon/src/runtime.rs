@@ -453,6 +453,7 @@ impl DaemonRuntime {
         self.reload_path_filter_if_requested();
         self.sweep_stale_leases_if_due(now)?;
         self.retry_cloud_root_if_needed();
+        self.apply_resolved_decisions(now)?;
 
         let (stabilized_events, suppressed_local_echoes, stabilize_mirror_reverts) =
             self.stabilize_events(now);
@@ -526,10 +527,15 @@ impl DaemonRuntime {
                 tags: &self.tags,
                 local_echoes: &mut self.local_echoes,
                 remote_echoes: &mut self.remote_echoes,
+                deletion_guard: self
+                    .mass_delete_settings
+                    .enabled
+                    .then_some(&mut self.mass_change_guard),
             };
             self.staged_executor
                 .advance(&mut self.app, &mut self.state_db, &mut env, now)?
         };
+        self.announce_decisions(&staged_report.decisions_opened, now);
         report.completed_intents += staged_report.completed;
         report.requeued_intents += staged_report.retried;
         report.failed_intents += staged_report.failed;
@@ -671,6 +677,10 @@ impl DaemonRuntime {
                     tags: &self.tags,
                     local_echoes: &mut self.local_echoes,
                     remote_echoes: &mut self.remote_echoes,
+                    deletion_guard: self
+                        .mass_delete_settings
+                        .enabled
+                        .then_some(&mut self.mass_change_guard),
                 };
                 let mut admission_report = crate::executor::StagedExecutorReport::default();
                 self.staged_executor.advance_intents(
@@ -688,6 +698,7 @@ impl DaemonRuntime {
                 self.mirror_delete_count += admission_report.mirror_deletes as u64;
                 report.conflicts += admission_report.conflicts;
                 self.conflict_count += admission_report.conflicts as u64;
+                self.announce_decisions(&admission_report.decisions_opened, now);
                 if let Some(timeline) = &self.timeline {
                     for (wanted, existing) in &admission_report.name_collisions {
                         timeline.push(
@@ -761,6 +772,11 @@ impl DaemonRuntime {
 
     pub fn app(&self) -> &DaemonApp {
         &self.app
+    }
+
+    #[cfg(test)]
+    pub(crate) fn state_db_mut(&mut self) -> &mut DurableStateDb {
+        &mut self.state_db
     }
 
     pub fn state_db(&self) -> &DurableStateDb {
@@ -1072,8 +1088,11 @@ impl DaemonRuntime {
         settings: crate::safeguards::MassDeleteGuardSettings,
     ) {
         self.mass_delete_settings = settings;
-        self.mass_change_guard =
-            crate::safeguards::MassChangeGuard::new(settings.window, settings.threshold);
+        self.mass_change_guard = crate::safeguards::MassChangeGuard::with_ratio(
+            settings.window,
+            settings.threshold,
+            settings.ratio_percent,
+        );
     }
 
     /// Passes the explicit transfer-concurrency ceiling to the app (see
@@ -1209,8 +1228,16 @@ impl DaemonRuntime {
                 continue;
             }
             let retrying = intent.available_at > now;
-            let stage = if retrying { "Retrying" } else { "Queued" };
-            let blocker_reason = if paused {
+            let stage = if intent.held_by.is_some() {
+                "Held"
+            } else if retrying {
+                "Retrying"
+            } else {
+                "Queued"
+            };
+            let blocker_reason = if let Some(decision) = intent.held_by {
+                format!("waiting for decision #{decision} (vapor decisions list)")
+            } else if paused {
                 "daemon is paused".to_string()
             } else if !self.cloud_root_ready {
                 "cloud sync directory is unavailable".to_string()
@@ -1505,10 +1532,6 @@ impl DaemonRuntime {
                 self.app
                     .set_run_state(RunState::Paused, "user paused via vapor pause");
             } else {
-                // An explicit resume is the human-in-the-loop reset for
-                // the mass-deletion guard: the operator looked
-                // at the alert and decided the changes are legitimate.
-                self.mass_change_guard.reset();
                 // Re-derive the run state from what can actually admit
                 // work: resuming while the cloud root is unavailable must
                 // not report Running (which would mask the real blocker),
@@ -1826,41 +1849,10 @@ impl DaemonRuntime {
             // applied writes never count as user activity or deletions).
             self.active_coding
                 .record_stabilized(event.debounce_class, now);
-            // One classification decision feeds both the guard and the
-            // scheduled intent — the existence probe inside must not
-            // run twice with the filesystem moving underneath.
+            // The deletion guard lives in the executor, at the moment a
+            // deletion would become irreversible, so it sees both
+            // directions and never counts a no-op.
             let intent_kind = crate::scheduler::intent_kind_for_stabilized_event(&event);
-            if intent_kind == PendingIntentKind::Delete
-                && self.mass_delete_settings.enabled
-                && self.mass_change_guard.record_delete(now)
-            {
-                // Mass-change / ransomware guard: stop admitting
-                // work before the deletion storm replicates to the cloud.
-                // Ingest keeps capturing intent state durably; an explicit
-                // `vapor resume` is the human-in-the-loop reset. Threshold
-                // and window come from the `safeguards` config group.
-                let reason = format!(
-                    "mass-deletion guard: {} or more local deletions inside {}s; \
-                     sync paused — review the changes, then run `vapor resume` \
-                     (tunable via the `safeguards` config group)",
-                    self.mass_delete_settings.threshold,
-                    self.mass_delete_settings.window.as_secs(),
-                );
-                self.app.set_run_state(RunState::Paused, reason.clone());
-                if let Some(timeline) = &self.timeline {
-                    timeline.push("guard", self.profile_id.as_str(), reason.clone(), now);
-                }
-                logging::warning(
-                    "Mass-deletion guard tripped; pausing sync",
-                    &[
-                        ("threshold", self.mass_delete_settings.threshold.to_string()),
-                        (
-                            "window_seconds",
-                            self.mass_delete_settings.window.as_secs().to_string(),
-                        ),
-                    ],
-                );
-            }
             if self.sync_scope.sync_mode == vapor_shared::SyncMode::PullOnly {
                 // Pull-only: local events never produce
                 // local-to-remote intents. A local change is divergence
@@ -1979,6 +1971,107 @@ impl DaemonRuntime {
         self.stabilize_events_with(now, true);
         self.drain_pending_intents();
         self.flush_scheduler_to_durable_queue()
+    }
+
+    /// Pushes a timeline event for every decision the executor opened
+    /// this tick, so surfaces learn about the question right away.
+    fn announce_decisions(&mut self, ids: &[i64], now: SystemTime) {
+        for id in ids {
+            let Ok(Some(decision)) = self.state_db.decision(*id) else {
+                continue;
+            };
+            if let Some(timeline) = &self.timeline {
+                timeline.push(
+                    "decision",
+                    self.profile_id.clone(),
+                    format!(
+                        "{} Answer with `vapor decisions resolve {} --choose <option>` ({}).",
+                        decision.question,
+                        decision.id,
+                        decision
+                            .options
+                            .iter()
+                            .map(|option| option.key.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    ),
+                    now,
+                );
+            }
+        }
+    }
+
+    /// Acts on decisions the user answered through the CLI since the
+    /// last tick: releases or drops the held intents, resets the guard
+    /// that held them, and marks the decision applied.
+    fn apply_resolved_decisions(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
+        let resolved = self.state_db.resolved_unapplied_decisions()?;
+        for decision in resolved {
+            let choice = decision.choice.clone().unwrap_or_default();
+            let summary = match (decision.kind.as_str(), choice.as_str()) {
+                ("mass-deletion", "apply") => {
+                    let released = self.state_db.release_held(decision.id, now)?;
+                    self.mass_change_guard.reset();
+                    format!("applied: {released} held deletion(s) released")
+                }
+                ("mass-deletion", "discard") => {
+                    // The deletions are not wanted: restore each path
+                    // from the side that still has it.
+                    let held = self.state_db.held_intents(decision.id)?;
+                    let mut restores = Vec::new();
+                    for intent in &held {
+                        let restore = match intent.kind {
+                            PendingIntentKind::Delete => PendingIntentKind::Download,
+                            PendingIntentKind::ApplyRemoteDelete => PendingIntentKind::Upload,
+                            other => other,
+                        };
+                        restores.push((intent.path.clone(), restore, now));
+                    }
+                    let dropped = self.state_db.drop_held(decision.id)?;
+                    let enqueued = self.state_db.enqueue_intents_coalesced(
+                        &restores,
+                        crate::safeguards::IntentSource::Fresh,
+                    )?;
+                    self.mass_change_guard.reset();
+                    format!(
+                        "discarded: {dropped} deletion(s) dropped, {enqueued} restore(s) enqueued"
+                    )
+                }
+                (kind, choice) => {
+                    // A kind this runtime does not know how to apply is
+                    // left answered-but-unapplied for a build that does;
+                    // it is reported, never silently consumed.
+                    logging::warning(
+                        "Answered decision has no applier in this build",
+                        &[
+                            ("decision_id", decision.id.to_string()),
+                            ("kind", kind.to_string()),
+                            ("choice", choice.to_string()),
+                        ],
+                    );
+                    continue;
+                }
+            };
+            self.state_db.mark_decision_applied(decision.id, now)?;
+            logging::info(
+                "Applied a resolved decision",
+                &[
+                    ("decision_id", decision.id.to_string()),
+                    ("kind", decision.kind.clone()),
+                    ("choice", choice.clone()),
+                    ("outcome", summary.clone()),
+                ],
+            );
+            if let Some(timeline) = &self.timeline {
+                timeline.push(
+                    "decision",
+                    self.profile_id.clone(),
+                    format!("Decision {} ({}) {}", decision.id, decision.kind, summary),
+                    now,
+                );
+            }
+        }
+        Ok(())
     }
 
     fn flush_scheduler_to_durable_queue(&mut self) -> Result<usize, DaemonRuntimeError> {
@@ -4075,6 +4168,124 @@ mod tests {
     }
 
     #[test]
+    fn offline_same_size_cloud_edit_is_downloaded_by_the_startup_reconcile() {
+        // The mirror image: the cloud copy is rewritten with the same
+        // byte count while no daemon runs (the filesystem provider's
+        // changes cursor is process-local, so the feed never reports
+        // it). Only the remote mtime the index recorded can reveal it,
+        // and since the local copy is untouched the answer is a
+        // download, never a conflict copy.
+        let temp = TempDir::new().expect("temp dir");
+        let watch_root = temp.path().join("watch");
+        let cloud_root = temp.path().join("cloud");
+        std::fs::create_dir_all(&watch_root).expect("watch root");
+        std::fs::create_dir_all(&cloud_root).expect("cloud root");
+        let watch_root =
+            vapor_shared::paths::canonicalize(&watch_root).expect("canonical watch root");
+        let database_path = temp.path().join("state/vapor.sqlite");
+        let local_file = watch_root.join("notes.txt");
+        std::fs::write(&local_file, b"version-A").expect("seed local");
+
+        let sync_scope = || SyncScope {
+            local_sync_directory: Some(watch_root.clone()),
+            cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            sync_mode: vapor_shared::SyncMode::TwoWay,
+        };
+        use crate::clock::Clock as _;
+        let drive = |runtime: &mut DaemonRuntime, clock: &Arc<crate::clock::ManualClock>| {
+            for _ in 0..400 {
+                clock.advance(Duration::from_millis(250));
+                clock.advance_system(Duration::from_millis(250));
+                runtime
+                    .tick_with_inputs(clock.now_system(), ThrottleInputs::default())
+                    .expect("tick");
+                if runtime.state_db().queue_depth().expect("depth") == 0
+                    && runtime.state_db().leased_depth().expect("leased") == 0
+                {
+                    break;
+                }
+            }
+        };
+        {
+            let mut state_db = DurableStateDb::open(&database_path).expect("open state db");
+            state_db
+                .enqueue_intent(&local_file, PendingIntentKind::Upload, timestamp_ms(0))
+                .expect("enqueue");
+            let clock = Arc::new(crate::clock::ManualClock::at_now());
+            let mut runtime = DaemonRuntime::build(
+                sync_scope(),
+                EventPathFilterOptions::default(),
+                state_db,
+                Box::new(vapor_providers::FilesystemProvider::new()),
+                Arc::new(StaticMetricsSampler::default()),
+                clock.clone(),
+                false,
+            )
+            .expect("first runtime");
+            drive(&mut runtime, &clock);
+            let index = runtime
+                .state_db()
+                .sync_index(&local_file)
+                .expect("index")
+                .expect("indexed after upload");
+            assert!(
+                index.remote_modified_at.is_some(),
+                "an upload must record the remote mtime"
+            );
+        }
+
+        // The cloud side rewrites the file with the same length. The
+        // op-id tag survives an in-place write on this filesystem, so
+        // the tag alone would call the remote unchanged.
+        let cloud_file = cloud_root.join("notes.txt");
+        std::fs::write(&cloud_file, b"version-C").expect("edit cloud offline");
+        let later = std::fs::metadata(&cloud_file)
+            .expect("metadata")
+            .modified()
+            .expect("mtime")
+            + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&cloud_file)
+            .expect("open for mtime")
+            .set_modified(later)
+            .expect("set mtime");
+
+        let state_db = DurableStateDb::open(&database_path).expect("reopen state db");
+        let clock = Arc::new(crate::clock::ManualClock::at_now());
+        let mut runtime = DaemonRuntime::build(
+            sync_scope(),
+            EventPathFilterOptions::default(),
+            state_db,
+            Box::new(vapor_providers::FilesystemProvider::new()),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            false,
+        )
+        .expect("second runtime");
+        runtime
+            .enqueue_startup_reconstruction_reconcile(clock.now_system())
+            .expect("queue startup reconcile");
+        drive(&mut runtime, &clock);
+        assert_eq!(
+            std::fs::read(&local_file).expect("local copy"),
+            b"version-C",
+            "the offline same-size cloud edit must reach this device"
+        );
+        assert_eq!(
+            std::fs::read(&cloud_file).expect("cloud copy"),
+            b"version-C",
+            "the cloud copy must not be overwritten by the stale local one"
+        );
+        let entries: Vec<String> = std::fs::read_dir(&watch_root)
+            .expect("list")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(entries, vec!["notes.txt".to_string()], "no conflict copy");
+    }
+
+    #[test]
     fn paused_daemon_stops_admitting_new_work_and_resume_restores_it() {
         // Regression for the "pause is cosmetic" bug: `vapor pause` used
         // to flip the status string while the runtime kept leasing and
@@ -4699,61 +4910,235 @@ mod tests {
 
     // ---- Optional advanced safeguards ----
 
+    /// Seeds `count` synced files (uploaded, indexed) so a deletion
+    /// burst has a tree to be measured against.
+    fn seed_synced_files(fixture: &mut BidirectionalFixture, count: usize) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        for index in 0..count {
+            let path = fixture
+                .watch_root
+                .join(format!("d{}/f{index}.txt", index % 5));
+            std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+            std::fs::write(&path, format!("payload {index}")).expect("seed");
+            fixture.record_local_event(&path, FsEventKind::Created, fixture.now_ms);
+            paths.push(path);
+        }
+        fixture.converge(30);
+        assert_eq!(
+            fixture
+                .runtime
+                .state_db()
+                .sync_index_count()
+                .expect("index"),
+            count,
+            "every seeded file must be indexed"
+        );
+        paths
+    }
+
     #[test]
-    fn mass_deletion_storm_pauses_daemon_raises_alert_and_resume_rearms() {
+    fn a_local_deletion_burst_is_held_behind_a_decision_while_other_work_continues() {
         let mut fixture = BidirectionalFixture::new();
         let timeline = crate::timeline::TimelineBuffer::new(256);
         fixture.runtime.attach_timeline(timeline.clone());
-        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
-        fixture.runtime.attach_control(control.clone());
-        fixture.tick(6_000); // baseline
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        let paths = seed_synced_files(&mut fixture, 40);
 
-        // A deletion storm: threshold-many distinct paths removed inside
-        // one window. Spread across sibling directories so the storm
-        // compactor does not swallow them before they stabilize.
-        for index in 0..constants::engine::MASS_DELETE_THRESHOLD {
-            let path = fixture
-                .watch_root
-                .join(format!("dir-{}", index % 40))
-                .join(format!("victim-{index}.bin"));
-            fixture.record_local_event(&path, FsEventKind::Removed, fixture.now_ms);
+        // Twelve of forty files vanish at once: over a quarter of the
+        // tree, well under the absolute threshold.
+        for path in &paths[..12] {
+            std::fs::remove_file(path).expect("unlink");
+            fixture.record_local_event(path, FsEventKind::Removed, fixture.now_ms);
         }
-        fixture.tick(6_000); // stabilize the burst
+        // And an ordinary edit arrives with them.
+        let edited = &paths[30];
+        std::fs::write(edited, b"edited during the burst").expect("edit");
+        fixture.record_local_event(edited, FsEventKind::Modified, fixture.now_ms);
+        fixture.converge(30);
 
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision("mass-deletion", None)
+            .expect("query")
+            .expect("the burst must open a mass-deletion decision");
         assert_eq!(
-            fixture.runtime.app.snapshot().run_state,
-            RunState::Paused,
-            "guard must pause on a mass-deletion storm"
+            decision.held_intents, 12,
+            "the whole burst is held before any of it lands"
         );
         assert!(
-            fixture
-                .runtime
-                .app
-                .snapshot()
-                .reason
-                .contains("vapor resume"),
-            "pause reason must tell the user the way out"
+            decision.question.contains("12 of the 40 files"),
+            "the question names the whole burst: {}",
+            decision.question
         );
+        assert!(decision.question.contains("this device"));
         assert!(
             timeline
                 .snapshot(None)
                 .iter()
-                .any(|entry| entry.kind == "guard"),
-            "guard trip must land on the activity timeline"
+                .any(|entry| entry.kind == "decision"),
+            "the decision must land on the timeline"
         );
-
-        // Explicit resume re-arms the guard with an empty window: the
-        // daemon runs again and a single further delete does not re-trip.
-        control.request_resume();
-        fixture.tick(1_000);
+        // The daemon is not paused; the edit went through.
         assert_eq!(fixture.runtime.app.snapshot().run_state, RunState::Running);
-        let lone = fixture.watch_root.join("post-resume.bin");
-        fixture.record_local_event(&lone, FsEventKind::Removed, fixture.now_ms);
-        fixture.tick(6_000);
         assert_eq!(
-            fixture.runtime.app.snapshot().run_state,
-            RunState::Running,
-            "one delete after resume is normal use, not a storm"
+            std::fs::read(fixture.cloud_root.join("d0/f30.txt")).expect("cloud copy"),
+            b"edited during the burst"
+        );
+        // Held deletions have not touched the cloud.
+        let surviving = paths[..12]
+            .iter()
+            .filter(|path| {
+                fixture
+                    .cloud_root
+                    .join(path.strip_prefix(&fixture.watch_root).unwrap())
+                    .exists()
+            })
+            .count();
+        assert_eq!(surviving, 12, "held deletions must not propagate");
+
+        // Answer: apply. The held deletions release and propagate; the
+        // guard re-arms with an empty window.
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "apply", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
+        fixture.converge(30);
+        for path in &paths[..12] {
+            let cloud = fixture
+                .cloud_root
+                .join(path.strip_prefix(&fixture.watch_root).unwrap());
+            assert!(
+                !cloud.exists(),
+                "{} must be deleted after apply",
+                cloud.display()
+            );
+        }
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .open_decision("mass-deletion", None)
+                .expect("query")
+                .is_none(),
+            "the answered decision is closed"
+        );
+        assert!(!fixture.runtime.mass_change_guard.is_tripped());
+    }
+
+    #[test]
+    fn discarding_a_held_deletion_burst_restores_the_files() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        let paths = seed_synced_files(&mut fixture, 40);
+        for path in &paths[..12] {
+            std::fs::remove_file(path).expect("unlink");
+            fixture.record_local_event(path, FsEventKind::Removed, fixture.now_ms);
+        }
+        fixture.converge(30);
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision("mass-deletion", None)
+            .expect("query")
+            .expect("decision");
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "discard", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
+        fixture.converge(30);
+        // Every held path is back on disk, downloaded from the cloud.
+        for path in &paths[..12] {
+            assert!(
+                path.exists(),
+                "{} must be restored after discard",
+                path.display()
+            );
+        }
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+    }
+
+    #[test]
+    fn a_cloud_deletion_burst_is_held_and_discarding_it_restores_the_cloud_copies() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        let paths = seed_synced_files(&mut fixture, 40);
+        let cloud_paths: Vec<PathBuf> = paths[..12]
+            .iter()
+            .map(|path| {
+                fixture
+                    .cloud_root
+                    .join(path.strip_prefix(&fixture.watch_root).unwrap())
+            })
+            .collect();
+        // Another device removes twelve files in the cloud at once.
+        for cloud in &cloud_paths {
+            std::fs::remove_file(cloud).expect("cloud unlink");
+            fixture
+                .feed
+                .emit_removed(cloud.clone(), timestamp_ms(fixture.now_ms));
+        }
+        fixture.converge(30);
+
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision("mass-deletion", None)
+            .expect("query")
+            .expect("the burst must open a mass-deletion decision");
+        assert_eq!(decision.held_intents, 12);
+        assert!(decision.question.contains("from the cloud"));
+        for path in &paths[..12] {
+            assert!(path.exists(), "{} must survive while held", path.display());
+        }
+
+        // The user did not mean it: the local copies go back up.
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "discard", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
+        fixture.converge(30);
+        for cloud in &cloud_paths {
+            assert!(
+                cloud.exists(),
+                "{} must be restored after discard",
+                cloud.display()
+            );
+        }
+        assert_eq!(
+            fixture
+                .runtime
+                .state_db()
+                .held_intent_count()
+                .expect("held"),
+            0
         );
     }
 

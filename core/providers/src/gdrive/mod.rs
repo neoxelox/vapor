@@ -919,6 +919,7 @@ impl Provider for GoogleDriveProvider {
         Ok(Box::new(GdriveDownloadSession {
             provider: self.handle(),
             file_id: file.id,
+            remote_modified_at: file.modified_time.as_deref().and_then(parse_rfc3339_millis),
             destination: Some(destination),
             destination_path: request.destination,
             total_bytes,
@@ -1246,6 +1247,7 @@ impl GdriveUploadSession {
         self.state = UploadState::Done;
         Ok(TransferOutcome {
             bytes_total: self.total_bytes,
+            remote_modified_at: file.modified_time.as_deref().and_then(parse_rfc3339_millis),
             content_hash: file
                 .md5_checksum
                 .unwrap_or_else(|| md5_hex_of_bytes(&content)),
@@ -1381,6 +1383,10 @@ impl TransferSession for GdriveUploadSession {
                         Ok(TransferStep::Completed(TransferOutcome {
                             bytes_total: self.total_bytes,
                             content_hash: file.md5_checksum.unwrap_or_default(),
+                            remote_modified_at: file
+                                .modified_time
+                                .as_deref()
+                                .and_then(parse_rfc3339_millis),
                         }))
                     }
                     _ => {
@@ -1413,6 +1419,7 @@ impl TransferSession for GdriveUploadSession {
 struct GdriveDownloadSession {
     provider: ProviderHandle,
     file_id: String,
+    remote_modified_at: Option<SystemTime>,
     destination: Option<std::fs::File>,
     destination_path: std::path::PathBuf,
     total_bytes: u64,
@@ -1502,6 +1509,7 @@ impl GdriveDownloadSession {
         Ok(TransferStep::Completed(TransferOutcome {
             bytes_total: self.received_bytes,
             content_hash: hex_encode(&digest),
+            remote_modified_at: self.remote_modified_at,
         }))
     }
 }

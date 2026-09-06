@@ -13,8 +13,8 @@ use vapor_cli::commands::service as service_cmd;
 use vapor_cli::{RunOptions, ServiceCommand};
 use vapor_cli::{
     commands::{
-        auth as auth_cmd, config as config_cmd, conflicts as conflicts_cmd, doctor as doctor_cmd,
-        ipc as ipc_cmd, run as run_cmd,
+        auth as auth_cmd, config as config_cmd, conflicts as conflicts_cmd,
+        decisions as decisions_cmd, doctor as doctor_cmd, ipc as ipc_cmd, run as run_cmd,
     },
     resolve_configuration_path,
 };
@@ -116,6 +116,45 @@ enum Command {
     Conflicts {
         #[command(subcommand)]
         action: ConflictsAction,
+    },
+    /// List and answer the questions the daemon parked (an irreversible
+    /// action on ambiguous evidence). Works with or without a running
+    /// daemon; the daemon applies an answer on its next tick.
+    Decisions {
+        #[command(subcommand)]
+        action: DecisionsAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DecisionsAction {
+    /// Open decisions of every enabled profile (`--all` includes
+    /// answered ones).
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        all: bool,
+    },
+    /// One decision with its question, options, and evidence.
+    Show {
+        id: i64,
+        /// Profile the id belongs to (needed only when several profiles
+        /// hold the same id).
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Answer a decision with one of its option keys.
+    Resolve {
+        id: i64,
+        #[arg(long)]
+        choose: String,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -330,6 +369,60 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
         Command::Auth { action } => dispatch_auth(action),
         Command::SupportBundle { output, json } => dispatch_support_bundle(output, json),
         Command::Conflicts { action } => dispatch_conflicts(action),
+        Command::Decisions { action } => dispatch_decisions(action),
+    }
+}
+
+fn dispatch_decisions(action: DecisionsAction) -> Result<ExitCode, String> {
+    let loaded = vapor_shared::config::load_from(&resolve_configuration_path());
+    if let Some(issue) = loaded.load_issue {
+        eprintln!("vapor: warning: {issue}");
+    }
+    match action {
+        DecisionsAction::List { json, all } => {
+            let report = decisions_cmd::list_decisions(&loaded.config, all);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("{}", decisions_cmd::render_list(&report));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        DecisionsAction::Show { id, profile, json } => {
+            let decision = decisions_cmd::show_decision(&loaded.config, id, profile.as_deref())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&decision).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("{}", decisions_cmd::render_show(&decision));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        DecisionsAction::Resolve {
+            id,
+            choose,
+            profile,
+            json,
+        } => {
+            let decision =
+                decisions_cmd::resolve_decision(&loaded.config, id, &choose, profile.as_deref())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&decision).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!(
+                    "Recorded {choose} for decision #{id}; the daemon applies it on its next tick (or at its next start)."
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

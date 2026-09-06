@@ -121,8 +121,13 @@ pub struct SafeguardsConfig {
     pub mass_delete_threshold: u64,
     #[serde(default = "default_mass_delete_window_seconds")]
     pub mass_delete_window_seconds: u64,
+    #[serde(default = "default_mass_delete_ratio_percent")]
+    pub mass_delete_ratio_percent: u8,
 }
 
+fn default_mass_delete_ratio_percent() -> u8 {
+    constants::engine::MASS_DELETE_RATIO_PERCENT
+}
 fn default_mass_delete_enabled() -> bool {
     constants::safeguards::DEFAULT_MASS_DELETE_ENABLED
 }
@@ -139,6 +144,7 @@ impl Default for SafeguardsConfig {
             mass_delete_enabled: default_mass_delete_enabled(),
             mass_delete_threshold: default_mass_delete_threshold(),
             mass_delete_window_seconds: default_mass_delete_window_seconds(),
+            mass_delete_ratio_percent: default_mass_delete_ratio_percent(),
         }
     }
 }

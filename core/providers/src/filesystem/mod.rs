@@ -866,6 +866,7 @@ impl FilesystemUploadSession {
         Ok(TransferOutcome {
             bytes_total: self.bytes_total,
             content_hash: hex_encode(&std::mem::take(&mut self.hasher).finalize()),
+            remote_modified_at: current_size_mtime(&self.target).map(|(_, mtime)| mtime),
         })
     }
 
@@ -1063,6 +1064,11 @@ impl TransferSession for FilesystemDownloadSession {
                 return Ok(TransferStep::Completed(TransferOutcome {
                     bytes_total: self.bytes_total,
                     content_hash: hex_encode(&std::mem::take(&mut self.hasher).finalize()),
+                    remote_modified_at: self
+                        .source
+                        .metadata()
+                        .ok()
+                        .and_then(|metadata| metadata.modified().ok()),
                 }));
             }
             let destination = self

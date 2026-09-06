@@ -38,7 +38,7 @@ Inside `VAPOR_DIR`:
 |----------|------|
 | Config | `vapor.json` (a running daemon applies the live keys within seconds; roots, provider, profiles and sync mode need a restart and show up in `vapor status` as `config_restart_required`) |
 | Daemon log | `logs/vapord.logs` (rotates at 8 MiB, three generations); `logs/vapord.stdout.log` / `.stderr.log` are the service manager's redirects |
-| Durable queue/state DB | `state/vapor.sqlite` for the implicit `default` profile; `state/profiles/<id>/vapor.sqlite` per configured profile (tables: `queue_intents`, `failed_intents`, `state_entries`, `sync_index`, `tombstones`, `schema_meta`) |
+| Durable queue/state DB | `state/vapor.sqlite` for the implicit `default` profile; `state/profiles/<id>/vapor.sqlite` per configured profile (tables: `queue_intents`, `failed_intents`, `pending_decisions`, `name_aliases`, `state_entries`, `sync_index`, `tombstones`, `schema_meta`) |
 | Quarantined DB | `vapor.sqlite.corrupt-<ms>` next to the DB: the daemon moved a corrupt file aside and started fresh; a startup reconcile rebuilt the queue |
 | Lifecycle state | `state/lifecycle.json` (crash-loop bookkeeping shared by the CLI and the app) |
 | IPC socket (framed JSON over UDS — Vapor does not use XPC) | `vapord.sock`, relocated under the OS temp dir when the path exceeds ~104 bytes (`vapor doctor` reports where) |
@@ -52,7 +52,8 @@ The `vapor` CLI is the fastest signal — use it before reading raw files:
 
 - `vapor status --json` — run state, throttle state + reason, provider, daemon id. "daemon not running" vs "daemon is not responding" are different failures (no socket vs wedged process).
 - `vapor doctor` (add `--json` for scripts) — sanity probes: `vapor_dir` writable/private, `ipc_socket_path` budget and relocation, `vapord_binary` discoverable (sibling, bundle, PATH), `secret_store` persistence, `throttle_inputs` source, and `host_launch_agent_plist` (host state, not the sandbox).
-- `vapor diagnostics --json` — every queued or in-flight intent with its stage, attempt count, last error, and blocker reason ("why is this stuck"), in lease order.
+- `vapor diagnostics --json` — every queued or in-flight intent with its stage, attempt count, last error, and blocker reason ("why is this stuck"), in lease order. Stage `Held` with blocker "waiting for decision #N" is not stuck: the daemon is asking.
+- `vapor decisions list` (`show <id>`, `resolve <id> --choose <key>`) — the questions the daemon parked (a deletion burst held by the mass-deletion guard, for one). `vapor status` counts them as `decisions_pending`; they work with the daemon stopped, and the daemon applies the answer on its next tick or start. A held batch is the product working as designed; the finding, if any, is why the evidence was ambiguous.
 - `vapor support-bundle` — one redacted archive with status, diagnostics, timeline, config, and log tail; the first thing to ask a user for.
 - `vapor logs --tail 100` — recent daemon log lines, already redacted.
 - `vapor timeline --json` — diagnostics activity timeline (real events; an empty list means nothing has been recorded yet, not that the feature is missing).
@@ -62,7 +63,7 @@ The `vapor` CLI is the fastest signal — use it before reading raw files:
 
 - **Daemon log:** `$VAPOR_DIR/logs/vapord.logs`. Line format is `unix_millis [LEVEL] (component): message. key=value key=value`, levels `DEBUG`/`INFO`/`WARNING`/`ERROR`. Grep `\[ERROR\]` and `\[WARNING\]` first, then read the surrounding context.
 - **Crash reports:** `~/Library/Logs/DiagnosticReports/Vapor*.{crash,ips}` and `vapord*.{crash,ips}` — both process names matter. `.ips` files are JSON (parse exception type, termination reason, faulting thread); `.crash` files are plain text.
-- **Durable state:** query read-only, never mutate: `sqlite3 -readonly "$VAPOR_DIR/state/vapor.sqlite" 'SELECT path_text, kind, failure_kind, last_error FROM failed_intents;'` — permanently failed intents carry their final error. `queue_intents` shows what's stuck pending/leased.
+- **Durable state:** query read-only, never mutate: `sqlite3 -readonly "$VAPOR_DIR/state/vapor.sqlite" 'SELECT path_text, kind, failure_kind, last_error FROM failed_intents;'` — permanently failed intents carry their final error. `queue_intents` shows what's stuck pending/leased, and the rows in state `held` name the decision they wait on (`decision_id`); `pending_decisions` holds the question, its options, and its JSON evidence.
 
 **Time-sensitive:** log timestamps are Unix **milliseconds**. Get the current time in both forms — `date +"%Y-%m-%d %H:%M:%S"` and `date +%s000` — and focus on a ±15 minute window around the incident, widening to ±1 hour, then ±4 hours only if needed. Prioritize crash reports by modification time.
 
@@ -135,4 +136,4 @@ After presenting the report, **stop and wait** for the user to:
 - Always check both the app and daemon sides — issues in one often manifest as errors in the other.
 - Logs are already redacted (tokens, auth headers, sensitive keys become `[REDACTED]`); if you see a secret in a log line, that itself is a bug worth reporting.
 - If logs are very large, summarize overall health first (error/warning counts, restart markers like "vapord started"), then zero in.
-- Never mutate `state/vapor.sqlite`; always open it with `-readonly`. The durable queue is the product's source of truth for intent state.
+- Never mutate `state/vapor.sqlite`; always open it with `-readonly`. The durable queue is the product's source of truth for intent state. The one sanctioned write from outside the daemon is `vapor decisions resolve`, which records an answer the daemon then applies.

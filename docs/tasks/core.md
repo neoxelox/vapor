@@ -556,7 +556,9 @@ inherits it.
       tracked in Phase C3 follow-ups; the heuristic composes with it
       additively when it lands.
 - [x] C8-56 Folder priority classes + temporary flush boost.
-- [x] C8-57 Mass-change / ransomware guard with pause + alert workflow.
+- [x] C8-57 Mass-change / ransomware guard. First shipped as a whole-daemon
+      pause on 200 local deletions; superseded by SF-1 (a held batch
+      behind a decision, both directions, ratio rule).
 - [x] C8-58 Diagnostics history + support export bundle.
 
 ### Sync modes (directional / one-way sync) — prioritized
@@ -938,3 +940,75 @@ Still open:
 - [ ] TR-10 Soak cells on Linux once the native Linux traits ship
       (`tmpfs` size limits for disk-full, cgroup CPU and memory limits),
       and the Google Drive soak mode once TR-8 lands.
+
+## Sync safety follow-ups (2026-09-06)
+
+The safety review that came with the testing review listed every
+mechanism common sync clients ship and Vapor did not, and the owner
+decided the rule for ambiguity: hold only the file or batch in question,
+ask a plain question with a short option list, keep the question until
+it is answered. Whole-profile stops are limited to the conditions in
+`data-flow.md` §Decisions.
+
+Landed:
+
+- [x] SF-1 Decisions: durable `pending_decisions`, the `held` queue
+      state, `vapor decisions list|show|resolve`, `decisions_pending`
+      in status, `Held` rows in diagnostics, timeline entries, and the
+      applier loop in the runtime. The mass-deletion guard is the first
+      kind: both directions, the whole burst judged before its first
+      member lands (queued deletions count), threshold 1000 or
+      `massDeleteRatioPercent` (25%, floor 10), `apply` releases,
+      `discard` restores. Scenarios S31 and S40; the soak driver
+      answers the decisions its subtree removals provoke.
+
+Still open, in order:
+
+- [ ] SF-2 Local trash. A `TrashBin` platform trait (macOS `~/.Trash`
+      or the volume's `.Trashes`; Windows Recycle Bin and Linux
+      freedesktop trash when those surfaces ship) plus a managed trash
+      under `<vapor_dir>/trash/<profile>/` with retention, so a file
+      Vapor removes on this device because the cloud deleted it can be
+      brought back without the cloud's own trash. `trash` config group
+      (`enabled`, `retentionDays`), `vapor trash list|restore|empty`.
+      The `discard` answer of a mass-deletion decision restores from
+      the trash first when the other side no longer has the file.
+- [ ] SF-3 Root identity. A `.vapor-root` marker (internal name, never
+      synced) written at first sync and checked at every start and
+      every reconcile, plus the provider's own root identity where it
+      has one (Google Drive folder id). A root that is missing, empty
+      where it was populated, or carries another marker opens a
+      profile-scope `root-replaced` decision (`reattach`: adopt the new
+      root and merge without deletions; `wait`: keep the profile
+      stopped) instead of mirroring an empty volume into the cloud.
+- [ ] SF-4 Offline deletions propagate through the index. A file in the
+      sync index that is gone from one side at startup, with the other
+      side's copy unchanged since the last sync (rsync quick check), is
+      a deletion to propagate, not a file to restore; a changed copy is
+      still kept. Runs through the mass-deletion guard like any other
+      deletion. Flips S27 and S28 from restore to propagate.
+- [ ] SF-5 Type mismatch decision. A path that is a file on one side
+      and a directory on the other opens a path-scope `type-mismatch`
+      decision (`keep-both`: the file becomes a conflict copy and the
+      directory syncs; `prefer-local`; `prefer-cloud`) instead of the
+      timeline warning that repeats every reconcile pass.
+- [ ] SF-6 Case and normalization collisions materialize as conflict
+      copies (TR-5) through `name_aliases` and `enqueue_download_from`;
+      S33 flips from known gap to pass.
+- [ ] SF-7 Headless supervision. A CLI-only install has nothing to
+      restart a crashed daemon: `vapor service install` on macOS sets
+      `KeepAlive` on the LaunchAgent under the crash-loop guard's
+      budget, and `vapor service check --loop` supervises where no
+      service manager exists. The soak driver stops restarting the
+      daemon itself once this lands.
+- [ ] SF-8 Move detection with hashes (folds RV-11): a delete and a
+      create with the same content hash inside one debounce window, or
+      found by the reconcile walk, become one server-side move on
+      providers that support it and one local rename on apply, so a
+      moved tree is not re-transferred.
+- [ ] SF-9 Knowledge base for each of the above: the `vapor-e2e`,
+      `vapor-soak`, `vapor-debug`, and `vapor-config` skills, the
+      scenario catalog, `data-flow.md` §Decisions (new kinds listed
+      there), the README Features and Configuration sections, and a
+      scenario for every new decision kind in the same change set.
+

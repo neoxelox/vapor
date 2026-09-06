@@ -14,6 +14,7 @@
 10. A SQLite durable queue/state DB (WAL, `synchronous = NORMAL`) persists pending and leased intents, recovers interrupted leases on startup (resetting `attempt_count` for leases older than `LEASE_TIMEOUT_MILLIS`) and sweeps stale leases periodically in-run, coalesces scheduler flushes per `(path, kind)` against already-pending rows inside one transaction, requeues retryable failures with exponential backoff/jitter/slower rate-limit delays (with `attempt_count` incremented only by the retry path, not by leasing), durably finalizes terminal failures, and injects a whole-scope startup reconcile (bounded by `STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS` to avoid starving non-reconcile work) so volatile pre-DB intent loss is reconstructed conservatively after restart.
 11. Provider selection is injected at runtime startup per profile, so daemon orchestration uses the provider trait boundary instead of hardcoding any cloud type in core engine state. `provider = "filesystem"` (default) selects the real filesystem provider; `provider = "gdrive"` selects `GoogleDriveProvider`. New backends onboard through the checklist in `provider-onboarding.md`.
 12. Non-reconcile work flows through a staged executor that leases durable intents into bounded planner, hash, transfer (upload/download), and apply-delete stages under workgate/throttle caps instead of finishing one leased intent at a time. Every blocking provider call — remote stats/hash probes during planning, `begin_upload`/`begin_download`, transfer-session steps, remote deletes — runs on a small provider-job worker pool, never on the tick thread: the tick loop dispatches jobs and harvests their outcomes, so provider RTT stalls neither fs-event draining nor debounce nor IPC status, and the upload/download concurrency caps buy real parallel transfers. The calls outside the executor follow the same rule with one thread per call: the changes poll, each directory listing of the reconcile walk, and the cloud-root retry start on one tick and are harvested on a later one (the walk resumes at the directory whose listing landed). Only the initial cloud-root ensure at startup and the rare cursor re-baseline run synchronously. Transfers remain chunked `TransferSession`s: workers re-check the throttle gates and draw a bounded byte grant (bandwidth token bucket × auto-tuned step size) between steps, so a `Suspended` throttle or an empty bucket hands the session back at its checkpoint instead of aborting it. Cheap stage transitions chain within one tick (lease → plan, permit-acquire → first hash chunk, hash-complete → transfer dispatch), so a small file no longer pays a fixed tick of latency per pipeline stage; durable leasing orders by priority class (`state-schema-migrations.md` §Current schema) so reconcile backlog never starves fresh edits.
+13. The reconcile walk compares each file pair with the rsync quick check on **both** sides: a pair is converged when the sizes match, the local size and mtime are what the sync index recorded at the last transfer, and the remote size and mtime are what the index recorded from the provider at that transfer. A pair the index has no row for, or that fails either check, is verified once through the upload planner in two-way mode, which knows the last synced hash: identical content converges silently and records the row; a local copy still equal to the last synced hash means the change is remote-only and becomes a download; a remote copy still equal to it means the change is local-only and becomes a guarded overwrite; both moved is a keep-both conflict. The op-id tag on the remote is never taken as proof on its own that the remote is unchanged, because an in-place write keeps the tag on a filesystem; the remote quick check has to agree. The provider reports the remote mtime with every completed transfer (`TransferOutcome::remote_modified_at`).
 
 On macOS the throttle inputs are read from the host every second: system and daemon CPU load, power source, thermal state, Low Power Mode, resident and physical memory, and keyboard/pointer presence. Disk pressure and link capacity have no macOS source yet and keep their neutral defaults. Linux and Windows are not shipping surfaces; their samplers return static defaults and the daemon logs a warning at startup saying so.
 
@@ -21,7 +22,7 @@ On macOS the throttle inputs are read from the host every second: system and dae
 
 - **Active-coding heuristic.** Stabilized code/config-class events feed a rolling 60s window; at or above the threshold the runtime ORs `user_active = true` into the throttle inputs, so a compile-edit loop throttles sync even on hosts without a permissioned HID-idle signal. Strictly additive — it can only raise throttle caution.
 - **Priority classes + flush boost.** Within one durable flush batch, key-config and code paths enqueue ahead of lockfile noise (reusing the debounce classification as the priority signal). An explicit `vapor flush` activates a bounded 30s boost window: deferred reconciles release immediately (bypassing not-before times and the idle gate) and the remote feed polls on the next tick. Execution still answers to the throttle ladder, so flush accelerates scheduling, never resource impact.
-- **Mass-change / ransomware guard.** 200+ local deletions inside 60s (post-echo-suppression, so the engine's own applied deletes never count) pause the daemon in the same tick, raise a `guard` timeline alert, and set an actionable status reason. Ingest keeps capturing intent durably while paused. `vapor resume` is the explicit human reset and re-arms the guard with an empty window.
+- **Mass-change / ransomware guard.** Counts deletions in both directions at the moment the executor would make them irreversible: a local deletion about to remove a cloud object, a cloud deletion about to remove a local file. A deletion that turns out to be a no-op (the other side is already gone) never counts, and neither do the engine's own echoed deletes. The burst is judged as a whole: the deletions still waiting in the queue count with the ones already applied inside the rolling window, so a large batch is held before its first member lands. The guard trips when the burst reaches `massDeleteThreshold` (default 1000) or `massDeleteRatioPercent` of the synced tree (default 25%, never fewer than 10 deletions). A tripped guard parks every further deletion behind one `mass-deletion` decision (§Decisions) and the rest of the sync keeps flowing; the daemon is never paused for it. `apply` releases the held deletions as approved and resets the window; `discard` drops them and enqueues a restore for each path from the side that still has the file.
 
 ## Remote to local (bidirectional MVP)
 
@@ -206,6 +207,54 @@ When local and remote versions of the same path diverge (both sides modified, or
 - **Rename-during-conflict.** If the loser is renamed by the user or remote during the conflict write, the conflict copy still lands at the resolved fallback path; the user-initiated rename becomes a separate follow-up intent through the normal scheduler.
 - **Tombstone interaction.** If one side has deleted the path while the other side has a modified version, the modification wins and is written to the original canonical path (no conflict suffix); the delete is recorded as a completed tombstone. "Delete wins" is never the default — data preservation always wins over deletion.
 - **Determinism.** All inputs to the suffix (device_id, timestamp_ms) must be derivable from durable state or event metadata, so the same conflict replayed on the same device produces the same conflict path across daemon restarts.
+
+## Decisions
+
+A decision is a question the daemon parks when an irreversible action
+rests on evidence that could be read two ways, and only the user can
+say which reading is right. The rules:
+
+- **Scope is the smallest thing that is ambiguous.** A decision holds
+  one path, one batch, or one profile. Everything outside the scope
+  keeps syncing. The daemon is never paused because a question is open.
+- **Durable and listable.** A decision lives in the profile's state DB
+  (`pending_decisions`), with its kind, scope, question, a short option
+  list, and JSON evidence. `vapor decisions list|show` read it with or
+  without a daemon; the app drives the same command. `vapor status`
+  reports the open count (`decisions_pending`), and a `decision`
+  timeline entry marks both the opening and the outcome.
+- **Held intents.** The intents the decision holds move to the `held`
+  queue state, tied to the decision by `decision_id`. Held rows are not
+  queued work: they are not leased, not counted in the queue depth, and
+  they survive restarts. `vapor diagnostics` shows them as `Held` with
+  the decision number as the blocker.
+- **Answering.** `vapor decisions resolve <id> --choose <key>` records
+  the answer in the DB; the daemon applies it on its next tick, or at
+  its next start, and marks it applied. Each kind has one applier; an
+  answer a build cannot apply is logged and left answered-but-unapplied,
+  never silently consumed. Released intents carry `approved`, which the
+  guard that held them respects.
+- **Kinds today.** `mass-deletion` (batch scope, options `apply` and
+  `discard`; see the guard under Local safeguards). Further kinds land
+  with the feature that needs them and are listed here.
+
+### What stops a whole profile
+
+Only conditions under which no file can be synced correctly stop a
+profile. Everything else is file- or batch-scoped and leaves the rest of
+the sync running.
+
+| Condition | Effect | Way out |
+|---|---|---|
+| The local root is missing or replaced (another volume, an empty folder where a populated one was) | profile stops; nothing is deleted anywhere | the root comes back, or a profile-scope decision |
+| The cloud is unreachable, refuses the credentials, or is out of quota | profile waits and retries with backoff; intents keep accumulating durably | connectivity, `vapor auth login`, freeing space |
+| The configuration is invalid | the daemon keeps the last valid configuration and reports the error | `vapor config` fixes it; live reload picks it up |
+| The daemon crash-loops | the lifecycle guard stops restarting it | `vapor service` after the cause is fixed |
+| The user pauses (`vapor pause`) | the profile stops; ingest keeps capturing intent durably | `vapor resume` |
+
+Never a whole-profile stop: a conflict, a name collision, a type
+mismatch, a deletion burst, a single failed transfer. Those hold their
+own path or batch and, when a person has to choose, open a decision.
 
 ## Loop prevention (self-write cache)
 

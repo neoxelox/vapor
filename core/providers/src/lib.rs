@@ -204,6 +204,13 @@ pub struct TransferOutcome {
     /// Hash of the transferred content in the provider's
     /// [`HashAlgorithm`], hex-encoded.
     pub content_hash: String,
+    /// The remote object's modification time as the provider reports
+    /// it once the transfer has landed (for an upload, the time of the
+    /// object just written; for a download, the time of the object
+    /// read). The sync index records it so a later reconcile can tell
+    /// a remote edit that kept the byte count from an untouched
+    /// object. `None` when the provider cannot say.
+    pub remote_modified_at: Option<SystemTime>,
 }
 
 /// A chunked upload or download in flight. Sessions hold whatever
@@ -463,6 +470,7 @@ impl TransferSession for NoopTransferSession {
         Ok(TransferStep::Completed(TransferOutcome {
             bytes_total: 0,
             content_hash: filesystem::hash_hex_of_bytes(b""),
+            remote_modified_at: None,
         }))
     }
 

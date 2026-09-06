@@ -909,30 +909,15 @@ impl Driver {
         }
     }
 
-    /// Restarts a dead daemon, resumes a guard pause, and waits for a
-    /// parked cloud root to come back, so the run never hangs on a
-    /// state the workload itself caused.
+    /// Restarts a dead daemon, answers the mass-deletion decisions the
+    /// workload provokes, and waits for the daemon to be running, so
+    /// the run never hangs on a state the workload itself caused.
     fn ensure_daemon_working(&mut self, deadline: Instant) -> Result<(), Failure> {
         if self.daemon_pid().is_none() {
             self.note("daemon is not running; restarting it");
             self.start_daemon()?;
         }
-        if let Some(status) = self.cli.status()
-            && status.run_state == "Paused"
-        {
-            let reason = status
-                .profiles
-                .first()
-                .map(|profile| profile.reason.clone())
-                .unwrap_or_default();
-            if reason.contains("mass-deletion guard") {
-                self.record_fault_event(
-                    "guard-trip",
-                    format!("mass-deletion guard paused sync; resuming ({reason})"),
-                );
-                self.cli.resume()?;
-            }
-        }
+        self.answer_mass_deletion_decisions()?;
         let started = Instant::now();
         while self.cli.run_state().as_deref() != Some("Running") {
             if Instant::now() >= deadline || started.elapsed() > STARTUP_TIMEOUT {
@@ -942,6 +927,45 @@ impl Driver {
                 )));
             }
             std::thread::sleep(wait::POLL_INTERVAL);
+        }
+        Ok(())
+    }
+
+    /// The workload's subtree removals are deliberate, so every open
+    /// mass-deletion decision is answered `apply`; each one is recorded
+    /// as a `guard-trip`, the product working as designed. Any other
+    /// open decision kind is a finding: the driver does not know the
+    /// right answer, and the run must not guess.
+    fn answer_mass_deletion_decisions(&mut self) -> Result<(), Failure> {
+        let Ok(report) = self.cli.json(&["decisions", "list", "--json"]) else {
+            return Ok(());
+        };
+        let open: Vec<serde_json::Value> = report["decisions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|decision| decision["choice"].is_null())
+            .cloned()
+            .collect();
+        for decision in open {
+            let id = decision["id"].as_i64().unwrap_or_default();
+            let kind = decision["kind"].as_str().unwrap_or_default().to_string();
+            if kind != "mass-deletion" {
+                return Err(Failure::new(format!(
+                    "the daemon opened a {kind} decision (#{id}) the driver cannot answer: {}",
+                    decision["question"].as_str().unwrap_or_default()
+                )));
+            }
+            self.record_fault_event(
+                "guard-trip",
+                format!(
+                    "mass-deletion guard held {} deletion(s) behind decision #{id}; applying ({})",
+                    decision["heldIntents"].as_u64().unwrap_or_default(),
+                    decision["question"].as_str().unwrap_or_default()
+                ),
+            );
+            self.cli
+                .ok(&["decisions", "resolve", &id.to_string(), "--choose", "apply"])?;
         }
         Ok(())
     }

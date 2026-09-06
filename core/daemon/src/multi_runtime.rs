@@ -881,6 +881,8 @@ impl MultiProfileRuntime {
         for slot in &self.slots {
             let queue_depth = slot.runtime.state_db().queue_depth().unwrap_or(0) as u64;
             let failed_intents = slot.runtime.state_db().failed_depth().unwrap_or(0) as u64;
+            let decisions_pending =
+                slot.runtime.state_db().open_decision_count().unwrap_or(0) as u64;
             let (mirror_reverts, mirror_deletes) = slot.runtime.mirror_counters();
             let conflicts = slot.runtime.conflict_count();
             let app_snapshot = slot.runtime.app().snapshot();
@@ -897,9 +899,11 @@ impl MultiProfileRuntime {
                 mirror_reverts,
                 mirror_deletes,
                 suspended_reason: slot.failed.clone(),
+                decisions_pending,
             });
             snapshot.queue_depth += queue_depth;
             snapshot.failed_intents += failed_intents;
+            snapshot.decisions_pending += decisions_pending;
             snapshot.conflicts += conflicts;
             snapshot.mirror_reverts += mirror_reverts;
             snapshot.mirror_deletes += mirror_deletes;

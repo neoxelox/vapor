@@ -300,20 +300,27 @@ pub mod idle_boost {
 
 pub mod safeguards {
     /// Keys of the `safeguards` config group. The mass-delete guard
-    /// pauses all sync when local deletions inside a rolling window
-    /// exceed the threshold, until an explicit `vapor resume` —
-    /// the ransomware / bulk-mistake backstop. Configurable because a
+    /// holds a burst of deletions (in either direction) behind a
+    /// decision when the burst reaches the threshold or the ratio
+    /// inside a rolling window; the rest of the sync keeps flowing.
+    /// The ransomware / bulk-mistake backstop. Configurable because a
     /// workflow that legitimately unlinks many files (`rm -rf` of large
-    /// trees, big build cleans) may need a higher threshold; the
-    /// defaults stay conservative.
+    /// trees, big build cleans) may need a higher threshold.
     pub const KEY_MASS_DELETE_ENABLED: &str = "massDeleteEnabled";
     pub const KEY_MASS_DELETE_THRESHOLD: &str = "massDeleteThreshold";
     pub const KEY_MASS_DELETE_WINDOW_SECONDS: &str = "massDeleteWindowSeconds";
+    /// Share of the synced files (percent) whose deletion inside the
+    /// window is held for a decision even when the absolute threshold is
+    /// not reached, so a small tree is protected too.
+    pub const KEY_MASS_DELETE_RATIO_PERCENT: &str = "massDeleteRatioPercent";
     pub const DEFAULT_MASS_DELETE_ENABLED: bool = true;
     /// Floor clamps: a threshold/window too low would trip the guard on
-    /// ordinary work and train users to blind-resume it.
+    /// ordinary work and train users to blind-approve it.
     pub const MIN_MASS_DELETE_THRESHOLD: usize = 10;
     pub const MIN_MASS_DELETE_WINDOW_SECONDS: u64 = 5;
+    /// The ratio rule never holds fewer deletions than this, so a tree
+    /// of three files does not prompt on every second deletion.
+    pub const MIN_MASS_DELETE_RATIO_COUNT: usize = 10;
 }
 
 pub mod sync_mode {
@@ -631,11 +638,13 @@ pub mod engine {
     /// when no HID signal is available.
     pub const ACTIVE_CODING_WINDOW_SECONDS: u64 = 60;
     pub const ACTIVE_CODING_EVENT_THRESHOLD: usize = 5;
-    /// Mass-change guard: local deletions above this rate pause
-    /// the daemon and raise an alert instead of propagating what may be
-    /// ransomware or an accidental recursive delete.
+    /// Mass-change guard: deletions in either direction above this rate,
+    /// or above the ratio of the synced tree, are held behind a
+    /// decision instead of propagating what may be ransomware, an
+    /// accidental recursive delete, or a bad listing from the cloud.
     pub const MASS_DELETE_WINDOW_SECONDS: u64 = 60;
-    pub const MASS_DELETE_THRESHOLD: usize = 200;
+    pub const MASS_DELETE_THRESHOLD: usize = 1_000;
+    pub const MASS_DELETE_RATIO_PERCENT: u8 = 25;
     /// FlushNow boost window: after an explicit flush request
     /// the runtime releases deferred work eagerly for this long.
     pub const FLUSH_BOOST_SECONDS: u64 = 30;

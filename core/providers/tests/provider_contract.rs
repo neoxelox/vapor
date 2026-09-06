@@ -432,6 +432,7 @@ impl Provider for MockObjectStoreProvider {
             outcome: Some(TransferOutcome {
                 bytes_total: bytes,
                 content_hash: hash,
+                remote_modified_at: None,
             }),
         }))
     }
@@ -453,6 +454,7 @@ impl Provider for MockObjectStoreProvider {
             outcome: Some(TransferOutcome {
                 bytes_total: content.len() as u64,
                 content_hash: hash_hex_of_bytes(&content),
+                remote_modified_at: None,
             }),
         }))
     }

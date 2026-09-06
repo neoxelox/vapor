@@ -268,7 +268,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S28 | a file deleted in the cloud while the daemon was down is re-uploaded on restart (pins today's rule) |
 | S29 | push-only uploads, overwrites a divergent cloud edit, removes a cloud-only file, never downloads |
 | S30 | two profiles in one daemon sync their own roots with their own durable state and never cross |
-| S31 | a burst of local deletions pauses sync naming `vapor resume`; resume re-arms and the deletions propagate |
+| S31 | a burst of local deletions is held whole behind a `mass-deletion` decision while other work continues; `vapor decisions resolve --choose apply` releases it |
 | S32 | with the state DB deleted, a restart rebuilds the index from both trees without loss or invented conflicts |
 | S33 | two cloud files differing only by case both materialize locally, the second as a conflict copy (known gap) |
 | S34 | the cloud root disappears mid-run: sync blocks with Error; it returns: work resumes and converges |
@@ -277,6 +277,8 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S37 | push-only overwrites a same-size cloud edit with no index row for the pair |
 | S38 | a cloud name that would alias a differently-cased local file never rewrites either cloud object, never loops, and lands on the timeline |
 | S39 | a write reported moments before SIGTERM becomes a durable intent at shutdown and uploads right after the restart |
+| S40 | a burst of cloud deletions is held before it touches this device; `--choose discard` restores the cloud copies from the local ones |
+| S41 | a cloud edit made while the daemon was down that keeps the byte count is found by the startup reconcile and downloaded, with no conflict copy |
 | R01 | install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd (`--full`) |
 
 ## Extending the harness
