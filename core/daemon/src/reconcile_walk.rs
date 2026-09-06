@@ -114,6 +114,9 @@ pub struct ReconcileWalker {
     /// one side only is transferred, never treated as a deletion to
     /// propagate, whatever the index says.
     merge_without_deletions: bool,
+    /// Names the conflict copies this walk materializes colliding
+    /// remote names as.
+    device_id: String,
 }
 
 impl ReconcileWalker {
@@ -132,12 +135,63 @@ impl ReconcileWalker {
             pending_dirs: VecDeque::from([subtree_root.to_path_buf()]),
             stats: WalkStats::default(),
             merge_without_deletions: false,
+            device_id: String::new(),
         }
     }
 
     pub fn with_merge_without_deletions(mut self, merge: bool) -> Self {
         self.merge_without_deletions = merge;
         self
+    }
+
+    pub fn with_device_id(mut self, device_id: &str) -> Self {
+        self.device_id = device_id.to_string();
+        self
+    }
+
+    /// A remote name this filesystem cannot hold next to an existing
+    /// local name is materialized under a conflict-copy name, and the
+    /// alias between the two is recorded so the copy keeps syncing with
+    /// its own cloud object from then on.
+    fn materialize_colliding_remote(
+        &mut self,
+        state_db: &mut DurableStateDb,
+        wanted: &Path,
+        existing: &Path,
+        remote: &RemoteEntry,
+        now: SystemTime,
+    ) -> Result<(), WalkError> {
+        if remote.kind != RemoteEntryKind::File {
+            // A colliding directory has no copy to make; reported as
+            // before.
+            self.name_collisions
+                .push((wanted.to_path_buf(), existing.to_path_buf()));
+            return Ok(());
+        }
+        let millis = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let copy = crate::conflict::conflict_copy_path(wanted, &self.device_id, millis, |path| {
+            path.exists() || crate::name_collision::colliding_local_path(path).is_some()
+        });
+        state_db.record_name_alias(
+            remote.path.as_str(),
+            &copy,
+            remote.content_hash.as_deref().unwrap_or(""),
+            now,
+        )?;
+        state_db.enqueue_download_from(&copy, remote.path.as_str(), now)?;
+        crate::logging::info(
+            "Remote name collides with a local file; materializing it as a conflict copy",
+            &[
+                ("remote", remote.path.as_str().to_string()),
+                ("existing", existing.display().to_string()),
+                ("copy", copy.display().to_string()),
+            ],
+        );
+        self.name_collisions.push((wanted.to_path_buf(), copy));
+        Ok(())
     }
 
     fn ignores(&self, local_path: &Path) -> bool {
@@ -341,10 +395,15 @@ impl ReconcileWalker {
             }
         }
 
+        // A remote name materialized under an alias pairs with its
+        // local copy, not with the name it cannot have here.
+        let aliases: BTreeMap<String, String> =
+            state_db.name_aliases_in(directory)?.into_iter().collect();
         for entry in remote_entries {
             let Some(name) = entry.path.file_name().map(ToOwned::to_owned) else {
                 continue;
             };
+            let name = aliases.get(&name).cloned().unwrap_or(name);
             // Remote entries are judged by the local path they would
             // converge onto, so one rule set governs both directions.
             if self.ignores(&directory.join(&name)) {
@@ -376,14 +435,11 @@ impl ReconcileWalker {
                 let winner = directory.join(&names[0]);
                 for name in &names[1..] {
                     let wanted = directory.join(name);
-                    crate::logging::warning(
-                        "Remote names differ only by case; this filesystem can hold one of them",
-                        &[
-                            ("kept", winner.display().to_string()),
-                            ("left_untouched", wanted.display().to_string()),
-                        ],
-                    );
-                    self.name_collisions.push((wanted, winner.clone()));
+                    if let Some(remote) = pairs.get(name).and_then(|pair| pair.remote.clone()) {
+                        self.materialize_colliding_remote(
+                            state_db, &wanted, &winner, &remote, now,
+                        )?;
+                    }
                     skipped_aliases.insert(name.clone());
                 }
             }
@@ -507,14 +563,13 @@ impl ReconcileWalker {
                 (None, Some(remote)) => {
                     if let Some(existing) = crate::name_collision::colliding_local_path(&local_path)
                     {
-                        crate::logging::warning(
-                            "Remote name collides with a differently-cased local file; leaving both sides untouched",
-                            &[
-                                ("remote", remote.path.as_str().to_string()),
-                                ("local", existing.display().to_string()),
-                            ],
-                        );
-                        self.name_collisions.push((local_path, existing));
+                        self.materialize_colliding_remote(
+                            state_db,
+                            &local_path,
+                            &existing,
+                            &remote,
+                            now,
+                        )?;
                         continue;
                     }
                     match sync_mode {
@@ -1051,11 +1106,12 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_name_aliasing_a_local_file_is_left_untouched_and_reported() {
+    fn a_remote_name_aliasing_a_local_file_materializes_as_an_aliased_conflict_copy() {
         // The cloud holds Readme.md and readme.md; a case-insensitive
         // local root can hold one. The second name must not download
         // onto the first one's file (that rewrote the cloud object it
-        // came from); it is reported and skipped on both sides.
+        // came from); it comes down under a conflict-copy name that is
+        // aliased to its own cloud object from then on.
         let mut fixture = Fixture::new();
         std::fs::write(fixture.local_root.join("Readme.md"), b"upper").expect("seed");
         let aliases_locally =
@@ -1064,7 +1120,8 @@ mod tests {
             entries: vec![remote_file("Readme.md", 5), remote_file("readme.md", 5)],
         });
 
-        let mut walker = ReconcileWalker::new(&fixture.local_root, &fixture.local_root, None);
+        let mut walker = ReconcileWalker::new(&fixture.local_root, &fixture.local_root, None)
+            .with_device_id("dev");
         let mut done = false;
         for _ in 0..64 {
             done = walker
@@ -1090,17 +1147,44 @@ mod tests {
             PendingIntentKind::Upload,
         );
         if aliases_locally {
+            assert_eq!(queued.len(), 2, "{queued:?}");
+            assert_eq!(queued[0], verify);
+            let (copy, kind) = &queued[1];
+            assert_eq!(*kind, PendingIntentKind::Download);
+            let copy_name = copy.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                copy_name.starts_with("readme~conflict-dev-") && copy_name.ends_with(".md"),
+                "the colliding name comes down as a conflict copy: {copy_name}"
+            );
+            let (alias_local, _) = fixture
+                .state_db
+                .name_alias("readme.md")
+                .expect("query")
+                .expect("the alias is recorded");
+            assert_eq!(&alias_local, copy);
             assert_eq!(
-                queued,
-                vec![verify],
-                "the colliding name must not become a download"
+                fixture
+                    .state_db
+                    .alias_remote_for_local(copy)
+                    .expect("query")
+                    .as_deref(),
+                Some("readme.md")
+            );
+            let intent = fixture
+                .state_db
+                .list_queue_intents(4)
+                .expect("queue")
+                .into_iter()
+                .find(|intent| intent.kind == PendingIntentKind::Download)
+                .expect("download");
+            assert_eq!(
+                intent.remote_path.as_deref(),
+                Some("readme.md"),
+                "the download names the cloud object it comes from"
             );
             assert_eq!(
                 walker.take_name_collisions(),
-                vec![(
-                    fixture.local_root.join("readme.md"),
-                    fixture.local_root.join("Readme.md")
-                )]
+                vec![(fixture.local_root.join("readme.md"), copy.clone())]
             );
         } else {
             // Case-sensitive local root: both names can coexist and the
@@ -1117,6 +1201,61 @@ mod tests {
             );
             assert!(walker.take_name_collisions().is_empty());
         }
+    }
+
+    #[test]
+    fn an_aliased_copy_pairs_with_its_own_cloud_object_on_later_walks() {
+        let mut fixture = Fixture::new();
+        std::fs::write(fixture.local_root.join("Readme.md"), b"upper").expect("seed");
+        let copy = fixture.local_root.join("readme~conflict-dev-1.md");
+        std::fs::write(&copy, b"lower").expect("copy");
+        // Both files are synced: Readme.md with its mirror, the copy
+        // with the aliased readme.md.
+        for (path, op) in [
+            (fixture.local_root.join("Readme.md"), "op-a"),
+            (copy.clone(), "op-b"),
+        ] {
+            let mtime = std::fs::symlink_metadata(&path)
+                .and_then(|m| m.modified())
+                .ok();
+            fixture
+                .state_db
+                .set_sync_index(&path, "hash", 5, mtime, Some(ts(0)), op, ts(1))
+                .expect("index");
+        }
+        fixture
+            .state_db
+            .record_name_alias("readme.md", &copy, "hash", ts(1))
+            .expect("alias");
+        let provider: Arc<dyn Provider> = Arc::new(ListingProvider {
+            entries: vec![remote_file("Readme.md", 5), remote_file("readme.md", 5)],
+        });
+        let mut walker = ReconcileWalker::new(&fixture.local_root, &fixture.local_root, None)
+            .with_device_id("dev");
+        let mut done = false;
+        for _ in 0..64 {
+            done = walker
+                .process(
+                    provider.clone(),
+                    &ProviderCallMode::Inline,
+                    SyncMode::TwoWay,
+                    &mut fixture.state_db,
+                    8,
+                    ts(0),
+                    &|| true,
+                )
+                .expect("walk step");
+            if done {
+                break;
+            }
+        }
+        assert!(done);
+        assert!(
+            fixture.queued_kinds().is_empty(),
+            "both pairs are converged: {:?}",
+            fixture.queued_kinds()
+        );
+        assert!(walker.take_name_collisions().is_empty());
     }
 
     #[test]

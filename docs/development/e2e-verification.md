@@ -143,9 +143,9 @@ Output is one line per scenario:
 ```
 [e2e] PASS S03 — local writes become durable intents and drain; the cloud root matches byte for byte (1.9s)
 [e2e] SKIP R01 — needs full: run with --full to include it
-[e2e] KNOWN-GAP S33 — both colliding payloads must exist locally (one as a conflict copy); local has: ["Readme.md"] (5.0s)
+[e2e] KNOWN-GAP S99 — the assertion the scenario cannot meet yet, quoted (5.0s)
 [e2e] FAIL S16 — timed out after 30s waiting for: .../cloud/Vapor/gone.txt to be removed (30.1s)
-[e2e] OK — 38 passed, 0 failed, 1 skipped, 1 known gaps, 0 unexpected passes (245.0s)
+[e2e] OK — 45 passed, 0 failed, 1 skipped, 0 known gaps, 0 unexpected passes (390.0s)
 [e2e] report: .../.vapor/e2e/run-711543-14708/e2e-result.json
 ```
 
@@ -270,12 +270,12 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S30 | two profiles in one daemon sync their own roots with their own durable state and never cross |
 | S31 | a burst of local deletions is held whole behind a `mass-deletion` decision while other work continues; `vapor decisions resolve --choose apply` releases it |
 | S32 | with the state DB deleted, a restart rebuilds the index from both trees without loss or invented conflicts |
-| S33 | two cloud files differing only by case both materialize locally, the second as a conflict copy (known gap) |
+| S33 | two cloud files differing only by case both materialize locally, the second as a conflict copy aliased to its own cloud object; an edit to the copy reaches that object and the cloud gains no third file |
 | S34 | the cloud root disappears mid-run: sync blocks with Error; it returns: work resumes and converges |
 | S35 | the shipped `vapord` binary starts, syncs, and shuts down cleanly like `vapor run` |
 | S36 | nested directories flow up and down; an emptied directory's files are removed |
 | S37 | push-only overwrites a same-size cloud edit with no index row for the pair |
-| S38 | a cloud name that would alias a differently-cased local file never rewrites either cloud object, never loops, and lands on the timeline |
+| S38 | a cloud name that would alias a differently-cased local file never rewrites either cloud object, materializes once as a conflict copy, and a second reconcile adds nothing |
 | S39 | a write reported moments before SIGTERM becomes a durable intent at shutdown and uploads right after the restart |
 | S40 | a burst of cloud deletions is held before it touches this device; `--choose discard` restores the cloud copies from the local ones |
 | S41 | a cloud edit made while the daemon was down that keeps the byte count is found by the startup reconcile and downloaded, with no conflict copy |

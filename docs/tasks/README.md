@@ -228,13 +228,13 @@ IDs stable; they do not imply low priority.)
 
 Status: SF-1 (decisions and the two-direction mass-deletion guard),
 SF-2 (the local trash), SF-3 (root identity), SF-4 (offline deletions
-through the index), and SF-5 (the type-mismatch decision) landed
-2026-09-06; SF-6 … SF-9 in `core.md` "Sync safety follow-ups" are
-next, before Wave 9 exposes any of it in the app: collisions as
-conflict copies, headless supervision, hash-based move detection, and
-the knowledge base for each. The testing tiers that prove them
-(`core.md` TR-1 … TR-10) are in place; TR-5, TR-8 and TR-10 wait on
-SF-6, the Google Drive test account, and the native Linux traits.
+through the index), SF-5 (the type-mismatch decision), and SF-6
+(collisions as aliased conflict copies) landed by 2026-09-07; SF-7 …
+SF-9 in `core.md` "Sync safety follow-ups" are next, before Wave 9
+exposes any of it in the app: headless supervision, hash-based move
+detection, and the knowledge base for each. The testing tiers that prove them
+(`core.md` TR-1 … TR-10) are in place; TR-8 and TR-10 wait on the
+Google Drive test account and the native Linux traits.
 
 ### Wave 9 — macOS app UX polish
 

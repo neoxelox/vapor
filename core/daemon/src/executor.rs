@@ -1718,14 +1718,44 @@ fn plan_intent(
             message: "no local sync directory configured".to_string(),
         };
     };
-    let Some(remote_path) = RemotePath::from_local(local_root, &intent.path) else {
-        return PlanOutcome::Fail {
-            failure: RetryFailureKind::Permanent,
-            message: format!(
-                "intent path {} is not inside the local sync root",
-                intent.path.display()
-            ),
-        };
+    // The cloud object of a local file normally lives at the mirror of
+    // its path. An intent that names its remote path explicitly (a
+    // download from a colliding name), or a local file that is the
+    // alias of a colliding remote name, points elsewhere.
+    let aliased = match intent.remote_path.clone() {
+        Some(text) => Some(text),
+        None => match state_db.alias_remote_for_local(&intent.path) {
+            Ok(alias) => alias,
+            Err(error) => {
+                return PlanOutcome::Fail {
+                    failure: RetryFailureKind::Transient,
+                    message: format!("cannot read the name aliases: {error}"),
+                };
+            }
+        },
+    };
+    let remote_path = match aliased {
+        Some(text) => match RemotePath::new(text) {
+            Ok(path) => path,
+            Err(error) => {
+                return PlanOutcome::Fail {
+                    failure: RetryFailureKind::Permanent,
+                    message: format!("intent names an invalid remote path: {error}"),
+                };
+            }
+        },
+        None => match RemotePath::from_local(local_root, &intent.path) {
+            Some(path) => path,
+            None => {
+                return PlanOutcome::Fail {
+                    failure: RetryFailureKind::Permanent,
+                    message: format!(
+                        "intent path {} is not inside the local sync root",
+                        intent.path.display()
+                    ),
+                };
+            }
+        },
     };
     let op_id = allocate_op_id(env, intent, now);
 
@@ -2798,6 +2828,14 @@ fn record_delete_tombstone(
     if let Err(error) = state_db.record_tombstone(local_path, origin, now) {
         crate::logging::warning(
             "Could not record deletion tombstone",
+            &[("error", error.to_string())],
+        );
+    }
+    // A deleted file that stood in for a colliding cloud name releases
+    // the alias with it, whichever side deleted.
+    if let Err(error) = state_db.remove_name_alias_for_local(local_path) {
+        crate::logging::warning(
+            "Could not release the name alias after a delete",
             &[("error", error.to_string())],
         );
     }

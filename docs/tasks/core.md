@@ -911,15 +911,8 @@ Engine gaps the harness found (each names its scenario). Landed:
 
 Still open:
 
-- [ ] TR-5 Case collisions: the guard that keeps two cloud objects
-      whose names differ only by case from rewriting each other landed
-      (the second name is reported on the timeline and left untouched
-      on both sides; scenario S38). The decided end state, the second
-      object materializing locally as a keep-both conflict copy through
-      the existing conflict naming, listing, and resolve flow, needs a
-      durable record of which cloud object owns the local name so a
-      later reconcile does not manufacture another copy. Belongs with
-      the decisions table. Scenario S33 stays a known gap until then.
+- [x] TR-5 Case collisions: landed as SF-6 (the second object
+      materializes as an aliased conflict copy). Scenarios S33, S38.
 - [ ] TR-8 Google Drive mode of the harness: a `CloudSide` the harness
       performs through the provider crate, a per-run `VaporE2E-<run-id>`
       folder created and deleted by the harness, longer wait budgets,
@@ -986,9 +979,10 @@ Still open, in order:
 - [x] SF-5 Type mismatch decision: `type-mismatch` with `keep-both`,
       `prefer-local`, `prefer-cloud`; asked once, both sides untouched
       until answered. Scenario S46.
-- [ ] SF-6 Case and normalization collisions materialize as conflict
-      copies (TR-5) through `name_aliases` and `enqueue_download_from`;
-      S33 flips from known gap to pass.
+- [x] SF-6 Case and normalization collisions materialize as conflict
+      copies aliased to their own cloud object (`name_aliases`,
+      resolved by the executor, the walk, and the feed); S33 flipped
+      from known gap to pass, S38 pins stability.
 - [ ] SF-7 Headless supervision. A CLI-only install has nothing to
       restart a crashed daemon: `vapor service install` on macOS sets
       `KeepAlive` on the LaunchAgent under the crash-loop guard's

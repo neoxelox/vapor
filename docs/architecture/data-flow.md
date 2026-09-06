@@ -166,16 +166,25 @@ directory is removed outright.
 
 **Names that differ only by case are one name on the filesystems Vapor
 ships on today.** A cloud can hold `Readme.md` next to `readme.md`; the
-local root cannot. The engine refuses to map a remote name whose exact
+local root cannot. The engine never maps a remote name whose exact
 spelling is absent locally while a differently-cased spelling is
-present (and, among remote-only names that fold to the same key, lets
-the lexically first one through): the reconcile walk, the changes-feed
-mapping, and the download apply all check, the colliding object stays
-untouched in the cloud, the local file stays untouched, a warning is
-logged once per name, and a `collision` timeline event names both
-paths so the user can rename one side. Materializing the second object
-as a conflict copy (the decided end state) waits on a durable record of
-which cloud object owns the local name; see `docs/tasks/core.md`.
+present (the reconcile walk, the changes-feed mapping, and the download
+apply all check), so the first object's local file is never rewritten
+by the second object. The second object is materialized under a
+conflict-copy name (`readme~conflict-<device>-<ms>.md`) and the pair is
+recorded in `name_aliases`: from then on that local copy syncs with its
+own cloud object in both directions (uploads, downloads, and deletes
+resolve the remote path through the alias before the mirror), the walk
+pairs the aliased remote name with the copy, the feed maps changes to
+the copy, and the alias is released when either side deletes. The cloud
+keeps its two objects; the device holds the kept name and the copy, and
+a `collision` timeline event names both. Among remote-only names that
+fold to one key the lexically first one takes the name and the rest are
+materialized the same way. A colliding *directory* has no copy to make
+and is reported and left untouched. `vapor conflicts resolve --keep
+canonical` on such a copy removes the cloud's other object; `--keep
+copy` is refused, since renaming the copy over the kept name would only
+swap which cloud object is stranded.
 
 **Special files (FIFOs, sockets, device nodes) are inert.** The executor
 refuses them at planning and the reconcile walk skips them — this must

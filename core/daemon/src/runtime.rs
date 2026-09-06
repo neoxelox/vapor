@@ -3147,7 +3147,8 @@ impl DaemonRuntime {
                     &running_root,
                     self.path_filter.clone(),
                 )
-                .with_merge_without_deletions(merge),
+                .with_merge_without_deletions(merge)
+                .with_device_id(&self.device_id),
             );
         }
         // Bound the chunk by a wall-clock slice so a slow provider's

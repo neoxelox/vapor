@@ -1705,6 +1705,60 @@ impl DurableStateDb {
         Ok(row.map(|(local, hash)| (path_from_text(local), hash)))
     }
 
+    /// The remote path a local file is materialized from, when its cloud
+    /// object lives under a name this filesystem cannot hold next to
+    /// another local name.
+    pub fn alias_remote_for_local(
+        &self,
+        local_path: &Path,
+    ) -> Result<Option<String>, StateDbError> {
+        let remote = self
+            .connection
+            .query_row(
+                "SELECT remote_path_text FROM name_aliases WHERE local_path_text = ?",
+                params![path_to_text(local_path)?],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(remote)
+    }
+
+    /// Every alias under `directory` (direct children only), as
+    /// `(remote file name, local file name)`.
+    pub fn name_aliases_in(&self, directory: &Path) -> Result<Vec<(String, String)>, StateDbError> {
+        let mut prefix = path_to_text(directory)?;
+        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
+            prefix.push(std::path::MAIN_SEPARATOR);
+        }
+        let mut statement = self
+            .connection
+            .prepare("SELECT remote_path_text, local_path_text FROM name_aliases")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut found = Vec::new();
+        for row in rows {
+            let (remote, local) = row?;
+            let Some(rest) = local.strip_prefix(&prefix) else {
+                continue;
+            };
+            if rest.contains(std::path::MAIN_SEPARATOR) {
+                continue;
+            }
+            let remote_name = remote.rsplit('/').next().unwrap_or(&remote).to_string();
+            found.push((remote_name, rest.to_string()));
+        }
+        Ok(found)
+    }
+
+    pub fn remove_name_alias_for_local(&mut self, local_path: &Path) -> Result<(), StateDbError> {
+        self.connection.execute(
+            "DELETE FROM name_aliases WHERE local_path_text = ?",
+            params![path_to_text(local_path)?],
+        )?;
+        Ok(())
+    }
+
     pub fn remove_name_alias(&mut self, remote_path: &str) -> Result<(), StateDbError> {
         self.connection.execute(
             "DELETE FROM name_aliases WHERE remote_path_text = ?",

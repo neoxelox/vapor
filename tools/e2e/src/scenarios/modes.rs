@@ -100,18 +100,13 @@ pub fn scenarios() -> Vec<Scenario> {
                 Need::CaseInsensitiveFs,
                 Need::DiskImage,
             ],
-            // Today the colliding name is left untouched and reported
-            // (S38); materializing it as a conflict copy needs a durable
-            // record of which cloud object owns the local name.
-            expect: Expect::KnownGap(
-                "a colliding cloud name is reported and skipped instead of materializing as a conflict copy",
-            ),
+            expect: Expect::Pass,
             run: case_collision,
         },
         Scenario {
             id: "S38",
-            name: "case-collision-untouched",
-            proves: "a cloud name that would alias a differently-cased local file never rewrites either cloud object, never loops, and is reported on the timeline",
+            name: "case-collision-stable",
+            proves: "a cloud name that would alias a differently-cased local file never rewrites either cloud object, materializes once as a conflict copy, and a second reconcile adds nothing",
             needs: &[
                 Need::NativeWatcher,
                 Need::Filesystem,
@@ -661,8 +656,13 @@ fn case_collision_untouched(ctx: &mut Ctx) -> Result<(), Failure> {
         .filter(|name| !name.starts_with('.'))
         .collect();
     ensure!(
-        local_names.len() == 1,
-        "expected exactly one local file for the colliding pair: {local_names:?}"
+        local_names.len() == 2
+            && local_names
+                .iter()
+                .filter(|name| name.contains("~conflict-"))
+                .count()
+                == 1,
+        "expected the kept name plus one conflict copy, and nothing more after a second reconcile: {local_names:?}"
     );
     let timeline = ctx.cli().json(&["timeline", "--json"])?;
     ensure!(
@@ -728,6 +728,29 @@ fn case_collision(ctx: &mut Ctx) -> Result<(), Failure> {
     ensure!(
         conflict_copy_exists(&home.local, "Readme") || conflict_copy_exists(&home.local, "readme"),
         "the colliding payload did not become a conflict copy"
+    );
+    // The copy is aliased to its own cloud object: an edit to the copy
+    // reaches the colliding cloud name, and the cloud gains no third file.
+    let copy = crate::scenario::conflict_copies(&home.local, "Readme")
+        .chain(crate::scenario::conflict_copies(&home.local, "readme"))
+        .next()
+        .ok_or_else(|| Failure::new("no conflict copy"))?;
+    let aliased_cloud = if read_string(&copy)? == "lower-case readme\n" {
+        home.cloud.join("readme.md")
+    } else {
+        home.cloud.join("Readme.md")
+    };
+    write_file(&copy, "edited on the device through the copy\n")?;
+    ctx.wait_same_content(&copy, &aliased_cloud, Duration::from_secs(60))?;
+    ctx.settle_home(&home, Duration::from_secs(3), Duration::from_secs(60))?;
+    let cloud_names: Vec<String> = fs::read_dir(&home.cloud)?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    ensure!(
+        cloud_names.len() == 2,
+        "the cloud keeps exactly its two objects, got {cloud_names:?}"
     );
     // The two trees cannot match by construction on this pair of
     // filesystems; the assertions above are the oracle.

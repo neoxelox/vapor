@@ -212,6 +212,20 @@ pub fn resolve_conflict(conflict_path: &Path, keep: KeepSide) -> Result<Resoluti
         ));
     }
     let canonical_path = conflict_path.with_file_name(&parsed.canonical_file_name);
+    if keep == KeepSide::Copy
+        && let Some(existing) = vapor_daemon::name_collision::colliding_local_path(&canonical_path)
+    {
+        // The copy stands in for a cloud name this filesystem cannot
+        // hold next to `existing`; renaming it over the canonical name
+        // would only swap which cloud object is stranded.
+        return Err(format!(
+            "{} is a name clash with {}: the two cloud files differ only in spelling this filesystem \
+             folds together. Keep the canonical side to drop the cloud's other copy, or rename the \
+             files apart in the cloud",
+            conflict_path.display(),
+            existing.display()
+        ));
+    }
 
     match keep {
         KeepSide::Canonical => {

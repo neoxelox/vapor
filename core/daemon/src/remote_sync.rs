@@ -295,7 +295,12 @@ impl RemotePoller {
                     page.changes.len() >= constants::engine::REMOTE_CHANGES_PAGE_MAX;
                 let mut batch = Vec::new();
                 for change in &page.changes {
-                    let local_target = change.path.to_local(local_root);
+                    // A remote name materialized under an alias maps to
+                    // its local copy, not to the name it cannot have here.
+                    let local_target = match state_db.name_alias(change.path.as_str())? {
+                        Some((alias, _)) => alias,
+                        None => change.path.to_local(local_root),
+                    };
                     if path_filter
                         .map(|filter| filter.should_ignore(&local_target))
                         .unwrap_or(false)
@@ -313,16 +318,26 @@ impl RemotePoller {
                         && let Some(existing) =
                             crate::name_collision::colliding_local_path(&local_target)
                     {
+                        // The walk materializes the colliding name as a
+                        // conflict copy and records the alias; the feed
+                        // asks for that walk rather than duplicating it.
                         if self.reported_collisions.insert(local_target.clone()) {
-                            crate::logging::warning(
-                                "Remote change collides with a differently-cased local file; leaving both sides untouched",
+                            crate::logging::info(
+                                "Remote change collides with a differently-cased local file; a reconcile will materialize it as a conflict copy",
                                 &[
                                     ("remote", change.path.as_str().to_string()),
                                     ("local", existing.display().to_string()),
                                 ],
                             );
                             report.name_collisions += 1;
-                            self.name_collisions.push((local_target, existing));
+                            self.name_collisions.push((local_target.clone(), existing));
+                            if let Some(parent) = local_target.parent() {
+                                batch.push((
+                                    parent.to_path_buf(),
+                                    PendingIntentKind::ReconcileSubtree,
+                                    event_time,
+                                ));
+                            }
                         }
                         continue;
                     }
