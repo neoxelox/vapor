@@ -129,7 +129,9 @@ eight-core machine reads as 13%.
 | Linux | Planned. `/proc/stat`, `/proc/self/stat`; `/sys/class/power_supply/*`; PSI under `/proc/pressure/`; `/proc/net/dev`; NetworkManager `NM-metered` when present. Static defaults today. |
 
 `StaticPlatformMetricsSampler` (config-driven) is the headless/CLI
-fallback and the test fake.
+fallback and the test fake. `VAPOR_THROTTLE_INPUTS=static` makes the
+daemon use it (with zero idle time) on any host; `scripts/e2e.sh` sets
+it so a run is not shaped by whoever is typing on the machine.
 
 ### `IdleNotifier`
 

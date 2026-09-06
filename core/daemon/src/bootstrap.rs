@@ -120,20 +120,31 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // the legacy state paths.
     let profiles = crate::profiles::resolve_profiles(&config);
     let filter_options = EventPathFilterOptions::from_environment_and_config(&config);
-    let metrics_sampler = Arc::new(NativePlatformMetricsSampler::for_current_host());
-    if NativePlatformMetricsSampler::has_native_sampling() {
+    let static_inputs = throttle_inputs_are_static();
+    let metrics_sampler: Arc<dyn crate::metrics::MetricsSampler> = if static_inputs {
+        logging::info(
+            "Throttle inputs are static by request: neutral defaults and zero idle time",
+            &[(
+                "env",
+                vapor_shared::constants::env::VAPOR_THROTTLE_INPUTS.to_string(),
+            )],
+        );
+        Arc::new(crate::metrics::StaticMetricsSampler::default())
+    } else if NativePlatformMetricsSampler::has_native_sampling() {
         logging::info(
             "Throttle inputs come from the host: CPU load, power source, thermal state, \
              Low Power Mode, memory, and keyboard/pointer presence",
             &[],
         );
+        Arc::new(NativePlatformMetricsSampler::for_current_host())
     } else {
         logging::warning(
             "Throttle inputs are static placeholders on this OS: battery, thermal and CPU \
              pressure will not throttle the daemon, and idle boost stays off",
             &[],
         );
-    }
+        Arc::new(NativePlatformMetricsSampler::for_current_host())
+    };
 
     let budget_config = crate::resource_budget::EffectiveBudgetConfig::resolve(&config);
     let mass_delete_settings = crate::safeguards::MassDeleteGuardSettings::resolve(&config);
@@ -151,6 +162,11 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // RTT never stalls the tick loop; tests keep the inline mode for
     // deterministic single-threaded ticks.
     runtime.enable_transfer_workers();
+    if static_inputs {
+        runtime.set_idle_notifier(Arc::new(vapor_platform::ManualIdleNotifier::new(
+            std::time::Duration::ZERO,
+        )));
+    }
 
     log_started(&runtime);
 
@@ -241,4 +257,28 @@ fn log_started(runtime: &MultiProfileRuntime) {
             ("profiles", profile_summary),
         ],
     );
+}
+
+/// `VAPOR_THROTTLE_INPUTS=static` pins the throttle to neutral inputs.
+/// Any other value (or none) reads the host. An unknown value is logged
+/// and treated as `host` so a typo never silently disables sampling.
+fn throttle_inputs_are_static() -> bool {
+    use vapor_shared::constants::{engine, env};
+    match std::env::var(env::VAPOR_THROTTLE_INPUTS) {
+        Ok(value) if value.trim() == engine::THROTTLE_INPUTS_STATIC => true,
+        Ok(value) if value.trim().is_empty() || value.trim() == engine::THROTTLE_INPUTS_HOST => {
+            false
+        }
+        Ok(value) => {
+            logging::warning(
+                "Unknown throttle-input source; reading the host instead",
+                &[
+                    ("env", env::VAPOR_THROTTLE_INPUTS.to_string()),
+                    ("value", value),
+                ],
+            );
+            false
+        }
+        Err(_) => false,
+    }
 }

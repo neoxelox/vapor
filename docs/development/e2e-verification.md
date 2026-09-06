@@ -127,6 +127,13 @@ daemon PID, and the CLI commands to poke at it. The daemon keeps
 running after the script exits; stop it with `kill -TERM <pid>` and
 remove the sandbox with `rm -rf` (or `./scripts/clean.sh`).
 
+The harness exports `VAPOR_THROTTLE_INPUTS=static` for every daemon it
+starts, scripted or sandboxed, so the throttle sits on neutral inputs
+instead of tracking your keyboard: with host inputs a daemon on a
+machine someone is typing on stays `Throttled`, and reconcile only runs
+in `IdleDrain`. To watch the real throttle react to load, battery or
+your own presence, start a daemon with that variable unset.
+
 Typical loop, entirely inside the sandbox:
 
 ```

@@ -13,6 +13,7 @@ public enum VaporConstants {
     public static let postIgnoreRules = "VAPOR_POST_IGNORE_RULES"
     public static let gdriveClientId = "VAPOR_GDRIVE_CLIENT_ID"
     public static let gdriveClientSecret = "VAPOR_GDRIVE_CLIENT_SECRET"
+    public static let throttleInputs = "VAPOR_THROTTLE_INPUTS"
   }
 
   public enum Runtime {

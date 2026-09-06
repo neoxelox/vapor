@@ -13,6 +13,11 @@ pub mod env {
     /// binary). See `docs/operations/provider-auth-operations.md`.
     pub const VAPOR_GDRIVE_CLIENT_ID: &str = "VAPOR_GDRIVE_CLIENT_ID";
     pub const VAPOR_GDRIVE_CLIENT_SECRET: &str = "VAPOR_GDRIVE_CLIENT_SECRET";
+    /// Where the daemon's throttle inputs come from: `host` (default)
+    /// reads the native sampler and idle clock; `static` uses the
+    /// neutral defaults and zero idle time. Test harnesses set `static`
+    /// so a run is not shaped by whoever is typing on the machine.
+    pub const VAPOR_THROTTLE_INPUTS: &str = "VAPOR_THROTTLE_INPUTS";
 }
 
 pub mod runtime {
@@ -479,6 +484,9 @@ pub mod engine {
     /// competes with someone at the keyboard. Long enough that a pause
     /// between keystrokes does not flip the state every second.
     pub const USER_ACTIVE_INPUT_WINDOW_MILLIS: u64 = 30_000;
+    /// Accepted values of `VAPOR_THROTTLE_INPUTS`.
+    pub const THROTTLE_INPUTS_HOST: &str = "host";
+    pub const THROTTLE_INPUTS_STATIC: &str = "static";
     pub const STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS: u64 = 60_000;
     pub const LEASE_TIMEOUT_MILLIS: u64 = 15 * 60 * 1_000;
     pub const LIGHT_SYSTEM_CPU_PERCENT: u8 = 35;

@@ -174,6 +174,14 @@ impl MultiProfileRuntime {
         }
     }
 
+    /// Replaces the idle source every profile runtime consults for idle
+    /// boost. The daemon uses it to honour `VAPOR_THROTTLE_INPUTS=static`.
+    pub fn set_idle_notifier(&mut self, notifier: Arc<dyn vapor_platform::IdleNotifier>) {
+        for slot in &mut self.slots {
+            slot.runtime.set_idle_notifier(notifier.clone());
+        }
+    }
+
     /// Applies the configured `timelineLimit`.
     pub fn set_timeline_limit(&self, limit: i64) {
         if let Ok(limit) = usize::try_from(limit)

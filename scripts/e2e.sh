@@ -73,6 +73,10 @@ CLOUD_ROOT="$E2E_ROOT/cloud/VaporE2E"
 export VAPOR_DIR="$E2E_ROOT/home"
 export VAPOR_ENV="dev"
 export VAPOR_LOG_LEVEL="debug"
+# Pin the throttle to neutral inputs: on a developer machine the host
+# sampler would otherwise hold the daemon at Throttled while the
+# developer types, and reconcile only runs in IdleDrain.
+export VAPOR_THROTTLE_INPUTS="static"
 # Never inherit sync-scope overrides from the invoking shell — config
 # must flow through `vapor config set` so the e2e run covers the
 # vapor.json loader path.

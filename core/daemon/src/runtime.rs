@@ -1040,6 +1040,10 @@ impl DaemonRuntime {
         self.idle_notifier = idle_notifier;
     }
 
+    pub fn set_idle_notifier(&mut self, idle_notifier: Arc<dyn vapor_platform::IdleNotifier>) {
+        self.idle_notifier = idle_notifier;
+    }
+
     /// Latest effective ceilings + utilization for the IPC surface
     ///. `None` until the first 1s sample.
     pub fn resource_budget_status(&self) -> Option<vapor_ipc::ResourceBudgetStatus> {
