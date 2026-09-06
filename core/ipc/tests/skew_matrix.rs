@@ -1,8 +1,6 @@
 //! End-to-end skew-matrix tests over a real Unix-domain-socket
-//! transport.
-//!
-//!by exercising every supported version pair
-//! plus the documented negative cases. Each test spins up a server in
+//! transport. They prove the handshake contract by exercising every
+//! supported version pair plus the documented negative cases. Each test spins up a server in
 //! a background thread, connects a client, and asserts on the
 //! handshake outcome.
 
@@ -218,9 +216,25 @@ fn payload_bounds_oversized_first_frame_drops_connection_cleanly() {
     stream
         .write_all(&bogus_length.to_le_bytes())
         .expect("write length");
-    // The server should close the connection — `read` will return 0.
-    let mut buf = [0u8; 4];
-    let _ = stream.read(&mut buf);
+    // The server answers with a PayloadTooLarge error frame, then closes:
+    // a length-prefixed JSON response followed by EOF.
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length).expect("error frame length");
+    let length = u32::from_le_bytes(length) as usize;
+    assert!(length > 0 && length <= vapor_shared::constants::ipc::MAX_PAYLOAD_BYTES);
+    let mut body = vec![0u8; length];
+    stream.read_exact(&mut body).expect("error frame body");
+    let text = String::from_utf8(body).expect("utf-8 frame");
+    assert!(
+        text.contains("payload_too_large") || text.contains("PayloadTooLarge"),
+        "unexpected frame: {text}"
+    );
+    let mut trailing = [0u8; 4];
+    assert_eq!(
+        stream.read(&mut trailing).expect("eof"),
+        0,
+        "connection stays open"
+    );
 
     handle.shutdown();
 }

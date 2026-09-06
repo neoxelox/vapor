@@ -39,11 +39,9 @@ signed release artifact yet; build-from-source is the supported path.
 - `src/commands/<command>.rs` — one module per command. Each owns its
   command-specific types, error enum, and unit tests.
 
-## Helper scripts
+## Scripts
 
-- `./scripts/cli/build.sh` — release build of the `vapor` binary.
-- `./scripts/cli/test.sh` — run the CLI unit tests via `cargo test
-  -p vapor-cli`.
-
-The cross-stack `./scripts/{lint,test,build}.sh` already cover the CLI
-because `cargo` operates on the whole workspace.
+The cross-stack `./scripts/{format,lint,test,build}.sh` cover the CLI
+because `cargo` operates on the whole workspace; there are no CLI-only
+wrappers. `./scripts/e2e.sh` drives the built `vapor` binary against a
+real daemon in a sandbox.

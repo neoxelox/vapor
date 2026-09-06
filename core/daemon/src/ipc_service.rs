@@ -167,19 +167,7 @@ impl DaemonIpcService {
                 .as_object_mut()
                 .ok_or_else(|| std::io::Error::other("configuration root is not an object"))?
                 .insert(key.to_string(), value);
-            let mut serialized = serde_json::to_string_pretty(&document).map_err(|error| {
-                std::io::Error::other(format!("cannot serialize configuration: {error}"))
-            })?;
-            serialized.push('\n');
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            // A per-writer temp name (not one shared `vapor.vapor-tmp`) so a
-            // second writer's rename can never consume the first's staging
-            // file and fail spuriously.
-            let temp = vapor_shared::runtime_paths::unique_temp_path(&path);
-            std::fs::write(&temp, serialized.as_bytes())?;
-            std::fs::rename(&temp, &path)?;
+            vapor_shared::runtime_paths::write_config_document(&path, &document)?;
             Ok(())
         })
         .map_err(|error| format!("cannot update {}: {error}", path.display()))

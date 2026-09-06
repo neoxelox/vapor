@@ -1,44 +1,51 @@
 # providers
 
-Rust provider modules implementing cloud integrations. Providers are
-consumed by the daemon via the `Provider` trait in `core/providers/src/lib.rs`
-and are deliberately provider-neutral from the engine's perspective.
+Cloud integrations behind the `Provider` trait in `src/lib.rs`. The
+engine talks to the trait and to `ProviderCapabilities`; nothing in
+`core/daemon` knows which backend it is driving. Onboarding checklist:
+`docs/architecture/provider-onboarding.md`.
 
-## Current state
+## Providers
 
-- `FilesystemStubProvider` — pre-GA default, inert. Reports no remote
-  changes feed and no server-side rename, so the daemon stays in a known
-  quiet state until a real provider is selected.
-- `GoogleDriveProvider` — compiled-in but inert until the bidirectional
-  runtime shell (Phase C8) and provider contract tests (Phase C8-43..47)
-  stabilize. Lands in Phase C8-48 onward.
+- `FilesystemProvider` (`src/filesystem/`) is the default. It treats a
+  local directory as the cloud side, with a real changes feed, write
+  preconditions, op-id tags (xattr, side-file on filesystems without
+  them), and atomic downloads. It validated every provider-neutral
+  mechanic before an external provider shipped and is the reference
+  implementation for the contract suite.
+- `GoogleDriveProvider` (`src/gdrive/`) is selected by
+  `provider = "gdrive"`. OAuth 2.0 with PKCE (`src/gdrive/oauth.rs`),
+  tokens in the platform `SecretStore`, resumable uploads, ranged
+  downloads verified by MD5, and the Drive changes feed with cursor
+  re-baselining. Operations: `docs/operations/provider-auth-operations.md`.
+- `FilesystemStubProvider` is inert: every write succeeds as a no-op and
+  every read is empty. It is not selectable from configuration; the
+  daemon uses it for a suspended profile, and tests use it to compose a
+  pipeline without a backend (`inert_stub_provider()`).
+- `select_provider_for_profile` maps the configured kind to a provider
+  and returns an error for unknown kinds, which suspends that profile.
 
-## Planned providers
+Every provider maps its failures onto the shared taxonomy in
+`core/shared` (`Transient`, `RateLimited`, `Authentication`,
+`PreconditionFailed`, `NotFound`, `Permanent`), so retry policy never
+parses error strings.
 
-- `provider_filesystem` (loopback local) — the Phase C8 reference provider
-  used to validate every provider-neutral bidirectional mechanic
-  (self-write cache, op-id correlation, remote-to-local apply, provider
-  cursor) before any external provider ships. Reused as the contract-test
-  harness for future providers.
-- `provider_gdrive` — first external cloud target, OAuth (PKCE) with
-  tokens stored via `core/platform/secrets::SecretStore` (Keychain on
-  macOS, Credential Manager on Windows, Secret Service on Linux, age-file
-  fallback for headless Linux).
-- Additional adapters (for example iCloud, S3, R2, Proton Drive) come
-  through the provider-system extensibility hardening pass and are not
-  part of the first release.
+## Testing
 
-All providers implement the shared trait and map errors into the
-provider-neutral error taxonomy (`Transient`, `RateLimited`,
-`Authentication`, `PreconditionFailed`, `NotFound`, `Permanent`) defined in
-`core/shared`.
+- Unit tests per module, including error mapping and the OAuth flow.
+- `tests/provider_contract.rs` runs one contract suite against three
+  fixtures: the filesystem provider, the same provider on a filesystem
+  without xattr support (the side-file mode of FAT and network mounts),
+  and an in-memory object-store mock (no op-id tags, no changes feed).
+  A provider must implement what it advertises and error loudly on what
+  it does not.
+- Google Drive is tested offline through the injectable `HttpTransport`
+  seam with scripted HTTP responses; no test touches the network.
 
-Testing: every provider ships with error-mapping unit tests and passes
-the provider contract-test suite (once `core.md` C8-44 lands). Policy:
-`docs/architecture/testing-strategy.md`.
+Policy: `docs/architecture/testing-strategy.md`.
 
-Logging:
+## Logging
 
-- Provider modules use shared structured logging from `vapor-shared`.
-- Default provider logs target `<vapor_dir>/logs/vapord.logs` where
-  `vapor_dir` comes from `VAPOR_DIR`.
+Provider modules use the structured logger from `vapor-shared`; lines
+land in `<vapor_dir>/logs/vapord.logs` and never contain tokens or auth
+headers.

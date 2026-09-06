@@ -128,7 +128,6 @@ impl ReconcileController {
         };
 
         let now_inst = self.clock.now();
-        let _ = now;
         self.running = Some(RunningReconcile {
             root: claimed.path.clone(),
             slice_started_inst: now_inst,
@@ -146,7 +145,6 @@ impl ReconcileController {
         now: SystemTime,
     ) -> Option<ReconcilePause> {
         let now_inst = self.clock.now();
-        let _ = now;
         let running = self.running.as_mut()?;
         running.checkpoint_count += 1;
 

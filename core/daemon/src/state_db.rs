@@ -202,8 +202,9 @@ impl DurableStateDb {
         read_schema_version(&self.connection)?.ok_or(StateDbError::MissingSchemaVersion)
     }
 
-    /// The oldest `limit` queue rows (pending and leased) for the
-    /// per-intent diagnostics surface.
+    /// The first `limit` queue rows (pending and leased) in lease order,
+    /// so the diagnostics surface shows the queue the way the executor
+    /// will drain it.
     pub fn list_queue_intents(
         &self,
         limit: usize,
@@ -212,7 +213,7 @@ impl DurableStateDb {
             "SELECT id, path_text, kind, priority_rank, enqueued_at_ms, available_at_ms,
                     leased_at_ms, attempt_count, last_error
              FROM queue_intents
-             ORDER BY available_at_ms, id
+             ORDER BY priority_rank ASC, available_at_ms ASC, id ASC
              LIMIT ?",
         )?;
         let rows = statement.query_map(

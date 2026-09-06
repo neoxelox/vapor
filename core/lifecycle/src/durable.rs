@@ -15,10 +15,8 @@
 //! Concurrent writers (two CLI invocations racing) resolve last-writer-
 //! wins on the whole document; registrations are rare, user-driven or
 //! tick-driven events, so the window is negligible and never corrupts
-//! the file.
-//!
-//!(tracked there because the gap was observed
-//! on the macOS surface; the implementation is portable).
+//! the file. The implementation is portable even though the gap it
+//! closes was first observed on the macOS surface.
 
 use std::fs;
 use std::io;
@@ -172,7 +170,9 @@ impl LifecycleStateStore for JsonFileLifecycleStateStore {
         let mut serialized = serde_json::to_string_pretty(state)
             .map_err(|error| JsonFileError::Parse(error.to_string()))?;
         serialized.push('\n');
-        let tmp_path = self.path.with_extension("vapor-tmp");
+        // Per-writer temp name: the app's health tick and a user's
+        // `vapor service` command can save concurrently.
+        let tmp_path = vapor_shared::runtime_paths::unique_temp_path(&self.path);
         fs::write(&tmp_path, serialized.as_bytes())?;
         fs::rename(&tmp_path, &self.path)?;
         Ok(())

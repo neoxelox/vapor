@@ -100,42 +100,9 @@ pub fn set(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
             .as_object_mut()
             .expect("read_or_empty_object returns an object");
         object.insert(key.to_string(), new_value);
-
-        if let Some(parent) = path.parent() {
-            // 0700 parent (not umask 0755): config holds sync-root paths.
-            vapor_shared::runtime_paths::ensure_private_directory(parent)?;
-        }
-        let mut serialized = serde_json::to_string_pretty(&document)
-            .map_err(|error| ConfigError::Parse(error.to_string()))?;
-        serialized.push('\n');
-
-        // Unique per-writer temp name so a concurrent write cannot clobber
-        // or ENOENT our staging file.
-        let tmp_path = vapor_shared::runtime_paths::unique_temp_path(path);
-        write_private(&tmp_path, serialized.as_bytes())?;
-        fs::rename(&tmp_path, path)?;
+        vapor_shared::runtime_paths::write_config_document(path, &document)?;
         Ok(())
     })
-}
-
-/// Writes `contents` to `path`, creating it 0600 on Unix.
-fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(constants::runtime::PRIVATE_FILE_MODE)
-            .open(path)?;
-        file.write_all(contents)
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(path, contents)
-    }
 }
 
 fn validate_key(key: &str) -> Result<(), ConfigError> {

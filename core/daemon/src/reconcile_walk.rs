@@ -91,6 +91,9 @@ pub struct ReconcileWalker {
     /// The subtree being reconciled (== scope_root for whole-scope).
     subtree_root: PathBuf,
     pending_enumeration: Option<PendingEnumeration>,
+    /// Two-way file/directory type mismatches found by this walk; the
+    /// runtime surfaces them on the timeline so the user can act.
+    type_mismatches: Vec<PathBuf>,
     /// Ignore rules, applied symmetrically: local entries and remote
     /// entries (via their local-equivalent path) that match never
     /// produce intents and are never descended into. Without this the
@@ -113,6 +116,7 @@ impl ReconcileWalker {
             subtree_root: subtree_root.to_path_buf(),
             path_filter,
             pending_enumeration: None,
+            type_mismatches: Vec::new(),
             pending_dirs: VecDeque::from([subtree_root.to_path_buf()]),
             stats: WalkStats::default(),
         }
@@ -135,6 +139,11 @@ impl ReconcileWalker {
 
     /// Drains the per-walk stat deltas accumulated since the last call
     /// (the runtime folds them into its cumulative mirror counters).
+    /// Drains the two-way type mismatches found since the last call.
+    pub fn take_type_mismatches(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.type_mismatches)
+    }
+
     pub fn take_mirror_deltas(&mut self) -> (usize, usize) {
         let deltas = (self.stats.mirror_reverts, self.stats.mirror_deletes);
         self.stats.mirror_reverts = 0;
@@ -250,7 +259,7 @@ impl ReconcileWalker {
                         vapor_providers::filesystem::reap_if_stale_temp_file(
                             &entry.path(),
                             &name,
-                            SystemTime::now(),
+                            now,
                         );
                         continue;
                     }
@@ -399,6 +408,7 @@ impl ReconcileWalker {
                                 "Reconcile found a file/directory type mismatch in two-way mode; leaving both sides untouched",
                                 &[("path", local_path.display().to_string())],
                             );
+                            self.type_mismatches.push(local_path.clone());
                         }
                     },
                 },
@@ -497,9 +507,11 @@ fn remote_deletion_wins(
 ) -> bool {
     match state_db.tombstone(local_path) {
         Ok(Some(tombstone)) if tombstone.origin == crate::state_db::TombstoneOrigin::Remote => {
+            // An unreadable mtime cannot prove the file predates the
+            // deletion; keeping data wins over honouring the tombstone.
             match local_modified_at {
                 Some(modified_at) => modified_at <= tombstone.deleted_at,
-                None => true,
+                None => false,
             }
         }
         _ => false,

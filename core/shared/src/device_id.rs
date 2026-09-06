@@ -75,43 +75,8 @@ pub fn resolve_or_persist(config_path: &Path) -> io::Result<String> {
         constants::config::KEY_DEVICE_ID.to_string(),
         serde_json::Value::String(device_id.clone()),
     );
-    if let Some(parent) = config_path.parent() {
-        // 0700 parent (not umask-default 0755): config holds sync-root
-        // paths and the device id, which other local users must not read.
-        crate::runtime_paths::ensure_private_directory(parent)?;
-    }
-    let mut serialized = serde_json::to_string_pretty(&document)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    serialized.push('\n');
-    // Unique per-writer temp name so a concurrent CLI/app write cannot
-    // collide on a shared staging path (one rename consuming the other's
-    // temp). The temp file is created 0600 so the atomically-renamed
-    // config inherits private permissions.
-    let temp_path = config_path.with_extension(format!("vapor-tmp-{}", std::process::id()));
-    write_private(&temp_path, serialized.as_bytes())?;
-    fs::rename(&temp_path, config_path)?;
+    crate::runtime_paths::write_config_document(config_path, &document)?;
     Ok(device_id)
-}
-
-/// Writes `contents` to `path`, creating it with 0600 permissions on Unix.
-fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(constants::runtime::PRIVATE_FILE_MODE)
-            .open(path)?;
-        file.write_all(contents)?;
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(path, contents)
-    }
 }
 
 fn read_config_object(path: &Path) -> io::Result<serde_json::Value> {

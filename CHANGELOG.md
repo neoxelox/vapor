@@ -18,6 +18,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `vapor service --help` documents `start`, `stop`, `restart` and `status`, and `--system` carries its own description instead of borrowing `--user`'s.
 - The inert test provider is constructed through `inert_stub_provider()`; the old `default_provider()` name and its doc comment claimed it was the runtime default, which stopped being true when the real filesystem provider became selectable.
 - `CONTRIBUTING.md` and `SECURITY.md` spell the command `vapor support-bundle`, which is what the CLI accepts.
+- Routine throttle transitions log at INFO; only entering `Suspended` is a WARNING. A healthy e2e run used to end with six warnings that were all "Updated throttle state".
+- Every `vapor.json` writer (the CLI, the daemon's IPC path, the lifecycle store, device-id persistence) goes through one helper in `core/shared` that stages a 0600 temp file under a 0700 parent and renames it into place. Two of the four writers used a plain `fs::write` (0644) and one skipped the cross-process lock's staging discipline. The lifecycle side-file uses a per-writer temp name too, so the app's health tick and a user's `vapor service` command cannot race on one staging path.
+- `vapor diagnostics` rows for intents that are mid-execution carry their real attempt count and last error instead of zero and an empty string, and the queued rows list in lease order (priority, then availability) so the display matches what the executor will drain next.
+- A remote-origin tombstone no longer wins over a local file whose mtime cannot be read; an unreadable mtime cannot prove the file predates the deletion, so the file stays.
+- A two-way file/directory type mismatch found by the reconcile walk is pushed to the activity timeline once per pass with what to do about it, instead of only repeating a log warning.
+- An upload whose preflight finds the remote gone re-dispatches with an `Absent` precondition, so a concurrent re-creation is caught as a race rather than overwritten.
+- The streaming hasher reuses its 64 KiB buffer across slices instead of allocating one per step.
+- `scripts/version.sh` checks the lockfile entry of every workspace member, derived from the manifest, instead of a hand-kept list of three crates. The Rust wrapper scripts dropped a bootstrap-era fallback for a missing workspace manifest.
+- `scripts/cli/{build,test}.sh` are gone; they duplicated `cargo` commands the workspace-wide scripts already run.
+- Doc comments and READMEs caught up: the IPC crate no longer calls its envelopes "JSON-RPC 2.0-style", the providers README describes the shipped providers and the three contract fixtures, the daemon README describes forward migrations and no longer claims `proptest` is in use, and three sentences left dangling by an earlier task-id purge read whole again. The IPC oversized-frame test now asserts the `PayloadTooLarge` error frame and the EOF that follows it instead of reading and discarding.
 
 ### Fixed
 

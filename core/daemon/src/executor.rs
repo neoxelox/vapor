@@ -125,6 +125,17 @@ pub struct ExecutionEnv<'a> {
     pub remote_echoes: &'a mut SelfWriteCache,
 }
 
+/// One row of [`StagedExecutor::active_stages`].
+pub type ActiveStageDiagnostic = (
+    i64,
+    PathBuf,
+    PendingIntentKind,
+    ExecutionStage,
+    u64,
+    u32,
+    String,
+);
+
 pub struct StagedExecutor {
     active: BTreeMap<i64, ActiveExecution>,
     active_paths: BTreeSet<PathBuf>,
@@ -356,9 +367,9 @@ impl StagedExecutor {
     }
 
     /// Diagnostic view of every active execution: (intent id, path,
-    /// kind, stage, elapsed-in-stage). Consumed by the IPC diagnostics
-    /// surface.
-    pub fn active_stages(&self) -> Vec<(i64, PathBuf, PendingIntentKind, ExecutionStage, u64)> {
+    /// kind, stage, elapsed-in-stage, attempt count, last error).
+    /// Consumed by the IPC diagnostics surface.
+    pub fn active_stages(&self) -> Vec<ActiveStageDiagnostic> {
         let now_inst = self.clock.now();
         self.active
             .values()
@@ -371,6 +382,8 @@ impl StagedExecutor {
                     now_inst
                         .saturating_duration_since(execution.stage_started_inst)
                         .as_millis() as u64,
+                    execution.intent.attempt_count,
+                    execution.intent.last_error.clone().unwrap_or_default(),
                 )
             })
             .collect()
@@ -816,7 +829,10 @@ impl StagedExecutor {
                     }
                     Some(Err(error)) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
                         // Remote vanished since planning: proceed as a
-                        // fresh create.
+                        // fresh create, guarded as such so a concurrent
+                        // re-creation is caught rather than overwritten.
+                        let mut plan = plan;
+                        plan.precondition = RemotePrecondition::Absent;
                         self.dispatch_upload(app, env, intent, permit, plan, now_inst)
                     }
                     Some(Err(error)) => {
@@ -2825,6 +2841,9 @@ fn max_in_flight_items(workgate: WorkgateSnapshot) -> usize {
 struct StreamingFileHash {
     file: fs::File,
     hasher: HashState,
+    /// Reused across steps; a hash execution spans many ticks and must
+    /// not allocate 64 KiB on each.
+    buffer: Vec<u8>,
 }
 
 enum HashState {
@@ -2861,20 +2880,20 @@ impl StreamingFileHash {
                 vapor_providers::HashAlgorithm::Sha256 => HashState::Sha256(Sha256::new()),
                 vapor_providers::HashAlgorithm::Md5 => HashState::Md5(md5::Md5::new()),
             },
+            buffer: vec![0_u8; 64 * 1024],
         })
     }
 
     /// Returns `Some(hex)` once the file is fully hashed.
     fn step(&mut self, max_bytes: u64) -> std::io::Result<Option<String>> {
         let mut remaining = max_bytes;
-        let mut buffer = vec![0_u8; 64 * 1024];
         while remaining > 0 {
-            let chunk = buffer.len().min(remaining as usize);
-            let read = self.file.read(&mut buffer[..chunk])?;
+            let chunk = self.buffer.len().min(remaining as usize);
+            let read = self.file.read(&mut self.buffer[..chunk])?;
             if read == 0 {
                 return Ok(Some(self.hasher.finalize_hex()));
             }
-            self.hasher.update(&buffer[..read]);
+            self.hasher.update(&self.buffer[..read]);
             remaining -= read as u64;
         }
         Ok(None)

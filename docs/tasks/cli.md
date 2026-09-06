@@ -23,9 +23,10 @@ Binary names are fixed:
       capability detection). Keep the dep list small. *(`indicatif` and
       `crossterm` are deferred — no progress / TTY rendering surface
       ships in Wave 6.)*
-- [x] L0-3 Add workspace-level script entrypoints: `scripts/cli/build.sh`,
-      `scripts/cli/test.sh`, consistent with the existing Rust wrapper
-      discipline.
+- [x] L0-3 Script entrypoints. The CLI is covered by the workspace-wide
+      `scripts/{format,lint,test,build}.sh`; the CLI-only wrappers that
+      briefly existed were thin duplicates of `cargo` commands and were
+      removed in the full-repo review.
 - [x] L0-4 Add `vapor --version` (uses the same build-info macro as
       `vapord`).
 - [x] L0-5 Add `install-from-source` instructions to `core/cli/README.md`

@@ -98,13 +98,28 @@ PY
 }
 
 cargo_lock_sync_error() {
-  python3 - "$CARGO_LOCK" "$1" <<'PY'
+  python3 - "$CARGO_LOCK" "$1" "$CARGO_TOML" <<'PY'
 from pathlib import Path
+import re
 import sys
 
 path = Path(sys.argv[1])
 expected = sys.argv[2]
-targets = {"vapor-daemon", "vapor-providers", "vapor-shared"}
+workspace = Path(sys.argv[3])
+
+# Every workspace member inherits [workspace.package] version, so every
+# member's lockfile entry must carry VERSION; derive the set from the
+# manifest instead of a hand-kept list that drifts as crates are added.
+members_block = re.search(r"members\s*=\s*\[(.*?)\]", workspace.read_text(encoding="utf-8"), re.S)
+if not members_block:
+    print("missing [workspace] members in Cargo.toml")
+    raise SystemExit(0)
+targets = set()
+for member in re.findall(r'"([^"]+)"', members_block.group(1)):
+    manifest = workspace.parent / member / "Cargo.toml"
+    name = re.search(r'^name\s*=\s*"([^"]+)"', manifest.read_text(encoding="utf-8"), re.M)
+    if name:
+        targets.add(name.group(1))
 found = {}
 current_name = None
 

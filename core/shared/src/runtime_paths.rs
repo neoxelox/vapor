@@ -83,6 +83,44 @@ where
     body()
 }
 
+/// Writes a whole `vapor.json` document atomically with private
+/// permissions: 0700 parent, pretty JSON plus a trailing newline staged
+/// in a per-writer temp file created 0600, then renamed into place. Every
+/// writer (CLI, daemon, lifecycle store, device-id persistence) goes
+/// through here so the file mode and the staging discipline cannot
+/// drift. Callers hold [`with_config_lock`] around their read-modify-write.
+pub fn write_config_document(
+    path: &std::path::Path,
+    document: &serde_json::Value,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_private_directory(parent)?;
+    }
+    let mut serialized = serde_json::to_string_pretty(document)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    serialized.push('\n');
+    let temp = unique_temp_path(path);
+    write_private_file(&temp, serialized.as_bytes())?;
+    fs::rename(&temp, path)
+}
+
+#[cfg(unix)]
+fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(constants::runtime::PRIVATE_FILE_MODE)
+        .open(path)?;
+    file.write_all(contents)
+}
+
+#[cfg(not(unix))]
+fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    fs::write(path, contents)
+}
+
 /// A unique temp path next to `target` for an atomic write, so concurrent
 /// writers never collide on one shared staging filename.
 pub fn unique_temp_path(target: &std::path::Path) -> PathBuf {

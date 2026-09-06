@@ -525,7 +525,7 @@ impl DaemonRuntime {
         report.conflicts += staged_report.conflicts;
         self.conflict_count += staged_report.conflicts as u64;
         if staged_report.cloud_root_unavailable > 0 {
-            self.mark_cloud_root_unavailable("a provider transfer reported the root missing");
+            self.mark_cloud_root_unavailable("a provider transfer reported the root missing", now);
         }
 
         if let Some(reconcile_intent_id) = self.running_reconcile_intent_id {
@@ -542,7 +542,7 @@ impl DaemonRuntime {
                         // Not a walk bug: the cloud root itself vanished.
                         // Block admission and let the ensure-retry loop
                         // recreate it instead of retrying the walk forever.
-                        self.mark_cloud_root_unavailable(&provider_error.message);
+                        self.mark_cloud_root_unavailable(&provider_error.message, now);
                     } else {
                         logging::warning(
                             "Reconcile comparison walk failed; yielding and retrying later",
@@ -566,6 +566,21 @@ impl DaemonRuntime {
                         report.mirror_deletes += mirror_deletes;
                         self.mirror_revert_count += mirror_reverts as u64;
                         self.mirror_delete_count += mirror_deletes as u64;
+                        let mismatches = walker.take_type_mismatches();
+                        if let Some(timeline) = &self.timeline {
+                            for path in mismatches {
+                                timeline.push(
+                                    "reconcile",
+                                    self.profile_id.clone(),
+                                    format!(
+                                        "{} is a file on one side and a directory on the other; \
+                                         two-way sync leaves both untouched until you rename one",
+                                        path.display()
+                                    ),
+                                    now,
+                                );
+                            }
+                        }
                     }
                     if walk_done {
                         // A finished walk completes regardless of the slice
@@ -654,6 +669,7 @@ impl DaemonRuntime {
                 if admission_report.cloud_root_unavailable > 0 {
                     self.mark_cloud_root_unavailable(
                         "a provider transfer reported the root missing",
+                        now,
                     );
                 }
             }
@@ -1108,7 +1124,9 @@ impl DaemonRuntime {
         let workgate = self.app.workgate_snapshot();
         let paused = self.app.snapshot().run_state == RunState::Paused;
 
-        for (intent_id, path, kind, stage, elapsed_ms) in self.staged_executor.active_stages() {
+        for (intent_id, path, kind, stage, elapsed_ms, attempt_count, last_error) in
+            self.staged_executor.active_stages()
+        {
             active_ids.insert(intent_id);
             let blocker_reason = match stage {
                 crate::executor::ExecutionStage::WaitingForHash => format!(
@@ -1135,8 +1153,8 @@ impl DaemonRuntime {
                 action: format!("{kind:?}").to_lowercase(),
                 stage: format!("{stage:?}"),
                 elapsed_in_stage_ms: elapsed_ms,
-                attempt_count: 0,
-                last_error: String::new(),
+                attempt_count,
+                last_error,
                 blocker_reason,
             });
             if rows.len() >= limit {
@@ -1312,7 +1330,7 @@ impl DaemonRuntime {
     /// `cloud_root_ready`), the periodic ensure-retry recreates the root,
     /// and recovery schedules a whole-scope reconcile — the same
     /// self-healing path a missing root takes at startup.
-    fn mark_cloud_root_unavailable(&mut self, reason: &str) {
+    fn mark_cloud_root_unavailable(&mut self, reason: &str, now: SystemTime) {
         if !self.cloud_root_ready {
             return;
         }
@@ -1345,7 +1363,7 @@ impl DaemonRuntime {
                 "cloud-root",
                 self.profile_id.clone(),
                 "cloud sync directory became unavailable; sync blocked until it is restored",
-                self.clock.now_system(),
+                now,
             );
         }
     }

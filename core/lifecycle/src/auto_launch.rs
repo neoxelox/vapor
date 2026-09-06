@@ -150,19 +150,7 @@ impl AutoLaunchSettingStore for JsonFileAutoLaunchSettingStore {
                 serde_json::Value::Bool(value),
             );
 
-            if let Some(parent) = self.path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-
-            let mut serialized = serde_json::to_string_pretty(&document)
-                .map_err(|error| JsonFileError::Parse(error.to_string()))?;
-            serialized.push('\n');
-
-            // Per-writer temp name so a concurrent rename cannot consume our
-            // staging file and fail with ENOENT.
-            let tmp_path = vapor_shared::runtime_paths::unique_temp_path(&self.path);
-            fs::write(&tmp_path, serialized.as_bytes())?;
-            fs::rename(&tmp_path, &self.path)?;
+            vapor_shared::runtime_paths::write_config_document(&self.path, &document)?;
             Ok(())
         })
     }

@@ -235,13 +235,17 @@ impl DaemonApp {
             return;
         }
 
-        logging::warning(
-            "Updated throttle state",
-            &[
-                ("throttle_state", format!("{:?}", throttle_state)),
-                ("reason", reason.clone()),
-            ],
-        );
+        // Routine transitions are INFO; Suspended stops uploads and
+        // hashing outright, which is worth a WARNING.
+        let fields = [
+            ("throttle_state", format!("{:?}", throttle_state)),
+            ("reason", reason.clone()),
+        ];
+        if throttle_state == ThrottleState::Suspended {
+            logging::warning("Updated throttle state", &fields);
+        } else {
+            logging::info("Updated throttle state", &fields);
+        }
         self.snapshot.throttle_state = throttle_state;
         self.snapshot.reason = reason;
         self.refresh_workgate_caps(SystemTime::now());
