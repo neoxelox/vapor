@@ -137,6 +137,14 @@ dump_diagnostics() {
       echo "[e2e] last 20 service-daemon log lines:"
       tail -n 20 "$SERVICE_HOME/logs/vapord.logs" | sed 's/^/[e2e]   /'
     fi
+    # A daemon that dies before its structured logger starts (lock,
+    # config, a panic in a debug build) only leaves a trace here.
+    for redirect in vapord.stderr.log vapord.stdout.log; do
+      if [[ -s "$SERVICE_HOME/logs/$redirect" ]]; then
+        echo "[e2e] service-daemon $redirect tail:"
+        tail -n 20 "$SERVICE_HOME/logs/$redirect" | sed 's/^/[e2e]   /'
+      fi
+    done
   fi
   echo "[e2e] ---------------------"
 }
@@ -812,6 +820,12 @@ daemon_pid_from_launchd() {
 
 kill_service_daemon() {
   local pid
+  # `launchctl print` reports a pid while the job is still in its
+  # xpcproxy spawn stage, before vapord has exec'd; a SIGKILL aimed at that
+  # moment misses. Wait for the daemon to answer over the sandbox socket
+  # so the crash we simulate is the crash of a running daemon.
+  wait_until 30 "daemon to answer over IPC before the simulated crash" run_state_is "Running" \
+    || fail "daemon never answered over IPC before the simulated crash"
   pid="$(daemon_pid_from_launchd)"
   [[ -n "$pid" ]] || fail "cannot simulate a crash — daemon pid not found via launchctl"
   kill -KILL "$pid" 2>/dev/null || fail "could not SIGKILL daemon pid $pid"
