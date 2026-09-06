@@ -542,19 +542,19 @@ config key, how to write commits/docs) rather than *invariants*. Proposal:
       post-run verification (`docs/operations/release-process.md`).
       Trigger: the owner asks to cut/prepare a release or touch
       `release.yml`.
-- [x] New skill `vapor-config-key` — the §8.6 four-step sync for any new
+- [x] New skill `vapor-config` — the §8.6 four-step sync for any new
       `vapor.json` key / `VAPOR_*` env var / default / launch label:
       `constants.rs` → `VaporConstants.swift` → call sites → README
       **Configuration** + `.env.example` + docs/tests, plus the CLI
       `config set` typed-parser table and the e2e S1 round-trip. Trigger:
       any change under `core/shared/src/constants.rs` or to config keys.
-- [x] New skill `vapor-add-provider` — provider trait + capability honesty
+- [x] New skill `vapor-provider` — provider trait + capability honesty
       rules, `RemotePath` scope safety, op-id tags, changes feed / cursor
       expiry contract, retry classification, the contract suite fixture
       list, docs (`provider-onboarding.md`, `provider-auth-ops.md`),
       README **Cloud Providers**. Trigger: touching `core/providers` or
       adding a provider kind.
-- [x] New skill `vapor-docs-sync` — the §10 documentation duties: CHANGELOG
+- [x] New skill `vapor-docs` — the §10 documentation duties: CHANGELOG
       `Unreleased` line before commit, group `README.md` per docs dir,
       root README Features/Configuration rules, plans/tasks update, "no
       task ids in code comments", and the AGENTS.md-update trigger.
@@ -694,13 +694,13 @@ Suggested order once the owner has reviewed this file:
 
 ## 16. Owner additions (2026-09-06, second round)
 
-- [x] Add the `unslop` skill verbatim at `.agents/skills/unslop/SKILL.md`
-      with the `.claude/skills/unslop` symlink. Done in this session; the
+- [x] Add the `vapor-unslop` skill verbatim at `.agents/skills/vapor-unslop/SKILL.md`
+      with the `.claude/skills/vapor-unslop` symlink. Done in this session; the
       symlink resolves. Claude Code discovers skills at session start, so
-      the load check is: restart, confirm `unslop` appears in the skill
+      the load check is: restart, confirm `vapor-unslop` appears in the skill
       list, invoke it once. Structure matches the two existing skills
       (front matter limited to `name` / `description`).
-- [x] Apply `unslop` to every piece of writing produced while implementing
+- [x] Apply `vapor-unslop` to every piece of writing produced while implementing
       this report: docs, READMEs, CHANGELOG lines, commit messages, code
       comments, and chat replies. The current README **Features** bullets
       fail it on two counts (colon connectors like "Low-impact by design:

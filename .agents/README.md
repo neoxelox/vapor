@@ -15,20 +15,21 @@ expects as a symlink, so there is one source of truth.
 
 | Skill | Use it when |
 |---|---|
-| `unslop` | Writing anything a human will read: docs, commit messages, replies. Always. |
+| `vapor-unslop` | Writing anything a human will read: docs, commit messages, replies. Always. |
 | `vapor-validate` | Before committing a change under `core/*`, `apps/*`, or `scripts/*`; when a script run is red. |
 | `vapor-e2e` | A change alters daemon- or CLI-observable behaviour and Tier 1 is green; to watch a feature in the real product. |
 | `vapor-debug` | The daemon crashed, will not start, sync is stuck, or a status looks wrong. |
-| `vapor-config-key` | Adding or changing a `vapor.json` key, a `VAPOR_*` variable, a default, a path name, or a launch label. |
-| `vapor-add-provider` | Touching `core/providers` or adding a provider kind. |
-| `vapor-docs-sync` | Any non-trivial change; any file added, removed, or renamed under `docs/`. |
+| `vapor-config` | Adding or changing a `vapor.json` key, a `VAPOR_*` variable, a default, a path name, or a launch label. |
+| `vapor-provider` | Touching `core/providers` or adding a provider kind. |
+| `vapor-docs` | Any non-trivial change; any file added, removed, or renamed under `docs/`. |
 | `vapor-commit` | Creating commits or a pull request. |
 | `vapor-release` | The owner asks to cut or rehearse a release, or `release.yml` changes. |
 
 ## Adding a skill
 
-1. Create `skills/<name>/SKILL.md`. Front matter is limited to `name`
-   (kebab-case, identical to the directory), `description`, and
+1. Create `skills/vapor-<word>/SKILL.md`, where the word names an
+   entity or an action (`vapor-config`, `vapor-validate`). Front matter
+   is limited to `name` (identical to the directory), `description`, and
    optionally `license`, `version`, `allowed-tools`, `user-invocable`.
    Write the description in the third person and say both what the
    skill does and when to use it; it is the only part an agent reads

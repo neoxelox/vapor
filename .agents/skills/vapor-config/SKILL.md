@@ -1,5 +1,5 @@
 ---
-name: vapor-config-key
+name: vapor-config
 description: Adds or changes a vapor.json key, a VAPOR_* environment variable, a default value, a runtime path name, or a launch label by walking the constants-first checklist (Rust source of truth, Swift mirror, call sites, CLI typing, live-reload class, README Configuration, .env.example, tests, e2e). Use whenever a change touches core/shared/src/constants.rs or introduces a new setting anywhere.
 license: GPL-3.0-only
 ---

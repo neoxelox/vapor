@@ -16,7 +16,7 @@ Reading order for a new session:
 3. `docs/tasks/README.md` for what is next; the surface task file
    (`docs/tasks/{core,macos,cli}.md`) for the item you are touching.
 4. The skill for the job (§13). `vapor-validate` before every commit;
-   `unslop` for every sentence you write.
+   `vapor-unslop` for every sentence you write.
 5. `docs/development/runbook.md` for the scripts and the local loop.
 
 ## 1) Product intent and non-negotiables
@@ -265,7 +265,7 @@ environment because the CLI has no secrets or trust chain of its own.
   - Version IPC payloads; pre-GA breaking changes are allowed with
     coordinated updates.
   - Provider trait changes require capability and behavior review
-    (`vapor-add-provider` skill).
+    (`vapor-provider` skill).
   - Platform-trait changes require a parity review so every supported OS
     either adopts the change or has a tracked task to do so.
 
@@ -329,7 +329,7 @@ how to read a red run: the `vapor-validate` skill.
 - Product version source of truth is the root `VERSION` file; the Cargo workspace version is synced from it via `./scripts/version.sh`.
 - No duplicated literals for `VAPOR_*` keys or shared defaults outside the constants modules.
 - Every config key is classified as live-reload or restart-required in `constants::config`; the daemon and the CLI read that classification.
-- Adding or changing a key, variable, default, path name, or launch label follows the `vapor-config-key` skill (constants, mirror, call sites, CLI typing, reload, docs, tests).
+- Adding or changing a key, variable, default, path name, or launch label follows the `vapor-config` skill (constants, mirror, call sites, CLI typing, reload, docs, tests).
 
 ## 8.7) Localization and user-facing copy policy
 
@@ -380,18 +380,21 @@ every agent. Layout and the add-a-skill checklist: `.agents/README.md`.
   same change set**, otherwise the skill is invisible to Claude Code.
   `.gitignore` keeps the rest of `.claude/` (machine-local agent state)
   untracked while tracking `.claude/skills`.
+- Skill names are `vapor-<word>`: one word after the prefix, naming an
+  entity (`config`, `provider`, `docs`, `e2e`) or an action (`validate`,
+  `commit`, `release`, `debug`, `unslop`).
 - `SKILL.md` front matter must stay within the fields every supported
-  agent understands: `name` (required, kebab-case, identical to the
-  directory name), `description` (required), and optionally `license`,
-  `version`, `allowed-tools`, `user-invocable`. Do not add tool-specific
-  keys. `license` matches the repository (`GPL-3.0-only`).
+  agent understands: `name` (required, identical to the directory name),
+  `description` (required), and optionally `license`, `version`,
+  `allowed-tools`, `user-invocable`. Do not add tool-specific keys.
+  `license` matches the repository (`GPL-3.0-only`).
 - The `description` is the only part an agent reads when deciding whether
   to invoke a skill; the body is loaded afterwards. Write it in the
   third person and state both what the skill does **and** when to use it.
 - A skill change is verified as loadable before commit: the symlink
   resolves to a `SKILL.md`, the front matter parses, and the skill shows
   up in the agent's skill list and can be invoked.
-- Writing rules for every document, comment, and message: the `unslop`
+- Writing rules for every document, comment, and message: the `vapor-unslop`
   skill. It always applies.
 
 ## 9) Required test matrix
@@ -559,7 +562,7 @@ work once, end to end. Procedure: the `vapor-e2e` skill and
   PR description template: the `vapor-commit` skill.
 - Documentation duties for every change (CHANGELOG line, root README
   Features and Configuration, the owning `docs/` file, group READMEs,
-  plans and tasks, this file when a rule changes): the `vapor-docs-sync`
+  plans and tasks, this file when a rule changes): the `vapor-docs`
   skill.
 
 The invariants behind both:
@@ -635,12 +638,12 @@ carries its own trigger conditions in its description.
 
 | Skill | Invoke when |
 |---|---|
-| `unslop` | Writing anything a human reads: docs, comments, commit messages, replies. Always. |
+| `vapor-unslop` | Writing anything a human reads: docs, comments, commit messages, replies. Always. |
 | `vapor-validate` | Before committing a change under `core/*`, `apps/*`, or `scripts/*`; when a script run is red. |
 | `vapor-e2e` | A change alters daemon- or CLI-observable behaviour and Tier 1 is green; to watch a feature in the real product. |
 | `vapor-debug` | The daemon crashed, will not start, sync is stuck, or a status looks wrong. |
-| `vapor-config-key` | Adding or changing a `vapor.json` key, `VAPOR_*` variable, default, path name, or launch label. |
-| `vapor-add-provider` | Touching `core/providers` or adding a provider kind. |
-| `vapor-docs-sync` | Any non-trivial change; any file added, removed, or renamed under `docs/`. |
+| `vapor-config` | Adding or changing a `vapor.json` key, `VAPOR_*` variable, default, path name, or launch label. |
+| `vapor-provider` | Touching `core/providers` or adding a provider kind. |
+| `vapor-docs` | Any non-trivial change; any file added, removed, or renamed under `docs/`. |
 | `vapor-commit` | Creating commits or a pull request. |
 | `vapor-release` | The owner asks to cut or rehearse a release, or `release.yml` changes. |

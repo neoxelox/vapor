@@ -1,5 +1,5 @@
 ---
-name: vapor-docs-sync
+name: vapor-docs
 description: Keeps Vapor's documentation in step with a change (CHANGELOG Unreleased line, root README Features and Configuration, the owning docs/ file, group README entrypoints, plans and tasks, AGENTS.md when a rule changes), and applies the writing rules for each document class. Use for any non-trivial change and whenever a file is added, removed, or renamed under docs/.
 license: GPL-3.0-only
 ---
@@ -50,7 +50,7 @@ change set as any file added, removed, or renamed there.
 - Present tense for shipped behaviour; "planned" or "open work" with a
   task pointer for anything else. A document that says "will" about
   something that exists is a bug.
-- Apply the `unslop` skill to every sentence you write.
+- Apply the `vapor-unslop` skill to every sentence you write.
 - Code comments follow the same rule: state the constraint or the
   non-obvious why, never the history or the schedule.
 

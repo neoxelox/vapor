@@ -1,5 +1,5 @@
 ---
-name: vapor-add-provider
+name: vapor-provider
 description: Guides adding or changing a cloud provider behind Vapor's Provider trait, covering capability honesty, RemotePath scope safety, op-id tags, the changes feed and cursor contract, retry classification, the contract-suite fixtures, offline HTTP tests, and the docs and README rows a provider must update. Use when touching core/providers or adding a provider kind.
 license: GPL-3.0-only
 ---
