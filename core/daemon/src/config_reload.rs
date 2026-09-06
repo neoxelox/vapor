@@ -203,14 +203,21 @@ mod tests {
     fn reloader_reports_a_file_change_once_and_keeps_bad_files_out() {
         let temp = tempfile::TempDir::new().expect("temp");
         let path = temp.path().join("vapor.json");
-        std::fs::write(&path, "{}\n").expect("seed");
+        // Every edit gets an explicit, strictly later mtime: the stamp
+        // must never depend on what the filesystem assigns to a rewrite,
+        // which on some hosts can equal the value already recorded.
+        let epoch = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        write_at(&path, "{}\n", epoch);
         let mut reloader = ConfigReloader::new(&path, VaporConfig::default());
         let start = Instant::now();
         assert!(reloader.poll(start).is_none(), "unchanged file");
 
-        // A write with a later mtime and a different length is a change.
-        std::fs::write(&path, "{\"timelineLimit\": 42}\n").expect("edit");
-        bump_mtime(&path);
+        // A later mtime and a different length is a change.
+        write_at(
+            &path,
+            "{\"timelineLimit\": 42}\n",
+            epoch + Duration::from_secs(10),
+        );
         let (change, fresh) = reloader
             .poll(start + Duration::from_secs(2))
             .expect("change detected");
@@ -221,30 +228,29 @@ mod tests {
             "a change is reported once"
         );
 
-        // Inside the poll interval nothing is even stat-ed.
-        std::fs::write(&path, "{\"timelineLimit\": 43}\n").expect("edit");
-        bump_mtime(&path);
+        // Same length, later mtime: still a change. Inside the poll
+        // interval nothing is even stat-ed.
+        write_at(
+            &path,
+            "{\"timelineLimit\": 43}\n",
+            epoch + Duration::from_secs(20),
+        );
         assert!(reloader.poll(start + Duration::from_secs(4)).is_none());
         assert!(reloader.poll(start + Duration::from_secs(6)).is_some());
 
         // A file that fails to load leaves the applied config alone.
-        std::fs::write(&path, "{ not json").expect("break");
-        bump_mtime(&path);
+        write_at(&path, "{ not json", epoch + Duration::from_secs(30));
         assert!(reloader.poll(start + Duration::from_secs(8)).is_none());
         assert_eq!(reloader.applied().timeline_limit, 43);
     }
 
-    fn bump_mtime(path: &Path) {
-        let later = std::fs::metadata(path)
-            .expect("metadata")
-            .modified()
-            .expect("mtime")
-            + Duration::from_secs(5);
+    fn write_at(path: &Path, contents: &str, modified_at: std::time::SystemTime) {
+        std::fs::write(path, contents).expect("write");
         std::fs::File::options()
             .write(true)
             .open(path)
             .expect("open")
-            .set_modified(later)
+            .set_modified(modified_at)
             .expect("set mtime");
     }
 }
