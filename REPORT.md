@@ -694,13 +694,13 @@ Suggested order once the owner has reviewed this file:
 
 ## 16. Owner additions (2026-09-06, second round)
 
-- [x] Add the `vapor-unslop` skill verbatim at `.agents/skills/vapor-unslop/SKILL.md`
-      with the `.claude/skills/vapor-unslop` symlink. Done in this session; the
+- [x] Add the `unslop` skill verbatim at `.agents/skills/unslop/SKILL.md`
+      with the `.claude/skills/unslop` symlink. Done in this session; the
       symlink resolves. Claude Code discovers skills at session start, so
-      the load check is: restart, confirm `vapor-unslop` appears in the skill
+      the load check is: restart, confirm `unslop` appears in the skill
       list, invoke it once. Structure matches the two existing skills
       (front matter limited to `name` / `description`).
-- [x] Apply `vapor-unslop` to every piece of writing produced while implementing
+- [x] Apply `unslop` to every piece of writing produced while implementing
       this report: docs, READMEs, CHANGELOG lines, commit messages, code
       comments, and chat replies. The current README **Features** bullets
       fail it on two counts (colon connectors like "Low-impact by design:

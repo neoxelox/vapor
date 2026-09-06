@@ -50,7 +50,7 @@ change set as any file added, removed, or renamed there.
 - Present tense for shipped behaviour; "planned" or "open work" with a
   task pointer for anything else. A document that says "will" about
   something that exists is a bug.
-- Apply the `vapor-unslop` skill to every sentence you write.
+- Apply the `unslop` skill to every sentence you write.
 - Code comments follow the same rule: state the constraint or the
   non-obvious why, never the history or the schedule.
 

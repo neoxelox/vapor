@@ -15,7 +15,7 @@ expects as a symlink, so there is one source of truth.
 
 | Skill | Use it when |
 |---|---|
-| `vapor-unslop` | Writing anything a human will read: docs, commit messages, replies. Always. |
+| `unslop` | Writing anything a human will read: docs, commit messages, replies. Always. |
 | `vapor-validate` | Before committing a change under `core/*`, `apps/*`, or `scripts/*`; when a script run is red. |
 | `vapor-e2e` | A change alters daemon- or CLI-observable behaviour and Tier 1 is green; to watch a feature in the real product. |
 | `vapor-debug` | The daemon crashed, will not start, sync is stuck, or a status looks wrong. |
@@ -28,7 +28,9 @@ expects as a symlink, so there is one source of truth.
 ## Adding a skill
 
 1. Create `skills/vapor-<word>/SKILL.md`, where the word names an
-   entity or an action (`vapor-config`, `vapor-validate`). Front matter
+   entity or an action (`vapor-config`, `vapor-validate`); a skill
+   adopted from outside the project keeps its own name (`unslop`).
+   Front matter
    is limited to `name` (identical to the directory), `description`, and
    optionally `license`, `version`, `allowed-tools`, `user-invocable`.
    Write the description in the third person and say both what the

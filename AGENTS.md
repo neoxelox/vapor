@@ -16,7 +16,7 @@ Reading order for a new session:
 3. `docs/tasks/README.md` for what is next; the surface task file
    (`docs/tasks/{core,macos,cli}.md`) for the item you are touching.
 4. The skill for the job (§13). `vapor-validate` before every commit;
-   `vapor-unslop` for every sentence you write.
+   `unslop` for every sentence you write.
 5. `docs/development/runbook.md` for the scripts and the local loop.
 
 ## 1) Product intent and non-negotiables
@@ -380,9 +380,11 @@ every agent. Layout and the add-a-skill checklist: `.agents/README.md`.
   same change set**, otherwise the skill is invisible to Claude Code.
   `.gitignore` keeps the rest of `.claude/` (machine-local agent state)
   untracked while tracking `.claude/skills`.
-- Skill names are `vapor-<word>`: one word after the prefix, naming an
-  entity (`config`, `provider`, `docs`, `e2e`) or an action (`validate`,
-  `commit`, `release`, `debug`, `unslop`).
+- Vapor's own skills are named `vapor-<word>`: one word after the
+  prefix, naming an entity (`config`, `provider`, `docs`, `e2e`) or an
+  action (`validate`, `commit`, `release`, `debug`). A general-purpose
+  skill brought in from outside the project (`unslop`) keeps its
+  original name.
 - `SKILL.md` front matter must stay within the fields every supported
   agent understands: `name` (required, identical to the directory name),
   `description` (required), and optionally `license`, `version`,
@@ -394,7 +396,7 @@ every agent. Layout and the add-a-skill checklist: `.agents/README.md`.
 - A skill change is verified as loadable before commit: the symlink
   resolves to a `SKILL.md`, the front matter parses, and the skill shows
   up in the agent's skill list and can be invoked.
-- Writing rules for every document, comment, and message: the `vapor-unslop`
+- Writing rules for every document, comment, and message: the `unslop`
   skill. It always applies.
 
 ## 9) Required test matrix
@@ -638,7 +640,7 @@ carries its own trigger conditions in its description.
 
 | Skill | Invoke when |
 |---|---|
-| `vapor-unslop` | Writing anything a human reads: docs, comments, commit messages, replies. Always. |
+| `unslop` | Writing anything a human reads: docs, comments, commit messages, replies. Always. |
 | `vapor-validate` | Before committing a change under `core/*`, `apps/*`, or `scripts/*`; when a script run is red. |
 | `vapor-e2e` | A change alters daemon- or CLI-observable behaviour and Tier 1 is green; to watch a feature in the real product. |
 | `vapor-debug` | The daemon crashed, will not start, sync is stuck, or a status looks wrong. |
