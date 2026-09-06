@@ -75,7 +75,17 @@ public struct ProcessVaporCLIRunner: VaporCLIRunning {
 
     let exited = DispatchSemaphore(value: 0)
     process.terminationHandler = { _ in exited.signal() }
-    try process.run()
+    do {
+      try process.run()
+    } catch {
+      // The child never started, so nothing will close the write ends;
+      // close them here so the drains finish now rather than whenever
+      // the pipes happen to deinit.
+      try? outputPipe.fileHandleForWriting.close()
+      try? errorPipe.fileHandleForWriting.close()
+      drains.wait()
+      throw error
+    }
 
     // Bounded wait; kill a wedged CLI so a hung invocation cannot hang the
     // lifecycle queue (and, transitively, Quit Vapor) forever.
@@ -194,6 +204,25 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
     }
   }
 
+  public func restartDaemon() throws -> DaemonLifecycleActionResult {
+    try actionCommand("restart")
+  }
+
+  public func daemonStatus() throws -> DaemonStatusSnapshot {
+    let arguments = ["status", "--json"]
+    let data = try runExpectingSuccess(arguments: arguments)
+    let response: DaemonStatusResponse = try decode(data: data, arguments: arguments)
+    return DaemonStatusSnapshot(
+      runState: response.runState,
+      throttleState: response.throttleState,
+      throttleReason: response.throttleReason,
+      providerName: response.providerName,
+      queueDepth: response.queueDepth,
+      failedIntents: response.failedIntents,
+      configRestartRequired: response.configRestartRequired
+    )
+  }
+
   public func acknowledgeCrashLoopPause() throws {
     let arguments = ["service", "acknowledge", "--json"]
     let data = try runExpectingSuccess(arguments: arguments)
@@ -253,6 +282,28 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
       case label
       case autoLaunch = "auto_launch"
       case crashLoop = "crash_loop"
+    }
+  }
+
+  /// Mirrors `core/ipc/src/protocol.rs::StatusResponse` (the fields the
+  /// app renders; unknown fields are ignored).
+  private struct DaemonStatusResponse: Decodable {
+    let runState: String
+    let throttleState: String
+    let throttleReason: String
+    let providerName: String
+    let queueDepth: UInt64
+    let failedIntents: UInt64
+    let configRestartRequired: String?
+
+    enum CodingKeys: String, CodingKey {
+      case runState = "run_state"
+      case throttleState = "throttle_state"
+      case throttleReason = "throttle_reason"
+      case providerName = "provider_name"
+      case queueDepth = "queue_depth"
+      case failedIntents = "failed_intents"
+      case configRestartRequired = "config_restart_required"
     }
   }
 

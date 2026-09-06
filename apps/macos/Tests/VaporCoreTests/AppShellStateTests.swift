@@ -34,25 +34,6 @@ func initialStateUsesSafeDefaults() {
 }
 
 @Test
-func statusLineIncludesStateAndProvider() {
-  let state = AppShellState(
-    syncState: .throttled,
-    configurationIssuePath: nil,
-    configurationIssueReason: nil,
-    autoLaunchEnabled: true,
-    useGitIgnore: true,
-    useVaporIgnore: true,
-    preIgnoreRules: "node_modules/",
-    postIgnoreRules: "!node_modules/keep.txt",
-    languageCode: "en",
-    effectiveLanguageCode: "en",
-    providerName: "Google Drive",
-    vaporDirectoryPath: "~/.vapor"
-  )
-  #expect(state.statusLine == "Throttled · Google Drive")
-}
-
-@Test
 func configurationIssueFlagReflectsPresenceOfDiagnosticPath() {
   let state = AppShellState(
     syncState: .error,
@@ -73,8 +54,30 @@ func configurationIssueFlagReflectsPresenceOfDiagnosticPath() {
 }
 
 @Test
-func syncStateDetailsAreNonEmpty() {
-  for state in SyncSurfaceState.allCases {
-    #expect(!state.detail.isEmpty)
+func surfaceStateFollowsTheDaemonStatusWhenRunning() {
+  func status(
+    run: String = "Running", throttle: String = "IdleDrain", queue: UInt64 = 0,
+    failed: UInt64 = 0
+  ) -> DaemonStatusSnapshot {
+    DaemonStatusSnapshot(
+      runState: run, throttleState: throttle, throttleReason: "", providerName: "filesystem",
+      queueDepth: queue, failedIntents: failed)
   }
+  #expect(SyncSurfaceState.from(health: .running, status: status()) == .idle)
+  #expect(SyncSurfaceState.from(health: .running, status: status(queue: 3)) == .syncing)
+  #expect(
+    SyncSurfaceState.from(health: .running, status: status(throttle: "Throttled", queue: 3))
+      == .throttled)
+  #expect(
+    SyncSurfaceState.from(health: .running, status: status(throttle: "Suspended", queue: 3))
+      == .suspended)
+  #expect(SyncSurfaceState.from(health: .running, status: status(run: "Paused")) == .paused)
+  #expect(SyncSurfaceState.from(health: .running, status: status(run: "Error")) == .error)
+  #expect(SyncSurfaceState.from(health: .running, status: status(failed: 2)) == .error)
+  // No status while the tick says running: the endpoint did not answer.
+  #expect(SyncSurfaceState.from(health: .running, status: nil) == .stopped)
+  #expect(SyncSurfaceState.from(health: .stoppedExpected, status: nil) == .stopped)
+  #expect(SyncSurfaceState.from(health: .notInstalled, status: nil) == .stopped)
+  #expect(SyncSurfaceState.from(health: .restartDeferred(30), status: nil) == .stopped)
+  #expect(SyncSurfaceState.from(health: .crashLoopPaused, status: nil) == .error)
 }

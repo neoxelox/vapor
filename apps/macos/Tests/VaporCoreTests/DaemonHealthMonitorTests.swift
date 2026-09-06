@@ -13,14 +13,31 @@ func healthCheckForwardsOutcomeToObserver() {
   controller.healthOutcome = .running
   let manager = DaemonLifecycleManager(launchAgentController: controller)
   let observed = OutcomeRecorder()
-  let monitor = DaemonHealthMonitor(manager: manager) { outcome in
-    observed.append(outcome)
+  let monitor = DaemonHealthMonitor(manager: manager) { outcome, status in
+    observed.append(outcome, status)
   }
 
   let outcome = monitor.performHealthCheck()
 
   #expect(outcome == .running)
   #expect(observed.outcomes == [.running])
+  #expect(observed.statuses == [controller.liveStatus])
+  #expect(controller.operations == ["check", "status"])
+}
+
+@Test
+func healthCheckSkipsTheStatusReadWhenTheDaemonIsNotRunning() {
+  let controller = RecordingServiceController()
+  controller.healthOutcome = .stoppedExpected
+  let manager = DaemonLifecycleManager(launchAgentController: controller)
+  let observed = OutcomeRecorder()
+  let monitor = DaemonHealthMonitor(manager: manager) { outcome, status in
+    observed.append(outcome, status)
+  }
+
+  _ = monitor.performHealthCheck()
+
+  #expect(observed.statuses == [nil])
   #expect(controller.operations == ["check"])
 }
 
@@ -30,8 +47,8 @@ func healthCheckSurfacesCrashLoopPause() {
   controller.healthOutcome = .crashLoopPaused
   let manager = DaemonLifecycleManager(launchAgentController: controller)
   let observed = OutcomeRecorder()
-  let monitor = DaemonHealthMonitor(manager: manager) { outcome in
-    observed.append(outcome)
+  let monitor = DaemonHealthMonitor(manager: manager) { outcome, status in
+    observed.append(outcome, status)
   }
 
   let outcome = monitor.performHealthCheck()
@@ -44,8 +61,8 @@ func healthCheckSurfacesCrashLoopPause() {
 func failedCheckReturnsNilAndDoesNotNotify() {
   let manager = DaemonLifecycleManager(launchAgentController: FailingServiceController())
   let observed = OutcomeRecorder()
-  let monitor = DaemonHealthMonitor(manager: manager) { outcome in
-    observed.append(outcome)
+  let monitor = DaemonHealthMonitor(manager: manager) { outcome, status in
+    observed.append(outcome, status)
   }
 
   let outcome = monitor.performHealthCheck()
@@ -57,7 +74,7 @@ func failedCheckReturnsNilAndDoesNotNotify() {
 @Test
 func startAndStopAreIdempotent() {
   let manager = DaemonLifecycleManager(launchAgentController: RecordingServiceController())
-  let monitor = DaemonHealthMonitor(manager: manager, interval: 3_600) { _ in }
+  let monitor = DaemonHealthMonitor(manager: manager, interval: 3_600) { _, _ in }
 
   monitor.start()
   monitor.start()
@@ -69,9 +86,11 @@ func startAndStopAreIdempotent() {
 
 private final class OutcomeRecorder: @unchecked Sendable {
   private(set) var outcomes: [ServiceHealthOutcome] = []
+  private(set) var statuses: [DaemonStatusSnapshot?] = []
 
-  func append(_ outcome: ServiceHealthOutcome) {
+  func append(_ outcome: ServiceHealthOutcome, _ status: DaemonStatusSnapshot?) {
     outcomes.append(outcome)
+    statuses.append(status)
   }
 }
 
@@ -103,4 +122,8 @@ private struct FailingServiceController: LaunchAgentControlling {
   func checkDaemonHealth() throws -> ServiceHealthOutcome { throw CheckError() }
 
   func acknowledgeCrashLoopPause() throws {}
+
+  func restartDaemon() throws -> DaemonLifecycleActionResult { .unchanged }
+
+  func daemonStatus() throws -> DaemonStatusSnapshot { throw CheckError() }
 }

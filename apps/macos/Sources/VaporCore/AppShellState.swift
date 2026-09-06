@@ -4,24 +4,9 @@ public enum SyncSurfaceState: String, CaseIterable, Codable, Sendable {
   case syncing = "Syncing"
   case throttled = "Throttled"
   case suspended = "Suspended"
+  case paused = "Paused"
+  case stopped = "Stopped"
   case error = "Error"
-
-  public var detail: String {
-    switch self {
-    case .idle:
-      return "No pending work"
-    case .queued:
-      return "Changes are queued"
-    case .syncing:
-      return "Applying lightweight sync work"
-    case .throttled:
-      return "Deferred because system is active"
-    case .suspended:
-      return "Paused due to pressure policy"
-    case .error:
-      return "Action required"
-    }
-  }
 
   public var labelLocalizationKey: String {
     switch self {
@@ -35,6 +20,10 @@ public enum SyncSurfaceState: String, CaseIterable, Codable, Sendable {
       return "sync_state_throttled_label"
     case .suspended:
       return "sync_state_suspended_label"
+    case .paused:
+      return "sync_state_paused_label"
+    case .stopped:
+      return "sync_state_stopped_label"
     case .error:
       return "sync_state_error_label"
     }
@@ -52,9 +41,51 @@ public enum SyncSurfaceState: String, CaseIterable, Codable, Sendable {
       return "sync_state_throttled_detail"
     case .suspended:
       return "sync_state_suspended_detail"
+    case .paused:
+      return "sync_state_paused_detail"
+    case .stopped:
+      return "sync_state_stopped_detail"
     case .error:
       return "sync_state_error_detail"
     }
+  }
+
+  /// Maps one supervision tick (and the daemon's own status when it was
+  /// running) onto the surface state. Order matters: a daemon in
+  /// `Error` or `Paused` says so before any queue or throttle detail.
+  public static func from(
+    health: ServiceHealthOutcome,
+    status: DaemonStatusSnapshot?
+  ) -> SyncSurfaceState {
+    switch health {
+    case .crashLoopPaused:
+      return .error
+    case .notInstalled, .stoppedExpected, .restartDeferred:
+      return .stopped
+    case .running, .restartedAfterCrash:
+      break
+    }
+    guard let status else {
+      return .stopped
+    }
+    switch status.runState {
+    case "Error":
+      return .error
+    case "Paused":
+      return .paused
+    default:
+      break
+    }
+    if status.throttleState == "Suspended" {
+      return .suspended
+    }
+    if status.queueDepth == 0 {
+      return status.failedIntents > 0 ? .error : .idle
+    }
+    if status.throttleState == "Throttled" {
+      return .throttled
+    }
+    return .syncing
   }
 }
 
@@ -76,6 +107,11 @@ public struct AppShellState: Equatable, Codable, Sendable {
   /// item (user disabled it in System Settings, or MDM policy). The UI
   /// shows a hint with a shortcut to System Settings › Login Items.
   public var loginItemRequiresApproval: Bool
+  /// The daemon's own throttle reason, shown under the state label
+  /// while the daemon is running (diagnostic text, English).
+  public var syncDetail: String?
+  /// The daemon's notice that a restart-required setting changed.
+  public var configRestartRequired: String?
 
   public init(
     syncState: SyncSurfaceState,
@@ -91,7 +127,9 @@ public struct AppShellState: Equatable, Codable, Sendable {
     providerName: String,
     vaporDirectoryPath: String,
     crashLoopPaused: Bool = false,
-    loginItemRequiresApproval: Bool = false
+    loginItemRequiresApproval: Bool = false,
+    syncDetail: String? = nil,
+    configRestartRequired: String? = nil
   ) {
     self.syncState = syncState
     self.configurationIssuePath = configurationIssuePath
@@ -107,6 +145,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     self.vaporDirectoryPath = vaporDirectoryPath
     self.crashLoopPaused = crashLoopPaused
     self.loginItemRequiresApproval = loginItemRequiresApproval
+    self.syncDetail = syncDetail
+    self.configRestartRequired = configRestartRequired
   }
 
   public static let initial = AppShellState(
@@ -125,10 +165,6 @@ public struct AppShellState: Equatable, Codable, Sendable {
     vaporDirectoryPath: VaporPaths.resolveVaporDirectoryURL().path,
     crashLoopPaused: false
   )
-
-  public var statusLine: String {
-    "\(syncState.rawValue) · \(providerName)"
-  }
 
   public var hasConfigurationIssue: Bool {
     configurationIssuePath != nil
