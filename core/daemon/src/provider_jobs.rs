@@ -164,6 +164,11 @@ pub(crate) enum ProviderJobOutcome {
     /// The job's generation was invalidated by `abort_in_flight`; any
     /// session was aborted worker-side. Harvest drops these.
     Cancelled,
+    /// The provider call panicked on the worker. The worker survives and
+    /// the executor fails the intent with the panic message; without
+    /// this the permit and the in-flight slot would leak for the rest of
+    /// the process. (Release builds abort on panic and never see it.)
+    Panicked(String),
 }
 
 pub(crate) struct CompletedJob {
@@ -371,13 +376,32 @@ fn worker_main(
         let Ok(job) = job else {
             return;
         };
-        let completed = run_job(job, &gates);
+        let (intent_id, generation) = (job.intent_id, job.generation);
+        let completed =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(job, &gates))) {
+                Ok(completed) => completed,
+                Err(payload) => CompletedJob {
+                    intent_id,
+                    outcome: ProviderJobOutcome::Panicked(panic_message(payload.as_ref())),
+                    generation,
+                },
+            };
         if results_tx.send(completed).is_err() {
             return;
         }
         if let Some(waker) = &waker {
             waker.notify();
         }
+    }
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "non-string panic payload".to_string()
     }
 }
 
@@ -537,12 +561,21 @@ mod tests {
 
     struct StubProvider {
         delete_calls: AtomicUsize,
+        panic_on_delete: bool,
     }
 
     impl StubProvider {
         fn new() -> Self {
             Self {
                 delete_calls: AtomicUsize::new(0),
+                panic_on_delete: false,
+            }
+        }
+
+        fn panicking() -> Self {
+            Self {
+                delete_calls: AtomicUsize::new(0),
+                panic_on_delete: true,
             }
         }
     }
@@ -580,6 +613,7 @@ mod tests {
         }
         fn delete(&self, _path: &RemotePath, _op_id: &str) -> Result<(), ProviderError> {
             self.delete_calls.fetch_add(1, Ordering::SeqCst);
+            assert!(!self.panic_on_delete, "simulated provider bug");
             Ok(())
         }
         fn rename(
@@ -660,6 +694,56 @@ mod tests {
         assert_eq!(harvested.len(), 1);
         assert_eq!(provider.delete_calls.load(Ordering::SeqCst), 1);
         assert_eq!(pool.in_flight(), 0);
+    }
+
+    #[test]
+    fn threaded_worker_survives_a_panicking_provider_call() {
+        let waker = Arc::new(TickWaker::default());
+        let mut pool = ProviderJobPool::threaded(1, Some(waker.clone()));
+        let harvest_one = |pool: &mut ProviderJobPool| {
+            for _ in 0..1_000 {
+                waker.wait_timeout(Duration::from_millis(50));
+                let harvested = pool.harvest();
+                if !harvested.is_empty() {
+                    return harvested;
+                }
+            }
+            Vec::new()
+        };
+        pool.dispatch(
+            11,
+            context(Arc::new(StubProvider::panicking())),
+            ProviderJobKind::RemoteDelete {
+                remote_path: RemotePath::root().join("a.txt").expect("path"),
+                op_id: "op".to_string(),
+            },
+        );
+        let harvested = harvest_one(&mut pool);
+        assert_eq!(harvested.len(), 1);
+        assert_eq!(harvested[0].intent_id, 11);
+        assert!(matches!(
+            &harvested[0].outcome,
+            ProviderJobOutcome::Panicked(message) if message.contains("simulated provider bug")
+        ));
+        assert_eq!(pool.in_flight(), 0);
+
+        // The single worker is still alive: a healthy job completes.
+        let provider = Arc::new(StubProvider::new());
+        pool.dispatch(
+            12,
+            context(provider.clone()),
+            ProviderJobKind::RemoteDelete {
+                remote_path: RemotePath::root().join("b.txt").expect("path"),
+                op_id: "op".to_string(),
+            },
+        );
+        let harvested = harvest_one(&mut pool);
+        assert_eq!(harvested.len(), 1);
+        assert!(matches!(
+            harvested[0].outcome,
+            ProviderJobOutcome::RemoteDelete(Ok(()))
+        ));
+        assert_eq!(provider.delete_calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -3747,6 +3747,122 @@ mod tests {
     }
 
     #[test]
+    fn offline_same_size_edit_is_uploaded_by_the_startup_reconcile() {
+        // A file synced by one daemon run is edited while no daemon is
+        // running, keeping its byte count. The watcher never sees the
+        // edit; only the startup reconcile can, through the mtime the
+        // sync index recorded.
+        let temp = TempDir::new().expect("temp dir");
+        let watch_root = temp.path().join("watch");
+        let cloud_root = temp.path().join("cloud");
+        std::fs::create_dir_all(&watch_root).expect("watch root");
+        std::fs::create_dir_all(&cloud_root).expect("cloud root");
+        let watch_root =
+            vapor_shared::paths::canonicalize(&watch_root).expect("canonical watch root");
+        let database_path = temp.path().join("state/vapor.sqlite");
+        let local_file = watch_root.join("notes.txt");
+        std::fs::write(&local_file, b"version-A").expect("seed local");
+
+        let sync_scope = || SyncScope {
+            local_sync_directory: Some(watch_root.clone()),
+            cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            sync_mode: vapor_shared::SyncMode::TwoWay,
+        };
+        use crate::clock::Clock as _;
+        let drive = |runtime: &mut DaemonRuntime, clock: &Arc<crate::clock::ManualClock>| {
+            for _ in 0..400 {
+                clock.advance(Duration::from_millis(250));
+                clock.advance_system(Duration::from_millis(250));
+                runtime
+                    .tick_with_inputs(clock.now_system(), ThrottleInputs::default())
+                    .expect("tick");
+                if runtime.state_db().queue_depth().expect("depth") == 0
+                    && runtime.state_db().leased_depth().expect("leased") == 0
+                {
+                    break;
+                }
+            }
+        };
+
+        // First run: upload the file so the sync index records its
+        // size and mtime.
+        {
+            let mut state_db = DurableStateDb::open(&database_path).expect("open state db");
+            state_db
+                .enqueue_intent(&local_file, PendingIntentKind::Upload, timestamp_ms(0))
+                .expect("enqueue");
+            let clock = Arc::new(crate::clock::ManualClock::at_now());
+            let mut runtime = DaemonRuntime::build(
+                sync_scope(),
+                EventPathFilterOptions::default(),
+                state_db,
+                Box::new(vapor_providers::FilesystemProvider::new()),
+                Arc::new(StaticMetricsSampler::default()),
+                clock.clone(),
+                false,
+            )
+            .expect("first runtime");
+            drive(&mut runtime, &clock);
+            assert_eq!(
+                std::fs::read(cloud_root.join("notes.txt")).expect("uploaded"),
+                b"version-A"
+            );
+            let index = runtime
+                .state_db()
+                .sync_index(&local_file)
+                .expect("index")
+                .expect("indexed after upload");
+            assert!(index.local_modified_at.is_some());
+        }
+
+        // Offline edit: same length, new content, mtime clearly later
+        // than what the index recorded.
+        std::fs::write(&local_file, b"version-B").expect("edit offline");
+        let later = std::fs::metadata(&local_file)
+            .expect("metadata")
+            .modified()
+            .expect("mtime")
+            + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&local_file)
+            .expect("open for mtime")
+            .set_modified(later)
+            .expect("set mtime");
+        assert_eq!(
+            std::fs::metadata(cloud_root.join("notes.txt"))
+                .expect("cloud metadata")
+                .len(),
+            9,
+            "the edit must keep the byte count for this test to mean anything"
+        );
+
+        // Second run: the startup whole-scope reconcile must notice the
+        // touched file and upload it.
+        let state_db = DurableStateDb::open(&database_path).expect("reopen state db");
+        let clock = Arc::new(crate::clock::ManualClock::at_now());
+        let mut runtime = DaemonRuntime::build(
+            sync_scope(),
+            EventPathFilterOptions::default(),
+            state_db,
+            Box::new(vapor_providers::FilesystemProvider::new()),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            false,
+        )
+        .expect("second runtime");
+        runtime
+            .enqueue_startup_reconstruction_reconcile(clock.now_system())
+            .expect("queue startup reconcile");
+        drive(&mut runtime, &clock);
+        assert_eq!(
+            std::fs::read(cloud_root.join("notes.txt")).expect("cloud copy"),
+            b"version-B",
+            "the offline same-size edit must reach the cloud"
+        );
+    }
+
+    #[test]
     fn paused_daemon_stops_admitting_new_work_and_resume_restores_it() {
         // Regression for the "pause is cosmetic" bug: `vapor pause` used
         // to flip the status string while the runtime kept leasing and

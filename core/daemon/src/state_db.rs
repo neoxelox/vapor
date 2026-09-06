@@ -855,6 +855,26 @@ pub struct SyncIndexEntry {
     pub updated_at: SystemTime,
 }
 
+impl SyncIndexEntry {
+    /// rsync-style quick check: the local file still has the size and
+    /// the mtime the index recorded at the last transfer, so its content
+    /// has not been touched since. Mtimes compare at the millisecond the
+    /// index stores; a filesystem mtime carries nanoseconds, and a plain
+    /// equality on the raw value never matched, which silently turned
+    /// every quick check into a full hash. An index row without an mtime
+    /// never matches, so the caller falls through to hashing.
+    pub fn matches_local(&self, size_bytes: u64, modified_at: Option<SystemTime>) -> bool {
+        let Some(indexed) = self.local_modified_at else {
+            return false;
+        };
+        let Some(observed) = modified_at else {
+            return false;
+        };
+        self.size_bytes == size_bytes
+            && system_time_to_millis(observed).ok() == system_time_to_millis(indexed).ok()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TombstoneOrigin {
     /// The deletion originated locally (propagates to the provider).

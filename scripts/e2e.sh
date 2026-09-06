@@ -672,6 +672,27 @@ wait_until 45 "cloud deletion to propagate through the changes feed" feed_delete
   || fail "S19: cloud deletion of an uploaded file never propagated locally (feed lost the event)"
 log "PASS S19 — cloud deletion of an uploaded file propagates via the live feed (no reconcile)"
 
+# S20 — offline same-size edit: a file edited while no daemon runs,
+# keeping its byte count, is invisible to the watcher and to a size-only
+# comparison. The startup reconcile must catch it through the mtime the
+# sync index recorded and upload the new content.
+printf 'offline-edit-AAAA' >"$LOCAL_ROOT/e2e-offline.txt"
+converge 30 || fail "S20: seed file did not converge before the offline edit"
+cmp -s "$LOCAL_ROOT/e2e-offline.txt" "$CLOUD_ROOT/e2e-offline.txt" \
+  || fail "S20: seed file missing or diverged in the cloud root"
+stop_daemon "$DAEMON_PID" || fail "S20: daemon did not shut down cleanly before the offline edit"
+DAEMON_PID=""
+printf 'offline-edit-BBBB' >"$LOCAL_ROOT/e2e-offline.txt"
+# Same byte count, mtime pushed clearly past what the index recorded.
+touch -t "$(date -v+1H +%Y%m%d%H%M.%S 2>/dev/null || date -d '+1 hour' +%Y%m%d%H%M.%S)" "$LOCAL_ROOT/e2e-offline.txt"
+start_daemon
+offline_edit_uploaded() {
+  cmp -s "$LOCAL_ROOT/e2e-offline.txt" "$CLOUD_ROOT/e2e-offline.txt"
+}
+wait_until 60 "offline same-size edit to reach the cloud root" offline_edit_uploaded \
+  || fail "S20: offline same-size edit never reached the cloud (startup reconcile missed it)"
+log "PASS S20 — offline same-size edit detected by the startup reconcile and uploaded"
+
 # --- service lifecycle round-trip (--full only) ---
 #
 # Everything below drives `vapor service` against the REAL macOS

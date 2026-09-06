@@ -17,11 +17,15 @@
 //! - `push-only` (strict mirror, local authoritative): local-only and
 //!   divergent entries → upload; remote-only entries → remote delete.
 //!
-//! Fast-path equality is size-based; equal-size same-name files are
-//! treated as converged. Content-hash comparison for equal-size pairs
-//! is deliberately out of the walk's budget (a whole-tree hash pass
-//! would violate the low-impact posture); event-driven intents cover
-//! same-size edits because the editing side observes the change.
+//! Equality is a quick check, never a hash: files whose sizes differ
+//! diverge; files of equal size diverge when the sync index shows the
+//! local copy was touched since the last transfer (a different mtime at
+//! the millisecond the index stores, the rsync quick check). That catches
+//! an edit made while the daemon was not running, which the watcher
+//! cannot see and which a size-only comparison missed. The upload
+//! planner hashes the file and converges silently when the content is
+//! in fact unchanged. A whole-tree hash pass stays out of the walk's
+//! budget on purpose.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -294,7 +298,9 @@ impl ReconcileWalker {
                         self.pending_dirs.push_back(local.path);
                     }
                     (false, RemoteEntryKind::File) => {
-                        if local.size_bytes != remote.size_bytes {
+                        let diverged = local.size_bytes != remote.size_bytes
+                            || touched_since_last_sync(state_db, &local_path, &local)?;
+                        if diverged {
                             match sync_mode {
                                 SyncMode::TwoWay => {
                                     // Divergence in two-way routes through
@@ -429,6 +435,22 @@ impl ReconcileWalker {
         }
         Ok(())
     }
+}
+
+/// Equal sizes are not enough: a local edit that kept the byte count
+/// (the common case for config files and source edits) is only visible
+/// through the mtime the sync index recorded at the last transfer. No
+/// index row means the pair was never synced by this daemon, so equal
+/// sizes are taken as converged, as before.
+fn touched_since_last_sync(
+    state_db: &DurableStateDb,
+    local_path: &Path,
+    local: &LocalEntry,
+) -> Result<bool, WalkError> {
+    Ok(state_db.sync_index(local_path)?.is_some_and(|index| {
+        index.local_modified_at.is_some()
+            && !index.matches_local(local.size_bytes, local.modified_at)
+    }))
 }
 
 /// Whether a remote-origin tombstone should win over a surviving local

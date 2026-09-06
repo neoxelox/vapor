@@ -756,15 +756,9 @@ impl StagedExecutor {
         match stage {
             ActiveStage::PlannerProbe { permit, pending } => {
                 let ProviderJobOutcome::Probe(probe) = outcome else {
-                    abort_outcome_session(outcome);
                     app.release_work(permit);
-                    return self.fail_internal(
-                        app,
-                        state_db,
-                        &intent,
-                        "provider-job outcome did not match the probing stage",
-                        now,
-                        report,
+                    return self.fail_unexpected_outcome(
+                        app, state_db, &intent, outcome, "probing", now, report,
                     );
                 };
                 // Probe results carry raw provider errors whose kind the
@@ -843,13 +837,13 @@ impl StagedExecutor {
                     }
                 },
                 other => {
-                    abort_outcome_session(other);
                     app.release_work(permit);
-                    self.fail_internal(
+                    self.fail_unexpected_outcome(
                         app,
                         state_db,
                         &intent,
-                        "provider-job outcome did not match the preflight stage",
+                        other,
+                        "preflight",
                         now,
                         report,
                     )
@@ -941,15 +935,9 @@ impl StagedExecutor {
                     Ok(None)
                 }
                 other => {
-                    abort_outcome_session(other);
                     app.release_work(permit);
-                    self.fail_internal(
-                        app,
-                        state_db,
-                        &intent,
-                        "provider-job outcome did not match the upload stage",
-                        now,
-                        report,
+                    self.fail_unexpected_outcome(
+                        app, state_db, &intent, other, "upload", now, report,
                     )
                 }
             },
@@ -1058,15 +1046,9 @@ impl StagedExecutor {
                     Ok(None)
                 }
                 other => {
-                    abort_outcome_session(other);
                     app.release_work(permit);
-                    self.fail_internal(
-                        app,
-                        state_db,
-                        &intent,
-                        "provider-job outcome did not match the download stage",
-                        now,
-                        report,
+                    self.fail_unexpected_outcome(
+                        app, state_db, &intent, other, "download", now, report,
                     )
                 }
             },
@@ -1092,6 +1074,48 @@ impl StagedExecutor {
     /// An internal state-machine mismatch (never provider behavior).
     /// Requeue transiently so the intent replans from scratch instead of
     /// wedging.
+    /// An outcome the waiting stage cannot apply. A panic inside the
+    /// provider call fails the intent permanently with the panic message
+    /// (the worker already survived it); anything else is a stage/outcome
+    /// mismatch, which is an engine bug.
+    #[allow(clippy::too_many_arguments)]
+    fn fail_unexpected_outcome(
+        &mut self,
+        app: &mut DaemonApp,
+        state_db: &mut DurableStateDb,
+        intent: &DurableIntentRecord,
+        outcome: ProviderJobOutcome,
+        stage: &str,
+        now: SystemTime,
+        report: &mut StagedExecutorReport,
+    ) -> Result<Option<ActiveExecution>, StateDbError> {
+        match outcome {
+            ProviderJobOutcome::Panicked(message) => {
+                self.resolve_failure(
+                    app,
+                    state_db,
+                    intent,
+                    RetryFailureKind::Permanent,
+                    &format!("provider call panicked during the {stage} stage: {message}"),
+                    now,
+                    report,
+                )?;
+                Ok(None)
+            }
+            other => {
+                abort_outcome_session(other);
+                self.fail_internal(
+                    app,
+                    state_db,
+                    intent,
+                    &format!("provider-job outcome did not match the {stage} stage"),
+                    now,
+                    report,
+                )
+            }
+        }
+    }
+
     fn fail_internal(
         &mut self,
         app: &mut DaemonApp,
@@ -2123,9 +2147,7 @@ fn deletion_loses_to_local_state(
     }
     let diverged = if metadata.len() != index.size_bytes {
         true
-    } else if index.local_modified_at.is_some()
-        && metadata.modified().ok() == index.local_modified_at
-    {
+    } else if index.matches_local(metadata.len(), metadata.modified().ok()) {
         false
     } else {
         hash_hex_of_file_or_err(&intent.path, algorithm)? != index.content_hash
@@ -2563,9 +2585,7 @@ fn child_delete_is_safe(
     };
     let diverged = if metadata.len() != index.size_bytes {
         true
-    } else if index.local_modified_at.is_some()
-        && metadata.modified().ok() == index.local_modified_at
-    {
+    } else if index.matches_local(metadata.len(), metadata.modified().ok()) {
         false
     } else {
         match hash_hex_of_file_with(path, algorithm) {
