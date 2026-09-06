@@ -85,6 +85,7 @@ pub type InMemoryPlatformMetricsSampler = StaticPlatformMetricsSampler;
 /// length and `cpus` the online core count, so the process figure is a
 /// share of the whole machine like the system figure. Shared by every
 /// native sampler so the arithmetic is tested once.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn cpu_percentages(
     system_ticks: (&[u32; 4], &[u32; 4]),
     process_cpu: (std::time::Duration, std::time::Duration),
