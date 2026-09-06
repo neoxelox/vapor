@@ -119,6 +119,33 @@ pub mod config {
     /// Safeguards group; object with the `safeguards::KEY_*` fields.
     pub const KEY_SAFEGUARDS: &str = "safeguards";
 
+    /// Keys a running daemon applies within one poll interval of the
+    /// file changing, without a restart. The CLI tells the user which
+    /// class a key falls in after `config set`.
+    pub const LIVE_RELOAD_KEYS: &[&str] = &[
+        KEY_USE_GIT_IGNORE,
+        KEY_USE_VAPOR_IGNORE,
+        KEY_PRE_IGNORE_RULES,
+        KEY_POST_IGNORE_RULES,
+        KEY_TIMELINE_LIMIT,
+        KEY_RESOURCE_LIMITS,
+        KEY_IDLE_BOOST,
+        KEY_SAFEGUARDS,
+    ];
+
+    /// Keys that reshape the pipeline (roots, provider, direction,
+    /// profile set) and therefore take effect on the next daemon start;
+    /// a running daemon reports them as `config_restart_required` in
+    /// status until it is restarted.
+    pub const RESTART_REQUIRED_KEYS: &[&str] = &[
+        KEY_LOCAL_SYNC_DIRECTORY,
+        KEY_CLOUD_SYNC_DIRECTORY,
+        KEY_PROVIDER,
+        KEY_SYNC_MODE,
+        KEY_PROFILES,
+        KEY_DEVICE_ID,
+    ];
+
     /// Every recognized key in one slice. Kept in lockstep with the
     /// `KEY_*` constants above; the CLI uses this for `validate_key`.
     pub const ALL_KEYS: &[&str] = &[
@@ -496,6 +523,9 @@ pub mod engine {
     /// this many times in a row is failed as transient, so a misbehaving
     /// endpoint cannot spin a worker at full speed forever.
     pub const MAX_ZERO_PROGRESS_TRANSFER_STEPS: u32 = 8;
+    /// How often the daemon stats `vapor.json` for a change. One stat
+    /// per second is the cost of settings that apply without a restart.
+    pub const CONFIG_RELOAD_POLL_MILLIS: u64 = 1_000;
     pub const STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS: u64 = 60_000;
     pub const LEASE_TIMEOUT_MILLIS: u64 = 15 * 60 * 1_000;
     pub const LIGHT_SYSTEM_CPU_PERCENT: u8 = 35;

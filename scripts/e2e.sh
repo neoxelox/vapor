@@ -734,6 +734,28 @@ wait "$BAD_PID" 2>/dev/null || true
 BAD_PID=""
 log "PASS S21 — a fully misconfigured daemon stays up and names the reason in status"
 
+# S22 — live configuration reload: a resource ceiling written with
+# `vapor config set` reaches the running daemon without a restart, and a
+# key that needs a restart is reported in status until then.
+"$VAPOR_BIN" config set resourceLimits '{"cpuPercent": 7}' | grep -q "within a few seconds" \
+  || fail "S22: config set did not say the key applies live"
+ceiling_is_seven() {
+  "$VAPOR_BIN" status --json 2>/dev/null | grep -q '"effective_cpu_percent": 7'
+}
+wait_until 15 "the running daemon to adopt cpuPercent 7" ceiling_is_seven \
+  || fail "S22: the running daemon never applied the new CPU ceiling"
+"$VAPOR_BIN" config set syncMode push-only | grep -q "restart the daemon" \
+  || fail "S22: config set did not say syncMode needs a restart"
+restart_notice_present() {
+  "$VAPOR_BIN" status --json 2>/dev/null | grep -q '"config_restart_required": ".*syncMode'
+}
+wait_until 15 "status to report the pending restart" restart_notice_present \
+  || fail "S22: status never reported the restart-required key"
+# Put both back so nothing below runs under a mirror mode or a 7% ceiling.
+"$VAPOR_BIN" config set syncMode two-way >/dev/null
+"$VAPOR_BIN" config set resourceLimits '{"cpuPercent": 15}' >/dev/null
+log "PASS S22 — resourceLimits applied live; syncMode change reported as restart-required"
+
 # --- service lifecycle round-trip (--full only) ---
 #
 # Everything below drives `vapor service` against the REAL macOS

@@ -65,6 +65,18 @@ pub fn get(path: &Path, key: &str) -> Result<Option<String>, ConfigError> {
         .or_else(|| default_for_key(key).as_ref().map(format_json_scalar)))
 }
 
+/// One line telling the user when the value takes effect, from the
+/// same key classes the daemon's live reload uses.
+pub fn apply_hint(key: &str) -> String {
+    if constants::config::LIVE_RELOAD_KEYS.contains(&key) {
+        format!("{key} saved; a running daemon applies it within a few seconds")
+    } else if constants::config::RESTART_REQUIRED_KEYS.contains(&key) {
+        format!("{key} saved; restart the daemon to apply it (vapor service restart)")
+    } else {
+        format!("{key} saved")
+    }
+}
+
 /// The compiled default for a key, rendered from the same struct the
 /// daemon starts from so the two can never disagree.
 fn default_for_key(key: &str) -> Option<Value> {

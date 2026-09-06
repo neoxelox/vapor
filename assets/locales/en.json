@@ -12,7 +12,7 @@
   "settings_post_ignore_rules": "Override rules",
   "settings_post_ignore_rules_help": "Applied last so you can add final excludes or !unignore overrides.",
   "settings_save_ignore_rules": "Save ignore rules",
-  "settings_ignore_rules_apply_note": "Saved rules are exported for the daemon's next launch.",
+  "settings_ignore_rules_apply_note": "Saved rules reach the running daemon within a few seconds.",
   "settings_language": "Language",
   "settings_language_system_default": "System Default",
   "settings_disable_auto_launch_and_stop_now": "Disable auto-launch and stop now",

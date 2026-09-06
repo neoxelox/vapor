@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Live configuration reload. The daemon composed its pipeline from `vapor.json` once and never looked again, so every `vapor config set` and every Settings change needed a daemon restart that nothing offered, while three documents described reload semantics that did not exist. The daemon now stats the file once per second; the resource ceilings, idle boost, mass-delete guard, ignore toggles and rules, and the timeline length apply on the tick that notices the change (the budget adopts new bounds without restarting an in-progress boost ramp, per the ceiling-transition rules in `data-flow.md`). The keys that reshape the pipeline (`localSyncDirectory`, `cloudSyncDirectory`, `provider`, `syncMode`, `profiles`, `deviceId`) are reported in `vapor status` as `config_restart_required` with the command to run, `vapor config set` prints which class a key falls in, and the Settings copy in the Mac app no longer says rules wait for the next launch. A file that stops loading is reported once and ignored, so a typo never drops a running daemon to defaults. Covered by unit tests, a multi-profile integration test, and e2e S22.
+
 ### Changed
 
 - `Provider::rename` and the `supports_server_side_rename` capability are gone from the provider contract. No engine path called them: a rename intent has always been planned as an upload of the new path plus a delete of the old one, so the two providers implemented a method nothing used and the contract suite tested a promise the product did not keep. Move detection that turns FSEvents rename pairs into a server-side move is tracked as future work; until it lands, renaming a large file re-uploads it.

@@ -162,6 +162,7 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // RTT never stalls the tick loop; tests keep the inline mode for
     // deterministic single-threaded ticks.
     runtime.enable_transfer_workers();
+    runtime.watch_config(&config_path, config.clone());
     if static_inputs {
         runtime.set_idle_notifier(Arc::new(vapor_platform::ManualIdleNotifier::new(
             std::time::Duration::ZERO,

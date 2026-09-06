@@ -26,6 +26,7 @@ pub mod build_info {
 pub mod auto_tune;
 pub mod bootstrap;
 pub mod clock;
+pub mod config_reload;
 pub mod conflict;
 pub mod debounce;
 pub mod event_intents;

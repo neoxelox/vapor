@@ -59,7 +59,7 @@ In flight and coming next:
 
 All user-facing configuration is documented here with meaning and defaults.
 
-All persisted user configuration lives in `<vapor_dir>/vapor.json`; Vapor reads it at startup, so changes apply the next time it starts. Some keys can also be set via a matching `VAPOR_*` environment variable, which takes priority over the file.
+All persisted user configuration lives in `<vapor_dir>/vapor.json`. A running daemon picks up changes to the resource, idle-boost, safeguard, ignore and timeline keys within a few seconds; the keys that reshape the pipeline (`localSyncDirectory`, `cloudSyncDirectory`, `provider`, `syncMode`, `profiles`, `deviceId`) take effect on the next start, and `vapor status` says so until then (`vapor service restart` applies them). `vapor config set` prints which case applies. Some keys can also be set via a matching `VAPOR_*` environment variable, which takes priority over the file.
 
 | Key                  | Type     | Default                                             | Description                                                                              |
 | -------------------- | -------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |

@@ -302,6 +302,31 @@ impl ResourceBudget {
         &self.config
     }
 
+    /// Adopts a reloaded budget without restarting the boost state
+    /// machine (`data-flow.md` §Ceiling transitions, rule 4): with boost
+    /// off or disabled the ceilings snap to the new base; mid-ramp or
+    /// active, the ramped values are clamped into the new base/boost
+    /// bounds, so a lowered base takes effect at once and a raised base
+    /// never lifts an in-progress ramp above its target.
+    pub fn replace_config(&mut self, config: EffectiveBudgetConfig) {
+        self.config = config;
+        if !self.config.boost_enabled || matches!(self.state, BoostState::Off) {
+            self.snap_to_base("configuration reloaded; base ceilings in force");
+            return;
+        }
+        self.current_cpu = self
+            .current_cpu
+            .clamp(self.config.cpu_percent, self.config.boost_cpu_percent);
+        self.current_memory = self
+            .current_memory
+            .clamp(self.config.memory_percent, self.config.boost_memory_percent);
+        self.current_bandwidth = self.current_bandwidth.clamp(
+            self.config.bandwidth_percent,
+            self.config.boost_bandwidth_percent,
+        );
+        self.last_reason = "configuration reloaded; boost bounds updated".to_string();
+    }
+
     /// One evaluation on the 1s throttle cadence.
     pub fn tick(
         &mut self,

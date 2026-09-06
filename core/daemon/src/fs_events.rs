@@ -148,7 +148,7 @@ impl From<FsWatcherError> for FsEventsWatcherError {
 #[derive(Debug)]
 pub struct SharedEventPathFilter {
     watch_root: PathBuf,
-    options: EventPathFilterOptions,
+    options: RwLock<EventPathFilterOptions>,
     filter: RwLock<EventPathFilter>,
     reload_requested: AtomicBool,
 }
@@ -158,10 +158,26 @@ impl SharedEventPathFilter {
         let filter = EventPathFilter::for_watch_root(watch_root, &options);
         Self {
             watch_root: watch_root.to_path_buf(),
-            options,
+            options: RwLock::new(options),
             filter: RwLock::new(filter),
             reload_requested: AtomicBool::new(false),
         }
+    }
+
+    /// Swaps the toggles and user rules (a live `vapor.json` change) and
+    /// rebuilds the filter in place, so every holder of this shared
+    /// instance, watcher callback included, sees the new rules at once.
+    pub fn replace_options(&self, options: EventPathFilterOptions) {
+        let rebuilt = EventPathFilter::for_watch_root(&self.watch_root, &options);
+        *self
+            .options
+            .write()
+            .expect("SharedEventPathFilter options lock poisoned") = options;
+        *self
+            .filter
+            .write()
+            .expect("SharedEventPathFilter lock poisoned") = rebuilt;
+        self.reload_requested.store(false, Ordering::Release);
     }
 
     pub fn should_ignore(&self, path: &Path) -> bool {
@@ -190,10 +206,14 @@ impl SharedEventPathFilter {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             return;
         };
+        let options = self
+            .options
+            .read()
+            .expect("SharedEventPathFilter options lock poisoned");
         let is_gitignore =
-            self.options.use_gitignore && file_name == constants::filtering::GIT_IGNORE_FILE_NAME;
-        let is_vaporignore = self.options.use_vaporignore
-            && file_name == constants::filtering::VAPOR_IGNORE_FILE_NAME;
+            options.use_gitignore && file_name == constants::filtering::GIT_IGNORE_FILE_NAME;
+        let is_vaporignore =
+            options.use_vaporignore && file_name == constants::filtering::VAPOR_IGNORE_FILE_NAME;
         if is_gitignore || is_vaporignore {
             self.request_reload();
         }
@@ -207,7 +227,13 @@ impl SharedEventPathFilter {
             return false;
         }
 
-        let rebuilt = EventPathFilter::for_watch_root(&self.watch_root, &self.options);
+        let rebuilt = {
+            let options = self
+                .options
+                .read()
+                .expect("SharedEventPathFilter options lock poisoned");
+            EventPathFilter::for_watch_root(&self.watch_root, &options)
+        };
         *self
             .filter
             .write()

@@ -42,6 +42,9 @@ pub struct DaemonStatusSnapshot {
     pub intent_diagnostics: Vec<IntentDiagnostic>,
     pub diagnostics_truncated: bool,
     pub resource_budget: Option<ResourceBudgetStatus>,
+    /// Set when a restart-required configuration key changed under the
+    /// running daemon; names the keys and the command to run.
+    pub config_restart_required: Option<String>,
 }
 
 impl Default for DaemonStatusSnapshot {
@@ -62,6 +65,7 @@ impl Default for DaemonStatusSnapshot {
             intent_diagnostics: Vec::new(),
             diagnostics_truncated: false,
             resource_budget: None,
+            config_restart_required: None,
         }
     }
 }
@@ -216,6 +220,7 @@ impl Service for DaemonIpcService {
             mirror_deletes: snapshot.mirror_deletes,
             profiles: snapshot.profiles,
             resource_budget: snapshot.resource_budget,
+            config_restart_required: snapshot.config_restart_required,
         }
     }
 
@@ -297,7 +302,7 @@ impl Service for DaemonIpcService {
         }
         Self::ack(
             true,
-            "exclude rules persisted; they apply on the next daemon restart (pre-GA contract)",
+            "exclude rules persisted; the running daemon applies them within a few seconds",
         )
     }
 
