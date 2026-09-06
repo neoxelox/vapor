@@ -108,9 +108,25 @@ protection. `launchd` is intentionally passive (`KeepAlive = false`):
    logs"). The user must explicitly acknowledge (via `vapor service
    acknowledge`, which the menubar action invokes) before restarts
    resume.
-4. `launchd` is NEVER expected to be the source of a restart. If a
-   contributor finds code or scripts that set `KeepAlive = true`, that is a
-   policy violation and must be reverted.
+4. `launchd` is NEVER expected to be the source of a daemon restart. If
+   a contributor finds code or scripts that set `KeepAlive = true` on the
+   daemon's job, that is a policy violation and must be reverted.
+
+## The headless supervisor
+
+Without the app, nobody runs `vapor service check`, so a CLI-only
+install would never restart a crashed daemon. `vapor service install
+--supervise` registers a second LaunchAgent, `sh.arn.vapor.supervisor`,
+whose program is the `vapor` binary itself running `service check
+--loop`: the app's health tick as a process, one tick every 30 seconds
+(`--interval` to change it), printing an outcome only when it changes.
+This job is the one job launchd keeps alive (`KeepAlive = true`): it is
+the supervisor, not the daemon, so the crash-loop guard still owns
+every daemon restart and its budget. Its output lands in
+`<vapor_dir>/logs/vapor-supervisor.log`. `vapor service status` reports
+`supervisor_installed`, and `vapor service uninstall` removes both jobs.
+The `--full` e2e run installs it, kills the daemon, and asserts the
+supervisor alone brings it back.
 
 ## Validation
 
@@ -124,7 +140,8 @@ candidate:
   `~/Library/LaunchAgents/sh.arn.vapor.daemon.plist` contains exactly
   `Label`, `ProgramArguments`, `RunAtLoad=true`, `KeepAlive=false`,
   `StandardOutPath`, `StandardErrorPath`, `EnvironmentVariables`,
-  `ProcessType=Background`, and no other keys.
+  `ProcessType=Background`, and no other keys; the supervisor's plist
+  is the same shape with `KeepAlive=true`.
 - **SIGKILL scenario**: start the daemon, `kill -9` its pid, wait `30s`,
   assert no automatic restart has occurred (no new pid for `vapord`).
   Touching the config or issuing a menubar action must then trigger a

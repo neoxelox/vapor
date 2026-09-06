@@ -40,6 +40,11 @@ pub struct ServiceDescriptor {
     pub stdout_path: Option<PathBuf>,
     /// Where the daemon's stderr should land.
     pub stderr_path: Option<PathBuf>,
+    /// Whether the service manager restarts the process itself when it
+    /// exits. False for the daemon (restart decisions belong to the
+    /// crash-loop guard); true for the headless supervisor, which is
+    /// what applies that guard where no app does.
+    pub keep_alive: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

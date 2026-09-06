@@ -40,7 +40,7 @@ Available now:
 - 🚀 Starts at login, restarts itself after a crash, and stops retrying when something is really broken instead of looping.
 - ⏯️ Pause and resume on demand. Changes made while paused sync when you resume.
 - 📈 Status with a reason, queue depth, a live activity timeline, per-file "why is this stuck", and a one-command support bundle.
-- ⌨️ A full command line for scripts and servers. Everything the app does, the terminal does too.
+- ⌨️ A full command line for scripts and servers. Everything the app does, the terminal does too, including a headless supervisor that restarts a crashed sync where no app is running.
 - 🔐 Sign-in tokens live in the system keychain, logs never contain secrets, and nothing leaves your device except the files you chose to sync.
 - 🔕 Lives in the menu bar. No windows unless you ask for one.
 

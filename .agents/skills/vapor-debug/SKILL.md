@@ -37,7 +37,7 @@ Inside `VAPOR_DIR`:
 | Artifact | Path |
 |----------|------|
 | Config | `vapor.json` (a running daemon applies the live keys within seconds; roots, provider, profiles and sync mode need a restart and show up in `vapor status` as `config_restart_required`) |
-| Daemon log | `logs/vapord.logs` (rotates at 8 MiB, three generations); `logs/vapord.stdout.log` / `.stderr.log` are the service manager's redirects |
+| Daemon log | `logs/vapord.logs` (rotates at 8 MiB, three generations); `logs/vapord.stdout.log` / `.stderr.log` are the service manager's redirects; `logs/vapor-supervisor.log` is the headless supervisor's (`vapor service check --loop` under launchd, when installed with `--supervise`) |
 | Durable queue/state DB | `state/vapor.sqlite` for the implicit `default` profile; `state/profiles/<id>/vapor.sqlite` per configured profile (tables: `queue_intents`, `failed_intents`, `pending_decisions`, `name_aliases`, `state_entries`, `sync_index`, `tombstones`, `schema_meta`) |
 | Quarantined DB | `vapor.sqlite.corrupt-<ms>` next to the DB: the daemon moved a corrupt file aside and started fresh; a startup reconcile rebuilt the queue |
 | Lifecycle state | `state/lifecycle.json` (crash-loop bookkeeping shared by the CLI and the app) |
@@ -58,7 +58,7 @@ The `vapor` CLI is the fastest signal — use it before reading raw files:
 - `vapor support-bundle` — one redacted archive with status, diagnostics, timeline, config, and log tail; the first thing to ask a user for.
 - `vapor logs --tail 100` — recent daemon log lines, already redacted.
 - `vapor timeline --json` — diagnostics activity timeline (real events; an empty list means nothing has been recorded yet, not that the feature is missing).
-- `launchctl list | grep sh.arn.vapor` and `ps aux | grep vapord` — is the service loaded / process alive? (The LaunchAgent label is `sh.arn.vapor.daemon`.)
+- `launchctl list | grep sh.arn.vapor` and `ps aux | grep vapord` — is the service loaded / process alive? (The LaunchAgent label is `sh.arn.vapor.daemon`; a headless install also has `sh.arn.vapor.supervisor`, and `vapor service status` says whether it is installed.)
 
 ### Step 2 — Gather logs and crash reports
 

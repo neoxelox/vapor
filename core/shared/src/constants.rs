@@ -46,6 +46,8 @@ pub mod runtime {
     /// `docs/operations/macos/launchagent-policy.md`.
     pub const DAEMON_STDOUT_LOG_FILE_NAME: &str = "vapord.stdout.log";
     pub const DAEMON_STDERR_LOG_FILE_NAME: &str = "vapord.stderr.log";
+    /// The headless supervisor's output under the service manager.
+    pub const SUPERVISOR_LOG_FILE_NAME: &str = "vapor-supervisor.log";
     /// Advisory lock file inside `vapor_dir` that enforces the
     /// one-daemon-per-vapor-dir invariant. Held (via OS file locking)
     /// for the lifetime of the daemon process.
@@ -388,6 +390,11 @@ pub mod service {
     /// unexpected daemon exits and route them through the crash-loop
     /// guard. Mirrored by the Swift constants file per AGENTS.md §8.6.
     pub const HEALTH_TICK_INTERVAL_SECONDS: u64 = 30;
+    /// The headless supervisor: a second service definition that runs
+    /// `vapor service check --loop` where no app surface does, so a
+    /// CLI-only install still restarts a crashed daemon under the
+    /// crash-loop guard's budget. Kept alive by the service manager.
+    pub const SUPERVISOR_LABEL: &str = "sh.arn.vapor.supervisor";
 }
 
 pub mod secrets {

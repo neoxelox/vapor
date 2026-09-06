@@ -268,13 +268,20 @@ fn detect_launchd(full: bool) -> (bool, Option<String>) {
 
 /// `~/Library/LaunchAgents/sh.arn.vapor.daemon.plist`.
 pub fn launch_agent_plist_path() -> std::path::PathBuf {
+    launch_agent_plist_for(vapor_shared::constants::service::DAEMON_LABEL)
+}
+
+pub fn supervisor_plist_path() -> std::path::PathBuf {
+    launch_agent_plist_for(vapor_shared::constants::service::SUPERVISOR_LABEL)
+}
+
+fn launch_agent_plist_for(label: &str) -> std::path::PathBuf {
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_default();
-    home.join("Library").join("LaunchAgents").join(format!(
-        "{}.plist",
-        vapor_shared::constants::service::DAEMON_LABEL
-    ))
+    home.join("Library")
+        .join("LaunchAgents")
+        .join(format!("{label}.plist"))
 }
 
 /// `gui/<uid>`.

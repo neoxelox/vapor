@@ -229,10 +229,10 @@ IDs stable; they do not imply low priority.)
 Status: SF-1 (decisions and the two-direction mass-deletion guard),
 SF-2 (the local trash), SF-3 (root identity), SF-4 (offline deletions
 through the index), SF-5 (the type-mismatch decision), and SF-6
-(collisions as aliased conflict copies) landed by 2026-09-07; SF-7 …
-SF-9 in `core.md` "Sync safety follow-ups" are next, before Wave 9
-exposes any of it in the app: headless supervision, hash-based move
-detection, and the knowledge base for each. The testing tiers that prove them
+(collisions as aliased conflict copies), and SF-7 (the headless
+supervisor) landed by 2026-09-07; SF-8 and SF-9 in `core.md` "Sync
+safety follow-ups" are next, before Wave 9 exposes any of it in the
+app: hash-based move detection and the knowledge base. The testing tiers that prove them
 (`core.md` TR-1 … TR-10) are in place; TR-8 and TR-10 wait on the
 Google Drive test account and the native Linux traits.
 

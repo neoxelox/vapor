@@ -12,7 +12,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::cli::Cli;
-use crate::host::{Need, launch_agent_plist_path, launchd_domain_target};
+use crate::host::{Need, launch_agent_plist_path, launchd_domain_target, supervisor_plist_path};
 use crate::scenario::{CONVERGE_TIMEOUT, Ctx, Expect, OracleMode, Scenario, write_file};
 use crate::wait;
 use crate::{Failure, ensure};
@@ -21,7 +21,7 @@ pub fn scenarios() -> Vec<Scenario> {
     vec![Scenario {
         id: "R01",
         name: "service-round-trip",
-        proves: "install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd",
+        proves: "install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd, then the headless supervisor restarting a killed daemon on its own",
         needs: &[
             Need::NativeWatcher,
             Need::Filesystem,
@@ -44,13 +44,15 @@ struct LaunchAgentGuard {
 impl Drop for LaunchAgentGuard {
     fn drop(&mut self) {
         let _ = self.cli.run(&["service", "uninstall"]);
-        let _ = Command::new("launchctl")
-            .args(["bootout", &launchd_domain_target()])
-            .arg(&self.plist)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        let _ = fs::remove_file(&self.plist);
+        for plist in [self.plist.clone(), supervisor_plist_path()] {
+            let _ = Command::new("launchctl")
+                .args(["bootout", &launchd_domain_target()])
+                .arg(&plist)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            let _ = fs::remove_file(&plist);
+        }
         kill_stragglers(&self.vapord_bin);
     }
 }
@@ -277,6 +279,51 @@ fn service_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     );
     svc.expect("R9", &["status"], "status", "not_installed")?;
     svc.expect("R9", &["check"], "health", "not_installed")?;
+
+    // R10: the headless supervisor. Installed alongside the daemon, it
+    // restarts a crashed daemon with nobody running `service check`.
+    svc.expect("R10", &["install", "--supervise"], "result", "started")?;
+    ensure!(
+        supervisor_plist_path().is_file(),
+        "R10: supervisor plist not written"
+    );
+    let status = svc.json("R10", &["status"])?;
+    ensure!(
+        status["supervisor_installed"] == true,
+        "R10: status must report the supervisor: {status}"
+    );
+    svc.wait_status("running", Duration::from_secs(30), "R10")?;
+    cli.wait_run_state("Running", Duration::from_secs(30))?;
+    // The crash counter starts fresh after the acknowledge above, so
+    // this crash restarts immediately, by the supervisor alone.
+    cli.wait_run_state("Running", Duration::from_secs(30))?;
+    let pid = daemon_pid_from_launchd()
+        .ok_or_else(|| Failure::new("R10: daemon pid not found via launchctl"))?;
+    let killed = Command::new("kill").args(["-KILL", &pid]).status()?;
+    ensure!(killed.success(), "R10: could not SIGKILL pid {pid}");
+    svc.wait_status("running", Duration::from_secs(90), "R10")?;
+    cli.wait_run_state("Running", Duration::from_secs(30))?;
+    let restarted = daemon_pid_from_launchd()
+        .ok_or_else(|| Failure::new("R10: daemon pid not found after the restart"))?;
+    ensure!(restarted != pid, "R10: the daemon was not restarted");
+    ensure!(
+        fs::read_to_string(home.dir.join("logs/vapor-supervisor.log"))
+            .unwrap_or_default()
+            .contains("restarted"),
+        "R10: the supervisor log does not record the restart"
+    );
+
+    // R11: uninstall removes the supervisor with the daemon.
+    svc.json("R11", &["uninstall"])?;
+    ensure!(
+        !supervisor_plist_path().exists() && !launch_agent_plist_path().exists(),
+        "R11: a plist is still present after uninstall"
+    );
+    let status = svc.json("R11", &["status"])?;
+    ensure!(
+        status["supervisor_installed"] == false,
+        "R11: status still reports the supervisor: {status}"
+    );
 
     // The launchd daemon was SIGKILLed five times; its log holds the
     // refusals and restarts the round-trip provoked on purpose.

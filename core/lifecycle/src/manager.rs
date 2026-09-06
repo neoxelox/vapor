@@ -502,6 +502,7 @@ mod tests {
             environment: vec![],
             stdout_path: None,
             stderr_path: None,
+            keep_alive: false,
         }
     }
 

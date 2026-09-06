@@ -86,7 +86,7 @@ Operational notes:
 - Override runtime root with `VAPOR_DIR=/path/to/vapor ./scripts/test.sh` (same for build, lint, and format).
 - `Vapor.app` is a single package that ships three executables: `Contents/MacOS/Vapor` (app), `Contents/MacOS/vapord` (daemon), and `Contents/Helpers/vapor` (CLI — it cannot live in `Contents/MacOS/` because the default macOS filesystem is case-insensitive and `vapor` would collide with `Vapor`).
 - Runtime daemon launch path is always the bundled `vapord`: a sibling of the launching binary, or `../MacOS/vapord` when resolved from the bundled CLI in `Contents/Helpers/`.
-- Daemon lifecycle (install/start/stop/supervision, crash-loop state) is driven through `vapor service` on every surface; `vapor service check` is one supervision tick, `vapor service acknowledge` clears a crash-loop pause, and durable crash-loop state lives at `<vapor_dir>/state/lifecycle.json`.
+- Daemon lifecycle (install/start/stop/supervision, crash-loop state) is driven through `vapor service` on every surface; `vapor service check` is one supervision tick (`--loop` keeps ticking, which is what `vapor service install --supervise` registers as the kept-alive `sh.arn.vapor.supervisor` job for installs without the app), `vapor service acknowledge` clears a crash-loop pause, and durable crash-loop state lives at `<vapor_dir>/state/lifecycle.json`.
 - Swift lint and format scripts intentionally use `swift format` only.
 - If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild build` in `./scripts/swift/build.sh`.
 

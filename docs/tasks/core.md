@@ -983,12 +983,12 @@ Still open, in order:
       copies aliased to their own cloud object (`name_aliases`,
       resolved by the executor, the walk, and the feed); S33 flipped
       from known gap to pass, S38 pins stability.
-- [ ] SF-7 Headless supervision. A CLI-only install has nothing to
-      restart a crashed daemon: `vapor service install` on macOS sets
-      `KeepAlive` on the LaunchAgent under the crash-loop guard's
-      budget, and `vapor service check --loop` supervises where no
-      service manager exists. The soak driver stops restarting the
-      daemon itself once this lands.
+- [x] SF-7 Headless supervision: `vapor service check --loop` and
+      `vapor service install --supervise` (a kept-alive
+      `sh.arn.vapor.supervisor` LaunchAgent); the daemon's job stays
+      passive so the crash-loop guard owns every restart. R01 covers
+      it under `--full`. The soak driver keeps restarting the daemon
+      itself: its sandbox never installs host services.
 - [ ] SF-8 Move detection with hashes (folds RV-11): a delete and a
       create with the same content hash inside one debounce window, or
       found by the reconcile walk, become one server-side move on

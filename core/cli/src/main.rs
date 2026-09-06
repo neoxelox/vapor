@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 #[cfg(target_os = "macos")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 #[cfg(target_os = "macos")]
@@ -267,6 +267,11 @@ enum ServiceAction {
     Install {
         #[arg(long)]
         json: bool,
+        /// Also register the headless supervisor (`vapor service check
+        /// --loop` kept alive by the service manager), for an install
+        /// with no app to restart a crashed daemon.
+        #[arg(long)]
+        supervise: bool,
     },
     /// Disable autolaunch and remove the service definition. Also
     /// sends the daemon an explicit stop unless `--keep-running` is
@@ -309,6 +314,14 @@ enum ServiceAction {
     Check {
         #[arg(long)]
         json: bool,
+        /// Keep ticking until a stop signal arrives, printing an
+        /// outcome only when it changes. What the app does every 30
+        /// seconds, for installs without one.
+        #[arg(long = "loop")]
+        keep_looping: bool,
+        /// Seconds between ticks with `--loop`.
+        #[arg(long)]
+        interval: Option<u64>,
     },
     /// Clear a crash-loop pause so restarts may resume.
     Acknowledge {
@@ -794,9 +807,14 @@ fn resolve_auth_token(token: Option<String>) -> Result<String, String> {
 }
 
 fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
+    let mut supervise = false;
+    let mut check_loop: Option<Duration> = None;
     let (command, json) = match action {
         ServiceAction::Bootstrap { json } => (ServiceCommand::Bootstrap, json),
-        ServiceAction::Install { json } => (ServiceCommand::Install, json),
+        ServiceAction::Install { json, supervise: s } => {
+            supervise = s;
+            (ServiceCommand::Install, json)
+        }
         ServiceAction::Uninstall { json, keep_running } => {
             (ServiceCommand::Uninstall { keep_running }, json)
         }
@@ -804,7 +822,20 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
         ServiceAction::Stop { json } => (ServiceCommand::Stop, json),
         ServiceAction::Restart { json } => (ServiceCommand::Restart, json),
         ServiceAction::Status { json } => (ServiceCommand::Status, json),
-        ServiceAction::Check { json } => (ServiceCommand::Check, json),
+        ServiceAction::Check {
+            json,
+            keep_looping,
+            interval,
+        } => {
+            if keep_looping {
+                check_loop = Some(Duration::from_secs(interval.unwrap_or(
+                    vapor_shared::constants::service::HEALTH_TICK_INTERVAL_SECONDS,
+                )));
+            } else if interval.is_some() {
+                return Err("--interval only means something with --loop".to_string());
+            }
+            (ServiceCommand::Check, json)
+        }
         ServiceAction::Acknowledge { json } => (ServiceCommand::Acknowledge, json),
     };
 
@@ -817,8 +848,44 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
         })?;
         let (manager, installer) = service_cmd::build_native_macos(config_path, daemon_binary)
             .map_err(|e| e.to_string())?;
-        let outcome = service_cmd::dispatch(command, &manager, installer.as_ref(), Instant::now())
+        if let Some(interval) = check_loop {
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = stop.clone();
+            vapor_platform::ProcessSupervisor::register_shutdown_handler(
+                &vapor_platform::NativeProcessSupervisor::new(),
+                move || flag.store(true, std::sync::atomic::Ordering::SeqCst),
+            )
             .map_err(|e| e.to_string())?;
+            service_cmd::check_loop(&manager, installer.as_ref(), interval, json, &stop)
+                .map_err(|e| e.to_string())?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        let supervisor = service_cmd::supervisor_installer().map_err(|e| e.to_string())?;
+        let mut outcome =
+            service_cmd::dispatch(command, &manager, installer.as_ref(), Instant::now())
+                .map_err(|e| e.to_string())?;
+        match &mut outcome {
+            service_cmd::ServiceCommandOutcome::Status(report) => {
+                report.supervisor_installed = vapor_platform::ServiceInstaller::status(&supervisor)
+                    .map(|status| status != vapor_platform::ServiceStatus::NotInstalled)
+                    .unwrap_or(false);
+            }
+            service_cmd::ServiceCommandOutcome::Action(_) if supervise => {
+                vapor_platform::ServiceInstaller::install_and_enable(&supervisor)
+                    .map_err(|e| format!("supervisor install failed: {e}"))?;
+            }
+            service_cmd::ServiceCommandOutcome::Action(_)
+                if matches!(command, ServiceCommand::Uninstall { .. }) =>
+            {
+                if vapor_platform::ServiceInstaller::status(&supervisor)
+                    .is_ok_and(|status| status != vapor_platform::ServiceStatus::NotInstalled)
+                {
+                    vapor_platform::ServiceInstaller::disable_and_uninstall(&supervisor)
+                        .map_err(|e| format!("supervisor uninstall failed: {e}"))?;
+                }
+            }
+            _ => {}
+        }
         if json {
             let serialized = serde_json::to_string_pretty(&service_cmd::render_json(&outcome))
                 .map_err(|e| e.to_string())?;
@@ -831,7 +898,7 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (command, json);
+        let _ = (command, json, supervise, check_loop);
         Err("`vapor service` currently supports macOS only; Linux and Windows land with those surfaces".to_string())
     }
 }
