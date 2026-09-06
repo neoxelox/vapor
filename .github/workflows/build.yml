@@ -10,9 +10,13 @@ on:
 permissions:
   contents: read
 
+# Inside a reusable-workflow call the `github` context is the caller's,
+# so the group carries this workflow's own name to stay distinct from the
+# caller's group, and runs on `main` or on a release tag are never
+# cancelled.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-build-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
