@@ -24,6 +24,33 @@ are provider-neutral unless a section says otherwise.
   profile-namespaced key `auth.{profile_id}.{provider}.token`, as a
   JSON document `{accessToken, refreshToken, expiresAtMs}`.
 
+## Where tokens live on macOS
+
+- Each secret is one generic-password item in the user's login
+  keychain. The service attribute is `sh.arn.vapor` and the account
+  attribute is the secret name (`auth.default.gdrive.token` for the
+  default profile), so Keychain Access lists every Vapor entry under
+  one search term and a user can remove them by hand.
+- The item is created with an access list naming the binary that
+  wrote it plus its companions (`vapor` and `vapord`, side by side in
+  a build directory or at `Contents/Helpers/vapor` and
+  `Contents/MacOS/vapord` inside the bundle). The daemon therefore
+  reads a token the CLI stored without a keychain prompt.
+- Development builds are unsigned, and macOS identifies an unsigned
+  binary by its content hash. Rebuilding `vapord` after a login makes
+  the next daemon read prompt once ("vapord wants to use your
+  confidential information"); choose Always Allow, or run `vapor auth
+  login` again so the item is recreated with the new hash. Signed
+  release builds are identified by their code requirement and do not
+  have this problem.
+- Without a GUI session (SSH, CI) the keychain refuses any operation
+  that would need a prompt with `errSecInteractionNotAllowed`; the
+  error surfaces verbatim in `vapor auth` output and in the daemon's
+  `Authentication` state.
+- Linux and Windows have no native store yet. `vapor auth login`
+  warns and keeps the token in process memory, so Google Drive cannot
+  sync on those hosts until their stores land.
+
 ## Token lifecycle policy
 
 - Access tokens refresh proactively 60 seconds before `expiresAtMs`.

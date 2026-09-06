@@ -150,9 +150,10 @@ pub fn status_from(
     Ok(entries)
 }
 
-/// Production constructor for the native secret store. Falls back to
-/// the in-process [`InMemorySecretStore`] until the per-OS Keychain /
-/// Credential Manager / libsecret bridges land.
+/// Production constructor for the native secret store (the login
+/// keychain on macOS). On an OS without a native store yet it falls
+/// back to the in-process [`InMemorySecretStore`]; the caller checks
+/// `is_persistent` and warns the user.
 pub fn build_native_store() -> Box<dyn SecretStore> {
     match NativeSecretStore::for_current_user() {
         Ok(store) => Box::new(store),

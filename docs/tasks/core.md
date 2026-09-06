@@ -152,10 +152,10 @@ from existing Swift/docs. Windows/Linux impls land later (Phase C6/C7).
       `std::process::Command`. Keep the exact plist schema from
       `docs/operations/macos/launchagent-policy.md`.
 - [x] C3-4 Define trait `SecretStore` (`get`, `set`, `delete`, `list`).
-      macOS implementation via `security-framework` (Keychain) or `keyring`
-      crate with macOS backend. Add in-memory fake for tests. *(Wave 4
-      ships the trait + in-memory store; the Keychain bridge lands with
-      Wave 5 / C4-5.)*
+      macOS implementation via Keychain Services (`security-framework-sys`
+      + `core-foundation`, one generic-password item per secret with an
+      access list covering `vapor` and `vapord`). In-memory fake for
+      tests; both run the same contract test.
 - [x] C3-5 Define trait `PlatformMetricsSampler` that returns
       `ThrottleInputs`. Add `StaticMetricsSampler` (config-driven) for the
       CLI / headless / test case. macOS implementation via `mach2` +

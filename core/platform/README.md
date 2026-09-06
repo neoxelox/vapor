@@ -16,9 +16,9 @@ Tasks: `docs/tasks/core.md` Phase C3.
 - `service` — install / start / stop the daemon as a platform-native
   background service (LaunchAgent on macOS; Task Scheduler / SCM on
   Windows; systemd on Linux).
-- `secrets` — per-provider OAuth tokens and other credentials (Keychain
-  Services on macOS; Credential Manager on Windows; libsecret /
-  age-encrypted file on Linux).
+- `secrets` — per-provider OAuth tokens and other credentials. Keychain
+  Services on macOS (shipped); Credential Manager on Windows and
+  libsecret / age-encrypted file on Linux (stubs).
 - `metrics` — `PlatformMetricsSampler` returning a fresh
   `ThrottleInputsSnapshot` every tick.
 - `idle` — user-idle duration source.

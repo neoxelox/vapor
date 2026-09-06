@@ -52,7 +52,7 @@ Config, state, and schema formats may change without migration
 Most valuable to look at:
 
 - **Secret handling** — provider tokens are held through
-  `core/platform/src/secrets.rs` (Keychain on macOS). Anything that
+  `core/platform/src/secrets/` (the login keychain on macOS). Anything that
   writes a token to disk, a log, or an argv is a real finding.
 - **Log redaction** — `core/shared/src/logging.rs` and
   `core/providers/src/logging.rs` must keep tokens, auth headers, and

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- macOS secret store. `vapor auth login` now writes the token to the login keychain instead of process memory, so the daemon can read it and Google Drive sync survives the CLI exiting. Each secret is one generic-password item under the `sh.arn.vapor` service, created with an access list that names `vapor` and `vapord` so the daemon reads CLI-stored tokens without a keychain prompt. The in-memory fake and the keychain store run the same contract test; Linux and Windows keep explicit `Unsupported` stubs and the CLI warns when it has to fall back to memory. Operational notes, including the one-time prompt after rebuilding an unsigned development binary, are in `docs/operations/provider-auth-operations.md`.
+
 ### Tooling / CI
 
 - `./scripts/test.sh` runs `cargo test --no-fail-fast`, so a failing crate no longer hides the results of the crates tested after it. The Windows verbatim-path bug above stayed masked for one CI round for exactly that reason: `vapor-daemon` failed first and `vapor-shared` never ran.

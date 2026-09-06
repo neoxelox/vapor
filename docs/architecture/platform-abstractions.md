@@ -99,17 +99,19 @@ backoff computed by `core/lifecycle::CrashLoopGuard`:
 
 ### `SecretStore`
 
-Per-provider OAuth tokens and other credentials.
+Per-provider OAuth tokens and other credentials. `get`, `set`,
+`delete`, `list`, plus `is_persistent` so a surface can tell the user
+when a value will not outlive the process.
 
-| OS | Native API | MVP crate |
+| OS | Native API | Status |
 |---|---|---|
-| macOS | Keychain Services | `security-framework` or `keyring` |
-| Windows | Credential Manager | `keyring` (Windows backend) |
-| Linux (desktop) | libsecret / Secret Service (D-Bus) | `secret-service` |
-| Linux (headless) | age-encrypted file or external command shim | `age` + custom |
+| macOS | Keychain Services (`SecItem*` through `security-framework-sys` and `core-foundation`) | Shipped. One generic-password item per secret under the `sh.arn.vapor` service, with an access list covering `vapor` and `vapord` so the daemon reads CLI-stored tokens without a prompt. Details: `docs/operations/provider-auth-operations.md`. |
+| Windows | Credential Manager | Stub. `for_current_user` returns `Unsupported`. |
+| Linux (desktop) | libsecret / Secret Service (D-Bus) | Stub. |
+| Linux (headless) | age-encrypted file or external command shim | Planned. The fallback will be explicit, never a silent fall-through, and selected by a CLI flag. |
 
-The headless-Linux fallback is explicit — no silent fall-through.
-`--secrets-backend=keyring|file|command` on the `vapor` CLI selects.
+On an OS whose native store is a stub, the CLI falls back to the
+in-memory store and prints a warning on every `auth` command.
 
 ### `PlatformMetricsSampler`
 

@@ -301,6 +301,16 @@ pub mod service {
     pub const HEALTH_TICK_INTERVAL_SECONDS: u64 = 30;
 }
 
+pub mod secrets {
+    /// Namespace under which every native secret store files Vapor's
+    /// entries: the Keychain service name on macOS, the credential
+    /// target prefix on Windows, the Secret Service attribute on Linux.
+    /// Secret names (`auth.<profile>.<provider>.token`) are the account
+    /// inside that namespace, so a user can find and remove every Vapor
+    /// item in the OS keychain UI by this one string.
+    pub const STORE_NAMESPACE: &str = "sh.arn.vapor";
+}
+
 pub mod ipc {
     /// Current schema version emitted by every Vapor surface that
     /// participates in the IPC handshake (`vapor` CLI, future macOS /

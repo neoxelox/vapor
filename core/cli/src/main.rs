@@ -537,8 +537,8 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
                 println!("auth login: stored token for {provider} (profile {profile})");
             } else {
                 eprintln!(
-                    "vapor: warning: native secret store is not yet wired in on this OS; \
-                     the token was kept in process memory only and will not survive restart."
+                    "vapor: warning: no native secret store on this OS yet; the token was \
+                     kept in process memory only and will not survive restart."
                 );
                 println!(
                     "auth login: stored token for {provider} (profile {profile}, process-local only)"
@@ -557,8 +557,8 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
                 auth_cmd::status_from(store.as_ref(), &profile).map_err(|e| e.to_string())?;
             if !persistent {
                 eprintln!(
-                    "vapor: note: native secret store is not yet wired in on this OS; \
-                     `bound` states below reflect process-local memory only."
+                    "vapor: note: no native secret store on this OS yet; `bound` states \
+                     below reflect process-local memory only."
                 );
             }
             for entry in entries {
