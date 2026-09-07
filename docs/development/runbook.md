@@ -133,19 +133,20 @@ Fast facts for local dev:
   runs one scenario; see `docs/development/e2e-verification.md`.
 - **Linux from a macOS checkout.** The `core/platform` Linux
   implementations and the daemon on inotify are verified in a
-  container over the same working tree. The target directory lives
-  outside the host's `target/` so the two toolchains never overwrite
-  each other's binaries, and a tmpfs covers `.vapor/`, because a
-  Docker Desktop bind mount refuses to bind the daemon's Unix socket.
-  The image's `rustup` follows `rust-toolchain.toml`, so the container
-  lints with the latest stable clippy, which is what CI runs too:
+  container over the same working tree. The target directory is a
+  named volume mounted outside the checkout, so the two toolchains
+  never overwrite each other's binaries and no mount point appears in
+  the repo, and a tmpfs covers `.vapor/`, because a Docker Desktop
+  bind mount refuses to bind the daemon's Unix socket. The image's
+  `rustup` follows `rust-toolchain.toml`, so the container lints with
+  the latest stable clippy, which is what CI runs too:
 
   ```sh
   docker run --rm -v "$PWD":/work -w /work \
-    -v vapor-linux-target:/work/target-linux \
+    -v vapor-linux-target:/target \
     -v vapor-linux-cargo:/usr/local/cargo/registry \
     --tmpfs /work/.vapor:rw,size=2g \
-    -e CARGO_TARGET_DIR=/work/target-linux -e VAPOR_ENV=dev \
+    -e CARGO_TARGET_DIR=/target -e VAPOR_ENV=dev \
     rust:slim sh -c 'apt-get update -qq && apt-get install -y -qq \
       pkg-config libsqlite3-dev build-essential attr procps >/dev/null && \
       cargo clippy --workspace --all-targets -- -D warnings && \
