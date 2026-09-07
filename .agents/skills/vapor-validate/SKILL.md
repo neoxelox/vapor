@@ -45,7 +45,12 @@ nothing.
   `TempDir`, no network, never `~/.vapor`.
 - A flaky test blocks merging until fixed or removed; removing one needs
   an issue naming the invariant it covered.
-- Every `vapor … --json` command keeps an explicit shape test.
+- Every `vapor … --json` command keeps an explicit shape test, and a
+  new command or flag that changes the shell contract (exit code,
+  stdout versus stderr) gets a case in `core/cli/tests/binary.rs`.
+- A new `core/platform` trait ships its contract body run against the
+  fake and the native implementation (`fs_watch/contract.rs` is the
+  shape to copy).
 
 ## Tier E2E rules
 
@@ -75,6 +80,13 @@ nothing.
 - A failing test: read the assertion message and the test body before
   the code; the tests are the specification. If the test is wrong, say
   so in the commit.
+- A failing `timing_guardrail_*` test on a busy host is a timing
+  event: rerun once; if it holds, treat it as a real slowdown. Never
+  loosen its budget in the same change as a logic fix.
+- A failing property test prints the minimal failing input under
+  `Test failed` and saves it in a `proptest-regressions/` file next to
+  the test; read the input, reproduce it as a plain test, and keep the
+  regression file in the change.
 - `version.sh check-sync`: `VERSION`, `[workspace.package] version` and
   every member's lockfile entry disagree; run `./scripts/version.sh sync`
   only as part of a release, otherwise fix the stray edit.

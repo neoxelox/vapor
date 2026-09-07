@@ -17,6 +17,7 @@ vapor-providers = { path = "../providers" }
 vapor-shared = { path = "../shared" }
 
 [dev-dependencies]
+proptest = { workspace = true }
 tempfile = { workspace = true }
 
 # Windows has no system `sqlite3.lib` to link against (macOS and Linux ship

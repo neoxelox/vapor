@@ -122,23 +122,31 @@ thousands of files belong to Tier 2 perf runs, not Tier 1.
 
 ### Property tests (Tier 1; every PR, bounded case count)
 
-Via `proptest`. High-value invariants where random inputs catch the
-edge cases humans miss. Each property runs **64–256 cases on CI** —
-enough to catch bugs, fast enough to not bog down the suite.
+Via `proptest` (`core/daemon/tests/properties.rs`). High-value
+invariants where random inputs catch the edge cases humans miss. Each
+property runs **256 cases** by default (`PROPTEST_CASES` raises it for
+a longer run), enough to catch bugs and fast enough for the Tier 1
+budget.
 
-High-priority properties to add:
+Properties that exist:
 
-- **Path normalization** — any generated path (including `../`, `./`,
-  multi-byte chars, traversal sequences) produces either an output
-  within the watch root or a rejection; never silently escapes.
+- **Path normalization** — any generated event path (`../`, `./`,
+  doubled separators, an absolute path elsewhere) is either accepted
+  and lies under the watch root once normalized, or rejected; a path
+  rooted elsewhere is never accepted.
 - **Scheduler superseding** — any sequence of upserts collapses to one
-  pending intent per path, and the intent's kind matches the latest
-  upsert.
+  pending intent per path, the intent's kind matches the latest
+  upsert, and draining claims each path once.
+- **Retry backoff monotonicity** — the exponential base never shrinks
+  between attempts (allowing for the symmetric jitter band), the delay
+  is never zero, and it never exceeds `RETRY_MAX_DELAY_MILLIS` plus
+  its jitter.
+
+Properties still to add:
+
 - **Throttle monotonicity** — monotonic input pressure produces
   monotonic state transitions; the controller never moves from
   `Throttled` to `IdleDrain` while CPU pressure rises.
-- **Retry backoff monotonicity** — the computed delay is
-  non-decreasing in attempt count and always `<= RETRY_MAX_DELAY_MILLIS`.
 - **Conflict suffix determinism** — identical `(path, device_id,
   timestamp_ms)` inputs produce an identical conflict suffix across
   runs.
@@ -152,27 +160,29 @@ High-priority properties to add:
 
 ### Platform trait contract tests (Tier 1; macOS CI + each shipping OS)
 
-When `core/platform` lands (wave 4), every trait gets a
-**parameterized contract suite** run against both the in-memory fake
-and the real native implementation on each shipping OS. This catches
-fake-vs-native drift — the single most likely source of "works in
-tests, breaks in prod".
+Every trait gets a **parameterized contract suite** run against both
+the in-memory fake and the real native implementation on each shipping
+OS. This catches fake-vs-native drift, the single most likely source
+of "works in tests, breaks in prod".
 
-Structure:
-
-```rust
-fn contract_tests<F: FsWatcher>(factory: impl Fn() -> F) {
-    // invariants
-}
-
-#[test] fn fake_fs_watcher_contract() { contract_tests(FakeFsWatcher::new); }
-#[test] fn macos_fs_watcher_contract() { contract_tests(MacosFsWatcher::new); }
-```
+Two traits have one today. `SecretStore` runs its body against the
+in-memory fake and the login keychain on macOS. `FsWatcher` runs
+`core/platform/src/fs_watch/contract.rs` against the fake on every host
+and FSEvents on macOS: the body performs real filesystem actions
+(create, modify, rename, remove) under a throwaway root, and asserts
+every delivered event is absolute, under the root, and plausibly
+timed, that each action produces the kinds the engine accepts for it,
+and that dropping the watcher disconnects the channel. The fake sees
+no OS events, so the harness mirrors each action through a clone of
+the watcher's channel; the native watcher gets nothing mirrored and
+the OS is the source. The remaining traits are open work
+(`docs/tasks/core.md` CT-5).
 
 Trait-specific invariants:
 
-- `FsWatcher` — create → modify → remove for a file; rename pairs;
-  symlink escape dropped; callback discipline preserved.
+- `FsWatcher` — create → modify → rename → remove for a file, as the
+  kinds the engine accepts for each; absolute paths under the root;
+  the channel closes with the watcher.
 - `ServiceInstaller` — install → start → status=`Running` → stop →
   uninstall round-trip; status transitions are observable.
 - `SecretStore` — get-after-set returns the value; delete removes; list
@@ -211,11 +221,16 @@ The SLO checks in `docs/performance/acceptance-budgets-and-benchmark-harness.md`
 are asserted on the report of one soak cell that `scripts/perf.sh`
 runs against the release profile. Release gate only; not a PR gate.
 
-Tier 1 keeps a small number of cheap **guard-rail** timing tests
-— the kind already present in `fs_events.rs` (5 000-event callback
-burst < 2 s) and `runtime.rs` (150-event composed tick < 3 s). These
+Tier 1 keeps a small number of cheap **guard-rail** timing tests,
+every one named `timing_guardrail_*` (the callback burst and deep-path
+budgets in `fs_events.rs`, the debounce tick, the scheduler superseding
+burst, the composed runtime tick, and the IPC connect timeout). These
 are not SLO tests; they exist to catch "someone accidentally made the
-callback 100× slower" before it reaches the release pipeline.
+callback 100× slower" before it reaches the release pipeline. The name
+is the triage rule: a flake in a `timing_guardrail_*` test on a
+saturated CI host is a timing event, not a logic failure, and is
+handled by rerunning the job, never by loosening the assertion in the
+same breath as a logic fix.
 
 ### Snapshot tests for CLI (Tier 1)
 
@@ -413,10 +428,14 @@ second copy of the Rust policy.
 
 ### `core/cli` (Rust, `vapor` binary)
 
-**Logic + snapshot + integration tests.** Every command with `--json`
-output has a snapshot. `vapor service install` / `run` / `status`
-round-trips are automated in CI. IPC client correctness runs against
-a fake daemon.
+**Logic + shape + binary tests.** Every command with `--json` output
+has an explicit shape test in its module. `core/cli/tests/binary.rs`
+spawns the built `vapor` on every CI OS with a throwaway `VAPOR_DIR`
+and locks the shell contract: exit codes, stdout for results and
+stderr for errors (never half a document on stdout), the typed
+`config set`, the empty-state shapes of `decisions` and `trash`, the
+`doctor --json` shape, and death on a closed pipe. The daemon paths
+(`vapor service install` / `run` / `status`) are Tier E2E.
 
 **No interactive TTY tests.** No color-code assertions, no
 cursor-position assertions, no terminal-resize simulations.

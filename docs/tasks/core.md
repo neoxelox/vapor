@@ -713,13 +713,14 @@ trivial restatements of code).
 
 ### One-time setup (do early)
 
-- [ ] CT-1 Adopt `proptest` as a dev-dependency in `core/daemon` and
-      `core/shared`. Add initial property tests for the high-value
-      invariants listed in `docs/architecture/testing-strategy.md`:
-      path normalization safety, scheduler superseding collapse,
-      throttle monotonicity, retry backoff monotonicity, ignore-rule
-      precedence determinism, durable-queue FIFO. Each property runs
-      64–256 cases on CI (fast tier).
+- [x] CT-1 `proptest` adopted in `core/daemon`
+      (`tests/properties.rs`): path normalization never escapes the
+      root, scheduler superseding leaves one intent per path, retry
+      backoff is monotonic and capped; 256 cases each. The remaining
+      properties listed in `testing-strategy.md` (throttle
+      monotonicity, conflict suffix determinism, durable-queue FIFO,
+      ignore-rule precedence, IPC handshake) are open and tracked
+      there.
 - [x] CT-2 Tier-1 timing guard: `./scripts/test.sh` fails a green run
       that exceeds `VAPOR_TEST_MAX_SECONDS` (the `test` workflow sets
       300) with a message pointing at `docs/architecture/testing-strategy.md`.
@@ -728,21 +729,23 @@ trivial restatements of code).
       Debug/Display string equality, serde round-trips of trivial
       structs). Remove or replace with behavior-level assertions.
       Document any kept legacy trivial test with a one-line rationale.
-- [ ] CT-4 Adopt `insta` as a dev-dependency in `core/cli` when it
-      lands (wave 6). Snapshot every `--json` command's output with a
-      fixed input fixture. Document the `cargo insta review` flow in
-      `docs/development/runbook.md`.
+- [ ] CT-4 Adopt `insta` for the `--json` shape locks in `core/cli`;
+      today every command has an explicit field-by-field test in its
+      module and `core/cli/tests/binary.rs` locks the shell contract
+      of the built binary on every CI OS. Document the `cargo insta
+      review` flow in `docs/development/runbook.md` when it lands.
 
 ### Per-wave standing requirements
 
 These do not have dedicated tickets — they ship with the wave that
 introduces the code they apply to.
 
-- [ ] CT-5 Every new `core/platform` trait ships with (a) an
-      in-memory fake, (b) a parameterized contract-test suite, and (c)
-      native implementations wired into that suite on every shipping
-      OS. Catches fake-vs-native drift. Applies to wave 4 and any new
-      trait added after.
+- [ ] CT-5 Every `core/platform` trait ships with (a) an in-memory
+      fake, (b) a parameterized contract-test suite, and (c) native
+      implementations wired into that suite on every shipping OS.
+      `SecretStore` and `FsWatcher` have theirs; `ServiceInstaller`,
+      `PlatformMetricsSampler`, `IdleNotifier`, `FilesystemCapabilities`,
+      `ProcessSupervisor`, and `TrashBin` are open.
 - [ ] CT-6 IPC skew matrix tests: when wave 6 lands, the test
       matrix covers `app-N ↔ daemon-N`, `app-N ↔ daemon-(N-1)`,
       `app-(N-1) ↔ daemon-N`, and `|N - M| = 2` (negative case).

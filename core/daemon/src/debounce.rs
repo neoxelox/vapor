@@ -641,8 +641,10 @@ mod tests {
         );
     }
 
+    /// A timing guard-rail (`testing-strategy.md`): a flake here means a
+    /// saturated host, not a logic failure, and is triaged as such.
     #[test]
-    fn debounce_tick_regression_stays_under_guardrail() {
+    fn timing_guardrail_debounce_tick_stays_under_budget() {
         let watch_root = PathBuf::from("/tmp/vapor-root");
         let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
             watch_root.clone(),

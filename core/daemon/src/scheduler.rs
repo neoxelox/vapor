@@ -615,8 +615,10 @@ mod tests {
         assert_eq!(scheduler.pending_count(), 1);
     }
 
+    /// A timing guard-rail (`testing-strategy.md`): a flake here means a
+    /// saturated host, not a logic failure, and is triaged as such.
     #[test]
-    fn scheduler_superseding_regression_stays_under_guardrail() {
+    fn timing_guardrail_scheduler_superseding_stays_under_budget() {
         let path = PathBuf::from("/tmp/vapor-root/src/main.rs");
         let mut scheduler = KeyedSupersedingScheduler::default();
 

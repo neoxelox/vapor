@@ -12,6 +12,8 @@ use std::time::SystemTime;
 mod fake;
 pub use fake::InMemoryFsWatcher;
 
+#[cfg(test)]
+pub mod contract;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]

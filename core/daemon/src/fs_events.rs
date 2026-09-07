@@ -801,8 +801,10 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    /// A timing guard-rail (`testing-strategy.md`): a flake here means a
+    /// saturated host, not a logic failure, and is triaged as such.
     #[test]
-    fn callback_burst_regression_stays_under_guardrail() {
+    fn timing_guardrail_callback_burst_stays_under_budget() {
         let watch_root = synthetic_watch_root();
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
@@ -827,8 +829,10 @@ mod tests {
         );
     }
 
+    /// A timing guard-rail (`testing-strategy.md`): a flake here means a
+    /// saturated host, not a logic failure, and is triaged as such.
     #[test]
-    fn callback_deep_path_regression_stays_under_guardrail() {
+    fn timing_guardrail_callback_deep_path_stays_under_budget() {
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         let mut deepest_directory = watch_root.clone();
