@@ -22,10 +22,10 @@
 use std::error::Error;
 use std::fmt::{self, Display};
 use std::path::PathBuf;
-// `Arc` is only referenced by the macOS `build_native_macos` constructor and
-// by the tests (which build `Arc<InMemory*>` fakes); it is unused on the
-// non-macOS lib build, which `-D warnings` treats as an error.
-#[cfg(any(target_os = "macos", test))]
+// `Arc` is only referenced by the `build_native` constructor (macOS and
+// Linux) and by the tests (which build `Arc<InMemory*>` fakes); it is
+// unused on the Windows lib build, which `-D warnings` treats as an error.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -33,18 +33,18 @@ use vapor_lifecycle::{
     CrashLoopStateSnapshot, DaemonHealthCheckOutcome, DaemonLifecycleActionResult,
     DaemonLifecycleError, DaemonLifecycleManager,
 };
-// The `AutoLaunchSettingStore` trait is needed by `build_native_macos` (macOS)
-// and by the tests (its `read` method is called on the in-memory store); the
-// concrete JSON-file stores are macOS-only.
-#[cfg(any(target_os = "macos", test))]
+// The `AutoLaunchSettingStore` trait is needed by `build_native` and by the
+// tests (its `read` method is called on the in-memory store); the concrete
+// JSON-file stores only exist where a native service manager does.
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 use vapor_lifecycle::AutoLaunchSettingStore;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use vapor_lifecycle::{
     CrashLoopPolicy, JsonFileAutoLaunchSettingStore, JsonFileLifecycleStateStore, SystemWallClock,
 };
 use vapor_platform::{ServiceInstallError, ServiceInstaller, ServiceStatus};
-// The macOS installer type + descriptor are only used by `build_native_macos`.
-#[cfg(target_os = "macos")]
+// The native installer type + descriptor are only used by `build_native`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use vapor_platform::{NativeServiceInstaller, ServiceDescriptor};
 use vapor_shared::constants;
 
@@ -354,24 +354,25 @@ pub fn render_text(outcome: &ServiceCommandOutcome) -> String {
     }
 }
 
-/// Production-mode constructor for the macOS service surface. Looks
-/// for the bundled daemon binary at `<cli-binary-parent>/vapord`,
-/// falling back to `PATH` lookup. Returns the manager + installer pair
-/// so the binary can call `dispatch` against them.
+/// Production-mode constructor for the native service surface: a
+/// LaunchAgent on macOS, a systemd user unit on Linux. Looks for the
+/// bundled daemon binary at `<cli-binary-parent>/vapord`, falling back
+/// to `PATH` lookup. Returns the manager + installer pair so the binary
+/// can call `dispatch` against them.
 ///
 /// The service descriptor follows
 /// `docs/operations/macos/launchagent-policy.md`: stdout/stderr are
 /// redirected under `<vapor_dir>/logs/`, and the environment carries
 /// only `VAPOR_DIR` (plus `VAPOR_ENV` when set in the invoking
-/// environment) — every other setting reaches the daemon through
-/// `vapor.json`. This keeps the plist identical no matter which surface
-/// (CLI or macOS app shim) drives the install.
+/// environment); every other setting reaches the daemon through
+/// `vapor.json`. This keeps the definition identical no matter which
+/// surface (CLI or app shim) drives the install.
 ///
 /// The manager is built over the durable lifecycle state at
 /// `<vapor_dir>/state/lifecycle.json`, so crash-loop backoff and pause
 /// survive across invocations and surfaces.
-#[cfg(target_os = "macos")]
-pub fn build_native_macos(
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn build_native(
     config_path: PathBuf,
     daemon_binary: PathBuf,
 ) -> Result<(DaemonLifecycleManager, Arc<NativeServiceInstaller>), ServiceCommandError> {
@@ -422,7 +423,7 @@ pub fn build_native_macos(
 /// The headless supervisor's service definition: this very `vapor`
 /// binary running `service check --loop`, kept alive by the service
 /// manager, with the same runtime directory as the daemon.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn supervisor_installer() -> Result<NativeServiceInstaller, ServiceCommandError> {
     let executable = std::env::current_exe().map_err(|error| {
         ServiceCommandError::Install(ServiceInstallError::Backend(Box::new(error)))

@@ -88,9 +88,13 @@ pub fn product_paths_profile(
     daemon_kind: DaemonKind,
     release: bool,
 ) -> Result<RunPaths, Failure> {
-    let debug = repo_root
-        .join("target")
-        .join(if release { "release" } else { "debug" });
+    // The same directory cargo just built into, so a run with
+    // `CARGO_TARGET_DIR` set (a Linux container over a macOS checkout)
+    // finds its own binaries and not the host's.
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root.join("target"));
+    let debug = target.join(if release { "release" } else { "debug" });
     let exe = |name: &str| {
         if cfg!(windows) {
             debug.join(format!("{name}.exe"))

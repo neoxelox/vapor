@@ -217,10 +217,92 @@ impl ChangesFeed {
                     ("kind", format!("{:?}", event.kind)),
                 ],
             );
+            if directory_appeared(root, &event) {
+                // A directory that appeared (created, renamed in) may
+                // already hold files the watcher never reported: on
+                // inotify anything that lands before the new watch is
+                // attached, on every backend the contents of a moved
+                // tree. Report them as the changes the watcher would
+                // have delivered one by one. A tree larger than the
+                // ring rolls the cursor over, which the engine answers
+                // with a reconcile.
+                let mut reported = 0usize;
+                report_directory_files(root, tags, &event.path, event.observed_at, &mut |change| {
+                    reported += 1;
+                    ring.push(change);
+                });
+                logging::debug(
+                    "Changes-feed directory appeared; reported its files",
+                    &[
+                        ("path", event.path.display().to_string()),
+                        ("files", reported.to_string()),
+                    ],
+                );
+                continue;
+            }
             if let Some(change) = normalize_watch_event(root, tags, event) {
                 ring.push(change);
             }
         }
+    }
+}
+
+/// A `Created`, `Renamed`, or `Other` event whose path is now a
+/// directory strictly inside the root.
+fn directory_appeared(root: &Path, event: &WatchEvent) -> bool {
+    matches!(
+        event.kind,
+        WatchEventKind::Created | WatchEventKind::Renamed | WatchEventKind::Other
+    ) && event.path != root
+        && event.path.starts_with(root)
+        && event
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| !is_internal_file_name(name))
+        && fs::symlink_metadata(&event.path).is_ok_and(|metadata| metadata.is_dir())
+}
+
+/// Walks `directory` and hands one `CreatedOrModified` change per
+/// regular file to `sink`, skipping symlinks and internal names.
+fn report_directory_files(
+    root: &Path,
+    tags: &OpIdTagStore,
+    directory: &Path,
+    observed_at: SystemTime,
+    sink: &mut dyn FnMut(RemoteChange),
+) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if is_internal_file_name(name) {
+            continue;
+        }
+        if metadata.is_dir() {
+            report_directory_files(root, tags, &path, observed_at, sink);
+            continue;
+        }
+        let Some(remote_path) = RemotePath::from_local(root, &path) else {
+            continue;
+        };
+        sink(RemoteChange {
+            path: remote_path,
+            kind: RemoteChangeKind::CreatedOrModified,
+            observed_at,
+            op_id: tags.read_op_id(&path),
+            content_hash: None,
+        });
     }
 }
 
@@ -374,6 +456,48 @@ mod tests {
         );
         assert_eq!(page.changes.len(), 1);
         assert_eq!(page.changes[0].kind, RemoteChangeKind::Removed);
+    }
+
+    #[test]
+    fn a_directory_that_appeared_reports_its_files() {
+        // The watcher said only "2026 was created": the file moved
+        // into it landed before its watch existed. The feed reports
+        // what is inside, nested directories included, and skips the
+        // internal side-files.
+        let (dir, feed, handle, tags) = feed_fixture();
+        let root = dir.path();
+        let baseline = expect_page(feed.poll(root, &tags, None, 100).expect("baseline"));
+
+        std::fs::create_dir_all(root.join("2026/raw")).expect("dirs");
+        std::fs::write(root.join("2026/footage-renamed.raw"), b"frames").expect("file");
+        std::fs::write(root.join("2026/raw/take-2.raw"), b"more").expect("nested file");
+        std::fs::write(
+            root.join("2026")
+                .join(format!("{}scratch", constants::provider::TEMP_FILE_PREFIX)),
+            b"staging",
+        )
+        .expect("internal file");
+        handle.emit_created(root.join("2026"), ts(5));
+
+        let page = expect_page(
+            feed.poll(root, &tags, Some(&baseline.next_cursor), 100)
+                .expect("poll"),
+        );
+        let mut paths: Vec<&str> = page
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            vec!["2026/footage-renamed.raw", "2026/raw/take-2.raw"]
+        );
+        assert!(
+            page.changes
+                .iter()
+                .all(|change| change.kind == RemoteChangeKind::CreatedOrModified)
+        );
     }
 
     #[test]

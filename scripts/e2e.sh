@@ -27,7 +27,7 @@ export VAPOR_ENV="dev"
 # from the invoking shell must never leak into a scenario.
 unset VAPOR_DIR
 
-E2E_BIN="$ROOT_DIR/target/debug/vapor-e2e"
+E2E_BIN="${CARGO_TARGET_DIR:-$ROOT_DIR/target}/debug/vapor-e2e"
 if [[ "$(uname -s 2>/dev/null || echo unknown)" == MINGW* || "$(uname -s 2>/dev/null || echo unknown)" == MSYS* ]]; then
   E2E_BIN="$E2E_BIN.exe"
 fi

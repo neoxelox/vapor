@@ -1727,6 +1727,32 @@ impl DurableStateDb {
         Ok(count as usize)
     }
 
+    /// Whether the queue still holds intent `id` in a working state.
+    /// An in-flight intent checks this before an irreversible step, so
+    /// a row dropped meanwhile (a root recovery) is honoured.
+    pub fn intent_is_queued(&self, id: i64) -> Result<bool, StateDbError> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM queue_intents WHERE id = ? AND state IN (?, ?)",
+            params![id, STATE_PENDING, STATE_LEASED],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Removes every queued (pending or leased) intent of `kind`. A
+    /// root recovery uses it: deletions observed while a root was
+    /// going away describe the root's absence, not the user's intent.
+    pub fn discard_queued_of_kind(
+        &mut self,
+        kind: PendingIntentKind,
+    ) -> Result<usize, StateDbError> {
+        let changed = self.connection.execute(
+            "DELETE FROM queue_intents WHERE kind = ? AND state IN (?, ?)",
+            params![intent_kind_label(kind), STATE_PENDING, STATE_LEASED],
+        )?;
+        Ok(changed)
+    }
+
     /// Removes every intent held behind `decision_id`.
     pub fn drop_held(&mut self, decision_id: i64) -> Result<usize, StateDbError> {
         let changed = self.connection.execute(

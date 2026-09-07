@@ -79,8 +79,9 @@ across platforms, start with `platform-abstractions.md`.
   transport (Unix domain socket, optional NSXPC wrapping).
 - `windows/` — Windows-specific architecture (transport choice
   documented now; native trait impls land with the optional Wave 12).
-- `linux/` — Linux-specific architecture (transport choice documented
-  now; native trait impls land with the optional Wave 13).
+- `linux/` — Linux-specific architecture (transport choice; the
+  native trait impls are in, the app and release lane are still to
+  come).
 
 Architecture docs are living references and are expected to evolve as
 implementation lands.

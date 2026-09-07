@@ -131,6 +131,26 @@ Fast facts for local dev:
   alters runtime behavior a user would observe through the daemon or
   CLI. One sandbox per scenario under `.vapor/e2e/`; `--only Sxx`
   runs one scenario; see `docs/development/e2e-verification.md`.
+- **Linux from a macOS checkout.** The `core/platform` Linux
+  implementations and the daemon on inotify are verified in a
+  container over the same working tree. The target directory lives
+  outside the host's `target/` so the two toolchains never overwrite
+  each other's binaries, and a tmpfs covers `.vapor/`, because a
+  Docker Desktop bind mount refuses to bind the daemon's Unix socket.
+  The image's `rustup` follows `rust-toolchain.toml`, so the container
+  lints with the latest stable clippy, which is what CI runs too:
+
+  ```sh
+  docker run --rm -v "$PWD":/work -w /work \
+    -v vapor-linux-target:/work/target-linux \
+    -v vapor-linux-cargo:/usr/local/cargo/registry \
+    --tmpfs /work/.vapor:rw,size=2g \
+    -e CARGO_TARGET_DIR=/work/target-linux -e VAPOR_ENV=dev \
+    rust:slim sh -c 'apt-get update -qq && apt-get install -y -qq \
+      pkg-config libsqlite3-dev build-essential attr procps >/dev/null && \
+      cargo clippy --workspace --all-targets -- -D warnings && \
+      cargo test --workspace && ./scripts/e2e.sh'
+  ```
 
 ## Release build policy
 

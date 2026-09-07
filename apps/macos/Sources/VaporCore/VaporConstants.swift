@@ -14,6 +14,7 @@ public enum VaporConstants {
     public static let gdriveClientId = "VAPOR_GDRIVE_CLIENT_ID"
     public static let gdriveClientSecret = "VAPOR_GDRIVE_CLIENT_SECRET"
     public static let throttleInputs = "VAPOR_THROTTLE_INPUTS"
+    public static let secretsCommand = "VAPOR_SECRETS_COMMAND"
   }
 
   public enum Runtime {

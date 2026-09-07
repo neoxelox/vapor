@@ -1,14 +1,15 @@
 // `PathBuf`, `Instant`, and the `service` command module are only referenced
-// by the `#[cfg(target_os = "macos")]` service-install wiring below, so they
-// are unused on the non-macOS build that CI compiles under `-D warnings`.
-#[cfg(target_os = "macos")]
+// by the service-install wiring below, which exists where a native service
+// manager does (launchd, systemd); they are unused on the Windows build that
+// CI compiles under `-D warnings`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::path::PathBuf;
 use std::process::ExitCode;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use vapor_cli::commands::service as service_cmd;
 use vapor_cli::{RunOptions, ServiceCommand};
 use vapor_cli::{
@@ -706,8 +707,9 @@ fn dispatch_logs(tail: Option<usize>) -> Result<ExitCode, String> {
 }
 
 fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
-    let store = auth_cmd::build_native_store();
+    let (store, fallback_reason) = auth_cmd::build_native_store();
     let persistent = store.is_persistent();
+    let fallback_reason = fallback_reason.unwrap_or_default();
     match action {
         AuthAction::Login {
             provider,
@@ -735,8 +737,8 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
                 println!("auth login: stored token for {provider} (profile {profile})");
             } else {
                 eprintln!(
-                    "vapor: warning: no native secret store on this OS yet; the token was \
-                     kept in process memory only and will not survive restart."
+                    "vapor: warning: {fallback_reason}; the token was kept in process memory \
+                     only and will not survive restart."
                 );
                 println!(
                     "auth login: stored token for {provider} (profile {profile}, process-local only)"
@@ -755,8 +757,8 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
                 auth_cmd::status_from(store.as_ref(), &profile).map_err(|e| e.to_string())?;
             if !persistent {
                 eprintln!(
-                    "vapor: note: no native secret store on this OS yet; `bound` states \
-                     below reflect process-local memory only."
+                    "vapor: note: {fallback_reason}; `bound` states below reflect \
+                     process-local memory only."
                 );
             }
             for entry in entries {
@@ -839,15 +841,15 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
         ServiceAction::Acknowledge { json } => (ServiceCommand::Acknowledge, json),
     };
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let config_path = resolve_configuration_path();
         let daemon_binary = locate_daemon_binary().ok_or_else(|| {
             "vapord binary not found near the running CLI; install via the macOS app or set PATH"
                 .to_string()
         })?;
-        let (manager, installer) = service_cmd::build_native_macos(config_path, daemon_binary)
-            .map_err(|e| e.to_string())?;
+        let (manager, installer) =
+            service_cmd::build_native(config_path, daemon_binary).map_err(|e| e.to_string())?;
         if let Some(interval) = check_loop {
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let flag = stop.clone();
@@ -875,14 +877,13 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
                     .map_err(|e| format!("supervisor install failed: {e}"))?;
             }
             service_cmd::ServiceCommandOutcome::Action(_)
-                if matches!(command, ServiceCommand::Uninstall { .. }) =>
+                if matches!(command, ServiceCommand::Uninstall { .. })
+                    && vapor_platform::ServiceInstaller::status(&supervisor).is_ok_and(
+                        |status| status != vapor_platform::ServiceStatus::NotInstalled,
+                    ) =>
             {
-                if vapor_platform::ServiceInstaller::status(&supervisor)
-                    .is_ok_and(|status| status != vapor_platform::ServiceStatus::NotInstalled)
-                {
-                    vapor_platform::ServiceInstaller::disable_and_uninstall(&supervisor)
-                        .map_err(|e| format!("supervisor uninstall failed: {e}"))?;
-                }
+                vapor_platform::ServiceInstaller::disable_and_uninstall(&supervisor)
+                    .map_err(|e| format!("supervisor uninstall failed: {e}"))?;
             }
             _ => {}
         }
@@ -896,14 +897,17 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
         Ok(ExitCode::SUCCESS)
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (command, json, supervise, check_loop);
-        Err("`vapor service` currently supports macOS only; Linux and Windows land with those surfaces".to_string())
+        Err(
+            "`vapor service` needs a native service manager; Windows lands with that surface"
+                .to_string(),
+        )
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn locate_daemon_binary() -> Option<PathBuf> {
     use vapor_cli::commands::daemon_binary::{self, DaemonBinarySource};
     let daemon = daemon_binary::locate()?;

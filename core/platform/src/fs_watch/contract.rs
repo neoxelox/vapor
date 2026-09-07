@@ -204,7 +204,7 @@ mod tests {
         });
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn the_native_watcher_keeps_the_contract() {
         let start = |root: PathBuf, sender: Sender<WatchEvent>| {

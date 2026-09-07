@@ -15,9 +15,9 @@
 //! 3. Stay byte-for-byte semantically identical across native impls
 //!    (parity tests guarantee this once they land).
 //!
-//! Every trait below ships with a macOS-native implementation seam.
-//! Windows / Linux native impls are intentionally `unimplemented!()`
-//! until those platforms become shipping surfaces.
+//! Every trait below has a macOS and a Linux native implementation;
+//! the Windows ones are honest stubs (`Unsupported`, neutral defaults)
+//! until that platform becomes a shipping surface.
 // Allow tightly-scoped `unsafe` for OS FFI calls (e.g. `libc::getuid()`).
 // Each `unsafe` block must explain why it is sound. Engine code in
 // `core/daemon`, `core/shared`, etc. continues to `forbid(unsafe_code)`.

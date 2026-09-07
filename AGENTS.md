@@ -33,7 +33,7 @@ Reading order for a new session:
   - Recover safely after crash/restart.
   - Defer under pressure and converge eventually.
 - Bidirectional behavior is in MVP for Google Drive and must be safety-first.
-- Feature parity is mandatory for the invariants above on every OS that currently ships a surface. Autolaunch, crash-loop protection, durable queue, throttle discipline, secret storage, and resource budgets must be delivered via the matching `core/platform` trait implementation; "skip it on the shipping OS" is never acceptable. An OS that is not yet a shipping surface (currently Windows and Linux) may have `unimplemented!()` stubs behind the trait, provided the engine continues to compile on that OS so the door stays open.
+- Feature parity is mandatory for the invariants above on every OS that currently ships a surface. Autolaunch, crash-loop protection, durable queue, throttle discipline, secret storage, and resource budgets must be delivered via the matching `core/platform` trait implementation; "skip it on the shipping OS" is never acceptable. An OS that is not yet a shipping surface (currently Windows; Linux has its native implementations but no app or release lane yet) may have `unimplemented!()` stubs behind the trait, provided the engine continues to compile on that OS so the door stays open.
 
 ## 1.1) Project maturity and compatibility policy
 
@@ -145,7 +145,7 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 
 ## 6) Security and privacy
 
-- Secrets/tokens only via `core/platform/secrets::SecretStore`: the login keychain on macOS (one generic-password item per secret under the `sh.arn.vapor` service, with an access list covering `vapor` and `vapord`), Credential Manager on Windows, Secret Service on desktop Linux, age-encrypted file or external command shim on headless Linux. Tests use the in-memory fake; the fake and the native store run the same contract test.
+- Secrets/tokens only via `core/platform/secrets::SecretStore`: the login keychain on macOS (one generic-password item per secret under the `sh.arn.vapor` service, with an access list covering `vapor` and `vapord`), Credential Manager on Windows, Secret Service on desktop Linux, the external command named by `VAPOR_SECRETS_COMMAND` on headless Linux, never a plaintext file. Tests use the in-memory fake; the fake and the native store run the same contract test.
 - Logs must redact secrets, tokens, auth headers, and sensitive identifiers.
 - Telemetry is local-only unless explicitly designed otherwise.
 - Any permissioned feature must degrade safely when denied.

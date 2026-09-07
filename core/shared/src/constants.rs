@@ -20,6 +20,11 @@ pub mod env {
     /// Test harnesses set `static` so a run is not shaped by whoever is
     /// typing on the machine; the soak driver uses `file:`.
     pub const VAPOR_THROTTLE_INPUTS: &str = "VAPOR_THROTTLE_INPUTS";
+    /// An external secret manager on Linux (`pass`, a vault CLI, an
+    /// `age` wrapper): the program the secret store shells out to with
+    /// the verbs in `secrets::COMMAND_VERB_*`. Takes precedence over the
+    /// desktop Secret Service when set.
+    pub const VAPOR_SECRETS_COMMAND: &str = "VAPOR_SECRETS_COMMAND";
 }
 
 pub mod runtime {
@@ -405,6 +410,15 @@ pub mod secrets {
     /// inside that namespace, so a user can find and remove every Vapor
     /// item in the OS keychain UI by this one string.
     pub const STORE_NAMESPACE: &str = "sh.arn.vapor";
+    /// The command shim's verbs, for a Linux host where an external
+    /// secret manager holds the tokens: `<command> get <name>` prints
+    /// the secret, `<command> set <name>` reads it on stdin,
+    /// `<command> delete <name>`, `<command> list` prints one name per
+    /// line. Exit 0 on success, 1 when a secret is not found.
+    pub const COMMAND_VERB_GET: &str = "get";
+    pub const COMMAND_VERB_SET: &str = "set";
+    pub const COMMAND_VERB_DELETE: &str = "delete";
+    pub const COMMAND_VERB_LIST: &str = "list";
 }
 
 pub mod ipc {

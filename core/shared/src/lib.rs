@@ -28,7 +28,18 @@ pub enum RunState {
 /// Thermal pressure tiers reported by the platform metrics sampler and
 /// consumed by the throttle controller. Lives in `vapor-shared` so the
 /// platform layer and the engine speak one type instead of mirroring it.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ThermalPressure {
     #[default]

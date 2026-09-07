@@ -2568,11 +2568,9 @@ fn hold_if_mass_deletion(
     let decision_id = match existing {
         Some(decision) => decision.id,
         None => {
-            let share = if synced == 0 {
-                100
-            } else {
-                (count * 100 / synced).min(100)
-            };
+            let share = (count * 100)
+                .checked_div(synced)
+                .map_or(100, |share| share.min(100));
             let question = format!(
                 "Vapor is holding a burst of deletions that arrived from {}: {count} of the {synced} \
                  files it syncs ({share}%) would be removed on {}. Apply them, or discard them and \
@@ -2954,11 +2952,45 @@ fn continue_apply_remote_delete(
     probe: &ProbeResult,
     now: SystemTime,
 ) -> PlanOutcome {
-    if matches!(probe.stat, Some(Ok(Some(_)))) {
-        // The remote object was recreated after the deletion was
-        // observed — completing the delete would remove a file that is
-        // present remotely.
-        return PlanOutcome::Noop("remote object exists again; deletion is stale");
+    // Only a stat that answers "no object" confirms the deletion. An
+    // error is not an answer: a vanished cloud root makes every probe
+    // fail, and finishing deletions on that evidence would mirror a
+    // missing root as the loss of every file under it.
+    match probe.stat.as_ref() {
+        Some(Ok(None)) => {}
+        Some(Ok(Some(_))) => {
+            // The remote object was recreated after the deletion was
+            // observed; completing the delete would remove a file that
+            // is present remotely.
+            return PlanOutcome::Noop("remote object exists again; deletion is stale");
+        }
+        Some(Err(error)) => {
+            return PlanOutcome::Fail {
+                failure: error.kind.retry_classification(),
+                message: format!(
+                    "cannot confirm the cloud deletion before removing the local copy: {}",
+                    error.message
+                ),
+            };
+        }
+        None => {
+            return PlanOutcome::Fail {
+                failure: RetryFailureKind::Transient,
+                message: "internal error: remote-delete probe carried no remote stat".to_string(),
+            };
+        }
+    }
+    // A root recovery drops queued deletions while this one may be in
+    // flight; the dropped row is the answer.
+    match state_db.intent_is_queued(intent.id) {
+        Ok(true) => {}
+        Ok(false) => return PlanOutcome::Noop("deletion withdrawn while its probe ran"),
+        Err(error) => {
+            return PlanOutcome::Fail {
+                failure: RetryFailureKind::Transient,
+                message: format!("cannot re-read the deletion intent: {error}"),
+            };
+        }
     }
     match deletion_loses_to_local_state(state_db, intent, env.hash_algorithm) {
         Ok(Some(reason)) => return PlanOutcome::Noop(reason),
@@ -4642,6 +4674,59 @@ mod tests {
             fixture
                 .local_echoes
                 .matches_delete(&local_file.to_string_lossy(), timestamp_ms(1))
+        );
+    }
+
+    #[test]
+    fn a_remote_delete_is_not_applied_when_the_cloud_root_is_gone() {
+        // The cloud root vanishes; the feed reports every file under
+        // it removed. The probe cannot answer "no object", it fails
+        // with the root missing, and the local copy has to stay.
+        let mut fixture = Fixture::new();
+        let local_file = fixture.local_root.join("kept.txt");
+        std::fs::write(&local_file, b"kept").expect("seed local");
+        let mtime = std::fs::symlink_metadata(&local_file)
+            .and_then(|m| m.modified())
+            .ok();
+        fixture
+            .state_db
+            .set_sync_index(
+                &local_file,
+                &hash_hex_of_bytes(b"kept"),
+                4,
+                mtime,
+                None,
+                "op-past",
+                timestamp_ms(0),
+            )
+            .expect("seed sync index");
+        std::fs::remove_dir_all(&fixture.cloud_root).expect("cloud root gone");
+
+        let intent = fixture.enqueue_and_lease(&local_file, PendingIntentKind::ApplyRemoteDelete);
+        assert_eq!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0)),
+            StartDecision::Started
+        );
+        let report = fixture.run_to_quiescence(8);
+
+        assert_eq!(report.completed, 0, "{report:?}");
+        assert!(
+            local_file.exists(),
+            "a missing root is never mirrored as deletions"
+        );
+        let last_error = fixture
+            .state_db
+            .list_queue_intents(8)
+            .expect("queue")
+            .into_iter()
+            .find(|record| record.path == local_file)
+            .and_then(|record| record.last_error)
+            .unwrap_or_default();
+        assert!(
+            last_error.contains("cannot confirm the cloud deletion"),
+            "{last_error}"
         );
     }
 

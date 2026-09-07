@@ -78,7 +78,7 @@ pub fn list_trash(config: &VaporConfig) -> TrashListReport {
         .flat_map(|profile_id| open(profile_id).list())
         .map(to_json)
         .collect();
-    entries.sort_by(|a, b| b.discarded_at_ms.cmp(&a.discarded_at_ms));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.discarded_at_ms));
     TrashListReport { entries }
 }
 

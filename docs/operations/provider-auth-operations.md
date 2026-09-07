@@ -47,9 +47,25 @@ are provider-neutral unless a section says otherwise.
   that would need a prompt with `errSecInteractionNotAllowed`; the
   error surfaces verbatim in `vapor auth` output and in the daemon's
   `Authentication` state.
-- Linux and Windows have no native store yet. `vapor auth login`
-  warns and keeps the token in process memory, so Google Drive cannot
-  sync on those hosts until their stores land.
+
+## Where tokens live on Linux
+
+- With `VAPOR_SECRETS_COMMAND` set, every secret goes through that
+  program: `<command> get <name>` prints it, `<command> set <name>`
+  reads it on stdin, `<command> delete <name>` removes it, `<command>
+  list` prints one name per line, exit 1 means not found. A `pass`
+  wrapper is a few lines of shell; the daemon and the CLI both call
+  it, so it must work without a terminal. This is the headless
+  choice, and it wins over the desktop store when set.
+- Otherwise, on a desktop with a session bus and `secret-tool`
+  (libsecret's CLI, package `libsecret-tools` on Debian and Ubuntu),
+  each secret is a Secret Service item with the attributes `service =
+  sh.arn.vapor` and `name = <secret name>`, so Seahorse or any keyring
+  UI lists every Vapor entry under one search.
+- With neither, `vapor auth login` warns with the variable to set and
+  keeps the token in process memory only; a token is never written to
+  a plaintext file. `vapor doctor` names the backend in use.
+- Windows has no native store yet; the CLI warns the same way.
 
 ## Token lifecycle policy
 

@@ -98,9 +98,9 @@ impl Host {
         Self {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
-            // The native watcher ships on macOS only; Linux and Windows
-            // stubs refuse to start until their implementations land.
-            native_watcher: cfg!(target_os = "macos"),
+            // FSEvents on macOS, inotify on Linux; the Windows stub
+            // refuses to start until its implementation lands.
+            native_watcher: cfg!(any(target_os = "macos", target_os = "linux")),
             unix,
             fifo: unix && probe_fifo(sandbox_root),
             posix_mode: unix && probe_posix_mode(sandbox_root),
@@ -190,22 +190,32 @@ fn probe_posix_mode(root: &Path) -> bool {
 }
 
 fn probe_xattr(root: &Path) -> bool {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let path = root.join(".probe.xattr");
         if fs::write(&path, b"x").is_err() {
             return false;
         }
-        let ok = Command::new("xattr")
-            .args(["-w", "sh.arn.vapor.probe", "1"])
+        let mut command = if cfg!(target_os = "macos") {
+            let mut command = Command::new("xattr");
+            command.args(["-w", "sh.arn.vapor.probe", "1"]);
+            command
+        } else {
+            let mut command = Command::new("setfattr");
+            command.args(["-n", "user.sh.arn.vapor.probe", "-v", "1"]);
+            command
+        };
+        let ok = command
             .arg(&path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|status| status.success())
             .unwrap_or(false);
         let _ = fs::remove_file(&path);
         ok
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = root;
         false
@@ -262,7 +272,10 @@ fn detect_launchd(full: bool) -> (bool, Option<String>) {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        (false, Some("service round-trip is macOS-only".to_string()))
+        (
+            false,
+            Some("the service round-trip drives launchd; this host has none".to_string()),
+        )
     }
 }
 

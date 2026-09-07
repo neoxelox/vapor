@@ -16,6 +16,8 @@ pub use fake::InMemoryFsWatcher;
 pub mod contract;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod notify_backend;
 #[cfg(target_os = "macos")]
 pub use macos::NativeFsWatcher;
 
@@ -110,10 +112,10 @@ pub trait FsWatcher: Send + 'static {
 /// Consumers that would otherwise advertise watch-backed capabilities
 /// (the filesystem provider's changes feed, the daemon runtime's local
 /// watch) must check this and degrade honestly on hosts whose native
-/// watcher is still a stub (currently Linux and Windows); the stub
-/// constructor itself fails with an `Unsupported` backend error.
+/// watcher is still a stub (currently Windows); the stub constructor
+/// itself fails with an `Unsupported` backend error.
 pub fn native_watcher_available() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(any(target_os = "macos", target_os = "linux"))
 }
 
 pub fn start_native_watcher(

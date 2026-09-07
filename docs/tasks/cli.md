@@ -91,8 +91,10 @@ state), and `acknowledge` (clear a crash-loop pause).
       Also walks the crash-loop supervision path: `check` restart /
       backoff deferral / pause → `acknowledge`. Host-mutating, so it is
       opt-in and never clobbers an existing install.)*
-- [ ] L2-6 Same round-trip automated on Linux CI (systemd user unit) once
-      `docs/tasks/core.md` C7-2 lands.
+- [ ] L2-6 Same round-trip automated on Linux CI (systemd user unit).
+      `vapor service` dispatches on Linux since C7-2 landed; the e2e
+      scenario needs a `systemctl --user` session on the runner, which
+      `ubuntu-latest` does not give a plain job.
 - [ ] L2-7 Same round-trip automated on Windows CI (Task Scheduler) once
       `docs/tasks/core.md` C6-2 lands.
 

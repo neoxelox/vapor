@@ -166,9 +166,11 @@ OS. This catches fake-vs-native drift, the single most likely source
 of "works in tests, breaks in prod".
 
 Two traits have one today. `SecretStore` runs its body against the
-in-memory fake and the login keychain on macOS. `FsWatcher` runs
-`core/platform/src/fs_watch/contract.rs` against the fake on every host
-and FSEvents on macOS: the body performs real filesystem actions
+in-memory fake, the login keychain on macOS, and the command shim on
+Linux (a file-backed shell script standing in for `pass`). `FsWatcher`
+runs `core/platform/src/fs_watch/contract.rs` against the fake on
+every host, FSEvents on macOS, and inotify on Linux: the body performs
+real filesystem actions
 (create, modify, rename, remove) under a throwaway root, and asserts
 every delivered event is absolute, under the root, and plausibly
 timed, that each action produces the kinds the engine accepts for it,
@@ -390,9 +392,9 @@ value", the test is not worth writing.
   runtime-affecting changes (`AGENTS.md §9.8`). Runs the shipped
   binaries sandboxed under `.vapor/e2e/`; the default suite takes a
   few minutes, most of it in scenarios that wait out a known gap. The
-  daemon scenarios run on macOS today (the native FSEvents watcher on
-  the shipping surface) and skip by name on Linux and Windows until
-  their native traits ship. The macOS job passes `--full`, which adds
+  daemon scenarios run on macOS (FSEvents) and Linux (inotify) and
+  skip by name on Windows until its native traits ship. The macOS job
+  passes `--full`, which adds
   the black-box `vapor service` round-trip (install → start → status
   → crash-loop supervision → acknowledge → stop → uninstall) against
   real `launchd`. That phase installs a real LaunchAgent,

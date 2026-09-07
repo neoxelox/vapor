@@ -5,11 +5,13 @@ architecture lives one level up in `docs/architecture/`. Read the
 common docs first; this directory captures Linux-specific transport
 and lifecycle choices.
 
-The native Linux surfaces (`apps/linux`, the `core/platform/*::linux`
-impls) are part of the optional Wave 13 work and are not committed
-deliverables. Until that wave lands, this directory is
-documentation-only — the runtime trait stubs return `Unsupported` on
-Linux.
+The `core/platform/*::linux` implementations exist: the daemon and
+the `vapor` CLI run on Linux with inotify, a systemd user unit, the
+freedesktop trash, `/proc` and `/sys` throttle inputs, and a secret
+store backed by `VAPOR_SECRETS_COMMAND` or the desktop Secret Service
+(`docs/architecture/platform-abstractions.md` has every row). The
+Linux app (`apps/linux`), the trust chain, and the release lane are
+still to come; until they land, Linux is not a shipping surface.
 
 ## How to use this group
 

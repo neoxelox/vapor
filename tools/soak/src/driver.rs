@@ -1146,31 +1146,29 @@ impl Driver {
                     faults.push(format!("throttle-walk:{}", station.label()));
                 }
             }
-            FaultKind::DiskFull => {
-                if self.image.is_some() && self.cloud_parked.is_none() {
-                    let filler = self.home.cloud.join(".soak-filler.bin");
-                    let mut file = fs::File::create(&filler)?;
-                    use std::io::Write;
-                    let chunk = vec![0xA5u8; 1024 * 1024];
-                    let mut written = 0u64;
-                    while file.write_all(&chunk).is_ok() {
-                        written += chunk.len() as u64;
-                        if written > 4 * 1024 * 1024 * 1024 {
-                            break;
-                        }
+            FaultKind::DiskFull if self.image.is_some() && self.cloud_parked.is_none() => {
+                let filler = self.home.cloud.join(".soak-filler.bin");
+                let mut file = fs::File::create(&filler)?;
+                use std::io::Write;
+                let chunk = vec![0xA5u8; 1024 * 1024];
+                let mut written = 0u64;
+                while file.write_all(&chunk).is_ok() {
+                    written += chunk.len() as u64;
+                    if written > 4 * 1024 * 1024 * 1024 {
+                        break;
                     }
-                    let _ = file.sync_all();
-                    drop(file);
-                    self.note(format!(
-                        "disk-full: cloud volume filled with {} MiB",
-                        written / (1024 * 1024)
-                    ));
-                    self.record_fault_event(
-                        "disk-full",
-                        format!("{} MiB filler", written / (1024 * 1024)),
-                    );
-                    faults.push("disk-full".to_string());
                 }
+                let _ = file.sync_all();
+                drop(file);
+                self.note(format!(
+                    "disk-full: cloud volume filled with {} MiB",
+                    written / (1024 * 1024)
+                ));
+                self.record_fault_event(
+                    "disk-full",
+                    format!("{} MiB filler", written / (1024 * 1024)),
+                );
+                faults.push("disk-full".to_string());
             }
             _ => {}
         }

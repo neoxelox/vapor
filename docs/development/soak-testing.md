@@ -192,5 +192,7 @@ sandbox with `hdiutil` and detached by the driver or by `clean.sh`.
 Locally, a run of a few minutes is a smoke check; the runs that find
 things are hours long. The scheduled `soak.yml` workflow runs a matrix
 of cells on the macOS runner; `scripts/perf.sh` runs one bounded cell
-in the release pipeline and asserts the SLO checks on its report. Linux
-cells wait for the native Linux traits (`docs/tasks/core.md`).
+in the release pipeline and asserts the SLO checks on its report. The
+driver runs on Linux too (the daemon does since its native traits
+landed); scheduled Linux cells with `tmpfs` and cgroup limits are
+still to come.

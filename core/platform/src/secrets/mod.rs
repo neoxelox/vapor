@@ -3,9 +3,11 @@
 //! See `docs/architecture/platform-abstractions.md` §`SecretStore`.
 //!
 //! macOS stores secrets in the login keychain through Keychain Services
-//! (`macos.rs`). Linux (libsecret / age-encrypted file) and Windows
-//! (Credential Manager) are not shipping surfaces yet, so their native
-//! constructors return [`SecretStoreError::Unsupported`] and callers fall
+//! (`macos.rs`). Linux uses the program named by `VAPOR_SECRETS_COMMAND`
+//! or, on a desktop, the Secret Service through `secret-tool`
+//! (`linux.rs`); a host with neither gets [`SecretStoreError::Unsupported`]
+//! naming the way out. Windows (Credential Manager) is not a shipping
+//! surface yet, so its constructor returns `Unsupported` and callers fall
 //! back to the process-local fake with a visible warning.
 
 use std::collections::BTreeMap;
@@ -72,6 +74,12 @@ pub trait SecretStore: Send + Sync {
     /// vanish at process exit.
     fn is_persistent(&self) -> bool {
         false
+    }
+
+    /// Where the secrets live, for `vapor doctor` and `vapor auth`
+    /// output: "login keychain", "Secret Service", the shim command.
+    fn describe(&self) -> String {
+        "in-memory store".to_string()
     }
 }
 

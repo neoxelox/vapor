@@ -5,9 +5,10 @@
 //! See `docs/architecture/platform-abstractions.md` §`TrashBin`. The
 //! daemon's managed trash (`core/daemon/src/trash.rs`) is the safety
 //! net that always works; this trait is the opt-in discoverable
-//! alternative. macOS moves into `~/.Trash` (`macos.rs`). Linux and
-//! Windows are not shipping surfaces yet; their `NativeTrashBin` refuses
-//! with `Unsupported`, and the daemon falls back to the managed trash.
+//! alternative. macOS moves into `~/.Trash` (`macos.rs`); Linux follows
+//! the freedesktop trash specification (`linux.rs`). Windows is not a
+//! shipping surface yet; its `NativeTrashBin` refuses with
+//! `Unsupported`, and the daemon falls back to the managed trash.
 
 use std::io;
 use std::path::{Path, PathBuf};

@@ -68,6 +68,11 @@ pub struct RemotePoller {
     /// A poll started on an earlier tick whose round trip is still in
     /// progress on its own thread.
     in_flight: Option<ProviderCall<Result<ChangesPoll, ProviderError>>>,
+    /// Set by a sync-root recovery: the changes the feed collected
+    /// while the root was away describe the outage, not the user. The
+    /// next poll is a baseline poll, and a page from before the flag
+    /// is discarded when harvested.
+    discard_history: bool,
 }
 
 impl RemotePoller {
@@ -84,7 +89,20 @@ impl RemotePoller {
             in_flight: None,
             name_collisions: Vec::new(),
             reported_collisions: std::collections::BTreeSet::new(),
+            discard_history: false,
         }
+    }
+
+    /// Forgets the feed's history: the next poll re-baselines the cursor
+    /// at the provider's current head and the whole-scope reconcile the
+    /// caller schedules merges the two sides instead. A sync root that
+    /// went away and came back calls this, so the removals the feed saw
+    /// while the root was going never reach the queue.
+    pub fn discard_history(&mut self) {
+        self.discard_history = true;
+        self.cursor = None;
+        self.cursor_loaded = true;
+        self.last_poll_inst = None;
     }
 
     /// Collisions found since the last call, for the timeline.
@@ -144,6 +162,11 @@ impl RemotePoller {
                 return Ok(report);
             };
             self.in_flight = None;
+            if self.discard_history {
+                // Started before the recovery: whatever it carries is
+                // the outage's history.
+                return Ok(report);
+            }
             report.polled = true;
             if let Some(poll) = Self::unwrap_poll(result) {
                 self.apply_poll(
@@ -185,6 +208,15 @@ impl RemotePoller {
                 .state(&self.cursor_state_key)?
                 .map(|entry| entry.value);
             self.cursor_loaded = true;
+        }
+        if self.discard_history {
+            self.discard_history = false;
+            state_db.delete_state(&self.cursor_state_key)?;
+            self.cursor = None;
+            logging::info(
+                "Re-baselining the remote changes feed after the sync root recovery",
+                &[("cursor_key", self.cursor_state_key.clone())],
+            );
         }
 
         let provider = app.provider_handle();

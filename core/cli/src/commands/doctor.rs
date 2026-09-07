@@ -101,6 +101,9 @@ pub fn run() -> DoctorReport {
     if cfg!(target_os = "macos") {
         checks.push(check_macos_launch_agent_plist());
     }
+    if cfg!(target_os = "linux") {
+        checks.push(check_linux_systemd_unit());
+    }
     DoctorReport { checks }
 }
 
@@ -234,11 +237,7 @@ fn check_secret_store() -> DoctorCheck {
         Ok(store) if store.is_persistent() => DoctorCheck {
             name,
             status: DoctorCheckStatus::Ok,
-            detail: if cfg!(target_os = "macos") {
-                "login keychain; tokens persist across restarts".to_string()
-            } else {
-                "native store; tokens persist across restarts".to_string()
-            },
+            detail: format!("{}; tokens persist across restarts", store.describe()),
         },
         Ok(_) => DoctorCheck {
             name,
@@ -291,8 +290,10 @@ fn check_throttle_inputs(override_value: Option<String>) -> DoctorCheck {
         DoctorCheck {
             name,
             status: DoctorCheckStatus::Ok,
-            detail: "host signals: CPU load, power source, thermal state, memory, user presence"
-                .to_string(),
+            detail: format!(
+                "host signals: {}",
+                vapor_platform::NativePlatformMetricsSampler::input_sources()
+            ),
         }
     } else {
         DoctorCheck {
@@ -329,6 +330,42 @@ fn check_macos_launch_agent_plist() -> DoctorCheck {
             detail: format!(
                 "{} not found; run `vapor service install` to create it",
                 plist_path.display()
+            ),
+        }
+    }
+}
+
+/// The systemd user unit `vapor service install` writes on Linux.
+fn check_linux_systemd_unit() -> DoctorCheck {
+    let name = "host_systemd_user_unit".to_string();
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
+    let Some(config_home) = config_home else {
+        return DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Warning,
+            detail: "neither XDG_CONFIG_HOME nor HOME is set; cannot locate the systemd user unit"
+                .to_string(),
+        };
+    };
+    let unit_path = config_home
+        .join("systemd/user")
+        .join(format!("{}.service", constants::service::DAEMON_LABEL));
+    if unit_path.exists() {
+        DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Ok,
+            detail: format!("found at {}", unit_path.display()),
+        }
+    } else {
+        DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Warning,
+            detail: format!(
+                "{} not found; run `vapor service install` to create it",
+                unit_path.display()
             ),
         }
     }

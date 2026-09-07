@@ -1672,6 +1672,12 @@ impl DaemonRuntime {
                 }
                 self.cloud_root_ready = true;
                 self.release_root_hold(crate::root_identity::RootSide::Cloud, now);
+                if let Err(error) = self.forget_the_outage() {
+                    logging::warning(
+                        "Could not drop the deletions queued during the outage",
+                        &[("error", error.to_string())],
+                    );
+                }
                 // A recovered root may have drifted while unreachable: a
                 // whole-scope reconcile converges it. The two-way walk
                 // only deletes locally behind a remote-origin tombstone,
@@ -2471,6 +2477,22 @@ impl DaemonRuntime {
                 accepted += 1;
                 continue;
             }
+            if event.path == watch_root && event.last_event_kind == FsEventKind::Other {
+                // The watcher lost events (a full kernel queue): the
+                // only honest answer is to compare the whole scope.
+                logging::warning(
+                    "The filesystem watcher dropped events; scheduling a whole-scope reconcile",
+                    &[("watch_root", watch_root.display().to_string())],
+                );
+                if let Err(error) = self.enqueue_startup_reconstruction_reconcile(now) {
+                    logging::warning(
+                        "Could not schedule the reconcile after dropped watcher events",
+                        &[("error", format!("{error:?}"))],
+                    );
+                }
+                accepted += 1;
+                continue;
+            }
             if intent_kind != PendingIntentKind::Delete
                 && std::fs::symlink_metadata(&event.path).is_ok_and(|metadata| metadata.is_dir())
             {
@@ -2899,6 +2921,8 @@ impl DaemonRuntime {
         self.state_db
             .set_state(constants::state::MERGE_WITHOUT_DELETIONS_KEY, "1", now)
             .map_err(|error| error.to_string())?;
+        self.forget_the_outage()
+            .map_err(|error| error.to_string())?;
         self.root_hold = None;
         self.enqueue_startup_reconstruction_reconcile(now)
             .map_err(|error| format!("{error:?}"))?;
@@ -2912,6 +2936,30 @@ impl DaemonRuntime {
             },
             side.label()
         ))
+    }
+
+    /// A sync root that went away and came back: the deletions the
+    /// watchers reported while it was going describe the outage, not
+    /// the user, and so does the feed's history across the gap. Both
+    /// are dropped; the whole-scope reconcile the caller schedules
+    /// merges the two sides instead.
+    fn forget_the_outage(&mut self) -> Result<(), StateDbError> {
+        let mut dropped = 0;
+        for kind in [
+            PendingIntentKind::Delete,
+            PendingIntentKind::ApplyRemoteDelete,
+        ] {
+            dropped += self.scheduler.discard_pending_of_kind(kind);
+            dropped += self.state_db.discard_queued_of_kind(kind)?;
+        }
+        if dropped > 0 {
+            logging::info(
+                "Dropped deletions queued while the sync root was missing",
+                &[("count", dropped.to_string())],
+            );
+        }
+        self.remote_poller.discard_history();
+        Ok(())
     }
 
     fn flush_scheduler_to_durable_queue(&mut self) -> Result<usize, DaemonRuntimeError> {
@@ -3971,8 +4019,13 @@ mod tests {
         );
 
         // The user deletes the whole cloud sync root out from under the
-        // running daemon.
+        // running daemon. A per-directory watcher (inotify) reports the
+        // files inside as removed before the root itself.
         std::fs::remove_dir_all(&fixture.cloud_root).expect("delete cloud root");
+        fixture.feed.emit_removed(
+            fixture.cloud_root.join("kept.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
 
         // New local work cannot reach the provider: the daemon must
         // block (Error state), not finalize failures or spin forever.
@@ -4002,6 +4055,10 @@ mod tests {
         assert!(
             !fixture.cloud_root.exists(),
             "an adopted root is never re-created silently"
+        );
+        assert!(
+            first.is_file(),
+            "a missing root is never mirrored as deletions on this device"
         );
         let decision = fixture
             .runtime
@@ -4038,6 +4095,10 @@ mod tests {
         }
         assert!(recovered, "recreate must bring the profile back to Running");
         fixture.converge(60);
+        assert!(
+            first.is_file(),
+            "the deletion queued while the root was missing is not applied after recreate"
+        );
         assert_eq!(
             std::fs::read(fixture.cloud_root.join("kept.txt")).expect("re-uploaded"),
             b"survives the outage",
@@ -4064,9 +4125,15 @@ mod tests {
         std::fs::write(&first, b"kept").expect("seed local");
         fixture.record_local_event(&first, FsEventKind::Created, fixture.now_ms);
         fixture.converge(12);
-        // The volume goes away and comes back with the same marker.
+        // The volume goes away and comes back with the same marker. A
+        // per-directory watcher reports the file under it as removed
+        // on the way out.
         let parked = fixture._temp.path().join("parked");
         std::fs::rename(&fixture.cloud_root, &parked).expect("unmount");
+        fixture.feed.emit_removed(
+            fixture.cloud_root.join("kept.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
         for _ in 0..12 {
             fixture.tick(6_000);
         }
@@ -4091,6 +4158,11 @@ mod tests {
         assert!(
             recovered,
             "the original root returning resumes sync on its own"
+        );
+        fixture.converge(30);
+        assert!(
+            first.is_file() && fixture.cloud_root.join("kept.txt").is_file(),
+            "the removal the feed reported on the way out is the outage's, not the user's"
         );
         let closed = fixture
             .runtime
@@ -6702,6 +6774,46 @@ mod tests {
                 .sync_index(&local_after)
                 .expect("index")
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn dropped_watcher_events_schedule_a_whole_scope_reconcile() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        fixture.converge(20);
+        // A file lands while the watcher's queue overflows: the only
+        // report the engine gets is "something changed" on the root.
+        std::fs::write(fixture.watch_root.join("missed.txt"), b"never reported").expect("seed");
+        let root = fixture.watch_root.clone();
+        fixture.record_local_event(&root, FsEventKind::Other, fixture.now_ms);
+        let mut scheduled = false;
+        for _ in 0..8 {
+            fixture.tick(6_000);
+            let queued = fixture
+                .runtime
+                .state_db()
+                .list_queue_intents(16)
+                .expect("queue")
+                .into_iter()
+                .any(|intent| {
+                    intent.kind == PendingIntentKind::ReconcileSubtree && intent.path == root
+                });
+            let running =
+                fixture.runtime.app().running_reconcile_root().as_deref() == Some(root.as_path());
+            if queued || running {
+                scheduled = true;
+                break;
+            }
+        }
+        assert!(
+            scheduled,
+            "a whole-scope reconcile is what answers dropped events"
+        );
+        fixture.converge(30);
+        assert!(
+            fixture.cloud_root.join("missed.txt").exists(),
+            "the whole-scope reconcile finds what the watcher dropped"
         );
     }
 

@@ -39,9 +39,15 @@ Observation channels are the product's own surfaces, never test hooks:
 `vapor status --json` and the other `--json` commands (parsed with the
 same types the CLI serializes), exit codes, the daemon log, and
 read-only queries against the durable state DB. The harness runs on
-the host it is built on: macOS today, Linux and Windows once their
-native platform traits ship (until then their daemon scenarios skip,
-by name).
+the host it is built on: macOS and Linux today (the launchd round-trip
+and the disk-image scenarios are macOS-only and skip elsewhere by
+name), Windows once its native platform traits ship (until then its
+daemon scenarios skip, by name). A Linux run over a macOS checkout
+works from a container with `CARGO_TARGET_DIR` pointing outside the
+host's `target/` (so the two toolchains never overwrite each other's
+binaries) and a tmpfs mounted over `.vapor/`: a Docker Desktop bind
+mount refuses to bind a Unix socket, so a daemon started on one never
+answers `vapor status`.
 
 ## The three shared checks
 
@@ -333,9 +339,11 @@ Discipline rules:
   operations and the credentials wait on the project owner (above).
 - **macOS app UI.** Owner-verified manually, per the standing test
   carve-out. Tier E2E's job there is the handoff checklist.
-- **Linux and Windows daemons.** Their scenarios skip until the native
+- **The Windows daemon.** Its scenarios skip until the native
   platform traits ship; the harness itself builds and runs `S01` there
-  on every PR.
+  on every PR. Linux runs the daemon scenarios; what it skips is the
+  launchd round-trip and the disk-image scenarios; a systemd
+  round-trip of its own is still to be written.
 
 ## Relationship to the other tiers
 

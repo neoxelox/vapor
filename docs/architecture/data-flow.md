@@ -18,7 +18,7 @@
 14. A rename is recognised from the sync index, not from the watcher, which reports it as a delete and a create (a `Rename` intent for the destination on macOS). At the upload gate, a new path whose hash and size match an index row whose local file is gone becomes one `Provider::move_object` of that cloud object, and the index row moves with it; the stale delete of the old path then converges as a no-op. In the download planner, a new cloud object with the size and remote mtime of an index row whose local file is present and untouched is confirmed by hash (the backend's, or one probe) and applied as a local rename with no transfer. So that the create half is seen first, the deletion of a synced file waits one settle window on its first planning and, while a transfer of the same size is queued, on later ones, at most `MOVE_SETTLE_MAX_DEFERRALS` times; a plain deletion then proceeds. An upload whose bytes the cloud already holds completes without transferring.
 15. The reconcile walk compares each file pair with the rsync quick check on **both** sides: a pair is converged when the sizes match, the local size and mtime are what the sync index recorded at the last transfer, and the remote size and mtime are what the index recorded from the provider at that transfer. A pair the index has no row for, or that fails either check, is verified once through the upload planner in two-way mode, which knows the last synced hash: identical content converges silently and records the row; a local copy still equal to the last synced hash means the change is remote-only and becomes a download; a remote copy still equal to it means the change is local-only and becomes a guarded overwrite; both moved is a keep-both conflict. The op-id tag on the remote is never taken as proof on its own that the remote is unchanged, because an in-place write keeps the tag on a filesystem; the remote quick check has to agree. The provider reports the remote mtime with every completed transfer (`TransferOutcome::remote_modified_at`).
 
-On macOS the throttle inputs are read from the host every second: system and daemon CPU load, power source, thermal state, Low Power Mode, resident and physical memory, and keyboard/pointer presence. Disk pressure and link capacity have no macOS source yet and keep their neutral defaults. Linux and Windows are not shipping surfaces; their samplers return static defaults and the daemon logs a warning at startup saying so.
+On macOS the throttle inputs are read from the host every second: system and daemon CPU load, power source, thermal state, Low Power Mode, resident and physical memory, and keyboard/pointer presence. On Linux they come from `/proc` and `/sys`: CPU load and memory, whether a battery is discharging, the hottest thermal zone against its trip points, and whether a graphical session exists at all (a headless host counts as idle). Disk pressure and link capacity have no source on either OS yet and keep their neutral defaults, as does Low Power Mode on Linux. Windows is not a shipping surface; its sampler returns static defaults and the daemon logs a warning at startup saying so. The daemon's startup log names the inputs the host feeds it.
 
 ## Local safeguards (optional advanced protections)
 
@@ -28,7 +28,12 @@ On macOS the throttle inputs are read from the host every second: system and dae
 
 ## Remote to local (bidirectional MVP)
 
-1. Provider poll fetches remote changes on throttle-aware cadence.
+1. Provider poll fetches remote changes on throttle-aware cadence. The
+   filesystem provider's feed is a watcher on the cloud root; a
+   directory that appears there (created, moved in) is reported as
+   one change per file inside it, because a per-directory watcher
+   (inotify) never reports what landed before its watch was attached
+   and no watcher reports the contents of a moved tree.
 2. Changes are mapped into durable intents with operation IDs. A change
    whose local-equivalent path matches the ignore rules is dropped here
    (counted as `ignored_changes`): ignore filtering is symmetric, so an
@@ -330,6 +335,16 @@ re-upload of everything. The mechanism (`core/daemon/src/root_identity.rs`,
   and adopts it. Both set `reconcile.merge_without_deletions` so the
   reconcile that follows merges the two sides and propagates no
   deletion in either direction, then lift the hold.
+- **The outage is forgotten.** A root going away looks like deletions
+  to a watcher that reports files one by one (inotify reports every
+  file under a removed directory before the directory), so every
+  recovery, on its own or by an answer, drops the queued `Delete` and
+  `ApplyRemoteDelete` intents and re-baselines the remote changes
+  cursor before the reconcile runs. A remote deletion whose probe
+  fails (the root missing is one such failure) is retried, never
+  applied: only a stat that answers "no object" finishes a deletion,
+  and an intent dropped while its probe ran is honoured when the
+  probe returns.
 
 ## Loop prevention (self-write cache)
 

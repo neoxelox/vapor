@@ -84,8 +84,9 @@ jobs:
       # Tier E2E: black-box run of the real vapor + vapord binaries in a
       # sandbox under the repo-local .vapor/e2e/, on every runner. The
       # harness skips (and names) every scenario whose need the host
-      # cannot meet: on Linux and Windows the daemon scenarios skip
-      # until their native fs-watch implementations ship. macOS adds
+      # cannot meet: Linux runs the daemon scenarios on inotify and
+      # skips the launchd and disk-image ones; on Windows the daemon
+      # scenarios skip until its native fs-watch ships. macOS adds
       # --full, the service lifecycle round-trip against the real
       # launchd: it installs a real LaunchAgent, so that phase is meant
       # for disposable runners like this one; contributors run plain

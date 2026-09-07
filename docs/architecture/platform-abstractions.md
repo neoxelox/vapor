@@ -9,13 +9,15 @@ Tasks: `docs/tasks/core.md` Phase C3 (traits + macOS impls), Phase C6
 (Windows impls), Phase C7 (Linux impls).
 
 Status: every trait below ships with a Rust trait definition, an
-in-memory fake usable on every OS, and a native macOS implementation the
-runtime consumes end to end (fs watch, service install, secret store,
-metrics sampling, idle detection, filesystem capabilities, process
-supervision). Linux and Windows implementations are stubs that compile
-and return `Unsupported` or neutral defaults; they land with the
-optional Waves 12 and 13 in `docs/tasks/README.md`. The per-trait
-tables name what each native implementation reads.
+in-memory fake usable on every OS, and native macOS and Linux
+implementations the runtime consumes end to end (fs watch, service
+install, secret store, metrics sampling, idle detection, filesystem
+capabilities, process supervision, trash). The Linux ones are verified
+in a container by the same Tier 1 tests and the e2e harness; Linux
+becomes a shipping surface when its app and release lane land. Windows
+implementations are stubs that compile and return `Unsupported` or
+neutral defaults until that surface ships. The per-trait tables name
+what each native implementation reads.
 
 ## Design rules
 
@@ -52,7 +54,15 @@ normalization, ignore filtering, and the recorder on a dedicated
 thread) and the filesystem provider's changes feed — so there is exactly
 one OS-event→kind mapping to test and fix per OS.
 
-Hosts whose native watcher is still a stub (Linux and Windows today)
+macOS and Linux share one `notify`-backed watcher
+(`fs_watch/notify_backend.rs`): FSEvents on macOS, inotify on Linux.
+When the kernel drops events (an inotify queue overflow, an FSEvents
+"must rescan" flag) the watcher emits an `Other` event on the watch
+root and the runtime answers with a whole-scope reconcile, so a burst
+too large for the queue is picked up by the walk instead of being
+lost. A Linux host whose `fs.inotify.max_user_watches` is too small
+for the tree fails to start the watcher with a message naming that
+sysctl. Hosts whose native watcher is still a stub (Windows today)
 report `native_watcher_available() == false`, and the stub constructor
 fails with an `Unsupported` backend error. Consumers degrade rather than
 fail: the filesystem provider stops advertising its changes feed, and the
@@ -85,8 +95,8 @@ background service. This is how "autolaunch at login" ports.
 | OS | Mechanism |
 |---|---|
 | macOS (per-user) | `~/Library/LaunchAgents/sh.arn.vapor.daemon.plist` + `launchctl bootstrap / kickstart / bootout` |
-| Linux (per-user) | `~/.config/systemd/user/vapord.service` + `systemctl --user` |
-| Linux (system) | `/etc/systemd/system/vapord.service` + `systemctl` |
+| Linux (per-user) | `~/.config/systemd/user/sh.arn.vapor.daemon.service` (`$XDG_CONFIG_HOME` honoured) + `systemctl --user daemon-reload / enable / start / stop / disable` |
+| Linux (system) | `/etc/systemd/system/vapord.service` + `systemctl` (not implemented; the per-user unit is the product) |
 | Windows (per-user) | Task Scheduler `AtLogOn` trigger via `ITaskService` |
 | Windows (system) | SCM (`CreateServiceW`) via `windows-service` |
 
@@ -94,8 +104,14 @@ Each installer configures the OS restart policy so the OS respects the
 backoff computed by `core/lifecycle::CrashLoopGuard`:
 
 - launchd: `KeepAlive=false` (daemon owns restart decisions).
-- systemd: `Restart=on-failure` + `RestartSec` matching the guard.
+- systemd: `Restart=no` (same reason).
 - Task Scheduler: `RestartOnFailure` matching the guard.
+
+The one service that is kept alive by the OS is the headless supervisor
+(`vapor service check --loop`, descriptor `keep_alive: true`):
+`KeepAlive=true` on launchd, `Restart=always` with `RestartSec=5` on
+systemd. It is the supervisor that applies the guard's backoff to the
+daemon.
 
 ### `SecretStore`
 
@@ -107,11 +123,14 @@ when a value will not outlive the process.
 |---|---|---|
 | macOS | Keychain Services (`SecItem*` through `security-framework-sys` and `core-foundation`) | Shipped. One generic-password item per secret under the `sh.arn.vapor` service, with an access list covering `vapor` and `vapord` so the daemon reads CLI-stored tokens without a prompt. Details: `docs/operations/provider-auth-operations.md`. |
 | Windows | Credential Manager | Stub. `for_current_user` returns `Unsupported`. |
-| Linux (desktop) | libsecret / Secret Service (D-Bus) | Stub. |
-| Linux (headless) | age-encrypted file or external command shim | Planned. The fallback will be explicit, never a silent fall-through, and selected by a CLI flag. |
+| Linux (desktop) | Secret Service through libsecret's `secret-tool` CLI (`lookup` / `store` / `clear` / `search`), items filed under the attribute `service = sh.arn.vapor` | Shipped. Chosen when `DBUS_SESSION_BUS_ADDRESS` is set, `secret-tool` is on `PATH`, and `VAPOR_SECRETS_COMMAND` is not. |
+| Linux (headless) | External command shim named by `VAPOR_SECRETS_COMMAND` (a `pass`, vault, or `age` wrapper): `<command> get <name>` prints the secret, `<command> set <name>` reads it on stdin, `<command> delete <name>`, `<command> list` prints one name per line; exit 1 means not found | Shipped. Takes precedence over the Secret Service when set. Never a plaintext file. |
 
-On an OS whose native store is a stub, the CLI falls back to the
-in-memory store and prints a warning on every `auth` command.
+A Linux host with neither backend gets `Unsupported` from
+`for_current_user`, with a message naming the variable to set; the CLI
+then falls back to the in-memory store and prints that reason on every
+`auth` command, as it does on Windows. `vapor doctor` names the backend
+in use.
 
 ### `PlatformMetricsSampler`
 
@@ -126,7 +145,7 @@ eight-core machine reads as 13%.
 |---|---|
 | macOS | Shipped. `host_statistics64` (system CPU), `getrusage` (daemon CPU), `IOPSGetTimeRemainingEstimate` (battery), `NSProcessInfo.thermalState` and `isLowPowerModeEnabled` through the Objective-C runtime, `proc_pidinfo` and `hw.memsize` (memory), and the HID idle clock for `user_active` (input within the last 30 s). One read per throttle interval; calls inside the interval return the cached reading. `disk_pressure` and the two network fields keep their defaults: macOS has no public disk-pressure signal and link capacity is not measured yet. |
 | Windows | Planned. `GetSystemTimes` + `GetProcessTimes`; `GetSystemPowerStatus`; `CallNtPowerInformation`; `NotifyNetworkConnectivityHintChange` (metered means auto-throttle). Today the native sampler returns the static defaults and `has_native_sampling()` is `false`. |
-| Linux | Planned. `/proc/stat`, `/proc/self/stat`; `/sys/class/power_supply/*`; PSI under `/proc/pressure/`; `/proc/net/dev`; NetworkManager `NM-metered` when present. Static defaults today. |
+| Linux | Shipped. `/proc/stat` (system CPU), `/proc/self/stat` (daemon CPU), `/proc/self/statm` and `/proc/meminfo` (memory), `/sys/class/power_supply/*` (`on_battery` when no mains or USB supply is online and a battery is discharging), the hottest `/sys/class/thermal` zone against its trip points (`thermal_pressure`), and the idle notifier for `user_active`. Anything the host does not expose (a container, a VM without thermal zones) keeps the neutral default for that input. `low_power_mode`, `disk_pressure`, and the network fields keep their defaults; PSI under `/proc/pressure/` and NetworkManager's metered flag are open work. |
 
 `StaticPlatformMetricsSampler` (config-driven) is the headless/CLI
 fallback and the test fake. `VAPOR_THROTTLE_INPUTS=static` makes the
@@ -147,7 +166,8 @@ User-idle duration, polled on the throttle cadence.
 |---|---|---|
 | macOS | `CGEventSourceSecondsSinceLastEventType` on the HID system state | Shipped. Without a window-server session (SSH, CI agents) the notifier reports the headless always-idle reading, decided once at construction. |
 | Windows | `GetLastInputInfo` | Planned. Reports zero idle time today so idle boost stays off. |
-| Linux (X11) | `XScreenSaverQueryInfo` | Planned. Zero idle time today. |
+| Linux | `DISPLAY` / `WAYLAND_DISPLAY` presence | Shipped as far as it goes: a host without a graphical session is always idle (idle boost may run on a server or in a container); a desktop reports zero idle time so idle boost stays off while someone may be typing. |
+| Linux (X11) | `XScreenSaverQueryInfo` | Planned. |
 | Linux (Wayland) | `org.freedesktop.ScreenSaver` / `ext-idle-notify-v1` | Planned. |
 | Headless | Always-idle | CLI and server default. |
 
@@ -201,7 +221,7 @@ unlink.
 |---|---|---|
 | macOS | Rename into `~/.Trash`, Finder-style numbered duplicates | Shipped. Cross-volume moves are refused rather than copied. |
 | Windows | `SHFileOperation` / `IFileOperation` with `FOF_ALLOWUNDO` (Recycle Bin) | Planned. Refuses with `Unsupported` today. |
-| Linux | freedesktop trash spec (`~/.local/share/Trash`, per-volume `.Trash-<uid>`) | Planned. Refuses with `Unsupported` today. |
+| Linux | freedesktop trash spec: `$XDG_DATA_HOME/Trash` (default `~/.local/share/Trash`) for files on the home volume, `<mount>/.Trash-<uid>` for other volumes; `info/<name>.trashinfo` written before the rename, numbered duplicates like a file manager | Shipped. A volume without a usable `.Trash-<uid>` is refused, and the managed trash takes over. |
 
 The fake (`InMemoryTrashBin`) moves into a directory the test owns and
 can be told to refuse, which is how the fallback is tested.

@@ -94,6 +94,12 @@ impl NativePlatformMetricsSampler {
         true
     }
 
+    /// The inputs this host feeds the throttle, for logs and doctor.
+    pub fn input_sources() -> &'static str {
+        "CPU load, power source, thermal state, Low Power Mode, memory, and keyboard/pointer \
+         presence"
+    }
+
     fn refresh(&self, state: &mut SampleState, now: Instant) {
         let mut inputs = state.inputs;
 

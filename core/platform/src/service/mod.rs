@@ -1,4 +1,5 @@
-//! Per-OS service installer trait + macOS native impl.
+//! Per-OS service installer trait and the native impls: a LaunchAgent
+//! on macOS, a systemd user unit on Linux.
 //!
 //! See `docs/architecture/platform-abstractions.md` §`ServiceInstaller`.
 

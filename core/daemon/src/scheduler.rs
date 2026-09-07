@@ -147,6 +147,20 @@ impl KeyedSupersedingScheduler {
         true
     }
 
+    /// Discards every pending intent of `kind`; returns how many.
+    pub fn discard_pending_of_kind(&mut self, kind: PendingIntentKind) -> usize {
+        let paths: Vec<PathBuf> = self
+            .intents
+            .values()
+            .filter(|record| record.kind == kind && record.state == ScheduledIntentState::Pending)
+            .map(|record| record.path.clone())
+            .collect();
+        paths
+            .iter()
+            .filter(|path| self.discard_pending(path))
+            .count()
+    }
+
     fn claim_path(&mut self, path: &Path) -> Option<ClaimedIntent> {
         let queue_key = {
             let record = self.intents.get(path)?;

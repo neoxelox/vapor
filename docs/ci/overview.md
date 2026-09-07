@@ -8,8 +8,9 @@ GitHub Actions workflows are defined in `.github/workflows/`:
   passes `--full` (the launchd round-trip on a disposable runner) and
   every job uploads the harness's JSON report as the
   `e2e-report-<os>` artifact. Scenarios whose needs the host cannot
-  meet skip by name, so the Linux and Windows jobs run the harness
-  and `S01` today and pick up the daemon scenarios once their native
+  meet skip by name: the Linux job runs the daemon scenarios (not the
+  launchd round-trip or the disk-image ones), the Windows job runs the
+  harness and `S01` and picks up the daemon scenarios once its native
   traits ship.
 - `build.yml`: runs distribution builds via repository scripts.
 - `perf.yml`: reusable performance gate workflow invoked by the release

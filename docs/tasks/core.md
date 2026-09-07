@@ -189,10 +189,11 @@ from existing Swift/docs. Windows/Linux impls land later (Phase C6/C7).
 - [ ] C3-11 Remaining throttle inputs. macOS: a disk-pressure source
       (none is public; evaluate free space on the sync-root volume as a
       proxy) and measured link capacity for `network_throughput_kbps`
-      (`nw_path_monitor` or a transfer-derived estimate). Windows and
-      Linux: the full sampler and idle notifier listed in
-      `docs/architecture/platform-abstractions.md` when those surfaces
-      ship; until then both return static defaults and zero idle time.
+      (`nw_path_monitor` or a transfer-derived estimate). Windows: the
+      full sampler and idle notifier listed in
+      `docs/architecture/platform-abstractions.md` when that surface
+      ships; until then it returns static defaults and zero idle time.
+      Linux: the display-server idle query and PSI (Phase C7).
 
 Exit gate:
 
@@ -316,34 +317,43 @@ Exit gate:
 
 ## Phase C7 - Linux platform implementations
 
-**Status: deferred / optional.** Gated on the project owner explicitly
-opting into a Linux surface. Nothing in the primary path (core +
-macOS app + CLI-on-macOS) is blocked by this phase. See
-`docs/tasks/README.md` wave 13.
+**Status: native traits landed (2026-09-07); the surface is not
+shipping yet.** Every `core/platform` trait has a Linux implementation
+that the daemon and the CLI consume, verified in a Linux container by
+Tier 1 and the e2e harness. What remains before Linux counts as a
+shipping OS is below and in `docs/tasks/README.md` wave 13.
 
-- [ ] C7-1 `core/platform/fs_watch/linux.rs`: `inotify` (user) MVP; optional
-      `fanotify` variant behind `CAP_SYS_ADMIN` for system-wide scenarios.
-      `vapor doctor` hooks for watch-limit detection
-      (`/proc/sys/fs/inotify/max_user_watches`).
-- [ ] C7-2 `core/platform/service/linux.rs`: systemd user unit
-      (`~/.config/systemd/user/vapord.service`) + `systemctl --user …`;
-      system unit (`/etc/systemd/system/vapord.service`) under `--system`.
-      Optional `loginctl enable-linger` prompt when the user wants sync
-      while logged out.
-- [ ] C7-3 `core/platform/secrets/linux.rs`: `secret-service` / libsecret
-      D-Bus as default; `age`-encrypted file at `<vapor_dir>/secrets.age`
-      fallback for headless hosts; `--secrets-backend=command` shim for
-      external tools.
-- [ ] C7-4 `core/platform/metrics/linux.rs`: `/proc/stat`,
-      `/proc/self/stat`, `/sys/class/power_supply/*`,
-      `/proc/pressure/{cpu,io,memory}` (PSI), `/proc/net/dev`. Optional
-      NetworkManager D-Bus `NM-metered` integration when present.
-- [ ] C7-5 `core/platform/idle/linux.rs`: X11 `XScreenSaverQueryInfo`;
-      Wayland `org.freedesktop.ScreenSaver` or `ext-idle-notify-v1`;
-      headless hosts report always-idle.
-- [ ] C7-6 `core/platform/fs_caps/linux.rs`: native xattr on ext4/xfs/btrfs;
-      side-file fallback on filesystems without xattr support; case-
-      sensitivity probe.
+- [x] C7-1 `core/platform/fs_watch/notify_backend.rs`: the `notify`
+      watcher shared with macOS (inotify on Linux). A dropped-events
+      signal (queue overflow) becomes a whole-scope reconcile; a
+      watch-limit failure names `fs.inotify.max_user_watches`.
+      *(Open: a `vapor doctor` check that compares the limit with the
+      tree size; the `fanotify` variant.)*
+- [x] C7-2 `core/platform/service/linux.rs`: systemd user unit
+      (`~/.config/systemd/user/sh.arn.vapor.daemon.service`) driven by
+      `systemctl --user`; `Restart=no` for the daemon, `Restart=always`
+      for the headless supervisor. `vapor service` dispatches on Linux.
+      *(Open: the system unit under `--system`; a `loginctl
+      enable-linger` hint for sync while logged out.)*
+- [x] C7-3 `core/platform/secrets/linux.rs`: the `VAPOR_SECRETS_COMMAND`
+      shim for headless hosts, the Secret Service through `secret-tool`
+      on a desktop, `Unsupported` naming the variable otherwise. Never a
+      plaintext file. *(Open: a libsecret D-Bus client instead of the
+      CLI, so a desktop without `secret-tool` installed works.)*
+- [x] C7-4 `core/platform/metrics/linux.rs`: `/proc/stat`,
+      `/proc/self/stat`, `/proc/self/statm`, `/proc/meminfo`,
+      `/sys/class/power_supply/*`, `/sys/class/thermal/*`. *(Open: PSI
+      under `/proc/pressure/` for `disk_pressure`; NetworkManager
+      `NM-metered`.)*
+- [x] C7-5 `core/platform/idle/linux.rs`: headless hosts are always
+      idle, a desktop reports zero idle time. *(Open: X11
+      `XScreenSaverQueryInfo`; Wayland `ext-idle-notify-v1`.)*
+- [x] C7-6 `fs_caps`: native xattr under the `user.` namespace on
+      ext4/xfs/btrfs, case-sensitive default. *(Open: a per-root probe
+      instead of the compile-time default, for a FAT or NTFS mount.)*
+- [x] C7-9 `core/platform/trash/linux.rs`: the freedesktop trash
+      (`~/.local/share/Trash`, `<mount>/.Trash-<uid>`), `.trashinfo`
+      written before the rename.
 - [ ] C7-7 Linux distribution trust chain doc:
       `docs/operations/linux/distribution-trust-chain.md` + systemd unit
       policy in `docs/operations/linux/systemd-unit-policy.md`.
@@ -356,8 +366,12 @@ macOS app + CLI-on-macOS) is blocked by this phase. See
 
 Exit gate:
 
-- `vapor run`, `vapor service install` on Linux work end-to-end.
-- Linux CI job runs the full `core/*` test suite including platform impls.
+- `vapor run`, `vapor service install` on Linux work end-to-end. `vapor
+  run` does (the e2e suite passes in a container); the `vapor service`
+  round-trip against a real `systemctl --user` session is still to be
+  automated (`cli.md` L2-6).
+- Linux CI job runs the full `core/*` test suite including platform
+  impls: it does, and the e2e suite runs there on every PR.
 
 ## Phase C8 - Port / finish runtime capabilities on the portable stack
 
@@ -931,9 +945,11 @@ Still open:
       oversight, `ops.jsonl`, freeze on first violation, `soak.yml`,
       and the Tier 2 SLO assertions in `scripts/perf.sh`.
       `docs/development/soak-testing.md`; the `vapor-soak` skill.
-- [ ] TR-10 Soak cells on Linux once the native Linux traits ship
-      (`tmpfs` size limits for disk-full, cgroup CPU and memory limits),
-      and the Google Drive soak mode once TR-8 lands.
+- [ ] TR-10 Soak cells on Linux (`tmpfs` size limits for disk-full,
+      cgroup CPU and memory limits) now that the native Linux traits
+      are in, and the Google Drive soak mode once TR-8 lands. The e2e
+      suite already runs on the `ubuntu-latest` job; the soak schedule
+      is macOS-only.
 
 ## Sync safety follow-ups (2026-09-06)
 

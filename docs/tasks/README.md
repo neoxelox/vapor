@@ -314,14 +314,19 @@ already-stable trait surface, not a rewrite.
 
 ### Wave 13 — Linux platform implementations (optional)
 
-- `core.md` C7-1 … C7-7 — Linux native impls (inotify / fanotify,
-  systemd user/system units, Secret Service / age fallback,
-  `/proc/pressure` PSI, X11/Wayland idle, xattr, systemd unit policy
-  doc).
+The native traits landed on 2026-09-07 (`core.md` C7-1 … C7-6, C7-9):
+the daemon runs on Linux with inotify, a systemd user unit, the
+freedesktop trash, `/proc` and `/sys` throttle inputs, and a secret
+store that is either the `VAPOR_SECRETS_COMMAND` shim or the desktop
+Secret Service. Left before Linux is a shipping surface:
+
+- `core.md` C7-7, C7-8 — the Linux trust chain doc and the
+  `release-linux` environment.
 - `cli.md` L2-6 — `vapor service install` round-trip automated on
-  Linux CI.
-- Extend the existing `ubuntu-latest` Rust job (it already runs the
-  whole test suite) with the `vapor service` round-trip.
+  Linux CI (a `systemctl --user` session on the runner).
+- The open items inside C7-1 … C7-6: display-server idle, PSI, the
+  system unit, a libsecret client, a per-root filesystem probe.
+- `core.md` TR-10 — soak cells on Linux.
 
 ### Wave 14 — Cross-OS CLI distribution (optional)
 

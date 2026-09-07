@@ -28,7 +28,7 @@ export VAPOR_ENV="dev"
 # the invoking shell must never leak into it.
 unset VAPOR_DIR
 
-SOAK_BIN="$ROOT_DIR/target/debug/vapor-soak"
+SOAK_BIN="${CARGO_TARGET_DIR:-$ROOT_DIR/target}/debug/vapor-soak"
 
 subcommand="run"
 args=()

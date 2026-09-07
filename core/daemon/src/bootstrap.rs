@@ -139,9 +139,11 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
         Arc::new(crate::metrics::FileMetricsSampler::new(path.clone()))
     } else if NativePlatformMetricsSampler::has_native_sampling() {
         logging::info(
-            "Throttle inputs come from the host: CPU load, power source, thermal state, \
-             Low Power Mode, memory, and keyboard/pointer presence",
-            &[],
+            "Throttle inputs come from the host",
+            &[(
+                "inputs",
+                NativePlatformMetricsSampler::input_sources().to_string(),
+            )],
         );
         Arc::new(NativePlatformMetricsSampler::for_current_host())
     } else {
