@@ -26,6 +26,7 @@ Reference implementations:
 | `enumerate()` / `stat()` / `content_hash()` | Read-side used by reconcile walks; `enumerate` is non-recursive so walks stay slice-interruptible. |
 | `begin_upload()` / `begin_download()` | Return a `TransferSession` that moves a bounded byte budget per `step()`; the engine grants budgets from the bandwidth shaper + auto-tuned step size. Uploads accept `RemotePrecondition` guards (keep-both safety). The completed `TransferOutcome` carries the content hash and the remote object's mtime as the backend reports it after the transfer (`remote_modified_at`); the sync index records that mtime so the reconcile walk can tell a same-size remote edit from an untouched object, so report it whenever the backend has one. |
 | `delete()` | Prefer recoverable semantics (Drive moves to trash; filesystem removes). |
+| `move_object()` | One-call move of a file to another path, keeping its content and tagging it with the op-id, when `supports_server_side_move`. A missing source is `NotFound`, an occupied destination `PreconditionFailed`; the engine falls back to a plain upload on either. The filesystem provider renames; Drive patches name and parents. |
 | `poll_changes()` | Incremental changes feed with an opaque cursor. Return `CursorExpired` when the cursor lapses — the engine reconciles and re-baselines. |
 
 Error taxonomy: every failure maps into `vapor_shared::ProviderErrorKind`

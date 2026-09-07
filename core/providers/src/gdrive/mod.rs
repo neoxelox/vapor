@@ -746,6 +746,43 @@ impl Provider for GoogleDriveProvider {
         Ok(())
     }
 
+    fn move_object(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        op_id: &str,
+    ) -> Result<(), ProviderError> {
+        let file = self.resolve(from)?.ok_or_else(|| {
+            ProviderError::not_found(format!("move source {from} does not exist"))
+        })?;
+        if self.resolve(to)?.is_some() {
+            return Err(ProviderError::precondition_failed(format!(
+                "move destination {to} already exists"
+            )));
+        }
+        let new_parent = self.ensure_parent_id(to)?;
+        let old_parent = file.parents.first().cloned().unwrap_or_default();
+        let mut url = format!("{API_BASE}/files/{}?fields=id", file.id);
+        if new_parent != old_parent {
+            url.push_str(&format!(
+                "&addParents={}&removeParents={}",
+                oauth::url_encode(&new_parent),
+                oauth::url_encode(&old_parent)
+            ));
+        }
+        let _: GdFile = self.api_json(
+            "PATCH",
+            url,
+            Some(serde_json::json!({
+                "name": to.file_name().unwrap_or_default(),
+                "appProperties": { OP_ID_PROPERTY: op_id },
+            })),
+        )?;
+        self.evict_path(from.as_str());
+        self.cache_mapping(to.as_str(), &file.id);
+        Ok(())
+    }
+
     fn root_identity(&self, cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
         // The folder id is the identity: a folder re-created at the
         // same path gets a new id, and a renamed folder keeps its own.

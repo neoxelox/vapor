@@ -25,6 +25,7 @@ Available now:
 - ❓ When the evidence is ambiguous, Vapor holds only the files in question, asks you a plain question with a short list of answers, and keeps the question until you answer it, from the terminal or the app.
 - 🗑️ Nothing Vapor removes from your device is gone: it waits in a trash you can list and restore from, for as long as you choose.
 - 🔌 An unplugged drive, or an empty folder where your sync folder used to be, never turns into deletions on the other side. Vapor waits for the folder, and asks before it merges anything.
+- ✂️ Renaming or moving a file, on either side, moves it on the other side too. No re-upload, no re-download.
 - 🔂 Your own uploads never bounce back as new changes, so two devices cannot ping-pong a file forever.
 - 🔀 Pick a direction per folder. Full two-way, or a one-way mirror for read-only backups and copies.
 - 🧩 Run several sync profiles at once. One folder can flow to two clouds, or separate setups stay isolated.
@@ -48,7 +49,6 @@ In flight and coming next:
 
 - 🪟 A diagnostics window in the Mac app with throttle reason, queue, conflicts, and timeline, plus live pause and flush controls.
 - 🔔 A notification when a conflict needs you.
-- ✂️ Renames and moves without re-uploading the file.
 - 🖥️ Windows and Linux apps on the same runtime as the Mac app.
 - 📥 Standalone command-line downloads for every OS, with Docker and systemd recipes.
 - 🧾 Signed and notarized releases, verified on a clean machine every cycle.

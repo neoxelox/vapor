@@ -866,10 +866,8 @@ runtime changed shape):
 
 Still open:
 
-- [ ] RV-11 Move detection: turn FSEvents rename pairs into a server-side
-      move on providers that support one (Google Drive does), so a
-      renamed large file is not re-uploaded. Reintroduce the capability
-      on the provider trait together with the engine path that calls it.
+- [x] RV-11 Move detection: landed as SF-8 (hash-based, both
+      directions, `Provider::move_object`).
 - [ ] RV-12 Adopt `insta` for the `--json` shape locks (see CT-4) and
       `proptest` for the invariants in CT-1.
 
@@ -989,11 +987,12 @@ Still open, in order:
       passive so the crash-loop guard owns every restart. R01 covers
       it under `--full`. The soak driver keeps restarting the daemon
       itself: its sandbox never installs host services.
-- [ ] SF-8 Move detection with hashes (folds RV-11): a delete and a
-      create with the same content hash inside one debounce window, or
-      found by the reconcile walk, become one server-side move on
-      providers that support it and one local rename on apply, so a
-      moved tree is not re-transferred.
+- [x] SF-8 Move detection with hashes (folds RV-11): a new local path
+      with the bytes of a vanished synced file becomes one
+      `Provider::move_object`; a new cloud object with a synced local
+      file's size, mtime, and hash becomes a local rename; deletions
+      wait a settle window so the create half is seen first.
+      Scenarios S47, S48.
 - [ ] SF-9 Knowledge base for each of the above: the `vapor-e2e`,
       `vapor-soak`, `vapor-debug`, and `vapor-config` skills, the
       scenario catalog, `data-flow.md` §Decisions (new kinds listed

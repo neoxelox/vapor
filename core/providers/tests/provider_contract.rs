@@ -334,6 +334,7 @@ impl Provider for MockObjectStoreProvider {
             supports_remote_changes_feed: false,
             supports_write_preconditions: true,
             supports_op_id_tags: false,
+            supports_server_side_move: false,
             supports_content_hashes_in_metadata: true,
         }
     }

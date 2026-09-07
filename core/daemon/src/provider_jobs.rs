@@ -148,6 +148,12 @@ pub(crate) enum ProviderJobKind {
         remote_path: RemotePath,
         op_id: String,
     },
+    /// A server-side move: the detected rename of a synced file.
+    Move {
+        from: RemotePath,
+        to: RemotePath,
+        op_id: String,
+    },
     /// `begin_upload` + step loop.
     Upload(UploadRequest),
     /// `begin_download` + step loop.
@@ -162,6 +168,7 @@ pub(crate) enum ProviderJobKind {
 pub(crate) enum ProviderJobOutcome {
     Probe(ProbeResult),
     RemoteDelete(Result<(), ProviderError>),
+    Move(Result<(), ProviderError>),
     /// Session held at its checkpoint: a gate closed or the bandwidth
     /// bucket ran dry. The executor re-dispatches on a later tick (its
     /// stage already knows the direction).
@@ -524,6 +531,9 @@ fn run_job(job: QueuedJob, gates: &TransferGates) -> CompletedJob {
         ProviderJobKind::Probe(request) => ProviderJobOutcome::Probe(run_probe(&context, request)),
         ProviderJobKind::RemoteDelete { remote_path, op_id } => {
             ProviderJobOutcome::RemoteDelete(context.provider.delete(&remote_path, &op_id))
+        }
+        ProviderJobKind::Move { from, to, op_id } => {
+            ProviderJobOutcome::Move(context.provider.move_object(&from, &to, &op_id))
         }
         ProviderJobKind::Upload(request) => match context.provider.begin_upload(request) {
             Ok(session) => run_transfer(

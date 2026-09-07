@@ -237,6 +237,9 @@ pub struct RuntimeTickReport {
     pub mirror_deletes: usize,
     /// Keep-both conflict copies created this tick.
     pub conflicts: usize,
+    /// Renames carried out as moves (server-side or local) instead of
+    /// transfers.
+    pub moves: usize,
     pub started_reconcile_root: Option<PathBuf>,
     pub completed_reconcile_root: Option<PathBuf>,
     pub staged_executor: StagedExecutorSnapshot,
@@ -633,6 +636,7 @@ impl DaemonRuntime {
         self.mirror_delete_count += staged_report.mirror_deletes as u64;
         report.conflicts += staged_report.conflicts;
         self.conflict_count += staged_report.conflicts as u64;
+        report.moves += staged_report.moves;
         if staged_report.cloud_root_unavailable > 0 {
             self.mark_cloud_root_unavailable("a provider transfer reported the root missing", now);
         }
@@ -784,6 +788,7 @@ impl DaemonRuntime {
                 self.mirror_delete_count += admission_report.mirror_deletes as u64;
                 report.conflicts += admission_report.conflicts;
                 self.conflict_count += admission_report.conflicts as u64;
+                report.moves += admission_report.moves;
                 self.announce_decisions(&admission_report.decisions_opened, now);
                 if let Some(timeline) = &self.timeline {
                     for (wanted, existing) in &admission_report.name_collisions {
@@ -6588,6 +6593,114 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].reason, constants::trash::REASON_MIRROR_REMOVAL);
         assert_eq!(entries[0].original_path, local_only);
+    }
+
+    #[test]
+    fn a_local_rename_becomes_a_server_side_move_instead_of_a_reupload() {
+        let mut fixture = BidirectionalFixture::new();
+        let timeline = crate::timeline::TimelineBuffer::new(64);
+        fixture.runtime.attach_timeline(timeline.clone());
+        fixture.tick(6_000);
+        let before = fixture.watch_root.join("report-v1.bin");
+        let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&before, &payload).expect("seed");
+        fixture.record_local_event(&before, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(30);
+        assert!(fixture.cloud_root.join("report-v1.bin").exists());
+
+        // The user renames it. The watcher reports a delete and a create.
+        let after = fixture.watch_root.join("archive/report-final.bin");
+        std::fs::create_dir_all(after.parent().unwrap()).expect("dir");
+        std::fs::rename(&before, &after).expect("rename");
+        fixture.record_local_event(&before, FsEventKind::Removed, fixture.now_ms);
+        fixture.record_local_event(&after, FsEventKind::Created, fixture.now_ms);
+        let mut moves = 0;
+        for _ in 0..30 {
+            let report = fixture.tick(6_000);
+            moves += report.moves;
+            if report.staged_executor.active_total == 0
+                && fixture.runtime.state_db().queue_depth().expect("depth") == 0
+            {
+                break;
+            }
+        }
+        assert_eq!(moves, 1, "the rename is one server-side move");
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("archive/report-final.bin")).expect("moved"),
+            payload
+        );
+        assert!(!fixture.cloud_root.join("report-v1.bin").exists());
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .sync_index(&after)
+                .expect("index")
+                .is_some(),
+            "the moved file is indexed under its new path"
+        );
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .sync_index(&before)
+                .expect("index")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_cloud_rename_becomes_a_local_rename_instead_of_a_download() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let local = fixture.watch_root.join("photo.raw");
+        let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
+        std::fs::write(&local, &payload).expect("seed");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(30);
+        let cloud_before = fixture.cloud_root.join("photo.raw");
+        assert!(cloud_before.exists());
+
+        // Another device renames it in the cloud; the feed reports a
+        // removal and a creation.
+        let cloud_after = fixture.cloud_root.join("2026/photo-renamed.raw");
+        std::fs::create_dir_all(cloud_after.parent().unwrap()).expect("dir");
+        std::fs::rename(&cloud_before, &cloud_after).expect("cloud rename");
+        fixture
+            .feed
+            .emit_removed(cloud_before.clone(), timestamp_ms(fixture.now_ms));
+        fixture
+            .feed
+            .emit_created(cloud_after.clone(), timestamp_ms(fixture.now_ms));
+        let mut moves = 0;
+        for _ in 0..30 {
+            let report = fixture.tick(6_000);
+            moves += report.moves;
+            if report.staged_executor.active_total == 0
+                && fixture.runtime.state_db().queue_depth().expect("depth") == 0
+            {
+                break;
+            }
+        }
+        let local_after = fixture.watch_root.join("2026/photo-renamed.raw");
+        assert_eq!(moves, 1, "the cloud rename is one local rename");
+        assert_eq!(std::fs::read(&local_after).expect("renamed"), payload);
+        assert!(
+            !local.exists(),
+            "the old name is gone, not trashed as a deletion"
+        );
+        assert!(
+            fixture.runtime.trash().is_none()
+                || fixture.runtime.trash().expect("trash").list().is_empty()
+        );
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .sync_index(&local_after)
+                .expect("index")
+                .is_some()
+        );
     }
 
     #[test]

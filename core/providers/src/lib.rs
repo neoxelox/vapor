@@ -115,6 +115,10 @@ pub struct ProviderCapabilities {
     /// echoes it back through entries and changes (loop prevention's
     /// primary correlator).
     pub supports_op_id_tags: bool,
+    /// Provider can move a remote object to another path without a
+    /// re-upload ([`Provider::move_object`]); the engine turns a
+    /// detected local rename into one call when this is set.
+    pub supports_server_side_move: bool,
     /// Provider reports content hashes in enumeration / changes
     /// metadata without a separate expensive call.
     pub supports_content_hashes_in_metadata: bool,
@@ -125,6 +129,7 @@ impl ProviderCapabilities {
         supports_remote_changes_feed: true,
         supports_write_preconditions: true,
         supports_op_id_tags: true,
+        supports_server_side_move: true,
         supports_content_hashes_in_metadata: false,
     };
 
@@ -132,6 +137,7 @@ impl ProviderCapabilities {
         supports_remote_changes_feed: true,
         supports_write_preconditions: true,
         supports_op_id_tags: true,
+        supports_server_side_move: true,
         supports_content_hashes_in_metadata: true,
     };
 }
@@ -355,6 +361,23 @@ pub trait Provider: Send + Sync {
     /// convergence, not failure.
     fn delete(&self, path: &RemotePath, op_id: &str) -> Result<(), ProviderError>;
 
+    /// Moves a remote file from `from` to `to` in one call, keeping its
+    /// content and tagging it with `op_id`, when
+    /// `supports_server_side_move`. A missing source reports
+    /// `NotFound`; an occupied destination reports
+    /// `PreconditionFailed` so the engine never overwrites by moving.
+    fn move_object(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        op_id: &str,
+    ) -> Result<(), ProviderError> {
+        let _ = (from, to, op_id);
+        Err(ProviderError::permanent(
+            "this provider cannot move objects server-side",
+        ))
+    }
+
     /// Pulls the next page of remote changes after `cursor`.
     /// `cursor = None` baselines the feed: it returns an empty page
     /// whose `next_cursor` marks "now". Only meaningful when
@@ -427,6 +450,7 @@ impl Provider for FilesystemStubProvider {
             supports_remote_changes_feed: false,
             supports_write_preconditions: false,
             supports_op_id_tags: false,
+            supports_server_side_move: false,
             supports_content_hashes_in_metadata: false,
         }
     }

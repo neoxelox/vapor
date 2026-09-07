@@ -284,6 +284,8 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S44 | a daemon started while the adopted local root is missing parks the profile with a `root-missing` decision, never re-creates the folder, and resumes on its own when the volume returns |
 | S45 | a deleted cloud root is never re-created on Vapor's own; the `root-missing` decision answered `recreate` re-creates it and re-uploads this device's files |
 | S46 | a name that is a file here and a folder in the cloud opens a `type-mismatch` decision and touches nothing; `keep-both` moves the file to a conflict name and brings the folder down |
+| S47 | renaming a synced file locally moves the cloud object in place (same inode, no re-upload) and re-keys the index |
+| S48 | renaming a synced file in the cloud renames the local file in place (same inode, no download) and leaves nothing in the trash |
 | R01 | install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd, then the headless supervisor (`install --supervise`) restarting a killed daemon on its own (`--full`) |
 
 ## Extending the harness

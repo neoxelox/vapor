@@ -341,6 +341,45 @@ impl Provider for FilesystemProvider {
         Ok(())
     }
 
+    fn move_object(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        op_id: &str,
+    ) -> Result<(), ProviderError> {
+        let resolved_from = self.resolve_in_scope(from)?;
+        let resolved_to = self.resolve_in_scope(to)?;
+        if !resolved_from.exists() {
+            return Err(ProviderError::not_found(format!(
+                "move source {from} does not exist"
+            )));
+        }
+        if fs::symlink_metadata(&resolved_to).is_ok() {
+            return Err(ProviderError::precondition_failed(format!(
+                "move destination {to} already exists"
+            )));
+        }
+        if let Some(parent) = resolved_to.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                ProviderError::transient(format!(
+                    "cannot create the destination directory for {to}: {error}"
+                ))
+            })?;
+        }
+        fs::rename(&resolved_from, &resolved_to).map_err(|error| {
+            ProviderError::transient(format!("cannot move {from} to {to}: {error}"))
+        })?;
+        self.tags
+            .relocate_side_file(&resolved_from, &resolved_to)
+            .map_err(|error| {
+                ProviderError::transient(format!(
+                    "moved {from} to {to} but could not relocate its tag side-file: {error}"
+                ))
+            })?;
+        let _ = self.tags.write_op_id(&resolved_to, op_id);
+        Ok(())
+    }
+
     fn root_identity(&self, cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
         let expanded = expand_cloud_directory(cloud_sync_directory)?;
         match fs::symlink_metadata(&expanded) {

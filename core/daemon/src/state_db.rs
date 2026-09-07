@@ -287,6 +287,25 @@ impl DurableStateDb {
         Ok(count as usize)
     }
 
+    /// Paths of the queued intents (pending or leased) of `kind`.
+    pub fn queued_paths_of_kind(
+        &self,
+        kind: PendingIntentKind,
+    ) -> Result<Vec<PathBuf>, StateDbError> {
+        let mut statement = self.connection.prepare(
+            "SELECT path_text FROM queue_intents WHERE kind = ? AND state IN (?, ?) LIMIT 256",
+        )?;
+        let rows = statement.query_map(
+            params![intent_kind_label(kind), STATE_PENDING, STATE_LEASED],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut paths = Vec::new();
+        for row in rows {
+            paths.push(path_from_text(row?));
+        }
+        Ok(paths)
+    }
+
     /// Number of queued intents (pending or leased) whose path lies
     /// strictly under `directory`, excluding `except_id`. A directory
     /// delete uses it to tell "children still being worked on" from
@@ -465,6 +484,33 @@ impl DurableStateDb {
         let changed = self.connection.execute(
             "DELETE FROM queue_intents WHERE id = ? AND state = ?",
             params![id, STATE_LEASED],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Puts a leased intent back for `available_at` because the
+    /// planner chose to wait (a deletion that may be half of a rename),
+    /// counting the deferral so it cannot repeat forever and recording
+    /// the reason where diagnostics show it.
+    pub fn defer_leased(
+        &mut self,
+        id: i64,
+        available_at: SystemTime,
+        reason: &str,
+    ) -> Result<bool, StateDbError> {
+        let available_at_ms = system_time_to_millis(available_at)?;
+        let changed = self.connection.execute(
+            "UPDATE queue_intents
+             SET state = ?, available_at_ms = ?, leased_at_ms = NULL,
+                 attempt_count = attempt_count + 1, last_error = ?
+             WHERE id = ? AND state = ?",
+            params![
+                STATE_PENDING,
+                available_at_ms,
+                sanitize_persisted_error(reason),
+                id,
+                STATE_LEASED
+            ],
         )?;
         Ok(changed > 0)
     }
@@ -1096,6 +1142,62 @@ impl DurableStateDb {
             },
         )
         .transpose()
+    }
+
+    /// Every synced path whose last transfer had this content, for move
+    /// detection (a file that vanished at one path and appeared at
+    /// another with the same bytes).
+    pub fn sync_index_by_content(
+        &self,
+        content_hash: &str,
+        size_bytes: u64,
+    ) -> Result<Vec<SyncIndexEntry>, StateDbError> {
+        let mut statement = self.connection.prepare(
+            "SELECT path_text FROM sync_index WHERE content_hash = ? AND size_bytes = ? LIMIT 16",
+        )?;
+        let paths: Vec<String> = statement
+            .query_map(
+                params![content_hash, i64::try_from(size_bytes).unwrap_or(i64::MAX)],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<_, _>>()?;
+        let mut entries = Vec::new();
+        for path in paths {
+            if let Some(entry) = self.sync_index(&path_from_text(path))? {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Every synced path whose remote object had this size and mtime
+    /// at the last transfer: the cheap first filter for a cloud-side
+    /// move (the object keeps both when it is renamed).
+    pub fn sync_index_by_remote_state(
+        &self,
+        size_bytes: u64,
+        remote_modified_at: SystemTime,
+    ) -> Result<Vec<SyncIndexEntry>, StateDbError> {
+        let mut statement = self.connection.prepare(
+            "SELECT path_text FROM sync_index
+             WHERE size_bytes = ? AND remote_modified_at_ms = ? LIMIT 16",
+        )?;
+        let paths: Vec<String> = statement
+            .query_map(
+                params![
+                    i64::try_from(size_bytes).unwrap_or(i64::MAX),
+                    system_time_to_millis(remote_modified_at)?
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<_, _>>()?;
+        let mut entries = Vec::new();
+        for path in paths {
+            if let Some(entry) = self.sync_index(&path_from_text(path))? {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
     }
 
     pub fn remove_sync_index(&mut self, path: &Path) -> Result<(), StateDbError> {
@@ -1922,7 +2024,11 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
              path_text TEXT PRIMARY KEY,
              origin TEXT NOT NULL CHECK(origin IN ('local', 'remote')),
              deleted_at_ms INTEGER NOT NULL
-         );",
+         );
+         CREATE INDEX IF NOT EXISTS idx_sync_index_content
+             ON sync_index(content_hash, size_bytes);
+         CREATE INDEX IF NOT EXISTS idx_sync_index_remote_state
+             ON sync_index(size_bytes, remote_modified_at_ms);",
     )?;
 
     if read_schema_version(&transaction)?.is_none() {

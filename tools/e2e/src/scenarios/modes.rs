@@ -406,6 +406,18 @@ fn mass_delete_guard(ctx: &mut Ctx) -> Result<(), Failure> {
     }
     let cli = ctx.cli();
     let id = wait_open_mass_deletion(&cli, Duration::from_secs(30))?;
+    // Each deletion of a synced file first waits out the move-settle
+    // window, so the twelve join the hold over a few ticks.
+    wait::wait_until(
+        Duration::from_secs(30),
+        "every deletion of the burst to be held",
+        || {
+            cli.json(&["decisions", "show", &id.to_string(), "--json"])
+                .ok()
+                .and_then(|decision| decision["heldIntents"].as_u64())
+                == Some(12)
+        },
+    )?;
     let decision = cli.json(&["decisions", "show", &id.to_string(), "--json"])?;
     ensure!(
         decision["heldIntents"].as_u64() == Some(12),
@@ -588,7 +600,9 @@ fn mass_delete_discard(ctx: &mut Ctx) -> Result<(), Failure> {
         fs::remove_file(home.cloud.join(format!("victim-{index:02}.txt")))?;
     }
     let cli = ctx.cli();
-    let id = wait_open_mass_deletion(&cli, Duration::from_secs(60))?;
+    // The changes feed polls once a minute under the harness's static
+    // throttle, and each removal waits out the move-settle window.
+    let id = wait_open_mass_deletion(&cli, Duration::from_secs(120))?;
     let decision = cli.json(&["decisions", "show", &id.to_string(), "--json"])?;
     ensure!(
         decision["evidence"]["direction"] == "cloud-to-local",

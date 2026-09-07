@@ -21,6 +21,22 @@ pub fn scenarios() -> Vec<Scenario> {
             run: rename_and_move,
         },
         Scenario {
+            id: "S47",
+            name: "local-rename-is-a-move",
+            proves: "renaming a synced file locally moves the cloud object in place (same inode, no re-upload) and re-keys the index",
+            needs: &[Need::NativeWatcher, Need::Filesystem, Need::Unix],
+            expect: Expect::Pass,
+            run: local_rename_is_a_move,
+        },
+        Scenario {
+            id: "S48",
+            name: "cloud-rename-is-a-move",
+            proves: "renaming a synced file in the cloud renames the local file in place (same inode, no download) and leaves nothing in the trash",
+            needs: &[Need::NativeWatcher, Need::Filesystem, Need::Unix],
+            expect: Expect::Pass,
+            run: cloud_rename_is_a_move,
+        },
+        Scenario {
             id: "S26",
             name: "tree-removal-and-type-flip",
             proves: "rm -rf of a tree removes it from the cloud; recreating the name as a file converges to a file on both sides",
@@ -140,6 +156,92 @@ fn directory_trees(ctx: &mut Ctx) -> Result<(), Failure> {
     ensure!(
         home.cloud.join("a/sibling.txt").is_file(),
         "removing one file took its sibling with it"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn inode_of(path: &std::path::Path) -> Result<u64, Failure> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(fs::metadata(path)?.ino())
+}
+
+#[cfg(not(unix))]
+fn inode_of(_path: &std::path::Path) -> Result<u64, Failure> {
+    Ok(0)
+}
+
+fn large_payload() -> Vec<u8> {
+    (0..2_000_000u32).map(|i| (i % 249) as u8).collect()
+}
+
+fn local_rename_is_a_move(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let before = home.local.join("dataset-v1.bin");
+    let mark = ctx.mark();
+    fs::write(&before, large_payload())?;
+    ctx.converge_from(&mark, 1, Duration::from_secs(60))?;
+    ctx.wait_exists(&home.cloud.join("dataset-v1.bin"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    let cloud_inode = inode_of(&home.cloud.join("dataset-v1.bin"))?;
+
+    let after = home.local.join("archive/dataset-final.bin");
+    fs::create_dir_all(after.parent().unwrap())?;
+    fs::rename(&before, &after)?;
+    ctx.wait_exists(
+        &home.cloud.join("archive/dataset-final.bin"),
+        Duration::from_secs(60),
+    )?;
+    ctx.wait_absent(&home.cloud.join("dataset-v1.bin"), Duration::from_secs(60))?;
+    ctx.settle(Duration::from_secs(60))?;
+    ensure!(
+        inode_of(&home.cloud.join("archive/dataset-final.bin"))? == cloud_inode,
+        "the cloud object must be the same one moved, not a re-upload"
+    );
+    ensure!(
+        read_string(&after).is_err() || fs::read(&after)? == large_payload(),
+        "payload intact"
+    );
+    let log = fs::read_to_string(home.daemon_log()).unwrap_or_default();
+    ensure!(
+        log.contains("Moved the cloud object instead of re-uploading"),
+        "the daemon log must record the move"
+    );
+    Ok(())
+}
+
+fn cloud_rename_is_a_move(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let local = home.local.join("footage.raw");
+    let mark = ctx.mark();
+    fs::write(&local, large_payload())?;
+    ctx.converge_from(&mark, 1, Duration::from_secs(60))?;
+    ctx.wait_exists(&home.cloud.join("footage.raw"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    let local_inode = inode_of(&local)?;
+
+    let cloud_after = home.cloud.join("2026/footage-renamed.raw");
+    fs::create_dir_all(cloud_after.parent().unwrap())?;
+    fs::rename(home.cloud.join("footage.raw"), &cloud_after)?;
+    let local_after = home.local.join("2026/footage-renamed.raw");
+    ctx.wait_exists(&local_after, Duration::from_secs(90))?;
+    ctx.wait_absent(&local, Duration::from_secs(60))?;
+    ctx.settle(Duration::from_secs(60))?;
+    ensure!(
+        inode_of(&local_after)? == local_inode,
+        "the local file must be the same one renamed, not a download"
+    );
+    let trash = ctx.cli().json(&["trash", "list", "--json"])?;
+    ensure!(
+        trash["entries"].as_array().is_some_and(Vec::is_empty),
+        "a rename must not leave the old name in the trash: {trash}"
+    );
+    let log = fs::read_to_string(home.daemon_log()).unwrap_or_default();
+    ensure!(
+        log.contains("Renamed the local file instead of downloading"),
+        "the daemon log must record the move"
     );
     Ok(())
 }

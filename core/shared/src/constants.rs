@@ -658,6 +658,13 @@ pub mod engine {
     /// the answer this long to land before it may ask about the same
     /// path again.
     pub const DECISION_APPLY_GRACE_SECONDS: u64 = 600;
+    /// The deletion of a synced file may be half of a rename whose
+    /// create is still coming through the debounce. Its first planning
+    /// always waits this long, and later ones wait while a transfer of
+    /// the same size is queued, at most this many times in all, before
+    /// it proceeds as a deletion.
+    pub const MOVE_SETTLE_DELAY_SECONDS: u64 = 3;
+    pub const MOVE_SETTLE_MAX_DEFERRALS: u32 = 3;
     /// Directories the reconcile comparison walk processes per runtime
     /// tick while a reconcile slice is active. Bounds per-tick I/O so
     /// the slice checkpoints keep their interruptibility guarantee.
