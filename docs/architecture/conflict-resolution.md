@@ -85,6 +85,22 @@ can arrive in a one-way scope via sync. In `pull-only`, resolve on the
 cloud side (local edits are mirror-reverted); in `push-only`, resolve
 locally.
 
+Name-clash copies: a copy that stands in for a cloud name this
+filesystem folds onto another local name (`data-flow.md` §Directory and
+symlink semantics, name collisions) is aliased to its own cloud
+object. `--keep canonical` drops that cloud object through the normal
+delete path; `--keep copy` is refused with the reason, since renaming
+the copy over the kept name would only swap which cloud object is
+stranded.
+
+Not every question is a conflict. Where an irreversible action rests
+on ambiguous evidence (a deletion burst, a missing or replaced sync
+root, a name that is a file on one side and a folder on the other),
+the daemon opens a decision instead: `vapor decisions list|show|resolve`
+(`data-flow.md` §Decisions). The two systems share the keep-both
+posture and the CLI-first shape; they differ in that a conflict copy is
+a file on disk and a decision is a row in the state DB.
+
 ## Per-surface responsibilities
 
 | Surface | Notify | List | Resolve |

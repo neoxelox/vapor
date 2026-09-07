@@ -76,6 +76,14 @@ order and quote what you find:
    the doc pointer that proves it). Hand off to the `vapor-debug`
    skill for the product side.
 
+States the driver expects and you should not mistake for findings: a
+`guard-trip` fault event (the mass-deletion guard held a subtree
+removal and the driver answered `apply`), a `root-missing` decision
+while the driver has the cloud root parked (it withdraws itself on
+restore), and the daemon in `Error` during that parking. A daemon that
+re-creates the parked root, or any other open decision, fails the run
+on purpose.
+
 Write the finding up with the seed, the flags, the phase, the op
 sequence, and the daemon log window, so it can be replayed.
 

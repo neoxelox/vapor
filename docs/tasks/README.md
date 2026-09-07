@@ -224,35 +224,38 @@ are opt-in per profile and destructive to the subordinate side — see
 `docs/architecture/sync-modes.md`. (The high task numbers only keep existing
 IDs stable; they do not imply low priority.)
 
-### Sync safety before users (cross-cutting, in progress)
+### Sync safety before users (cross-cutting)
 
-Status: SF-1 (decisions and the two-direction mass-deletion guard),
-SF-2 (the local trash), SF-3 (root identity), SF-4 (offline deletions
-through the index), SF-5 (the type-mismatch decision), and SF-6
-(collisions as aliased conflict copies), SF-7 (the headless
-supervisor), and SF-8 (hash-based move detection) landed by
-2026-09-07; SF-9 in `core.md` "Sync safety follow-ups", the
-knowledge-base sweep, closes the block before Wave 9 exposes any of
-it in the app. The testing tiers that prove them
-(`core.md` TR-1 … TR-10) are in place; TR-8 and TR-10 wait on the
-Google Drive test account and the native Linux traits.
+Status: **complete** (SF-1 … SF-9 in `core.md` "Sync safety
+follow-ups", landed 2026-09-06 and 2026-09-07): decisions and the
+two-direction mass-deletion guard, the local trash, root identity,
+offline deletions through the index, the type-mismatch decision,
+collisions as aliased conflict copies, the headless supervisor,
+hash-based move detection, and the knowledge base for each. Wave 9
+exposes decisions and the trash in the app on top of the `--json`
+commands. The testing tiers that prove them (`core.md` TR-1 … TR-10)
+are in place; TR-8 and TR-10 wait on the Google Drive test account and
+the native Linux traits.
 
 ### Wave 9 — macOS app UX polish
 
 Status: pending — **now unblocked** (every Wave 8 dependency below has
 landed).
 
-- `macos.md` M3-1 … M3-8 — diagnostics UX in the macOS app: real
+- `macos.md` M3-1 … M3-11 — diagnostics UX in the macOS app: real
   IPC-backed controls (`Pause`/`Resume`/`Flush now`), full menubar
   state model, diagnostics panel with throttle reason + queue depth +
   conflicts + failures + effective ceilings + utilization + idle-boost
-  reason, per-intent "why stuck" UI, live timeline tab, tests, plus the
+  reason, per-intent "why stuck" UI, live timeline tab, tests, the
   conflicts pane and conflict notifications (M3-7/M3-8, driving the
   shipped `vapor conflicts` CLI per
-  `docs/architecture/conflict-resolution.md`). Depends on C8-27 … C8-31
-  and the post-Wave-8 follow-ups C8-67 … C8-70 (all landed; C8-71
-  per-path timeline detail is the one open core dependency, only for
-  naming files inside notifications).
+  `docs/architecture/conflict-resolution.md`), and the decisions pane,
+  trash pane, and root-state display (M3-9 … M3-11, driving the shipped
+  `vapor decisions` and `vapor trash` commands). Depends on C8-27 …
+  C8-31, the post-Wave-8 follow-ups C8-67 … C8-70, and the sync safety
+  block SF-1 … SF-9 (all landed; C8-71 per-path timeline detail is the
+  one open core dependency, only for naming files inside
+  notifications).
 - `macos.md` M4-1 … M4-5 — profiles UX: create/rename/select/enable/
   disable/delete flows, profile-scoped override settings UI (including the
   per-profile `syncMode` toggle and its strict-mirror warning), safe

@@ -993,9 +993,10 @@ Still open, in order:
       file's size, mtime, and hash becomes a local rename; deletions
       wait a settle window so the create half is seen first.
       Scenarios S47, S48.
-- [ ] SF-9 Knowledge base for each of the above: the `vapor-e2e`,
-      `vapor-soak`, `vapor-debug`, and `vapor-config` skills, the
-      scenario catalog, `data-flow.md` §Decisions (new kinds listed
-      there), the README Features and Configuration sections, and a
-      scenario for every new decision kind in the same change set.
+- [x] SF-9 Knowledge base: every item above shipped with its docs
+      (`data-flow.md` §Decisions, §Root identity, items 13 and 14,
+      `conflict-resolution.md`, the schema, IPC, and provider docs,
+      README Features and Configuration, the runbook) and skills
+      (`vapor-e2e`, `vapor-soak`, `vapor-debug`, `vapor-provider`), and
+      every decision kind has a scenario.
 
