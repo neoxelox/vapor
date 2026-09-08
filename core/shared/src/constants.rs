@@ -41,11 +41,6 @@ pub mod runtime {
     /// original name and a `meta.json` next to it.
     pub const TRASH_DIRECTORY_NAME: &str = "trash";
     pub const TRASH_ENTRY_META_FILE_NAME: &str = "meta.json";
-    /// The managed trash's home on a volume other than the runtime
-    /// directory's: `<volume root>/.vapor-trash/<profile>/`, so a
-    /// discard from a sync root on an external drive is a rename on
-    /// that drive, never a copy onto this one.
-    pub const VOLUME_TRASH_DIRECTORY_NAME: &str = ".vapor-trash";
     pub const CONFIGURATION_FILE_NAME: &str = "vapor.json";
     pub const SQLITE_DATABASE_FILE_NAME: &str = "vapor.sqlite";
     pub const APP_LOG_FILE_NAME: &str = "vapor.logs";
@@ -478,9 +473,15 @@ pub mod filtering {
     /// prevention depends on these never becoming intents, so they are
     /// enforced in the path filter itself rather than the editable
     /// rule set.
-    pub const INTERNAL_IGNORE_FILE_PREFIXES: &[&str] =
-        &[".vapor-tmp-", ".vapor-root", ".vapor-trash"];
+    pub const INTERNAL_IGNORE_FILE_PREFIXES: &[&str] = &[".vapor-tmp-", ".vapor-root"];
     pub const INTERNAL_IGNORE_FILE_SUFFIXES: &[&str] = &[".vapor-meta.json"];
+    /// Directory names that are Vapor's own state wherever they sit
+    /// and never sync, with everything under them: the runtime
+    /// directory (`~/.vapor`, a `VAPOR_DIR` inside a sync root, a dev
+    /// checkout's `./.vapor` with its logs and e2e sandboxes) and the
+    /// trash a sync root's volume carries at `<volume root>/.vapor/trash/`.
+    /// Matched as a whole name only, so `.vaporignore` still syncs.
+    pub const INTERNAL_IGNORE_DIRECTORY_NAMES: &[&str] = &[".vapor"];
     pub const DEFAULT_LOCAL_SYNC_DIRECTORY: &str = "~/Vapor";
     pub const DEFAULT_CLOUD_SYNC_DIRECTORY: &str = "/Vapor";
     /// Baseline low-signal exclusions applied before discovered ignore
@@ -495,6 +496,17 @@ pub mod filtering {
         ".DS_Store",
         "Thumbs.db",
         "desktop.ini",
+        // What an OS keeps at the root of a volume, for a sync root that
+        // is a whole external drive
+        ".fseventsd/",
+        ".Spotlight-V100/",
+        ".Trashes/",
+        ".TemporaryItems/",
+        ".DocumentRevisions-V100/",
+        "System Volume Information/",
+        "$RECYCLE.BIN/",
+        "lost+found/",
+        ".Trash-*/",
         // Editor swap / temp / partial files
         "*.tmp",
         "*.temp",

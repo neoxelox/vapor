@@ -85,7 +85,7 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             id: "S49",
             name: "trash-on-the-sync-root-volume",
-            proves: "a sync root on another volume gets its own trash location there: a cloud deletion is a rename on that volume (same inode, no copy onto the runtime directory's volume), vapor trash list shows it, restore puts it back, and the location never syncs",
+            proves: "a sync root that is a whole volume of its own gets its trash at <volume>/.vapor/trash/: a cloud deletion is a rename on that volume (same inode, no copy onto the runtime directory's volume), vapor trash list shows it, restore puts it back, and the .vapor directory inside the root never syncs",
             needs: &[Need::NativeWatcher, Need::Filesystem, Need::DiskImage],
             expect: Expect::Pass,
             run: trash_on_the_sync_root_volume,
@@ -599,10 +599,11 @@ fn trash_keeps_cloud_deletions(ctx: &mut Ctx) -> Result<(), Failure> {
 
 fn trash_on_the_sync_root_volume(ctx: &mut Ctx) -> Result<(), Failure> {
     let mut home = ctx.primary.clone();
-    // The local root lives on its own volume; the runtime directory
-    // (and so the trash's home location) stays on the sandbox's.
+    // The local root is a whole volume of its own, so its trash sits
+    // inside the sync root; the runtime directory (and so the trash's
+    // home location) stays on the sandbox's volume.
     let image = DiskImage::create(&ctx.sandbox.root, "local-volume", 64, ImageFs::Apfs)?;
-    home.local = image.mount_point.join("Vapor");
+    home.local = image.mount_point.clone();
     ctx.register_home(home.clone());
     ctx.configure_scope(&home)?;
     ctx.start_daemon()?;
@@ -625,7 +626,7 @@ fn trash_on_the_sync_root_volume(ctx: &mut Ctx) -> Result<(), Failure> {
     let entries = listed["entries"].as_array().cloned().unwrap_or_default();
     ensure!(entries.len() == 1, "expected one trash entry, got {listed}");
     let id = entries[0]["id"].as_str().unwrap_or_default().to_string();
-    let volume_trash = image.mount_point.join(".vapor-trash/default");
+    let volume_trash = image.mount_point.join(".vapor/trash/default");
     let payload = volume_trash.join(&id).join("keep.txt");
     ensure!(
         payload.is_file(),
@@ -641,8 +642,8 @@ fn trash_on_the_sync_root_volume(ctx: &mut Ctx) -> Result<(), Failure> {
         "nothing may be copied onto the runtime directory's volume"
     );
     ensure!(
-        !home.cloud.join(".vapor-trash").exists(),
-        "the volume trash must never sync"
+        !home.cloud.join(".vapor").exists(),
+        "the volume trash sits inside the sync root and must never sync"
     );
 
     let mark = ctx.mark();

@@ -203,6 +203,16 @@ impl EventPathFilter {
         let Ok(relative_path) = path.strip_prefix(&self.watch_root) else {
             return false;
         };
+        // Vapor's own directories are invisible with everything under
+        // them, so a runtime directory or a volume's trash inside the
+        // watch root never becomes intents.
+        if relative_path.components().any(|component| {
+            component.as_os_str().to_str().is_some_and(|name| {
+                constants::filtering::INTERNAL_IGNORE_DIRECTORY_NAMES.contains(&name)
+            })
+        }) {
+            return true;
+        }
 
         let normalized_relative_path = normalize_relative_path(relative_path);
         if normalized_relative_path.is_empty() {
@@ -236,6 +246,7 @@ fn is_internal_artifact(path: &Path) -> bool {
         || constants::filtering::INTERNAL_IGNORE_FILE_SUFFIXES
             .iter()
             .any(|suffix| name.ends_with(suffix))
+        || constants::filtering::INTERNAL_IGNORE_DIRECTORY_NAMES.contains(&name)
 }
 
 fn append_rules_from_file_tree(
@@ -630,6 +641,25 @@ mod tests {
         assert!(filter.should_ignore(&watch_root.join("docs/.vapor-tmp-upload")));
         assert!(filter.should_ignore(&watch_root.join("docs/report.md.vapor-meta.json")));
         assert!(!filter.should_ignore(&watch_root.join("docs/report.md")));
+    }
+
+    #[test]
+    fn a_vapor_directory_is_invisible_with_everything_under_it() {
+        let (_watch_root_guard, watch_root) = create_test_directory();
+        let options = EventPathFilterOptions {
+            pre_user_rules: vec!["!.vapor".to_string(), "!.vapor/**".to_string()],
+            ..EventPathFilterOptions::default()
+        };
+        let filter = EventPathFilter::for_watch_root(&watch_root, &options);
+
+        // The runtime directory or a volume's trash inside the root,
+        // at any depth, files included.
+        assert!(filter.should_ignore(&watch_root.join(".vapor")));
+        assert!(filter.should_ignore(&watch_root.join(".vapor/trash/default/1-0000/keep.txt")));
+        assert!(filter.should_ignore(&watch_root.join("projects/app/.vapor/logs/vapord.logs")));
+        // The user's ignore file is a different name and still syncs.
+        assert!(!filter.should_ignore(&watch_root.join(".vaporignore")));
+        assert!(!filter.should_ignore(&watch_root.join("docs/.vapor-notes.md")));
     }
 
     #[test]

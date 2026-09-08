@@ -292,7 +292,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S46 | a name that is a file here and a folder in the cloud opens a `type-mismatch` decision and touches nothing; `keep-both` moves the file to a conflict name and brings the folder down |
 | S47 | renaming a synced file locally moves the cloud object in place (same inode, no re-upload) and re-keys the index |
 | S48 | renaming a synced file in the cloud renames the local file in place (same inode, no download) and leaves nothing in the trash |
-| S49 | a sync root on another volume gets its own trash location there: a cloud deletion is a rename on that volume (same inode, no copy onto the runtime directory's volume), `vapor trash list` shows it, restore puts it back, and the location never syncs (needs a disk image) |
+| S49 | a sync root that is a whole volume of its own gets its trash at `<volume>/.vapor/trash/`: a cloud deletion is a rename on that volume (same inode, no copy onto the runtime directory's volume), `vapor trash list` shows it, restore puts it back, and the `.vapor` directory inside the root never syncs (needs a disk image) |
 | R01 | install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd, then the headless supervisor (`install --supervise`) restarting a killed daemon on its own (`--full`) |
 
 ## Extending the harness

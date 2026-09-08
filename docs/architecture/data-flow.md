@@ -51,12 +51,18 @@ On macOS the throttle inputs are read from the host every second: system and dae
    original path, the time, and the reason, or to the user's own trash
    when `trash.useSystemTrash` is set and the platform `TrashBin`
    accepts it. A sync root on another volume (an external drive) has
-   a second location on that volume, `<volume root>/.vapor-trash/<profile>/`,
-   with the same layout, so the discard is a rename on that volume and
-   never a copy onto this one; both locations are listed, restored
-   from, and purged together, and the name is one of the internal
-   names no side ever syncs. A volume that refuses the directory
-   falls back to the home location at the cost of a copy.
+   a second location on that volume, `<volume root>/.vapor/trash/<profile>/`,
+   the runtime directory's layout at the volume root, so the discard
+   is a rename on that volume and never a copy onto this one; both
+   locations are listed, restored from, and purged together. A
+   directory named `.vapor` is invisible to sync at any depth with
+   everything under it (the path filter, the reconcile walk, and the
+   filesystem provider's listings and feed all agree), so the volume
+   trash inside a sync root that is a whole drive, a runtime directory
+   inside a sync root, or a dev checkout's `./.vapor` with its logs and
+   sandboxes never becomes an intent; `.vaporignore` is a different
+   name and syncs. A volume that refuses the directory falls back to
+   the home location at the cost of a copy.
    `vapor trash list|restore|empty` work with or without a daemon; a
    restored file lands in the sync root and syncs like any write. The
    daemon purges entries older than `trash.retentionDays` (7 by

@@ -100,13 +100,20 @@ fn hex_encode(digest: &[u8]) -> String {
     out
 }
 
-/// Whether `name` is one of the provider's hidden internal files
-/// (op-id side-files and in-flight temp files).
+/// Whether `name` is one of Vapor's hidden internal names: op-id
+/// side-files, in-flight temp files, the root marker, and the `.vapor`
+/// runtime directory.
 pub fn is_internal_file_name(name: &str) -> bool {
     name.starts_with(constants::provider::TEMP_FILE_PREFIX)
         || name.ends_with(constants::provider::OP_ID_SIDE_FILE_SUFFIX)
         || name == constants::provider::ROOT_MARKER_FILE_NAME
-        || name == constants::runtime::VOLUME_TRASH_DIRECTORY_NAME
+        || constants::filtering::INTERNAL_IGNORE_DIRECTORY_NAMES.contains(&name)
+}
+
+/// Whether any segment of `remote` is an internal name: a path under
+/// a `.vapor` directory is Vapor's own state, never an object to sync.
+pub fn has_internal_segment(remote: &RemotePath) -> bool {
+    remote.as_str().split('/').any(is_internal_file_name)
 }
 
 /// Best-effort reap of an orphaned staging temp file. A `TEMP_FILE_PREFIX`

@@ -331,6 +331,9 @@ fn normalize_watch_event(
         return None;
     }
     let remote_path = RemotePath::from_local(root, &event.path)?;
+    if super::has_internal_segment(&remote_path) {
+        return None;
+    }
 
     match fs::symlink_metadata(&event.path) {
         Ok(metadata) => {
@@ -456,6 +459,31 @@ mod tests {
         );
         assert_eq!(page.changes.len(), 1);
         assert_eq!(page.changes[0].kind, RemoteChangeKind::Removed);
+    }
+
+    #[test]
+    fn anything_under_a_vapor_directory_is_invisible_to_the_feed() {
+        let (dir, feed, handle, tags) = feed_fixture();
+        let root = dir.path();
+        let baseline = expect_page(feed.poll(root, &tags, None, 100).expect("baseline"));
+
+        std::fs::create_dir_all(root.join(".vapor/trash/default/1-0000")).expect("dirs");
+        std::fs::write(root.join(".vapor/trash/default/1-0000/keep.txt"), b"x").expect("file");
+        std::fs::write(root.join(".vaporignore"), b"build/\n").expect("ignore file");
+        handle.emit_created(root.join(".vapor"), ts(1));
+        handle.emit_created(root.join(".vapor/trash/default/1-0000/keep.txt"), ts(2));
+        handle.emit_created(root.join(".vaporignore"), ts(3));
+
+        let page = expect_page(
+            feed.poll(root, &tags, Some(&baseline.next_cursor), 100)
+                .expect("poll"),
+        );
+        let paths: Vec<&str> = page
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect();
+        assert_eq!(paths, vec![".vaporignore"]);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! under its original file name and a `meta.json` next to it with the
 //! original path, when and why it was discarded. A sync root on
 //! another volume (an external drive) gets a second location on that
-//! volume, `<volume root>/.vapor-trash/<profile>/`, with the same
+//! volume, `<volume root>/.vapor/trash/<profile>/`, with the same
 //! layout, so a discard there is a rename on that drive and never a
 //! copy onto this one; both locations are listed, restored from, and
 //! purged together. Entries older than the retention window are
@@ -187,7 +187,8 @@ impl LocalTrash {
         }
         let top = vapor_platform::fs_ops::volume_root_of(path).ok()?;
         Some(
-            top.join(constants::runtime::VOLUME_TRASH_DIRECTORY_NAME)
+            top.join(constants::runtime::VAPOR_DIRECTORY_NAME)
+                .join(constants::runtime::TRASH_DIRECTORY_NAME)
                 .join(&self.profile_id),
         )
     }
@@ -524,7 +525,7 @@ mod tests {
         let temp = TempDir::new().expect("temp");
         let mut trash = managed(&temp);
         // A second location stands in for the sync root's volume.
-        let volume = temp.path().join("volume/.vapor-trash/default");
+        let volume = temp.path().join("volume/.vapor/trash/default");
         trash.pinned_volume = Some(volume.clone());
         let on_volume = temp.path().join("volume/Vapor/a.txt");
         fs::create_dir_all(on_volume.parent().unwrap()).expect("root");
