@@ -41,6 +41,11 @@ pub mod runtime {
     /// original name and a `meta.json` next to it.
     pub const TRASH_DIRECTORY_NAME: &str = "trash";
     pub const TRASH_ENTRY_META_FILE_NAME: &str = "meta.json";
+    /// The managed trash's home on a volume other than the runtime
+    /// directory's: `<volume root>/.vapor-trash/<profile>/`, so a
+    /// discard from a sync root on an external drive is a rename on
+    /// that drive, never a copy onto this one.
+    pub const VOLUME_TRASH_DIRECTORY_NAME: &str = ".vapor-trash";
     pub const CONFIGURATION_FILE_NAME: &str = "vapor.json";
     pub const SQLITE_DATABASE_FILE_NAME: &str = "vapor.sqlite";
     pub const APP_LOG_FILE_NAME: &str = "vapor.logs";
@@ -364,7 +369,7 @@ pub mod trash {
     /// fall back to the managed trash when that fails.
     pub const KEY_USE_SYSTEM_TRASH: &str = "useSystemTrash";
     pub const DEFAULT_ENABLED: bool = true;
-    pub const DEFAULT_RETENTION_DAYS: u32 = 30;
+    pub const DEFAULT_RETENTION_DAYS: u32 = 7;
     pub const DEFAULT_USE_SYSTEM_TRASH: bool = false;
     /// How often a running daemon looks for expired entries.
     pub const PURGE_INTERVAL_SECONDS: u64 = 1_800;
@@ -473,7 +478,8 @@ pub mod filtering {
     /// prevention depends on these never becoming intents, so they are
     /// enforced in the path filter itself rather than the editable
     /// rule set.
-    pub const INTERNAL_IGNORE_FILE_PREFIXES: &[&str] = &[".vapor-tmp-", ".vapor-root"];
+    pub const INTERNAL_IGNORE_FILE_PREFIXES: &[&str] =
+        &[".vapor-tmp-", ".vapor-root", ".vapor-trash"];
     pub const INTERNAL_IGNORE_FILE_SUFFIXES: &[&str] = &[".vapor-meta.json"];
     pub const DEFAULT_LOCAL_SYNC_DIRECTORY: &str = "~/Vapor";
     pub const DEFAULT_CLOUD_SYNC_DIRECTORY: &str = "/Vapor";

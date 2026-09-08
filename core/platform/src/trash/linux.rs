@@ -9,7 +9,6 @@
 #![allow(unsafe_code)]
 
 use std::io;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -40,39 +39,13 @@ impl NativeTrashBin {
     /// on the home volume, else the volume's own `.Trash-<uid>`.
     fn trash_for(&self, path: &Path) -> io::Result<PathBuf> {
         let home_trash = self.home_trash()?;
-        let file_device = std::fs::symlink_metadata(path)?.dev();
-        // The trash directory may not exist yet; the volume it would
-        // land on is the nearest ancestor that does.
-        let home_device = home_trash
-            .ancestors()
-            .find_map(|ancestor| std::fs::metadata(ancestor).ok())
-            .map(|metadata| metadata.dev());
-        if home_device == Some(file_device) {
+        if crate::fs_ops::same_volume(path, &home_trash)? {
             return Ok(home_trash);
         }
-        let top = mount_point_of(path, file_device)?;
+        let top = crate::fs_ops::volume_root_of(path)?;
         // SAFETY: `getuid` has no preconditions and cannot fail.
         let uid = unsafe { libc::getuid() };
-        let volume_trash = top.join(format!(".Trash-{uid}"));
-        Ok(volume_trash)
-    }
-}
-
-/// The highest ancestor of `path` on the same device: the mount point.
-fn mount_point_of(path: &Path, device: u64) -> io::Result<PathBuf> {
-    let mut current = path
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "path has no parent"))?;
-    loop {
-        let Some(parent) = current.parent() else {
-            return Ok(current);
-        };
-        let parent_device = std::fs::metadata(parent)?.dev();
-        if parent_device != device {
-            return Ok(current);
-        }
-        current = parent.to_path_buf();
+        Ok(top.join(format!(".Trash-{uid}")))
     }
 }
 

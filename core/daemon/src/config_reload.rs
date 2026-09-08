@@ -170,7 +170,7 @@ mod tests {
         fresh.pre_ignore_rules = "build/".to_string();
         fresh.provider = "gdrive".to_string();
         fresh.language_code = "es".to_string();
-        fresh.trash.retention_days = 7;
+        fresh.trash.retention_days = 14;
         let change = diff(&applied, &fresh);
         assert_eq!(
             change.live,

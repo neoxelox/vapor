@@ -106,6 +106,7 @@ pub fn is_internal_file_name(name: &str) -> bool {
     name.starts_with(constants::provider::TEMP_FILE_PREFIX)
         || name.ends_with(constants::provider::OP_ID_SIDE_FILE_SUFFIX)
         || name == constants::provider::ROOT_MARKER_FILE_NAME
+        || name == constants::runtime::VOLUME_TRASH_DIRECTORY_NAME
 }
 
 /// Best-effort reap of an orphaned staging temp file. A `TEMP_FILE_PREFIX`

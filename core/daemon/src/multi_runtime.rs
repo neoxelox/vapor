@@ -1189,12 +1189,15 @@ fn compose_slot(
     runtime.set_profile_id(profile.id.clone());
     runtime.configure_mass_delete_guard(composer.mass_delete_settings);
     let trash_root = composer.trash_root(&profile.id);
-    runtime.attach_trash(crate::trash::LocalTrash::new(
-        &profile.id,
-        trash_root,
-        composer.trash_settings,
-        Arc::new(vapor_platform::NativeTrashBin::for_current_host()),
-    ));
+    runtime.attach_trash(
+        crate::trash::LocalTrash::new(
+            &profile.id,
+            trash_root,
+            composer.trash_settings,
+            Arc::new(vapor_platform::NativeTrashBin::for_current_host()),
+        )
+        .with_sync_root(profile.scope.local_sync_directory.clone()),
+    );
     runtime.set_max_concurrent_transfers(composer.max_concurrent_transfers);
     runtime.attach_timeline(composer.timeline.clone());
     runtime.attach_resource_management(

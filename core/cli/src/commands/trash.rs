@@ -64,18 +64,25 @@ fn enabled_profile_ids(config: &VaporConfig) -> Vec<String> {
         .collect()
 }
 
-fn open(profile_id: &str) -> LocalTrash {
+/// The profile's trash, home location plus the sync root's volume
+/// when that is another volume.
+fn open(config: &VaporConfig, profile_id: &str) -> LocalTrash {
+    let sync_root = resolve_profiles(config)
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .and_then(|profile| profile.scope.local_sync_directory);
     LocalTrash::open(
         profile_id,
         vapor_shared::runtime_paths::profile_trash_directory(profile_id),
     )
+    .with_sync_root(sync_root)
 }
 
 /// Every entry of every enabled profile, newest first.
 pub fn list_trash(config: &VaporConfig) -> TrashListReport {
     let mut entries: Vec<TrashEntryJson> = enabled_profile_ids(config)
         .iter()
-        .flat_map(|profile_id| open(profile_id).list())
+        .flat_map(|profile_id| open(config, profile_id).list())
         .map(to_json)
         .collect();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.discarded_at_ms));
@@ -90,7 +97,7 @@ pub fn restore(
     profile: Option<&str>,
 ) -> Result<RestoreReport, String> {
     let profile_id = pick_profile(config, id, profile)?;
-    let restored_to = open(&profile_id)
+    let restored_to = open(config, &profile_id)
         .restore(id)
         .map_err(|error| format!("cannot restore trash entry {id}: {error}"))?;
     Ok(RestoreReport {
@@ -109,7 +116,7 @@ pub fn empty(config: &VaporConfig, profile: Option<&str>) -> EmptyReport {
     EmptyReport {
         removed: profiles
             .iter()
-            .map(|profile_id| open(profile_id).empty())
+            .map(|profile_id| open(config, profile_id).empty())
             .sum(),
     }
 }
@@ -120,7 +127,7 @@ fn pick_profile(config: &VaporConfig, id: &str, profile: Option<&str>) -> Result
     }
     let holders: Vec<String> = enabled_profile_ids(config)
         .into_iter()
-        .filter(|profile_id| open(profile_id).entry(id).is_some())
+        .filter(|profile_id| open(config, profile_id).entry(id).is_some())
         .collect();
     match holders.as_slice() {
         [one] => Ok(one.clone()),

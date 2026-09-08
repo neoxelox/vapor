@@ -83,6 +83,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: trash_keeps_cloud_deletions,
         },
         Scenario {
+            id: "S49",
+            name: "trash-on-the-sync-root-volume",
+            proves: "a sync root on another volume gets its own trash location there: a cloud deletion is a rename on that volume (same inode, no copy onto the runtime directory's volume), vapor trash list shows it, restore puts it back, and the location never syncs",
+            needs: &[Need::NativeWatcher, Need::Filesystem, Need::DiskImage],
+            expect: Expect::Pass,
+            run: trash_on_the_sync_root_volume,
+        },
+        Scenario {
             id: "S40",
             name: "mass-delete-decision-discard",
             proves: "a burst of cloud deletions is held before it touches this device; --choose discard restores the cloud copies from the local ones",
@@ -586,6 +594,76 @@ fn trash_keeps_cloud_deletions(ctx: &mut Ctx) -> Result<(), Failure> {
         after["entries"].as_array().is_some_and(Vec::is_empty),
         "a restored entry must leave the trash: {after}"
     );
+    Ok(())
+}
+
+fn trash_on_the_sync_root_volume(ctx: &mut Ctx) -> Result<(), Failure> {
+    let mut home = ctx.primary.clone();
+    // The local root lives on its own volume; the runtime directory
+    // (and so the trash's home location) stays on the sandbox's.
+    let image = DiskImage::create(&ctx.sandbox.root, "local-volume", 64, ImageFs::Apfs)?;
+    home.local = image.mount_point.join("Vapor");
+    ctx.register_home(home.clone());
+    ctx.configure_scope(&home)?;
+    ctx.start_daemon()?;
+    ctx.settle_home(&home, Duration::from_secs(3), Duration::from_secs(60))?;
+
+    let local = home.local.join("docs/keep.txt");
+    let cloud = home.cloud.join("docs/keep.txt");
+    let mark = ctx.mark();
+    write_file(&local, "kept on the external volume\n")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&cloud, CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    let inode_before = crate::scenarios::structure::inode_of(&local)?;
+
+    fs::remove_file(&cloud)?;
+    ctx.wait_absent(&local, Duration::from_secs(90))?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    let cli = ctx.cli();
+    let listed = cli.json(&["trash", "list", "--json"])?;
+    let entries = listed["entries"].as_array().cloned().unwrap_or_default();
+    ensure!(entries.len() == 1, "expected one trash entry, got {listed}");
+    let id = entries[0]["id"].as_str().unwrap_or_default().to_string();
+    let volume_trash = image.mount_point.join(".vapor-trash/default");
+    let payload = volume_trash.join(&id).join("keep.txt");
+    ensure!(
+        payload.is_file(),
+        "the entry must live on the sync root's volume at {}",
+        payload.display()
+    );
+    ensure!(
+        crate::scenarios::structure::inode_of(&payload)? == inode_before,
+        "the discard must be a rename on that volume, not a copy"
+    );
+    ensure!(
+        !home.dir.join("trash/default").join(&id).exists(),
+        "nothing may be copied onto the runtime directory's volume"
+    );
+    ensure!(
+        !home.cloud.join(".vapor-trash").exists(),
+        "the volume trash must never sync"
+    );
+
+    let mark = ctx.mark();
+    let restored = cli.json(&["trash", "restore", &id, "--json"])?;
+    ensure!(
+        restored["restoredTo"].as_str() == Some(local.to_str().unwrap_or_default()),
+        "restored somewhere else: {restored}"
+    );
+    ensure!(
+        crate::scenarios::structure::inode_of(&local)? == inode_before,
+        "the restore must be a rename too"
+    );
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&cloud, CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    let after = cli.json(&["trash", "list", "--json"])?;
+    ensure!(
+        after["entries"].as_array().is_some_and(Vec::is_empty),
+        "a restored entry must leave the trash: {after}"
+    );
+    ctx.keep_alive(Box::new(image));
     Ok(())
 }
 

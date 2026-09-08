@@ -50,10 +50,18 @@ On macOS the throttle inputs are read from the host every second: system and dae
    `vapor_dir/trash/<profile>/<entry>/` with a `meta.json` naming the
    original path, the time, and the reason, or to the user's own trash
    when `trash.useSystemTrash` is set and the platform `TrashBin`
-   accepts it. `vapor trash list|restore|empty` work with or without a
-   daemon; a restored file lands in the sync root and syncs like any
-   write. The daemon purges entries older than `trash.retentionDays`
-   at startup and every half hour. `trash.enabled: false` unlinks.
+   accepts it. A sync root on another volume (an external drive) has
+   a second location on that volume, `<volume root>/.vapor-trash/<profile>/`,
+   with the same layout, so the discard is a rename on that volume and
+   never a copy onto this one; both locations are listed, restored
+   from, and purged together, and the name is one of the internal
+   names no side ever syncs. A volume that refuses the directory
+   falls back to the home location at the cost of a copy.
+   `vapor trash list|restore|empty` work with or without a daemon; a
+   restored file lands in the sync root and syncs like any write. The
+   daemon purges entries older than `trash.retentionDays` (7 by
+   default) at startup and every half hour. `trash.enabled: false`
+   unlinks.
    What Vapor removes in the cloud follows the provider's own semantics
    (Google Drive trashes; the filesystem provider removes).
 

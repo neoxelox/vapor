@@ -161,13 +161,13 @@ fn directory_trees(ctx: &mut Ctx) -> Result<(), Failure> {
 }
 
 #[cfg(unix)]
-fn inode_of(path: &std::path::Path) -> Result<u64, Failure> {
+pub(crate) fn inode_of(path: &std::path::Path) -> Result<u64, Failure> {
     use std::os::unix::fs::MetadataExt;
     Ok(fs::metadata(path)?.ino())
 }
 
 #[cfg(not(unix))]
-fn inode_of(_path: &std::path::Path) -> Result<u64, Failure> {
+pub(crate) fn inode_of(_path: &std::path::Path) -> Result<u64, Failure> {
     Ok(0)
 }
 

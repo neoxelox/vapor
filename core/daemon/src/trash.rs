@@ -4,11 +4,16 @@
 //!
 //! Layout: `vapor_dir/trash/<profile>/<entry id>/` holds the payload
 //! under its original file name and a `meta.json` next to it with the
-//! original path, when and why it was discarded. Entries older than
-//! the retention window are purged by the daemon. With
-//! `trash.useSystemTrash` the user's own trash is tried first (the
-//! Finder's Trash on macOS) and the managed trash is the fallback, so a
-//! discard never silently degrades to an unlink.
+//! original path, when and why it was discarded. A sync root on
+//! another volume (an external drive) gets a second location on that
+//! volume, `<volume root>/.vapor-trash/<profile>/`, with the same
+//! layout, so a discard there is a rename on that drive and never a
+//! copy onto this one; both locations are listed, restored from, and
+//! purged together. Entries older than the retention window are
+//! purged by the daemon. With `trash.useSystemTrash` the user's own
+//! trash is tried first (the Finder's Trash on macOS) and the managed
+//! trash is the fallback, so a discard never silently degrades to an
+//! unlink.
 //!
 //! Design: `docs/architecture/data-flow.md` §Remote to local.
 
@@ -87,7 +92,15 @@ impl TrashEntry {
 
 pub struct LocalTrash {
     profile_id: String,
+    /// The home location, under the runtime directory.
     root: PathBuf,
+    /// The profile's local sync root, when known: the one place
+    /// discards come from, and so the one other volume that may hold
+    /// a location of its own.
+    sync_root: Option<PathBuf>,
+    /// Tests stand in a second location without a second volume.
+    #[cfg(test)]
+    pinned_volume: Option<PathBuf>,
     settings: TrashSettings,
     system: Arc<dyn TrashBin>,
     sequence: AtomicU64,
@@ -98,6 +111,7 @@ impl std::fmt::Debug for LocalTrash {
         f.debug_struct("LocalTrash")
             .field("profile_id", &self.profile_id)
             .field("root", &self.root)
+            .field("sync_root", &self.sync_root)
             .field("settings", &self.settings)
             .finish()
     }
@@ -119,6 +133,9 @@ impl LocalTrash {
         Self {
             profile_id: profile_id.to_string(),
             root,
+            sync_root: None,
+            #[cfg(test)]
+            pinned_volume: None,
             settings,
             system,
             sequence: AtomicU64::new(0),
@@ -136,8 +153,78 @@ impl LocalTrash {
         )
     }
 
+    /// Names the profile's local sync root, which is where every
+    /// discard comes from. When that root sits on another volume, the
+    /// trash keeps a location there too.
+    pub fn with_sync_root(mut self, sync_root: Option<PathBuf>) -> Self {
+        self.sync_root = sync_root;
+        self
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The location on the sync root's volume, when that volume is not
+    /// the runtime directory's. `None` while the sync root is absent
+    /// (an unplugged drive) or unknown.
+    pub fn volume_root(&self) -> Option<PathBuf> {
+        #[cfg(test)]
+        if self.pinned_volume.is_some() {
+            return self.pinned_volume.clone();
+        }
+        let sync_root = self.sync_root.as_ref()?;
+        self.volume_location_for(sync_root)
+    }
+
+    fn volume_location_for(&self, path: &Path) -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(pinned) = &self.pinned_volume {
+            return Some(pinned.clone());
+        }
+        if vapor_platform::fs_ops::same_volume(path, &self.root).ok()? {
+            return None;
+        }
+        let top = vapor_platform::fs_ops::volume_root_of(path).ok()?;
+        Some(
+            top.join(constants::runtime::VOLUME_TRASH_DIRECTORY_NAME)
+                .join(&self.profile_id),
+        )
+    }
+
+    /// Every location that may hold entries: the home one and, when
+    /// present, the sync root's volume.
+    fn locations(&self) -> Vec<PathBuf> {
+        let mut locations = vec![self.root.clone()];
+        if let Some(volume) = self.volume_root()
+            && volume.is_dir()
+        {
+            locations.push(volume);
+        }
+        locations
+    }
+
+    /// The location a discard of `path` lands in: the home one when
+    /// `path` is on its volume, else the location on `path`'s volume,
+    /// created on first use. A volume that refuses the directory (read
+    /// only) falls back to the home location, which then costs a copy.
+    fn location_for(&self, path: &Path) -> PathBuf {
+        match self.volume_location_for(path) {
+            Some(volume) => match vapor_shared::runtime_paths::ensure_private_directory(&volume) {
+                Ok(()) => volume,
+                Err(error) => {
+                    crate::logging::warning(
+                        "The sync root's volume refused a trash directory; the item is copied to the runtime directory's trash instead",
+                        &[
+                            ("volume_trash", volume.display().to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    self.root.clone()
+                }
+            },
+            None => self.root.clone(),
+        }
     }
 
     pub fn settings(&self) -> TrashSettings {
@@ -179,7 +266,7 @@ impl LocalTrash {
             millis(now),
             self.sequence.fetch_add(1, Ordering::Relaxed) % 10_000
         );
-        let entry_dir = self.root.join(&id);
+        let entry_dir = self.location_for(path).join(&id);
         vapor_shared::runtime_paths::ensure_private_directory(&entry_dir)?;
         let destination = entry_dir.join(&file_name);
         match fs::rename(path, &destination) {
@@ -221,14 +308,14 @@ impl LocalTrash {
         Ok(Disposition::Managed(id))
     }
 
-    /// Every entry, newest first. An entry directory without a readable
-    /// `meta.json` is skipped, never deleted.
+    /// Every entry in every location, newest first. An entry directory
+    /// without a readable `meta.json` is skipped, never deleted.
     pub fn list(&self) -> Vec<TrashEntry> {
-        let Ok(entries) = fs::read_dir(&self.root) else {
-            return Vec::new();
-        };
-        let mut found: Vec<TrashEntry> = entries
-            .flatten()
+        let mut found: Vec<TrashEntry> = self
+            .locations()
+            .iter()
+            .filter_map(|location| fs::read_dir(location).ok())
+            .flat_map(|entries| entries.flatten().collect::<Vec<_>>())
             .filter_map(|entry| self.read_entry(&entry.path()))
             .collect();
         found.sort_by(|a, b| {
@@ -240,10 +327,23 @@ impl LocalTrash {
     }
 
     pub fn entry(&self, id: &str) -> Option<TrashEntry> {
-        if id.contains(std::path::MAIN_SEPARATOR) || id.contains('/') {
+        self.entry_dir(id)
+            .and_then(|entry_dir| self.read_entry(&entry_dir))
+    }
+
+    /// The directory holding entry `id`, in whichever location has it.
+    fn entry_dir(&self, id: &str) -> Option<PathBuf> {
+        if id.is_empty() || id.contains(std::path::MAIN_SEPARATOR) || id.contains('/') {
             return None;
         }
-        self.read_entry(&self.root.join(id))
+        self.locations()
+            .into_iter()
+            .map(|location| location.join(id))
+            .find(|entry_dir| {
+                entry_dir
+                    .join(constants::runtime::TRASH_ENTRY_META_FILE_NAME)
+                    .is_file()
+            })
     }
 
     fn read_entry(&self, entry_dir: &Path) -> Option<TrashEntry> {
@@ -255,10 +355,12 @@ impl LocalTrash {
     /// `<stem>~restored-<id><ext>` when that path is taken. Returns
     /// where it landed.
     pub fn restore(&self, id: &str) -> io::Result<PathBuf> {
-        let entry = self.entry(id).ok_or_else(|| {
+        let entry_dir = self.entry_dir(id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("no trash entry {id}"))
         })?;
-        let entry_dir = self.root.join(&entry.id);
+        let entry = self.read_entry(&entry_dir).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("no trash entry {id}"))
+        })?;
         let payload = entry_dir.join(&entry.file_name);
         if fs::symlink_metadata(&payload).is_err() {
             return Err(io::Error::new(
@@ -292,7 +394,7 @@ impl LocalTrash {
         let mut purged = 0;
         for entry in self.list() {
             let expired = cutoff.is_some_and(|cutoff| entry.discarded_at() < cutoff);
-            if expired && fs::remove_dir_all(self.root.join(&entry.id)).is_ok() {
+            if expired && self.remove_entry(&entry.id) {
                 purged += 1;
             }
         }
@@ -301,13 +403,15 @@ impl LocalTrash {
 
     /// Removes every entry. Returns how many were removed.
     pub fn empty(&self) -> usize {
-        let mut removed = 0;
-        for entry in self.list() {
-            if fs::remove_dir_all(self.root.join(&entry.id)).is_ok() {
-                removed += 1;
-            }
-        }
-        removed
+        self.list()
+            .iter()
+            .filter(|entry| self.remove_entry(&entry.id))
+            .count()
+    }
+
+    fn remove_entry(&self, id: &str) -> bool {
+        self.entry_dir(id)
+            .is_some_and(|entry_dir| fs::remove_dir_all(entry_dir).is_ok())
     }
 }
 
@@ -413,6 +517,77 @@ mod tests {
         assert_eq!(landed, file);
         assert_eq!(fs::read(&file).expect("restored"), b"keep me");
         assert!(trash.list().is_empty(), "a restored entry leaves the trash");
+    }
+
+    #[test]
+    fn the_sync_roots_volume_holds_its_own_location_and_both_are_listed_purged_and_emptied() {
+        let temp = TempDir::new().expect("temp");
+        let mut trash = managed(&temp);
+        // A second location stands in for the sync root's volume.
+        let volume = temp.path().join("volume/.vapor-trash/default");
+        trash.pinned_volume = Some(volume.clone());
+        let on_volume = temp.path().join("volume/Vapor/a.txt");
+        fs::create_dir_all(on_volume.parent().unwrap()).expect("root");
+        fs::write(&on_volume, b"on the volume").expect("seed");
+
+        let Disposition::Managed(id) = trash
+            .discard(&on_volume, constants::trash::REASON_CLOUD_DELETION, at(100))
+            .expect("discard")
+        else {
+            panic!("expected the managed trash");
+        };
+        assert!(
+            volume.join(&id).join("a.txt").is_file(),
+            "the entry lands on the sync root's volume"
+        );
+        assert!(
+            !trash.root().join(&id).exists(),
+            "nothing is written to the home location"
+        );
+
+        // An older entry in the home location, as if from before the
+        // volume was in use.
+        let home_entry = trash.root().join("1000-0000");
+        fs::create_dir_all(&home_entry).expect("home entry");
+        fs::write(home_entry.join("old.txt"), b"old").expect("payload");
+        let meta = TrashEntry {
+            id: "1000-0000".into(),
+            profile_id: "default".into(),
+            original_path: temp.path().join("volume/Vapor/old.txt"),
+            file_name: "old.txt".into(),
+            kind: "file".into(),
+            reason: constants::trash::REASON_CLOUD_DELETION.into(),
+            discarded_at_ms: 1_000,
+            size_bytes: 3,
+        };
+        fs::write(
+            home_entry.join(constants::runtime::TRASH_ENTRY_META_FILE_NAME),
+            serde_json::to_vec(&meta).expect("meta"),
+        )
+        .expect("write meta");
+
+        let ids: Vec<String> = trash.list().into_iter().map(|entry| entry.id).collect();
+        assert_eq!(ids, vec![id.clone(), "1000-0000".to_string()]);
+        assert!(trash.entry("1000-0000").is_some() && trash.entry(&id).is_some());
+
+        let landed = trash.restore(&id).expect("restore from the volume");
+        assert_eq!(landed, on_volume);
+        assert_eq!(fs::read(&on_volume).expect("restored"), b"on the volume");
+
+        // The old home entry is past retention (3_600 s); the fresh
+        // one on the volume is not.
+        fs::write(&on_volume, b"again").expect("seed again");
+        trash
+            .discard(
+                &on_volume,
+                constants::trash::REASON_CLOUD_DELETION,
+                at(5_000),
+            )
+            .expect("discard again");
+        assert_eq!(trash.purge_expired(at(5_000)), 1);
+        assert_eq!(trash.list().len(), 1);
+        assert_eq!(trash.empty(), 1);
+        assert!(trash.list().is_empty());
     }
 
     #[test]
