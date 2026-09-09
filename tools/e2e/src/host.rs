@@ -4,6 +4,9 @@
 
 use std::fs;
 use std::path::Path;
+// Every probe that shells out is Unix- or macOS-only; Windows probes
+// answer without a process.
+#[cfg(unix)]
 use std::process::Command;
 
 /// A capability a scenario requires from the host or the run.
