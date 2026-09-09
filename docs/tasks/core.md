@@ -951,6 +951,21 @@ Still open:
       are in, and the Google Drive soak mode once TR-8 lands. The e2e
       suite already runs on the `ubuntu-latest` job; the soak schedule
       is macOS-only.
+- [ ] TR-11 The rows of the 2026-09-06 review's coverage table that no
+      scenario or soak fault exercises through the real binaries yet:
+      a backward wall-clock step while the daemon runs (the mtime quick
+      check and tombstone ordering; Tier 1 covers the rolling counters
+      only), the CLI against a daemon of another IPC version through
+      two real binaries (the skew matrix is in-process), and an
+      upgrade (a state DB and a config written by an older binary,
+      opened by the new one; the migration tests cover the schema
+      chain in-process). Each is one scenario.
+- [ ] TR-12 The Google Drive leg of the release gate has not run yet:
+      the first release after the dedicated test account is signed in
+      runs `./scripts/release.sh` with the Drive leg for real, and
+      TR-8's Drive-side scenarios land before or with it. Until then
+      the leg is empty (every scenario declares the filesystem
+      provider) and the gate refuses without credentials.
 
 ## Sync safety follow-ups (2026-09-06)
 
