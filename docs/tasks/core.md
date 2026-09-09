@@ -931,10 +931,11 @@ Still open:
 - [ ] TR-8 Google Drive mode of the harness: a `CloudSide` the harness
       performs through the provider crate, a per-run `VaporE2E-<run-id>`
       folder created and deleted by the harness, longer wait budgets,
-      `gdrive-provider` scenarios for token refresh and rate limits, a
-      scheduled CI job under a `gdrive-e2e` GitHub Environment that
-      never runs on fork PRs. Waits on a dedicated test account from the
-      project owner.
+      `gdrive-provider` scenarios for token refresh and rate limits, and
+      the Drive leg of the soak. Runs only as a leg of
+      `./scripts/release-gate.sh` on the maintainer's machine, never in
+      CI. Waits on the dedicated test account being signed in on that
+      machine.
 - [x] TR-9 The soak driver (`tools/soak`, `vapor-soak`): seeded
       workload on both sides, model with the no-loss, no-invention,
       convergence, revert, and contested oracles, fault injection

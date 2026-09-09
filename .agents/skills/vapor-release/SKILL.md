@@ -17,7 +17,11 @@ form; the runbook wins on any disagreement.
    `CHANGELOG.md` (`scripts/version.sh` refuses otherwise).
 2. `CHANGELOG.md` `Unreleased` holds every line for the release; the
    script rolls them into the versioned section.
-3. Tier 1 and e2e green on the commit being released.
+3. `./scripts/release-gate.sh` green on the commit being released:
+   format, lint, Tier 1, and the e2e suite once per provider. The
+   Google Drive leg runs only here, by hand, with the dedicated test
+   account signed in and `VAPOR_GDRIVE_CLIENT_ID` set; it never runs
+   in CI and never against a personal account.
 4. The release environment is protected before any secret is added:
    one `v*` tag rule and no branch rule, a required reviewer, and
    `can_admins_bypass` set to `false` once a second admin exists. New

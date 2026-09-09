@@ -244,15 +244,20 @@ covers this; `vapor doctor` explains it when active).
 directory and scenarios write to it directly to play "another device".
 
 `--provider gdrive` runs the same catalog against a real Google Drive
-with real credentials. It is wired in the harness and every scenario
-that manipulates the cloud root directly declares `filesystem-provider`
-and skips under it; the Drive-side operations (a `CloudSide` the
-harness performs through the provider crate, a per-run
-`VaporE2E-<run-id>` folder created and deleted by the harness, longer
-wait budgets, and the `gdrive-provider` scenarios for token refresh and
-rate limits) are open work tracked in `docs/tasks/core.md`, waiting on
-a dedicated test account from the project owner. No scenario contacts
-the network in the default mode.
+with real credentials. It is a release-gate leg, run by hand on the
+maintainer's machine by `./scripts/release-gate.sh` before a version
+bump, with a dedicated test account signed in and
+`VAPOR_GDRIVE_CLIENT_ID` set; it never runs in CI, never on an
+ordinary change, and never against a personal account. It is wired in
+the harness and every scenario that manipulates the cloud root
+directly declares `filesystem-provider` and skips under it; the
+Drive-side operations (a `CloudSide` the harness performs through the
+provider crate, a per-run `VaporE2E-<run-id>` folder created and
+deleted by the harness, longer wait budgets, and the `gdrive-provider`
+scenarios for token refresh and rate limits) are open work tracked in
+`docs/tasks/core.md`, waiting on the test account. No scenario
+contacts the network in the default mode. `./scripts/e2e.sh
+--providers` lists the providers a run can target.
 
 ## Scenario catalog
 

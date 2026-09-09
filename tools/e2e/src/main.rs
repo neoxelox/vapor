@@ -74,7 +74,9 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-
+    /// List the providers a run can target, one per line; the release
+    /// gate runs the suite once per provider.
+    Providers,
     /// Provision a sandbox with a running daemon for manual work.
     Sandbox {
         #[arg(long)]
@@ -147,6 +149,12 @@ fn main() -> ExitCode {
                     ExitCode::from(2)
                 }
             }
+        }
+        Cmd::Providers => {
+            for provider in Provider::ALL {
+                println!("{}", provider.label());
+            }
+            ExitCode::SUCCESS
         }
         Cmd::List { json } => {
             let all = scenarios::all();

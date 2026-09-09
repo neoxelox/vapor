@@ -189,10 +189,13 @@ one it gates.
     - Ensure docs and CI references are current.
 
 2. Validate before tagging
-   - Run required checks in order:
-     - `./scripts/format.sh`
-     - `./scripts/lint.sh`
-     - `./scripts/test.sh`
+   - Run the release gate: `./scripts/release-gate.sh`. It runs
+     `format`, `lint`, `test`, and the e2e suite once per provider the
+     harness knows (`./scripts/e2e.sh --providers`). The Google Drive
+     leg runs only here, never in CI: it needs the dedicated test
+     account signed in (`vapor auth login gdrive`) and
+     `VAPOR_GDRIVE_CLIENT_ID` in the environment, and a missing leg
+     fails the gate.
    - Commit any non-`CHANGELOG.md` fixes produced by validation.
    - Confirm only `CHANGELOG.md` remains dirty before release preparation.
    - Optionally run local package rehearsal: `./scripts/build.sh package`.
@@ -254,7 +257,7 @@ one it gates.
 
 - [ ] Changelog entry exists for target version.
 - [ ] Worktree is clean except for `CHANGELOG.md` before running `./scripts/version.sh`.
-- [ ] Validation scripts passed (`format`, `lint`, `test`).
+- [ ] `./scripts/release-gate.sh` passed (`format`, `lint`, `test`, e2e for every provider).
 - [ ] `./scripts/version.sh ...` created commit `release: v$(cat VERSION)` and tag `v$(cat VERSION)`.
 - [ ] Release push command used: `git push origin "$(git branch --show-current)" --follow-tags`.
 - [ ] Release gates passed (`lint`, `test`, `perf` reusable workflows / local script equivalents).

@@ -40,6 +40,7 @@ for arg in "$@"; do
     --sandbox) subcommand="sandbox" ;;
     --sandbox-stop) subcommand="sandbox-stop" ;;
     --list) subcommand="list" ;;
+    --providers) subcommand="providers" ;;
     --skip-build) skip_harness_build=1; args+=("$arg") ;;
     --) subcommand="" ;;
     *) args+=("$arg") ;;

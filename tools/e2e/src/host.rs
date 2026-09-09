@@ -68,6 +68,9 @@ pub enum Provider {
 }
 
 impl Provider {
+    /// Every provider the harness can run against, in gate order.
+    pub const ALL: &'static [Provider] = &[Provider::Filesystem, Provider::Gdrive];
+
     pub fn label(self) -> &'static str {
         match self {
             Provider::Filesystem => "filesystem",
