@@ -90,7 +90,12 @@ fn status_without_a_daemon_fails_with_the_reason_on_stderr_only() {
     );
     let message = stderr(&output);
     assert!(message.starts_with("vapor: "), "{message:?}");
-    assert!(message.contains("daemon"), "{message:?}");
+    // On an OS whose IPC transport has not shipped the reason is the
+    // transport, not a missing daemon.
+    assert!(
+        message.contains("daemon") || message.contains("transport"),
+        "{message:?}"
+    );
     // The same holds with --json: an error never prints half a document.
     let output = vapor(home.path(), &["status", "--json"]);
     assert_eq!(output.status.code(), Some(1));
