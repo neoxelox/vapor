@@ -5,8 +5,9 @@
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
