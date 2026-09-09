@@ -14,7 +14,7 @@ export VAPOR_ENV="dev"
 
 step() {
   echo
-  echo "[release-gate] $1"
+  echo "[release] $1"
 }
 
 step "format"
@@ -31,7 +31,7 @@ providers="$("$ROOT_DIR/scripts/e2e.sh" --providers)"
 for provider in $providers; do
   if [[ "$provider" == "gdrive" ]]; then
     if [[ -z "${VAPOR_GDRIVE_CLIENT_ID:-}" ]]; then
-      echo "[release-gate] the Google Drive leg needs VAPOR_GDRIVE_CLIENT_ID (and the test account signed in with 'vapor auth login gdrive')"
+      echo "[release] the Google Drive leg needs VAPOR_GDRIVE_CLIENT_ID (and the test account signed in with 'vapor auth login gdrive')"
       exit 1
     fi
   fi
@@ -40,4 +40,4 @@ for provider in $providers; do
 done
 
 echo
-echo "[release-gate] every gate passed for providers: $(echo $providers | tr '\n' ' ')"
+echo "[release] every gate passed for providers: $(echo $providers | tr '\n' ' ')"

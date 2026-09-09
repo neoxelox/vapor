@@ -247,7 +247,7 @@ directory and scenarios write to it directly to play "another device".
 
 `--provider gdrive` runs the same catalog against a real Google Drive
 with real credentials. It is a release-gate leg, run by hand on the
-maintainer's machine by `./scripts/release-gate.sh` before a version
+maintainer's machine by `./scripts/release.sh` before a version
 bump, with a dedicated test account signed in and
 `VAPOR_GDRIVE_CLIENT_ID` set; it never runs in CI, never on an
 ordinary change, and never against a personal account. It is wired in

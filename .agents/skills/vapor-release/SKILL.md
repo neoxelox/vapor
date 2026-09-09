@@ -17,7 +17,7 @@ form; the runbook wins on any disagreement.
    `CHANGELOG.md` (`scripts/version.sh` refuses otherwise).
 2. `CHANGELOG.md` `Unreleased` holds every line for the release; the
    script rolls them into the versioned section.
-3. `./scripts/release-gate.sh` green on the commit being released:
+3. `./scripts/release.sh` green on the commit being released:
    format, lint, Tier 1, and the e2e suite once per provider. The
    Google Drive leg runs only here, by hand, with the dedicated test
    account signed in and `VAPOR_GDRIVE_CLIENT_ID` set; it never runs

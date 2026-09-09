@@ -589,7 +589,7 @@ work once, end to end. Procedure: the `vapor-e2e` skill and
   dedicated test account: never part of the default run, never in CI,
   never run implicitly by an agent, never against the project owner's
   account. It runs once per release, by hand, as a leg of
-  `./scripts/release-gate.sh`, which runs the suite for every provider
+  `./scripts/release.sh`, which runs the suite for every provider
   the harness knows before a version bump.
 
 ## 10) Pull requests, commits, and documentation
