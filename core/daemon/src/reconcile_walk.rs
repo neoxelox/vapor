@@ -97,6 +97,9 @@ pub struct ReconcileWalker {
     /// Two-way file/directory type mismatches found by this walk; the
     /// runtime surfaces them on the timeline so the user can act.
     type_mismatches: Vec<PathBuf>,
+    /// Local names this walk could not carry to the other side; the
+    /// runtime asks about each once.
+    unsyncable_names: Vec<crate::unsyncable::UnsyncableName>,
     /// Remote names that would alias an existing, differently-cased
     /// local file (`(wanted local path, existing local path)`); left
     /// untouched on both sides and surfaced on the timeline.
@@ -131,6 +134,7 @@ impl ReconcileWalker {
             path_filter,
             pending_enumeration: None,
             type_mismatches: Vec::new(),
+            unsyncable_names: Vec::new(),
             name_collisions: Vec::new(),
             pending_dirs: VecDeque::from([subtree_root.to_path_buf()]),
             stats: WalkStats::default(),
@@ -214,6 +218,16 @@ impl ReconcileWalker {
     /// Drains the two-way type mismatches found since the last call.
     pub fn take_type_mismatches(&mut self) -> Vec<PathBuf> {
         std::mem::take(&mut self.type_mismatches)
+    }
+
+    pub fn take_unsyncable_names(&mut self) -> Vec<crate::unsyncable::UnsyncableName> {
+        std::mem::take(&mut self.unsyncable_names)
+    }
+
+    /// Whether this walk covers the whole scope, so what it did not
+    /// report is known to be gone.
+    pub fn is_whole_scope(&self) -> bool {
+        self.subtree_root == self.scope_root
     }
 
     pub fn take_name_collisions(&mut self) -> Vec<(PathBuf, PathBuf)> {
@@ -320,12 +334,10 @@ impl ReconcileWalker {
                 for entry in entries.flatten() {
                     let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
                         // Non-UTF-8 names are unrepresentable in the sync
-                        // path model; log so a file that never syncs is
-                        // diagnosable (macOS enforces UTF-8, so this is rare).
-                        crate::logging::warning(
-                            "Reconcile walk skipped a non-UTF-8 local file name (cannot be synced)",
-                            &[("path", entry.path().to_string_lossy().into_owned())],
-                        );
+                        // path model; the runtime asks about the file
+                        // once instead of logging on every walk.
+                        self.unsyncable_names
+                            .push(crate::unsyncable::UnsyncableName::not_utf8(&entry.path()));
                         continue;
                     };
                     if vapor_providers::filesystem::is_internal_file_name(&name) {

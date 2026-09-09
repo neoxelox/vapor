@@ -28,6 +28,7 @@ tempfile = "=3.27.0"
 notify = "=8.2.0"
 md-5 = "=0.10.6"
 sha2 = "=0.10.9"
+unicode-normalization = "=0.1.25"
 rusqlite = "=0.38.0"
 proptest = "=1.11.0"
 

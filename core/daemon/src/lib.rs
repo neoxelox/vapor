@@ -60,6 +60,7 @@ pub mod throttle;
 pub mod timeline;
 pub mod trash;
 pub mod type_mismatch;
+pub mod unsyncable;
 pub mod workgate;
 
 pub struct DaemonApp {

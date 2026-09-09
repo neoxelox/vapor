@@ -164,7 +164,12 @@ impl TreeOracle {
             })?;
             for entry in entries {
                 let entry = entry?;
-                let name = entry.file_name().to_string_lossy().into_owned();
+                // A name that is not UTF-8 never syncs by contract (the
+                // daemon asks about it instead), so it is not part of
+                // what the two trees must agree on.
+                let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+                    continue;
+                };
                 let relative = if prefix.is_empty() {
                     name.clone()
                 } else {
@@ -262,6 +267,7 @@ pub fn is_internal_name(name: &str) -> bool {
         || constants::filtering::INTERNAL_IGNORE_FILE_SUFFIXES
             .iter()
             .any(|suffix| name.ends_with(suffix))
+        || constants::filtering::INTERNAL_IGNORE_DIRECTORY_NAMES.contains(&name)
 }
 
 fn file_facts(path: &Path, metadata: &fs::Metadata) -> Result<FileFacts, Failure> {

@@ -999,7 +999,17 @@ Still open, in order:
 - [x] SF-6 Case and normalization collisions materialize as conflict
       copies aliased to their own cloud object (`name_aliases`,
       resolved by the executor, the walk, and the feed); S33 flipped
-      from known gap to pass, S38 pins stability.
+      from known gap to pass, S38 pins stability. Names fold through
+      NFC before case, so the two spellings of `café` collide too
+      (unit-tested on APFS; no single host can stage the pair through
+      the filesystem provider, so no e2e scenario).
+- [x] SF-10 Unsyncable names (a local name that is not valid UTF-8)
+      open an `unsyncable-name` decision with `skip`, withdrawn when
+      the name goes; watcher events for such a path are dropped at the
+      bridge instead of failing the tick. S50 on Linux.
+- [x] SF-11 The mass-deletion guard holds the whole queued burst the
+      moment it trips, so one answer covers the question's count, and
+      withdraws a hold the other side made moot.
 - [x] SF-7 Headless supervision: `vapor service check --loop` and
       `vapor service install --supervise` (a kept-alive
       `sh.arn.vapor.supervisor` LaunchAgent); the daemon's job stays

@@ -544,6 +544,7 @@ impl DaemonRuntime {
         self.retry_cloud_root_if_needed()?;
         self.check_roots_if_due(now)?;
         self.apply_resolved_decisions(now)?;
+        self.withdraw_holds_left_empty(now)?;
 
         let (stabilized_events, suppressed_local_echoes, stabilize_mirror_reverts) =
             self.stabilize_events(now);
@@ -680,10 +681,13 @@ impl DaemonRuntime {
                         self.mirror_revert_count += mirror_reverts as u64;
                         self.mirror_delete_count += mirror_deletes as u64;
                         let mismatches = walker.take_type_mismatches();
+                        let unsyncable = walker.take_unsyncable_names();
+                        let whole_scope = walker.is_whole_scope();
                         let collisions = walker.take_name_collisions();
                         for path in mismatches {
                             self.open_type_mismatch_decision(&path, now)?;
                         }
+                        self.reconcile_unsyncable_names(&unsyncable, whole_scope, now)?;
                         if let Some(timeline) = &self.timeline {
                             for (wanted, existing) in collisions {
                                 timeline.push(
@@ -2461,6 +2465,21 @@ impl DaemonRuntime {
             // deletion would become irreversible, so it sees both
             // directions and never counts a no-op.
             let intent_kind = crate::scheduler::intent_kind_for_stabilized_event(&event);
+            if intent_kind == PendingIntentKind::Delete
+                && let Ok(Some(decision_id)) = self
+                    .state_db
+                    .drop_held_at(&event.path, PendingIntentKind::ApplyRemoteDelete)
+            {
+                // The cloud's deletion of this path was held behind a
+                // question; the user just deleted it here too.
+                logging::info(
+                    "Dropped a held cloud deletion: the file was deleted on this device as well",
+                    &[
+                        ("path", event.path.display().to_string()),
+                        ("decision_id", decision_id.to_string()),
+                    ],
+                );
+            }
             if self.sync_scope.sync_mode == vapor_shared::SyncMode::PullOnly {
                 // Pull-only: local events never produce
                 // local-to-remote intents. A local change is divergence
@@ -2625,6 +2644,108 @@ impl DaemonRuntime {
         }
     }
 
+    /// Asks once about each name the walk could not carry, and after a
+    /// whole-scope walk withdraws the questions whose name is gone (the
+    /// user renamed or removed the file). A name the user chose to
+    /// skip is not asked about again.
+    fn reconcile_unsyncable_names(
+        &mut self,
+        found: &[crate::unsyncable::UnsyncableName],
+        whole_scope: bool,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        use crate::unsyncable::{DECISION_KIND, OPTION_SKIP, options, question};
+        for name in found {
+            if self
+                .state_db
+                .open_decision(DECISION_KIND, Some(&name.shown_path))?
+                .is_some()
+                || self
+                    .state_db
+                    .decision_answered(DECISION_KIND, &name.shown_path, OPTION_SKIP)?
+            {
+                continue;
+            }
+            let id = self.state_db.create_decision(
+                DECISION_KIND,
+                crate::state_db::DecisionScope::Path,
+                Some(&name.shown_path),
+                &question(name),
+                &options(),
+                &serde_json::json!({ "reason": name.reason }),
+                now,
+            )?;
+            logging::warning(
+                "A local file has a name that cannot be synced; asking once",
+                &[
+                    ("path", name.shown_path.display().to_string()),
+                    ("reason", name.reason.clone()),
+                    ("decision_id", id.to_string()),
+                ],
+            );
+            self.announce_decisions(&[id], now);
+        }
+        if !whole_scope {
+            return Ok(());
+        }
+        for decision in self.state_db.decisions(false)? {
+            if decision.kind != DECISION_KIND {
+                continue;
+            }
+            let still_there = decision
+                .path
+                .as_ref()
+                .is_some_and(|path| found.iter().any(|name| &name.shown_path == path));
+            if still_there {
+                continue;
+            }
+            self.state_db.withdraw_decision(decision.id, now)?;
+            if let Some(timeline) = &self.timeline {
+                timeline.push(
+                    "decision",
+                    self.profile_id.clone(),
+                    format!(
+                        "Decision {} (unsyncable-name) withdrawn: the name is gone",
+                        decision.id
+                    ),
+                    now,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A mass-deletion question whose every held deletion the other
+    /// side applied meanwhile has nothing left to decide: withdraw it
+    /// and re-arm the guard.
+    fn withdraw_holds_left_empty(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
+        for decision in self.state_db.decisions(false)? {
+            if decision.kind != "mass-deletion"
+                || !self.state_db.held_intents(decision.id)?.is_empty()
+            {
+                continue;
+            }
+            self.state_db.withdraw_decision(decision.id, now)?;
+            self.mass_change_guard.reset();
+            logging::info(
+                "Withdrew the mass-deletion decision: the other side already applied every held deletion",
+                &[("decision_id", decision.id.to_string())],
+            );
+            if let Some(timeline) = &self.timeline {
+                timeline.push(
+                    "decision",
+                    self.profile_id.clone(),
+                    format!(
+                        "Decision {} (mass-deletion) withdrawn: the other side already applied every held deletion",
+                        decision.id
+                    ),
+                    now,
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Acts on decisions the user answered through the CLI since the
     /// last tick: releases or drops the held intents, resets the guard
     /// that held them, and marks the decision applied.
@@ -2690,6 +2811,9 @@ impl DaemonRuntime {
                             continue;
                         }
                     }
+                }
+                (crate::unsyncable::DECISION_KIND, crate::unsyncable::OPTION_SKIP) => {
+                    "skipped: the file stays on this device only".to_string()
                 }
                 (kind, choice) => {
                     // A kind this runtime does not know how to apply is
@@ -5550,6 +5674,114 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_cannot_be_synced_is_asked_about_once_and_withdrawn_when_renamed() {
+        use std::os::unix::ffi::OsStrExt;
+        let fixture = OfflineFixture::new();
+        let bad = fixture
+            .watch_root
+            .join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt"));
+        if std::fs::write(&bad, b"latin-1 name").is_err() {
+            // This filesystem refuses a name that is not UTF-8 (APFS
+            // does), so the case cannot arise here.
+            return;
+        }
+        std::fs::write(fixture.watch_root.join("fine.txt"), b"fine").expect("seed");
+
+        let runtime = fixture.run(&[]);
+        let open: Vec<_> = runtime
+            .state_db()
+            .decisions(false)
+            .expect("decisions")
+            .into_iter()
+            .filter(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+            .collect();
+        assert_eq!(open.len(), 1, "asked once: {open:?}");
+        assert!(
+            open[0].question.contains("not valid UTF-8"),
+            "{}",
+            open[0].question
+        );
+        assert!(fixture.cloud_root.join("fine.txt").is_file());
+        assert_eq!(
+            std::fs::read_dir(&fixture.cloud_root)
+                .expect("cloud")
+                .flatten()
+                .filter(|entry| entry.file_name().to_str().is_none())
+                .count(),
+            0,
+            "the name never reaches the cloud"
+        );
+        drop(runtime);
+
+        // Another walk asks nothing new.
+        let runtime = fixture.run(&[]);
+        assert_eq!(
+            runtime
+                .state_db()
+                .decisions(true)
+                .expect("history")
+                .iter()
+                .filter(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+                .count(),
+            1
+        );
+        drop(runtime);
+
+        // Renamed to something the model carries: the question goes
+        // and the file syncs.
+        std::fs::rename(&bad, fixture.watch_root.join("cafe.txt")).expect("rename");
+        let runtime = fixture.run(&[]);
+        let history: Vec<_> = runtime
+            .state_db()
+            .decisions(true)
+            .expect("history")
+            .into_iter()
+            .filter(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+            .collect();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].choice.as_deref(), Some("withdrawn"));
+        assert!(fixture.cloud_root.join("cafe.txt").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skipping_an_unsyncable_name_stops_the_asking() {
+        use std::os::unix::ffi::OsStrExt;
+        let fixture = OfflineFixture::new();
+        let bad = fixture
+            .watch_root
+            .join(std::ffi::OsStr::from_bytes(b"bad\xff.bin"));
+        if std::fs::write(&bad, b"x").is_err() {
+            return;
+        }
+        let runtime = fixture.run(&[]);
+        let decision = runtime
+            .state_db()
+            .decisions(false)
+            .expect("decisions")
+            .into_iter()
+            .find(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+            .expect("asked");
+        drop(runtime);
+        {
+            let mut db = DurableStateDb::open(&fixture.database_path).expect("open");
+            db.resolve_decision(decision.id, "skip", timestamp_ms(1))
+                .expect("resolve");
+        }
+        let runtime = fixture.run(&[]);
+        let all: Vec<_> = runtime
+            .state_db()
+            .decisions(true)
+            .expect("history")
+            .into_iter()
+            .filter(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+            .collect();
+        assert_eq!(all.len(), 1, "skip is honoured on the next walk: {all:?}");
+        assert!(all[0].applied_at.is_some(), "the skip answer is applied");
+    }
+
     #[test]
     fn prefer_cloud_trashes_the_local_side() {
         let fixture = OfflineFixture::new();
@@ -6482,6 +6714,137 @@ mod tests {
                 .expect("query")
                 .is_none(),
             "the answered decision is closed"
+        );
+        assert!(!fixture.runtime.mass_change_guard.is_tripped());
+    }
+
+    #[test]
+    fn an_answer_given_the_moment_the_guard_trips_covers_the_whole_burst() {
+        // The user (or an app) answers as soon as the question appears,
+        // while most of the burst is still queued behind the first
+        // deletion. The answer must cover the burst the question
+        // counted: no second question for the stragglers.
+        let mut fixture = BidirectionalFixture::new();
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        let paths = seed_synced_files(&mut fixture, 40);
+        for path in &paths[..12] {
+            std::fs::remove_file(path).expect("unlink");
+            fixture.record_local_event(path, FsEventKind::Removed, fixture.now_ms);
+        }
+        let mut decision = None;
+        for _ in 0..40 {
+            fixture.tick(1_000);
+            decision = fixture
+                .runtime
+                .state_db()
+                .open_decision("mass-deletion", None)
+                .expect("query");
+            if decision.is_some() {
+                break;
+            }
+        }
+        let decision = decision.expect("the burst opens a decision");
+        assert_eq!(
+            decision.held_intents, 12,
+            "every queued deletion of the burst is held the moment the guard trips"
+        );
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "apply", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
+        fixture.converge(40);
+        for path in &paths[..12] {
+            let cloud = fixture
+                .cloud_root
+                .join(path.strip_prefix(&fixture.watch_root).unwrap());
+            assert!(!cloud.exists(), "{} must be deleted", cloud.display());
+        }
+        let asked = fixture
+            .runtime
+            .state_db()
+            .decisions(true)
+            .expect("history")
+            .into_iter()
+            .filter(|decision| decision.kind == "mass-deletion")
+            .count();
+        assert_eq!(asked, 1, "one burst, one question");
+    }
+
+    #[test]
+    fn a_hold_the_other_side_makes_moot_is_withdrawn_on_its_own() {
+        // A local burst is held; meanwhile the same files are deleted
+        // in the cloud (another device did the same cleanup). Nothing
+        // is left to decide: the hold empties and the question goes.
+        let mut fixture = BidirectionalFixture::new();
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        let paths = seed_synced_files(&mut fixture, 40);
+        for path in &paths[..12] {
+            std::fs::remove_file(path).expect("unlink");
+            fixture.record_local_event(path, FsEventKind::Removed, fixture.now_ms);
+        }
+        fixture.converge(30);
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision("mass-deletion", None)
+            .expect("query")
+            .expect("the burst opens a decision");
+        assert_eq!(decision.held_intents, 12);
+
+        for path in &paths[..12] {
+            let cloud = fixture
+                .cloud_root
+                .join(path.strip_prefix(&fixture.watch_root).unwrap());
+            std::fs::remove_file(&cloud).expect("cloud delete");
+            fixture
+                .feed
+                .emit_removed(cloud, timestamp_ms(fixture.now_ms));
+        }
+        // Held rows are not queued work, so the poll cadence, not the
+        // queue, decides when the feed is read.
+        for _ in 0..12 {
+            fixture.tick(6_000);
+        }
+        fixture.converge(30);
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .open_decision("mass-deletion", None)
+                .expect("query")
+                .is_none(),
+            "an emptied hold is withdrawn without an answer"
+        );
+        let withdrawn = fixture
+            .runtime
+            .state_db()
+            .decisions(true)
+            .expect("history")
+            .into_iter()
+            .find(|decision| decision.kind == "mass-deletion")
+            .expect("kept in history");
+        assert_eq!(withdrawn.choice.as_deref(), Some("withdrawn"));
+        assert_eq!(
+            fixture.runtime.state_db().queue_depth().expect("depth"),
+            0,
+            "nothing is left queued or held"
         );
         assert!(!fixture.runtime.mass_change_guard.is_tripped());
     }

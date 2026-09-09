@@ -71,7 +71,7 @@ enum Cmd {
         load: String,
         /// Faults: none, crash, all, or a comma-separated list
         /// (crash, crash-mid-transfer, freeze, pause-resume,
-        /// cloud-root-vanish, throttle-walk, config-reload, disk-full).
+        /// cloud-root-vanish, cloud-root-permissions, throttle-walk, config-reload, disk-full).
         #[arg(long, default_value = "none")]
         faults: String,
         #[arg(long, value_enum, default_value_t = ThrottleArg::Static)]

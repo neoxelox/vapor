@@ -84,6 +84,7 @@ touch those files too.
 | `pause-resume` | `vapor pause`, a few operations, `vapor resume` | between operations |
 | `config-reload` | `resourceLimits.bandwidthPercent` to 5 and back through `vapor config set` | between operations |
 | `cloud-root-vanish` | the cloud root is renamed away for the phase and restored after it | per phase |
+| `cloud-root-permissions` | every permission is taken off the cloud root for the phase and given back after it: the root is there but unreadable, sync blocks with no question asked, and the daemon recovers on its own | per phase |
 | `throttle-walk` | with `--throttle walk`, the throttle inputs file is set to idle, battery, user-active, or overloaded for the phase | per phase |
 | `disk-full` | with `--cloud-image-mb`, the cloud volume is filled to the last block for the phase | per phase |
 

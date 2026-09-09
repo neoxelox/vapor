@@ -45,6 +45,9 @@ pub struct RemotePollReport {
     /// Push-only strict-mirror removals scheduled this poll (cloud-only
     /// content deleted).
     pub mirror_deletes: usize,
+    /// Held deletions dropped because the cloud removed the path itself
+    /// while the question was open.
+    pub moot_holds: usize,
     /// Remote changes left untouched because they would alias a
     /// differently-cased local file. The paths are kept by the poller
     /// (`take_name_collisions`) for the timeline.
@@ -448,6 +451,15 @@ impl RemotePoller {
                                     report.mirror_reverts += 1;
                                 }
                                 continue;
+                            }
+                            // A deletion of this path held behind the
+                            // mass-deletion decision has nothing left to
+                            // do: the cloud copy is already gone.
+                            if state_db
+                                .drop_held_at(&local_target, PendingIntentKind::Delete)?
+                                .is_some()
+                            {
+                                report.moot_holds += 1;
                             }
                             batch.push((
                                 local_target,

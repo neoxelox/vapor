@@ -1609,6 +1609,24 @@ impl DurableStateDb {
         Ok(count > 0)
     }
 
+    /// Whether a decision of `kind` at `path` was ever answered with
+    /// `choice`. An answer that means "stop asking" is honoured across
+    /// walks and restarts through this.
+    pub fn decision_answered(
+        &self,
+        kind: &str,
+        path: &Path,
+        choice: &str,
+    ) -> Result<bool, StateDbError> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM pending_decisions
+             WHERE kind = ? AND path_text = ? AND choice = ?",
+            params![kind, path_to_text(path)?, choice],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Closes an open decision the daemon no longer needs an answer to
     /// (the condition it asked about went away). Recorded as resolved
     /// and applied with the choice `withdrawn`, so the history says
@@ -1674,6 +1692,65 @@ impl DurableStateDb {
             params![STATE_HELD, decision_id, intent_id, STATE_LEASED],
         )?;
         Ok(changed == 1)
+    }
+
+    /// Parks every pending intent of `kind` behind `decision_id` and
+    /// returns their paths. The mass-deletion guard calls this when it
+    /// trips, so the decision holds the whole burst the question
+    /// describes, not only the deletions that reached the executor.
+    pub fn hold_pending_of_kind(
+        &mut self,
+        kind: PendingIntentKind,
+        decision_id: i64,
+    ) -> Result<Vec<PathBuf>, StateDbError> {
+        let mut statement = self.connection.prepare(
+            "SELECT path_text FROM queue_intents WHERE kind = ? AND state = ? ORDER BY id ASC",
+        )?;
+        let rows = statement.query_map(params![intent_kind_label(kind), STATE_PENDING], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut paths = Vec::new();
+        for row in rows {
+            paths.push(path_from_text(row?));
+        }
+        drop(statement);
+        self.connection.execute(
+            "UPDATE queue_intents SET state = ?, decision_id = ? WHERE kind = ? AND state = ?",
+            params![
+                STATE_HELD,
+                decision_id,
+                intent_kind_label(kind),
+                STATE_PENDING
+            ],
+        )?;
+        Ok(paths)
+    }
+
+    /// Drops the held intent of `kind` at `path`, if any, and returns
+    /// the decision it was held behind. The other side already applied
+    /// the deletion, so there is nothing left to ask about for it.
+    pub fn drop_held_at(
+        &mut self,
+        path: &Path,
+        kind: PendingIntentKind,
+    ) -> Result<Option<i64>, StateDbError> {
+        let path_text = path_to_text(path)?;
+        let decision_id: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT decision_id FROM queue_intents
+                 WHERE path_text = ? AND kind = ? AND state = ?",
+                params![path_text, intent_kind_label(kind), STATE_HELD],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if decision_id.is_some() {
+            self.connection.execute(
+                "DELETE FROM queue_intents WHERE path_text = ? AND kind = ? AND state = ?",
+                params![path_text, intent_kind_label(kind), STATE_HELD],
+            )?;
+        }
+        Ok(decision_id)
     }
 
     pub fn held_intents(&self, decision_id: i64) -> Result<Vec<DurableIntentRecord>, StateDbError> {

@@ -75,6 +75,19 @@ pub fn scenarios() -> Vec<Scenario> {
             run: type_mismatch_decision,
         },
         Scenario {
+            id: "S50",
+            name: "unsyncable-name-decision",
+            proves: "a local file whose name is not valid UTF-8 opens an unsyncable-name decision, never reaches the cloud, and the question is withdrawn once the file is renamed; skip stops the asking",
+            needs: &[
+                Need::NativeWatcher,
+                Need::Filesystem,
+                Need::Unix,
+                Need::NonUtf8Names,
+            ],
+            expect: Expect::Pass,
+            run: unsyncable_name_decision,
+        },
+        Scenario {
             id: "S42",
             name: "trash-keeps-cloud-deletions",
             proves: "a file removed on this device because the cloud deleted it lands in the trash; vapor trash list shows it and vapor trash restore brings it back and re-uploads it",
@@ -485,6 +498,117 @@ fn mass_delete_guard(ctx: &mut Ctx) -> Result<(), Failure> {
     );
     ctx.allow_warning("Mass-deletion guard tripped");
     Ok(())
+}
+
+#[cfg(unix)]
+fn unsyncable_name_decision(ctx: &mut Ctx) -> Result<(), Failure> {
+    use std::os::unix::ffi::OsStrExt;
+    let home = ctx.primary.clone();
+    ctx.allow_warning("cannot be synced");
+    fs::create_dir_all(&home.local)?;
+    let bad = home
+        .local
+        .join(std::ffi::OsStr::from_bytes(b"report-\xe9.txt"));
+    fs::write(&bad, b"latin-1 name")?;
+    let skipped = home
+        .local
+        .join(std::ffi::OsStr::from_bytes(b"keep-\xff.bin"));
+    fs::write(&skipped, b"stays here")?;
+    write_file(&home.local.join("fine.txt"), "fine\n")?;
+    ctx.configure_scope(&home)?;
+    let first = ctx.start_daemon()?;
+    ctx.wait_exists(&home.cloud.join("fine.txt"), CONVERGE_TIMEOUT)?;
+    let cli = ctx.cli();
+    let mut open = Vec::new();
+    wait::wait_until(
+        Duration::from_secs(60),
+        "two unsyncable-name decisions",
+        || {
+            let Ok(report) = cli.json(&["decisions", "list", "--json"]) else {
+                return false;
+            };
+            open = report["decisions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|decision| {
+                    decision["kind"] == "unsyncable-name" && decision["choice"].is_null()
+                })
+                .cloned()
+                .collect();
+            open.len() == 2
+        },
+    )?;
+    ensure!(
+        open.iter().all(|decision| decision["question"]
+            .as_str()
+            .is_some_and(|question| question.contains("not valid UTF-8"))),
+        "the question names the reason: {open:?}"
+    );
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    let cloud_names: Vec<String> = fs::read_dir(&home.cloud)?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    ensure!(
+        !cloud_names
+            .iter()
+            .any(|name| name.starts_with("report-") || name.starts_with("keep-")),
+        "a name the model cannot carry never reaches the cloud: {cloud_names:?}"
+    );
+
+    // Skip one, rename the other; a whole-scope reconcile (a restart
+    // runs one) withdraws the renamed one's question.
+    let to_skip = open
+        .iter()
+        .find(|decision| {
+            decision["path"]
+                .as_str()
+                .is_some_and(|path| path.contains("keep-"))
+        })
+        .ok_or_else(|| Failure::new("no decision for keep-"))?;
+    let id = to_skip["id"].as_i64().unwrap_or_default().to_string();
+    cli.ok(&["decisions", "resolve", &id, "--choose", "skip"])?;
+    fs::rename(&bad, home.local.join("report.txt"))?;
+    ctx.wait_exists(&home.cloud.join("report.txt"), CONVERGE_TIMEOUT)?;
+    ctx.stop_daemon(first)?;
+    ctx.start_daemon()?;
+    wait::wait_until(
+        Duration::from_secs(60),
+        "no open unsyncable-name decision",
+        || {
+            cli.json(&["decisions", "list", "--json"])
+                .ok()
+                .and_then(|report| report["decisions"].as_array().cloned())
+                .is_some_and(|decisions| {
+                    decisions.iter().all(|decision| {
+                        decision["kind"] != "unsyncable-name" || !decision["choice"].is_null()
+                    })
+                })
+        },
+    )?;
+    let history = cli.json(&["decisions", "list", "--all", "--json"])?;
+    let choices: Vec<String> = history["decisions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|decision| decision["kind"] == "unsyncable-name")
+        .map(|decision| decision["choice"].as_str().unwrap_or_default().to_string())
+        .collect();
+    ensure!(
+        choices.len() == 2
+            && choices.contains(&"skip".to_string())
+            && choices.contains(&"withdrawn".to_string()),
+        "one skipped, one withdrawn, none re-asked: {choices:?}"
+    );
+    ensure!(skipped.is_file(), "the skipped file stays on this device");
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn unsyncable_name_decision(_ctx: &mut Ctx) -> Result<(), Failure> {
+    Err(Failure::new("non-UTF-8 names need a Unix host"))
 }
 
 fn type_mismatch_decision(ctx: &mut Ctx) -> Result<(), Failure> {

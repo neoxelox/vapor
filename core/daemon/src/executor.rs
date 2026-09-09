@@ -2626,12 +2626,22 @@ fn hold_if_mass_deletion(
         MASS_DELETION_EVIDENCE_PATHS,
     )?;
     report.held += 1;
+    // The rest of the burst is still queued. It is held now, as one
+    // batch, so the answer covers what the question counted: an
+    // `apply` releases it whole and a `discard` restores it whole,
+    // instead of each straggler re-tripping the guard and asking again.
+    let queued = state_db.hold_pending_of_kind(direction.intent_kind(), decision_id)?;
+    for path in &queued {
+        state_db.append_decision_evidence_path(decision_id, path, MASS_DELETION_EVIDENCE_PATHS)?;
+    }
+    report.held += queued.len();
     crate::logging::info(
         "Held a deletion behind the mass-deletion decision",
         &[
             ("decision_id", decision_id.to_string()),
             ("path", intent.path.display().to_string()),
             ("direction", direction.label().to_string()),
+            ("queued_held_with_it", queued.len().to_string()),
         ],
     );
     Ok(true)

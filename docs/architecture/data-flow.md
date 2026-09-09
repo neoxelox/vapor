@@ -24,7 +24,7 @@ On macOS the throttle inputs are read from the host every second: system and dae
 
 - **Active-coding heuristic.** Stabilized code/config-class events feed a rolling 60s window; at or above the threshold the runtime ORs `user_active = true` into the throttle inputs, so a compile-edit loop throttles sync even on hosts without a permissioned HID-idle signal. Strictly additive — it can only raise throttle caution.
 - **Priority classes + flush boost.** Within one durable flush batch, key-config and code paths enqueue ahead of lockfile noise (reusing the debounce classification as the priority signal). An explicit `vapor flush` activates a bounded 30s boost window: deferred reconciles release immediately (bypassing not-before times and the idle gate) and the remote feed polls on the next tick. Execution still answers to the throttle ladder, so flush accelerates scheduling, never resource impact.
-- **Mass-change / ransomware guard.** Counts deletions in both directions at the moment the executor would make them irreversible: a local deletion about to remove a cloud object, a cloud deletion about to remove a local file. A deletion that turns out to be a no-op (the other side is already gone) never counts, and neither do the engine's own echoed deletes. The burst is judged as a whole: the deletions still waiting in the queue count with the ones already applied inside the rolling window, so a large batch is held before its first member lands. The guard trips when the burst reaches `massDeleteThreshold` (default 1000) or `massDeleteRatioPercent` of the synced tree (default 25%, never fewer than 10 deletions). A tripped guard parks every further deletion behind one `mass-deletion` decision (§Decisions) and the rest of the sync keeps flowing; the daemon is never paused for it. `apply` releases the held deletions as approved and resets the window; `discard` drops them and enqueues a restore for each path from the side that still has the file.
+- **Mass-change / ransomware guard.** Counts deletions in both directions at the moment the executor would make them irreversible: a local deletion about to remove a cloud object, a cloud deletion about to remove a local file. A deletion that turns out to be a no-op (the other side is already gone) never counts, and neither do the engine's own echoed deletes. The burst is judged as a whole: the deletions still waiting in the queue count with the ones already applied inside the rolling window, so a large batch is held before its first member lands. The guard trips when the burst reaches `massDeleteThreshold` (default 1000) or `massDeleteRatioPercent` of the synced tree (default 25%, never fewer than 10 deletions). A tripped guard parks the whole burst behind one `mass-deletion` decision (§Decisions): the deletion that tripped it, every deletion of that direction still queued at that moment, and every further one while the question is open. The rest of the sync keeps flowing; the daemon is never paused for it. `apply` releases the held deletions as approved and resets the window; `discard` drops them and enqueues a restore for each path from the side that still has the file. Because the whole burst is held at once, one answer covers what the question counted, and an answer given the moment the question appears does not leave stragglers to ask again. A held deletion whose target the other side removes meanwhile (the cloud reports the path gone, or the user deletes the file here too) is dropped as moot, and a question left holding nothing is withdrawn on its own.
 
 ## Remote to local (bidirectional MVP)
 
@@ -288,7 +288,15 @@ say which reading is right. The rules:
   trash and the cloud side comes down). Both sides stay untouched while
   it is open, the question is asked once, and an applied answer gets
   `DECISION_APPLY_GRACE_SECONDS` to land before the walk may ask about
-  the path again. Further kinds land with the feature that needs them
+  the path again. `unsyncable-name` (path scope, option `skip`) for a
+  local file whose name the sync path model cannot carry, today a name
+  that is not valid UTF-8 (possible on Linux; macOS refuses to create
+  one). Nothing is held: the file stays on this device only and the
+  question is the user's notice. A rename fixes it, after which the
+  next whole-scope walk finds the name gone and withdraws the
+  question; `skip` stops the asking for that name. Watcher events for
+  such a path are dropped at the callback bridge, since the durable
+  queue is UTF-8. Further kinds land with the feature that needs them
   and are listed here.
 
 ### What stops a whole profile

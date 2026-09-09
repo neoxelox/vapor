@@ -17,6 +17,9 @@ pub enum FaultKind {
     PauseResume,
     /// Rename the cloud root away for a while, then put it back.
     CloudRootVanish,
+    /// Take every permission off the cloud root for a phase, then give
+    /// them back: the root is there but cannot be read or written.
+    CloudRootPermissions,
     /// Walk the throttle inputs through every state during a phase.
     ThrottleWalk,
     /// Lower and restore a resource ceiling with `vapor config set`.
@@ -33,6 +36,7 @@ impl FaultKind {
             FaultKind::Freeze => "freeze",
             FaultKind::PauseResume => "pause-resume",
             FaultKind::CloudRootVanish => "cloud-root-vanish",
+            FaultKind::CloudRootPermissions => "cloud-root-permissions",
             FaultKind::ThrottleWalk => "throttle-walk",
             FaultKind::ConfigReload => "config-reload",
             FaultKind::DiskFull => "disk-full",
@@ -45,6 +49,7 @@ impl FaultKind {
         FaultKind::Freeze,
         FaultKind::PauseResume,
         FaultKind::CloudRootVanish,
+        FaultKind::CloudRootPermissions,
         FaultKind::ThrottleWalk,
         FaultKind::ConfigReload,
         FaultKind::DiskFull,

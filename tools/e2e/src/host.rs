@@ -36,6 +36,9 @@ pub enum Need {
     CaseSensitiveFs,
     /// Throwaway disk images can be created and mounted (macOS `hdiutil`).
     DiskImage,
+    /// The sandbox filesystem accepts a file name that is not UTF-8
+    /// (ext4 and tmpfs do; APFS refuses).
+    NonUtf8Names,
 }
 
 impl Need {
@@ -53,6 +56,7 @@ impl Need {
             Need::CaseInsensitiveFs => "case-insensitive-fs",
             Need::CaseSensitiveFs => "case-sensitive-fs",
             Need::DiskImage => "disk-image",
+            Need::NonUtf8Names => "non-utf8-names",
         }
     }
 }
@@ -85,6 +89,7 @@ pub struct Host {
     pub launchd_blocker: Option<String>,
     pub case_insensitive_fs: bool,
     pub disk_image: bool,
+    pub non_utf8_names: bool,
     pub full: bool,
     pub provider: Provider,
 }
@@ -109,6 +114,7 @@ impl Host {
             launchd_blocker,
             case_insensitive_fs: probe_case_insensitive(sandbox_root),
             disk_image: crate::diskimage::DiskImage::available(),
+            non_utf8_names: probe_non_utf8_names(sandbox_root),
             full,
             provider,
         }
@@ -129,6 +135,7 @@ impl Host {
             Need::CaseInsensitiveFs => self.case_insensitive_fs,
             Need::CaseSensitiveFs => !self.case_insensitive_fs,
             Need::DiskImage => self.disk_image,
+            Need::NonUtf8Names => self.non_utf8_names,
         };
         if ok {
             Ok(())
@@ -216,6 +223,22 @@ fn probe_xattr(root: &Path) -> bool {
         ok
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = root;
+        false
+    }
+}
+
+fn probe_non_utf8_names(root: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = root.join(std::ffi::OsStr::from_bytes(b".probe-\xff"));
+        let accepted = fs::write(&path, b"x").is_ok();
+        let _ = fs::remove_file(&path);
+        accepted
+    }
+    #[cfg(not(unix))]
     {
         let _ = root;
         false

@@ -184,7 +184,9 @@ this OS), `unix`, `fifo`, `posix-mode`, `xattr`, `launchd` (with
 `--full`, no existing Vapor LaunchAgent, a usable `gui/<uid>` domain),
 `full`, `filesystem-provider`, `gdrive-provider`,
 `case-insensitive-fs`, `case-sensitive-fs`, `disk-image` (macOS
-`hdiutil`, used to mount a case-sensitive or tiny volume).
+`hdiutil`, used to mount a case-sensitive or tiny volume),
+`non-utf8-names` (the sandbox filesystem accepts a file name that is
+not UTF-8: ext4 and tmpfs do, APFS refuses).
 
 ## Manual sandbox
 
@@ -293,6 +295,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S47 | renaming a synced file locally moves the cloud object in place (same inode, no re-upload) and re-keys the index |
 | S48 | renaming a synced file in the cloud renames the local file in place (same inode, no download) and leaves nothing in the trash |
 | S49 | a sync root that is a whole volume of its own gets its trash at `<volume>/.vapor/trash/`: a cloud deletion is a rename on that volume (same inode, no copy onto the runtime directory's volume), `vapor trash list` shows it, restore puts it back, and the `.vapor` directory inside the root never syncs (needs a disk image) |
+| S50 | a local file whose name is not valid UTF-8 opens an `unsyncable-name` decision, never reaches the cloud, and the question is withdrawn once the file is renamed; `skip` stops the asking (needs a filesystem that accepts such a name: Linux) |
 | R01 | install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd, then the headless supervisor (`install --supervise`) restarting a killed daemon on its own (`--full`) |
 
 ## Extending the harness

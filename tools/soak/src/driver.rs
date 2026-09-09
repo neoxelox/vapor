@@ -157,6 +157,9 @@ pub struct Driver {
     /// Set while the cloud root is parked so the workload never writes
     /// into a directory that does not exist.
     cloud_parked: Option<PathBuf>,
+    /// The cloud root's permissions before the permissions fault took
+    /// them away; `Some` while the root is unreadable.
+    cloud_locked_mode: Option<u32>,
 }
 
 impl Driver {
@@ -240,6 +243,7 @@ impl Driver {
             state: RunState::Starting,
             message: "provisioning".to_string(),
             cloud_parked: None,
+            cloud_locked_mode: None,
         };
         driver.start_daemon()?;
         driver.state = RunState::Running;
@@ -269,15 +273,21 @@ impl Driver {
         )?;
         self.daemon = Some(daemon);
         self.health.reset_process();
-        // A daemon started while the cloud root is parked holds the
-        // profile (Error) until the root is back.
-        let expected = if self.cloud_parked.is_some() {
+        // A daemon started while the cloud root is parked or locked
+        // blocks (Error) until the root is usable again.
+        let expected = if self.cloud_unavailable() {
             "Error"
         } else {
             "Running"
         };
         self.cli.wait_run_state(expected, STARTUP_TIMEOUT)?;
         Ok(())
+    }
+
+    /// The cloud root cannot take the driver's writes right now: parked
+    /// away or stripped of its permissions by a phase fault.
+    fn cloud_unavailable(&self) -> bool {
+        self.cloud_parked.is_some() || self.cloud_locked_mode.is_some()
     }
 
     fn daemon_pid(&mut self) -> Option<u32> {
@@ -694,7 +704,7 @@ impl Driver {
         subset: Option<&[String]>,
         faults: &mut Vec<String>,
     ) -> Result<(), Failure> {
-        if side == Side::Cloud && self.cloud_parked.is_some() {
+        if side == Side::Cloud && self.cloud_unavailable() {
             return Ok(());
         }
         let owned: Vec<String> = match subset {
@@ -805,7 +815,7 @@ impl Driver {
             let cloud_bytes = content_for(self.cfg.seed, &path, cloud_version, size + 7);
             let local_full = join_relative(&self.home.local, &path);
             let cloud_full = join_relative(&self.home.cloud, &path);
-            if self.cloud_parked.is_some() {
+            if self.cloud_unavailable() {
                 return Ok(());
             }
             let write = |full: &Path, bytes: &[u8]| -> Result<(), Failure> {
@@ -927,9 +937,10 @@ impl Driver {
         }
         self.answer_decisions()?;
         // While the cloud root is parked the daemon holds the profile
-        // (Error, with a root-missing decision open); that is the
+        // (Error, with a root-missing decision open), and while it is
+        // unreadable sync blocks (Error, no decision); that is the
         // product working as designed, not a daemon to wait on.
-        let expected = if self.cloud_parked.is_some() {
+        let expected = if self.cloud_unavailable() {
             "Error"
         } else {
             "Running"
@@ -1137,6 +1148,18 @@ impl Driver {
                     faults.push("cloud-root-vanish".to_string());
                 }
             }
+            FaultKind::CloudRootPermissions if self.cloud_parked.is_none() => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = fs::metadata(&self.home.cloud)?.permissions().mode();
+                    fs::set_permissions(&self.home.cloud, fs::Permissions::from_mode(0o000))?;
+                    self.cloud_locked_mode = Some(mode);
+                    self.note("cloud-root-permissions: cloud root unreadable for this phase");
+                    self.record_fault_event("cloud-root-permissions", "locked".to_string());
+                    faults.push("cloud-root-permissions".to_string());
+                }
+            }
             FaultKind::ThrottleWalk => {
                 if let Some(script) = &self.throttle {
                     let station = *self.rng.pick(Station::WALK);
@@ -1192,6 +1215,21 @@ impl Driver {
                     self.record_fault_event("cloud-root-vanish", "restored".to_string());
                     // The daemon notices on its root-check cadence and
                     // lifts the hold on its own; give it that long.
+                    if self.daemon_pid().is_some() {
+                        self.cli
+                            .wait_run_state("Running", Duration::from_secs(90))?;
+                    }
+                }
+            }
+            FaultKind::CloudRootPermissions => {
+                #[cfg(unix)]
+                if let Some(mode) = self.cloud_locked_mode.take() {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&self.home.cloud, fs::Permissions::from_mode(mode))?;
+                    self.note("cloud-root-permissions: permissions restored");
+                    self.record_fault_event("cloud-root-permissions", "restored".to_string());
+                    // An unreadable root is retried at the ensure cadence,
+                    // never asked about; the daemon recovers on its own.
                     if self.daemon_pid().is_some() {
                         self.cli
                             .wait_run_state("Running", Duration::from_secs(90))?;

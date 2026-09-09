@@ -32,6 +32,24 @@ describe the new behaviour. Do this before the commit, not after.
 6. macOS UI changes: state the intended experience and its HIG
    alignment in the change, and hand the owner a manual checklist.
 
+## The sweep for stale mentions
+
+Before the last commit of a change that introduces, renames, or
+removes a command, flag, path, config key, environment variable,
+scenario id, decision kind, or tier name, search the whole knowledge
+base for every old and new spelling and fix each stale mention:
+
+```sh
+grep -rn "<old spelling>\|<new spelling>" AGENTS.md .agents README.md docs CHANGELOG.md .env.example
+```
+
+That covers `AGENTS.md`, every `.agents/skills/*/SKILL.md`,
+`.agents/README.md`, root `README.md`, `docs/**`, and the CHANGELOG.
+A default that changed shows up as a number, so search for the old
+value too. A mention in a document that describes history (an older
+CHANGELOG release, a dated task entry) stays; a mention in a document
+that describes the system now is a bug.
+
 ## Group README rule
 
 Every `docs/<group>/` and `docs/<group>/<platform>/` has a `README.md`
