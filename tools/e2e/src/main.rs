@@ -63,9 +63,9 @@ enum Cmd {
         /// Write the JSON report here (default: inside the run root).
         #[arg(long)]
         json: Option<PathBuf>,
-        /// Scenarios to run at once (default: half the cores, at most
-        /// four). Each has its own sandbox; deadlines grow with the
-        /// count so a loaded host does not read as a failure.
+        /// Scenarios to run at once (default: one per core). Each has
+        /// its own sandbox; deadlines grow with the count so a loaded
+        /// host does not read as a failure.
         #[arg(long)]
         jobs: Option<usize>,
     },

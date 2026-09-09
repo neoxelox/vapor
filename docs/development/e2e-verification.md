@@ -142,7 +142,7 @@ Two obligations when Tier E2E applies:
 ./scripts/e2e.sh --full                # add the launchd round-trip (disposable runners only)
 ./scripts/e2e.sh --sandbox             # manual sandbox: provision + leave a daemon running
 ./scripts/e2e.sh --sandbox-stop        # stop and remove every manual sandbox
-./scripts/e2e.sh --jobs 1              # one scenario at a time (default: half the cores, at most six)
+./scripts/e2e.sh --jobs 1              # one scenario at a time (default: one per core)
 ```
 
 Scenarios run several at a time. Each has its own sandbox, runtime
@@ -156,9 +156,11 @@ images take a lock among themselves, and the launchd round-trip runs
 alone after everything else, since it mutates host state. The queue
 starts with the scenarios the previous run found longest, read from
 the last report, so the tail is the slowest scenario and not the sum.
-The default suite takes about a minute and a half on a laptop and
-under two in a four-core container, against nine and a half in
-sequence; the summary line reports wall time.
+The default suite takes about as long as its slowest scenario, a
+little over a minute on a twelve-core laptop and under two in a
+container, against nine and a half in sequence; the summary line
+reports wall time. A scenario is mostly a daemon waiting on its own
+timers, so one per core leaves the host far from saturated.
 
 Output is one line per scenario:
 
@@ -351,7 +353,8 @@ Discipline rules:
   task in `docs/tasks/core.md`, never a skipped or weakened assertion.
 - **Agent-friendly failures.** The failure message says what was
   expected; the epilogue and diagnostics do the rest.
-- **Budget.** The default suite runs in about a minute and a half;
+- **Budget.** The default suite runs in about the time of its slowest
+  scenario, a little over a minute;
   each known-gap scenario costs its timeout until the product catches
   up, and a scenario that waits out a product timer sets the floor for
   the whole run, so keep such waits to what the proof needs. Long or

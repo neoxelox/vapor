@@ -13,9 +13,9 @@ under `<repo>/.vapor/e2e/`. The harness is the `vapor-e2e` crate in
 Three modes:
 
 1. **Scenario suite** (`./scripts/e2e.sh`): every scenario the host can
-   run, several at a time, each in its own sandbox, each ending with
-   the tree oracle and the log-hygiene check. About a minute and a
-   half; the floor is the slowest scenario.
+   run, one per core, each in its own sandbox, each ending with the
+   tree oracle and the log-hygiene check. About the length of the
+   slowest scenario, a little over a minute.
 2. **One scenario** (`./scripts/e2e.sh --only S23`): the loop while
    implementing or fixing something.
 3. **Manual sandbox** (`./scripts/e2e.sh --sandbox`): a provisioned,

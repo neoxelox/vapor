@@ -42,13 +42,15 @@ pub struct RunOptions {
     pub jobs: usize,
 }
 
-/// Half the host's cores, at most six: enough to hide the product's
-/// timers behind each other without turning the run into a CPU test.
+/// One scenario per core. A scenario is mostly a daemon waiting on its
+/// own timers, so the host stays far from saturated: twelve at once
+/// on twelve cores used a third of the CPU and moved no scenario's
+/// clock.
 pub fn default_jobs() -> usize {
     std::thread::available_parallelism()
-        .map(|cores| cores.get() / 2)
+        .map(|cores| cores.get())
         .unwrap_or(1)
-        .clamp(1, 6)
+        .max(1)
 }
 
 /// Deadlines grow by half per extra sandbox sharing the host.
