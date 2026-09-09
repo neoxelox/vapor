@@ -6981,7 +6981,29 @@ mod tests {
             .feed
             .emit_removed(cloud.clone(), timestamp_ms(fixture.now_ms));
         fixture.converge(20);
-        assert!(!local.exists(), "the deletion applies locally");
+        if local.exists() {
+            let queue: Vec<_> = fixture
+                .runtime
+                .state_db()
+                .list_queue_intents(16)
+                .expect("queue")
+                .into_iter()
+                .map(|r| (r.kind, r.attempt_count, r.last_error, r.path))
+                .collect();
+            let failed = fixture.runtime.state_db().failed_depth().expect("failed");
+            let decisions: Vec<_> = fixture
+                .runtime
+                .state_db()
+                .decisions(true)
+                .expect("decisions")
+                .into_iter()
+                .map(|d| (d.kind, d.question))
+                .collect();
+            panic!(
+                "the deletion applies locally; queue={queue:?} failed={failed} decisions={decisions:?} local_root={:?} cloud_root={:?}",
+                fixture.watch_root, fixture.cloud_root
+            );
+        }
         let entries = fixture.runtime.trash().expect("trash").list();
         assert_eq!(entries.len(), 1, "the removed file is kept in the trash");
         assert_eq!(entries[0].original_path, local);
