@@ -390,8 +390,9 @@ value", the test is not worth writing.
   OS job (every PR; part of the required `test` check on `main`).
   Also part of the local contributor validation loop for
   runtime-affecting changes (`AGENTS.md §9.8`). Runs the shipped
-  binaries sandboxed under `.vapor/e2e/`; the default suite takes a
-  few minutes, most of it in scenarios that wait out a known gap. The
+  binaries sandboxed under `.vapor/e2e/`; scenarios run several at a
+  time in their own sandboxes, so the default suite takes about a
+  minute and a half, the length of its slowest scenario. The
   daemon scenarios run on macOS (FSEvents) and Linux (inotify) and
   skip by name on Windows until its native traits ship. The macOS job
   passes `--full`, which adds

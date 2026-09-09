@@ -4,13 +4,16 @@
 //! sandbox and prints diagnostics; a green run removes everything
 //! unless asked to keep it.
 
+use std::collections::VecDeque;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::daemon::DaemonKind;
-use crate::host::{Host, Provider};
+use crate::host::{Host, Need, Provider};
 use crate::report::{HostSummary, RunReport, ScenarioResult, Summary, Verdict, console_line};
 use crate::sandbox::{self, Sandbox};
 pub use crate::scenario::RunPaths;
@@ -30,6 +33,28 @@ pub struct RunOptions {
     pub daemon_kind: DaemonKind,
     /// Where to write the JSON report (default: inside the run root).
     pub json_path: Option<PathBuf>,
+    /// Scenarios run at once. Each has its own sandbox, runtime
+    /// directory, and socket, so they are independent; what they share
+    /// is the host's CPU and disk, which the deadline scale accounts
+    /// for. Scenarios that mount disk images run one at a time among
+    /// themselves, and the host-mutating service round-trip runs alone
+    /// after everything else.
+    pub jobs: usize,
+}
+
+/// Half the host's cores, at most six: enough to hide the product's
+/// timers behind each other without turning the run into a CPU test.
+pub fn default_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(|cores| cores.get() / 2)
+        .unwrap_or(1)
+        .clamp(1, 6)
+}
+
+/// Deadlines grow by half per extra sandbox sharing the host.
+fn deadline_scale_percent(jobs: usize) -> u32 {
+    let extra = u32::try_from(jobs.saturating_sub(1)).unwrap_or(u32::MAX);
+    100u32.saturating_add(extra.saturating_mul(50)).min(400)
 }
 
 pub fn e2e_root(repo_root: &Path) -> PathBuf {
@@ -186,16 +211,29 @@ pub fn run(options: &RunOptions) -> Result<RunReport, Failure> {
         summary: Summary::default(),
     };
 
-    let mut any_preserved = false;
-    for scenario in scenarios {
-        let result = run_one(&scenario, &host, &paths, &run_root, options.keep);
-        if result.sandbox.is_some() {
-            any_preserved = true;
-        }
-        println!("{}", console_line(&result));
-        report.scenarios.push(result);
+    let jobs = options.jobs.max(1);
+    crate::wait::set_deadline_scale_percent(deadline_scale_percent(jobs));
+    if jobs > 1 {
+        println!(
+            "[e2e] {jobs} scenarios at a time; deadlines scaled to {}%",
+            crate::wait::deadline_scale_percent()
+        );
     }
-    report.recompute_summary();
+    let started = Instant::now();
+    let last_durations =
+        RunReport::durations_from(&e2e_root(&options.repo_root).join("last-result.json"));
+    let results = run_all(
+        &scenarios,
+        jobs,
+        &last_durations,
+        &host,
+        &paths,
+        &run_root,
+        options.keep,
+    );
+    let any_preserved = results.iter().any(|result| result.sandbox.is_some());
+    report.scenarios = results;
+    report.recompute_summary(started.elapsed().as_secs_f64());
 
     let json_path = options
         .json_path
@@ -231,6 +269,73 @@ pub fn run(options: &RunOptions) -> Result<RunReport, Failure> {
         sandbox::remove_tree(&run_root)?;
     }
     Ok(report)
+}
+
+/// Runs every scenario, `jobs` at a time, and returns the results in
+/// catalog order. Disk-image scenarios take a lock among themselves
+/// (one `hdiutil` at a time); a scenario that needs launchd waits
+/// until every other one is done and then runs alone, since it
+/// mutates host state.
+fn run_all(
+    scenarios: &[Scenario],
+    jobs: usize,
+    last_durations: &std::collections::BTreeMap<String, f64>,
+    host: &Host,
+    paths: &RunPaths,
+    run_root: &Path,
+    keep: bool,
+) -> Vec<ScenarioResult> {
+    let exclusive = |scenario: &Scenario| scenario.needs.contains(&Need::Launchd);
+    let mut shared: Vec<(usize, Scenario)> = scenarios
+        .iter()
+        .enumerate()
+        .filter(|(_, scenario)| !exclusive(scenario))
+        .map(|(index, scenario)| (index, *scenario))
+        .collect();
+    // Longest first, by the previous run's clock; a scenario without a
+    // record goes ahead of the known short ones. Catalog order breaks
+    // ties, so a run with no history keeps it.
+    shared.sort_by(|(a_index, a), (b_index, b)| {
+        let seconds = |scenario: &Scenario| last_durations.get(scenario.id).copied();
+        let a_seconds = seconds(a).unwrap_or(f64::MAX);
+        let b_seconds = seconds(b).unwrap_or(f64::MAX);
+        b_seconds
+            .partial_cmp(&a_seconds)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a_index.cmp(b_index))
+    });
+    let queue = Mutex::new(VecDeque::from(shared));
+    let results: Mutex<Vec<(usize, ScenarioResult)>> = Mutex::new(Vec::new());
+    let disk_images = Mutex::new(());
+    let workers = jobs.min(scenarios.len().max(1));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let next = queue.lock().expect("queue").pop_front();
+                    let Some((index, scenario)) = next else {
+                        break;
+                    };
+                    let guard = scenario
+                        .needs
+                        .contains(&Need::DiskImage)
+                        .then(|| disk_images.lock().expect("disk image lock"));
+                    let result = run_one(&scenario, host, paths, run_root, keep);
+                    drop(guard);
+                    results.lock().expect("results").push((index, result));
+                }
+            });
+        }
+    });
+    for (index, scenario) in scenarios.iter().enumerate() {
+        if exclusive(scenario) {
+            let result = run_one(scenario, host, paths, run_root, keep);
+            results.lock().expect("results").push((index, result));
+        }
+    }
+    let mut results = results.into_inner().expect("results");
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
 }
 
 /// Failures, notes, and diagnostics of one scenario run.
@@ -313,20 +418,25 @@ fn run_one(
     } else {
         let _ = sandbox::remove_tree(&scenario_root);
     }
+    // One lock for the whole block, so parallel scenarios never
+    // interleave their lines.
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
     if result.verdict.is_red() || matches!(result.verdict, Verdict::KnownGap) {
         for reason in &result.reasons {
-            println!("[e2e]   {}: {reason}", scenario.id);
+            let _ = writeln!(out, "[e2e]   {}: {reason}", scenario.id);
         }
     }
     if result.verdict.is_red()
         && let Some(diagnostics) = diagnostics
     {
-        println!("[e2e] ---- diagnostics {} ----", scenario.id);
+        let _ = writeln!(out, "[e2e] ---- diagnostics {} ----", scenario.id);
         for line in diagnostics.lines() {
-            println!("[e2e]   {line}");
+            let _ = writeln!(out, "[e2e]   {line}");
         }
-        println!("[e2e] ---------------------");
+        let _ = writeln!(out, "[e2e] ---------------------");
     }
+    let _ = writeln!(out, "{}", console_line(&result));
     result
 }
 

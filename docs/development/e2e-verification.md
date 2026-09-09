@@ -142,7 +142,23 @@ Two obligations when Tier E2E applies:
 ./scripts/e2e.sh --full                # add the launchd round-trip (disposable runners only)
 ./scripts/e2e.sh --sandbox             # manual sandbox: provision + leave a daemon running
 ./scripts/e2e.sh --sandbox-stop        # stop and remove every manual sandbox
+./scripts/e2e.sh --jobs 1              # one scenario at a time (default: half the cores, at most six)
 ```
+
+Scenarios run several at a time. Each has its own sandbox, runtime
+directory, and socket, so they never share state; what they share is
+the host's CPU and disk, and the harness treats each sandbox as a
+smaller computer for it: the daemon under test gets two concurrent
+transfers per direction, and every wait deadline grows by half per
+extra scenario running (a bound, so a green run costs nothing extra;
+a loaded host does not read as a failure). Scenarios that mount disk
+images take a lock among themselves, and the launchd round-trip runs
+alone after everything else, since it mutates host state. The queue
+starts with the scenarios the previous run found longest, read from
+the last report, so the tail is the slowest scenario and not the sum.
+The default suite takes about a minute and a half on a laptop and
+under two in a four-core container, against nine and a half in
+sequence; the summary line reports wall time.
 
 Output is one line per scenario:
 
@@ -151,7 +167,7 @@ Output is one line per scenario:
 [e2e] SKIP R01 — needs full: run with --full to include it
 [e2e] KNOWN-GAP S99 — the assertion the scenario cannot meet yet, quoted (5.0s)
 [e2e] FAIL S16 — timed out after 30s waiting for: .../cloud/Vapor/gone.txt to be removed (30.1s)
-[e2e] OK — 45 passed, 0 failed, 1 skipped, 0 known gaps, 0 unexpected passes (390.0s)
+[e2e] OK — 49 passed, 0 failed, 2 skipped, 0 known gaps, 0 unexpected passes (93.6s)
 [e2e] report: .../.vapor/e2e/run-711543-14708/e2e-result.json
 ```
 
@@ -330,8 +346,10 @@ Discipline rules:
   task in `docs/tasks/core.md`, never a skipped or weakened assertion.
 - **Agent-friendly failures.** The failure message says what was
   expected; the epilogue and diagnostics do the rest.
-- **Budget.** The default suite runs in a few minutes; each known-gap
-  scenario costs its timeout until the product catches up. Long or
+- **Budget.** The default suite runs in about a minute and a half;
+  each known-gap scenario costs its timeout until the product catches
+  up, and a scenario that waits out a product timer sets the floor for
+  the whole run, so keep such waits to what the proof needs. Long or
   load-shaped runs belong to the soak tier, not here.
 
 ## What Tier E2E deliberately does not cover (today)

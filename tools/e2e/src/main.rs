@@ -63,12 +63,18 @@ enum Cmd {
         /// Write the JSON report here (default: inside the run root).
         #[arg(long)]
         json: Option<PathBuf>,
+        /// Scenarios to run at once (default: half the cores, at most
+        /// four). Each has its own sandbox; deadlines grow with the
+        /// count so a loaded host does not read as a failure.
+        #[arg(long)]
+        jobs: Option<usize>,
     },
     /// List scenarios with their needs.
     List {
         #[arg(long)]
         json: bool,
     },
+
     /// Provision a sandbox with a running daemon for manual work.
     Sandbox {
         #[arg(long)]
@@ -114,6 +120,7 @@ fn main() -> ExitCode {
             provider,
             daemon,
             json,
+            jobs,
         } => {
             let options = RunOptions {
                 repo_root,
@@ -130,6 +137,7 @@ fn main() -> ExitCode {
                     DaemonArg::Vapord => DaemonKind::Vapord,
                 },
                 json_path: json,
+                jobs: jobs.unwrap_or_else(runner::default_jobs),
             };
             match runner::run(&options) {
                 Ok(report) if report.is_green() => ExitCode::SUCCESS,

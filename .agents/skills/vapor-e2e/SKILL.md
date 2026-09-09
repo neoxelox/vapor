@@ -13,8 +13,9 @@ under `<repo>/.vapor/e2e/`. The harness is the `vapor-e2e` crate in
 Three modes:
 
 1. **Scenario suite** (`./scripts/e2e.sh`): every scenario the host can
-   run, each in its own sandbox, each ending with the tree oracle and
-   the log-hygiene check.
+   run, several at a time, each in its own sandbox, each ending with
+   the tree oracle and the log-hygiene check. About a minute and a
+   half; the floor is the slowest scenario.
 2. **One scenario** (`./scripts/e2e.sh --only S23`): the loop while
    implementing or fixing something.
 3. **Manual sandbox** (`./scripts/e2e.sh --sandbox`): a provisioned,
@@ -55,7 +56,14 @@ Full process doc: `docs/development/e2e-verification.md`. Policy:
 ./scripts/e2e.sh --keep              # keep sandboxes after a green run
 ./scripts/e2e.sh --json out.json     # machine-readable report
 ./scripts/e2e.sh --daemon vapord     # drive the shipped daemon binary
+./scripts/e2e.sh --jobs 1            # one at a time, when a failure might be contention
 ```
+
+A failure that looks like a timeout under the parallel run is retried
+alone (`--only Sxx --jobs 1`) before it is called a finding: deadlines
+already grow with the job count, so a scenario that only passes alone
+is a scenario whose proof depends on host speed, which is a bug in the
+scenario.
 
 Read the verdict line per scenario: `PASS`, `FAIL`, `SKIP` (with the
 need the host lacks), `KNOWN-GAP` (expected failure, marker names the

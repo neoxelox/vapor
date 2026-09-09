@@ -88,7 +88,9 @@ impl RunReport {
         self.summary.failed == 0 && self.summary.unexpected_passes == 0
     }
 
-    pub fn recompute_summary(&mut self) {
+    /// Tallies the verdicts; `seconds` is the run's wall time, which
+    /// with parallel scenarios is less than the sum of theirs.
+    pub fn recompute_summary(&mut self, wall_seconds: f64) {
         let mut summary = Summary::default();
         for result in &self.scenarios {
             match result.verdict {
@@ -98,9 +100,26 @@ impl RunReport {
                 Verdict::KnownGap => summary.known_gaps += 1,
                 Verdict::UnexpectedPass => summary.unexpected_passes += 1,
             }
-            summary.seconds += result.seconds;
         }
+        summary.seconds = wall_seconds;
         self.summary = summary;
+    }
+
+    /// Seconds each scenario took in a report, by id: the next run
+    /// starts the long ones first so the tail does not wait on them.
+    pub fn durations_from(path: &Path) -> std::collections::BTreeMap<String, f64> {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Default::default();
+        };
+        let Ok(report) = serde_json::from_str::<RunReport>(&text) else {
+            return Default::default();
+        };
+        report
+            .scenarios
+            .into_iter()
+            .filter(|result| result.verdict != Verdict::Skip)
+            .map(|result| (result.id, result.seconds))
+            .collect()
     }
 
     pub fn write(&self, path: &Path) -> Result<(), crate::Failure> {
@@ -180,11 +199,12 @@ mod tests {
             .collect(),
             summary: Summary::default(),
         };
-        report.recompute_summary();
+        report.recompute_summary(12.5);
         assert_eq!(report.summary.passed, 1);
         assert_eq!(report.summary.skipped, 1);
         assert_eq!(report.summary.known_gaps, 1);
         assert_eq!(report.summary.unexpected_passes, 1);
+        assert_eq!(report.summary.seconds, 12.5, "wall time, not the sum");
         assert!(
             !report.is_green(),
             "an unexpected pass must make the run red"

@@ -30,6 +30,8 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// debounce windows; scenarios that touch files of the "other" class
 /// (no or unknown extension, 4 s window) pass a longer quiet window.
 pub const SETTLE_QUIET: Duration = Duration::from_millis(3_000);
+/// Concurrent transfers per direction a sandbox daemon gets.
+pub const SANDBOX_CONCURRENT_TRANSFERS: usize = 2;
 
 /// Enqueue-counter snapshot; see `Ctx::mark`.
 #[derive(Clone, Copy, Debug)]
@@ -173,6 +175,16 @@ impl Ctx {
         let cli = self.cli_for(home);
         cli.config_set("localSyncDirectory", &home.local.to_string_lossy())?;
         cli.config_set("cloudSyncDirectory", &home.cloud.to_string_lossy())?;
+        // A sandbox is a small computer: two transfers at a time, so
+        // the scenarios sharing the host do not each spin up a core's
+        // worth of workers. The workgate's own scaling is Tier 1's.
+        cli.config_set(
+            "resourceLimits",
+            &format!(
+                "{{\"maxConcurrentTransfers\": {}}}",
+                SANDBOX_CONCURRENT_TRANSFERS
+            ),
+        )?;
         Ok(())
     }
 
@@ -333,6 +345,7 @@ impl Ctx {
     ) -> Result<(), Failure> {
         let db = self.db_for(home);
         let cli = self.cli_for(home);
+        let timeout = timeout.mul_f64(f64::from(wait::deadline_scale_percent()) / 100.0);
         let deadline = std::time::Instant::now() + timeout;
         loop {
             cli.flush_now();
