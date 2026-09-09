@@ -2505,7 +2505,15 @@ fn fetch_failed_intent(
         .transpose()
 }
 
+/// The durable spelling of a path. On Windows a path may arrive with
+/// either separator (`docs/keep.txt` joined onto `C:\\watch`), and the
+/// same file must key the same row, so the text is rebuilt from the
+/// path's components, which spells every separator the OS way.
 fn path_to_text(path: &Path) -> Result<String, StateDbError> {
+    #[cfg(windows)]
+    let normalized: PathBuf = path.components().collect();
+    #[cfg(windows)]
+    let path = normalized.as_path();
     path.to_str()
         .map(|s| s.to_string())
         .ok_or_else(|| StateDbError::NonUtf8Path(path.display().to_string()))
@@ -3288,6 +3296,16 @@ mod tests {
         let path = PathBuf::from("/tmp/vapor/file.txt");
         let text = path_to_text(&path).expect("ascii path is UTF-8");
         assert_eq!(text, "/tmp/vapor/file.txt");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_to_text_spells_every_separator_the_os_way() {
+        let mixed = PathBuf::from("C:\\watch\\docs/keep.txt");
+        assert_eq!(
+            path_to_text(&mixed).expect("utf-8"),
+            "C:\\watch\\docs\\keep.txt"
+        );
     }
 
     #[cfg(unix)]
