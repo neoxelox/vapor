@@ -7290,17 +7290,6 @@ mod tests {
         fixture.converge(20);
         let cloud = fixture.cloud_root.join("docs/keep.txt");
         let before = std::fs::metadata(&cloud).expect("cloud copy");
-        let inode_before = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                before.ino()
-            }
-            #[cfg(not(unix))]
-            {
-                0u64
-            }
-        };
 
         // The directory is reported again, and with it the file.
         let docs = fixture.watch_root.join("docs");
@@ -7314,7 +7303,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            assert_eq!(after.ino(), inode_before, "the cloud copy was rewritten");
+            assert_eq!(after.ino(), before.ino(), "the cloud copy was rewritten");
         }
         assert_eq!(
             after.modified().expect("mtime"),
