@@ -27,13 +27,13 @@ Reading order for a new session:
 - Primary priority is user device impact, not strict real-time sync.
 - Vapor sync scope is a user-selected local directory replicated bidirectionally with a user-selected cloud directory.
 - Vapor is not a full-device backup product and must never broaden scope beyond configured sync roots.
-- If configured sync roots are missing, Vapor creates the local root on-device and ensures the cloud root exists provider-side before regular sync work proceeds.
+- On a profile's first contact with its sync roots, Vapor creates the local root on-device, ensures the cloud root exists provider-side, and adopts both (`docs/architecture/data-flow.md` §Root identity). After that a missing root is waited for and never re-created on Vapor's own, and a root that is present without the adopted identity is put to the user as a decision; neither is ever mirrored as deletions.
 - Core guarantees:
   - Never lose intent state.
   - Recover safely after crash/restart.
   - Defer under pressure and converge eventually.
 - Bidirectional behavior is in MVP for Google Drive and must be safety-first.
-- Feature parity is mandatory for the invariants above on every OS that currently ships a surface. Autolaunch, crash-loop protection, durable queue, throttle discipline, secret storage, and resource budgets must be delivered via the matching `core/platform` trait implementation; "skip it on the shipping OS" is never acceptable. An OS that is not yet a shipping surface (currently Windows and Linux) may have `unimplemented!()` stubs behind the trait, provided the engine continues to compile on that OS so the door stays open.
+- Feature parity is mandatory for the invariants above on every OS that currently ships a surface. Autolaunch, crash-loop protection, durable queue, throttle discipline, secret storage, and resource budgets must be delivered via the matching `core/platform` trait implementation; "skip it on the shipping OS" is never acceptable. An OS that is not yet a shipping surface (currently Windows; Linux has its native implementations but no app or release lane yet) may have `unimplemented!()` stubs behind the trait, provided the engine continues to compile on that OS so the door stays open.
 
 ## 1.1) Project maturity and compatibility policy
 
@@ -118,9 +118,10 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 - Implement loop prevention (`self_write_cache`, operation IDs, TTL discipline).
 - Handle local/remote races deterministically.
 - Default conflict policy: keep both (never silent overwrite).
-- Maintain tombstones and deletion semantics with durable replay. When the evidence is ambiguous (an unreadable mtime, an unknown provenance), keeping data wins over honouring a deletion.
+- Maintain tombstones and deletion semantics with durable replay. A deletion made while no daemon was watching propagates when the surviving copy is exactly what the sync index last saw; when the evidence is ambiguous (a changed survivor, an unreadable mtime, an unknown provenance), keeping data wins over honouring a deletion.
+- A file Vapor removes on this device goes to the trash (`core/daemon/src/trash.rs`, the `TrashBin` platform trait), never straight to an unlink, unless the user turned the trash off.
 - Remote poll/apply pipeline must obey throttle and retry constraints.
-- Equality checks in the reconcile walk are the rsync quick check (size plus the mtime the sync index recorded), never a whole-tree hash; the upload planner hashes and converges identical content silently.
+- Equality checks in the reconcile walk are the rsync quick check on both sides (size plus the local mtime and the remote mtime the sync index recorded), never a whole-tree hash; a pair the index has no row for is verified once, not assumed converged; the upload planner hashes and converges identical content silently, and a change on one side only while the other side still equals the last synced hash is a transfer in that direction, never a conflict copy.
 - Sync direction is selected by `syncMode` (`two-way` default; one-way
   `pull-only` / `push-only`), resolved per profile with the top-level value as
   the default. Vapor's "never lose data" / keep-both guarantee applies **only
@@ -129,8 +130,10 @@ Do not move heavy compute into an app process or the fs-watch callback path.
   to exactly match the declared source of truth, permanently overwriting
   divergent edits and removing extra content). They must never be enabled
   silently or inferred, and must surface an up-front data-loss warning before
-  activation. There is no recoverable quarantine; the warning is the
-  safeguard. Full design: `docs/architecture/sync-modes.md`.
+  activation. The local trash keeps what a mirror removes on this device
+  for the retention window; overwrites and cloud-side removals on a
+  provider without a trash have no undo, so the warning is the safeguard.
+  Full design: `docs/architecture/sync-modes.md`.
 
 ## 5) Data durability and migrations
 
@@ -142,7 +145,7 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 
 ## 6) Security and privacy
 
-- Secrets/tokens only via `core/platform/secrets::SecretStore`: the login keychain on macOS (one generic-password item per secret under the `sh.arn.vapor` service, with an access list covering `vapor` and `vapord`), Credential Manager on Windows, Secret Service on desktop Linux, age-encrypted file or external command shim on headless Linux. Tests use the in-memory fake; the fake and the native store run the same contract test.
+- Secrets/tokens only via `core/platform/secrets::SecretStore`: the login keychain on macOS (one generic-password item per secret under the `sh.arn.vapor` service, with an access list covering `vapor` and `vapord`), Credential Manager on Windows, Secret Service on desktop Linux, the external command named by `VAPOR_SECRETS_COMMAND` on headless Linux, never a plaintext file. Tests use the in-memory fake; the fake and the native store run the same contract test.
 - Logs must redact secrets, tokens, auth headers, and sensitive identifiers.
 - Telemetry is local-only unless explicitly designed otherwise.
 - Any permissioned feature must degrade safely when denied.
@@ -499,12 +502,25 @@ If a test's failure mode is "I typo'd a default value", skip it.
   `workflow_call`. Runs on every PR; required check on `main`
   (`docs/ci/required-checks.md`). Budget: under 5 minutes per OS on CI.
 - **Tier 2**: `scripts/perf.sh` via `perf.yml`, release pipeline only.
-  Performance SLO tests, long-running property cases, fuzz corpora,
-  `loom`-backed concurrency tests. Not a PR gate.
-- **Tier E2E**: `./scripts/e2e.sh`, on every PR in `test.yml`'s macOS
-  job (with `--full`, which installs a real LaunchAgent and is for
-  disposable runners only) and locally by the contributor (host-safe
-  default). Contract in §9.8; procedure in the `vapor-e2e` skill.
+  One bounded soak cell against the release profile with the SLO
+  checks asserted on its report; long-running property cases, fuzz
+  corpora, and `loom`-backed concurrency tests as they land. Not a PR
+  gate.
+- **Tier S**: `./scripts/soak.sh` (the `tools/soak` driver), on a
+  schedule in `soak.yml` and on demand. Hours of seeded file churn on
+  both sides of a real daemon, fault injection, and a model-checked
+  oracle after every phase (nothing lost, nothing invented, both trees
+  converged, one-way reverts honoured). The first violation freezes the
+  run with the sandbox intact. Contract in
+  `docs/development/soak-testing.md`; procedure in the `vapor-soak`
+  skill. Never a PR gate; the workload and the model are never edited
+  to make a run green.
+- **Tier E2E**: `./scripts/e2e.sh` (the `tools/e2e` harness), on
+  every PR in every `test.yml` OS job (macOS adds `--full`, which
+  installs a real LaunchAgent and is for disposable runners only;
+  scenarios whose needs the host cannot meet skip by name) and locally
+  by the contributor (host-safe default). Contract in §9.8; procedure
+  in the `vapor-e2e` skill.
 
 ### 9.6) Flaky-test policy
 
@@ -536,10 +552,17 @@ that ships a runtime-affecting change must also watch the real product
 work once, end to end. Procedure: the `vapor-e2e` skill and
 `docs/development/e2e-verification.md`. The invariants:
 
-- `./scripts/e2e.sh` builds the shipping binaries (`vapor`, `vapord`)
-  and drives the daemon black-box through the CLI only, never the
-  macOS app, asserting via `vapor status --json`, `vapor doctor`,
-  exit codes, daemon logs, and read-only durable-DB queries.
+- `./scripts/e2e.sh` builds the harness (`tools/e2e`, crate
+  `vapor-e2e`, a dev tool that never ships) and the shipping binaries
+  (`vapor`, `vapord`), then drives the daemon black-box through the
+  CLI only, never the macOS app, asserting via the `--json` commands,
+  exit codes, daemon logs, the two trees on disk, and read-only
+  durable-DB queries. It runs on the host it is built on; there is no
+  container target.
+- Every scenario runs in its own sandbox and ends with the tree
+  oracle (the local root and the cloud root hold the same files) and
+  log hygiene (no ERROR line, no warning it did not declare, no failed
+  intent). A scenario opts out of the oracle only with a stated reason.
 - Sandbox discipline is absolute: everything runs under the repo-local
   `.vapor/e2e/` directory (removed by `./scripts/clean.sh`). Tier E2E
   must never touch `~/.vapor`, install host services (LaunchAgents,
@@ -548,15 +571,26 @@ work once, end to end. Procedure: the `vapor-e2e` skill and
   change daemon/CLI-observable behavior, startup/shutdown/IPC/schema
   changes, and build changes to the shipping binaries. Not required
   for doc-only, UI-only, or test-only changes.
-- When a change adds e2e-observable behavior, extend the harness with
-  a scenario for it in the same change set. A green run of old
-  scenarios proves non-regression, not the new feature.
+- When a change adds e2e-observable behavior, add a scenario for it
+  under `tools/e2e/src/scenarios/` in the same change set, and run it
+  once against the base commit: it must fail before the change and
+  pass after. A green run of old scenarios proves non-regression, not
+  the new feature.
+- A scenario that asserts behavior the product does not have yet is a
+  known gap: it stays in the suite marked as such, with the gap named
+  in words and a task in `docs/tasks/core.md`. Weakening an assertion
+  to make a run green is never acceptable. A known-gap scenario that
+  passes makes the run red until its marker is removed.
 - UI-affecting changes additionally get a short manual-verification
   handoff checklist for the project owner, since agents never verify
   UI.
-- Live cloud-provider E2E (real Google Drive, dedicated test account)
-  is a future, explicitly gated tier: never part of the default run,
-  never a PR gate, never run implicitly by an agent.
+- The filesystem provider is the default. Google Drive is an opt-in
+  mode (`--provider gdrive`) that needs real credentials for a
+  dedicated test account: never part of the default run, never in CI,
+  never run implicitly by an agent, never against the project owner's
+  account. It runs once per release, by hand, as a leg of
+  `./scripts/release.sh`, which runs the suite for every provider
+  the harness knows before a version bump.
 
 ## 10) Pull requests, commits, and documentation
 
@@ -643,6 +677,7 @@ carries its own trigger conditions in its description.
 | `unslop` | Writing anything a human reads: docs, comments, commit messages, replies. Always. |
 | `vapor-validate` | Before committing a change under `core/*`, `apps/*`, or `scripts/*`; when a script run is red. |
 | `vapor-e2e` | A change alters daemon- or CLI-observable behaviour and Tier 1 is green; to watch a feature in the real product. |
+| `vapor-soak` | Proving the product is safe for real data: hours of seeded churn with faults and a no-loss oracle, watched on a loop and triaged at the first violation. |
 | `vapor-debug` | The daemon crashed, will not start, sync is stuck, or a status looks wrong. |
 | `vapor-config` | Adding or changing a `vapor.json` key, `VAPOR_*` variable, default, path name, or launch label. |
 | `vapor-provider` | Touching `core/providers` or adding a provider kind. |

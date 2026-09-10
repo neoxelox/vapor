@@ -252,6 +252,11 @@ pub struct StatusResponse {
     /// the running daemon; names the keys and the command to run.
     #[serde(default)]
     pub config_restart_required: Option<String>,
+    /// Open decisions across profiles: questions the daemon parked
+    /// because an irreversible action rested on ambiguous evidence
+    /// (`vapor decisions list`).
+    #[serde(default)]
+    pub decisions_pending: u64,
 }
 
 /// One profile's status row inside [`StatusResponse`] (schema v2).
@@ -282,6 +287,8 @@ pub struct ProfileStatus {
     /// Set when the profile was suspended by blast-radius containment.
     #[serde(default)]
     pub suspended_reason: Option<String>,
+    #[serde(default)]
+    pub decisions_pending: u64,
 }
 
 /// Effective resource ceilings, measured utilization, and idle-boost

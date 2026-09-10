@@ -105,7 +105,7 @@ Priority scenarios:
 - Multi-profile runtime preserves isolation (own DB per profile,
   shared workgate caps, blast-radius containment on a panicking
   profile).
-- Safeguards: mass-deletion storm pauses + alerts + `resume` re-arms;
+- Safeguards: a deletion burst in either direction is held whole behind a `mass-deletion` decision while other work continues; `apply` releases, `discard` restores;
   code-churn heuristic flips throttle to user-active; flush boost
   re-polls the remote feed.
 - Config reload mid-work does not lose in-flight intents.
@@ -122,23 +122,31 @@ thousands of files belong to Tier 2 perf runs, not Tier 1.
 
 ### Property tests (Tier 1; every PR, bounded case count)
 
-Via `proptest`. High-value invariants where random inputs catch the
-edge cases humans miss. Each property runs **64–256 cases on CI** —
-enough to catch bugs, fast enough to not bog down the suite.
+Via `proptest` (`core/daemon/tests/properties.rs`). High-value
+invariants where random inputs catch the edge cases humans miss. Each
+property runs **256 cases** by default (`PROPTEST_CASES` raises it for
+a longer run), enough to catch bugs and fast enough for the Tier 1
+budget.
 
-High-priority properties to add:
+Properties that exist:
 
-- **Path normalization** — any generated path (including `../`, `./`,
-  multi-byte chars, traversal sequences) produces either an output
-  within the watch root or a rejection; never silently escapes.
+- **Path normalization** — any generated event path (`../`, `./`,
+  doubled separators, an absolute path elsewhere) is either accepted
+  and lies under the watch root once normalized, or rejected; a path
+  rooted elsewhere is never accepted.
 - **Scheduler superseding** — any sequence of upserts collapses to one
-  pending intent per path, and the intent's kind matches the latest
-  upsert.
+  pending intent per path, the intent's kind matches the latest
+  upsert, and draining claims each path once.
+- **Retry backoff monotonicity** — the exponential base never shrinks
+  between attempts (allowing for the symmetric jitter band), the delay
+  is never zero, and it never exceeds `RETRY_MAX_DELAY_MILLIS` plus
+  its jitter.
+
+Properties still to add:
+
 - **Throttle monotonicity** — monotonic input pressure produces
   monotonic state transitions; the controller never moves from
   `Throttled` to `IdleDrain` while CPU pressure rises.
-- **Retry backoff monotonicity** — the computed delay is
-  non-decreasing in attempt count and always `<= RETRY_MAX_DELAY_MILLIS`.
 - **Conflict suffix determinism** — identical `(path, device_id,
   timestamp_ms)` inputs produce an identical conflict suffix across
   runs.
@@ -152,27 +160,31 @@ High-priority properties to add:
 
 ### Platform trait contract tests (Tier 1; macOS CI + each shipping OS)
 
-When `core/platform` lands (wave 4), every trait gets a
-**parameterized contract suite** run against both the in-memory fake
-and the real native implementation on each shipping OS. This catches
-fake-vs-native drift — the single most likely source of "works in
-tests, breaks in prod".
+Every trait gets a **parameterized contract suite** run against both
+the in-memory fake and the real native implementation on each shipping
+OS. This catches fake-vs-native drift, the single most likely source
+of "works in tests, breaks in prod".
 
-Structure:
-
-```rust
-fn contract_tests<F: FsWatcher>(factory: impl Fn() -> F) {
-    // invariants
-}
-
-#[test] fn fake_fs_watcher_contract() { contract_tests(FakeFsWatcher::new); }
-#[test] fn macos_fs_watcher_contract() { contract_tests(MacosFsWatcher::new); }
-```
+Two traits have one today. `SecretStore` runs its body against the
+in-memory fake, the login keychain on macOS, and the command shim on
+Linux (a file-backed shell script standing in for `pass`). `FsWatcher`
+runs `core/platform/src/fs_watch/contract.rs` against the fake on
+every host, FSEvents on macOS, and inotify on Linux: the body performs
+real filesystem actions
+(create, modify, rename, remove) under a throwaway root, and asserts
+every delivered event is absolute, under the root, and plausibly
+timed, that each action produces the kinds the engine accepts for it,
+and that dropping the watcher disconnects the channel. The fake sees
+no OS events, so the harness mirrors each action through a clone of
+the watcher's channel; the native watcher gets nothing mirrored and
+the OS is the source. The remaining traits are open work
+(`docs/tasks/core.md` CT-5).
 
 Trait-specific invariants:
 
-- `FsWatcher` — create → modify → remove for a file; rename pairs;
-  symlink escape dropped; callback discipline preserved.
+- `FsWatcher` — create → modify → rename → remove for a file, as the
+  kinds the engine accepts for each; absolute paths under the root;
+  the channel closes with the watcher.
 - `ServiceInstaller` — install → start → status=`Running` → stop →
   uninstall round-trip; status transitions are observable.
 - `SecretStore` — get-after-set returns the value; delete removes; list
@@ -207,14 +219,21 @@ Loom tests are slow. Keep them small, keep them few, and run them in
 
 ### Performance regression tests (Tier 2; release gate)
 
-The SLO suite in `docs/performance/acceptance-budgets-and-benchmark-harness.md`
-runs via `scripts/perf.sh`. Release gate only; not a PR gate.
+The SLO checks in `docs/performance/acceptance-budgets-and-benchmark-harness.md`
+are asserted on the report of one soak cell that `scripts/perf.sh`
+runs against the release profile. Release gate only; not a PR gate.
 
-Tier 1 keeps a small number of cheap **guard-rail** timing tests
-— the kind already present in `fs_events.rs` (5 000-event callback
-burst < 2 s) and `runtime.rs` (150-event composed tick < 3 s). These
+Tier 1 keeps a small number of cheap **guard-rail** timing tests,
+every one named `timing_guardrail_*` (the callback burst and deep-path
+budgets in `fs_events.rs`, the debounce tick, the scheduler superseding
+burst, the composed runtime tick, the IPC connect timeout, and the
+provider session overhead in the contract suite). These
 are not SLO tests; they exist to catch "someone accidentally made the
-callback 100× slower" before it reaches the release pipeline.
+callback 100× slower" before it reaches the release pipeline. The name
+is the triage rule: a flake in a `timing_guardrail_*` test on a
+saturated CI host is a timing event, not a logic failure, and is
+handled by rerunning the job, never by loosening the assertion in the
+same breath as a logic fix.
 
 ### Snapshot tests for CLI (Tier 1)
 
@@ -236,10 +255,14 @@ Commands to snapshot:
 ### End-to-end tests (Tier E2E; runtime-affecting changes)
 
 `./scripts/e2e.sh` runs the real `vapor` + `vapord` binaries black-box
-through the CLI against a disposable sandbox under the repo-local
-`.vapor/e2e/` directory — real process boundaries, real FSEvents, real
-durable DB, real IPC socket, real signals. It is how an autonomous
-agent verifies "the product actually works", not just "the modules are
+through the CLI, one disposable sandbox per scenario under the
+repo-local `.vapor/e2e/` directory — real process boundaries, real
+FSEvents, real durable DB, real IPC socket, real signals. The harness
+is a Rust dev crate (`tools/e2e`, `vapor-e2e`) so the same scenarios
+run on every OS job once its native traits exist; scenarios declare
+what they need and skip by name elsewhere. Every scenario ends with the
+tree oracle and the log-hygiene check. It is how an autonomous agent
+verifies "the product actually works", not just "the modules are
 correct". Fully sandboxed: never `~/.vapor`, never a host service
 install, never the macOS app, no network.
 
@@ -249,6 +272,21 @@ adds e2e-observable behavior, the harness gains a scenario for it in
 the same change set. Full process, scenario catalog, and extension
 discipline: `docs/development/e2e-verification.md`; policy summary:
 `AGENTS.md §9.8`.
+
+### Soak tests (Tier S; scheduled and on demand)
+
+`./scripts/soak.sh` runs the real binaries under hours of seeded file
+churn on both sides of the sync, with faults (crash, freeze, pause,
+vanished cloud root, full disk, throttle walk), and after every phase
+asks a model what both trees must hold: nothing lost, nothing
+invented, both trees converged, one-way reverts honoured, contested
+payloads both surviving. The first violation freezes the run with the
+sandbox intact; `ops.jsonl` and the daemon log carry the evidence. The
+driver (`tools/soak`) reuses the e2e harness library. Nightly matrix in
+`soak.yml`; one bounded cell is the Tier 2 release gate. Full process:
+`docs/development/soak-testing.md`. Never a PR gate: a soak is
+evidence for the cells it ran, and the model is never edited to make a
+run green.
 
 ### Fuzz tests (Tier 2; release gate)
 
@@ -342,23 +380,29 @@ value", the test is not worth writing.
   integration + platform-trait contract + property + snapshot tests.
   Runs on every PR. Required check on `main`. Target budget: under
   **5 minutes** per OS in the matrix.
-- **Tier 2** — `perf.yml`. Runs performance SLO tests
-  (`scripts/perf.sh`), long-running property cases (higher case
-  counts), fuzz corpora, and any `loom`-backed tests. Release gate
-  only: `perf.yml` has no standalone triggers and is invoked solely by
-  `release.yml`.
-- **Tier E2E** — `scripts/e2e.sh`, at the end of `test.yml`'s
-  macOS job (every PR; part of the required `test` check on `main`).
+- **Tier 2** — `perf.yml`. Runs one soak cell with the SLO checks
+  (`scripts/perf.sh`), and, as they land, long-running property cases
+  (higher case counts), fuzz corpora, and `loom`-backed tests. Release
+  gate only: `perf.yml` has no standalone triggers and is invoked
+  solely by `release.yml`.
+- **Tier S** — `soak.yml`, nightly and on demand, never a PR gate.
+  Long soak cells across modes, loads, faults, and throttle walks.
+- **Tier E2E** — `scripts/e2e.sh`, at the end of every `test.yml`
+  OS job (every PR; part of the required `test` check on `main`).
   Also part of the local contributor validation loop for
   runtime-affecting changes (`AGENTS.md §9.8`). Runs the shipped
-  binaries sandboxed under `.vapor/e2e/`; budget ~60 s after the
-  build. macOS only — it exercises the native FSEvents watcher on the
-  shipping surface. CI invokes it with `--full`, which appends the
-  black-box `vapor service` round-trip (install → start → status →
-  crash-loop supervision → acknowledge → stop → uninstall) against
-  real `launchd`. That phase installs a real LaunchAgent —
-  host-mutating by design — so it is opt-in: contributors run the
+  binaries sandboxed under `.vapor/e2e/`; scenarios run one per core
+  in their own sandboxes, so the default suite takes about the length
+  of its slowest scenario, a little over a minute. The
+  daemon scenarios run on macOS (FSEvents) and Linux (inotify) and
+  skip by name on Windows until its native traits ship. The macOS job
+  passes `--full`, which adds
+  the black-box `vapor service` round-trip (install → start → status
+  → crash-loop supervision → acknowledge → stop → uninstall) against
+  real `launchd`. That phase installs a real LaunchAgent,
+  host-mutating by design, so it is opt-in: contributors run the
   default (host-safe) suite; only disposable CI runners pass `--full`.
+  The JSON report is uploaded as a workflow artifact.
 
 ## Per-surface scope
 
@@ -388,10 +432,14 @@ second copy of the Rust policy.
 
 ### `core/cli` (Rust, `vapor` binary)
 
-**Logic + snapshot + integration tests.** Every command with `--json`
-output has a snapshot. `vapor service install` / `run` / `status`
-round-trips are automated in CI. IPC client correctness runs against
-a fake daemon.
+**Logic + shape + binary tests.** Every command with `--json` output
+has an explicit shape test in its module. `core/cli/tests/binary.rs`
+spawns the built `vapor` on every CI OS with a throwaway `VAPOR_DIR`
+and locks the shell contract: exit codes, stdout for results and
+stderr for errors (never half a document on stdout), the typed
+`config set`, the empty-state shapes of `decisions` and `trash`, the
+`doctor --json` shape, and death on a closed pipe. The daemon paths
+(`vapor service install` / `run` / `status`) are Tier E2E.
 
 **No interactive TTY tests.** No color-code assertions, no
 cursor-position assertions, no terminal-resize simulations.

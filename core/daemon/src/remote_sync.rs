@@ -13,7 +13,7 @@
 //! re-baselines the cursor, which is exactly the recovery path a real
 //! cloud provider needs when its server-side cursor lapses.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use vapor_providers::{ChangesPoll, ProviderError, RemoteChangeKind};
@@ -45,16 +45,37 @@ pub struct RemotePollReport {
     /// Push-only strict-mirror removals scheduled this poll (cloud-only
     /// content deleted).
     pub mirror_deletes: usize,
+    /// Held deletions dropped because the cloud removed the path itself
+    /// while the question was open.
+    pub moot_holds: usize,
+    /// Remote changes left untouched because they would alias a
+    /// differently-cased local file. The paths are kept by the poller
+    /// (`take_name_collisions`) for the timeline.
+    pub name_collisions: usize,
 }
 
 pub struct RemotePoller {
     cursor_state_key: String,
     cursor: Option<String>,
+    /// Collisions found by polls since the last `take_name_collisions`.
+    name_collisions: Vec<(PathBuf, PathBuf)>,
+    /// Colliding remote names already reported once; the feed repeats
+    /// events for the same object and one report per name is enough.
+    reported_collisions: std::collections::BTreeSet<PathBuf>,
     cursor_loaded: bool,
+    /// Whether the first poll after startup has run. A cursor that the
+    /// provider rejects on that poll is a restart re-baseline (the
+    /// filesystem feed's cursor is process-local), not a feed gap.
+    first_poll_done: bool,
     last_poll_inst: Option<Instant>,
     /// A poll started on an earlier tick whose round trip is still in
     /// progress on its own thread.
     in_flight: Option<ProviderCall<Result<ChangesPoll, ProviderError>>>,
+    /// Set by a sync-root recovery: the changes the feed collected
+    /// while the root was away describe the outage, not the user. The
+    /// next poll is a baseline poll, and a page from before the flag
+    /// is discarded when harvested.
+    discard_history: bool,
 }
 
 impl RemotePoller {
@@ -66,9 +87,30 @@ impl RemotePoller {
             ),
             cursor: None,
             cursor_loaded: false,
+            first_poll_done: false,
             last_poll_inst: None,
             in_flight: None,
+            name_collisions: Vec::new(),
+            reported_collisions: std::collections::BTreeSet::new(),
+            discard_history: false,
         }
+    }
+
+    /// Forgets the feed's history: the next poll re-baselines the cursor
+    /// at the provider's current head and the whole-scope reconcile the
+    /// caller schedules merges the two sides instead. A sync root that
+    /// went away and came back calls this, so the removals the feed saw
+    /// while the root was going never reach the queue.
+    pub fn discard_history(&mut self) {
+        self.discard_history = true;
+        self.cursor = None;
+        self.cursor_loaded = true;
+        self.last_poll_inst = None;
+    }
+
+    /// Collisions found since the last call, for the timeline.
+    pub fn take_name_collisions(&mut self) -> Vec<(PathBuf, PathBuf)> {
+        std::mem::take(&mut self.name_collisions)
     }
 
     /// Poll cadence for the current throttle state; `None` means the
@@ -123,6 +165,11 @@ impl RemotePoller {
                 return Ok(report);
             };
             self.in_flight = None;
+            if self.discard_history {
+                // Started before the recovery: whatever it carries is
+                // the outage's history.
+                return Ok(report);
+            }
             report.polled = true;
             if let Some(poll) = Self::unwrap_poll(result) {
                 self.apply_poll(
@@ -164,6 +211,15 @@ impl RemotePoller {
                 .state(&self.cursor_state_key)?
                 .map(|entry| entry.value);
             self.cursor_loaded = true;
+        }
+        if self.discard_history {
+            self.discard_history = false;
+            state_db.delete_state(&self.cursor_state_key)?;
+            self.cursor = None;
+            logging::info(
+                "Re-baselining the remote changes feed after the sync root recovery",
+                &[("cursor_key", self.cursor_state_key.clone())],
+            );
         }
 
         let provider = app.provider_handle();
@@ -235,13 +291,25 @@ impl RemotePoller {
         now: SystemTime,
         report: &mut RemotePollReport,
     ) -> Result<(), StateDbError> {
+        let first_poll = !self.first_poll_done;
+        self.first_poll_done = true;
         match poll {
             ChangesPoll::CursorExpired => {
                 report.cursor_expired = true;
-                logging::warning(
-                    "Remote changes cursor expired; scheduling whole-scope reconcile and re-baselining",
-                    &[("cursor_key", self.cursor_state_key.clone())],
-                );
+                if first_poll {
+                    logging::info(
+                        "Remote changes cursor did not survive the restart; re-baselining behind the startup reconcile",
+                        &[("cursor_key", self.cursor_state_key.clone())],
+                    );
+                } else {
+                    // The feed lost its place (a rescan signal, a ring
+                    // that rolled over); the reconcile repairs it on its
+                    // own, so this is routine.
+                    logging::info(
+                        "Remote changes cursor expired; scheduling whole-scope reconcile and re-baselining",
+                        &[("cursor_key", self.cursor_state_key.clone())],
+                    );
+                }
                 // Reconcile reconstructs whatever the gap in the feed
                 // hid; the coalesced enqueue dedupes against a pending
                 // reconcile row.
@@ -265,7 +333,12 @@ impl RemotePoller {
                     page.changes.len() >= constants::engine::REMOTE_CHANGES_PAGE_MAX;
                 let mut batch = Vec::new();
                 for change in &page.changes {
-                    let local_target = change.path.to_local(local_root);
+                    // A remote name materialized under an alias maps to
+                    // its local copy, not to the name it cannot have here.
+                    let local_target = match state_db.name_alias(change.path.as_str())? {
+                        Some((alias, _)) => alias,
+                        None => change.path.to_local(local_root),
+                    };
                     if path_filter
                         .map(|filter| filter.should_ignore(&local_target))
                         .unwrap_or(false)
@@ -279,6 +352,33 @@ impl RemotePoller {
                     // feed (up to 60s under Throttled) would otherwise let a
                     // stale Removed delete a freshly re-uploaded local file.
                     let event_time = change.observed_at;
+                    if change.kind == RemoteChangeKind::CreatedOrModified
+                        && let Some(existing) =
+                            crate::name_collision::colliding_local_path(&local_target)
+                    {
+                        // The walk materializes the colliding name as a
+                        // conflict copy and records the alias; the feed
+                        // asks for that walk rather than duplicating it.
+                        if self.reported_collisions.insert(local_target.clone()) {
+                            crate::logging::info(
+                                "Remote change collides with a differently-cased local file; a reconcile will materialize it as a conflict copy",
+                                &[
+                                    ("remote", change.path.as_str().to_string()),
+                                    ("local", existing.display().to_string()),
+                                ],
+                            );
+                            report.name_collisions += 1;
+                            self.name_collisions.push((local_target.clone(), existing));
+                            if let Some(parent) = local_target.parent() {
+                                batch.push((
+                                    parent.to_path_buf(),
+                                    PendingIntentKind::ReconcileSubtree,
+                                    event_time,
+                                ));
+                            }
+                        }
+                        continue;
+                    }
                     match change.kind {
                         RemoteChangeKind::CreatedOrModified => {
                             if remote_echoes.matches_write(
@@ -354,6 +454,15 @@ impl RemotePoller {
                                     report.mirror_reverts += 1;
                                 }
                                 continue;
+                            }
+                            // A deletion of this path held behind the
+                            // mass-deletion decision has nothing left to
+                            // do: the cloud copy is already gone.
+                            if state_db
+                                .drop_held_at(&local_target, PendingIntentKind::Delete)?
+                                .is_some()
+                            {
+                                report.moot_holds += 1;
                             }
                             batch.push((
                                 local_target,

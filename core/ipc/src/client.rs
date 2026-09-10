@@ -341,8 +341,10 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 
+    /// A timing guard-rail (`testing-strategy.md`): a flake here means a
+    /// saturated host, not a logic failure, and is triaged as such.
     #[test]
-    fn connect_with_timeout_returns_promptly_against_wedged_peer() {
+    fn timing_guardrail_connect_timeout_returns_promptly_against_wedged_peer() {
         // Invariant: the CLI must never hang against a daemon
         // that accepted the connection but is not answering. We bind
         // a UDS, accept the client, then sit on the stream without

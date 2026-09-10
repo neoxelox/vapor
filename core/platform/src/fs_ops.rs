@@ -1,7 +1,7 @@
 //! Filesystem operations with per-OS optimal implementations.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Atomically renames `from` onto `to`, failing with
 /// [`io::ErrorKind::AlreadyExists`] when `to` already exists — an
@@ -132,5 +132,99 @@ mod tests {
             from.exists(),
             "the staged file stays for the caller to clean up"
         );
+    }
+}
+
+/// The volume `path` lives on, as an identity two paths can be compared
+/// by: the device number on Unix, the drive or share prefix on Windows.
+/// A path that does not exist yet is judged by its nearest existing
+/// ancestor, which is the volume it would be created on.
+pub fn volume_of(path: &Path) -> io::Result<VolumeId> {
+    let existing = path
+        .ancestors()
+        .find(|ancestor| std::fs::symlink_metadata(ancestor).is_ok())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no ancestor of {} exists", path.display()),
+            )
+        })?;
+    volume_of_existing(existing)
+}
+
+/// Whether `a` and `b` are on the same volume, so a rename between them
+/// is a metadata operation rather than a copy.
+pub fn same_volume(a: &Path, b: &Path) -> io::Result<bool> {
+    Ok(volume_of(a)? == volume_of(b)?)
+}
+
+/// The top of the volume `path` lives on: the mount point on Unix, the
+/// drive or share root on Windows.
+pub fn volume_root_of(path: &Path) -> io::Result<PathBuf> {
+    let volume = volume_of(path)?;
+    let mut current = path
+        .ancestors()
+        .find(|ancestor| std::fs::symlink_metadata(ancestor).is_ok())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "path has no existing ancestor"))?;
+    loop {
+        let Some(parent) = current.parent() else {
+            return Ok(current);
+        };
+        if volume_of_existing(parent)? != volume {
+            return Ok(current);
+        }
+        current = parent.to_path_buf();
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VolumeId(VolumeIdInner);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VolumeIdInner {
+    #[cfg(unix)]
+    Device(u64),
+    #[cfg(windows)]
+    Prefix(std::ffi::OsString),
+}
+
+#[cfg(unix)]
+fn volume_of_existing(path: &Path) -> io::Result<VolumeId> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(VolumeId(VolumeIdInner::Device(
+        std::fs::symlink_metadata(path)?.dev(),
+    )))
+}
+
+#[cfg(windows)]
+fn volume_of_existing(path: &Path) -> io::Result<VolumeId> {
+    use std::path::Component;
+    let canonical = vapor_shared::paths::canonicalize(path)?;
+    let prefix = match canonical.components().next() {
+        Some(Component::Prefix(prefix)) => prefix.as_os_str().to_os_string(),
+        _ => std::ffi::OsString::new(),
+    };
+    Ok(VolumeId(VolumeIdInner::Prefix(prefix)))
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+
+    #[test]
+    fn a_path_and_its_parent_share_a_volume_and_a_missing_child_follows_its_parent() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let file = temp.path().join("a.txt");
+        std::fs::write(&file, b"a").expect("write");
+        assert!(same_volume(&file, temp.path()).expect("same"));
+        let missing = temp.path().join("not/yet/here");
+        assert_eq!(
+            volume_of(&missing).expect("judged by the ancestor"),
+            volume_of(temp.path()).expect("volume")
+        );
+        let root = volume_root_of(&file).expect("root");
+        assert!(temp.path().starts_with(&root), "{root:?}");
+        assert_eq!(volume_root_of(&root).expect("idempotent"), root);
     }
 }

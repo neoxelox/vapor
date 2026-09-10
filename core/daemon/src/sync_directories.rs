@@ -1,5 +1,4 @@
 use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use vapor_shared::{SyncMode, constants, runtime_paths};
@@ -165,28 +164,10 @@ fn resolve_local_directory(
         return None;
     };
 
-    if !path.exists() {
-        match fs::create_dir_all(&path) {
-            Ok(_) => {
-                logging::info(
-                    "Created missing local sync directory",
-                    &[("path", path.display().to_string())],
-                );
-            }
-            Err(error) => {
-                logging::error(
-                    "Failed to create missing local sync directory",
-                    &[
-                        ("path", path.display().to_string()),
-                        ("error", error.to_string()),
-                    ],
-                );
-                return None;
-            }
-        }
-    }
-
-    if !path.is_dir() {
+    // A missing directory is not created here: whether to create it
+    // is the root identity check's call (`root_identity.rs`), which
+    // knows whether this profile synced there before.
+    if path.exists() && !path.is_dir() {
         logging::warning(
             "Skipping local sync directory because path is not a directory",
             &[("path", path.display().to_string())],
@@ -338,7 +319,10 @@ mod tests {
         );
         assert_eq!(scope.local_sync_directory, Some(home.join("Vapor")));
         assert_eq!(scope.cloud_sync_directory, "/Vapor");
-        assert!(home.join("Vapor").exists());
+        assert!(
+            !home.join("Vapor").exists(),
+            "resolution names the root; the root identity check creates it"
+        );
     }
 
     #[test]
@@ -475,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_missing_local_directory() {
+    fn a_missing_local_directory_resolves_without_being_created() {
         let (_guard, root) = create_test_directory();
         let missing = root.join("missing");
 
@@ -487,7 +471,7 @@ mod tests {
             None,
         );
         assert_eq!(scope.local_sync_directory, Some(missing.clone()));
-        assert!(missing.exists());
+        assert!(!missing.exists());
         assert_eq!(scope.cloud_sync_directory, "/Cloud");
     }
 
@@ -495,7 +479,7 @@ mod tests {
     fn returns_none_when_local_sync_path_is_a_file() {
         let (_guard, root) = create_test_directory();
         let file_path = root.join("not-a-directory");
-        fs::write(&file_path, b"x").expect("failed to create file path");
+        std::fs::write(&file_path, b"x").expect("failed to create file path");
 
         let scope = resolve_scope(
             Some(file_path.to_string_lossy().as_ref()),
@@ -514,9 +498,9 @@ mod tests {
         let current_directory = root.join("current-directory");
         let home_directory = root.join("home-directory");
         let file_path = root.join("not-a-directory");
-        fs::create_dir_all(&current_directory).expect("failed to create current directory");
-        fs::create_dir_all(&home_directory).expect("failed to create home directory");
-        fs::write(&file_path, b"x").expect("failed to create file path");
+        std::fs::create_dir_all(&current_directory).expect("failed to create current directory");
+        std::fs::create_dir_all(&home_directory).expect("failed to create home directory");
+        std::fs::write(&file_path, b"x").expect("failed to create file path");
 
         let scope = resolve_scope(
             Some(file_path.to_string_lossy().as_ref()),
@@ -535,7 +519,7 @@ mod tests {
     fn resolves_relative_local_path_against_current_directory() {
         let (_guard, root) = create_test_directory();
         let projects = root.join("projects");
-        fs::create_dir_all(&projects).expect("failed to create projects directory");
+        std::fs::create_dir_all(&projects).expect("failed to create projects directory");
 
         let scope = resolve_scope(
             Some("projects"),
@@ -555,13 +539,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_local_sync_root_creation_stays_scoped_to_configured_directory() {
+    fn a_configured_local_root_resolves_to_itself_not_the_cwd_or_home() {
         let (_guard, root) = create_test_directory();
         let current_directory = root.join("current-directory");
         let home_directory = root.join("home-directory");
         let configured = root.join("nested").join("sync-root");
-        fs::create_dir_all(&current_directory).expect("failed to create current directory");
-        fs::create_dir_all(&home_directory).expect("failed to create home directory");
+        std::fs::create_dir_all(&current_directory).expect("failed to create current directory");
+        std::fs::create_dir_all(&home_directory).expect("failed to create home directory");
 
         let scope = resolve_scope(
             Some(configured.to_string_lossy().as_ref()),
@@ -572,7 +556,6 @@ mod tests {
         );
 
         assert_eq!(scope.local_sync_directory, Some(configured.clone()));
-        assert!(configured.exists());
         assert_ne!(scope.local_sync_directory, Some(current_directory));
         assert_ne!(scope.local_sync_directory, Some(home_directory));
     }

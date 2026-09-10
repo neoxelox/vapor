@@ -30,17 +30,18 @@ Everything runtime lives under one directory root, `VAPOR_DIR`. Resolve it first
 2. `./.vapor` (repo-local) when running via repository scripts / `VAPOR_ENV=dev` — this is what dev, test, CI, and e2e workflows use
 3. `~/.vapor` — the real user install (the project owner's machine)
 
-E2E sandboxes live under `<repo>/.vapor/e2e/<run-id>/home`. When debugging a failed `./scripts/e2e.sh` run, that preserved sandbox is your `VAPOR_DIR`.
+E2E sandboxes live under `<repo>/.vapor/e2e/<run-id>/<scenario id>/`: `home/` is that scenario's `VAPOR_DIR`, `local/` and `cloud/Vapor/` are its two trees, `<label>-daemon.out` is the daemon's stdout/stderr, and a scenario with several daemons has `<label>-home/` siblings. A failed run keeps the sandbox, prints its path, and has already printed `vapor status --json`, `vapor diagnostics --json`, the queue rows, and the log tail for every daemon; start from that output, then open the directory. The run's `e2e-result.json` next to the scenario directories carries every verdict and note.
 
 Inside `VAPOR_DIR`:
 
 | Artifact | Path |
 |----------|------|
 | Config | `vapor.json` (a running daemon applies the live keys within seconds; roots, provider, profiles and sync mode need a restart and show up in `vapor status` as `config_restart_required`) |
-| Daemon log | `logs/vapord.logs` (rotates at 8 MiB, three generations); `logs/vapord.stdout.log` / `.stderr.log` are the service manager's redirects |
-| Durable queue/state DB | `state/vapor.sqlite` for the implicit `default` profile; `state/profiles/<id>/vapor.sqlite` per configured profile (tables: `queue_intents`, `failed_intents`, `state_entries`, `sync_index`, `tombstones`, `schema_meta`) |
+| Daemon log | `logs/vapord.logs` (rotates at 8 MiB, three generations); `logs/vapord.stdout.log` / `.stderr.log` are the service manager's redirects; `logs/vapor-supervisor.log` is the headless supervisor's (`vapor service check --loop` under launchd, when installed with `--supervise`) |
+| Durable queue/state DB | `state/vapor.sqlite` for the implicit `default` profile; `state/profiles/<id>/vapor.sqlite` per configured profile (tables: `queue_intents`, `failed_intents`, `pending_decisions`, `name_aliases`, `state_entries`, `sync_index`, `tombstones`, `schema_meta`) |
 | Quarantined DB | `vapor.sqlite.corrupt-<ms>` next to the DB: the daemon moved a corrupt file aside and started fresh; a startup reconcile rebuilt the queue |
 | Lifecycle state | `state/lifecycle.json` (crash-loop bookkeeping shared by the CLI and the app) |
+| Trash | `trash/<profile>/<entry>/` (what Vapor removed on this device: the payload under its original name plus `meta.json`; `vapor trash list` reads it) |
 | IPC socket (framed JSON over UDS — Vapor does not use XPC) | `vapord.sock`, relocated under the OS temp dir when the path exceeds ~104 bytes (`vapor doctor` reports where) |
 | Singleton lock | `vapord.lock` |
 
@@ -52,17 +53,18 @@ The `vapor` CLI is the fastest signal — use it before reading raw files:
 
 - `vapor status --json` — run state, throttle state + reason, provider, daemon id. "daemon not running" vs "daemon is not responding" are different failures (no socket vs wedged process).
 - `vapor doctor` (add `--json` for scripts) — sanity probes: `vapor_dir` writable/private, `ipc_socket_path` budget and relocation, `vapord_binary` discoverable (sibling, bundle, PATH), `secret_store` persistence, `throttle_inputs` source, and `host_launch_agent_plist` (host state, not the sandbox).
-- `vapor diagnostics --json` — every queued or in-flight intent with its stage, attempt count, last error, and blocker reason ("why is this stuck"), in lease order.
+- `vapor diagnostics --json` — every queued or in-flight intent with its stage, attempt count, last error, and blocker reason ("why is this stuck"), in lease order. Stage `Held` with blocker "waiting for decision #N" is not stuck: the daemon is asking.
+- `vapor decisions list` (`show <id>`, `resolve <id> --choose <key>`) — the questions the daemon parked: a deletion burst held by the mass-deletion guard (`mass-deletion`), a sync root that is gone (`root-missing`) or swapped for a folder the profile never adopted (`root-replaced`; the hidden `.vapor-root` marker in each root is the identity), a name that is a file on one side and a folder on the other (`type-mismatch`), a local file whose name is not valid UTF-8 and so never syncs (`unsyncable-name`, answer `skip` or rename the file). `vapor status` counts them as `decisions_pending`; they work with the daemon stopped, and the daemon applies the answer on its next tick or start. A held batch is the product working as designed; the finding, if any, is why the evidence was ambiguous.
 - `vapor support-bundle` — one redacted archive with status, diagnostics, timeline, config, and log tail; the first thing to ask a user for.
 - `vapor logs --tail 100` — recent daemon log lines, already redacted.
 - `vapor timeline --json` — diagnostics activity timeline (real events; an empty list means nothing has been recorded yet, not that the feature is missing).
-- `launchctl list | grep sh.arn.vapor` and `ps aux | grep vapord` — is the service loaded / process alive? (The LaunchAgent label is `sh.arn.vapor.daemon`.)
+- `launchctl list | grep sh.arn.vapor` and `ps aux | grep vapord` — is the service loaded / process alive? (The LaunchAgent label is `sh.arn.vapor.daemon`; a headless install also has `sh.arn.vapor.supervisor`, and `vapor service status` says whether it is installed.)
 
 ### Step 2 — Gather logs and crash reports
 
 - **Daemon log:** `$VAPOR_DIR/logs/vapord.logs`. Line format is `unix_millis [LEVEL] (component): message. key=value key=value`, levels `DEBUG`/`INFO`/`WARNING`/`ERROR`. Grep `\[ERROR\]` and `\[WARNING\]` first, then read the surrounding context.
 - **Crash reports:** `~/Library/Logs/DiagnosticReports/Vapor*.{crash,ips}` and `vapord*.{crash,ips}` — both process names matter. `.ips` files are JSON (parse exception type, termination reason, faulting thread); `.crash` files are plain text.
-- **Durable state:** query read-only, never mutate: `sqlite3 -readonly "$VAPOR_DIR/state/vapor.sqlite" 'SELECT path_text, kind, failure_kind, last_error FROM failed_intents;'` — permanently failed intents carry their final error. `queue_intents` shows what's stuck pending/leased.
+- **Durable state:** query read-only, never mutate: `sqlite3 -readonly "$VAPOR_DIR/state/vapor.sqlite" 'SELECT path_text, kind, failure_kind, last_error FROM failed_intents;'` — permanently failed intents carry their final error. `queue_intents` shows what's stuck pending/leased, and the rows in state `held` name the decision they wait on (`decision_id`); `pending_decisions` holds the question, its options, and its JSON evidence.
 
 **Time-sensitive:** log timestamps are Unix **milliseconds**. Get the current time in both forms — `date +"%Y-%m-%d %H:%M:%S"` and `date +%s000` — and focus on a ±15 minute window around the incident, widening to ±1 hour, then ±4 hours only if needed. Prioritize crash reports by modification time.
 
@@ -85,7 +87,7 @@ To reproduce a bug hands-on, use the sandboxed manual environment instead of the
 ./scripts/e2e.sh --sandbox
 ```
 
-It provisions a disposable `VAPOR_DIR` under `<repo>/.vapor/e2e/`, starts a daemon, and prints a command cheat-sheet (see the `vapor-e2e` skill). Do not guess either — if you need missing context (repro steps, the user action right before the crash, recent code changes, whether vapord is running), ask. A precise diagnosis beats a fast wrong one.
+It provisions a disposable `VAPOR_DIR` under `<repo>/.vapor/e2e/sbx-<id>/`, starts a daemon, and prints a command cheat-sheet (see the `vapor-e2e` skill); `./scripts/e2e.sh --sandbox-stop` removes it. To reproduce a scripted scenario's failure by hand, run it alone with `./scripts/e2e.sh --only Sxx --keep` and work inside the preserved sandbox. Do not guess either — if you need missing context (repro steps, the user action right before the crash, recent code changes, whether vapord is running), ask. A precise diagnosis beats a fast wrong one.
 
 ### Step 5 — Write a diagnostic report
 
@@ -115,7 +117,9 @@ and why each change addresses the root cause.
 
 ### Risks & Side Effects
 Note anything the fix might affect, any edge cases to watch for,
-and which e2e scenario (scripts/e2e.sh) should cover the regression.
+and which e2e scenario (`tools/e2e/src/scenarios/`, run with
+`./scripts/e2e.sh --only Sxx`) should cover the regression: an
+existing one, or a new one written per the `vapor-e2e` skill.
 ```
 
 ### Step 6 — Wait for confirmation
@@ -133,4 +137,4 @@ After presenting the report, **stop and wait** for the user to:
 - Always check both the app and daemon sides — issues in one often manifest as errors in the other.
 - Logs are already redacted (tokens, auth headers, sensitive keys become `[REDACTED]`); if you see a secret in a log line, that itself is a bug worth reporting.
 - If logs are very large, summarize overall health first (error/warning counts, restart markers like "vapord started"), then zero in.
-- Never mutate `state/vapor.sqlite`; always open it with `-readonly`. The durable queue is the product's source of truth for intent state.
+- Never mutate `state/vapor.sqlite`; always open it with `-readonly`. The durable queue is the product's source of truth for intent state. The one sanctioned write from outside the daemon is `vapor decisions resolve`, which records an answer the daemon then applies.

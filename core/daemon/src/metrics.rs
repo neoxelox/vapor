@@ -11,7 +11,9 @@
 //! to walk a deterministic sequence.
 //!
 
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use crate::throttle::ThrottleInputs;
 
@@ -59,10 +61,75 @@ impl MetricsSampler for ScriptedMetricsSampler {
     }
 }
 
+/// The document a `file:` throttle-input source reads.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ThrottleInputsFile {
+    pub inputs: ThrottleInputs,
+    /// How long the user has been idle, as the idle notifier should
+    /// report it.
+    pub idle_seconds: u64,
+}
+
+impl ThrottleInputsFile {
+    pub fn read(path: &Path) -> Option<Self> {
+        let contents = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&contents).ok()
+    }
+}
+
+/// Samples throttle inputs from a JSON file on every call. A missing
+/// or malformed file samples as the static defaults, so a driver that
+/// has not written yet, or a document mid-write, never wedges the
+/// daemon.
+#[derive(Debug)]
+pub struct FileMetricsSampler {
+    path: PathBuf,
+}
+
+impl FileMetricsSampler {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl MetricsSampler for FileMetricsSampler {
+    fn sample(&self) -> ThrottleInputs {
+        ThrottleInputsFile::read(&self.path)
+            .map(|document| document.inputs)
+            .unwrap_or_default()
+    }
+}
+
+/// Idle notifier that reads `idle_seconds` from the same file.
+#[derive(Debug)]
+pub struct FileIdleNotifier {
+    path: PathBuf,
+}
+
+impl FileIdleNotifier {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+impl vapor_platform::IdleNotifier for FileIdleNotifier {
+    fn idle_for(&self) -> Duration {
+        ThrottleInputsFile::read(&self.path)
+            .map(|document| Duration::from_secs(document.idle_seconds))
+            .unwrap_or(Duration::ZERO)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::throttle::ThermalPressure;
+    use vapor_platform::IdleNotifier;
 
     #[test]
     fn static_sampler_returns_configured_inputs() {
@@ -102,5 +169,33 @@ mod tests {
     #[should_panic(expected = "ScriptedMetricsSampler requires at least one element")]
     fn scripted_sampler_rejects_empty_sequence() {
         let _sampler = ScriptedMetricsSampler::new(Vec::new());
+    }
+    #[test]
+    fn file_sampler_reads_the_document_on_every_sample_and_defaults_when_absent() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let path = dir.path().join("inputs.json");
+        let sampler = FileMetricsSampler::new(&path);
+        let idle = FileIdleNotifier::new(&path);
+        assert_eq!(sampler.sample(), ThrottleInputs::default());
+        assert_eq!(idle.idle_for(), Duration::ZERO);
+
+        let document = ThrottleInputsFile {
+            inputs: ThrottleInputs {
+                on_battery: true,
+                system_cpu_load_percent: 90,
+                user_active: true,
+                ..ThrottleInputs::default()
+            },
+            idle_seconds: 42,
+        };
+        std::fs::write(&path, serde_json::to_string(&document).expect("json")).expect("write");
+        let sampled = sampler.sample();
+        assert!(sampled.on_battery && sampled.user_active);
+        assert_eq!(sampled.system_cpu_load_percent, 90);
+        assert_eq!(idle.idle_for(), Duration::from_secs(42));
+
+        // A half-written document never wedges the daemon.
+        std::fs::write(&path, "{\"inputs\": {").expect("write");
+        assert_eq!(sampler.sample(), ThrottleInputs::default());
     }
 }

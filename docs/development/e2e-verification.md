@@ -8,57 +8,96 @@ extend it, and what it deliberately does not cover.
 ## Why this tier exists
 
 Vapor is coded autonomously. Tier 1 (`./scripts/test.sh`) proves that
-modules and composed behaviors are correct *in-process*, but a coding
+modules and composed behaviors are correct in-process, but a coding
 agent that only ever runs unit and integration tests has never watched
-the product actually work: real binaries, real process boundaries, real
+the product work: real binaries, real process boundaries, real
 FSEvents, a real durable DB on disk, real IPC over a real socket, real
 signals. Tier E2E closes that gap. It is the closest an autonomous
-agent gets to "I ran the app and it worked" — without touching the
+agent gets to "I ran the app and it worked" without touching the
 machine it runs on.
 
 ## What Tier E2E is
 
-`./scripts/e2e.sh` builds the two shipping Rust binaries (`vapor`,
-`vapord`), then drives the daemon **black-box through the CLI only** —
-exactly like a headless user would — against a disposable sandbox:
+`./scripts/e2e.sh` builds the harness (`tools/e2e`, crate `vapor-e2e`)
+and the two shipping Rust binaries (`vapor`, `vapord`), then drives the
+daemon black-box through the CLI only, the way a headless user would,
+against disposable sandboxes. Every scenario gets its own sandbox:
 
 ```
-<repo>/.vapor/e2e/run-<timestamp>-<pid>/
-├── home/    ← VAPOR_DIR: vapor.json, logs/, state/, vapord.sock, vapord.lock
-├── local/   ← the watched local sync root (created by the daemon itself)
-└── cloud/   ← the cloud root the filesystem provider treats as the cloud side
+<repo>/.vapor/e2e/run-<id>/<scenario id>/
+├── home/          ← VAPOR_DIR: vapor.json, logs/, state/, vapord.sock, vapord.lock
+├── local/         ← the watched local sync root (created by the daemon itself)
+├── cloud/Vapor/   ← the cloud root the filesystem provider treats as the cloud side
+└── primary-daemon.out   ← the daemon's stdout/stderr
 ```
 
-Observation channels are the product's own observable surfaces, never
-test hooks: `vapor status --json`, `vapor doctor`, exit codes, the
-daemon log (`home/logs/vapord.logs`), and **read-only** queries against
-the durable state DB (`home/state/vapor.sqlite`).
+A scenario that needs more than one daemon provisions extra homes
+(`<label>-home/`, `<label>-local/`, `cloud/Vapor-<label>/`) in the same
+sandbox. Nothing is shared between scenarios.
+
+Observation channels are the product's own surfaces, never test hooks:
+`vapor status --json` and the other `--json` commands (parsed with the
+same types the CLI serializes), exit codes, the daemon log, and
+read-only queries against the durable state DB. The harness runs on
+the host it is built on: macOS and Linux today (the launchd round-trip
+and the disk-image scenarios are macOS-only and skip elsewhere by
+name), Windows once its native platform traits ship (until then its
+daemon scenarios skip, by name). A Linux run over a macOS checkout
+works from a container with `CARGO_TARGET_DIR` pointing outside the
+host's `target/` (so the two toolchains never overwrite each other's
+binaries) and a tmpfs mounted over `.vapor/`: a Docker Desktop bind
+mount refuses to bind a Unix socket, so a daemon started on one never
+answers `vapor status`.
+
+## The three shared checks
+
+Every scenario ends with the same epilogue, so a scenario that passes
+its own assertions can still fail on the invariants the product must
+hold everywhere:
+
+1. **Clean shutdown.** Every daemon the scenario started is stopped
+   with SIGTERM and must exit cleanly within the grace period.
+2. **Tree oracle.** The local root and the cloud root of every home
+   must hold the same files: same paths, sizes, content hashes, and
+   (on Unix) executable bits, after removing ignored names and the
+   provider's internal files. Directories are not compared on their
+   own, since Vapor materializes parents when it applies children.
+   A scenario whose trees cannot match by construction opts out with
+   a reason that shows up in the report.
+3. **Log hygiene.** No `[ERROR]` line in any daemon log, and no
+   warning the scenario did not declare it expects (a keep-both
+   resolution, a restart-required key). A healthy run has a warning
+   budget of zero. Any `failed_intents` row fails the scenario unless
+   it said otherwise.
+
+A queue that is empty is not a converged queue. Scenarios wait for the
+intents their changes produce (`mark` then `converge_from`) or for a
+quiet window with nothing enqueued (`settle`), then assert on files.
 
 ## Safety contract (hard rules)
 
-The default run of Tier E2E must be safe to run unattended on a
-contributor machine or CI:
+The default run must be safe to run unattended on a contributor
+machine or CI:
 
 - Everything lives under the repo-local `.vapor/e2e/` sandbox.
-  `./scripts/clean.sh` removes all residue. Never touch `~/.vapor`.
+  `./scripts/clean.sh` removes all residue and stops any manual
+  sandbox daemon first. Never touch `~/.vapor`.
 - Never install host services: no `vapor service install`, no
-  LaunchAgent/launchd mutation, no login items. (`vapor doctor` *reads*
-  host state; that is fine.)
+  LaunchAgent or launchd mutation, no login items. (`vapor doctor`
+  reads host state; that is fine.)
 - Never launch the macOS app (`AGENTS.md §7.1`: agents do not open
   packaged apps). Runtime behavior is verified through the CLI.
-- No network. The scripted scenarios run the filesystem provider; the
-  live cloud-provider tier is explicitly gated (see below) and is never
-  part of the default run.
-- A failed run preserves its sandbox and prints the path; a green run
-  deletes it (keep it with `--keep`).
+- No network. The filesystem provider is the default; the Google Drive
+  mode is opt-in and needs credentials (below).
+- A failed scenario preserves its sandbox and prints diagnostics for
+  every daemon it started; a green run deletes its sandboxes (keep them
+  with `--keep`). Any non-zero exit preserves.
 
-The one sanctioned exception is the opt-in `--full` flag, which appends
-the service lifecycle round-trip (see "Coverage" below): that phase
-*does* install a real LaunchAgent, so it is meant for disposable CI
-runners (`test.yml` passes `--full`), refuses outright when a
+The one sanctioned exception is `--full`, which adds the service
+round-trip (`R01`): it installs a real LaunchAgent, so it is meant for
+disposable CI runners (`test.yml` passes it on macOS), refuses when a
 `sh.arn.vapor.daemon` LaunchAgent already exists, and removes the
-LaunchAgent on exit. Agents and contributors run the default suite —
-never `--full` — on non-disposable machines.
+LaunchAgent on every exit path.
 
 ## When an agent must run it
 
@@ -66,194 +105,288 @@ After Tier 1 passes, run `./scripts/e2e.sh` before committing when the
 change plausibly alters end-to-end runtime behavior:
 
 - new features in `core/daemon`, `core/cli`, `core/ipc`, `core/shared`
-  (config/paths/logging), `core/lifecycle`, `core/providers`, or
+  (config, paths, logging), `core/lifecycle`, `core/providers`, or
   `core/platform`;
 - bug fixes whose failure mode a user would see through the daemon or
-  CLI (sync stalls, wrong state reporting, startup/shutdown problems,
-  config not applying, …);
+  CLI (sync stalls, wrong state reporting, startup or shutdown
+  problems, config not applying);
 - changes to startup order, signal handling, IPC contracts, durable
   schema, or the build of the shipping binaries.
 
-Doc-only, UI-only (Swift view/menubar), or test-only changes do not
-need an E2E run. When in doubt, run it — a green run costs well under a
-minute after the build.
+Doc-only, UI-only (Swift view or menubar), or test-only changes do not
+need an E2E run. When in doubt, run it.
 
-Two additional obligations when Tier E2E applies:
+Two obligations when Tier E2E applies:
 
-1. **Feature coverage.** If the change adds e2e-observable behavior
-   (a new CLI command, a new daemon state, a new convergence path),
-   extend the harness with a scenario for it *in the same change set* —
-   running only the pre-existing scenarios verifies that you broke
-   nothing, not that the feature works.
+1. **Feature coverage.** If the change adds e2e-observable behavior (a
+   new CLI command, a new daemon state, a new convergence path), add a
+   scenario for it in the same change set, and run it once against the
+   base commit: it must fail before the feature and pass after. Running
+   only the pre-existing scenarios proves that nothing broke, not that
+   the feature works.
 2. **Owner handoff.** If the change also affects a UI surface, finish
-   your report with a short manual-verification checklist for the
-   project owner (what to open, what to click, what they should see),
-   since agents never verify UI.
+   the report with a short manual-verification checklist for the
+   project owner, since agents never verify UI.
 
 ## Running it
 
 ```
-./scripts/e2e.sh               # scenario suite: build + all scenarios
-./scripts/e2e.sh --skip-build  # reuse target/debug binaries (~15 s)
-./scripts/e2e.sh --keep        # preserve the sandbox after a green run
-./scripts/e2e.sh --sandbox     # manual sandbox: provision + leave running
+./scripts/e2e.sh                       # build + every scenario the host can run
+./scripts/e2e.sh --skip-build          # reuse target/debug binaries
+./scripts/e2e.sh --only S16,S23        # a subset, by id or name
+./scripts/e2e.sh --keep                # preserve the sandboxes after a green run
+./scripts/e2e.sh --json out.json       # write the report here (default: in the run root)
+./scripts/e2e.sh --daemon vapord       # start the shipped vapord binary instead of `vapor run`
+./scripts/e2e.sh --provider gdrive     # Google Drive mode (needs credentials; see below)
+./scripts/e2e.sh --list                # scenario catalog with needs and known gaps
+./scripts/e2e.sh --full                # add the launchd round-trip (disposable runners only)
+./scripts/e2e.sh --sandbox             # manual sandbox: provision + leave a daemon running
+./scripts/e2e.sh --sandbox-stop        # stop and remove every manual sandbox
+./scripts/e2e.sh --jobs 1              # one scenario at a time (default: one per core)
 ```
 
-Output is one `PASS`/`FAIL` line per scenario. On failure the script
-dumps `vapor status --json`, the daemon log tail, and the sandbox path,
-then exits non-zero. Use the `vapor-debug` skill (or read
-`home/logs/vapord.logs` and query `home/state/vapor.sqlite` read-only)
-to diagnose a preserved sandbox.
+Scenarios run several at a time. Each has its own sandbox, runtime
+directory, and socket, so they never share state; what they share is
+the host's CPU and disk, and the harness treats each sandbox as a
+smaller computer for it: the daemon under test gets two concurrent
+transfers per direction, and every wait deadline grows by half per
+extra scenario running (a bound, so a green run costs nothing extra;
+a loaded host does not read as a failure). Scenarios that mount disk
+images take a lock among themselves. The queue starts with the
+launchd round-trip when `--full` asks for it (the longest scenario by
+far: real crash-loop backoff and the supervisor's tick, in a sandbox
+of its own), then the scenarios the previous run found longest, read
+from the last report, so the tail is the slowest scenario and not the
+sum.
+The default suite takes about as long as its slowest scenario, a
+little over a minute on a twelve-core laptop and under two in a
+container, against nine and a half in sequence; the summary line
+reports wall time. A scenario is mostly a daemon waiting on its own
+timers, so one per core leaves the host far from saturated.
 
-On CI, the suite runs at the end of `test.yml`'s macOS job on every PR
-(part of the required `test` check), followed only by the host-mutating
-service round-trip step (see below). macOS only — the harness exercises
-the native FSEvents watcher, and macOS is the shipping surface.
+Output is one line per scenario:
 
-## Manual sandbox — exploratory testing and debugging
+```
+[e2e] PASS S03 — local writes become durable intents and drain; the cloud root matches byte for byte (1.9s)
+[e2e] SKIP R01 — needs full: run with --full to include it
+[e2e] KNOWN-GAP S99 — the assertion the scenario cannot meet yet, quoted (5.0s)
+[e2e] FAIL S16 — timed out after 30s waiting for: .../cloud/Vapor/gone.txt to be removed (30.1s)
+[e2e] OK — 49 passed, 0 failed, 2 skipped, 0 known gaps, 0 unexpected passes (93.6s)
+[e2e] report: .../.vapor/e2e/run-711543-14708/e2e-result.json
+```
+
+On a failure the harness prints, for every home in the scenario,
+`vapor status --json` and `vapor diagnostics --json` (if the daemon is
+still up), the queue and failed-intent rows, the last 60 daemon log
+lines that say something (the polling chatter left out), and the
+daemon's stdout/stderr tail, then keeps the sandbox. Use the
+`vapor-debug` skill on the preserved directory; on CI the preserved
+sandboxes' logs ride along in the `e2e-report-<os>` artifact.
+
+The JSON report (`e2e-result.json`, schema version 1) carries the host
+facts, every scenario's verdict, reasons, seconds, notes, and preserved
+sandbox path, and a summary. The run's exit code is 0 only when no
+scenario failed and no known-gap scenario unexpectedly passed.
+
+### Verdicts
+
+| Verdict | Meaning |
+|---|---|
+| `PASS` | the scenario's assertions and the shared epilogue held |
+| `FAIL` | something did not; sandbox preserved, diagnostics printed |
+| `SKIP` | the host cannot meet a need the scenario declares; the reason names the need |
+| `KNOWN-GAP` | the scenario asserts behavior the product should have and is marked as a known gap; it failed as expected. The marker names the gap in words |
+| `FIXED?` | a known-gap scenario passed: remove its marker in the same change that fixed the product. Counts as red |
+
+### Needs
+
+A scenario declares what it needs; the runner skips it, by name, when
+the host cannot provide it: `native-watcher` (the daemon can start on
+this OS), `unix`, `fifo`, `posix-mode`, `xattr`, `launchd` (with
+`--full`, no existing Vapor LaunchAgent, a usable `gui/<uid>` domain),
+`full`, `filesystem-provider`, `gdrive-provider`,
+`case-insensitive-fs`, `case-sensitive-fs`, `disk-image` (macOS
+`hdiutil`, used to mount a case-sensitive or tiny volume),
+`non-utf8-names` (the sandbox filesystem accepts a file name that is
+not UTF-8: ext4 and tmpfs do, APFS refuses).
+
+## Manual sandbox
 
 The scripted scenarios prove non-regression; they cannot explore. When
 developing a feature or chasing a bug, run the product yourself, scoped
-to the same disposable sandbox:
+to the same disposable layout:
 
 ```
 ./scripts/e2e.sh --sandbox
 ```
 
-This builds the binaries, provisions a fresh sandbox under
-`.vapor/e2e/sbx-…`, starts the daemon, and prints a cheat-sheet: the
-`VAPOR_DIR` export, the watched local root, the log/state-DB paths, the
-daemon PID, and the CLI commands to poke at it. The daemon keeps
-running after the script exits; stop it with `kill -TERM <pid>` and
-remove the sandbox with `rm -rf` (or `./scripts/clean.sh`).
+This builds, provisions `.vapor/e2e/sbx-<id>/`, configures the scope,
+starts a daemon, writes its PID to `daemon.pid`, and prints a
+cheat-sheet: the `VAPOR_DIR` export, the watched local root, the cloud
+root, the log and state-DB paths, the CLI commands to poke at it, and
+the `verify-trees` command that runs the tree oracle by hand. The
+daemon keeps running after the script exits; stop it and remove the
+sandbox with `./scripts/e2e.sh --sandbox-stop` (`./scripts/clean.sh`
+does the same for every sandbox).
 
-The harness exports `VAPOR_THROTTLE_INPUTS=static` for every daemon it
-starts, scripted or sandboxed, so the throttle sits on neutral inputs
+The harness sets `VAPOR_THROTTLE_INPUTS=static` for every daemon it
+starts, scripted or manual, so the throttle sits on neutral inputs
 instead of tracking your keyboard: with host inputs a daemon on a
-machine someone is typing on stays `Throttled`, and reconcile only runs
-in `IdleDrain`. To watch the real throttle react to load, battery or
-your own presence, start a daemon with that variable unset.
+machine someone is typing on stays `Throttled`, and reconcile only
+runs in `IdleDrain`. To watch the real throttle react, start a daemon
+with that variable unset.
 
-Typical loop, entirely inside the sandbox:
+Never run manual experiments against `~/.vapor` or with `VAPOR_DIR`
+unset; that is the project owner's real runtime dir.
 
-```
-export VAPOR_DIR="<repo>/.vapor/e2e/sbx-…/home"   # printed by --sandbox
-vapor=target/debug/vapor
+Deep paths: macOS caps Unix-socket paths at about 104 bytes. When
+`<vapor_dir>/vapord.sock` exceeds the budget, daemon and CLI rendezvous
+at a short per-`vapor_dir` socket under the OS temp dir instead (S09
+covers this; `vapor doctor` explains it when active).
 
-echo hello > "$VAPOR_DIR/../local/demo.txt"   # feed the watcher a change
-$vapor status --json                          # observe daemon state
-$vapor logs --tail 50                         # watch the pipeline react
-$vapor pause; $vapor resume; $vapor flush-now # drive it over IPC
-sqlite3 -readonly "$VAPOR_DIR/state/vapor.sqlite" \
-  'SELECT path_text, kind, state FROM queue_intents;'
-```
+## Provider modes
 
-The same safety contract applies: with `VAPOR_DIR` pointing into the
-sandbox, the daemon's entire universe (config, logs, durable state,
-socket, lock) is path-scoped there by design — nothing on the host is
-touched. Never run manual experiments against `~/.vapor` or with
-`VAPOR_DIR` unset; that is the project owner's real runtime dir.
+`--provider filesystem` (default) needs nothing: the cloud root is a
+directory and scenarios write to it directly to play "another device".
 
-Note on deep paths: macOS caps Unix-socket paths at ~104 bytes. When
-`<vapor_dir>/vapord.sock` exceeds the budget, daemon and CLI
-deterministically rendezvous at a short per-`vapor_dir` socket under
-the OS temp dir instead (the S9 scenario covers this; `vapor doctor`'s
-`ipc_socket_path` probe explains it when active). The harness first
-surfaced this failure mode — pre-fix, a deep `VAPOR_DIR` silently cost
-the daemon its IPC endpoint.
+`--provider gdrive` runs the same catalog against a real Google Drive
+with real credentials. It is a release-gate leg, run by hand on the
+maintainer's machine by `./scripts/release.sh` before a version
+bump, with a dedicated test account signed in and
+`VAPOR_GDRIVE_CLIENT_ID` set; it never runs in CI, never on an
+ordinary change, and never against a personal account. It is wired in
+the harness and every scenario that manipulates the cloud root
+directly declares `filesystem-provider` and skips under it; the
+Drive-side operations (a `CloudSide` the harness performs through the
+provider crate, a per-run `VaporE2E-<run-id>` folder created and
+deleted by the harness, longer wait budgets, and the `gdrive-provider`
+scenarios for token refresh and rate limits) are open work tracked in
+`docs/tasks/core.md`, waiting on the test account. No scenario
+contacts the network in the default mode. `./scripts/e2e.sh
+--providers` lists the providers a run can target.
 
-## Why not a Docker container?
+## Scenario catalog
 
-Considered and deliberately not used, for now:
+`./scripts/e2e.sh --list` is the source of truth; this table mirrors
+it. A scenario marked "known gap" asserts the intended behavior and is
+expected to fail until the named work lands (`docs/tasks/core.md`).
 
-- A container on macOS is a Linux VM: the daemon inside it would use
-  the Linux fs-watch path, not the native FSEvents watcher that
-  actually ships. Linux is not a shipping surface yet; the E2E tier
-  must exercise the real one.
-- Isolation is already achieved by design: `VAPOR_DIR` scoping makes
-  the repo-local sandbox the daemon's entire universe, the default
-  provider has no network side, and the harness never installs host
-  services. There is no residual host risk for a container to remove.
-- The Docker toolchain is not part of the contributor baseline, and a
-  VM boundary would slow the agent's feedback loop.
+| Id | Proves |
+|---|---|
+| S01 | config set/get round-trips through `vapor.json`; structured keys are stored as JSON |
+| S02 | daemon reaches Running, creates the missing local sync root, binds the IPC socket |
+| S03 | local writes become durable intents and drain; the cloud root matches byte for byte |
+| S04 | pause flips run_state over IPC, resume restores it, the paused backlog drains |
+| S05 | a second daemon on the same `VAPOR_DIR` exits non-zero saying one is already running |
+| S06 | `vapor doctor` reports no failures inside the sandbox, in text and `--json` |
+| S07 | clean SIGTERM shutdown, restart on the same state DB, post-restart writes converge |
+| S08 | a healthy run across two restarts emits no ERROR line and no warning |
+| S09 | an over-budget `VAPOR_DIR` relocates the IPC socket; status and doctor still work |
+| S10 | uploads land byte for byte, a cloud-born file downloads through reconcile, POSIX modes survive |
+| S11 | a path that diverged on both sides while the daemon was down keeps both payloads |
+| S12 | pull-only materializes cloud content locally and removes a local-only file without uploading |
+| S13 | diagnostics answers over IPC; the support bundle exports config, logs, live captures, manifest |
+| S14 | ignored names never sync in either direction and never manufacture a conflict copy |
+| S15 | conflicts list finds a keep-both copy; resolve promotes it; the resolution syncs; the list drains |
+| S16 | a plain local rm removes the cloud copy |
+| S17 | a FIFO in the watched root never becomes a remote object and never wedges the queue |
+| S18 | a downstream reader that closes the pipe early does not make the CLI panic |
+| S19 | a cloud-side delete of an uploaded file propagates through the live changes feed, no reconcile |
+| S20 | an offline edit that keeps the byte count is found by the startup reconcile and uploaded |
+| S21 | a daemon whose only profile cannot be composed stays up and names the reason in status |
+| S22 | a resource ceiling reaches the running daemon live; a restart-required key is reported |
+| S23 | SIGKILL mid-upload, restart: the upload completes, trees match, nothing duplicated |
+| S24 | SIGKILL mid-download, restart: the download completes and the local copy matches |
+| S25 | file rename, directory rename with children, and a move across subtrees converge to the same shape in the cloud |
+| S26 | `rm -rf` of a tree removes it from the cloud; the name coming back as a file converges on both sides |
+| S27 | a file deleted locally while the daemon was down is deleted in the cloud on restart when the cloud copy is unchanged, and restored when the cloud copy changed meanwhile |
+| S28 | a file deleted in the cloud while the daemon was down is removed here into the trash on restart when the local copy is unchanged, and re-uploaded when the local copy changed meanwhile |
+| S29 | push-only uploads, overwrites a divergent cloud edit, removes a cloud-only file, never downloads |
+| S30 | two profiles in one daemon sync their own roots with their own durable state and never cross |
+| S31 | a burst of local deletions is held whole behind a `mass-deletion` decision while other work continues; `vapor decisions resolve --choose apply` releases it |
+| S32 | with the state DB deleted, a restart rebuilds the index from both trees without loss or invented conflicts |
+| S33 | two cloud files differing only by case both materialize locally, the second as a conflict copy aliased to its own cloud object; an edit to the copy reaches that object and the cloud gains no third file |
+| S34 | the cloud root disappears mid-run: sync blocks with Error; it returns: work resumes and converges |
+| S35 | the shipped `vapord` binary starts, syncs, and shuts down cleanly like `vapor run` |
+| S36 | nested directories flow up and down; an emptied directory's files are removed |
+| S37 | push-only overwrites a same-size cloud edit with no index row for the pair |
+| S38 | a cloud name that would alias a differently-cased local file never rewrites either cloud object, materializes once as a conflict copy, and a second reconcile adds nothing |
+| S39 | a write reported moments before SIGTERM becomes a durable intent at shutdown and uploads right after the restart |
+| S40 | a burst of cloud deletions is held before it touches this device; `--choose discard` restores the cloud copies from the local ones |
+| S41 | a cloud edit made while the daemon was down that keeps the byte count is found by the startup reconcile and downloaded, with no conflict copy |
+| S42 | a file removed on this device because the cloud deleted it lands in the trash; `vapor trash list` shows it and `vapor trash restore` brings it back and re-uploads it |
+| S43 | an empty folder appearing where the adopted local root was opens a `root-replaced` decision and syncs nothing; `reattach` merges the cloud into it with no deletion anywhere |
+| S44 | a daemon started while the adopted local root is missing parks the profile with a `root-missing` decision, never re-creates the folder, and resumes on its own when the volume returns |
+| S45 | a deleted cloud root is never re-created on Vapor's own; the `root-missing` decision answered `recreate` re-creates it and re-uploads this device's files |
+| S46 | a name that is a file here and a folder in the cloud opens a `type-mismatch` decision and touches nothing; `keep-both` moves the file to a conflict name and brings the folder down |
+| S47 | renaming a synced file locally moves the cloud object in place (same inode, no re-upload) and re-keys the index |
+| S48 | renaming a synced file in the cloud renames the local file in place (same inode, no download) and leaves nothing in the trash |
+| S49 | a sync root that is a whole volume of its own gets its trash at `<volume>/.vapor/trash/`: a cloud deletion is a rename on that volume (same inode, no copy onto the runtime directory's volume), `vapor trash list` shows it, restore puts it back, and the `.vapor` directory inside the root never syncs (needs a disk image) |
+| S50 | a local file whose name is not valid UTF-8 opens an `unsyncable-name` decision, never reaches the cloud, and the question is withdrawn once the file is renamed; `skip` stops the asking (needs a filesystem that accepts such a name: Linux) |
+| R01 | install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd, then the headless supervisor (`install --supervise`) restarting a killed daemon on its own (`--full`) |
 
-Revisit when Linux becomes a shipping surface (containerized Linux E2E
-in CI is the natural fit then) or when a live cloud-provider tier needs
-network egress control.
+## Extending the harness
 
-## Scenario catalog (current)
+Scenarios are Rust functions in `tools/e2e/src/scenarios/<group>.rs`,
+registered in that file's `scenarios()` list with a stable id, a
+kebab-case name, a one-line `proves`, the `needs`, and an `expect`
+(`Pass`, or `KnownGap("what is missing, in words")`). The context
+(`Ctx`) provides homes, daemon control (start, stop, kill, signals),
+the CLI bound to a home, read-only DB access, marks and converge or
+settle waits, and the epilogue knobs (`allow_warning`, `allow_error`,
+`tolerate_failed_intents`, `skip_oracle`, `oracle_ignore`).
 
-| # | Scenario | Proves |
-|---|----------|--------|
-| S1 | Config round-trip | `vapor config set/get` writes and reads `vapor.json` under `VAPOR_DIR` |
-| S2 | Daemon startup | `vapor run` reaches `Running`, creates the missing local sync root itself, binds the IPC socket |
-| S3 | Local ingest converges | real file writes → FSEvents → debounce → durable intents (≥3 captured, observed via the `queue_intents` high-water mark) → executor → queue drains, `failed_intents` stays empty |
-| S4 | Pause/resume | IPC pause flips `run_state` to `Paused`, resume restores `Running`, backlog written while paused drains |
-| S5 | Singleton lock | a second daemon on the same `VAPOR_DIR` exits non-zero with "already running" |
-| S6 | Doctor | `vapor doctor` reports no failures inside the sandbox |
-| S7 | Restart recovery | clean SIGTERM shutdown, restart on the same state DB, post-restart writes still converge |
-| S8 | Log hygiene | a healthy run emits zero `[ERROR]` lines |
-| S9 | Socket relocation | with an over-budget `VAPOR_DIR` the IPC socket relocates deterministically under the OS temp dir; `vapor status` still reaches the daemon and `vapor doctor` explains the relocation |
-| S10 | Bidirectional sync | uploaded files land in the cloud root byte-for-byte; a cloud-born file (external write, no feed event) downloads through `vapor reconcile` with matching content |
-| S11 | Keep-both conflict | the same path diverges on both sides while the daemon is down; the restart reconcile preserves BOTH payloads (canonical + `~conflict-` copy), never overwriting |
-| S12 | Pull-only mirror | a `syncMode = pull-only` runtime materializes cloud content locally and removes a local-only file (never uploading it) |
-| S13 | Observability | `vapor diagnostics --json` answers over IPC; `vapor support-bundle` exports config + logs + live status/diagnostics/timeline with a manifest |
-| S14 | Symmetric ignore filtering | ignored names (`.DS_Store`, `*.tmp`) never sync in either direction — divergent copies on both sides survive untouched, a cloud-side ignored file never downloads, and no `~conflict-` copy is manufactured |
-| S15 | Conflict surfacing | `vapor conflicts list --json` finds the S11 keep-both copy from durable file state; `resolve --keep copy` promotes the preserved version, the resolution syncs to the cloud, and the list drains to empty |
-| S16 | Local delete propagation | a plain `rm` in the watched root removes the cloud copy — deletion classification comes from ground truth, not fs-watch fragment order |
-| S17 | Special files are inert | a FIFO in the watched root never becomes a remote object and never wedges the queue; files around it keep syncing |
-
-## Extending the harness — discipline rules
+Discipline rules:
 
 - **Observe through product surfaces.** CLI exit codes and `--json`
-  output, the daemon log, and read-only state-DB queries. Never add a
-  test-only hook to the daemon for the harness's benefit.
-- **Bounded waits, never bare sleeps.** Every wait is a
-  `wait_until <deadline> <description> <predicate>` poll with a hard
-  deadline and a named condition. A scenario that needs "sleep 5 and
-  hope" is not deterministic enough to land.
-- **Keep it fast.** The whole suite must stay under ~60 s after the
-  build. Long-running or load-shaped scenarios belong to Tier 2
-  (`scripts/perf.sh`), not here.
-- **Agent-friendly failures.** A failing scenario must say what was
-  expected, dump enough context to debug (status, log tail, sandbox
-  path), and preserve the sandbox.
-- **One scenario, one behavior.** Same rule as Tier 1: if the name
-  needs "and", split it.
-- **JSON parsing:** the `--json` shapes are locked by Tier 1 snapshot
-  tests, so simple `grep` extraction is acceptable; do not add new
-  host-tool dependencies beyond what macOS/CI ship (`sqlite3` is fine,
-  `jq` is not assumed).
+  output, the daemon log, the trees, and read-only state-DB queries.
+  Never add a test-only hook to the daemon for the harness's benefit.
+- **Bounded waits, never bare sleeps.** Every wait has a deadline on
+  the clock and a named condition. To prove something stays true, use
+  `hold_for`, which polls the condition for the window.
+- **Wait for the intents, then for the drain.** Take a `mark` before
+  the change and `converge_from(mark, n)` after it, or `settle` when
+  the number of intents is not predictable (renames, directories,
+  reconciles). A queue that is empty because the debounce window has
+  not elapsed proves nothing.
+- **One scenario, one behavior.** If the name needs "and", split it.
+- **Own the setup.** Every scenario provisions its own files; nothing
+  chains on another scenario's leftovers.
+- **Name the gap.** A scenario that documents behavior the product
+  does not have yet is a `KnownGap` with a plain-words reason and a
+  task in `docs/tasks/core.md`, never a skipped or weakened assertion.
+- **Agent-friendly failures.** The failure message says what was
+  expected; the epilogue and diagnostics do the rest.
+- **Budget.** The default suite runs in about the time of its slowest
+  scenario, a little over a minute;
+  each known-gap scenario costs its timeout until the product catches
+  up, and a scenario that waits out a product timer sets the floor for
+  the whole run, so keep such waits to what the proof needs. Long or
+  load-shaped runs belong to the soak tier, not here.
 
 ## What Tier E2E deliberately does not cover (today)
 
-- **Live cloud providers.** A future, explicitly gated tier: real
-  Google Drive against a dedicated test account, enabled only by an
-  explicit opt-in flag, riding the release pipeline like Tier 2 —
-  never a PR gate, never run implicitly by an agent. (Byte replication
-  itself is covered: S10–S12 run the real filesystem provider and
-  assert actual content on both sides.)
-- **`vapor service install` round-trips — in the default run.**
-  Installing a LaunchAgent mutates the host, so that round-trip is
-  gated behind `./scripts/e2e.sh --full` and runs in CI per
-  `AGENTS.md §9.7`, not on contributor machines. The `--full` phase
-  (scenarios R1–R9) drives install → start → status → crash-loop
-  supervision through backoff and pause → acknowledge → stop →
-  uninstall against real `launchd`. Its guard rails: it refuses when a
-  `sh.arn.vapor.daemon` plist already exists (never clobbers a real
-  install), keeps all runtime state in a repo-local sandbox via
-  `VAPOR_DIR`, and removes the LaunchAgent on exit.
+- **Load and duration.** Hours of churn, fault injection at random
+  points, and the model-checked no-loss oracle belong to the soak
+  driver (`tools/soak`, `docs/development/soak-testing.md`).
+- **Live Google Drive.** The mode exists as a flag; the Drive-side
+  operations and the credentials wait on the project owner (above).
 - **macOS app UI.** Owner-verified manually, per the standing test
-  carve-out. Tier E2E's job there is the handoff checklist, not the
-  verification.
+  carve-out. Tier E2E's job there is the handoff checklist.
+- **The Windows daemon.** Its scenarios skip until the native
+  platform traits ship; the harness itself builds and runs `S01` there
+  on every PR. Linux runs the daemon scenarios; what it skips is the
+  launchd round-trip and the disk-image scenarios; a systemd
+  round-trip of its own is still to be written.
 
 ## Relationship to the other tiers
 
 | Tier | Entry point | Gate | Proves |
-|------|-------------|------|--------|
+|---|---|---|---|
 | Tier 1 | `./scripts/test.sh` | every PR | module + composed correctness, in-process |
-| Tier E2E | `./scripts/e2e.sh` | every PR (macOS CI job) + locally for runtime-affecting changes | the shipped binaries work black-box, end to end |
-| Tier 2 | `./scripts/perf.sh` | release pipeline | performance SLOs, long property/fuzz/loom runs |
+| Tier E2E | `./scripts/e2e.sh` | every PR (all three OS jobs; `--full` on macOS) + locally for runtime-affecting changes | the shipped binaries work black-box, end to end |
+| Tier 2 | `./scripts/perf.sh` | release pipeline | one soak cell with the SLO checks asserted on its report |
+| Tier S | `./scripts/soak.sh` | nightly + on demand | hours of churn with faults; nothing lost, both trees converged (`soak-testing.md`) |
 
-Tier E2E complements Tier 1 — it never replaces writing the Tier 1
-tests that `AGENTS.md §9.2` requires.
+Tier E2E complements Tier 1; it never replaces the Tier 1 tests that
+`AGENTS.md §9.2` requires.

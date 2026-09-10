@@ -722,17 +722,7 @@ impl Provider for GoogleDriveProvider {
     }
 
     fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), ProviderError> {
-        let segments: Vec<&str> = cloud_sync_directory
-            .trim()
-            .trim_matches('/')
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .collect();
-        if segments.is_empty() {
-            return Err(ProviderError::permanent(
-                "cloudSyncDirectory must name a folder inside Google Drive (for example \"/Vapor\")",
-            ));
-        }
+        let segments = cloud_root_segments(cloud_sync_directory)?;
         let mut parent_id = "root".to_string();
         for segment in &segments {
             parent_id = match self.find_child(&parent_id, segment)? {
@@ -754,6 +744,65 @@ impl Provider for GoogleDriveProvider {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(parent_id);
         Ok(())
+    }
+
+    fn move_object(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        op_id: &str,
+    ) -> Result<(), ProviderError> {
+        let file = self.resolve(from)?.ok_or_else(|| {
+            ProviderError::not_found(format!("move source {from} does not exist"))
+        })?;
+        if self.resolve(to)?.is_some() {
+            return Err(ProviderError::precondition_failed(format!(
+                "move destination {to} already exists"
+            )));
+        }
+        let new_parent = self.ensure_parent_id(to)?;
+        let old_parent = file.parents.first().cloned().unwrap_or_default();
+        let mut url = format!("{API_BASE}/files/{}?fields=id", file.id);
+        if new_parent != old_parent {
+            url.push_str(&format!(
+                "&addParents={}&removeParents={}",
+                oauth::url_encode(&new_parent),
+                oauth::url_encode(&old_parent)
+            ));
+        }
+        let _: GdFile = self.api_json(
+            "PATCH",
+            url,
+            Some(serde_json::json!({
+                "name": to.file_name().unwrap_or_default(),
+                "appProperties": { OP_ID_PROPERTY: op_id },
+            })),
+        )?;
+        self.evict_path(from.as_str());
+        self.cache_mapping(to.as_str(), &file.id);
+        Ok(())
+    }
+
+    fn root_identity(&self, cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
+        // The folder id is the identity: a folder re-created at the
+        // same path gets a new id, and a renamed folder keeps its own.
+        let mut parent_id = "root".to_string();
+        for segment in cloud_root_segments(cloud_sync_directory)? {
+            parent_id = match self.find_child(&parent_id, segment)? {
+                Some(existing) if existing.mime_type == FOLDER_MIME => existing.id,
+                Some(_) => {
+                    return Err(ProviderError::permanent(format!(
+                        "cloudSyncDirectory component '{segment}' exists in Drive but is not a folder"
+                    )));
+                }
+                None => {
+                    return Err(ProviderError::not_found(format!(
+                        "Google Drive folder {cloud_sync_directory} is missing"
+                    )));
+                }
+            };
+        }
+        Ok(Some(parent_id))
     }
 
     fn enumerate(&self, directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {
@@ -919,6 +968,7 @@ impl Provider for GoogleDriveProvider {
         Ok(Box::new(GdriveDownloadSession {
             provider: self.handle(),
             file_id: file.id,
+            remote_modified_at: file.modified_time.as_deref().and_then(parse_rfc3339_millis),
             destination: Some(destination),
             destination_path: request.destination,
             total_bytes,
@@ -1246,6 +1296,7 @@ impl GdriveUploadSession {
         self.state = UploadState::Done;
         Ok(TransferOutcome {
             bytes_total: self.total_bytes,
+            remote_modified_at: file.modified_time.as_deref().and_then(parse_rfc3339_millis),
             content_hash: file
                 .md5_checksum
                 .unwrap_or_else(|| md5_hex_of_bytes(&content)),
@@ -1381,6 +1432,10 @@ impl TransferSession for GdriveUploadSession {
                         Ok(TransferStep::Completed(TransferOutcome {
                             bytes_total: self.total_bytes,
                             content_hash: file.md5_checksum.unwrap_or_default(),
+                            remote_modified_at: file
+                                .modified_time
+                                .as_deref()
+                                .and_then(parse_rfc3339_millis),
                         }))
                     }
                     _ => {
@@ -1413,6 +1468,7 @@ impl TransferSession for GdriveUploadSession {
 struct GdriveDownloadSession {
     provider: ProviderHandle,
     file_id: String,
+    remote_modified_at: Option<SystemTime>,
     destination: Option<std::fs::File>,
     destination_path: std::path::PathBuf,
     total_bytes: u64,
@@ -1502,8 +1558,25 @@ impl GdriveDownloadSession {
         Ok(TransferStep::Completed(TransferOutcome {
             bytes_total: self.received_bytes,
             content_hash: hex_encode(&digest),
+            remote_modified_at: self.remote_modified_at,
         }))
     }
+}
+
+/// The path components of the configured Drive root.
+fn cloud_root_segments(cloud_sync_directory: &str) -> Result<Vec<&str>, ProviderError> {
+    let segments: Vec<&str> = cloud_sync_directory
+        .trim()
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    if segments.is_empty() {
+        return Err(ProviderError::permanent(
+            "cloudSyncDirectory must name a folder inside Google Drive (for example \"/Vapor\")",
+        ));
+    }
+    Ok(segments)
 }
 
 // ---------------------------------------------------------------------

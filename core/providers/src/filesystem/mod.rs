@@ -100,11 +100,20 @@ fn hex_encode(digest: &[u8]) -> String {
     out
 }
 
-/// Whether `name` is one of the provider's hidden internal files
-/// (op-id side-files and in-flight temp files).
+/// Whether `name` is one of Vapor's hidden internal names: op-id
+/// side-files, in-flight temp files, the root marker, and the `.vapor`
+/// runtime directory.
 pub fn is_internal_file_name(name: &str) -> bool {
     name.starts_with(constants::provider::TEMP_FILE_PREFIX)
         || name.ends_with(constants::provider::OP_ID_SIDE_FILE_SUFFIX)
+        || name == constants::provider::ROOT_MARKER_FILE_NAME
+        || constants::filtering::INTERNAL_IGNORE_DIRECTORY_NAMES.contains(&name)
+}
+
+/// Whether any segment of `remote` is an internal name: a path under
+/// a `.vapor` directory is Vapor's own state, never an object to sync.
+pub fn has_internal_segment(remote: &RemotePath) -> bool {
+    remote.as_str().split('/').any(is_internal_file_name)
 }
 
 /// Best-effort reap of an orphaned staging temp file. A `TEMP_FILE_PREFIX`
@@ -340,6 +349,94 @@ impl Provider for FilesystemProvider {
         Ok(())
     }
 
+    fn move_object(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        op_id: &str,
+    ) -> Result<(), ProviderError> {
+        let resolved_from = self.resolve_in_scope(from)?;
+        let resolved_to = self.resolve_in_scope(to)?;
+        if !resolved_from.exists() {
+            return Err(ProviderError::not_found(format!(
+                "move source {from} does not exist"
+            )));
+        }
+        if fs::symlink_metadata(&resolved_to).is_ok() {
+            return Err(ProviderError::precondition_failed(format!(
+                "move destination {to} already exists"
+            )));
+        }
+        if let Some(parent) = resolved_to.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                ProviderError::transient(format!(
+                    "cannot create the destination directory for {to}: {error}"
+                ))
+            })?;
+        }
+        fs::rename(&resolved_from, &resolved_to).map_err(|error| {
+            ProviderError::transient(format!("cannot move {from} to {to}: {error}"))
+        })?;
+        self.tags
+            .relocate_side_file(&resolved_from, &resolved_to)
+            .map_err(|error| {
+                ProviderError::transient(format!(
+                    "moved {from} to {to} but could not relocate its tag side-file: {error}"
+                ))
+            })?;
+        let _ = self.tags.write_op_id(&resolved_to, op_id);
+        Ok(())
+    }
+
+    fn root_identity(&self, cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
+        let expanded = expand_cloud_directory(cloud_sync_directory)?;
+        match fs::symlink_metadata(&expanded) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(ProviderError::permanent(format!(
+                    "filesystem cloud sync directory {} is not a directory",
+                    expanded.display()
+                )));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(ProviderError::not_found(format!(
+                    "filesystem cloud sync directory {} is missing",
+                    expanded.display()
+                )));
+            }
+            Err(error) => {
+                return Err(ProviderError::transient(format!(
+                    "cannot stat filesystem cloud sync directory {}: {error}",
+                    expanded.display()
+                )));
+            }
+        }
+        crate::root_marker::read_marker(&expanded)
+            .map(|marker| marker.map(|marker| marker.root_id))
+            .map_err(|error| {
+                ProviderError::transient(format!(
+                    "cannot read the root marker in {}: {error}",
+                    expanded.display()
+                ))
+            })
+    }
+
+    fn adopt_root(
+        &self,
+        cloud_sync_directory: &str,
+        device_id: &str,
+    ) -> Result<Option<String>, ProviderError> {
+        let expanded = expand_cloud_directory(cloud_sync_directory)?;
+        crate::root_marker::adopt(&expanded, device_id, SystemTime::now())
+            .map(|marker| Some(marker.root_id))
+            .map_err(|error| {
+                ProviderError::transient(format!(
+                    "cannot write the root marker in {}: {error}",
+                    expanded.display()
+                ))
+            })
+    }
+
     fn enumerate(&self, directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {
         let resolved = self.resolve_in_scope(directory)?;
         let reader = fs::read_dir(&resolved).map_err(|error| {
@@ -561,12 +658,15 @@ impl Provider for FilesystemProvider {
             Err(error) if resolved.is_dir() => {
                 // Non-recursive on purpose: `remove_dir` fails on a
                 // non-empty directory. A recursive `remove_dir_all` here
-                // would destroy children the engine never observed (a
-                // delete intent is planned with no remote stat), violating
-                // the never-silent-overwrite guarantee. When the directory
-                // still holds content, the transient error retries and the
-                // walk converges once the changes feed surfaces and removes
-                // the children, emptying the directory.
+                // would destroy children the engine never observed,
+                // violating the never-silent-overwrite guarantee. The one
+                // exception is Vapor's own bookkeeping: a staging temp an
+                // aborted transfer left behind, or the op-id side-file of
+                // a file that is already gone. Those are invisible to
+                // listings, so the engine can never delete them itself,
+                // and a directory holding nothing else is empty as far as
+                // the user is concerned.
+                reap_internal_files(&resolved);
                 fs::remove_dir(&resolved).map_err(|dir_error| {
                     ProviderError::transient(format!(
                         "cannot delete remote directory {path}: {dir_error} (file path error: {error})"
@@ -587,6 +687,24 @@ impl Provider for FilesystemProvider {
         self.ensure_feed_started()?;
         let root = self.canonical_root()?;
         self.feed.poll(&root, &self.tags, cursor, max_changes)
+    }
+}
+
+/// Removes Vapor's internal files (staging temps, op-id side-files)
+/// directly inside `directory` and nothing else. Used before deleting
+/// a directory the engine believes is empty.
+fn reap_internal_files(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if is_internal_file_name(name) && entry.path().is_file() {
+            let _ = fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -646,13 +764,25 @@ fn copy_permissions_from_handle(source: &fs::File, staged: &Path) {
     match source.metadata() {
         Ok(metadata) => {
             if let Err(error) = fs::set_permissions(staged, metadata.permissions()) {
-                crate::logging::warning(
-                    "Could not carry file permissions onto the staged transfer payload",
-                    &[
-                        ("path", staged.display().to_string()),
-                        ("error", error.to_string()),
-                    ],
-                );
+                let fields = [
+                    ("path", staged.display().to_string()),
+                    ("error", error.to_string()),
+                ];
+                if error.kind() == io::ErrorKind::NotFound {
+                    // The staging file's directory was removed underneath
+                    // the transfer (a concurrent remote delete); the
+                    // commit that follows fails and the intent retries
+                    // against fresh remote state. Nothing to act on here.
+                    crate::logging::debug(
+                        "Staged transfer payload vanished before its permissions could be set",
+                        &fields,
+                    );
+                } else {
+                    crate::logging::warning(
+                        "Could not carry file permissions onto the staged transfer payload",
+                        &fields,
+                    );
+                }
             }
         }
         Err(error) => {
@@ -833,6 +963,7 @@ impl FilesystemUploadSession {
         Ok(TransferOutcome {
             bytes_total: self.bytes_total,
             content_hash: hex_encode(&std::mem::take(&mut self.hasher).finalize()),
+            remote_modified_at: current_size_mtime(&self.target).map(|(_, mtime)| mtime),
         })
     }
 
@@ -1030,6 +1161,11 @@ impl TransferSession for FilesystemDownloadSession {
                 return Ok(TransferStep::Completed(TransferOutcome {
                     bytes_total: self.bytes_total,
                     content_hash: hex_encode(&std::mem::take(&mut self.hasher).finalize()),
+                    remote_modified_at: self
+                        .source
+                        .metadata()
+                        .ok()
+                        .and_then(|metadata| metadata.modified().ok()),
                 }));
             }
             let destination = self
@@ -1537,6 +1673,33 @@ mod tests {
             .delete(&RemotePath::new("a.txt").expect("path"), "op-6")
             .expect_err("second delete reports not found");
         assert_eq!(error.kind, vapor_shared::ProviderErrorKind::NotFound);
+    }
+
+    #[test]
+    fn deleting_a_directory_reaps_only_vapor_internal_leftovers() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cloud = dir.path().join("cloud");
+        let provider = provider_at(&cloud);
+        // A crash mid-upload left a staging temp; a deleted file left its
+        // side-file. Neither shows in listings, so the engine cannot
+        // delete them, and neither is user content.
+        fs::create_dir_all(cloud.join("gone")).expect("dirs");
+        fs::write(cloud.join("gone/.vapor-tmp-orphan"), b"partial").expect("temp");
+        fs::write(cloud.join("gone/old.txt.vapor-meta.json"), b"{}").expect("side");
+        provider
+            .delete(&RemotePath::new("gone").expect("path"), "op-1")
+            .expect("an empty-but-for-internals directory deletes");
+        assert!(!cloud.join("gone").exists());
+
+        // User content is never reaped.
+        fs::create_dir_all(cloud.join("kept")).expect("dirs");
+        fs::write(cloud.join("kept/.vapor-tmp-orphan"), b"partial").expect("temp");
+        fs::write(cloud.join("kept/user.txt"), b"mine").expect("user");
+        let error = provider
+            .delete(&RemotePath::new("kept").expect("path"), "op-2")
+            .expect_err("a directory with user content stays");
+        assert_eq!(error.kind, vapor_shared::ProviderErrorKind::Transient);
+        assert!(cloud.join("kept/user.txt").exists());
     }
 
     #[test]

@@ -1,6 +1,8 @@
 # --- Rust / Cargo ---
 debug/
-target/
+# Any cargo target directory, including the one a Linux container
+# builds into over this checkout.
+target*/
 **/*.rs.bk
 *.pdb
 **/mutants.out*/

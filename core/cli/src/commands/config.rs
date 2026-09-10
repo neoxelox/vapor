@@ -128,7 +128,7 @@ fn read_or_empty_object(path: &Path) -> Result<Value, ConfigError> {
 fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
     use constants::config::{
         KEY_AUTO_LAUNCH, KEY_IDLE_BOOST, KEY_PROFILES, KEY_PROVIDER, KEY_RESOURCE_LIMITS,
-        KEY_SAFEGUARDS, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT, KEY_USE_GIT_IGNORE,
+        KEY_SAFEGUARDS, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT, KEY_TRASH, KEY_USE_GIT_IGNORE,
         KEY_USE_VAPOR_IGNORE,
     };
     if matches!(
@@ -189,6 +189,13 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
             key,
             raw,
             "a JSON object such as {\"massDeleteThreshold\": 500}",
+        );
+    }
+    if key == KEY_TRASH {
+        return parse_json_value::<vapor_shared::config::TrashConfig>(
+            key,
+            raw,
+            "a JSON object such as {\"retentionDays\": 14}",
         );
     }
     Ok(Value::String(raw.to_string()))

@@ -68,6 +68,42 @@ pub struct VaporConfig {
     /// Safeguards group (mass-delete guard tuning). Clamped to floors at
     /// daemon resolve time, not at config load.
     pub safeguards: SafeguardsConfig,
+    /// Trash group: where a file Vapor removes on this device goes.
+    pub trash: TrashConfig,
+}
+
+/// The `trash` config group.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashConfig {
+    #[serde(default = "default_trash_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_trash_retention_days")]
+    pub retention_days: u32,
+    #[serde(default = "default_trash_use_system_trash")]
+    pub use_system_trash: bool,
+}
+
+fn default_trash_enabled() -> bool {
+    constants::trash::DEFAULT_ENABLED
+}
+
+fn default_trash_retention_days() -> u32 {
+    constants::trash::DEFAULT_RETENTION_DAYS
+}
+
+fn default_trash_use_system_trash() -> bool {
+    constants::trash::DEFAULT_USE_SYSTEM_TRASH
+}
+
+impl Default for TrashConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_trash_enabled(),
+            retention_days: default_trash_retention_days(),
+            use_system_trash: default_trash_use_system_trash(),
+        }
+    }
 }
 
 /// The `resourceLimits` config group.
@@ -121,8 +157,13 @@ pub struct SafeguardsConfig {
     pub mass_delete_threshold: u64,
     #[serde(default = "default_mass_delete_window_seconds")]
     pub mass_delete_window_seconds: u64,
+    #[serde(default = "default_mass_delete_ratio_percent")]
+    pub mass_delete_ratio_percent: u8,
 }
 
+fn default_mass_delete_ratio_percent() -> u8 {
+    constants::engine::MASS_DELETE_RATIO_PERCENT
+}
 fn default_mass_delete_enabled() -> bool {
     constants::safeguards::DEFAULT_MASS_DELETE_ENABLED
 }
@@ -139,6 +180,7 @@ impl Default for SafeguardsConfig {
             mass_delete_enabled: default_mass_delete_enabled(),
             mass_delete_threshold: default_mass_delete_threshold(),
             mass_delete_window_seconds: default_mass_delete_window_seconds(),
+            mass_delete_ratio_percent: default_mass_delete_ratio_percent(),
         }
     }
 }
@@ -284,6 +326,7 @@ impl Default for VaporConfig {
             resource_limits: ResourceLimitsConfig::default(),
             idle_boost: IdleBoostConfig::default(),
             safeguards: SafeguardsConfig::default(),
+            trash: TrashConfig::default(),
         }
     }
 }
@@ -448,6 +491,7 @@ fn config_from_object(map: &serde_json::Map<String, serde_json::Value>) -> Vapor
         ),
         idle_boost: field(map, keys::KEY_IDLE_BOOST, defaults.idle_boost, &mut issues),
         safeguards: field(map, keys::KEY_SAFEGUARDS, defaults.safeguards, &mut issues),
+        trash: field(map, keys::KEY_TRASH, defaults.trash, &mut issues),
     };
 
     for key in map.keys() {
@@ -475,7 +519,8 @@ mod tests {
             &path,
             r#"{
                 "safeguards": { "massDeleteThreshold": 1000 },
-                "resourceLimits": { "maxConcurrentTransfers": 2 }
+                "resourceLimits": { "maxConcurrentTransfers": 2 },
+                "trash": { "retentionDays": 7 }
             }"#,
         )
         .expect("write config");
@@ -485,6 +530,9 @@ mod tests {
         assert_eq!(result.config.safeguards.mass_delete_threshold, 1_000);
         // Unset group members keep their defaults.
         assert!(result.config.safeguards.mass_delete_enabled);
+        assert_eq!(result.config.trash.retention_days, 7);
+        assert!(result.config.trash.enabled);
+        assert!(!result.config.trash.use_system_trash);
         assert_eq!(
             result.config.resource_limits.max_concurrent_transfers,
             Some(2)

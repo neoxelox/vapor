@@ -3,9 +3,24 @@
 GitHub Actions workflows are defined in `.github/workflows/`:
 
 - `lint.yml`: runs lint and format checks via repository scripts.
-- `test.yml`: runs test suites via repository scripts.
+- `test.yml`: runs the Tier 1 suites via repository scripts, then the
+  Tier E2E harness (`./scripts/e2e.sh`) on every OS job; the macOS job
+  passes `--full` (the launchd round-trip on a disposable runner) and
+  every job uploads the harness's JSON report as the
+  `e2e-report-<os>` artifact. Scenarios whose needs the host cannot
+  meet skip by name: the Linux job runs the daemon scenarios (not the
+  launchd round-trip or the disk-image ones), the Windows job runs the
+  harness and `S01` and picks up the daemon scenarios once its native
+  traits ship.
 - `build.yml`: runs distribution builds via repository scripts.
-- `perf.yml`: reusable performance gate workflow invoked by the release pipeline.
+- `perf.yml`: reusable performance gate workflow invoked by the release
+  pipeline; runs one soak cell against the release profile and asserts
+  the SLO checks on its report (`scripts/perf.sh`).
+- `soak.yml`: Tier S, nightly and on demand, never a PR gate: a matrix
+  of soak cells (mode, load, faults, throttle) on the macOS runner, each
+  uploading its report, status, op log, model, and daemon log as the
+  `soak-<cell>` artifact. `workflow_dispatch` takes a duration and a
+  seed.
 - `release.yml`: runs tag-driven package and GitHub Release publication flow.
 
 ## Toolchain defaults in CI
@@ -27,6 +42,7 @@ and the repository enforces `sha_pinning_required`:
 - `maxim-lobanov/setup-xcode` v1.7.0
 - `actions-rust-lang/setup-rust-toolchain` v1.17.0
 - `actions/cache` v5.1.0 for Rust (`cargo`) and SwiftPM caches
+- `actions/upload-artifact` v4.6.2 for the Tier E2E report
 
 ## Action allowlist
 

@@ -273,12 +273,15 @@ fn contract_scope_rejects_traversal_shapes_at_the_type_boundary() {
     assert!(RemotePath::new("/absolute").is_err());
 }
 
-/// Cheap adapter-overhead guard: a hundred small uploads
-/// through the full session machinery must complete quickly. Catches
-/// "someone made every session step allocate/copy quadratically"-class
-/// regressions, not SLO-grade measurement (that is Tier 2).
+/// Cheap adapter-overhead guard: a hundred small uploads through the
+/// full session machinery must complete well inside a budget sized
+/// for a regression, not for a slow disk. Each upload fsyncs, and a
+/// Windows CI runner spends about 50 ms on that alone, so the budget
+/// is an order of magnitude above a slow host's normal: it catches
+/// "someone made every session step allocate/copy quadratically",
+/// not SLO-grade measurement (that is Tier 2).
 #[test]
-fn contract_session_overhead_guard_rail() {
+fn timing_guardrail_session_overhead_stays_under_budget() {
     let sandbox = tempfile::TempDir::new().expect("sandbox");
     let cloud = sandbox.path().join("cloud");
     std::fs::create_dir_all(&cloud).expect("cloud root");
@@ -298,7 +301,7 @@ fn contract_session_overhead_guard_rail() {
     }
     let elapsed = started.elapsed();
     assert!(
-        elapsed < std::time::Duration::from_secs(5),
+        elapsed < std::time::Duration::from_secs(60),
         "100 small uploads took {elapsed:?}; the adapter overhead regressed"
     );
 }
@@ -334,6 +337,7 @@ impl Provider for MockObjectStoreProvider {
             supports_remote_changes_feed: false,
             supports_write_preconditions: true,
             supports_op_id_tags: false,
+            supports_server_side_move: false,
             supports_content_hashes_in_metadata: true,
         }
     }
@@ -432,6 +436,7 @@ impl Provider for MockObjectStoreProvider {
             outcome: Some(TransferOutcome {
                 bytes_total: bytes,
                 content_hash: hash,
+                remote_modified_at: None,
             }),
         }))
     }
@@ -453,6 +458,7 @@ impl Provider for MockObjectStoreProvider {
             outcome: Some(TransferOutcome {
                 bytes_total: content.len() as u64,
                 content_hash: hash_hex_of_bytes(&content),
+                remote_modified_at: None,
             }),
         }))
     }

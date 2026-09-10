@@ -232,6 +232,10 @@ impl SecretStore for NativeSecretStore {
     fn is_persistent(&self) -> bool {
         true
     }
+
+    fn describe(&self) -> String {
+        "login keychain".to_string()
+    }
 }
 
 const DUPLICATE_MARKER: &str = "[duplicate]";

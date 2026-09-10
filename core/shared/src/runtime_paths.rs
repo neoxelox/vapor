@@ -217,6 +217,16 @@ pub fn profile_database_path(profile_id: &str) -> PathBuf {
         .join(crate::constants::runtime::SQLITE_DATABASE_FILE_NAME)
 }
 
+/// The managed trash root, `vapor_dir/trash`.
+pub fn trash_directory() -> PathBuf {
+    vapor_directory().join(constants::runtime::TRASH_DIRECTORY_NAME)
+}
+
+/// One profile's managed trash, `vapor_dir/trash/<profile id>`.
+pub fn profile_trash_directory(profile_id: &str) -> PathBuf {
+    trash_directory().join(profile_id)
+}
+
 /// Durable daemon-lifecycle side-file (crash-loop bookkeeping +
 /// supervision expectations). Lives under `vapor_dir/state/` per the
 /// runtime data directory policy (AGENTS.md §8.5).

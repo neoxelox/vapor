@@ -186,6 +186,12 @@ pub fn render_status(status: &StatusResponse) -> String {
     if let Some(notice) = &status.config_restart_required {
         rendered.push_str(&format!("\nRestart required: {notice}"));
     }
+    if status.decisions_pending > 0 {
+        rendered.push_str(&format!(
+            "\nDecisions waiting for you: {} (vapor decisions list)",
+            status.decisions_pending
+        ));
+    }
     for profile in &status.profiles {
         rendered.push_str(&format!(
             "\nProfile {}: {} ({}, {}) queue {} failed {}{}",
@@ -384,6 +390,7 @@ mod tests {
             conflicts: 2,
             mirror_reverts: 1,
             mirror_deletes: 1,
+            decisions_pending: 1,
             profiles: vec![vapor_ipc::ProfileStatus {
                 id: "mirror".to_string(),
                 provider_name: "filesystem".to_string(),
@@ -403,6 +410,7 @@ mod tests {
         assert!(rendered.contains("IPC schema: 2"));
         assert!(rendered.contains("Queue: 3 pending, 1 failed"));
         assert!(rendered.contains("Strict mirror: 1 reverts, 1 deletes"));
+        assert!(rendered.contains("Decisions waiting for you: 1 (vapor decisions list)"));
         assert!(rendered.contains("Profile mirror: Running (filesystem, pull-only)"));
     }
 
@@ -493,7 +501,8 @@ mod tests {
   "mirror_deletes": 0,
   "profiles": [],
   "resource_budget": null,
-  "config_restart_required": null
+  "config_restart_required": null,
+  "decisions_pending": 0
 }"#
         );
     }

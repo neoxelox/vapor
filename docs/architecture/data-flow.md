@@ -10,22 +10,30 @@
 6. A keyed latest-wins scheduler keeps one intent per path, supersedes stale actions, and requeues dirty paths after in-flight work finishes.
 7. A throttle controller evaluates 1s power, thermal, load, disk, network, and activity samples to select `IdleDrain`, `Light`, `Throttled`, or `Suspended`.
 8. Planner, hash, upload, and reconcile stages acquire strict throttle-gated work permits before starting; reconcile only starts in `IdleDrain`, yields on slice expiry or throttle changes, and clears compacted subtree boundaries after successful quiet completion.
-9. A live daemon runtime loop wires watcher ingest -> incoming queue drain + symlink resolution -> debounce -> scheduler -> durable queue -> workgate -> reconcile, so the local engine runs as one composed pipeline instead of isolated primitives. The loop is event-nudged: fs-event callbacks and IPC control requests signal a tick waker, and a fully idle daemon relaxes from the 250 ms work cadence to a 1 s cadence. Exactly one daemon may serve a `vapor_dir` (an OS advisory lock on `vapord.lock` enforces it). `Pause` semantics: ingest/debounce/durable-flush keep capturing intent state and in-flight work finishes, but no new work is released or leased until `Resume`.
+9. A live daemon runtime loop wires watcher ingest -> incoming queue drain + symlink resolution -> debounce -> scheduler -> durable queue -> workgate -> reconcile, so the local engine runs as one composed pipeline instead of isolated primitives. The loop is event-nudged: fs-event callbacks and IPC control requests signal a tick waker, and a fully idle daemon relaxes from the 250 ms work cadence to a 1 s cadence. Exactly one daemon may serve a `vapor_dir` (an OS advisory lock on `vapord.lock` enforces it). On a shutdown signal the loop stabilizes every local event still inside its debounce window and writes the resulting intents to the durable queue before exiting (`intents_flushed` in the shutdown log line), so a change reported moments before SIGTERM does not depend on the next startup reconcile to be found. `Pause` semantics: ingest/debounce/durable-flush keep capturing intent state and in-flight work finishes, but no new work is released or leased until `Resume`.
 10. A SQLite durable queue/state DB (WAL, `synchronous = NORMAL`) persists pending and leased intents, recovers interrupted leases on startup (resetting `attempt_count` for leases older than `LEASE_TIMEOUT_MILLIS`) and sweeps stale leases periodically in-run, coalesces scheduler flushes per `(path, kind)` against already-pending rows inside one transaction, requeues retryable failures with exponential backoff/jitter/slower rate-limit delays (with `attempt_count` incremented only by the retry path, not by leasing), durably finalizes terminal failures, and injects a whole-scope startup reconcile (bounded by `STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS` to avoid starving non-reconcile work) so volatile pre-DB intent loss is reconstructed conservatively after restart.
 11. Provider selection is injected at runtime startup per profile, so daemon orchestration uses the provider trait boundary instead of hardcoding any cloud type in core engine state. `provider = "filesystem"` (default) selects the real filesystem provider; `provider = "gdrive"` selects `GoogleDriveProvider`. New backends onboard through the checklist in `provider-onboarding.md`.
 12. Non-reconcile work flows through a staged executor that leases durable intents into bounded planner, hash, transfer (upload/download), and apply-delete stages under workgate/throttle caps instead of finishing one leased intent at a time. Every blocking provider call — remote stats/hash probes during planning, `begin_upload`/`begin_download`, transfer-session steps, remote deletes — runs on a small provider-job worker pool, never on the tick thread: the tick loop dispatches jobs and harvests their outcomes, so provider RTT stalls neither fs-event draining nor debounce nor IPC status, and the upload/download concurrency caps buy real parallel transfers. The calls outside the executor follow the same rule with one thread per call: the changes poll, each directory listing of the reconcile walk, and the cloud-root retry start on one tick and are harvested on a later one (the walk resumes at the directory whose listing landed). Only the initial cloud-root ensure at startup and the rare cursor re-baseline run synchronously. Transfers remain chunked `TransferSession`s: workers re-check the throttle gates and draw a bounded byte grant (bandwidth token bucket × auto-tuned step size) between steps, so a `Suspended` throttle or an empty bucket hands the session back at its checkpoint instead of aborting it. Cheap stage transitions chain within one tick (lease → plan, permit-acquire → first hash chunk, hash-complete → transfer dispatch), so a small file no longer pays a fixed tick of latency per pipeline stage; durable leasing orders by priority class (`state-schema-migrations.md` §Current schema) so reconcile backlog never starves fresh edits.
+13. A file present on one side only is not always a file to transfer. When the sync index has a row for it and the surviving copy is exactly what was last synced (the rsync quick check on that side, or the provider's hash), the other side deleted it while no daemon was watching, and the walk propagates that deletion: a `Delete` for a file gone from this device, an `ApplyRemoteDelete` (into the trash) for a file gone from the cloud. A surviving copy that changed since the last sync is kept and transferred instead, and a pair the index cannot vouch for is transferred. Both deletion kinds still pass the executor's own guard and the mass-deletion guard, so a wiped side becomes a question, never a mirror. A whole-scope walk after a `reattach` or `recreate` answer runs with `reconcile.merge_without_deletions` set and transfers every one-sided file.
+14. A rename is recognised from the sync index, not from the watcher, which reports it as a delete and a create (a `Rename` intent for the destination on macOS). At the upload gate, a new path whose hash and size match an index row whose local file is gone becomes one `Provider::move_object` of that cloud object, and the index row moves with it; the stale delete of the old path then converges as a no-op. In the download planner, a new cloud object with the size and remote mtime of an index row whose local file is present and untouched is confirmed by hash (the backend's, or one probe) and applied as a local rename with no transfer. So that the create half is seen first, the deletion of a synced file waits one settle window on its first planning and, while a transfer of the same size is queued, on later ones, at most `MOVE_SETTLE_MAX_DEFERRALS` times; a plain deletion then proceeds. An upload whose bytes the cloud already holds completes without transferring.
+15. The reconcile walk compares each file pair with the rsync quick check on **both** sides: a pair is converged when the sizes match, the local size and mtime are what the sync index recorded at the last transfer, and the remote size and mtime are what the index recorded from the provider at that transfer. A pair the index has no row for, or that fails either check, is verified once through the upload planner in two-way mode, which knows the last synced hash: identical content converges silently and records the row; a local copy still equal to the last synced hash means the change is remote-only and becomes a download; a remote copy still equal to it means the change is local-only and becomes a guarded overwrite; both moved is a keep-both conflict. The op-id tag on the remote is never taken as proof on its own that the remote is unchanged, because an in-place write keeps the tag on a filesystem; the remote quick check has to agree. The provider reports the remote mtime with every completed transfer (`TransferOutcome::remote_modified_at`).
 
-On macOS the throttle inputs are read from the host every second: system and daemon CPU load, power source, thermal state, Low Power Mode, resident and physical memory, and keyboard/pointer presence. Disk pressure and link capacity have no macOS source yet and keep their neutral defaults. Linux and Windows are not shipping surfaces; their samplers return static defaults and the daemon logs a warning at startup saying so.
+On macOS the throttle inputs are read from the host every second: system and daemon CPU load, power source, thermal state, Low Power Mode, resident and physical memory, and keyboard/pointer presence. On Linux they come from `/proc` and `/sys`: CPU load and memory, whether a battery is discharging, the hottest thermal zone against its trip points, and whether a graphical session exists at all (a headless host counts as idle). Disk pressure and link capacity have no source on either OS yet and keep their neutral defaults, as does Low Power Mode on Linux. Windows is not a shipping surface; its sampler returns static defaults and the daemon logs a warning at startup saying so. The daemon's startup log names the inputs the host feeds it.
 
 ## Local safeguards (optional advanced protections)
 
 - **Active-coding heuristic.** Stabilized code/config-class events feed a rolling 60s window; at or above the threshold the runtime ORs `user_active = true` into the throttle inputs, so a compile-edit loop throttles sync even on hosts without a permissioned HID-idle signal. Strictly additive — it can only raise throttle caution.
 - **Priority classes + flush boost.** Within one durable flush batch, key-config and code paths enqueue ahead of lockfile noise (reusing the debounce classification as the priority signal). An explicit `vapor flush` activates a bounded 30s boost window: deferred reconciles release immediately (bypassing not-before times and the idle gate) and the remote feed polls on the next tick. Execution still answers to the throttle ladder, so flush accelerates scheduling, never resource impact.
-- **Mass-change / ransomware guard.** 200+ local deletions inside 60s (post-echo-suppression, so the engine's own applied deletes never count) pause the daemon in the same tick, raise a `guard` timeline alert, and set an actionable status reason. Ingest keeps capturing intent durably while paused. `vapor resume` is the explicit human reset and re-arms the guard with an empty window.
+- **Mass-change / ransomware guard.** Counts deletions in both directions at the moment the executor would make them irreversible: a local deletion about to remove a cloud object, a cloud deletion about to remove a local file. A deletion that turns out to be a no-op (the other side is already gone) never counts, and neither do the engine's own echoed deletes. The burst is judged as a whole: the deletions still waiting in the queue count with the ones already applied inside the rolling window, so a large batch is held before its first member lands. The guard trips when the burst reaches `massDeleteThreshold` (default 1000) or `massDeleteRatioPercent` of the synced tree (default 25%, never fewer than 10 deletions). A tripped guard parks the whole burst behind one `mass-deletion` decision (§Decisions): the deletion that tripped it, every deletion of that direction still queued at that moment, and every further one while the question is open. The rest of the sync keeps flowing; the daemon is never paused for it. `apply` releases the held deletions as approved and resets the window; `discard` drops them and enqueues a restore for each path from the side that still has the file. Because the whole burst is held at once, one answer covers what the question counted, and an answer given the moment the question appears does not leave stragglers to ask again. A held deletion whose target the other side removes meanwhile (the cloud reports the path gone, or the user deletes the file here too) is dropped as moot, and a question left holding nothing is withdrawn on its own.
 
 ## Remote to local (bidirectional MVP)
 
-1. Provider poll fetches remote changes on throttle-aware cadence.
+1. Provider poll fetches remote changes on throttle-aware cadence. The
+   filesystem provider's feed is a watcher on the cloud root; a
+   directory that appears there (created, moved in) is reported as
+   one change per file inside it, because a per-directory watcher
+   (inotify) never reports what landed before its watch was attached
+   and no watcher reports the contents of a moved tree.
 2. Changes are mapped into durable intents with operation IDs. A change
    whose local-equivalent path matches the ignore rules is dropped here
    (counted as `ignored_changes`): ignore filtering is symmetric, so an
@@ -36,6 +44,32 @@ On macOS the throttle inputs are read from the host every second: system and dae
    downloaded, and can never manufacture a keep-both conflict copy.
 3. Loop prevention filters self-originated writes.
 4. Apply pipeline writes local changes and records conflict/tombstone outcomes.
+5. A file Vapor removes on this device (a deletion that arrived from the
+   cloud in `two-way`, a mirror removal in `pull-only`) is never
+   unlinked: it goes to the profile's managed trash under
+   `vapor_dir/trash/<profile>/<entry>/` with a `meta.json` naming the
+   original path, the time, and the reason, or to the user's own trash
+   when `trash.useSystemTrash` is set and the platform `TrashBin`
+   accepts it. A sync root on another volume (an external drive) has
+   a second location on that volume, `<volume root>/.vapor/trash/<profile>/`,
+   the runtime directory's layout at the volume root, so the discard
+   is a rename on that volume and never a copy onto this one; both
+   locations are listed, restored from, and purged together. A
+   directory named `.vapor` is invisible to sync at any depth with
+   everything under it (the path filter, the reconcile walk, and the
+   filesystem provider's listings and feed all agree), so the volume
+   trash inside a sync root that is a whole drive, a runtime directory
+   inside a sync root, or a dev checkout's `./.vapor` with its logs and
+   sandboxes never becomes an intent; `.vaporignore` is a different
+   name and syncs. A volume that refuses the directory falls back to
+   the home location at the cost of a copy.
+   `vapor trash list|restore|empty` work with or without a daemon; a
+   restored file lands in the sync root and syncs like any write. The
+   daemon purges entries older than `trash.retentionDays` (7 by
+   default) at startup and every half hour. `trash.enabled: false`
+   unlinks.
+   What Vapor removes in the cloud follows the provider's own semantics
+   (Google Drive trashes; the filesystem provider removes).
 
 ## Sync modes (directionality)
 
@@ -129,6 +163,49 @@ keeping every synced object content-shaped is what keeps the conflict,
 echo-suppression, and transfer machinery simple — folders cannot
 "conflict", and parent materialization is idempotent by construction.
 
+Two mechanics make the folder rename work with a file-only engine. A
+directory that *appears* locally (created, or renamed in from
+elsewhere) arrives from the watcher as one event with no events for its
+children, so the runtime walks it and reports one `Created` event per
+file underneath, pruning ignored names the way the watcher bridge would;
+those synthesized events then debounce, compact, and upload exactly as
+a `cp -r` would have. A subtree larger than
+`SYNTHESIZED_SUBTREE_EVENT_CAP` files leaves a subtree reconcile marker
+for the rest, the same deferral a storm gets. A local directory that
+*disappears* arrives as one `Delete` intent; the provider never deletes
+a directory recursively (that would destroy children the engine never
+compared against the index), so the delete planner lists the remote
+subtree and expands the intent into one guarded `Delete` per entry,
+deepest first, with the directory itself re-enqueued last. Each child
+delete keeps the usual rule (refused, and the newer remote content
+downloaded, when the remote changed since the last sync). A directory
+delete that still finds children waits while any of them has queued
+work, and keeps the directory once the children that remain exist
+locally again, which is what stops an expansion loop. An empty remote
+directory is removed outright.
+
+**Names that differ only by case are one name on the filesystems Vapor
+ships on today.** A cloud can hold `Readme.md` next to `readme.md`; the
+local root cannot. The engine never maps a remote name whose exact
+spelling is absent locally while a differently-cased spelling is
+present (the reconcile walk, the changes-feed mapping, and the download
+apply all check), so the first object's local file is never rewritten
+by the second object. The second object is materialized under a
+conflict-copy name (`readme~conflict-<device>-<ms>.md`) and the pair is
+recorded in `name_aliases`: from then on that local copy syncs with its
+own cloud object in both directions (uploads, downloads, and deletes
+resolve the remote path through the alias before the mirror), the walk
+pairs the aliased remote name with the copy, the feed maps changes to
+the copy, and the alias is released when either side deletes. The cloud
+keeps its two objects; the device holds the kept name and the copy, and
+a `collision` timeline event names both. Among remote-only names that
+fold to one key the lexically first one takes the name and the rest are
+materialized the same way. A colliding *directory* has no copy to make
+and is reported and left untouched. `vapor conflicts resolve --keep
+canonical` on such a copy removes the cloud's other object; `--keep
+copy` is refused, since renaming the copy over the kept name would only
+swap which cloud object is stranded.
+
 **Special files (FIFOs, sockets, device nodes) are inert.** The executor
 refuses them at planning and the reconcile walk skips them — this must
 stay an *explicit* guard, not an accident of ordering: hashing a FIFO
@@ -170,8 +247,126 @@ When local and remote versions of the same path diverge (both sides modified, or
 - **Device identifier.** Sourced at first-run from `gethostname()` normalized to `[a-z0-9-]` (non-matching characters stripped, length capped at 32). If empty after normalization, fall back to a generated UUIDv4 truncated to 12 characters. The resolved value is persisted in `vapor.json` as `deviceId` and never silently regenerated; changing machine hostnames does not change `deviceId` once persisted.
 - **Collision-avoidance fallback.** If the derived conflict path already exists (on either side), append `-{seq}` starting at `2` and increment until free. Fallback template becomes `{stem}~conflict-{device_id}-{timestamp_ms}-{seq}{ext}`.
 - **Rename-during-conflict.** If the loser is renamed by the user or remote during the conflict write, the conflict copy still lands at the resolved fallback path; the user-initiated rename becomes a separate follow-up intent through the normal scheduler.
-- **Tombstone interaction.** If one side has deleted the path while the other side has a modified version, the modification wins and is written to the original canonical path (no conflict suffix); the delete is recorded as a completed tombstone. "Delete wins" is never the default — data preservation always wins over deletion.
+- **Tombstone interaction.** If one side has deleted the path while the other side has a modified version, the modification wins and is written to the original canonical path (no conflict suffix); the delete is recorded as a completed tombstone. "Delete wins" is never the default — data preservation always wins over deletion. A local copy that is exactly what the index last synced is not a modification: when its cloud object is found gone at upload time (a watcher reported the file again just as the cloud deleted it), the deletion applies here through the guard and the trash instead of a re-upload that would undo it and whose own events the feed would read as echoes. An upload the user asked for (the restore after `discard`, the merge after a root answer) carries `approved` and is never read that way.
 - **Determinism.** All inputs to the suffix (device_id, timestamp_ms) must be derivable from durable state or event metadata, so the same conflict replayed on the same device produces the same conflict path across daemon restarts.
+
+## Decisions
+
+A decision is a question the daemon parks when an irreversible action
+rests on evidence that could be read two ways, and only the user can
+say which reading is right. The rules:
+
+- **Scope is the smallest thing that is ambiguous.** A decision holds
+  one path, one batch, or one profile. Everything outside the scope
+  keeps syncing. The daemon is never paused because a question is open.
+- **Durable and listable.** A decision lives in the profile's state DB
+  (`pending_decisions`), with its kind, scope, question, a short option
+  list, and JSON evidence. `vapor decisions list|show` read it with or
+  without a daemon; the app drives the same command. `vapor status`
+  reports the open count (`decisions_pending`), and a `decision`
+  timeline entry marks both the opening and the outcome.
+- **Held intents.** The intents the decision holds move to the `held`
+  queue state, tied to the decision by `decision_id`. Held rows are not
+  queued work: they are not leased, not counted in the queue depth, and
+  they survive restarts. `vapor diagnostics` shows them as `Held` with
+  the decision number as the blocker.
+- **Answering.** `vapor decisions resolve <id> --choose <key>` records
+  the answer in the DB; the daemon applies it on its next tick, or at
+  its next start, and marks it applied. Each kind has one applier; an
+  answer a build cannot apply is logged and left answered-but-unapplied,
+  never silently consumed. Released intents carry `approved`, which the
+  guard that held them respects.
+- **Kinds today.** `mass-deletion` (batch scope, options `apply` and
+  `discard`; see the guard under Local safeguards); `root-missing`
+  (profile scope, option `recreate`) and `root-replaced` (profile
+  scope, option `reattach`), both under Root identity below;
+  `type-mismatch` (path scope) for a name that is a file on one side
+  and a directory on the other, with `keep-both` (the local side moves
+  to a conflict name and the cloud side comes down under the original
+  name), `prefer-local` (the cloud side is removed, guarded, and the
+  local side goes up), and `prefer-cloud` (the local side goes to the
+  trash and the cloud side comes down). Both sides stay untouched while
+  it is open, the question is asked once, and an applied answer gets
+  `DECISION_APPLY_GRACE_SECONDS` to land before the walk may ask about
+  the path again. `unsyncable-name` (path scope, option `skip`) for a
+  local file whose name the sync path model cannot carry, today a name
+  that is not valid UTF-8 (possible on Linux; macOS refuses to create
+  one). Nothing is held: the file stays on this device only and the
+  question is the user's notice. A rename fixes it, after which the
+  next whole-scope walk finds the name gone and withdraws the
+  question; `skip` stops the asking for that name. Watcher events for
+  such a path are dropped at the callback bridge, since the durable
+  queue is UTF-8. Further kinds land with the feature that needs them
+  and are listed here.
+
+### What stops a whole profile
+
+Only conditions under which no file can be synced correctly stop a
+profile. Everything else is file- or batch-scoped and leaves the rest of
+the sync running.
+
+| Condition | Effect | Way out |
+|---|---|---|
+| A sync root is missing (a volume unplugged, a folder deleted or moved) | profile holds; nothing is created or deleted anywhere; a `root-missing` decision is open | the root comes back (the hold lifts on its own), or `recreate` |
+| A sync root is replaced (a different folder at the same path, an emptied one) | profile holds; nothing is synced into the stranger; a `root-replaced` decision is open | the original root comes back, or `reattach` (merge, no deletions) |
+| The cloud is unreachable, refuses the credentials, or is out of quota | profile waits and retries with backoff; intents keep accumulating durably | connectivity, `vapor auth login`, freeing space |
+| The configuration is invalid | the daemon keeps the last valid configuration and reports the error | `vapor config` fixes it; live reload picks it up |
+| The daemon crash-loops | the lifecycle guard stops restarting it | `vapor service` after the cause is fixed |
+| The user pauses (`vapor pause`) | the profile stops; ingest keeps capturing intent durably | `vapor resume` |
+
+Never a whole-profile stop: a conflict, a name collision, a type
+mismatch, a deletion burst, a single failed transfer. Those hold their
+own path or batch and, when a person has to choose, open a decision.
+
+## Root identity
+
+The folders a profile syncs are the folders it adopted, not whatever
+sits at the configured paths. Without that check an unplugged volume
+reads as "every file was deleted", an empty folder at a mount point
+gets mirrored into the cloud, and a re-created cloud folder swallows a
+re-upload of everything. The mechanism (`core/daemon/src/root_identity.rs`,
+`core/providers/src/root_marker.rs`):
+
+- **Identity.** The local root carries a hidden `.vapor-root` marker
+  (an internal name: never synced, hidden from listings and feeds,
+  dropped by ingest). The cloud root carries whatever the provider
+  offers through `Provider::root_identity`: the same marker on a
+  filesystem-backed root, the folder id on Google Drive. A backend
+  without one records an empty identity and is only checked for
+  presence.
+- **Adoption.** On a profile's first contact with a root (nothing
+  recorded in `state_entries` under `root_identity.local` /
+  `root_identity.cloud`), the root is created when missing, the marker
+  is read or written (`Provider::adopt_root` on the cloud side), and
+  the identity is recorded. This is the only time Vapor creates a sync
+  root on its own.
+- **Checks.** At every start and every 15 seconds afterwards
+  (`ROOT_CHECK_INTERVAL_SECONDS`), the local root inline and the cloud
+  root through a worker probe. A missing root holds the profile and
+  opens a `root-missing` decision; a present root without the recorded
+  identity holds the profile and opens a `root-replaced` decision.
+  While held, nothing is leased, the status reason names the decision,
+  and ingest keeps capturing intent durably.
+- **Return.** The original root coming back (the marker matches again)
+  lifts the hold on its own, withdraws the decision, and runs a
+  whole-scope reconcile. A local root missing at daemon start parks the
+  profile as a placeholder that the multi-profile runtime composes
+  again when the folder returns, with no restart.
+- **Answers.** `reattach` adopts the folder now at the root (a fresh
+  marker where there was none) and `recreate` creates the folder empty
+  and adopts it. Both set `reconcile.merge_without_deletions` so the
+  reconcile that follows merges the two sides and propagates no
+  deletion in either direction, then lift the hold.
+- **The outage is forgotten.** A root going away looks like deletions
+  to a watcher that reports files one by one (inotify reports every
+  file under a removed directory before the directory), so every
+  recovery, on its own or by an answer, drops the queued `Delete` and
+  `ApplyRemoteDelete` intents and re-baselines the remote changes
+  cursor before the reconcile runs. A remote deletion whose probe
+  fails (the root missing is one such failure) is retried, never
+  applied: only a stat that answers "no object" finishes a deletion,
+  and an intent dropped while its probe ran is honoured when the
+  probe returns.
 
 ## Loop prevention (self-write cache)
 

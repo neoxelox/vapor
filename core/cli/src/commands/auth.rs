@@ -151,13 +151,17 @@ pub fn status_from(
 }
 
 /// Production constructor for the native secret store (the login
-/// keychain on macOS). On an OS without a native store yet it falls
-/// back to the in-process [`InMemorySecretStore`]; the caller checks
-/// `is_persistent` and warns the user.
-pub fn build_native_store() -> Box<dyn SecretStore> {
+/// keychain on macOS, the Secret Service or the command shim on
+/// Linux). When the host has no usable store it falls back to the
+/// in-process [`InMemorySecretStore`] and returns why, so the caller
+/// can warn the user with the way out.
+pub fn build_native_store() -> (Box<dyn SecretStore>, Option<String>) {
     match NativeSecretStore::for_current_user() {
-        Ok(store) => Box::new(store),
-        Err(_) => Box::new(InMemorySecretStore::new()),
+        Ok(store) => (Box::new(store), None),
+        Err(error) => (
+            Box::new(InMemorySecretStore::new()),
+            Some(error.to_string()),
+        ),
     }
 }
 
@@ -200,6 +204,14 @@ pub fn run_gdrive_pkce_flow() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         let _ = std::process::Command::new("open").arg(&url).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(&url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
     }
     eprintln!("Waiting for the authorization redirect on {redirect_uri} ...");
 

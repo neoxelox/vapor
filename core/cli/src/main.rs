@@ -1,20 +1,23 @@
 // `PathBuf`, `Instant`, and the `service` command module are only referenced
-// by the `#[cfg(target_os = "macos")]` service-install wiring below, so they
-// are unused on the non-macOS build that CI compiles under `-D warnings`.
-#[cfg(target_os = "macos")]
+// by the service-install wiring below, which exists where a native service
+// manager does (launchd, systemd); they are unused on the Windows build that
+// CI compiles under `-D warnings`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::path::PathBuf;
 use std::process::ExitCode;
-#[cfg(target_os = "macos")]
+use std::time::Duration;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use vapor_cli::commands::service as service_cmd;
 use vapor_cli::{RunOptions, ServiceCommand};
 use vapor_cli::{
     commands::{
-        auth as auth_cmd, config as config_cmd, conflicts as conflicts_cmd, doctor as doctor_cmd,
-        ipc as ipc_cmd, run as run_cmd,
+        auth as auth_cmd, config as config_cmd, conflicts as conflicts_cmd,
+        decisions as decisions_cmd, doctor as doctor_cmd, ipc as ipc_cmd, run as run_cmd,
+        trash as trash_cmd,
     },
     resolve_configuration_path,
 };
@@ -117,6 +120,79 @@ enum Command {
         #[command(subcommand)]
         action: ConflictsAction,
     },
+    /// List and answer the questions the daemon parked (an irreversible
+    /// action on ambiguous evidence). Works with or without a running
+    /// daemon; the daemon applies an answer on its next tick.
+    Decisions {
+        #[command(subcommand)]
+        action: DecisionsAction,
+    },
+    /// The files Vapor removed on this device and kept in its trash
+    /// (a deletion that arrived from the cloud, a mirror removal).
+    /// Works with or without a running daemon.
+    Trash {
+        #[command(subcommand)]
+        action: TrashAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TrashAction {
+    /// Every kept item of every enabled profile, newest first.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Put one item back at its original path (or beside it, when the
+    /// path is taken again).
+    Restore {
+        id: String,
+        /// Profile the id belongs to (needed only when several profiles
+        /// hold the same id).
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove every kept item, for good.
+    Empty {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DecisionsAction {
+    /// Open decisions of every enabled profile (`--all` includes
+    /// answered ones).
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        all: bool,
+    },
+    /// One decision with its question, options, and evidence.
+    Show {
+        id: i64,
+        /// Profile the id belongs to (needed only when several profiles
+        /// hold the same id).
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Answer a decision with one of its option keys.
+    Resolve {
+        id: i64,
+        #[arg(long)]
+        choose: String,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -193,6 +269,11 @@ enum ServiceAction {
     Install {
         #[arg(long)]
         json: bool,
+        /// Also register the headless supervisor (`vapor service check
+        /// --loop` kept alive by the service manager), for an install
+        /// with no app to restart a crashed daemon.
+        #[arg(long)]
+        supervise: bool,
     },
     /// Disable autolaunch and remove the service definition. Also
     /// sends the daemon an explicit stop unless `--keep-running` is
@@ -235,6 +316,14 @@ enum ServiceAction {
     Check {
         #[arg(long)]
         json: bool,
+        /// Keep ticking until a stop signal arrives, printing an
+        /// outcome only when it changes. What the app does every 30
+        /// seconds, for installs without one.
+        #[arg(long = "loop")]
+        keep_looping: bool,
+        /// Seconds between ticks with `--loop`.
+        #[arg(long)]
+        interval: Option<u64>,
     },
     /// Clear a crash-loop pause so restarts may resume.
     Acknowledge {
@@ -330,6 +419,106 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
         Command::Auth { action } => dispatch_auth(action),
         Command::SupportBundle { output, json } => dispatch_support_bundle(output, json),
         Command::Conflicts { action } => dispatch_conflicts(action),
+        Command::Decisions { action } => dispatch_decisions(action),
+        Command::Trash { action } => dispatch_trash(action),
+    }
+}
+
+fn dispatch_decisions(action: DecisionsAction) -> Result<ExitCode, String> {
+    let loaded = vapor_shared::config::load_from(&resolve_configuration_path());
+    if let Some(issue) = loaded.load_issue {
+        eprintln!("vapor: warning: {issue}");
+    }
+    match action {
+        DecisionsAction::List { json, all } => {
+            let report = decisions_cmd::list_decisions(&loaded.config, all);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("{}", decisions_cmd::render_list(&report));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        DecisionsAction::Show { id, profile, json } => {
+            let decision = decisions_cmd::show_decision(&loaded.config, id, profile.as_deref())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&decision).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("{}", decisions_cmd::render_show(&decision));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        DecisionsAction::Resolve {
+            id,
+            choose,
+            profile,
+            json,
+        } => {
+            let decision =
+                decisions_cmd::resolve_decision(&loaded.config, id, &choose, profile.as_deref())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&decision).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!(
+                    "Recorded {choose} for decision #{id}; the daemon applies it on its next tick (or at its next start)."
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn dispatch_trash(action: TrashAction) -> Result<ExitCode, String> {
+    let loaded = vapor_shared::config::load_from(&resolve_configuration_path());
+    if let Some(issue) = loaded.load_issue {
+        eprintln!("vapor: warning: {issue}");
+    }
+    match action {
+        TrashAction::List { json } => {
+            let report = trash_cmd::list_trash(&loaded.config);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("{}", trash_cmd::render_list(&report));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        TrashAction::Restore { id, profile, json } => {
+            let report = trash_cmd::restore(&loaded.config, &id, profile.as_deref())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("Restored {} to {}", report.id, report.restored_to.display());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        TrashAction::Empty { profile, json } => {
+            let report = trash_cmd::empty(&loaded.config, profile.as_deref());
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("Removed {} item(s) from the trash.", report.removed);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -519,8 +708,9 @@ fn dispatch_logs(tail: Option<usize>) -> Result<ExitCode, String> {
 }
 
 fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
-    let store = auth_cmd::build_native_store();
+    let (store, fallback_reason) = auth_cmd::build_native_store();
     let persistent = store.is_persistent();
+    let fallback_reason = fallback_reason.unwrap_or_default();
     match action {
         AuthAction::Login {
             provider,
@@ -548,8 +738,8 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
                 println!("auth login: stored token for {provider} (profile {profile})");
             } else {
                 eprintln!(
-                    "vapor: warning: no native secret store on this OS yet; the token was \
-                     kept in process memory only and will not survive restart."
+                    "vapor: warning: {fallback_reason}; the token was kept in process memory \
+                     only and will not survive restart."
                 );
                 println!(
                     "auth login: stored token for {provider} (profile {profile}, process-local only)"
@@ -568,8 +758,8 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
                 auth_cmd::status_from(store.as_ref(), &profile).map_err(|e| e.to_string())?;
             if !persistent {
                 eprintln!(
-                    "vapor: note: no native secret store on this OS yet; `bound` states \
-                     below reflect process-local memory only."
+                    "vapor: note: {fallback_reason}; `bound` states below reflect \
+                     process-local memory only."
                 );
             }
             for entry in entries {
@@ -620,9 +810,14 @@ fn resolve_auth_token(token: Option<String>) -> Result<String, String> {
 }
 
 fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
+    let mut supervise = false;
+    let mut check_loop: Option<Duration> = None;
     let (command, json) = match action {
         ServiceAction::Bootstrap { json } => (ServiceCommand::Bootstrap, json),
-        ServiceAction::Install { json } => (ServiceCommand::Install, json),
+        ServiceAction::Install { json, supervise: s } => {
+            supervise = s;
+            (ServiceCommand::Install, json)
+        }
         ServiceAction::Uninstall { json, keep_running } => {
             (ServiceCommand::Uninstall { keep_running }, json)
         }
@@ -630,21 +825,69 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
         ServiceAction::Stop { json } => (ServiceCommand::Stop, json),
         ServiceAction::Restart { json } => (ServiceCommand::Restart, json),
         ServiceAction::Status { json } => (ServiceCommand::Status, json),
-        ServiceAction::Check { json } => (ServiceCommand::Check, json),
+        ServiceAction::Check {
+            json,
+            keep_looping,
+            interval,
+        } => {
+            if keep_looping {
+                check_loop = Some(Duration::from_secs(interval.unwrap_or(
+                    vapor_shared::constants::service::HEALTH_TICK_INTERVAL_SECONDS,
+                )));
+            } else if interval.is_some() {
+                return Err("--interval only means something with --loop".to_string());
+            }
+            (ServiceCommand::Check, json)
+        }
         ServiceAction::Acknowledge { json } => (ServiceCommand::Acknowledge, json),
     };
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let config_path = resolve_configuration_path();
         let daemon_binary = locate_daemon_binary().ok_or_else(|| {
             "vapord binary not found near the running CLI; install via the macOS app or set PATH"
                 .to_string()
         })?;
-        let (manager, installer) = service_cmd::build_native_macos(config_path, daemon_binary)
+        let (manager, installer) =
+            service_cmd::build_native(config_path, daemon_binary).map_err(|e| e.to_string())?;
+        if let Some(interval) = check_loop {
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = stop.clone();
+            vapor_platform::ProcessSupervisor::register_shutdown_handler(
+                &vapor_platform::NativeProcessSupervisor::new(),
+                move || flag.store(true, std::sync::atomic::Ordering::SeqCst),
+            )
             .map_err(|e| e.to_string())?;
-        let outcome = service_cmd::dispatch(command, &manager, installer.as_ref(), Instant::now())
-            .map_err(|e| e.to_string())?;
+            service_cmd::check_loop(&manager, installer.as_ref(), interval, json, &stop)
+                .map_err(|e| e.to_string())?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        let supervisor = service_cmd::supervisor_installer().map_err(|e| e.to_string())?;
+        let mut outcome =
+            service_cmd::dispatch(command, &manager, installer.as_ref(), Instant::now())
+                .map_err(|e| e.to_string())?;
+        match &mut outcome {
+            service_cmd::ServiceCommandOutcome::Status(report) => {
+                report.supervisor_installed = vapor_platform::ServiceInstaller::status(&supervisor)
+                    .map(|status| status != vapor_platform::ServiceStatus::NotInstalled)
+                    .unwrap_or(false);
+            }
+            service_cmd::ServiceCommandOutcome::Action(_) if supervise => {
+                vapor_platform::ServiceInstaller::install_and_enable(&supervisor)
+                    .map_err(|e| format!("supervisor install failed: {e}"))?;
+            }
+            service_cmd::ServiceCommandOutcome::Action(_)
+                if matches!(command, ServiceCommand::Uninstall { .. })
+                    && vapor_platform::ServiceInstaller::status(&supervisor).is_ok_and(
+                        |status| status != vapor_platform::ServiceStatus::NotInstalled,
+                    ) =>
+            {
+                vapor_platform::ServiceInstaller::disable_and_uninstall(&supervisor)
+                    .map_err(|e| format!("supervisor uninstall failed: {e}"))?;
+            }
+            _ => {}
+        }
         if json {
             let serialized = serde_json::to_string_pretty(&service_cmd::render_json(&outcome))
                 .map_err(|e| e.to_string())?;
@@ -655,14 +898,17 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
         Ok(ExitCode::SUCCESS)
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (command, json);
-        Err("`vapor service` currently supports macOS only; Linux and Windows land with those surfaces".to_string())
+        let _ = (command, json, supervise, check_loop);
+        Err(
+            "`vapor service` needs a native service manager; Windows lands with that surface"
+                .to_string(),
+        )
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn locate_daemon_binary() -> Option<PathBuf> {
     use vapor_cli::commands::daemon_binary::{self, DaemonBinarySource};
     let daemon = daemon_binary::locate()?;

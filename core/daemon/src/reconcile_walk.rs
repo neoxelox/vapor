@@ -22,10 +22,13 @@
 //! local copy was touched since the last transfer (a different mtime at
 //! the millisecond the index stores, the rsync quick check). That catches
 //! an edit made while the daemon was not running, which the watcher
-//! cannot see and which a size-only comparison missed. The upload
-//! planner hashes the file and converges silently when the content is
-//! in fact unchanged. A whole-tree hash pass stays out of the walk's
-//! budget on purpose.
+//! cannot see and which a size-only comparison missed. A pair the index
+//! has no row for (first sync of two pre-populated roots, a lost state
+//! DB) is unverified rather than converged: it is routed the same way,
+//! and the transfer planner hashes it once, converges silently when the
+//! content matches, and records the row so the quick check works from
+//! then on. A whole-tree hash pass stays out of the walk's budget on
+//! purpose.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
@@ -94,6 +97,13 @@ pub struct ReconcileWalker {
     /// Two-way file/directory type mismatches found by this walk; the
     /// runtime surfaces them on the timeline so the user can act.
     type_mismatches: Vec<PathBuf>,
+    /// Local names this walk could not carry to the other side; the
+    /// runtime asks about each once.
+    unsyncable_names: Vec<crate::unsyncable::UnsyncableName>,
+    /// Remote names that would alias an existing, differently-cased
+    /// local file (`(wanted local path, existing local path)`); left
+    /// untouched on both sides and surfaced on the timeline.
+    name_collisions: Vec<(PathBuf, PathBuf)>,
     /// Ignore rules, applied symmetrically: local entries and remote
     /// entries (via their local-equivalent path) that match never
     /// produce intents and are never descended into. Without this the
@@ -103,6 +113,13 @@ pub struct ReconcileWalker {
     path_filter: Option<Arc<SharedEventPathFilter>>,
     pending_dirs: VecDeque<PathBuf>,
     stats: WalkStats,
+    /// A reattached or re-created root is merged: a file present on
+    /// one side only is transferred, never treated as a deletion to
+    /// propagate, whatever the index says.
+    merge_without_deletions: bool,
+    /// Names the conflict copies this walk materializes colliding
+    /// remote names as.
+    device_id: String,
 }
 
 impl ReconcileWalker {
@@ -117,9 +134,68 @@ impl ReconcileWalker {
             path_filter,
             pending_enumeration: None,
             type_mismatches: Vec::new(),
+            unsyncable_names: Vec::new(),
+            name_collisions: Vec::new(),
             pending_dirs: VecDeque::from([subtree_root.to_path_buf()]),
             stats: WalkStats::default(),
+            merge_without_deletions: false,
+            device_id: String::new(),
         }
+    }
+
+    pub fn with_merge_without_deletions(mut self, merge: bool) -> Self {
+        self.merge_without_deletions = merge;
+        self
+    }
+
+    pub fn with_device_id(mut self, device_id: &str) -> Self {
+        self.device_id = device_id.to_string();
+        self
+    }
+
+    /// A remote name this filesystem cannot hold next to an existing
+    /// local name is materialized under a conflict-copy name, and the
+    /// alias between the two is recorded so the copy keeps syncing with
+    /// its own cloud object from then on.
+    fn materialize_colliding_remote(
+        &mut self,
+        state_db: &mut DurableStateDb,
+        wanted: &Path,
+        existing: &Path,
+        remote: &RemoteEntry,
+        now: SystemTime,
+    ) -> Result<(), WalkError> {
+        if remote.kind != RemoteEntryKind::File {
+            // A colliding directory has no copy to make; reported as
+            // before.
+            self.name_collisions
+                .push((wanted.to_path_buf(), existing.to_path_buf()));
+            return Ok(());
+        }
+        let millis = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let copy = crate::conflict::conflict_copy_path(wanted, &self.device_id, millis, |path| {
+            path.exists() || crate::name_collision::colliding_local_path(path).is_some()
+        });
+        state_db.record_name_alias(
+            remote.path.as_str(),
+            &copy,
+            remote.content_hash.as_deref().unwrap_or(""),
+            now,
+        )?;
+        state_db.enqueue_download_from(&copy, remote.path.as_str(), now)?;
+        crate::logging::info(
+            "Remote name collides with a local file; materializing it as a conflict copy",
+            &[
+                ("remote", remote.path.as_str().to_string()),
+                ("existing", existing.display().to_string()),
+                ("copy", copy.display().to_string()),
+            ],
+        );
+        self.name_collisions.push((wanted.to_path_buf(), copy));
+        Ok(())
     }
 
     fn ignores(&self, local_path: &Path) -> bool {
@@ -142,6 +218,20 @@ impl ReconcileWalker {
     /// Drains the two-way type mismatches found since the last call.
     pub fn take_type_mismatches(&mut self) -> Vec<PathBuf> {
         std::mem::take(&mut self.type_mismatches)
+    }
+
+    pub fn take_unsyncable_names(&mut self) -> Vec<crate::unsyncable::UnsyncableName> {
+        std::mem::take(&mut self.unsyncable_names)
+    }
+
+    /// Whether this walk covers the whole scope, so what it did not
+    /// report is known to be gone.
+    pub fn is_whole_scope(&self) -> bool {
+        self.subtree_root == self.scope_root
+    }
+
+    pub fn take_name_collisions(&mut self) -> Vec<(PathBuf, PathBuf)> {
+        std::mem::take(&mut self.name_collisions)
     }
 
     pub fn take_mirror_deltas(&mut self) -> (usize, usize) {
@@ -244,12 +334,10 @@ impl ReconcileWalker {
                 for entry in entries.flatten() {
                     let Some(name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
                         // Non-UTF-8 names are unrepresentable in the sync
-                        // path model; log so a file that never syncs is
-                        // diagnosable (macOS enforces UTF-8, so this is rare).
-                        crate::logging::warning(
-                            "Reconcile walk skipped a non-UTF-8 local file name (cannot be synced)",
-                            &[("path", entry.path().to_string_lossy().into_owned())],
-                        );
+                        // path model; the runtime asks about the file
+                        // once instead of logging on every walk.
+                        self.unsyncable_names
+                            .push(crate::unsyncable::UnsyncableName::not_utf8(&entry.path()));
                         continue;
                     };
                     if vapor_providers::filesystem::is_internal_file_name(&name) {
@@ -319,10 +407,15 @@ impl ReconcileWalker {
             }
         }
 
+        // A remote name materialized under an alias pairs with its
+        // local copy, not with the name it cannot have here.
+        let aliases: BTreeMap<String, String> =
+            state_db.name_aliases_in(directory)?.into_iter().collect();
         for entry in remote_entries {
             let Some(name) = entry.path.file_name().map(ToOwned::to_owned) else {
                 continue;
             };
+            let name = aliases.get(&name).cloned().unwrap_or(name);
             // Remote entries are judged by the local path they would
             // converge onto, so one rule set governs both directions.
             if self.ignores(&directory.join(&name)) {
@@ -331,8 +424,44 @@ impl ReconcileWalker {
             pairs.entry(name).or_default().remote = Some(entry);
         }
 
+        // Remote-only names that differ only by case cannot all
+        // materialize on a case-insensitive local filesystem. The
+        // lexically first one proceeds; the rest are collisions, the
+        // same verdict a later walk would reach once the first exists.
+        let mut skipped_aliases: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        if crate::name_collision::local_filesystem_folds_case() {
+            let mut by_fold: BTreeMap<String, Vec<String>> = BTreeMap::new();
+            for (name, pair) in &pairs {
+                if pair.local.is_none() && pair.remote.is_some() {
+                    by_fold
+                        .entry(crate::name_collision::fold(name))
+                        .or_default()
+                        .push(name.clone());
+                }
+            }
+            for names in by_fold.into_values() {
+                if names.len() < 2 {
+                    continue;
+                }
+                let winner = directory.join(&names[0]);
+                for name in &names[1..] {
+                    let wanted = directory.join(name);
+                    if let Some(remote) = pairs.get(name).and_then(|pair| pair.remote.clone()) {
+                        self.materialize_colliding_remote(
+                            state_db, &wanted, &winner, &remote, now,
+                        )?;
+                    }
+                    skipped_aliases.insert(name.clone());
+                }
+            }
+        }
+
         let mut batch: Vec<(PathBuf, PendingIntentKind, SystemTime)> = Vec::new();
         for (name, pair) in pairs {
+            if skipped_aliases.contains(&name) {
+                continue;
+            }
             let local_path = directory.join(&name);
             match (pair.local, pair.remote) {
                 (Some(local), Some(remote)) => match (local.is_dir, remote.kind) {
@@ -341,7 +470,8 @@ impl ReconcileWalker {
                     }
                     (false, RemoteEntryKind::File) => {
                         let diverged = local.size_bytes != remote.size_bytes
-                            || touched_since_last_sync(state_db, &local_path, &local)?;
+                            || touched_since_last_sync(state_db, &local_path, &local)?
+                            || remote_touched_since_last_sync(state_db, &local_path, &remote)?;
                         if diverged {
                             match sync_mode {
                                 SyncMode::TwoWay => {
@@ -417,12 +547,18 @@ impl ReconcileWalker {
                         if local.is_dir {
                             self.pending_dirs.push_back(local.path);
                         } else if sync_mode == SyncMode::TwoWay
-                            && remote_deletion_wins(state_db, &local_path, local.modified_at)
+                            && !self.merge_without_deletions
+                            && (remote_deletion_wins(state_db, &local_path, local.modified_at)
+                                || deleted_in_cloud_while_away(state_db, &local_path, &local)?)
                         {
-                            // Restart-safe deletion replay: the
-                            // remote deleted this path and the local copy
-                            // has not been modified since — finish the
-                            // apply instead of resurrecting the file.
+                            // A deletion to finish, not a file to
+                            // resurrect: either a remote-origin tombstone
+                            // the local copy predates, or a synced file the
+                            // cloud no longer has while the local copy is
+                            // exactly what was last synced (the cloud side
+                            // deleted it while no daemon was running).
+                            // The executor's own guard and the
+                            // mass-deletion guard still get their say.
                             batch.push((local_path, PendingIntentKind::ApplyRemoteDelete, now));
                         } else {
                             batch.push((local_path, PendingIntentKind::Upload, now));
@@ -436,44 +572,71 @@ impl ReconcileWalker {
                         self.stats.mirror_deletes += 1;
                     }
                 },
-                (None, Some(remote)) => match sync_mode {
-                    SyncMode::TwoWay | SyncMode::PullOnly => match remote.kind {
-                        RemoteEntryKind::Directory => {
-                            // Children materialize local parents on
-                            // apply; walk deeper to find them.
-                            self.pending_dirs.push_back(local_path);
-                        }
-                        RemoteEntryKind::File => {
-                            if sync_mode == SyncMode::TwoWay
-                                && local_deletion_wins(state_db, &local_path, remote.modified_at)
-                            {
-                                // Restart-safe deletion replay:
-                                // we deleted this path locally and the
-                                // remote copy has not changed since —
-                                // finish propagating the delete instead
-                                // of re-downloading.
-                                batch.push((local_path, PendingIntentKind::Delete, now));
-                            } else {
-                                batch.push((local_path, PendingIntentKind::Download, now));
-                            }
-                        }
-                    },
-                    SyncMode::PushOnly => {
-                        // Strict mirror: cloud-only content does not
-                        // exist at the local source of truth — remove it
-                        // (provider delete handles directories).
-                        batch.push((local_path, PendingIntentKind::Delete, now));
-                        self.stats.mirror_deletes += 1;
+                (None, Some(remote)) => {
+                    if let Some(existing) = crate::name_collision::colliding_local_path(&local_path)
+                    {
+                        self.materialize_colliding_remote(
+                            state_db,
+                            &local_path,
+                            &existing,
+                            &remote,
+                            now,
+                        )?;
+                        continue;
                     }
-                },
+                    match sync_mode {
+                        SyncMode::TwoWay | SyncMode::PullOnly => match remote.kind {
+                            RemoteEntryKind::Directory => {
+                                // Children materialize local parents on
+                                // apply; walk deeper to find them.
+                                self.pending_dirs.push_back(local_path);
+                            }
+                            RemoteEntryKind::File => {
+                                if sync_mode == SyncMode::TwoWay
+                                    && !self.merge_without_deletions
+                                    && (local_deletion_wins(
+                                        state_db,
+                                        &local_path,
+                                        remote.modified_at,
+                                    ) || deleted_here_while_away(
+                                        state_db,
+                                        &local_path,
+                                        &remote,
+                                    )?)
+                                {
+                                    // The mirror image: a local-origin
+                                    // tombstone the remote copy predates,
+                                    // or a synced file this device no
+                                    // longer has while the cloud copy is
+                                    // exactly what was last synced (deleted
+                                    // here while no daemon was running).
+                                    batch.push((local_path, PendingIntentKind::Delete, now));
+                                } else {
+                                    batch.push((local_path, PendingIntentKind::Download, now));
+                                }
+                            }
+                        },
+                        SyncMode::PushOnly => {
+                            // Strict mirror: cloud-only content does not
+                            // exist at the local source of truth — remove it
+                            // (provider delete handles directories).
+                            batch.push((local_path, PendingIntentKind::Delete, now));
+                            self.stats.mirror_deletes += 1;
+                        }
+                    }
+                }
                 (None, None) => unreachable!("pair map only holds observed entries"),
             }
         }
 
         if !batch.is_empty() {
-            self.stats.intents_enqueued += state_db.enqueue_intents_coalesced(
+            // A merge after a root answer transfers every one-sided
+            // file on the user's say-so; its uploads must not be read
+            // as cloud deletions by the upload gate.
+            self.stats.intents_enqueued += state_db.enqueue_intents_coalesced_with(
                 &batch,
                 crate::safeguards::IntentSource::ReconcileBacklog,
+                self.merge_without_deletions,
             )?;
         }
         Ok(())
@@ -483,17 +646,75 @@ impl ReconcileWalker {
 /// Equal sizes are not enough: a local edit that kept the byte count
 /// (the common case for config files and source edits) is only visible
 /// through the mtime the sync index recorded at the last transfer. No
-/// index row means the pair was never synced by this daemon, so equal
-/// sizes are taken as converged, as before.
+/// index row means the pair was never verified by this daemon, so it
+/// counts as diverged too: the planner hashes it once and records the
+/// row, which is the only way the index gets rebuilt after a loss.
 fn touched_since_last_sync(
     state_db: &DurableStateDb,
     local_path: &Path,
     local: &LocalEntry,
 ) -> Result<bool, WalkError> {
-    Ok(state_db.sync_index(local_path)?.is_some_and(|index| {
-        index.local_modified_at.is_some()
-            && !index.matches_local(local.size_bytes, local.modified_at)
-    }))
+    Ok(match state_db.sync_index(local_path)? {
+        None => true,
+        Some(index) => {
+            index.local_modified_at.is_some()
+                && !index.matches_local(local.size_bytes, local.modified_at)
+        }
+    })
+}
+
+/// The cloud-side twin of [`touched_since_last_sync`]: a remote edit
+/// that kept the byte count is only visible through the remote mtime
+/// the index recorded at the last transfer. A row without one (written
+/// before the provider reported it) cannot claim divergence here; the
+/// local check and the size comparison still apply.
+fn remote_touched_since_last_sync(
+    state_db: &DurableStateDb,
+    local_path: &Path,
+    remote: &RemoteEntry,
+) -> Result<bool, WalkError> {
+    Ok(match state_db.sync_index(local_path)? {
+        None => true,
+        Some(index) => {
+            index.remote_modified_at.is_some()
+                && !index.matches_remote(remote.size_bytes, remote.modified_at)
+        }
+    })
+}
+
+/// A synced file the cloud no longer has, while the local copy is
+/// exactly what was last synced: the cloud side deleted it while no
+/// daemon was watching. A local copy that changed since, or a pair the
+/// index cannot vouch for (no row, no recorded mtime), keeps the file.
+fn deleted_in_cloud_while_away(
+    state_db: &DurableStateDb,
+    local_path: &Path,
+    local: &LocalEntry,
+) -> Result<bool, WalkError> {
+    Ok(match state_db.sync_index(local_path)? {
+        Some(index) => index.matches_local(local.size_bytes, local.modified_at),
+        None => false,
+    })
+}
+
+/// The mirror image: a synced file this device no longer has, while the
+/// cloud copy is exactly what was last synced (the remote mtime the
+/// index recorded, or its hash when the provider carries one).
+fn deleted_here_while_away(
+    state_db: &DurableStateDb,
+    local_path: &Path,
+    remote: &RemoteEntry,
+) -> Result<bool, WalkError> {
+    Ok(match state_db.sync_index(local_path)? {
+        Some(index) => {
+            index.matches_remote(remote.size_bytes, remote.modified_at)
+                || remote
+                    .content_hash
+                    .as_deref()
+                    .is_some_and(|hash| hash == index.content_hash)
+        }
+        None => false,
+    })
 }
 
 /// Whether a remote-origin tombstone should win over a surviving local
@@ -807,13 +1028,250 @@ mod tests {
     }
 
     #[test]
-    fn equal_size_same_name_files_are_treated_as_converged() {
+    fn equal_size_pair_without_an_index_row_is_verified_once() {
+        // Two pre-populated roots (or a lost state DB): the walk cannot
+        // tell identical from divergent content by size alone, so the
+        // pair is routed to the upload planner, which hashes it and
+        // records the index row. With the row present and matching, the
+        // next walk treats the pair as converged.
         let mut fixture = Fixture::new();
-        std::fs::write(fixture.local_root.join("same.txt"), b"12345").expect("seed");
+        let local = fixture.local_root.join("same.txt");
+        std::fs::write(&local, b"12345").expect("seed");
         std::fs::write(fixture.cloud_root.join("same.txt"), b"12345").expect("seed");
 
         fixture.run_walk(SyncMode::TwoWay);
+        assert_eq!(
+            fixture.queued_kinds(),
+            vec![(local.clone(), PendingIntentKind::Upload)]
+        );
+
+        let mtime = std::fs::symlink_metadata(&local)
+            .and_then(|m| m.modified())
+            .ok();
+        fixture
+            .state_db
+            .set_sync_index(&local, "hash-of-12345", 5, mtime, None, "op-1", ts(1))
+            .expect("index row");
+        fixture.run_walk(SyncMode::TwoWay);
         assert!(fixture.queued_kinds().is_empty());
+    }
+
+    /// A provider that only answers `enumerate`, with whatever names
+    /// the test hands it, so a listing a real filesystem cloud root
+    /// cannot hold (two names differing only by case) can be staged.
+    struct ListingProvider {
+        entries: Vec<RemoteEntry>,
+    }
+
+    impl Provider for ListingProvider {
+        fn name(&self) -> &'static str {
+            "listing"
+        }
+        fn capabilities(&self) -> vapor_providers::ProviderCapabilities {
+            vapor_providers::inert_stub_provider().capabilities()
+        }
+        fn ensure_cloud_sync_directory(&self, _: &str) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn enumerate(&self, directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {
+            Ok(if directory.is_root() {
+                self.entries.clone()
+            } else {
+                Vec::new()
+            })
+        }
+        fn stat(&self, _: &RemotePath) -> Result<Option<RemoteEntry>, ProviderError> {
+            Ok(None)
+        }
+        fn content_hash(&self, _: &RemotePath) -> Result<String, ProviderError> {
+            Err(ProviderError::not_found("listing provider has no content"))
+        }
+        fn begin_upload(
+            &self,
+            _: vapor_providers::UploadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, ProviderError> {
+            Err(ProviderError::not_found("listing provider cannot upload"))
+        }
+        fn begin_download(
+            &self,
+            _: vapor_providers::DownloadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, ProviderError> {
+            Err(ProviderError::not_found("listing provider cannot download"))
+        }
+        fn delete(&self, _: &RemotePath, _: &str) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn poll_changes(
+            &self,
+            _: Option<&str>,
+            _: usize,
+        ) -> Result<vapor_providers::ChangesPoll, ProviderError> {
+            Err(ProviderError::not_found("listing provider has no feed"))
+        }
+    }
+
+    fn remote_file(name: &str, size: u64) -> RemoteEntry {
+        RemoteEntry {
+            path: RemotePath::root().join(name).expect("name"),
+            kind: RemoteEntryKind::File,
+            size_bytes: size,
+            modified_at: ts(0),
+            content_hash: None,
+            op_id: None,
+        }
+    }
+
+    #[test]
+    fn a_remote_name_aliasing_a_local_file_materializes_as_an_aliased_conflict_copy() {
+        // The cloud holds Readme.md and readme.md; a case-insensitive
+        // local root can hold one. The second name must not download
+        // onto the first one's file (that rewrote the cloud object it
+        // came from); it comes down under a conflict-copy name that is
+        // aliased to its own cloud object from then on.
+        let mut fixture = Fixture::new();
+        std::fs::write(fixture.local_root.join("Readme.md"), b"upper").expect("seed");
+        let aliases_locally =
+            std::fs::symlink_metadata(fixture.local_root.join("readme.md")).is_ok();
+        let provider: Arc<dyn Provider> = Arc::new(ListingProvider {
+            entries: vec![remote_file("Readme.md", 5), remote_file("readme.md", 5)],
+        });
+
+        let mut walker = ReconcileWalker::new(&fixture.local_root, &fixture.local_root, None)
+            .with_device_id("dev");
+        let mut done = false;
+        for _ in 0..64 {
+            done = walker
+                .process(
+                    provider.clone(),
+                    &ProviderCallMode::Inline,
+                    SyncMode::TwoWay,
+                    &mut fixture.state_db,
+                    8,
+                    ts(0),
+                    &|| true,
+                )
+                .expect("walk step");
+            if done {
+                break;
+            }
+        }
+        assert!(done);
+        let queued = fixture.queued_kinds();
+        // Readme.md itself has no index row, so it is verified once.
+        let verify = (
+            fixture.local_root.join("Readme.md"),
+            PendingIntentKind::Upload,
+        );
+        if aliases_locally {
+            assert_eq!(queued.len(), 2, "{queued:?}");
+            assert_eq!(queued[0], verify);
+            let (copy, kind) = &queued[1];
+            assert_eq!(*kind, PendingIntentKind::Download);
+            let copy_name = copy.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                copy_name.starts_with("readme~conflict-dev-") && copy_name.ends_with(".md"),
+                "the colliding name comes down as a conflict copy: {copy_name}"
+            );
+            let (alias_local, _) = fixture
+                .state_db
+                .name_alias("readme.md")
+                .expect("query")
+                .expect("the alias is recorded");
+            assert_eq!(&alias_local, copy);
+            assert_eq!(
+                fixture
+                    .state_db
+                    .alias_remote_for_local(copy)
+                    .expect("query")
+                    .as_deref(),
+                Some("readme.md")
+            );
+            let intent = fixture
+                .state_db
+                .list_queue_intents(4)
+                .expect("queue")
+                .into_iter()
+                .find(|intent| intent.kind == PendingIntentKind::Download)
+                .expect("download");
+            assert_eq!(
+                intent.remote_path.as_deref(),
+                Some("readme.md"),
+                "the download names the cloud object it comes from"
+            );
+            assert_eq!(
+                walker.take_name_collisions(),
+                vec![(fixture.local_root.join("readme.md"), copy.clone())]
+            );
+        } else {
+            // Case-sensitive local root: both names can coexist and the
+            // second one downloads like any remote-only file.
+            assert_eq!(
+                queued,
+                vec![
+                    verify,
+                    (
+                        fixture.local_root.join("readme.md"),
+                        PendingIntentKind::Download
+                    )
+                ]
+            );
+            assert!(walker.take_name_collisions().is_empty());
+        }
+    }
+
+    #[test]
+    fn an_aliased_copy_pairs_with_its_own_cloud_object_on_later_walks() {
+        let mut fixture = Fixture::new();
+        std::fs::write(fixture.local_root.join("Readme.md"), b"upper").expect("seed");
+        let copy = fixture.local_root.join("readme~conflict-dev-1.md");
+        std::fs::write(&copy, b"lower").expect("copy");
+        // Both files are synced: Readme.md with its mirror, the copy
+        // with the aliased readme.md.
+        for (path, op) in [
+            (fixture.local_root.join("Readme.md"), "op-a"),
+            (copy.clone(), "op-b"),
+        ] {
+            let mtime = std::fs::symlink_metadata(&path)
+                .and_then(|m| m.modified())
+                .ok();
+            fixture
+                .state_db
+                .set_sync_index(&path, "hash", 5, mtime, Some(ts(0)), op, ts(1))
+                .expect("index");
+        }
+        fixture
+            .state_db
+            .record_name_alias("readme.md", &copy, "hash", ts(1))
+            .expect("alias");
+        let provider: Arc<dyn Provider> = Arc::new(ListingProvider {
+            entries: vec![remote_file("Readme.md", 5), remote_file("readme.md", 5)],
+        });
+        let mut walker = ReconcileWalker::new(&fixture.local_root, &fixture.local_root, None)
+            .with_device_id("dev");
+        let mut done = false;
+        for _ in 0..64 {
+            done = walker
+                .process(
+                    provider.clone(),
+                    &ProviderCallMode::Inline,
+                    SyncMode::TwoWay,
+                    &mut fixture.state_db,
+                    8,
+                    ts(0),
+                    &|| true,
+                )
+                .expect("walk step");
+            if done {
+                break;
+            }
+        }
+        assert!(done);
+        assert!(
+            fixture.queued_kinds().is_empty(),
+            "both pairs are converged: {:?}",
+            fixture.queued_kinds()
+        );
+        assert!(walker.take_name_collisions().is_empty());
     }
 
     #[test]

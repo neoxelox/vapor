@@ -189,10 +189,11 @@ from existing Swift/docs. Windows/Linux impls land later (Phase C6/C7).
 - [ ] C3-11 Remaining throttle inputs. macOS: a disk-pressure source
       (none is public; evaluate free space on the sync-root volume as a
       proxy) and measured link capacity for `network_throughput_kbps`
-      (`nw_path_monitor` or a transfer-derived estimate). Windows and
-      Linux: the full sampler and idle notifier listed in
-      `docs/architecture/platform-abstractions.md` when those surfaces
-      ship; until then both return static defaults and zero idle time.
+      (`nw_path_monitor` or a transfer-derived estimate). Windows: the
+      full sampler and idle notifier listed in
+      `docs/architecture/platform-abstractions.md` when that surface
+      ships; until then it returns static defaults and zero idle time.
+      Linux: the display-server idle query and PSI (Phase C7).
 
 Exit gate:
 
@@ -316,34 +317,43 @@ Exit gate:
 
 ## Phase C7 - Linux platform implementations
 
-**Status: deferred / optional.** Gated on the project owner explicitly
-opting into a Linux surface. Nothing in the primary path (core +
-macOS app + CLI-on-macOS) is blocked by this phase. See
-`docs/tasks/README.md` wave 13.
+**Status: native traits landed (2026-09-07); the surface is not
+shipping yet.** Every `core/platform` trait has a Linux implementation
+that the daemon and the CLI consume, verified in a Linux container by
+Tier 1 and the e2e harness. What remains before Linux counts as a
+shipping OS is below and in `docs/tasks/README.md` wave 13.
 
-- [ ] C7-1 `core/platform/fs_watch/linux.rs`: `inotify` (user) MVP; optional
-      `fanotify` variant behind `CAP_SYS_ADMIN` for system-wide scenarios.
-      `vapor doctor` hooks for watch-limit detection
-      (`/proc/sys/fs/inotify/max_user_watches`).
-- [ ] C7-2 `core/platform/service/linux.rs`: systemd user unit
-      (`~/.config/systemd/user/vapord.service`) + `systemctl --user …`;
-      system unit (`/etc/systemd/system/vapord.service`) under `--system`.
-      Optional `loginctl enable-linger` prompt when the user wants sync
-      while logged out.
-- [ ] C7-3 `core/platform/secrets/linux.rs`: `secret-service` / libsecret
-      D-Bus as default; `age`-encrypted file at `<vapor_dir>/secrets.age`
-      fallback for headless hosts; `--secrets-backend=command` shim for
-      external tools.
-- [ ] C7-4 `core/platform/metrics/linux.rs`: `/proc/stat`,
-      `/proc/self/stat`, `/sys/class/power_supply/*`,
-      `/proc/pressure/{cpu,io,memory}` (PSI), `/proc/net/dev`. Optional
-      NetworkManager D-Bus `NM-metered` integration when present.
-- [ ] C7-5 `core/platform/idle/linux.rs`: X11 `XScreenSaverQueryInfo`;
-      Wayland `org.freedesktop.ScreenSaver` or `ext-idle-notify-v1`;
-      headless hosts report always-idle.
-- [ ] C7-6 `core/platform/fs_caps/linux.rs`: native xattr on ext4/xfs/btrfs;
-      side-file fallback on filesystems without xattr support; case-
-      sensitivity probe.
+- [x] C7-1 `core/platform/fs_watch/notify_backend.rs`: the `notify`
+      watcher shared with macOS (inotify on Linux). A dropped-events
+      signal (queue overflow) becomes a whole-scope reconcile; a
+      watch-limit failure names `fs.inotify.max_user_watches`.
+      *(Open: a `vapor doctor` check that compares the limit with the
+      tree size; the `fanotify` variant.)*
+- [x] C7-2 `core/platform/service/linux.rs`: systemd user unit
+      (`~/.config/systemd/user/sh.arn.vapor.daemon.service`) driven by
+      `systemctl --user`; `Restart=no` for the daemon, `Restart=always`
+      for the headless supervisor. `vapor service` dispatches on Linux.
+      *(Open: the system unit under `--system`; a `loginctl
+      enable-linger` hint for sync while logged out.)*
+- [x] C7-3 `core/platform/secrets/linux.rs`: the `VAPOR_SECRETS_COMMAND`
+      shim for headless hosts, the Secret Service through `secret-tool`
+      on a desktop, `Unsupported` naming the variable otherwise. Never a
+      plaintext file. *(Open: a libsecret D-Bus client instead of the
+      CLI, so a desktop without `secret-tool` installed works.)*
+- [x] C7-4 `core/platform/metrics/linux.rs`: `/proc/stat`,
+      `/proc/self/stat`, `/proc/self/statm`, `/proc/meminfo`,
+      `/sys/class/power_supply/*`, `/sys/class/thermal/*`. *(Open: PSI
+      under `/proc/pressure/` for `disk_pressure`; NetworkManager
+      `NM-metered`.)*
+- [x] C7-5 `core/platform/idle/linux.rs`: headless hosts are always
+      idle, a desktop reports zero idle time. *(Open: X11
+      `XScreenSaverQueryInfo`; Wayland `ext-idle-notify-v1`.)*
+- [x] C7-6 `fs_caps`: native xattr under the `user.` namespace on
+      ext4/xfs/btrfs, case-sensitive default. *(Open: a per-root probe
+      instead of the compile-time default, for a FAT or NTFS mount.)*
+- [x] C7-9 `core/platform/trash/linux.rs`: the freedesktop trash
+      (`~/.local/share/Trash`, `<mount>/.Trash-<uid>`), `.trashinfo`
+      written before the rename.
 - [ ] C7-7 Linux distribution trust chain doc:
       `docs/operations/linux/distribution-trust-chain.md` + systemd unit
       policy in `docs/operations/linux/systemd-unit-policy.md`.
@@ -356,8 +366,12 @@ macOS app + CLI-on-macOS) is blocked by this phase. See
 
 Exit gate:
 
-- `vapor run`, `vapor service install` on Linux work end-to-end.
-- Linux CI job runs the full `core/*` test suite including platform impls.
+- `vapor run`, `vapor service install` on Linux work end-to-end. `vapor
+  run` does (the e2e suite passes in a container); the `vapor service`
+  round-trip against a real `systemctl --user` session is still to be
+  automated (`cli.md` L2-6).
+- Linux CI job runs the full `core/*` test suite including platform
+  impls: it does, and the e2e suite runs there on every PR.
 
 ## Phase C8 - Port / finish runtime capabilities on the portable stack
 
@@ -556,7 +570,9 @@ inherits it.
       tracked in Phase C3 follow-ups; the heuristic composes with it
       additively when it lands.
 - [x] C8-56 Folder priority classes + temporary flush boost.
-- [x] C8-57 Mass-change / ransomware guard with pause + alert workflow.
+- [x] C8-57 Mass-change / ransomware guard. First shipped as a whole-daemon
+      pause on 200 local deletions; superseded by SF-1 (a held batch
+      behind a decision, both directions, ratio rule).
 - [x] C8-58 Diagnostics history + support export bundle.
 
 ### Sync modes (directional / one-way sync) — prioritized
@@ -711,13 +727,14 @@ trivial restatements of code).
 
 ### One-time setup (do early)
 
-- [ ] CT-1 Adopt `proptest` as a dev-dependency in `core/daemon` and
-      `core/shared`. Add initial property tests for the high-value
-      invariants listed in `docs/architecture/testing-strategy.md`:
-      path normalization safety, scheduler superseding collapse,
-      throttle monotonicity, retry backoff monotonicity, ignore-rule
-      precedence determinism, durable-queue FIFO. Each property runs
-      64–256 cases on CI (fast tier).
+- [x] CT-1 `proptest` adopted in `core/daemon`
+      (`tests/properties.rs`): path normalization never escapes the
+      root, scheduler superseding leaves one intent per path, retry
+      backoff is monotonic and capped; 256 cases each. The remaining
+      properties listed in `testing-strategy.md` (throttle
+      monotonicity, conflict suffix determinism, durable-queue FIFO,
+      ignore-rule precedence, IPC handshake) are open and tracked
+      there.
 - [x] CT-2 Tier-1 timing guard: `./scripts/test.sh` fails a green run
       that exceeds `VAPOR_TEST_MAX_SECONDS` (the `test` workflow sets
       300) with a message pointing at `docs/architecture/testing-strategy.md`.
@@ -726,21 +743,23 @@ trivial restatements of code).
       Debug/Display string equality, serde round-trips of trivial
       structs). Remove or replace with behavior-level assertions.
       Document any kept legacy trivial test with a one-line rationale.
-- [ ] CT-4 Adopt `insta` as a dev-dependency in `core/cli` when it
-      lands (wave 6). Snapshot every `--json` command's output with a
-      fixed input fixture. Document the `cargo insta review` flow in
-      `docs/development/runbook.md`.
+- [ ] CT-4 Adopt `insta` for the `--json` shape locks in `core/cli`;
+      today every command has an explicit field-by-field test in its
+      module and `core/cli/tests/binary.rs` locks the shell contract
+      of the built binary on every CI OS. Document the `cargo insta
+      review` flow in `docs/development/runbook.md` when it lands.
 
 ### Per-wave standing requirements
 
 These do not have dedicated tickets — they ship with the wave that
 introduces the code they apply to.
 
-- [ ] CT-5 Every new `core/platform` trait ships with (a) an
-      in-memory fake, (b) a parameterized contract-test suite, and (c)
-      native implementations wired into that suite on every shipping
-      OS. Catches fake-vs-native drift. Applies to wave 4 and any new
-      trait added after.
+- [ ] CT-5 Every `core/platform` trait ships with (a) an in-memory
+      fake, (b) a parameterized contract-test suite, and (c) native
+      implementations wired into that suite on every shipping OS.
+      `SecretStore` and `FsWatcher` have theirs; `ServiceInstaller`,
+      `PlatformMetricsSampler`, `IdleNotifier`, `FilesystemCapabilities`,
+      `ProcessSupervisor`, and `TrashBin` are open.
 - [ ] CT-6 IPC skew matrix tests: when wave 6 lands, the test
       matrix covers `app-N ↔ daemon-N`, `app-N ↔ daemon-(N-1)`,
       `app-(N-1) ↔ daemon-N`, and `|N - M| = 2` (negative case).
@@ -816,8 +835,9 @@ snapshot.
 
 ## Deferred tasks
 
-- [ ] PT-1 Tune `./scripts/perf.sh` smoke thresholds using real CI/release
-      baseline history once per-OS baselines exist.
+- [ ] PT-1 Tune the soak cell `scripts/perf.sh` gates on (duration,
+      seed, load) using release baseline history once per-OS baselines
+      exist; gate SLO-1 on the `quiet` phases.
 - [ ] PT-2 Tier-2 perf fixtures carved out of C8-11 / C8-46: 10k-file
       provider-backed fixture within engine budgets, remote-apply
       linear-scaling measurement, and provider-adapter overhead
@@ -863,9 +883,165 @@ runtime changed shape):
 
 Still open:
 
-- [ ] RV-11 Move detection: turn FSEvents rename pairs into a server-side
-      move on providers that support one (Google Drive does), so a
-      renamed large file is not re-uploaded. Reintroduce the capability
-      on the provider trait together with the engine path that calls it.
+- [x] RV-11 Move detection: landed as SF-8 (hash-based, both
+      directions, `Provider::move_object`).
 - [ ] RV-12 Adopt `insta` for the `--json` shape locks (see CT-4) and
       `proptest` for the invariants in CT-1.
+
+## Testing review follow-ups (2026-09-06)
+
+The testing review (`REPORT.md` at the time, now folded into the
+documents it changed) rebuilt Tier E2E and found engine gaps on the
+harness's first run. The harness work is done; the engine gaps stay
+here until each one's scenario flips from known gap to pass.
+
+Landed:
+
+- [x] TR-1 Tier E2E harness as a Rust dev crate (`tools/e2e`,
+      `vapor-e2e`): one sandbox per scenario, tree oracle and log
+      hygiene after every scenario, `--only`, `--list`, `--json`,
+      `--daemon vapord`, `--sandbox-stop`, known-gap verdicts, host
+      `needs` with skip-by-name, the harness on every CI OS job with
+      the report uploaded as an artifact, fifteen new scenarios
+      (S23 to S37). `docs/development/e2e-verification.md`.
+
+Engine gaps the harness found (each names its scenario). Landed:
+
+- [x] TR-2 A local directory rename neither uploaded the new subtree
+      nor deleted the old one remotely. A directory that appears is now
+      walked and its files reported as synthesized watcher events; a
+      directory delete expands into guarded per-entry deletes, deepest
+      first, with the directory last. Scenario S25.
+- [x] TR-3 Stale changes-feed events under a path that became a file
+      produced a permanently failed download. `NotADirectory` now reads
+      as a removal in the feed. Scenario S26.
+- [x] TR-4 The reconcile walk took an equal-size pair with no index row
+      as converged and never recorded it. Index-less pairs are verified
+      once through the upload planner and recorded. Scenarios S32, S37.
+- [x] TR-6 A local change inside its debounce window was lost from
+      memory on SIGTERM. The runtime flushes pending events to the
+      durable queue at shutdown. Scenario S39.
+- [x] TR-7 Two routine transitions logged at WARNING on every restart.
+      Demoted to INFO; the harness's routine-warning list is empty.
+
+Still open:
+
+- [x] TR-5 Case collisions: landed as SF-6 (the second object
+      materializes as an aliased conflict copy). Scenarios S33, S38.
+- [ ] TR-8 Google Drive mode of the harness: a `CloudSide` the harness
+      performs through the provider crate, a per-run `VaporE2E-<run-id>`
+      folder created and deleted by the harness, longer wait budgets,
+      `gdrive-provider` scenarios for token refresh and rate limits, and
+      the Drive leg of the soak. Runs only as a leg of
+      `./scripts/release.sh` on the maintainer's machine, never in
+      CI. Waits on the dedicated test account being signed in on that
+      machine.
+- [x] TR-9 The soak driver (`tools/soak`, `vapor-soak`): seeded
+      workload on both sides, model with the no-loss, no-invention,
+      convergence, revert, and contested oracles, fault injection
+      (SIGKILL between ops and mid-transfer, SIGSTOP, pause/resume,
+      cloud root vanish, disk-full through a disk image, config reload,
+      throttle walk through `VAPOR_THROTTLE_INPUTS=file:`), daemon
+      supervision after injected crashes, `soak-status.json` for agent
+      oversight, `ops.jsonl`, freeze on first violation, `soak.yml`,
+      and the Tier 2 SLO assertions in `scripts/perf.sh`.
+      `docs/development/soak-testing.md`; the `vapor-soak` skill.
+- [ ] TR-10 Soak cells on Linux (`tmpfs` size limits for disk-full,
+      cgroup CPU and memory limits) now that the native Linux traits
+      are in, and the Google Drive soak mode once TR-8 lands. The e2e
+      suite already runs on the `ubuntu-latest` job; the soak schedule
+      is macOS-only.
+- [ ] TR-11 The rows of the 2026-09-06 review's coverage table that no
+      scenario or soak fault exercises through the real binaries yet:
+      a backward wall-clock step while the daemon runs (the mtime quick
+      check and tombstone ordering; Tier 1 covers the rolling counters
+      only), the CLI against a daemon of another IPC version through
+      two real binaries (the skew matrix is in-process), and an
+      upgrade (a state DB and a config written by an older binary,
+      opened by the new one; the migration tests cover the schema
+      chain in-process). Each is one scenario.
+- [ ] TR-12 The Google Drive leg of the release gate has not run yet:
+      the first release after the dedicated test account is signed in
+      runs `./scripts/release.sh` with the Drive leg for real, and
+      TR-8's Drive-side scenarios land before or with it. Until then
+      the leg is empty (every scenario declares the filesystem
+      provider) and the gate refuses without credentials.
+
+## Sync safety follow-ups (2026-09-06)
+
+The safety review that came with the testing review listed every
+mechanism common sync clients ship and Vapor did not, and the owner
+decided the rule for ambiguity: hold only the file or batch in question,
+ask a plain question with a short option list, keep the question until
+it is answered. Whole-profile stops are limited to the conditions in
+`data-flow.md` §Decisions.
+
+Landed:
+
+- [x] SF-1 Decisions: durable `pending_decisions`, the `held` queue
+      state, `vapor decisions list|show|resolve`, `decisions_pending`
+      in status, `Held` rows in diagnostics, timeline entries, and the
+      applier loop in the runtime. The mass-deletion guard is the first
+      kind: both directions, the whole burst judged before its first
+      member lands (queued deletions count), threshold 1000 or
+      `massDeleteRatioPercent` (25%, floor 10), `apply` releases,
+      `discard` restores. Scenarios S31 and S40; the soak driver
+      answers the decisions its subtree removals provoke.
+
+- [x] SF-2 Local trash: the `TrashBin` platform trait (macOS
+      `~/.Trash`; Windows and Linux refuse until their surfaces ship)
+      and the managed trash under `<vapor_dir>/trash/<profile>/` with
+      retention, fed by every local removal the engine performs
+      (cloud deletions applied in two-way, pull-only mirror removals).
+      `trash` config group, `vapor trash list|restore|empty`. Scenario
+      S42.
+
+Still open, in order:
+
+- [x] SF-3 Root identity: the `.vapor-root` marker and the provider's
+      `root_identity` / `adopt_root`, adoption on first contact, checks
+      at start and every 15 seconds, `root-missing` (`recreate`) and
+      `root-replaced` (`reattach`) decisions, holds that lift on their
+      own when the original root returns, and a parked profile that is
+      composed again without a restart. Scenarios S43, S44, S45.
+- [x] SF-4 Offline deletions propagate through the index: a one-sided
+      file whose surviving copy is exactly what was last synced is a
+      deletion to finish (into the trash here, a delete in the cloud),
+      still guarded; a changed survivor is kept; a merge after
+      `reattach` or `recreate` propagates nothing. S27 and S28 flipped.
+- [x] SF-5 Type mismatch decision: `type-mismatch` with `keep-both`,
+      `prefer-local`, `prefer-cloud`; asked once, both sides untouched
+      until answered. Scenario S46.
+- [x] SF-6 Case and normalization collisions materialize as conflict
+      copies aliased to their own cloud object (`name_aliases`,
+      resolved by the executor, the walk, and the feed); S33 flipped
+      from known gap to pass, S38 pins stability. Names fold through
+      NFC before case, so the two spellings of `café` collide too
+      (unit-tested on APFS; no single host can stage the pair through
+      the filesystem provider, so no e2e scenario).
+- [x] SF-10 Unsyncable names (a local name that is not valid UTF-8)
+      open an `unsyncable-name` decision with `skip`, withdrawn when
+      the name goes; watcher events for such a path are dropped at the
+      bridge instead of failing the tick. S50 on Linux.
+- [x] SF-11 The mass-deletion guard holds the whole queued burst the
+      moment it trips, so one answer covers the question's count, and
+      withdraws a hold the other side made moot.
+- [x] SF-7 Headless supervision: `vapor service check --loop` and
+      `vapor service install --supervise` (a kept-alive
+      `sh.arn.vapor.supervisor` LaunchAgent); the daemon's job stays
+      passive so the crash-loop guard owns every restart. R01 covers
+      it under `--full`. The soak driver keeps restarting the daemon
+      itself: its sandbox never installs host services.
+- [x] SF-8 Move detection with hashes (folds RV-11): a new local path
+      with the bytes of a vanished synced file becomes one
+      `Provider::move_object`; a new cloud object with a synced local
+      file's size, mtime, and hash becomes a local rename; deletions
+      wait a settle window so the create half is seen first.
+      Scenarios S47, S48.
+- [x] SF-9 Knowledge base: every item above shipped with its docs
+      (`data-flow.md` §Decisions, §Root identity, items 13 and 14,
+      `conflict-resolution.md`, the schema, IPC, and provider docs,
+      README Features and Configuration, the runbook) and skills
+      (`vapor-e2e`, `vapor-soak`, `vapor-debug`, `vapor-provider`), and
+      every decision kind has a scenario.
+

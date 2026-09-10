@@ -22,6 +22,10 @@ Available now:
 - 🧠 Nothing is lost. Every change is written to disk before it moves, so a crash, a reboot, or a dropped connection resumes where it stopped.
 - 🛡 Edits never silently overwrite each other. When two devices change the same file, Vapor keeps both copies.
 - 🧭 Conflicts stay visible until you settle them, and one command resolves each one from any device.
+- ❓ When the evidence is ambiguous, Vapor holds only the files in question, asks you a plain question with a short list of answers, and keeps the question until you answer it, from the terminal or the app.
+- 🗑️ Nothing Vapor removes from your device is gone: it waits in a trash you can list and restore from, for as long as you choose.
+- 🔌 An unplugged drive, or an empty folder where your sync folder used to be, never turns into deletions on the other side. Vapor waits for the folder, and asks before it merges anything.
+- ✂️ Renaming or moving a file, on either side, moves it on the other side too. No re-upload, no re-download.
 - 🔂 Your own uploads never bounce back as new changes, so two devices cannot ping-pong a file forever.
 - 🔀 Pick a direction per folder. Full two-way, or a one-way mirror for read-only backups and copies.
 - 🧩 Run several sync profiles at once. One folder can flow to two clouds, or separate setups stay isolated.
@@ -31,13 +35,13 @@ Available now:
 - ⚙️ Hard caps on the share of CPU, memory, and network Vapor may use, so streaming and browsing always have room.
 - 🌙 When the device sits idle, Vapor speeds up. It backs off the moment you return.
 - 🌩 A burst of thousands of file changes is absorbed instead of turned into thousands of uploads.
-- 🛟 A sudden mass deletion pauses sync before the wipe can reach the cloud.
+- 🛟 A sudden mass deletion, from this device or from the cloud, is held and put to you as a question before it can reach the other side; everything else keeps syncing.
 - 🧹 Ignore rules, including your existing gitignore files, keep build output and junk out of the sync.
 - ♻️ Settings apply while it runs. Ceilings, ignore rules, and safeguards change without a restart, and Vapor tells you when one is needed.
 - 🚀 Starts at login, restarts itself after a crash, and stops retrying when something is really broken instead of looping.
 - ⏯️ Pause and resume on demand. Changes made while paused sync when you resume.
 - 📈 Status with a reason, queue depth, a live activity timeline, per-file "why is this stuck", and a one-command support bundle.
-- ⌨️ A full command line for scripts and servers. Everything the app does, the terminal does too.
+- ⌨️ A full command line for scripts and servers. Everything the app does, the terminal does too, including a headless supervisor that restarts a crashed sync where no app is running.
 - 🔐 Sign-in tokens live in the system keychain, logs never contain secrets, and nothing leaves your device except the files you chose to sync.
 - 🔕 Lives in the menu bar. No windows unless you ask for one.
 
@@ -45,7 +49,6 @@ In flight and coming next:
 
 - 🪟 A diagnostics window in the Mac app with throttle reason, queue, conflicts, and timeline, plus live pause and flush controls.
 - 🔔 A notification when a conflict needs you.
-- ✂️ Renames and moves without re-uploading the file.
 - 🖥️ Windows and Linux apps on the same runtime as the Mac app.
 - 📥 Standalone command-line downloads for every OS, with Docker and systemd recipes.
 - 🧾 Signed and notarized releases, verified on a clean machine every cycle.
@@ -88,7 +91,8 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`. A running da
 | `profiles`           | `Array`  | Absent (single implicit profile)                    | Optional named sync profiles. Each entry (`id`, `name`, `enabled`, plus optional `provider`, `localSyncDirectory`, `cloudSyncDirectory`, `syncMode`, `resourceLimits`, `idleBoost` overrides) runs as an isolated pipeline with its own durable state; unset fields inherit the top-level values. The two resource groups merge per field and only toward caution: a `resourceLimits` value can only lower the top-level one, `idleBoost.enabled: false` wins daemon-wide, `boost*Percent`, `headroomCpuPercent` and `rampDownSeconds` can only shrink, `minIdleSeconds` and `rampUpSeconds` can only grow. Fields a profile does not name keep the top-level value. |
 | `resourceLimits`     | `Object` | `{ cpuPercent: 15, memoryPercent: 10, bandwidthPercent: 25 }` | Sets hard ceilings on daemon CPU (share of the whole device), device memory (resident size as a share of physical memory), and measured bandwidth. Honored by the throttle controller and auto-tuner. Profile overrides may only lower these values. The optional `maxConcurrentTransfers` (`1..16`, absent = automatic) additionally caps parallel uploads and downloads; when absent, the idle transfer width derives from the machine's core count (4–8 per direction) and always collapses while you are actively using the device. |
 | `idleBoost`          | `Object` | `{ enabled: true, minIdleSeconds: 300, headroomCpuPercent: 30, boostCpuPercent: 50, boostMemoryPercent: 20, boostBandwidthPercent: 80, rampUpSeconds: 30, rampDownSeconds: 10 }` | Dynamically raises effective ceilings when the device is user-idle with measured resource headroom. Boost requires all of: throttle state `IdleDrain`, user-idle for at least `minIdleSeconds`, and non-Vapor CPU utilization at or below `headroomCpuPercent`. Each `boost*Percent` must be `>=` the matching `resourceLimits.*Percent` (lower values are treated as equal to the base ceiling). Ramp-down is deliberately faster than ramp-up so returning to your device is never met with a busy daemon. Setting `enabled: false` in any enabled profile disables boost daemon-wide. |
-| `safeguards`         | `Object` | `{ massDeleteEnabled: true, massDeleteThreshold: 200, massDeleteWindowSeconds: 60 }` | Tunes the mass-deletion guard: when more than `massDeleteThreshold` local file deletions land within the rolling window, sync pauses until an explicit `vapor resume` (the ransomware / bulk-mistake backstop). Deleting a folder from Finder counts as one deletion; per-file deletion tools (`rm -rf` of large trees) count per file — raise the threshold if that is part of your normal workflow. Values below the floors (`10` deletions / `5` seconds) are clamped up; `massDeleteEnabled: false` turns the guard off entirely. |
+| `safeguards`         | `Object` | `{ massDeleteEnabled: true, massDeleteThreshold: 1000, massDeleteWindowSeconds: 60, massDeleteRatioPercent: 25 }` | Tunes the mass-deletion guard, the ransomware and bulk-mistake backstop. A burst of deletions in either direction (files vanishing from this device, or from the cloud) that reaches `massDeleteThreshold` inside the rolling window, or `massDeleteRatioPercent` of the files Vapor syncs (never fewer than 10), is held whole behind a decision before any of it lands on the other side; everything else keeps syncing. `vapor decisions list` shows the question, `vapor decisions resolve <id> --choose apply` lets the deletions through, `--choose discard` restores the files from the side that still has them. Values below the floors (`10` deletions / `5` seconds) are clamped up; `massDeleteRatioPercent: 0` turns the ratio rule off and leaves the absolute threshold; `massDeleteEnabled: false` turns the guard off, which the daemon logs as a warning. |
+| `trash`              | `Object` | `{ enabled: true, retentionDays: 7, useSystemTrash: false }` | Where a file Vapor removes on this device goes (a deletion that arrived from the cloud, a `pull-only` mirror removal): the managed trash under `<vapor_dir>/trash/<profile>/`, or `<volume root>/.vapor/trash/<profile>/` when the sync root is on another volume so the move never copies, listed and restored with `vapor trash list` and `vapor trash restore <id>`, purged after `retentionDays`. `useSystemTrash: true` tries the system trash first (the Finder's Trash on macOS, the freedesktop trash on Linux) and falls back to the managed one. `enabled: false` unlinks. Applies live. |
 
 ### Ignore rules
 
@@ -96,7 +100,7 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`. A running da
 - Ignore rules are symmetric: a name that matches them never syncs in either direction — it is skipped by local ingest, by the remote changes feed, and by reconcile comparison on both sides — so an ignored file (for example `.DS_Store`) can never be pulled down from the cloud or produce a conflict copy.
 - Rule precedence (lowest to highest): `preIgnoreRules` -> `.gitignore` (when enabled, recursive per-directory) -> `.vaporignore` (when enabled, recursive per-directory) -> `postIgnoreRules`.
 - `.vaporignore` supports glob-like rules and `!` unignore rules.
-- `preIgnoreRules` default content covers common low-signal, regenerable paths across programming ecosystems: dependency/module directories (`node_modules/`, `vendor/`, `Pods/`, …), build outputs (`dist/`, `build/`, `out/`, `target/`, `_build/`, …), tool caches (`__pycache__/`, `.gradle/`, `.terraform/`, `.cache/`, …), and OS/editor junk (`.DS_Store`, swap/tmp/partial files, logs). Repositories (`.git/`) and dotenv files are deliberately NOT ignored — they sync like any other content.
+- `preIgnoreRules` default content covers common low-signal, regenerable paths across programming ecosystems: dependency/module directories (`node_modules/`, `vendor/`, `Pods/`, …), build outputs (`dist/`, `build/`, `out/`, `target/`, `_build/`, …), tool caches (`__pycache__/`, `.gradle/`, `.terraform/`, `.cache/`, …), and OS/editor junk (`.DS_Store`, swap/tmp/partial files, logs, what an OS keeps at the root of a volume such as `.fseventsd/`, `.Spotlight-V100/`, `System Volume Information/`). Repositories (`.git/`) and dotenv files are deliberately NOT ignored — they sync like any other content. Independently of every rule, a directory named `.vapor` never syncs, with everything under it: it is Vapor's own runtime state or a volume's trash, wherever it sits.
 
 ## Development
 
@@ -128,7 +132,7 @@ See `.env.example` for the available `VAPOR_*` environment variables used by app
 - Format both stacks: `./scripts/format.sh`
 - Format check both stacks (included in lint): `./scripts/format.sh check`
 - Test both stacks: `./scripts/test.sh`
-- End-to-end verification in a disposable repo-local sandbox: `./scripts/e2e.sh` (manual sandbox: `--sandbox`; see `docs/development/e2e-verification.md`)
+- End-to-end verification in disposable repo-local sandboxes: `./scripts/e2e.sh` (one scenario: `--only Sxx`; manual sandbox: `--sandbox`; see `docs/development/e2e-verification.md`)
 - Sync locale catalogs into every app surface: `./scripts/locales.sh`
 - Install git pre-commit hook (clean → lint → test → build): `./scripts/hooks.sh`
 - Remove the installed pre-commit hook: `./scripts/hooks.sh uninstall`

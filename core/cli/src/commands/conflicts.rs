@@ -77,6 +77,11 @@ pub fn list_conflicts(config: &VaporConfig) -> ConflictListReport {
         let Some(root) = profile.scope.local_sync_directory else {
             continue;
         };
+        if !root.exists() {
+            // A root the daemon has not created yet (or is waiting for)
+            // holds no conflicts; only an unreadable one is skipped.
+            continue;
+        }
         let Ok(root) = vapor_shared::paths::canonicalize(&root) else {
             skipped_roots.push(root);
             continue;
@@ -207,6 +212,20 @@ pub fn resolve_conflict(conflict_path: &Path, keep: KeepSide) -> Result<Resoluti
         ));
     }
     let canonical_path = conflict_path.with_file_name(&parsed.canonical_file_name);
+    if keep == KeepSide::Copy
+        && let Some(existing) = vapor_daemon::name_collision::colliding_local_path(&canonical_path)
+    {
+        // The copy stands in for a cloud name this filesystem cannot
+        // hold next to `existing`; renaming it over the canonical name
+        // would only swap which cloud object is stranded.
+        return Err(format!(
+            "{} is a name clash with {}: the two cloud files differ only in spelling this filesystem \
+             folds together. Keep the canonical side to drop the cloud's other copy, or rename the \
+             files apart in the cloud",
+            conflict_path.display(),
+            existing.display()
+        ));
+    }
 
     match keep {
         KeepSide::Canonical => {
@@ -362,16 +381,16 @@ mod tests {
     }
 
     #[test]
-    fn list_on_a_fresh_config_creates_the_root_and_reports_clean() {
-        // Profile resolution creates a missing local root (product
-        // policy §1), so a fresh config lists zero conflicts against
-        // the just-created empty root — nothing is skipped.
+    fn list_on_a_fresh_config_reports_clean_without_creating_the_root() {
+        // Creating the local root is the daemon's call (it knows
+        // whether the profile synced there before); a listing never
+        // creates anything, and an absent root holds no conflicts.
         let temp = TempDir::new().expect("temp");
         let root = temp.path().join("never-created");
         let report = list_conflicts(&config_for(&root));
         assert!(report.conflicts.is_empty());
         assert!(report.skipped_roots.is_empty());
-        assert!(root.is_dir(), "resolution must have created the root");
+        assert!(!root.exists(), "a listing must not create the root");
     }
 
     #[test]

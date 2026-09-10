@@ -9,7 +9,7 @@ use vapor_shared::{constants, logging::sanitize_diagnostic_text, runtime_paths};
 use crate::event_intents::PendingIntentKind;
 use crate::retry::{RetryDecision, RetryFailureKind, RetryPolicy};
 
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 /// The oldest schema version this build can migrate forward in place
 /// (v3 → v4 widened the intent-kind vocabulary; v4 → v5 added the
 /// durable lease-priority column). Anything older predates the
@@ -17,6 +17,9 @@ const CURRENT_SCHEMA_VERSION: i64 = 5;
 const MIGRATABLE_SCHEMA_VERSION: i64 = 3;
 const STATE_PENDING: &str = "pending";
 const STATE_LEASED: &str = "leased";
+/// An intent parked behind a pending decision: never leased until the
+/// decision is resolved, then released or dropped by its answer.
+const STATE_HELD: &str = "held";
 
 #[derive(Debug)]
 pub enum StateDbError {
@@ -98,6 +101,15 @@ pub struct DurableIntentRecord {
     pub leased_at: Option<SystemTime>,
     pub attempt_count: u32,
     pub last_error: Option<String>,
+    /// For a download whose remote object does not live at the local
+    /// path's mirror (a name that collides on this filesystem,
+    /// materialized as a conflict copy): the remote path to fetch.
+    pub remote_path: Option<String>,
+    /// The user approved this intent through a decision; the guards
+    /// that hold deletions let it through.
+    pub approved: bool,
+    /// The decision this intent is parked behind, while held.
+    pub held_by: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -194,6 +206,18 @@ impl DurableStateDb {
         Ok(Self { path, connection })
     }
 
+    /// A private, process-local database: the inert runtime a parked
+    /// profile is composed with when its own state DB cannot be read.
+    pub fn open_in_memory() -> Result<Self, StateDbError> {
+        let mut connection = Connection::open_in_memory()?;
+        configure_connection(&connection)?;
+        migrate_schema(&mut connection)?;
+        Ok(Self {
+            path: PathBuf::from(":memory:"),
+            connection,
+        })
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -209,13 +233,12 @@ impl DurableStateDb {
         &self,
         limit: usize,
     ) -> Result<Vec<DurableIntentRecord>, StateDbError> {
-        let mut statement = self.connection.prepare(
-            "SELECT id, path_text, kind, priority_rank, enqueued_at_ms, available_at_ms,
-                    leased_at_ms, attempt_count, last_error
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {INTENT_COLUMNS}
              FROM queue_intents
              ORDER BY priority_rank ASC, available_at_ms ASC, id ASC
-             LIMIT ?",
-        )?;
+             LIMIT ?"
+        ))?;
         let rows = statement.query_map(
             params![i64::try_from(limit).unwrap_or(i64::MAX)],
             intent_from_row,
@@ -227,6 +250,9 @@ impl DurableStateDb {
         Ok(records)
     }
 
+    /// Intents waiting to be worked (pending or leased). Held intents
+    /// are parked behind a decision, not queued work; `held_intent_count`
+    /// reports them.
     pub fn queue_depth(&self) -> Result<usize, StateDbError> {
         count_intents(&self.connection, None)
     }
@@ -237,6 +263,69 @@ impl DurableStateDb {
 
     pub fn leased_depth(&self) -> Result<usize, StateDbError> {
         count_intents(&self.connection, Some(STATE_LEASED))
+    }
+
+    /// Number of queued intents (pending or leased) of `kind`, excluding
+    /// `except_id`. The deletion guard reads it to judge a burst as a
+    /// whole before the first deletion lands.
+    pub fn queued_deletions(
+        &self,
+        kind: PendingIntentKind,
+        except_id: i64,
+    ) -> Result<usize, StateDbError> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM queue_intents
+             WHERE kind = ? AND id != ? AND state IN (?, ?)",
+            params![
+                intent_kind_label(kind),
+                except_id,
+                STATE_PENDING,
+                STATE_LEASED
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Paths of the queued intents (pending or leased) of `kind`.
+    pub fn queued_paths_of_kind(
+        &self,
+        kind: PendingIntentKind,
+    ) -> Result<Vec<PathBuf>, StateDbError> {
+        let mut statement = self.connection.prepare(
+            "SELECT path_text FROM queue_intents WHERE kind = ? AND state IN (?, ?) LIMIT 256",
+        )?;
+        let rows = statement.query_map(
+            params![intent_kind_label(kind), STATE_PENDING, STATE_LEASED],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut paths = Vec::new();
+        for row in rows {
+            paths.push(path_from_text(row?));
+        }
+        Ok(paths)
+    }
+
+    /// Number of queued intents (pending or leased) whose path lies
+    /// strictly under `directory`, excluding `except_id`. A directory
+    /// delete uses it to tell "children still being worked on" from
+    /// "children kept on purpose".
+    pub fn intents_under(&self, directory: &Path, except_id: i64) -> Result<usize, StateDbError> {
+        let mut prefix = path_to_text(directory)?;
+        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
+            prefix.push(std::path::MAIN_SEPARATOR);
+        }
+        // LIKE would treat `_` and `%` in the prefix as wildcards; a
+        // range comparison on the text column is exact.
+        let mut upper = prefix.clone();
+        upper.push(char::MAX);
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM queue_intents
+             WHERE path_text > ? AND path_text < ? AND id != ?",
+            params![prefix, upper, except_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count as usize)
     }
 
     pub fn failed_depth(&self) -> Result<usize, StateDbError> {
@@ -365,7 +454,7 @@ impl DurableStateDb {
         // update + per-row re-fetch: a single statement, a single
         // implicit transaction. RETURNING row order is unspecified, so
         // ready order is restored in memory below.
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare(&format!(
             "UPDATE queue_intents
              SET state = ?, leased_at_ms = ?
              WHERE id IN (
@@ -374,9 +463,8 @@ impl DurableStateDb {
                  ORDER BY priority_rank ASC, available_at_ms ASC, id ASC
                  LIMIT ?
              )
-             RETURNING id, path_text, kind, priority_rank, enqueued_at_ms, available_at_ms,
-                       leased_at_ms, attempt_count, last_error",
-        )?;
+             RETURNING {INTENT_COLUMNS}"
+        ))?;
         let mut leased_intents: Vec<DurableIntentRecord> = statement
             .query_map(
                 params![STATE_LEASED, now_ms, STATE_PENDING, now_ms, limit as i64],
@@ -396,6 +484,33 @@ impl DurableStateDb {
         let changed = self.connection.execute(
             "DELETE FROM queue_intents WHERE id = ? AND state = ?",
             params![id, STATE_LEASED],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Puts a leased intent back for `available_at` because the
+    /// planner chose to wait (a deletion that may be half of a rename),
+    /// counting the deferral so it cannot repeat forever and recording
+    /// the reason where diagnostics show it.
+    pub fn defer_leased(
+        &mut self,
+        id: i64,
+        available_at: SystemTime,
+        reason: &str,
+    ) -> Result<bool, StateDbError> {
+        let available_at_ms = system_time_to_millis(available_at)?;
+        let changed = self.connection.execute(
+            "UPDATE queue_intents
+             SET state = ?, available_at_ms = ?, leased_at_ms = NULL,
+                 attempt_count = attempt_count + 1, last_error = ?
+             WHERE id = ? AND state = ?",
+            params![
+                STATE_PENDING,
+                available_at_ms,
+                sanitize_persisted_error(reason),
+                id,
+                STATE_LEASED
+            ],
         )?;
         Ok(changed > 0)
     }
@@ -794,6 +909,20 @@ impl DurableStateDb {
         intents: &[(PathBuf, PendingIntentKind, SystemTime)],
         source: crate::safeguards::IntentSource,
     ) -> Result<usize, StateDbError> {
+        self.enqueue_intents_coalesced_with(intents, source, false)
+    }
+
+    /// Like [`Self::enqueue_intents_coalesced`], with `approved` set on
+    /// every row it inserts: the intent carries out a decision the user
+    /// made (a restore after `discard`, the merge after a root answer),
+    /// so no guard or planner second-guesses it. A row that already
+    /// existed keeps its own flag.
+    pub fn enqueue_intents_coalesced_with(
+        &mut self,
+        intents: &[(PathBuf, PendingIntentKind, SystemTime)],
+        source: crate::safeguards::IntentSource,
+        approved: bool,
+    ) -> Result<usize, StateDbError> {
         if intents.is_empty() {
             return Ok(0);
         }
@@ -825,7 +954,7 @@ impl DurableStateDb {
                 }
                 continue;
             }
-            insert_intent(
+            let id = insert_intent(
                 &transaction,
                 path,
                 *kind,
@@ -833,6 +962,12 @@ impl DurableStateDb {
                 *observed_at,
                 source,
             )?;
+            if approved {
+                transaction.execute(
+                    "UPDATE queue_intents SET approved = 1 WHERE id = ?",
+                    params![id],
+                )?;
+            }
             inserted += 1;
         }
         transaction.commit()?;
@@ -852,6 +987,9 @@ pub struct SyncIndexEntry {
     /// Local mtime at the moment the transfer completed; the cheap
     /// pre-filter for local-divergence checks (rsync-style quick check).
     pub local_modified_at: Option<SystemTime>,
+    /// The remote object's mtime as the provider reported it when the
+    /// transfer completed; the same quick check for the cloud side.
+    pub remote_modified_at: Option<SystemTime>,
     pub last_op_id: String,
     pub updated_at: SystemTime,
 }
@@ -865,13 +1003,41 @@ impl SyncIndexEntry {
     /// every quick check into a full hash. An index row without an mtime
     /// never matches, so the caller falls through to hashing.
     pub fn matches_local(&self, size_bytes: u64, modified_at: Option<SystemTime>) -> bool {
-        let Some(indexed) = self.local_modified_at else {
+        Self::quick_check(
+            self.local_modified_at,
+            self.size_bytes,
+            size_bytes,
+            modified_at,
+        )
+    }
+
+    /// The same quick check against the remote object: its size and
+    /// mtime are what the index recorded at the last transfer, so the
+    /// cloud copy has not been touched since. An index row without a
+    /// remote mtime (written before the provider reported one) never
+    /// matches, so the caller falls through to hashing.
+    pub fn matches_remote(&self, size_bytes: u64, modified_at: SystemTime) -> bool {
+        Self::quick_check(
+            self.remote_modified_at,
+            self.size_bytes,
+            size_bytes,
+            Some(modified_at),
+        )
+    }
+
+    fn quick_check(
+        indexed: Option<SystemTime>,
+        indexed_size: u64,
+        size_bytes: u64,
+        modified_at: Option<SystemTime>,
+    ) -> bool {
+        let Some(indexed) = indexed else {
             return false;
         };
         let Some(observed) = modified_at else {
             return false;
         };
-        self.size_bytes == size_bytes
+        indexed_size == size_bytes
             && system_time_to_millis(observed).ok() == system_time_to_millis(indexed).ok()
     }
 }
@@ -912,24 +1078,29 @@ pub struct TombstoneRecord {
 }
 
 impl DurableStateDb {
+    #[allow(clippy::too_many_arguments)]
     pub fn set_sync_index(
         &mut self,
         path: &Path,
         content_hash: &str,
         size_bytes: u64,
         local_modified_at: Option<SystemTime>,
+        remote_modified_at: Option<SystemTime>,
         last_op_id: &str,
         now: SystemTime,
     ) -> Result<(), StateDbError> {
         let local_modified_at_ms = local_modified_at.map(system_time_to_millis).transpose()?;
+        let remote_modified_at_ms = remote_modified_at.map(system_time_to_millis).transpose()?;
         self.connection.execute(
             "INSERT INTO sync_index
-                 (path_text, content_hash, size_bytes, local_modified_at_ms, last_op_id, updated_at_ms)
-             VALUES (?, ?, ?, ?, ?, ?)
+                 (path_text, content_hash, size_bytes, local_modified_at_ms,
+                  remote_modified_at_ms, last_op_id, updated_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(path_text) DO UPDATE SET
                  content_hash = excluded.content_hash,
                  size_bytes = excluded.size_bytes,
                  local_modified_at_ms = excluded.local_modified_at_ms,
+                 remote_modified_at_ms = excluded.remote_modified_at_ms,
                  last_op_id = excluded.last_op_id,
                  updated_at_ms = excluded.updated_at_ms",
             params![
@@ -937,6 +1108,7 @@ impl DurableStateDb {
                 content_hash,
                 i64::try_from(size_bytes).unwrap_or(i64::MAX),
                 local_modified_at_ms,
+                remote_modified_at_ms,
                 last_op_id,
                 system_time_to_millis(now)?
             ],
@@ -949,7 +1121,8 @@ impl DurableStateDb {
         let row = self
             .connection
             .query_row(
-                "SELECT content_hash, size_bytes, local_modified_at_ms, last_op_id, updated_at_ms
+                "SELECT content_hash, size_bytes, local_modified_at_ms, remote_modified_at_ms,
+                        last_op_id, updated_at_ms
                  FROM sync_index WHERE path_text = ?",
                 params![path_text],
                 |row| {
@@ -957,19 +1130,30 @@ impl DurableStateDb {
                         row.get::<_, String>(0)?,
                         row.get::<_, i64>(1)?,
                         row.get::<_, Option<i64>>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
                     ))
                 },
             )
             .optional()?;
         row.map(
-            |(content_hash, size_bytes, local_modified_at_ms, last_op_id, updated_at_ms)| {
+            |(
+                content_hash,
+                size_bytes,
+                local_modified_at_ms,
+                remote_modified_at_ms,
+                last_op_id,
+                updated_at_ms,
+            )| {
                 Ok(SyncIndexEntry {
                     path: path.to_path_buf(),
                     content_hash,
                     size_bytes: u64::try_from(size_bytes).unwrap_or(0),
                     local_modified_at: local_modified_at_ms
+                        .map(millis_to_system_time)
+                        .transpose()?,
+                    remote_modified_at: remote_modified_at_ms
                         .map(millis_to_system_time)
                         .transpose()?,
                     last_op_id,
@@ -978,6 +1162,62 @@ impl DurableStateDb {
             },
         )
         .transpose()
+    }
+
+    /// Every synced path whose last transfer had this content, for move
+    /// detection (a file that vanished at one path and appeared at
+    /// another with the same bytes).
+    pub fn sync_index_by_content(
+        &self,
+        content_hash: &str,
+        size_bytes: u64,
+    ) -> Result<Vec<SyncIndexEntry>, StateDbError> {
+        let mut statement = self.connection.prepare(
+            "SELECT path_text FROM sync_index WHERE content_hash = ? AND size_bytes = ? LIMIT 16",
+        )?;
+        let paths: Vec<String> = statement
+            .query_map(
+                params![content_hash, i64::try_from(size_bytes).unwrap_or(i64::MAX)],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<_, _>>()?;
+        let mut entries = Vec::new();
+        for path in paths {
+            if let Some(entry) = self.sync_index(&path_from_text(path))? {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Every synced path whose remote object had this size and mtime
+    /// at the last transfer: the cheap first filter for a cloud-side
+    /// move (the object keeps both when it is renamed).
+    pub fn sync_index_by_remote_state(
+        &self,
+        size_bytes: u64,
+        remote_modified_at: SystemTime,
+    ) -> Result<Vec<SyncIndexEntry>, StateDbError> {
+        let mut statement = self.connection.prepare(
+            "SELECT path_text FROM sync_index
+             WHERE size_bytes = ? AND remote_modified_at_ms = ? LIMIT 16",
+        )?;
+        let paths: Vec<String> = statement
+            .query_map(
+                params![
+                    i64::try_from(size_bytes).unwrap_or(i64::MAX),
+                    system_time_to_millis(remote_modified_at)?
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<_, _>>()?;
+        let mut entries = Vec::new();
+        for path in paths {
+            if let Some(entry) = self.sync_index(&path_from_text(path))? {
+                entries.push(entry);
+            }
+        }
+        Ok(entries)
     }
 
     pub fn remove_sync_index(&mut self, path: &Path) -> Result<(), StateDbError> {
@@ -1116,6 +1356,643 @@ fn insert_intent(
     Ok(connection.last_insert_rowid())
 }
 
+/// One answer the user can give to a decision.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DecisionOption {
+    pub key: String,
+    pub label: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecisionScope {
+    /// One path.
+    Path,
+    /// A batch of intents (a deletion burst).
+    Batch,
+    /// The whole profile is waiting.
+    Profile,
+}
+
+impl DecisionScope {
+    pub fn label(self) -> &'static str {
+        match self {
+            DecisionScope::Path => "path",
+            DecisionScope::Batch => "batch",
+            DecisionScope::Profile => "profile",
+        }
+    }
+
+    fn parse(text: &str) -> Result<Self, StateDbError> {
+        match text {
+            "path" => Ok(Self::Path),
+            "batch" => Ok(Self::Batch),
+            "profile" => Ok(Self::Profile),
+            other => Err(StateDbError::InvalidStateValue(format!(
+                "decision scope {other:?}"
+            ))),
+        }
+    }
+}
+
+/// A durable question: an irreversible action whose evidence is
+/// ambiguous, parked until the user answers. Lives in the profile's
+/// state DB; `vapor decisions` reads and resolves it with or without a
+/// running daemon, and the daemon applies the answer on its next tick.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecisionRecord {
+    pub id: i64,
+    pub kind: String,
+    pub scope: DecisionScope,
+    pub path: Option<PathBuf>,
+    pub question: String,
+    pub options: Vec<DecisionOption>,
+    pub evidence: serde_json::Value,
+    pub created_at: SystemTime,
+    pub resolved_at: Option<SystemTime>,
+    pub choice: Option<String>,
+    pub applied_at: Option<SystemTime>,
+    /// Intents parked behind this decision.
+    pub held_intents: usize,
+}
+
+impl DecisionRecord {
+    pub fn is_open(&self) -> bool {
+        self.resolved_at.is_none()
+    }
+}
+
+impl DurableStateDb {
+    /// Opens a decision. Returns its id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_decision(
+        &mut self,
+        kind: &str,
+        scope: DecisionScope,
+        path: Option<&Path>,
+        question: &str,
+        options: &[DecisionOption],
+        evidence: &serde_json::Value,
+        now: SystemTime,
+    ) -> Result<i64, StateDbError> {
+        let path_text = path.map(path_to_text).transpose()?;
+        let options_json = serde_json::to_string(options)
+            .map_err(|error| StateDbError::InvalidStateValue(error.to_string()))?;
+        let evidence_json = serde_json::to_string(evidence)
+            .map_err(|error| StateDbError::InvalidStateValue(error.to_string()))?;
+        self.connection.execute(
+            "INSERT INTO pending_decisions
+                 (kind, scope, path_text, question, options_json, evidence_json, created_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                kind,
+                scope.label(),
+                path_text,
+                question,
+                options_json,
+                evidence_json,
+                system_time_to_millis(now)?
+            ],
+        )?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    /// The unresolved decision of `kind` for `path` (or for the profile
+    /// when `path` is `None`), if one is already open.
+    pub fn open_decision(
+        &self,
+        kind: &str,
+        path: Option<&Path>,
+    ) -> Result<Option<DecisionRecord>, StateDbError> {
+        let path_text = path.map(path_to_text).transpose()?;
+        let id = self
+            .connection
+            .query_row(
+                "SELECT id FROM pending_decisions
+                 WHERE kind = ? AND resolved_at_ms IS NULL
+                   AND ((path_text IS NULL AND ? IS NULL) OR path_text = ?)
+                 ORDER BY id LIMIT 1",
+                params![kind, path_text, path_text],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        match id {
+            Some(id) => self.decision(id),
+            None => Ok(None),
+        }
+    }
+
+    pub fn decision(&self, id: i64) -> Result<Option<DecisionRecord>, StateDbError> {
+        let mut records = self.decisions_where("id = ?", params![id])?;
+        Ok(records.pop())
+    }
+
+    /// Every decision, open first, newest first within each group.
+    pub fn decisions(&self, include_closed: bool) -> Result<Vec<DecisionRecord>, StateDbError> {
+        if include_closed {
+            self.decisions_where("1 = 1", [])
+        } else {
+            self.decisions_where("resolved_at_ms IS NULL", [])
+        }
+    }
+
+    pub fn open_decision_count(&self) -> Result<usize, StateDbError> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM pending_decisions WHERE resolved_at_ms IS NULL",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Decisions the user answered that the daemon has not acted on.
+    pub fn resolved_unapplied_decisions(&self) -> Result<Vec<DecisionRecord>, StateDbError> {
+        self.decisions_where("resolved_at_ms IS NOT NULL AND applied_at_ms IS NULL", [])
+    }
+
+    fn decisions_where(
+        &self,
+        clause: &str,
+        parameters: impl rusqlite::Params,
+    ) -> Result<Vec<DecisionRecord>, StateDbError> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT d.id, d.kind, d.scope, d.path_text, d.question, d.options_json,
+                    d.evidence_json, d.created_at_ms, d.resolved_at_ms, d.choice, d.applied_at_ms,
+                    (SELECT COUNT(*) FROM queue_intents q WHERE q.decision_id = d.id AND q.state = 'held')
+             FROM pending_decisions d
+             WHERE {clause}
+             ORDER BY (d.resolved_at_ms IS NOT NULL) ASC, d.id DESC"
+        ))?;
+        let rows = statement.query_map(parameters, |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, Option<i64>>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<i64>>(10)?,
+                row.get::<_, i64>(11)?,
+            ))
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (
+                id,
+                kind,
+                scope,
+                path_text,
+                question,
+                options_json,
+                evidence_json,
+                created_at_ms,
+                resolved_at_ms,
+                choice,
+                applied_at_ms,
+                held,
+            ) = row?;
+            records.push(DecisionRecord {
+                id,
+                kind,
+                scope: DecisionScope::parse(&scope)?,
+                path: path_text.map(path_from_text),
+                question,
+                options: serde_json::from_str(&options_json)
+                    .map_err(|error| StateDbError::InvalidStateValue(error.to_string()))?,
+                evidence: serde_json::from_str(&evidence_json).unwrap_or(serde_json::Value::Null),
+                created_at: millis_to_system_time(created_at_ms)?,
+                resolved_at: resolved_at_ms.map(millis_to_system_time).transpose()?,
+                choice,
+                applied_at: applied_at_ms.map(millis_to_system_time).transpose()?,
+                held_intents: usize::try_from(held).unwrap_or(0),
+            });
+        }
+        Ok(records)
+    }
+
+    /// Records the user's answer. Refuses an unknown option or an
+    /// already-resolved decision.
+    pub fn resolve_decision(
+        &mut self,
+        id: i64,
+        choice: &str,
+        now: SystemTime,
+    ) -> Result<DecisionRecord, StateDbError> {
+        let Some(record) = self.decision(id)? else {
+            return Err(StateDbError::InvalidStateValue(format!(
+                "decision {id} does not exist"
+            )));
+        };
+        if !record.is_open() {
+            return Err(StateDbError::InvalidStateValue(format!(
+                "decision {id} was already resolved as {:?}",
+                record.choice.as_deref().unwrap_or("")
+            )));
+        }
+        if !record.options.iter().any(|option| option.key == choice) {
+            return Err(StateDbError::InvalidStateValue(format!(
+                "decision {id} has no option {choice:?}; choose one of {}",
+                record
+                    .options
+                    .iter()
+                    .map(|option| option.key.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        self.connection.execute(
+            "UPDATE pending_decisions SET resolved_at_ms = ?, choice = ? WHERE id = ?",
+            params![system_time_to_millis(now)?, choice, id],
+        )?;
+        self.decision(id)?
+            .ok_or_else(|| StateDbError::InvalidStateValue(format!("decision {id} vanished")))
+    }
+
+    /// Whether a decision of `kind` for `path` was applied after `since`:
+    /// the walk uses it to give an answer time to land before asking
+    /// the same question again.
+    pub fn decision_applied_since(
+        &self,
+        kind: &str,
+        path: &Path,
+        since: SystemTime,
+    ) -> Result<bool, StateDbError> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM pending_decisions
+             WHERE kind = ? AND path_text = ? AND applied_at_ms >= ?",
+            params![kind, path_to_text(path)?, system_time_to_millis(since)?],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Whether a decision of `kind` at `path` was ever answered with
+    /// `choice`. An answer that means "stop asking" is honoured across
+    /// walks and restarts through this.
+    pub fn decision_answered(
+        &self,
+        kind: &str,
+        path: &Path,
+        choice: &str,
+    ) -> Result<bool, StateDbError> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM pending_decisions
+             WHERE kind = ? AND path_text = ? AND choice = ?",
+            params![kind, path_to_text(path)?, choice],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Closes an open decision the daemon no longer needs an answer to
+    /// (the condition it asked about went away). Recorded as resolved
+    /// and applied with the choice `withdrawn`, so the history says
+    /// why it closed.
+    pub fn withdraw_decision(&mut self, id: i64, now: SystemTime) -> Result<(), StateDbError> {
+        let now_ms = system_time_to_millis(now)?;
+        self.connection.execute(
+            "UPDATE pending_decisions
+             SET resolved_at_ms = ?, choice = 'withdrawn', applied_at_ms = ?
+             WHERE id = ? AND resolved_at_ms IS NULL",
+            params![now_ms, now_ms, id],
+        )?;
+        Ok(())
+    }
+
+    /// Adds a path to the decision's evidence (`paths` array, capped
+    /// at `cap`; the count of held intents is tracked separately).
+    pub fn append_decision_evidence_path(
+        &mut self,
+        id: i64,
+        path: &Path,
+        cap: usize,
+    ) -> Result<(), StateDbError> {
+        let Some(record) = self.decision(id)? else {
+            return Ok(());
+        };
+        let mut evidence = record.evidence;
+        let paths = evidence
+            .as_object_mut()
+            .and_then(|object| object.get_mut("paths"))
+            .and_then(|paths| paths.as_array_mut());
+        if let Some(paths) = paths
+            && paths.len() < cap
+        {
+            paths.push(serde_json::Value::String(path.display().to_string()));
+        } else {
+            return Ok(());
+        }
+        let evidence_json = serde_json::to_string(&evidence)
+            .map_err(|error| StateDbError::InvalidStateValue(error.to_string()))?;
+        self.connection.execute(
+            "UPDATE pending_decisions SET evidence_json = ? WHERE id = ?",
+            params![evidence_json, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_decision_applied(&mut self, id: i64, now: SystemTime) -> Result<(), StateDbError> {
+        self.connection.execute(
+            "UPDATE pending_decisions SET applied_at_ms = ? WHERE id = ?",
+            params![system_time_to_millis(now)?, id],
+        )?;
+        Ok(())
+    }
+
+    /// Parks a leased intent behind a decision. It is not leased again
+    /// until `release_held` or removed by `drop_held`.
+    pub fn hold_leased(&mut self, intent_id: i64, decision_id: i64) -> Result<bool, StateDbError> {
+        let changed = self.connection.execute(
+            "UPDATE queue_intents
+             SET state = ?, leased_at_ms = NULL, decision_id = ?
+             WHERE id = ? AND state = ?",
+            params![STATE_HELD, decision_id, intent_id, STATE_LEASED],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Parks every pending intent of `kind` behind `decision_id` and
+    /// returns their paths. The mass-deletion guard calls this when it
+    /// trips, so the decision holds the whole burst the question
+    /// describes, not only the deletions that reached the executor.
+    pub fn hold_pending_of_kind(
+        &mut self,
+        kind: PendingIntentKind,
+        decision_id: i64,
+    ) -> Result<Vec<PathBuf>, StateDbError> {
+        let mut statement = self.connection.prepare(
+            "SELECT path_text FROM queue_intents WHERE kind = ? AND state = ? ORDER BY id ASC",
+        )?;
+        let rows = statement.query_map(params![intent_kind_label(kind), STATE_PENDING], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut paths = Vec::new();
+        for row in rows {
+            paths.push(path_from_text(row?));
+        }
+        drop(statement);
+        self.connection.execute(
+            "UPDATE queue_intents SET state = ?, decision_id = ? WHERE kind = ? AND state = ?",
+            params![
+                STATE_HELD,
+                decision_id,
+                intent_kind_label(kind),
+                STATE_PENDING
+            ],
+        )?;
+        Ok(paths)
+    }
+
+    /// Drops the held intent of `kind` at `path`, if any, and returns
+    /// the decision it was held behind. The other side already applied
+    /// the deletion, so there is nothing left to ask about for it.
+    pub fn drop_held_at(
+        &mut self,
+        path: &Path,
+        kind: PendingIntentKind,
+    ) -> Result<Option<i64>, StateDbError> {
+        let path_text = path_to_text(path)?;
+        let decision_id: Option<i64> = self
+            .connection
+            .query_row(
+                "SELECT decision_id FROM queue_intents
+                 WHERE path_text = ? AND kind = ? AND state = ?",
+                params![path_text, intent_kind_label(kind), STATE_HELD],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if decision_id.is_some() {
+            self.connection.execute(
+                "DELETE FROM queue_intents WHERE path_text = ? AND kind = ? AND state = ?",
+                params![path_text, intent_kind_label(kind), STATE_HELD],
+            )?;
+        }
+        Ok(decision_id)
+    }
+
+    pub fn held_intents(&self, decision_id: i64) -> Result<Vec<DurableIntentRecord>, StateDbError> {
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT {INTENT_COLUMNS} FROM queue_intents
+             WHERE decision_id = ? AND state = ?
+             ORDER BY id ASC"
+        ))?;
+        let rows = statement.query_map(params![decision_id, STATE_HELD], intent_from_row)?;
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(raw_intent_to_record(row?)?);
+        }
+        Ok(records)
+    }
+
+    pub fn held_intent_count(&self) -> Result<usize, StateDbError> {
+        count_intents(&self.connection, Some(STATE_HELD))
+    }
+
+    /// Returns every intent held behind `decision_id` to the pending
+    /// state, ready now and marked approved so the guard that held it
+    /// lets it through.
+    pub fn release_held(
+        &mut self,
+        decision_id: i64,
+        now: SystemTime,
+    ) -> Result<usize, StateDbError> {
+        let changed = self.connection.execute(
+            "UPDATE queue_intents
+             SET state = ?, available_at_ms = ?, decision_id = NULL, approved = 1
+             WHERE decision_id = ? AND state = ?",
+            params![
+                STATE_PENDING,
+                system_time_to_millis(now)?,
+                decision_id,
+                STATE_HELD
+            ],
+        )?;
+        Ok(changed)
+    }
+
+    /// Number of paths the sync index knows: the size of the synced
+    /// tree the deletion guard measures its ratio against.
+    pub fn sync_index_count(&self) -> Result<usize, StateDbError> {
+        let count = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM sync_index", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        Ok(count as usize)
+    }
+
+    /// Whether the queue still holds intent `id` in a working state.
+    /// An in-flight intent checks this before an irreversible step, so
+    /// a row dropped meanwhile (a root recovery) is honoured.
+    pub fn intent_is_queued(&self, id: i64) -> Result<bool, StateDbError> {
+        let count = self.connection.query_row(
+            "SELECT COUNT(*) FROM queue_intents WHERE id = ? AND state IN (?, ?)",
+            params![id, STATE_PENDING, STATE_LEASED],
+            |row| row.get::<_, i64>(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Removes every queued (pending or leased) intent of `kind`. A
+    /// root recovery uses it: deletions observed while a root was
+    /// going away describe the root's absence, not the user's intent.
+    pub fn discard_queued_of_kind(
+        &mut self,
+        kind: PendingIntentKind,
+    ) -> Result<usize, StateDbError> {
+        let changed = self.connection.execute(
+            "DELETE FROM queue_intents WHERE kind = ? AND state IN (?, ?)",
+            params![intent_kind_label(kind), STATE_PENDING, STATE_LEASED],
+        )?;
+        Ok(changed)
+    }
+
+    /// Removes every intent held behind `decision_id`.
+    pub fn drop_held(&mut self, decision_id: i64) -> Result<usize, StateDbError> {
+        let changed = self.connection.execute(
+            "DELETE FROM queue_intents WHERE decision_id = ? AND state = ?",
+            params![decision_id, STATE_HELD],
+        )?;
+        Ok(changed)
+    }
+
+    /// Enqueues a download whose remote object lives at `remote_path`
+    /// rather than at the local path's mirror.
+    pub fn enqueue_download_from(
+        &mut self,
+        local_path: &Path,
+        remote_path: &str,
+        now: SystemTime,
+    ) -> Result<i64, StateDbError> {
+        let path_text = path_to_text(local_path)?;
+        let now_ms = system_time_to_millis(now)?;
+        let rank = i64::from(crate::safeguards::durable_intent_priority_rank(
+            local_path,
+            PendingIntentKind::Download,
+            crate::safeguards::IntentSource::Fresh,
+        ));
+        self.connection.execute(
+            "INSERT INTO queue_intents
+                 (path_text, kind, state, priority_rank, enqueued_at_ms, available_at_ms, remote_path_text)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                path_text,
+                intent_kind_label(PendingIntentKind::Download),
+                STATE_PENDING,
+                rank,
+                now_ms,
+                now_ms,
+                remote_path
+            ],
+        )?;
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    /// Records that `remote_path` is materialized locally at `local_path`
+    /// holding the remote version `remote_hash`.
+    pub fn record_name_alias(
+        &mut self,
+        remote_path: &str,
+        local_path: &Path,
+        remote_hash: &str,
+        now: SystemTime,
+    ) -> Result<(), StateDbError> {
+        self.connection.execute(
+            "INSERT INTO name_aliases (remote_path_text, local_path_text, remote_hash, created_at_ms)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(remote_path_text) DO UPDATE SET
+                 local_path_text = excluded.local_path_text,
+                 remote_hash = excluded.remote_hash,
+                 created_at_ms = excluded.created_at_ms",
+            params![
+                remote_path,
+                path_to_text(local_path)?,
+                remote_hash,
+                system_time_to_millis(now)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// `(local path, remote hash)` the remote name is materialized as.
+    pub fn name_alias(&self, remote_path: &str) -> Result<Option<(PathBuf, String)>, StateDbError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT local_path_text, remote_hash FROM name_aliases WHERE remote_path_text = ?",
+                params![remote_path],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(local, hash)| (path_from_text(local), hash)))
+    }
+
+    /// The remote path a local file is materialized from, when its cloud
+    /// object lives under a name this filesystem cannot hold next to
+    /// another local name.
+    pub fn alias_remote_for_local(
+        &self,
+        local_path: &Path,
+    ) -> Result<Option<String>, StateDbError> {
+        let remote = self
+            .connection
+            .query_row(
+                "SELECT remote_path_text FROM name_aliases WHERE local_path_text = ?",
+                params![path_to_text(local_path)?],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(remote)
+    }
+
+    /// Every alias under `directory` (direct children only), as
+    /// `(remote file name, local file name)`.
+    pub fn name_aliases_in(&self, directory: &Path) -> Result<Vec<(String, String)>, StateDbError> {
+        let mut prefix = path_to_text(directory)?;
+        if !prefix.ends_with(std::path::MAIN_SEPARATOR) {
+            prefix.push(std::path::MAIN_SEPARATOR);
+        }
+        let mut statement = self
+            .connection
+            .prepare("SELECT remote_path_text, local_path_text FROM name_aliases")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut found = Vec::new();
+        for row in rows {
+            let (remote, local) = row?;
+            let Some(rest) = local.strip_prefix(&prefix) else {
+                continue;
+            };
+            if rest.contains(std::path::MAIN_SEPARATOR) {
+                continue;
+            }
+            let remote_name = remote.rsplit('/').next().unwrap_or(&remote).to_string();
+            found.push((remote_name, rest.to_string()));
+        }
+        Ok(found)
+    }
+
+    pub fn remove_name_alias_for_local(&mut self, local_path: &Path) -> Result<(), StateDbError> {
+        self.connection.execute(
+            "DELETE FROM name_aliases WHERE local_path_text = ?",
+            params![path_to_text(local_path)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_name_alias(&mut self, remote_path: &str) -> Result<(), StateDbError> {
+        self.connection.execute(
+            "DELETE FROM name_aliases WHERE remote_path_text = ?",
+            params![remote_path],
+        )?;
+        Ok(())
+    }
+}
+
 /// Whether a SQLite error means the file is genuinely not a usable
 /// database (structural corruption or "not a database"), as opposed to a
 /// transient/environmental failure (disk full, I/O error, busy lock,
@@ -1164,9 +2041,14 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
             Some(MIGRATABLE_SCHEMA_VERSION) => {
                 migrate_v3_to_v4(&transaction)?;
                 migrate_v4_to_v5(&transaction)?;
+                migrate_v5_to_v6(&transaction)?;
             }
             Some(4) => {
                 migrate_v4_to_v5(&transaction)?;
+                migrate_v5_to_v6(&transaction)?;
+            }
+            Some(5) => {
+                migrate_v5_to_v6(&transaction)?;
             }
             Some(found) => {
                 return Err(StateDbError::SchemaVersionMismatch {
@@ -1186,13 +2068,44 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              path_text TEXT NOT NULL,
              kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
-             state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
+             state TEXT NOT NULL CHECK(state IN ('pending', 'leased', 'held')),
              priority_rank INTEGER NOT NULL DEFAULT 4 CHECK(priority_rank >= 0),
              enqueued_at_ms INTEGER NOT NULL,
              available_at_ms INTEGER NOT NULL,
              leased_at_ms INTEGER,
              attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
-             last_error TEXT
+             last_error TEXT,
+             decision_id INTEGER,
+             remote_path_text TEXT,
+             approved INTEGER NOT NULL DEFAULT 0
+         );
+         -- A durable question for the user: an irreversible action whose
+         -- evidence is ambiguous. Held intents reference it; the CLI
+         -- resolves it; the daemon applies the answer.
+         CREATE TABLE IF NOT EXISTS pending_decisions (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             kind TEXT NOT NULL,
+             scope TEXT NOT NULL CHECK(scope IN ('path', 'batch', 'profile')),
+             path_text TEXT,
+             question TEXT NOT NULL,
+             options_json TEXT NOT NULL,
+             evidence_json TEXT NOT NULL,
+             created_at_ms INTEGER NOT NULL,
+             resolved_at_ms INTEGER,
+             choice TEXT,
+             applied_at_ms INTEGER
+         );
+         CREATE INDEX IF NOT EXISTS idx_pending_decisions_open
+             ON pending_decisions(applied_at_ms, kind, path_text);
+         -- A remote name this filesystem cannot hold next to a
+         -- differently-cased sibling, materialized under another local
+         -- name (a keep-both copy). The hash records which remote
+         -- version the copy holds.
+         CREATE TABLE IF NOT EXISTS name_aliases (
+             remote_path_text TEXT PRIMARY KEY,
+             local_path_text TEXT NOT NULL,
+             remote_hash TEXT NOT NULL,
+             created_at_ms INTEGER NOT NULL
          );
          -- Lease order: priority class first, then readiness, then id.
          CREATE INDEX IF NOT EXISTS idx_queue_intents_ready
@@ -1226,6 +2139,7 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
              content_hash TEXT NOT NULL,
              size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
              local_modified_at_ms INTEGER,
+             remote_modified_at_ms INTEGER,
              last_op_id TEXT NOT NULL,
              updated_at_ms INTEGER NOT NULL
          );
@@ -1233,7 +2147,11 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
              path_text TEXT PRIMARY KEY,
              origin TEXT NOT NULL CHECK(origin IN ('local', 'remote')),
              deleted_at_ms INTEGER NOT NULL
-         );",
+         );
+         CREATE INDEX IF NOT EXISTS idx_sync_index_content
+             ON sync_index(content_hash, size_bytes);
+         CREATE INDEX IF NOT EXISTS idx_sync_index_remote_state
+             ON sync_index(size_bytes, remote_modified_at_ms);",
     )?;
 
     if read_schema_version(&transaction)?.is_none() {
@@ -1335,6 +2253,98 @@ fn migrate_v4_to_v5(transaction: &rusqlite::Transaction<'_>) -> Result<(), State
     Ok(())
 }
 
+/// Forward migration v5 → v6: rebuilds `queue_intents` with the `held`
+/// state, a `decision_id`, and a `remote_path_text` (SQLite cannot
+/// alter CHECK constraints in place), and adds the `pending_decisions`
+/// and `name_aliases` tables. Rollback story: a v5 build rejects a
+/// `held` row and knows neither table, so rollback requires dropping
+/// the DB (pre-GA policy, AGENTS.md §1.1).
+fn migrate_v5_to_v6(transaction: &rusqlite::Transaction<'_>) -> Result<(), StateDbError> {
+    transaction.execute_batch(
+        "CREATE TABLE queue_intents_v6 (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             path_text TEXT NOT NULL,
+             kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
+             state TEXT NOT NULL CHECK(state IN ('pending', 'leased', 'held')),
+             priority_rank INTEGER NOT NULL DEFAULT 4 CHECK(priority_rank >= 0),
+             enqueued_at_ms INTEGER NOT NULL,
+             available_at_ms INTEGER NOT NULL,
+             leased_at_ms INTEGER,
+             attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+             last_error TEXT,
+             decision_id INTEGER,
+             remote_path_text TEXT,
+             approved INTEGER NOT NULL DEFAULT 0
+         );
+         INSERT INTO queue_intents_v6
+             (id, path_text, kind, state, priority_rank, enqueued_at_ms, available_at_ms,
+              leased_at_ms, attempt_count, last_error)
+             SELECT id, path_text, kind, state, priority_rank, enqueued_at_ms, available_at_ms,
+                    leased_at_ms, attempt_count, last_error
+             FROM queue_intents;
+         DROP TABLE queue_intents;
+         ALTER TABLE queue_intents_v6 RENAME TO queue_intents;
+         CREATE INDEX IF NOT EXISTS idx_queue_intents_ready
+             ON queue_intents(state, priority_rank, available_at_ms, id);
+         CREATE INDEX IF NOT EXISTS idx_queue_intents_path
+             ON queue_intents(path_text, kind, state);
+         CREATE INDEX IF NOT EXISTS idx_queue_intents_order
+             ON queue_intents(available_at_ms, id);
+         DELETE FROM sqlite_sequence WHERE name = 'queue_intents';
+         INSERT INTO sqlite_sequence (name, seq)
+             VALUES ('queue_intents',
+                     MAX(COALESCE((SELECT MAX(id) FROM queue_intents), 0),
+                         COALESCE((SELECT MAX(id) FROM failed_intents), 0)));
+         CREATE TABLE IF NOT EXISTS pending_decisions (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             kind TEXT NOT NULL,
+             scope TEXT NOT NULL CHECK(scope IN ('path', 'batch', 'profile')),
+             path_text TEXT,
+             question TEXT NOT NULL,
+             options_json TEXT NOT NULL,
+             evidence_json TEXT NOT NULL,
+             created_at_ms INTEGER NOT NULL,
+             resolved_at_ms INTEGER,
+             choice TEXT,
+             applied_at_ms INTEGER
+         );
+         CREATE INDEX IF NOT EXISTS idx_pending_decisions_open
+             ON pending_decisions(applied_at_ms, kind, path_text);
+         CREATE TABLE IF NOT EXISTS name_aliases (
+             remote_path_text TEXT PRIMARY KEY,
+             local_path_text TEXT NOT NULL,
+             remote_hash TEXT NOT NULL,
+             created_at_ms INTEGER NOT NULL
+         );
+         UPDATE schema_meta SET schema_version = 6 WHERE singleton = 1;",
+    )?;
+    // A database from before the sync index existed reaches this
+    // migration without the table; the base schema creates it in its
+    // v6 shape afterwards. An older table gains the column here.
+    let has_sync_index = transaction.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sync_index'",
+        [],
+        |row| row.get::<_, i64>(0),
+    )? > 0;
+    if has_sync_index {
+        let has_column = transaction
+            .prepare("PRAGMA table_info(sync_index)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(Result::ok)
+            .any(|name| name == "remote_modified_at_ms");
+        if !has_column {
+            transaction.execute_batch(
+                "ALTER TABLE sync_index ADD COLUMN remote_modified_at_ms INTEGER;",
+            )?;
+        }
+    }
+    crate::logging::info(
+        "Migrated durable state schema v5 -> v6 (decisions, held intents, name aliases, remote mtimes)",
+        &[],
+    );
+    Ok(())
+}
+
 fn read_schema_version(connection: &Connection) -> Result<Option<i64>, StateDbError> {
     let version = connection
         .query_row(
@@ -1353,6 +2363,8 @@ fn read_schema_version(connection: &Connection) -> Result<Option<i64>, StateDbEr
     Ok(version)
 }
 
+/// Counts queue rows in `state`, or the workable rows (pending and
+/// leased) when `state` is `None`.
 fn count_intents(connection: &Connection, state: Option<&str>) -> Result<usize, StateDbError> {
     let count = match state {
         Some(state) => connection.query_row(
@@ -1360,9 +2372,11 @@ fn count_intents(connection: &Connection, state: Option<&str>) -> Result<usize, 
             params![state],
             |row| row.get::<_, i64>(0),
         )?,
-        None => connection.query_row("SELECT COUNT(*) FROM queue_intents", [], |row| {
-            row.get::<_, i64>(0)
-        })?,
+        None => connection.query_row(
+            "SELECT COUNT(*) FROM queue_intents WHERE state IN (?, ?)",
+            params![STATE_PENDING, STATE_LEASED],
+            |row| row.get::<_, i64>(0),
+        )?,
     };
     Ok(count as usize)
 }
@@ -1380,7 +2394,15 @@ type RawIntentRow = (
     Option<i64>,
     i64,
     Option<String>,
+    Option<String>,
+    i64,
+    String,
+    Option<i64>,
 );
+
+const INTENT_COLUMNS: &str = "id, path_text, kind, priority_rank, enqueued_at_ms, available_at_ms, \
+                              leased_at_ms, attempt_count, last_error, remote_path_text, approved, \
+                              state, decision_id";
 
 fn intent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawIntentRow> {
     Ok((
@@ -1393,6 +2415,10 @@ fn intent_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawIntentRow> {
         row.get::<_, Option<i64>>(6)?,
         row.get::<_, i64>(7)?,
         row.get::<_, Option<String>>(8)?,
+        row.get::<_, Option<String>>(9)?,
+        row.get::<_, i64>(10)?,
+        row.get::<_, String>(11)?,
+        row.get::<_, Option<i64>>(12)?,
     ))
 }
 
@@ -1407,6 +2433,10 @@ fn raw_intent_to_record(raw: RawIntentRow) -> Result<DurableIntentRecord, StateD
         leased_at_ms,
         attempt_count,
         last_error,
+        remote_path_text,
+        approved,
+        state,
+        decision_id,
     ) = raw;
     Ok(DurableIntentRecord {
         id,
@@ -1418,6 +2448,9 @@ fn raw_intent_to_record(raw: RawIntentRow) -> Result<DurableIntentRecord, StateD
         leased_at: leased_at_ms.map(millis_to_system_time).transpose()?,
         attempt_count: validate_attempt_count(attempt_count)?,
         last_error: last_error.map(|value| sanitize_persisted_error(&value)),
+        remote_path: remote_path_text,
+        approved: approved != 0,
+        held_by: (state == STATE_HELD).then_some(decision_id).flatten(),
     })
 }
 
@@ -1427,9 +2460,11 @@ fn fetch_intent(
 ) -> Result<Option<DurableIntentRecord>, StateDbError> {
     let raw_intent = connection
         .query_row(
-            "SELECT id, path_text, kind, priority_rank, enqueued_at_ms, available_at_ms, leased_at_ms, attempt_count, last_error
-             FROM queue_intents
-             WHERE id = ?",
+            &format!(
+                "SELECT {INTENT_COLUMNS}
+                 FROM queue_intents
+                 WHERE id = ?"
+            ),
             params![id],
             intent_from_row,
         )
@@ -1490,7 +2525,15 @@ fn fetch_failed_intent(
         .transpose()
 }
 
+/// The durable spelling of a path. On Windows a path may arrive with
+/// either separator (`docs/keep.txt` joined onto `C:\\watch`), and the
+/// same file must key the same row, so the text is rebuilt from the
+/// path's components, which spells every separator the OS way.
 fn path_to_text(path: &Path) -> Result<String, StateDbError> {
+    #[cfg(windows)]
+    let normalized: PathBuf = path.components().collect();
+    #[cfg(windows)]
+    let path = normalized.as_path();
     path.to_str()
         .map(|s| s.to_string())
         .ok_or_else(|| StateDbError::NonUtf8Path(path.display().to_string()))
@@ -2268,11 +3311,22 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn path_to_text_returns_utf8_for_ascii_paths() {
         let path = PathBuf::from("/tmp/vapor/file.txt");
         let text = path_to_text(&path).expect("ascii path is UTF-8");
         assert_eq!(text, "/tmp/vapor/file.txt");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_to_text_spells_every_separator_the_os_way() {
+        let mixed = PathBuf::from("C:\\watch\\docs/keep.txt");
+        assert_eq!(
+            path_to_text(&mixed).expect("utf-8"),
+            "C:\\watch\\docs\\keep.txt"
+        );
     }
 
     #[cfg(unix)]
@@ -2555,6 +3609,257 @@ mod tests {
             first.priority_rank,
             crate::safeguards::RECONCILE_INTENT_PRIORITY_RANK
         );
+    }
+
+    #[test]
+    fn version_five_database_migrates_in_place_adding_decisions_and_held_state() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        fs::create_dir_all(database_path.parent().unwrap()).expect("parent");
+        let connection = Connection::open(&database_path).expect("open sqlite connection");
+        configure_connection(&connection).expect("configure connection");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_meta (
+                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                     schema_version INTEGER NOT NULL CHECK(schema_version > 0)
+                 );
+                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 5);
+                 CREATE TABLE queue_intents (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     path_text TEXT NOT NULL,
+                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
+                     state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
+                     priority_rank INTEGER NOT NULL DEFAULT 4 CHECK(priority_rank >= 0),
+                     enqueued_at_ms INTEGER NOT NULL,
+                     available_at_ms INTEGER NOT NULL,
+                     leased_at_ms INTEGER,
+                     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+                     last_error TEXT
+                 );
+                 CREATE TABLE failed_intents (
+                     id INTEGER PRIMARY KEY,
+                     path_text TEXT NOT NULL,
+                     kind TEXT NOT NULL,
+                     failure_kind TEXT NOT NULL,
+                     enqueued_at_ms INTEGER NOT NULL,
+                     failed_at_ms INTEGER NOT NULL,
+                     attempt_count INTEGER NOT NULL,
+                     last_error TEXT NOT NULL
+                 );
+                 CREATE TABLE state_entries (
+                     key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at_ms INTEGER NOT NULL
+                 );
+                 CREATE TABLE sync_index (
+                     path_text TEXT PRIMARY KEY, content_hash TEXT NOT NULL,
+                     size_bytes INTEGER NOT NULL, local_modified_at_ms INTEGER,
+                     last_op_id TEXT NOT NULL, updated_at_ms INTEGER NOT NULL
+                 );
+                 CREATE TABLE tombstones (
+                     path_text TEXT PRIMARY KEY, origin TEXT NOT NULL, deleted_at_ms INTEGER NOT NULL
+                 );
+                 INSERT INTO queue_intents
+                     (path_text, kind, state, priority_rank, enqueued_at_ms, available_at_ms)
+                     VALUES ('/tmp/vapor-root/file.txt', 'upload', 'pending', 3, 100, 100);
+                 ",
+            )
+            .expect("seed version five schema");
+        // The row's text is the spelling this OS stores for the path.
+        connection
+            .execute(
+                "INSERT INTO sync_index
+                     (path_text, content_hash, size_bytes, local_modified_at_ms, last_op_id, updated_at_ms)
+                     VALUES (?, 'abc', 3, 50, 'op-1', 60)",
+                params![path_to_text(Path::new("/tmp/vapor-root/synced.txt")).expect("text")],
+            )
+            .expect("seed the synced row");
+        drop(connection);
+
+        let mut migrated = DurableStateDb::open(&database_path)
+            .expect("version five database must migrate forward in place");
+        assert_eq!(migrated.schema_version().expect("version"), 6);
+        let index = migrated
+            .sync_index(Path::new("/tmp/vapor-root/synced.txt"))
+            .expect("index")
+            .expect("index row survived");
+        assert_eq!(
+            index.remote_modified_at, None,
+            "old rows carry no remote mtime"
+        );
+        assert!(
+            !index.matches_remote(3, timestamp_ms(50)),
+            "an old row never passes the remote quick check"
+        );
+        let leased = migrated
+            .lease_next_ready(timestamp_ms(200))
+            .expect("lease")
+            .expect("row survived");
+        assert_eq!(leased.path, PathBuf::from("/tmp/vapor-root/file.txt"));
+        assert_eq!(leased.remote_path, None);
+        assert!(!leased.approved);
+        assert_eq!(migrated.open_decision_count().expect("count"), 0);
+    }
+
+    #[test]
+    fn a_held_intent_waits_for_its_decision_and_follows_the_answer() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut db =
+            DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite")).expect("open");
+        let path = PathBuf::from("/tmp/vapor-root/doomed.txt");
+        db.enqueue_intent(&path, PendingIntentKind::Delete, timestamp_ms(0))
+            .expect("enqueue");
+        let leased = db
+            .lease_next_ready(timestamp_ms(1))
+            .expect("lease")
+            .expect("leased");
+        let decision = db
+            .create_decision(
+                "mass-deletion",
+                DecisionScope::Batch,
+                None,
+                "Apply 1 deletion?",
+                &[
+                    DecisionOption {
+                        key: "apply".into(),
+                        label: "Apply".into(),
+                    },
+                    DecisionOption {
+                        key: "discard".into(),
+                        label: "Discard".into(),
+                    },
+                ],
+                &serde_json::json!({ "count": 1 }),
+                timestamp_ms(1),
+            )
+            .expect("decision");
+        assert!(db.hold_leased(leased.id, decision).expect("hold"));
+
+        // Held rows never lease, and count separately from pending.
+        assert!(
+            db.lease_next_ready(timestamp_ms(100))
+                .expect("lease")
+                .is_none()
+        );
+        assert_eq!(db.held_intent_count().expect("held"), 1);
+        assert_eq!(db.pending_depth().expect("pending"), 0);
+        // Startup recovery leaves held rows alone.
+        assert_eq!(db.recover_leased(timestamp_ms(100)).expect("recover"), 0);
+        let open = db
+            .open_decision("mass-deletion", None)
+            .expect("open")
+            .expect("exists");
+        assert_eq!(open.id, decision);
+        assert_eq!(open.held_intents, 1);
+        assert!(
+            db.resolved_unapplied_decisions()
+                .expect("unapplied")
+                .is_empty()
+        );
+
+        // A wrong option is refused; a right one records the answer.
+        assert!(
+            db.resolve_decision(decision, "maybe", timestamp_ms(200))
+                .is_err()
+        );
+        let resolved = db
+            .resolve_decision(decision, "apply", timestamp_ms(200))
+            .expect("resolve");
+        assert_eq!(resolved.choice.as_deref(), Some("apply"));
+        assert!(
+            db.resolve_decision(decision, "apply", timestamp_ms(201))
+                .is_err()
+        );
+        assert_eq!(
+            db.resolved_unapplied_decisions().expect("unapplied").len(),
+            1
+        );
+        assert_eq!(db.open_decision_count().expect("count"), 0);
+
+        // Applying releases the held intent back to the queue.
+        assert_eq!(
+            db.release_held(decision, timestamp_ms(300))
+                .expect("release"),
+            1
+        );
+        db.mark_decision_applied(decision, timestamp_ms(300))
+            .expect("applied");
+        assert!(
+            db.resolved_unapplied_decisions()
+                .expect("unapplied")
+                .is_empty()
+        );
+        let again = db
+            .lease_next_ready(timestamp_ms(301))
+            .expect("lease")
+            .expect("released intent leases");
+        assert_eq!(again.id, leased.id);
+        assert!(
+            again.approved,
+            "a released intent carries the user's approval"
+        );
+    }
+
+    #[test]
+    fn dropping_a_held_batch_removes_its_intents() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut db =
+            DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite")).expect("open");
+        let decision = db
+            .create_decision(
+                "mass-deletion",
+                DecisionScope::Batch,
+                None,
+                "?",
+                &[DecisionOption {
+                    key: "discard".into(),
+                    label: "Discard".into(),
+                }],
+                &serde_json::Value::Null,
+                timestamp_ms(0),
+            )
+            .expect("decision");
+        for name in ["a", "b"] {
+            db.enqueue_intent(
+                &PathBuf::from(format!("/tmp/vapor-root/{name}.txt")),
+                PendingIntentKind::Delete,
+                timestamp_ms(0),
+            )
+            .expect("enqueue");
+            let leased = db
+                .lease_next_ready(timestamp_ms(1))
+                .expect("lease")
+                .expect("row");
+            db.hold_leased(leased.id, decision).expect("hold");
+        }
+        assert_eq!(db.held_intents(decision).expect("held").len(), 2);
+        assert_eq!(db.drop_held(decision).expect("drop"), 2);
+        assert_eq!(db.queue_depth().expect("depth"), 0);
+    }
+
+    #[test]
+    fn name_aliases_and_aliased_downloads_round_trip() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut db =
+            DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite")).expect("open");
+        let local = PathBuf::from("/tmp/vapor-root/readme~conflict-x.md");
+        db.record_name_alias("readme.md", &local, "hash-1", timestamp_ms(0))
+            .expect("alias");
+        assert_eq!(
+            db.name_alias("readme.md").expect("alias"),
+            Some((local.clone(), "hash-1".to_string()))
+        );
+        let id = db
+            .enqueue_download_from(&local, "readme.md", timestamp_ms(1))
+            .expect("enqueue");
+        let leased = db
+            .lease_next_ready(timestamp_ms(2))
+            .expect("lease")
+            .expect("row");
+        assert_eq!(leased.id, id);
+        assert_eq!(leased.kind, PendingIntentKind::Download);
+        assert_eq!(leased.remote_path.as_deref(), Some("readme.md"));
+        db.remove_name_alias("readme.md").expect("remove");
+        assert_eq!(db.name_alias("readme.md").expect("alias"), None);
     }
 
     #[test]

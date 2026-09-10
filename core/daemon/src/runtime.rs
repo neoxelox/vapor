@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -44,11 +44,88 @@ const MAX_CONSECUTIVE_TICK_ERRORS: u32 = 5;
 pub enum DaemonRuntimeError {
     Watcher(FsEventsWatcherError),
     StateDb(StateDbError),
+    /// The local root the profile adopted is not there. Waited for by
+    /// the caller; never re-created.
+    LocalRootMissing(PathBuf),
 }
 
 impl From<FsEventsWatcherError> for DaemonRuntimeError {
     fn from(value: FsEventsWatcherError) -> Self {
         Self::Watcher(value)
+    }
+}
+
+/// What a cloud-root ensure or identity probe found, computed on the
+/// worker so the tick thread never waits on the provider.
+#[derive(Debug)]
+enum CloudRootOutcome {
+    /// Present, ensured, and carrying the recorded identity (or just
+    /// adopted: the identity to record is carried along).
+    Ready {
+        adopted: Option<String>,
+    },
+    Missing,
+    Unreachable(String),
+    Replaced {
+        found: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct RootHold {
+    side: crate::root_identity::RootSide,
+    reason: String,
+    /// The open decision the hold waits on (`root-missing` or
+    /// `root-replaced`).
+    decision_id: Option<i64>,
+    /// An absence rather than a replacement.
+    missing: bool,
+}
+
+/// Ensures or checks the cloud root, on whichever thread calls it.
+/// With no recorded identity the root is ensured (created when the
+/// backend allows) and adopted; with one it is only checked, never
+/// created, and ensured when it matches so the provider's root cache
+/// is primed.
+fn probe_cloud_root(
+    provider: Arc<dyn Provider>,
+    cloud_root: &str,
+    recorded: Option<String>,
+    device_id: &str,
+) -> CloudRootOutcome {
+    use crate::root_identity::{RootStatus, classify_cloud_probe};
+    match recorded {
+        None => match provider.ensure_cloud_sync_directory(cloud_root) {
+            Ok(()) => match provider.adopt_root(cloud_root, device_id) {
+                Ok(identity) => {
+                    logging::info(
+                        "Adopted the cloud sync directory",
+                        &[
+                            ("cloud_sync_directory", cloud_root.to_string()),
+                            (
+                                "identity",
+                                identity.clone().unwrap_or_else(|| "none".to_string()),
+                            ),
+                        ],
+                    );
+                    CloudRootOutcome::Ready {
+                        adopted: Some(identity.unwrap_or_default()),
+                    }
+                }
+                Err(error) => CloudRootOutcome::Unreachable(error.message),
+            },
+            Err(error) => CloudRootOutcome::Unreachable(error.message),
+        },
+        Some(recorded) => match classify_cloud_probe(&recorded, provider.root_identity(cloud_root))
+        {
+            RootStatus::Ready => match provider.ensure_cloud_sync_directory(cloud_root) {
+                Ok(()) => CloudRootOutcome::Ready { adopted: None },
+                Err(error) => CloudRootOutcome::Unreachable(error.message),
+            },
+            RootStatus::Missing => CloudRootOutcome::Missing,
+            RootStatus::Unreachable(message) => CloudRootOutcome::Unreachable(message),
+            RootStatus::Replaced { found, .. } => CloudRootOutcome::Replaced { found },
+        },
     }
 }
 
@@ -160,6 +237,9 @@ pub struct RuntimeTickReport {
     pub mirror_deletes: usize,
     /// Keep-both conflict copies created this tick.
     pub conflicts: usize,
+    /// Renames carried out as moves (server-side or local) instead of
+    /// transfers.
+    pub moves: usize,
     pub started_reconcile_root: Option<PathBuf>,
     pub completed_reconcile_root: Option<PathBuf>,
     pub staged_executor: StagedExecutorSnapshot,
@@ -211,9 +291,17 @@ pub struct DaemonRuntime {
     /// the changes poll, reconcile enumerate and cloud-root retry never
     /// hold the tick thread on a network round trip.
     provider_call_mode: crate::provider_jobs::ProviderCallMode,
-    /// A cloud-root ensure started on an earlier tick.
-    cloud_root_call:
-        Option<crate::provider_jobs::ProviderCall<Result<(), vapor_providers::ProviderError>>>,
+    /// A cloud-root ensure or identity probe started on an earlier tick.
+    cloud_root_call: Option<crate::provider_jobs::ProviderCall<CloudRootOutcome>>,
+    /// A replaced or missing root holds the profile: nothing is leased
+    /// and the status names why, until the root returns or a
+    /// `root-replaced` decision is answered.
+    root_hold: Option<RootHold>,
+    last_root_check_inst: Option<Instant>,
+    /// A watcher signal asked for a whole-scope reconcile; it is
+    /// queued once the next root check finds the adopted root in
+    /// place.
+    reconcile_after_root_check: bool,
     /// Whether the provider-side sync root has been ensured. While
     /// `false`, no work is leased and the remote feed is not polled;
     /// ingest keeps capturing intent state durably.
@@ -262,12 +350,16 @@ pub struct DaemonRuntime {
     /// Heuristic active-coding signal; ORs `user_active` into
     /// the throttle inputs when code-class files churn rapidly.
     active_coding: crate::safeguards::ActiveCodingHeuristic,
-    /// Mass-deletion guard; pauses the daemon and raises a
-    /// timeline alert on a local deletion storm.
+    /// Mass-deletion guard; holds a deletion burst in either direction
+    /// behind a decision.
     mass_change_guard: crate::safeguards::MassChangeGuard,
-    /// Resolved `safeguards` config: threshold/window feeding the guard
-    /// and its user-facing trip reason; `enabled = false` bypasses it.
+    /// Resolved `safeguards` config: threshold, window, and ratio
+    /// feeding the guard; `enabled = false` bypasses it.
     mass_delete_settings: crate::safeguards::MassDeleteGuardSettings,
+    /// Where a file Vapor removes on this device goes. `None` until
+    /// the profile runtime attaches one; the bare fixtures unlink.
+    trash: Option<crate::trash::LocalTrash>,
+    last_trash_purge_inst: Option<Instant>,
     /// Flush boost deadline (monotonic). While set and in the
     /// future, deferred reconciles release immediately regardless of
     /// the idle gate.
@@ -375,9 +467,10 @@ impl DaemonRuntime {
                 }
             }
         }
-        logging::warning(
+        let flushed = self.flush_for_shutdown(self.clock.now_system())?;
+        logging::info(
             "Received shutdown signal; exiting daemon runtime loop cleanly",
-            &[],
+            &[("intents_flushed", flushed.to_string())],
         );
         Ok(())
     }
@@ -451,7 +544,11 @@ impl DaemonRuntime {
         self.sample_throttle_inputs(now, throttle_inputs);
         self.reload_path_filter_if_requested();
         self.sweep_stale_leases_if_due(now)?;
-        self.retry_cloud_root_if_needed();
+        self.purge_trash_if_due(now);
+        self.retry_cloud_root_if_needed()?;
+        self.check_roots_if_due(now)?;
+        self.apply_resolved_decisions(now)?;
+        self.withdraw_holds_left_empty(now)?;
 
         let (stabilized_events, suppressed_local_echoes, stabilize_mirror_reverts) =
             self.stabilize_events(now);
@@ -463,7 +560,9 @@ impl DaemonRuntime {
         // cloud root blocks the same way. Evaluated *after*
         // stabilization so a mass-deletion guard trip stops
         // admission in the same tick that detected the storm.
-        let paused = self.app.snapshot().run_state == RunState::Paused || !self.cloud_root_ready;
+        let paused = self.app.snapshot().run_state == RunState::Paused
+            || !self.cloud_root_ready
+            || self.root_hold.is_some();
         self.mirror_revert_count += stabilize_mirror_reverts as u64;
         let mut report = RuntimeTickReport {
             released_deferred_reconciles: if paused {
@@ -498,6 +597,18 @@ impl DaemonRuntime {
             )?;
             report.mirror_reverts += report.remote_poll.mirror_reverts;
             report.mirror_deletes += report.remote_poll.mirror_deletes;
+            if report.remote_poll.name_collisions > 0
+                && let Some(timeline) = &self.timeline
+            {
+                for (wanted, existing) in self.remote_poller.take_name_collisions() {
+                    timeline.push(
+                        "collision",
+                        self.profile_id.clone(),
+                        name_collision_message(&wanted, &existing),
+                        now,
+                    );
+                }
+            }
             self.mirror_revert_count += report.remote_poll.mirror_reverts as u64;
             self.mirror_delete_count += report.remote_poll.mirror_deletes as u64;
         }
@@ -513,10 +624,16 @@ impl DaemonRuntime {
                 tags: &self.tags,
                 local_echoes: &mut self.local_echoes,
                 remote_echoes: &mut self.remote_echoes,
+                deletion_guard: self
+                    .mass_delete_settings
+                    .enabled
+                    .then_some(&mut self.mass_change_guard),
+                trash: self.trash.as_ref(),
             };
             self.staged_executor
                 .advance(&mut self.app, &mut self.state_db, &mut env, now)?
         };
+        self.announce_decisions(&staged_report.decisions_opened, now);
         report.completed_intents += staged_report.completed;
         report.requeued_intents += staged_report.retried;
         report.failed_intents += staged_report.failed;
@@ -524,6 +641,7 @@ impl DaemonRuntime {
         self.mirror_delete_count += staged_report.mirror_deletes as u64;
         report.conflicts += staged_report.conflicts;
         self.conflict_count += staged_report.conflicts as u64;
+        report.moves += staged_report.moves;
         if staged_report.cloud_root_unavailable > 0 {
             self.mark_cloud_root_unavailable("a provider transfer reported the root missing", now);
         }
@@ -567,16 +685,19 @@ impl DaemonRuntime {
                         self.mirror_revert_count += mirror_reverts as u64;
                         self.mirror_delete_count += mirror_deletes as u64;
                         let mismatches = walker.take_type_mismatches();
+                        let unsyncable = walker.take_unsyncable_names();
+                        let whole_scope = walker.is_whole_scope();
+                        let collisions = walker.take_name_collisions();
+                        for path in mismatches {
+                            self.open_type_mismatch_decision(&path, now)?;
+                        }
+                        self.reconcile_unsyncable_names(&unsyncable, whole_scope, now)?;
                         if let Some(timeline) = &self.timeline {
-                            for path in mismatches {
+                            for (wanted, existing) in collisions {
                                 timeline.push(
-                                    "reconcile",
+                                    "collision",
                                     self.profile_id.clone(),
-                                    format!(
-                                        "{} is a file on one side and a directory on the other; \
-                                         two-way sync leaves both untouched until you rename one",
-                                        path.display()
-                                    ),
+                                    name_collision_message(&wanted, &existing),
                                     now,
                                 );
                             }
@@ -593,12 +714,16 @@ impl DaemonRuntime {
                             self.reconcile_walker = None;
                             self.state_db.complete_leased(reconcile_intent_id)?;
                             self.running_reconcile_intent_id = None;
-                            if self.startup_reconstruction_barrier
-                                && self.sync_scope.local_sync_directory.as_ref()
-                                    == Some(&completed_root)
+                            if self.sync_scope.local_sync_directory.as_ref()
+                                == Some(&completed_root)
                             {
-                                self.startup_reconstruction_barrier = false;
-                                self.startup_barrier_expires_inst = None;
+                                // The merge flag covers one whole-scope walk.
+                                self.state_db
+                                    .delete_state(constants::state::MERGE_WITHOUT_DELETIONS_KEY)?;
+                                if self.startup_reconstruction_barrier {
+                                    self.startup_reconstruction_barrier = false;
+                                    self.startup_barrier_expires_inst = None;
+                                }
                             }
                             report.completed_intents += 1;
                             report.completed_reconcile_root = Some(completed_root);
@@ -649,6 +774,11 @@ impl DaemonRuntime {
                     tags: &self.tags,
                     local_echoes: &mut self.local_echoes,
                     remote_echoes: &mut self.remote_echoes,
+                    deletion_guard: self
+                        .mass_delete_settings
+                        .enabled
+                        .then_some(&mut self.mass_change_guard),
+                    trash: self.trash.as_ref(),
                 };
                 let mut admission_report = crate::executor::StagedExecutorReport::default();
                 self.staged_executor.advance_intents(
@@ -666,6 +796,18 @@ impl DaemonRuntime {
                 self.mirror_delete_count += admission_report.mirror_deletes as u64;
                 report.conflicts += admission_report.conflicts;
                 self.conflict_count += admission_report.conflicts as u64;
+                report.moves += admission_report.moves;
+                self.announce_decisions(&admission_report.decisions_opened, now);
+                if let Some(timeline) = &self.timeline {
+                    for (wanted, existing) in &admission_report.name_collisions {
+                        timeline.push(
+                            "collision",
+                            self.profile_id.clone(),
+                            name_collision_message(wanted, existing),
+                            now,
+                        );
+                    }
+                }
                 if admission_report.cloud_root_unavailable > 0 {
                     self.mark_cloud_root_unavailable(
                         "a provider transfer reported the root missing",
@@ -698,6 +840,35 @@ impl DaemonRuntime {
     /// Periodic in-run recovery of leases that exceeded the lease
     /// timeout (an orphaned execution). Startup recovery handles dead
     /// processes; this sweep handles a lease lost *within* a live run.
+    /// Drops managed-trash entries past their retention, at startup and
+    /// then on a slow cadence. A directory scan of the trash, cheap at
+    /// the cadence and only while the daemon is otherwise ticking.
+    fn purge_trash_if_due(&mut self, now: SystemTime) {
+        let Some(trash) = &self.trash else {
+            return;
+        };
+        let now_inst = self.clock.now();
+        let interval = Duration::from_secs(constants::trash::PURGE_INTERVAL_SECONDS);
+        let due = self
+            .last_trash_purge_inst
+            .map(|last| now_inst.saturating_duration_since(last) >= interval)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.last_trash_purge_inst = Some(now_inst);
+        let purged = trash.purge_expired(now);
+        if purged > 0 {
+            logging::info(
+                "Purged expired trash entries",
+                &[
+                    ("profile_id", self.profile_id.clone()),
+                    ("purged", purged.to_string()),
+                ],
+            );
+        }
+    }
+
     fn sweep_stale_leases_if_due(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
         let now_inst = self.clock.now();
         let due = self
@@ -729,6 +900,11 @@ impl DaemonRuntime {
 
     pub fn app(&self) -> &DaemonApp {
         &self.app
+    }
+
+    #[cfg(test)]
+    pub(crate) fn state_db_mut(&mut self) -> &mut DurableStateDb {
+        &mut self.state_db
     }
 
     pub fn state_db(&self) -> &DurableStateDb {
@@ -865,15 +1041,74 @@ impl DaemonRuntime {
             );
         }
 
+        let device_id = vapor_shared::device_id::derive_device_id();
+        let mut local_replacement: Option<Option<String>> = None;
+        if let Some(local_root) = sync_scope.local_sync_directory.as_deref() {
+            match crate::root_identity::check_local_root(
+                &mut state_db,
+                local_root,
+                &device_id,
+                now,
+            )? {
+                crate::root_identity::RootStatus::Ready => {}
+                crate::root_identity::RootStatus::Missing => {
+                    return Err(DaemonRuntimeError::LocalRootMissing(
+                        local_root.to_path_buf(),
+                    ));
+                }
+                crate::root_identity::RootStatus::Replaced { found, .. } => {
+                    local_replacement = Some(found);
+                }
+                crate::root_identity::RootStatus::Unreachable(_) => {}
+            }
+        }
         sync_scope.local_sync_directory = sync_scope
             .local_sync_directory
             .take()
             .map(normalize_watch_root)
             .transpose()?;
 
-        let cloud_root_ready = app
-            .ensure_cloud_sync_directory(sync_scope.cloud_sync_directory.as_str())
-            .is_ok();
+        // The cloud root: adopted on first contact, checked against the
+        // recorded identity afterwards. Synchronous only here, at
+        // startup; every later probe runs on a worker. A runtime with
+        // no local root (a parked profile) never touches the cloud.
+        let cloud_outcome = if sync_scope.local_sync_directory.is_some() {
+            probe_cloud_root(
+                app.provider_handle(),
+                sync_scope.cloud_sync_directory.as_str(),
+                crate::root_identity::recorded_identity(
+                    &state_db,
+                    crate::root_identity::RootSide::Cloud,
+                )?,
+                &device_id,
+            )
+        } else {
+            CloudRootOutcome::Missing
+        };
+        let mut cloud_replacement: Option<Option<String>> = None;
+        let mut cloud_missing = false;
+        let cloud_root_ready = match cloud_outcome {
+            CloudRootOutcome::Ready { adopted } => {
+                if let Some(identity) = adopted {
+                    crate::root_identity::record_identity(
+                        &mut state_db,
+                        crate::root_identity::RootSide::Cloud,
+                        &identity,
+                        now,
+                    )?;
+                }
+                true
+            }
+            CloudRootOutcome::Replaced { found } => {
+                cloud_replacement = Some(found);
+                true
+            }
+            CloudRootOutcome::Missing => {
+                cloud_missing = sync_scope.local_sync_directory.is_some();
+                false
+            }
+            CloudRootOutcome::Unreachable(_) => false,
+        };
 
         let tick_waker = Arc::new(TickWaker::default());
         let recorder = sync_scope
@@ -949,7 +1184,7 @@ impl DaemonRuntime {
         let debounce =
             DebounceLoop::with_windows_and_clock(DebounceWindows::default(), clock.clone());
         let tick_interval = debounce.tick_interval();
-        Ok(Self {
+        let mut runtime = Self {
             app,
             sync_scope,
             state_db,
@@ -986,6 +1221,9 @@ impl DaemonRuntime {
             remote_poller: RemotePoller::new(DEFAULT_PROFILE_ID),
             provider_call_mode: crate::provider_jobs::ProviderCallMode::Inline,
             cloud_root_call: None,
+            root_hold: None,
+            last_root_check_inst: None,
+            reconcile_after_root_check: false,
             profile_id: DEFAULT_PROFILE_ID.to_string(),
             timeline_default_entries: None,
             cloud_root_ready,
@@ -1013,8 +1251,21 @@ impl DaemonRuntime {
             active_coding: crate::safeguards::ActiveCodingHeuristic::default(),
             mass_change_guard: crate::safeguards::MassChangeGuard::default(),
             mass_delete_settings: crate::safeguards::MassDeleteGuardSettings::default(),
+            trash: None,
+            last_trash_purge_inst: None,
             flush_boost_until_inst: None,
-        })
+        };
+        if let Some(found) = local_replacement {
+            runtime.hold_for_replaced_root(crate::root_identity::RootSide::Local, found, now)?;
+        } else if let Some(found) = cloud_replacement {
+            runtime.hold_for_replaced_root(crate::root_identity::RootSide::Cloud, found, now)?;
+        } else if cloud_missing {
+            runtime.hold_for_missing_root(crate::root_identity::RootSide::Cloud, now)?;
+        }
+        if !cloud_root_ready {
+            runtime.last_cloud_root_attempt_inst = Some(runtime.clock.now());
+        }
+        Ok(runtime)
     }
 
     /// Wires the shared daemon activity timeline in.
@@ -1040,8 +1291,28 @@ impl DaemonRuntime {
         settings: crate::safeguards::MassDeleteGuardSettings,
     ) {
         self.mass_delete_settings = settings;
-        self.mass_change_guard =
-            crate::safeguards::MassChangeGuard::new(settings.window, settings.threshold);
+        self.mass_change_guard = crate::safeguards::MassChangeGuard::with_ratio(
+            settings.window,
+            settings.threshold,
+            settings.ratio_percent,
+        );
+    }
+
+    /// Attaches the profile's trash. Every local removal the engine
+    /// performs from then on goes through it.
+    pub fn attach_trash(&mut self, trash: crate::trash::LocalTrash) {
+        self.trash = Some(trash);
+    }
+
+    /// Applies the `trash` config group to the attached trash.
+    pub fn configure_trash(&mut self, settings: crate::trash::TrashSettings) {
+        if let Some(trash) = &mut self.trash {
+            trash.configure(settings);
+        }
+    }
+
+    pub fn trash(&self) -> Option<&crate::trash::LocalTrash> {
+        self.trash.as_ref()
     }
 
     /// Passes the explicit transfer-concurrency ceiling to the app (see
@@ -1177,8 +1448,16 @@ impl DaemonRuntime {
                 continue;
             }
             let retrying = intent.available_at > now;
-            let stage = if retrying { "Retrying" } else { "Queued" };
-            let blocker_reason = if paused {
+            let stage = if intent.held_by.is_some() {
+                "Held"
+            } else if retrying {
+                "Retrying"
+            } else {
+                "Queued"
+            };
+            let blocker_reason = if let Some(decision) = intent.held_by {
+                format!("waiting for decision #{decision} (vapor decisions list)")
+            } else if paused {
                 "daemon is paused".to_string()
             } else if !self.cloud_root_ready {
                 "cloud sync directory is unavailable".to_string()
@@ -1368,83 +1647,486 @@ impl DaemonRuntime {
         }
     }
 
-    fn retry_cloud_root_if_needed(&mut self) {
+    fn retry_cloud_root_if_needed(&mut self) -> Result<(), DaemonRuntimeError> {
         if self.cloud_root_ready {
-            return;
+            return Ok(());
         }
         let now_inst = self.clock.now();
-        // Harvest an ensure started on an earlier tick before consulting
-        // the cadence, so a slow round trip is never abandoned.
-        let result = if let Some(call) = self.cloud_root_call.as_mut() {
-            let Some(result) = call.take() else {
-                return;
-            };
-            self.cloud_root_call = None;
-            result
+        // A root that was adopted is probed at the root-check cadence
+        // (a stat, cheap); creating one that never existed retries at
+        // the slower ensure cadence.
+        let interval = if self.root_hold.is_some() {
+            Duration::from_secs(constants::engine::ROOT_CHECK_INTERVAL_SECONDS)
         } else {
-            let retry_interval =
-                Duration::from_secs(constants::engine::CLOUD_ROOT_ENSURE_RETRY_SECONDS);
-            let due = self
-                .last_cloud_root_attempt_inst
-                .map(|last| now_inst.saturating_duration_since(last) >= retry_interval)
-                .unwrap_or(true);
-            if !due {
-                return;
+            Duration::from_secs(constants::engine::CLOUD_ROOT_ENSURE_RETRY_SECONDS)
+        };
+        let Some(outcome) = self.harvest_or_start_cloud_probe(now_inst, interval) else {
+            return Ok(());
+        };
+        let now = self.clock.now_system();
+        match outcome {
+            CloudRootOutcome::Ready { adopted } => {
+                if let Some(identity) = adopted
+                    && let Err(error) = crate::root_identity::record_identity(
+                        &mut self.state_db,
+                        crate::root_identity::RootSide::Cloud,
+                        &identity,
+                        now,
+                    )
+                {
+                    logging::warning(
+                        "Could not record the adopted cloud root identity",
+                        &[("error", error.to_string())],
+                    );
+                }
+                self.cloud_root_ready = true;
+                self.release_root_hold(crate::root_identity::RootSide::Cloud, now);
+                if let Err(error) = self.forget_the_outage() {
+                    logging::warning(
+                        "Could not drop the deletions queued during the outage",
+                        &[("error", error.to_string())],
+                    );
+                }
+                // A recovered root may have drifted while unreachable: a
+                // whole-scope reconcile converges it. The two-way walk
+                // only deletes locally behind a remote-origin tombstone,
+                // so a root that came back emptier re-uploads instead of
+                // mirroring the emptiness back.
+                if let Err(error) = self.enqueue_startup_reconstruction_reconcile(now) {
+                    logging::warning(
+                        "Could not schedule the post-recovery whole-scope reconcile",
+                        &[("error", format!("{error:?}"))],
+                    );
+                }
+                self.restore_run_state_after_root_recovery("cloud sync directory recovered");
             }
-            self.last_cloud_root_attempt_inst = Some(now_inst);
-            let provider = self.app.provider_handle();
-            let cloud_root = self.sync_scope.cloud_sync_directory.clone();
-            let mut call = crate::provider_jobs::ProviderCall::start(
-                &self.provider_call_mode,
-                "ensure-cloud-root",
-                move || provider.ensure_cloud_sync_directory(cloud_root.as_str()),
-            );
-            match call.take() {
-                Some(result) => result,
-                None => {
-                    self.cloud_root_call = Some(call);
-                    return;
+            CloudRootOutcome::Replaced { found } => {
+                self.cloud_root_ready = true;
+                if let Err(error) =
+                    self.hold_for_replaced_root(crate::root_identity::RootSide::Cloud, found, now)
+                {
+                    logging::warning(
+                        "Could not open the root-replaced decision",
+                        &[("error", format!("{error:?}"))],
+                    );
                 }
             }
-        };
-        if matches!(result, Ok(Ok(()))) {
-            self.cloud_root_ready = true;
-            // A recovered root may be freshly recreated and empty (or
-            // have drifted while unreachable): a whole-scope reconcile
-            // restores it from local content. The two-way walk only
-            // deletes locally behind a remote-origin tombstone, so an
-            // empty recreated root re-uploads instead of mirroring the
-            // emptiness back.
-            if let Err(error) =
-                self.enqueue_startup_reconstruction_reconcile(self.clock.now_system())
-            {
+            CloudRootOutcome::Missing => {
+                self.hold_for_missing_root(crate::root_identity::RootSide::Cloud, now)?;
+            }
+            CloudRootOutcome::Unreachable(message) => logging::debug(
+                "Cloud root probe failed; retrying at the ensure cadence",
+                &[("error", message)],
+            ),
+        }
+        Ok(())
+    }
+
+    /// Harvests a cloud probe started on an earlier tick, or starts one
+    /// when the cadence allows. `None` while nothing has landed.
+    fn harvest_or_start_cloud_probe(
+        &mut self,
+        now_inst: Instant,
+        interval: Duration,
+    ) -> Option<CloudRootOutcome> {
+        if let Some(call) = self.cloud_root_call.as_mut() {
+            let outcome = call.take()?;
+            self.cloud_root_call = None;
+            return match outcome {
+                Ok(outcome) => Some(outcome),
+                Err(panic) => Some(CloudRootOutcome::Unreachable(panic)),
+            };
+        }
+        let due = self
+            .last_cloud_root_attempt_inst
+            .map(|last| now_inst.saturating_duration_since(last) >= interval)
+            .unwrap_or(true);
+        if !due {
+            return None;
+        }
+        self.last_cloud_root_attempt_inst = Some(now_inst);
+        let recorded = match crate::root_identity::recorded_identity(
+            &self.state_db,
+            crate::root_identity::RootSide::Cloud,
+        ) {
+            Ok(recorded) => recorded,
+            Err(error) => {
                 logging::warning(
-                    "Could not schedule the post-recovery whole-scope reconcile",
-                    &[("error", format!("{error:?}"))],
+                    "Could not read the recorded cloud root identity",
+                    &[("error", error.to_string())],
                 );
+                return None;
             }
-            // Recovering the cloud root must only clear the cloud-root
-            // Error state. If the daemon is Paused — an explicit
-            // `vapor pause`, or the mass-deletion (ransomware) guard — leave
-            // the pause and its reason intact so recovery cannot silently
-            // resume sync (and replicate queued mass deletions) without the
-            // human review the pause exists to force.
-            if self.app.snapshot().run_state == RunState::Paused {
-                return;
-            }
-            match self.sync_scope.local_sync_directory.as_ref() {
-                Some(path) => self.app.set_run_state(
-                    RunState::Running,
-                    format!(
-                        "cloud sync directory recovered; watching {}",
-                        path.display()
-                    ),
-                ),
-                None => self
-                    .app
-                    .set_run_state(RunState::Paused, "no local sync directory configured"),
+        };
+        let provider = self.app.provider_handle();
+        let cloud_root = self.sync_scope.cloud_sync_directory.clone();
+        let device_id = self.device_id.clone();
+        let mut call = crate::provider_jobs::ProviderCall::start(
+            &self.provider_call_mode,
+            "probe-cloud-root",
+            move || probe_cloud_root(provider, cloud_root.as_str(), recorded, &device_id),
+        );
+        match call.take() {
+            Some(Ok(outcome)) => Some(outcome),
+            Some(Err(panic)) => Some(CloudRootOutcome::Unreachable(panic)),
+            None => {
+                self.cloud_root_call = Some(call);
+                None
             }
         }
+    }
+
+    /// Re-derives the run state once a root is back. An explicit pause
+    /// (the user's) stays a pause: recovery never resumes silently.
+    fn restore_run_state_after_root_recovery(&mut self, what: &str) {
+        if self.root_hold.is_some() {
+            let reason = self
+                .root_hold
+                .as_ref()
+                .map(|hold| hold.reason.clone())
+                .unwrap_or_default();
+            self.app.set_run_state(RunState::Error, reason);
+            return;
+        }
+        if !self.cloud_root_ready {
+            self.app.set_run_state(
+                RunState::Error,
+                format!(
+                    "cloud sync directory {} is unavailable; sync work is blocked until it comes back",
+                    self.sync_scope.cloud_sync_directory
+                ),
+            );
+            return;
+        }
+        if self.app.snapshot().run_state == RunState::Paused {
+            return;
+        }
+        match self.sync_scope.local_sync_directory.as_ref() {
+            Some(path) => self.app.set_run_state(
+                RunState::Running,
+                format!("{what}; watching {}", path.display()),
+            ),
+            None => self
+                .app
+                .set_run_state(RunState::Paused, "no local sync directory configured"),
+        }
+    }
+
+    /// Opens (or finds) the `root-replaced` decision for `side` and holds
+    /// the profile behind it.
+    fn hold_for_replaced_root(
+        &mut self,
+        side: crate::root_identity::RootSide,
+        found: Option<String>,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        use crate::root_identity::{DECISION_KIND, OPTION_REATTACH, RootSide, question};
+        if self
+            .root_hold
+            .as_ref()
+            .is_some_and(|hold| hold.side == side && !hold.missing)
+        {
+            return Ok(());
+        }
+        self.withdraw_root_decisions(side, crate::root_identity::MISSING_DECISION_KIND, now)?;
+        let root = match side {
+            RootSide::Local => self
+                .sync_scope
+                .local_sync_directory
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            RootSide::Cloud => self.sync_scope.cloud_sync_directory.clone(),
+        };
+        let path = match side {
+            RootSide::Local => self.sync_scope.local_sync_directory.clone(),
+            RootSide::Cloud => None,
+        };
+        let decision_id = match self
+            .state_db
+            .open_decision(DECISION_KIND, path.as_deref())?
+        {
+            Some(decision) => decision.id,
+            None => {
+                let question = question(side, &root, found.as_deref());
+                let options = [crate::state_db::DecisionOption {
+                    key: OPTION_REATTACH.to_string(),
+                    label: "Reattach this folder and merge, deleting nothing".to_string(),
+                }];
+                let evidence = serde_json::json!({
+                    "side": side.label(),
+                    "root": root,
+                    "found_identity": found,
+                });
+                let id = self.state_db.create_decision(
+                    DECISION_KIND,
+                    crate::state_db::DecisionScope::Profile,
+                    path.as_deref(),
+                    &question,
+                    &options,
+                    &evidence,
+                    now,
+                )?;
+                logging::warning(
+                    "Sync root replaced; holding the profile behind a decision",
+                    &[
+                        ("side", side.label().to_string()),
+                        ("root", root.clone()),
+                        ("decision_id", id.to_string()),
+                    ],
+                );
+                self.announce_decisions(&[id], now);
+                id
+            }
+        };
+        let reason = format!(
+            "{} sync directory {root} is not the folder this profile adopted; answer decision #{decision_id} (vapor decisions list) or put the original folder back",
+            side.label()
+        );
+        self.root_hold = Some(RootHold {
+            side,
+            reason: reason.clone(),
+            decision_id: Some(decision_id),
+            missing: false,
+        });
+        if self.app.snapshot().run_state != RunState::Paused {
+            self.app.set_run_state(RunState::Error, reason);
+        }
+        Ok(())
+    }
+
+    /// Holds the profile because a root went away, with a `root-missing`
+    /// decision so the user can ask for it to be re-created instead of
+    /// waiting.
+    fn hold_for_missing_root(
+        &mut self,
+        side: crate::root_identity::RootSide,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        use crate::root_identity::{
+            MISSING_DECISION_KIND, OPTION_RECREATE, RootSide, missing_question,
+        };
+        if self
+            .root_hold
+            .as_ref()
+            .is_some_and(|hold| hold.side == side && hold.missing)
+        {
+            return Ok(());
+        }
+        self.withdraw_root_decisions(side, crate::root_identity::DECISION_KIND, now)?;
+        let root = match side {
+            RootSide::Local => self
+                .sync_scope
+                .local_sync_directory
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            RootSide::Cloud => self.sync_scope.cloud_sync_directory.clone(),
+        };
+        let path = match side {
+            RootSide::Local => self.sync_scope.local_sync_directory.clone(),
+            RootSide::Cloud => None,
+        };
+        let decision_id = match self
+            .state_db
+            .open_decision(MISSING_DECISION_KIND, path.as_deref())?
+        {
+            Some(decision) => decision.id,
+            None => {
+                let question = missing_question(side, &root);
+                let options = [crate::state_db::DecisionOption {
+                    key: OPTION_RECREATE.to_string(),
+                    label: format!(
+                        "Re-create the folder empty and let the {} fill it",
+                        match side {
+                            RootSide::Local => "cloud",
+                            RootSide::Cloud => "device",
+                        }
+                    ),
+                }];
+                let evidence = serde_json::json!({
+                    "side": side.label(),
+                    "root": root,
+                });
+                let id = self.state_db.create_decision(
+                    MISSING_DECISION_KIND,
+                    crate::state_db::DecisionScope::Profile,
+                    path.as_deref(),
+                    &question,
+                    &options,
+                    &evidence,
+                    now,
+                )?;
+                logging::warning(
+                    "Sync root is missing; holding the profile until it returns",
+                    &[
+                        ("side", side.label().to_string()),
+                        ("root", root.clone()),
+                        ("decision_id", id.to_string()),
+                    ],
+                );
+                self.announce_decisions(&[id], now);
+                id
+            }
+        };
+        let reason = format!(
+            "{} sync directory {root} is missing; Vapor waits for it and never re-creates a folder it synced before (decision #{decision_id}: vapor decisions list)",
+            side.label()
+        );
+        self.root_hold = Some(RootHold {
+            side,
+            reason: reason.clone(),
+            decision_id: Some(decision_id),
+            missing: true,
+        });
+        if self.app.snapshot().run_state != RunState::Paused {
+            self.app.set_run_state(RunState::Error, reason);
+        }
+        Ok(())
+    }
+
+    /// Withdraws every open decision of `kind` about `side`: the
+    /// condition it asked about is gone.
+    fn withdraw_root_decisions(
+        &mut self,
+        side: crate::root_identity::RootSide,
+        kind: &str,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        for decision in self.state_db.decisions(false)? {
+            if decision.kind == kind && decision.evidence["side"] == side.label() {
+                self.state_db.withdraw_decision(decision.id, now)?;
+                if let Some(timeline) = &self.timeline {
+                    timeline.push(
+                        "decision",
+                        self.profile_id.clone(),
+                        format!(
+                            "Decision {} ({kind}) withdrawn: the {} root changed state",
+                            decision.id,
+                            side.label()
+                        ),
+                        now,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Clears a hold on `side` once its root is back or reattached,
+    /// withdrawing the decision the hold was waiting on.
+    fn release_root_hold(&mut self, side: crate::root_identity::RootSide, now: SystemTime) {
+        let Some(hold) = self.root_hold.clone() else {
+            return;
+        };
+        if hold.side != side {
+            return;
+        }
+        if let Some(decision_id) = hold.decision_id
+            && let Ok(Some(decision)) = self.state_db.decision(decision_id)
+            && decision.is_open()
+        {
+            if let Err(error) = self.state_db.withdraw_decision(decision_id, now) {
+                logging::warning(
+                    "Could not withdraw the root-replaced decision",
+                    &[("error", error.to_string())],
+                );
+            }
+            if let Some(timeline) = &self.timeline {
+                timeline.push(
+                    "decision",
+                    self.profile_id.clone(),
+                    format!(
+                        "Decision {decision_id} ({}) withdrawn: the original {} root is back",
+                        decision.kind,
+                        side.label()
+                    ),
+                    now,
+                );
+            }
+        }
+        self.root_hold = None;
+        logging::info(
+            "Sync root is back; releasing the profile",
+            &[("side", side.label().to_string())],
+        );
+    }
+
+    /// Checks both roots on a cadence: the local one inline (a stat and
+    /// a small read), the cloud one through a worker probe.
+    fn check_roots_if_due(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
+        let now_inst = self.clock.now();
+        let interval = Duration::from_secs(constants::engine::ROOT_CHECK_INTERVAL_SECONDS);
+        let due = self
+            .last_root_check_inst
+            .map(|last| now_inst.saturating_duration_since(last) >= interval)
+            .unwrap_or(true);
+        if !due {
+            return Ok(());
+        }
+        self.last_root_check_inst = Some(now_inst);
+        if let Some(local_root) = self.sync_scope.local_sync_directory.clone() {
+            use crate::root_identity::{RootSide, RootStatus};
+            match crate::root_identity::check_local_root(
+                &mut self.state_db,
+                &local_root,
+                &self.device_id,
+                now,
+            )? {
+                RootStatus::Ready => {
+                    if self
+                        .root_hold
+                        .as_ref()
+                        .is_some_and(|hold| hold.side == RootSide::Local)
+                    {
+                        self.release_root_hold(RootSide::Local, now);
+                        self.enqueue_startup_reconstruction_reconcile(now)?;
+                        self.restore_run_state_after_root_recovery("local sync directory is back");
+                    } else if std::mem::take(&mut self.reconcile_after_root_check) {
+                        self.enqueue_startup_reconstruction_reconcile(now)?;
+                    }
+                    // A `root-missing` question left by a start that found
+                    // no folder is moot now that the folder is here.
+                    self.withdraw_root_decisions(
+                        RootSide::Local,
+                        crate::root_identity::MISSING_DECISION_KIND,
+                        now,
+                    )?;
+                }
+                RootStatus::Missing => {
+                    self.reconcile_after_root_check = false;
+                    self.hold_for_missing_root(RootSide::Local, now)?;
+                }
+                RootStatus::Replaced { found, .. } => {
+                    self.reconcile_after_root_check = false;
+                    self.hold_for_replaced_root(RootSide::Local, found, now)?;
+                }
+                RootStatus::Unreachable(_) => {}
+            }
+        }
+        if self.cloud_root_ready
+            && self
+                .root_hold
+                .as_ref()
+                .is_none_or(|hold| hold.side != crate::root_identity::RootSide::Cloud)
+            && let Some(outcome) = self.harvest_or_start_cloud_probe(now_inst, interval)
+        {
+            match outcome {
+                CloudRootOutcome::Ready { .. } => {}
+                CloudRootOutcome::Unreachable(message) => logging::debug(
+                    "Cloud root check failed; keeping the last known state",
+                    &[("error", message)],
+                ),
+                CloudRootOutcome::Missing => {
+                    self.mark_cloud_root_unavailable("the cloud sync directory is missing", now);
+                    self.hold_for_missing_root(crate::root_identity::RootSide::Cloud, now)?;
+                }
+                CloudRootOutcome::Replaced { found } => {
+                    self.hold_for_replaced_root(crate::root_identity::RootSide::Cloud, found, now)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Drains any pause / resume / flush / reconcile requests recorded
@@ -1473,10 +2155,6 @@ impl DaemonRuntime {
                 self.app
                     .set_run_state(RunState::Paused, "user paused via vapor pause");
             } else {
-                // An explicit resume is the human-in-the-loop reset for
-                // the mass-deletion guard: the operator looked
-                // at the alert and decided the changes are legitimate.
-                self.mass_change_guard.reset();
                 // Re-derive the run state from what can actually admit
                 // work: resuming while the cloud root is unavailable must
                 // not report Running (which would mask the real blocker),
@@ -1741,15 +2419,26 @@ impl DaemonRuntime {
     }
 
     fn stabilize_events(&mut self, now: SystemTime) -> (usize, usize, usize) {
-        let Some(recorder) = &self.recorder else {
+        self.stabilize_events_with(now, false)
+    }
+
+    /// With `force`, every pending event stabilizes now regardless of
+    /// its quiet window (shutdown flush).
+    fn stabilize_events_with(&mut self, now: SystemTime, force: bool) -> (usize, usize, usize) {
+        let Some(recorder) = self.recorder.clone() else {
             return (0, 0, 0);
         };
 
-        let Some(watch_root) = self.sync_scope.local_sync_directory.as_ref() else {
+        let Some(watch_root) = self.sync_scope.local_sync_directory.clone() else {
             return (0, 0, 0);
         };
+        let watch_root = watch_root.as_path();
 
-        let stabilized = self.debounce.run_tick_for_recorder(recorder, now);
+        let stabilized = if force {
+            self.debounce.drain_all_for_recorder(&recorder, now)
+        } else {
+            self.debounce.run_tick_for_recorder(&recorder, now)
+        };
         let hash_algorithm = self.app.provider().content_hash_algorithm();
         let mut accepted = 0;
         let mut suppressed = 0;
@@ -1783,38 +2472,22 @@ impl DaemonRuntime {
             // applied writes never count as user activity or deletions).
             self.active_coding
                 .record_stabilized(event.debounce_class, now);
-            // One classification decision feeds both the guard and the
-            // scheduled intent — the existence probe inside must not
-            // run twice with the filesystem moving underneath.
+            // The deletion guard lives in the executor, at the moment a
+            // deletion would become irreversible, so it sees both
+            // directions and never counts a no-op.
             let intent_kind = crate::scheduler::intent_kind_for_stabilized_event(&event);
             if intent_kind == PendingIntentKind::Delete
-                && self.mass_delete_settings.enabled
-                && self.mass_change_guard.record_delete(now)
+                && let Ok(Some(decision_id)) = self
+                    .state_db
+                    .drop_held_at(&event.path, PendingIntentKind::ApplyRemoteDelete)
             {
-                // Mass-change / ransomware guard: stop admitting
-                // work before the deletion storm replicates to the cloud.
-                // Ingest keeps capturing intent state durably; an explicit
-                // `vapor resume` is the human-in-the-loop reset. Threshold
-                // and window come from the `safeguards` config group.
-                let reason = format!(
-                    "mass-deletion guard: {} or more local deletions inside {}s; \
-                     sync paused — review the changes, then run `vapor resume` \
-                     (tunable via the `safeguards` config group)",
-                    self.mass_delete_settings.threshold,
-                    self.mass_delete_settings.window.as_secs(),
-                );
-                self.app.set_run_state(RunState::Paused, reason.clone());
-                if let Some(timeline) = &self.timeline {
-                    timeline.push("guard", self.profile_id.as_str(), reason.clone(), now);
-                }
-                logging::warning(
-                    "Mass-deletion guard tripped; pausing sync",
+                // The cloud's deletion of this path was held behind a
+                // question; the user just deleted it here too.
+                logging::info(
+                    "Dropped a held cloud deletion: the file was deleted on this device as well",
                     &[
-                        ("threshold", self.mass_delete_settings.threshold.to_string()),
-                        (
-                            "window_seconds",
-                            self.mass_delete_settings.window.as_secs().to_string(),
-                        ),
+                        ("path", event.path.display().to_string()),
+                        ("decision_id", decision_id.to_string()),
                     ],
                 );
             }
@@ -1834,11 +2507,600 @@ impl DaemonRuntime {
                 accepted += 1;
                 continue;
             }
+            if event.path == watch_root
+                && matches!(
+                    event.last_event_kind,
+                    FsEventKind::Other | FsEventKind::Removed | FsEventKind::Renamed
+                )
+            {
+                // The watcher lost events (a full kernel queue), or
+                // reported the root itself removed or renamed: never a
+                // deletion to mirror. The root identity check runs
+                // next, and only a root that is still the adopted one
+                // gets the whole-scope reconcile; a walk over a
+                // replacement folder would read it as deletions.
+                logging::info(
+                    "The filesystem watcher dropped events or reported the root itself; checking the root, then reconciling",
+                    &[("watch_root", watch_root.display().to_string())],
+                );
+                self.last_root_check_inst = None;
+                self.reconcile_after_root_check = true;
+                accepted += 1;
+                continue;
+            }
+            if intent_kind != PendingIntentKind::Delete
+                && std::fs::symlink_metadata(&event.path).is_ok_and(|metadata| metadata.is_dir())
+            {
+                // A directory that appeared (created, or renamed in from
+                // elsewhere) carries children the watcher never reported
+                // as events. Report them ourselves, as the events the
+                // watcher would have delivered had the files been created
+                // one by one, so they flow through the same debounce,
+                // storm compaction, filters and guards as a `cp -r`. A
+                // subtree too large to enumerate here becomes a deferred
+                // reconcile marker, exactly as a storm would.
+                let synthesized =
+                    self.synthesize_subtree_events(&event.path, event.last_observed_at);
+                logging::info(
+                    "Directory appeared; reported its children as watcher events",
+                    &[
+                        ("path", event.path.display().to_string()),
+                        ("files", synthesized.to_string()),
+                    ],
+                );
+                accepted += 1;
+                continue;
+            }
             self.scheduler
                 .upsert_stabilized_event_as(event, intent_kind);
             accepted += 1;
         }
         (accepted, suppressed, mirror_reverts)
+    }
+
+    /// Walks a directory that just appeared and records one `Created`
+    /// event per regular file underneath it, pruning ignored names the
+    /// way the watcher bridge would. Stops at
+    /// `SYNTHESIZED_SUBTREE_EVENT_CAP` files and leaves a subtree
+    /// reconcile marker for the rest. Returns the number of files
+    /// reported.
+    fn synthesize_subtree_events(&mut self, directory: &Path, observed_at: SystemTime) -> usize {
+        let Some(recorder) = self.recorder.clone() else {
+            return 0;
+        };
+        let filter = self.path_filter.clone();
+        let ignored = |path: &Path| {
+            filter
+                .as_ref()
+                .is_some_and(|filter| filter.should_ignore(path))
+        };
+        let mut reported = 0usize;
+        let mut pending = vec![directory.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&current) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if ignored(&path) {
+                    continue;
+                }
+                if metadata.is_dir() {
+                    pending.push(path);
+                } else if metadata.is_file() {
+                    if reported >= constants::engine::SYNTHESIZED_SUBTREE_EVENT_CAP {
+                        self.scheduler.upsert_intent(
+                            directory.to_path_buf(),
+                            PendingIntentKind::ReconcileSubtree,
+                            observed_at,
+                        );
+                        logging::info(
+                            "Directory too large to report file by file; scheduled a subtree reconcile",
+                            &[
+                                ("path", directory.display().to_string()),
+                                ("reported", reported.to_string()),
+                            ],
+                        );
+                        return reported;
+                    }
+                    FsEventRecording::record_event(
+                        recorder.as_ref(),
+                        FsEventRecord {
+                            path,
+                            kind: FsEventKind::Created,
+                            observed_at,
+                        },
+                    );
+                    reported += 1;
+                }
+            }
+        }
+        reported
+    }
+
+    /// Shutdown flush: stabilizes every pending local event regardless
+    /// of its debounce window and writes the resulting intents to the
+    /// durable queue, so nothing the watcher reported lives only in
+    /// memory when the process exits. Returns the number of intents
+    /// enqueued.
+    pub fn flush_for_shutdown(&mut self, now: SystemTime) -> Result<usize, DaemonRuntimeError> {
+        self.stabilize_events_with(now, true);
+        self.drain_pending_intents();
+        self.flush_scheduler_to_durable_queue()
+    }
+
+    /// Pushes a timeline event for every decision the executor opened
+    /// this tick, so surfaces learn about the question right away.
+    fn announce_decisions(&mut self, ids: &[i64], now: SystemTime) {
+        for id in ids {
+            let Ok(Some(decision)) = self.state_db.decision(*id) else {
+                continue;
+            };
+            if let Some(timeline) = &self.timeline {
+                timeline.push(
+                    "decision",
+                    self.profile_id.clone(),
+                    format!(
+                        "{} Answer with `vapor decisions resolve {} --choose <option>` ({}).",
+                        decision.question,
+                        decision.id,
+                        decision
+                            .options
+                            .iter()
+                            .map(|option| option.key.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    ),
+                    now,
+                );
+            }
+        }
+    }
+
+    /// Asks once about each name the walk could not carry, and after a
+    /// whole-scope walk withdraws the questions whose name is gone (the
+    /// user renamed or removed the file). A name the user chose to
+    /// skip is not asked about again.
+    fn reconcile_unsyncable_names(
+        &mut self,
+        found: &[crate::unsyncable::UnsyncableName],
+        whole_scope: bool,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        use crate::unsyncable::{DECISION_KIND, OPTION_SKIP, options, question};
+        for name in found {
+            if self
+                .state_db
+                .open_decision(DECISION_KIND, Some(&name.shown_path))?
+                .is_some()
+                || self
+                    .state_db
+                    .decision_answered(DECISION_KIND, &name.shown_path, OPTION_SKIP)?
+            {
+                continue;
+            }
+            let id = self.state_db.create_decision(
+                DECISION_KIND,
+                crate::state_db::DecisionScope::Path,
+                Some(&name.shown_path),
+                &question(name),
+                &options(),
+                &serde_json::json!({ "reason": name.reason }),
+                now,
+            )?;
+            logging::warning(
+                "A local file has a name that cannot be synced; asking once",
+                &[
+                    ("path", name.shown_path.display().to_string()),
+                    ("reason", name.reason.clone()),
+                    ("decision_id", id.to_string()),
+                ],
+            );
+            self.announce_decisions(&[id], now);
+        }
+        if !whole_scope {
+            return Ok(());
+        }
+        for decision in self.state_db.decisions(false)? {
+            if decision.kind != DECISION_KIND {
+                continue;
+            }
+            let still_there = decision
+                .path
+                .as_ref()
+                .is_some_and(|path| found.iter().any(|name| &name.shown_path == path));
+            if still_there {
+                continue;
+            }
+            self.state_db.withdraw_decision(decision.id, now)?;
+            if let Some(timeline) = &self.timeline {
+                timeline.push(
+                    "decision",
+                    self.profile_id.clone(),
+                    format!(
+                        "Decision {} (unsyncable-name) withdrawn: the name is gone",
+                        decision.id
+                    ),
+                    now,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A mass-deletion question whose every held deletion the other
+    /// side applied meanwhile has nothing left to decide: withdraw it
+    /// and re-arm the guard.
+    fn withdraw_holds_left_empty(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
+        for decision in self.state_db.decisions(false)? {
+            if decision.kind != "mass-deletion"
+                || !self.state_db.held_intents(decision.id)?.is_empty()
+            {
+                continue;
+            }
+            self.state_db.withdraw_decision(decision.id, now)?;
+            self.mass_change_guard.reset();
+            logging::info(
+                "Withdrew the mass-deletion decision: the other side already applied every held deletion",
+                &[("decision_id", decision.id.to_string())],
+            );
+            if let Some(timeline) = &self.timeline {
+                timeline.push(
+                    "decision",
+                    self.profile_id.clone(),
+                    format!(
+                        "Decision {} (mass-deletion) withdrawn: the other side already applied every held deletion",
+                        decision.id
+                    ),
+                    now,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Acts on decisions the user answered through the CLI since the
+    /// last tick: releases or drops the held intents, resets the guard
+    /// that held them, and marks the decision applied.
+    fn apply_resolved_decisions(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
+        let resolved = self.state_db.resolved_unapplied_decisions()?;
+        for decision in resolved {
+            let choice = decision.choice.clone().unwrap_or_default();
+            let summary = match (decision.kind.as_str(), choice.as_str()) {
+                ("mass-deletion", "apply") => {
+                    let released = self.state_db.release_held(decision.id, now)?;
+                    self.mass_change_guard.reset();
+                    format!("applied: {released} held deletion(s) released")
+                }
+                ("mass-deletion", "discard") => {
+                    // The deletions are not wanted: restore each path
+                    // from the side that still has it.
+                    let held = self.state_db.held_intents(decision.id)?;
+                    let mut restores = Vec::new();
+                    for intent in &held {
+                        let restore = match intent.kind {
+                            PendingIntentKind::Delete => PendingIntentKind::Download,
+                            PendingIntentKind::ApplyRemoteDelete => PendingIntentKind::Upload,
+                            other => other,
+                        };
+                        restores.push((intent.path.clone(), restore, now));
+                    }
+                    let dropped = self.state_db.drop_held(decision.id)?;
+                    let enqueued = self.state_db.enqueue_intents_coalesced_with(
+                        &restores,
+                        crate::safeguards::IntentSource::Fresh,
+                        true,
+                    )?;
+                    self.mass_change_guard.reset();
+                    format!(
+                        "discarded: {dropped} deletion(s) dropped, {enqueued} restore(s) enqueued"
+                    )
+                }
+                (crate::type_mismatch::DECISION_KIND, choice) => {
+                    match self.apply_type_mismatch(&decision, choice, now) {
+                        Ok(summary) => summary,
+                        Err(message) => {
+                            logging::warning(
+                                "Could not apply the type-mismatch answer; will retry",
+                                &[("decision_id", decision.id.to_string()), ("error", message)],
+                            );
+                            continue;
+                        }
+                    }
+                }
+                (
+                    crate::root_identity::MISSING_DECISION_KIND,
+                    crate::root_identity::OPTION_RECREATE,
+                )
+                | (crate::root_identity::DECISION_KIND, crate::root_identity::OPTION_REATTACH) => {
+                    match self.reattach_root(&decision, now) {
+                        Ok(summary) => summary,
+                        Err(message) => {
+                            // Left answered-but-unapplied: the next tick
+                            // tries again, and the log says why.
+                            logging::warning(
+                                "Could not reattach the sync root; will retry",
+                                &[("decision_id", decision.id.to_string()), ("error", message)],
+                            );
+                            continue;
+                        }
+                    }
+                }
+                (crate::unsyncable::DECISION_KIND, crate::unsyncable::OPTION_SKIP) => {
+                    "skipped: the file stays on this device only".to_string()
+                }
+                (kind, choice) => {
+                    // A kind this runtime does not know how to apply is
+                    // left answered-but-unapplied for a build that does;
+                    // it is reported, never silently consumed.
+                    logging::warning(
+                        "Answered decision has no applier in this build",
+                        &[
+                            ("decision_id", decision.id.to_string()),
+                            ("kind", kind.to_string()),
+                            ("choice", choice.to_string()),
+                        ],
+                    );
+                    continue;
+                }
+            };
+            self.state_db.mark_decision_applied(decision.id, now)?;
+            logging::info(
+                "Applied a resolved decision",
+                &[
+                    ("decision_id", decision.id.to_string()),
+                    ("kind", decision.kind.clone()),
+                    ("choice", choice.clone()),
+                    ("outcome", summary.clone()),
+                ],
+            );
+            if let Some(timeline) = &self.timeline {
+                timeline.push(
+                    "decision",
+                    self.profile_id.clone(),
+                    format!("Decision {} ({}) {}", decision.id, decision.kind, summary),
+                    now,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A path that is a file on one side and a directory on the other
+    /// gets a `type-mismatch` decision, once; both sides stay untouched
+    /// until it is answered.
+    fn open_type_mismatch_decision(
+        &mut self,
+        path: &Path,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        use crate::type_mismatch::{DECISION_KIND, options, question};
+        if self
+            .state_db
+            .open_decision(DECISION_KIND, Some(path))?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let grace = Duration::from_secs(constants::engine::DECISION_APPLY_GRACE_SECONDS);
+        if self.state_db.decision_applied_since(
+            DECISION_KIND,
+            path,
+            now.checked_sub(grace).unwrap_or(SystemTime::UNIX_EPOCH),
+        )? {
+            // An answer is still landing (a delete in flight); asking
+            // again would be noise.
+            return Ok(());
+        }
+        let local_is_dir = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+        let id = self.state_db.create_decision(
+            DECISION_KIND,
+            crate::state_db::DecisionScope::Path,
+            Some(path),
+            &question(path, local_is_dir),
+            &options(local_is_dir),
+            &serde_json::json!({
+                "local": if local_is_dir { "directory" } else { "file" },
+                "cloud": if local_is_dir { "file" } else { "directory" },
+            }),
+            now,
+        )?;
+        logging::warning(
+            "Reconcile found a file/directory type mismatch; asking which side wins",
+            &[
+                ("path", path.display().to_string()),
+                ("decision_id", id.to_string()),
+            ],
+        );
+        self.announce_decisions(&[id], now);
+        Ok(())
+    }
+
+    /// Applies a `type-mismatch` answer. `keep-both` and `prefer-cloud`
+    /// move the local side out of the way (to a conflict name, or into
+    /// the trash) and let the cloud side come down; `prefer-local`
+    /// removes the cloud side and lets the local side go up. The
+    /// local move is echo-suppressed so the watcher's `Removed` never
+    /// turns into a delete of the cloud side.
+    fn apply_type_mismatch(
+        &mut self,
+        decision: &crate::state_db::DecisionRecord,
+        choice: &str,
+        now: SystemTime,
+    ) -> Result<String, String> {
+        use crate::type_mismatch::{OPTION_KEEP_BOTH, OPTION_PREFER_CLOUD, OPTION_PREFER_LOCAL};
+        let path = decision
+            .path
+            .clone()
+            .ok_or_else(|| "decision has no path".to_string())?;
+        let summary = match choice {
+            OPTION_KEEP_BOTH => {
+                let copy = crate::conflict::conflict_copy_path(
+                    &path,
+                    &self.device_id,
+                    now.duration_since(SystemTime::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0),
+                    |candidate| candidate.exists(),
+                );
+                std::fs::rename(&path, &copy)
+                    .map_err(|error| format!("cannot rename {} aside: {error}", path.display()))?;
+                self.local_echoes
+                    .record_delete(crate::executor::path_key(&path), now);
+                self.state_db
+                    .enqueue_intents_coalesced(
+                        &[(copy.clone(), PendingIntentKind::Upload, now)],
+                        crate::safeguards::IntentSource::Fresh,
+                    )
+                    .map_err(|error| error.to_string())?;
+                format!(
+                    "kept both: the local side moved to {}; the cloud side comes down under the original name",
+                    copy.display()
+                )
+            }
+            OPTION_PREFER_CLOUD => {
+                let trash = self
+                    .trash
+                    .as_ref()
+                    .ok_or_else(|| "no trash attached".to_string())?;
+                trash
+                    .discard(&path, constants::trash::REASON_CLOUD_DELETION, now)
+                    .map_err(|error| {
+                        format!("cannot move {} to the trash: {error}", path.display())
+                    })?;
+                self.local_echoes
+                    .record_delete(crate::executor::path_key(&path), now);
+                "preferred the cloud side: the local side is in the trash; the cloud side comes down"
+                    .to_string()
+            }
+            OPTION_PREFER_LOCAL => {
+                // A Delete for the path removes the cloud side whatever
+                // it is (a directory expands into guarded per-entry
+                // deletes); a local file then uploads through the
+                // reconcile below, and a local directory through the
+                // subtree reconcile the completed delete enqueues.
+                self.state_db
+                    .enqueue_intents_coalesced(
+                        &[(path.clone(), PendingIntentKind::Delete, now)],
+                        crate::safeguards::IntentSource::Fresh,
+                    )
+                    .map_err(|error| error.to_string())?;
+                "preferred the local side: the cloud side is being removed; the local side goes up"
+                    .to_string()
+            }
+            other => return Err(format!("no applier for choice {other:?}")),
+        };
+        // The reconcile that follows materializes the winning side.
+        self.enqueue_startup_reconstruction_reconcile(now)
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(summary)
+    }
+
+    /// Applies a `reattach` answer: the folder now at the root becomes
+    /// the profile's root, the next whole-scope reconcile merges the
+    /// two sides without propagating any deletion, and the hold lifts.
+    fn reattach_root(
+        &mut self,
+        decision: &crate::state_db::DecisionRecord,
+        now: SystemTime,
+    ) -> Result<String, String> {
+        use crate::root_identity::RootSide;
+        let side = match decision.evidence["side"].as_str() {
+            Some("cloud") => RootSide::Cloud,
+            _ => RootSide::Local,
+        };
+        match side {
+            RootSide::Local => {
+                let root = self
+                    .sync_scope
+                    .local_sync_directory
+                    .clone()
+                    .ok_or_else(|| "no local sync directory configured".to_string())?;
+                if decision.kind == crate::root_identity::MISSING_DECISION_KIND {
+                    std::fs::create_dir_all(&root)
+                        .map_err(|error| format!("cannot re-create {}: {error}", root.display()))?;
+                }
+                if !root.is_dir() {
+                    return Err(format!("{} is not there", root.display()));
+                }
+                crate::root_identity::reattach_local(
+                    &mut self.state_db,
+                    &root,
+                    &self.device_id,
+                    now,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            RootSide::Cloud => {
+                // Rare and user-triggered: the one provider call the
+                // tick thread makes outside startup.
+                let cloud_root = self.sync_scope.cloud_sync_directory.clone();
+                if decision.kind == crate::root_identity::MISSING_DECISION_KIND {
+                    self.app
+                        .provider()
+                        .ensure_cloud_sync_directory(cloud_root.as_str())
+                        .map_err(|error| error.message)?;
+                }
+                let identity = self
+                    .app
+                    .provider()
+                    .adopt_root(cloud_root.as_str(), &self.device_id)
+                    .map_err(|error| error.message)?;
+                crate::root_identity::record_identity(
+                    &mut self.state_db,
+                    RootSide::Cloud,
+                    identity.as_deref().unwrap_or(""),
+                    now,
+                )
+                .map_err(|error| error.to_string())?;
+                self.cloud_root_ready = true;
+            }
+        }
+        self.state_db
+            .set_state(constants::state::MERGE_WITHOUT_DELETIONS_KEY, "1", now)
+            .map_err(|error| error.to_string())?;
+        self.forget_the_outage()
+            .map_err(|error| error.to_string())?;
+        self.root_hold = None;
+        self.enqueue_startup_reconstruction_reconcile(now)
+            .map_err(|error| format!("{error:?}"))?;
+        self.restore_run_state_after_root_recovery("sync root reattached");
+        Ok(format!(
+            "{} the {} sync directory; merging without deletions",
+            if decision.kind == crate::root_identity::MISSING_DECISION_KIND {
+                "re-created"
+            } else {
+                "reattached"
+            },
+            side.label()
+        ))
+    }
+
+    /// A sync root that went away and came back: the deletions the
+    /// watchers reported while it was going describe the outage, not
+    /// the user, and so does the feed's history across the gap. Both
+    /// are dropped; the whole-scope reconcile the caller schedules
+    /// merges the two sides instead.
+    fn forget_the_outage(&mut self) -> Result<(), StateDbError> {
+        let mut dropped = 0;
+        for kind in [
+            PendingIntentKind::Delete,
+            PendingIntentKind::ApplyRemoteDelete,
+        ] {
+            dropped += self.scheduler.discard_pending_of_kind(kind);
+            dropped += self.state_db.discard_queued_of_kind(kind)?;
+        }
+        if dropped > 0 {
+            logging::info(
+                "Dropped deletions queued while the sync root was missing",
+                &[("count", dropped.to_string())],
+            );
+        }
+        self.remote_poller.discard_history();
+        Ok(())
     }
 
     fn flush_scheduler_to_durable_queue(&mut self) -> Result<usize, DaemonRuntimeError> {
@@ -2058,11 +3320,30 @@ impl DaemonRuntime {
             .map(|walker| walker.subtree_root() != running_root.as_path())
             .unwrap_or(true);
         if needs_new_walker {
-            self.reconcile_walker = Some(crate::reconcile_walk::ReconcileWalker::new(
-                &scope_root,
-                &running_root,
-                self.path_filter.clone(),
-            ));
+            // A whole-scope walk after a reattached or re-created root
+            // merges the two sides and propagates no deletion.
+            let merge = running_root == scope_root
+                && self
+                    .state_db
+                    .state(constants::state::MERGE_WITHOUT_DELETIONS_KEY)
+                    .ok()
+                    .flatten()
+                    .is_some();
+            if merge {
+                logging::info(
+                    "Whole-scope reconcile merges without propagating deletions",
+                    &[("root", scope_root.display().to_string())],
+                );
+            }
+            self.reconcile_walker = Some(
+                crate::reconcile_walk::ReconcileWalker::new(
+                    &scope_root,
+                    &running_root,
+                    self.path_filter.clone(),
+                )
+                .with_merge_without_deletions(merge)
+                .with_device_id(&self.device_id),
+            );
         }
         // Bound the chunk by a wall-clock slice so a slow provider's
         // enumerate cannot hold the tick thread for the whole directory
@@ -2146,6 +3427,16 @@ impl DaemonRuntime {
 /// Requeue delay applied when a leased intent cannot start because no
 /// permit / slot is available. Coarser than the tick interval so blocked
 /// intents don't churn a lease+requeue write pair on every tick.
+/// Timeline text for a remote name that would alias a local file.
+fn name_collision_message(wanted: &Path, existing: &Path) -> String {
+    format!(
+        "{} exists in the cloud but this filesystem cannot hold it next to {}; \
+         both are left untouched until you rename one of them",
+        wanted.display(),
+        existing.display()
+    )
+}
+
 fn blocked_intent_requeue_delay() -> Duration {
     Duration::from_millis(constants::engine::BLOCKED_INTENT_REQUEUE_DELAY_MILLIS)
 }
@@ -2547,8 +3838,10 @@ mod tests {
         );
     }
 
+    /// A timing guard-rail (`testing-strategy.md`): a flake here means a
+    /// saturated host, not a logic failure, and is triaged as such.
     #[test]
-    fn composed_runtime_tick_regression_stays_under_guardrail() {
+    fn timing_guardrail_composed_runtime_tick_stays_under_budget() {
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
@@ -2849,7 +4142,7 @@ mod tests {
     }
 
     #[test]
-    fn deleted_cloud_root_blocks_sync_then_recovers_and_reuploads() {
+    fn deleted_cloud_root_holds_the_profile_and_recreate_reuploads() {
         let mut fixture = BidirectionalFixture::new();
         // Baseline the feed cursor, then sync one file normally.
         fixture.tick(6_000);
@@ -2858,10 +4151,22 @@ mod tests {
         fixture.record_local_event(&first, FsEventKind::Created, fixture.now_ms);
         assert!(fixture.converge(12) >= 1, "baseline upload must complete");
         assert!(fixture.cloud_root.join("kept.txt").exists());
+        assert!(
+            fixture
+                .cloud_root
+                .join(constants::provider::ROOT_MARKER_FILE_NAME)
+                .is_file(),
+            "adoption wrote the cloud root marker"
+        );
 
         // The user deletes the whole cloud sync root out from under the
-        // running daemon.
+        // running daemon. A per-directory watcher (inotify) reports the
+        // files inside as removed before the root itself.
         std::fs::remove_dir_all(&fixture.cloud_root).expect("delete cloud root");
+        fixture.feed.emit_removed(
+            fixture.cloud_root.join("kept.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
 
         // New local work cannot reach the provider: the daemon must
         // block (Error state), not finalize failures or spin forever.
@@ -2883,19 +4188,58 @@ mod tests {
             "root loss must never finalize intents into failed_intents"
         );
 
-        // Self-healing: the ensure-retry loop recreates the root, the
-        // daemon returns to Running, and the post-recovery reconcile
-        // re-uploads local content into the recreated (empty) root.
+        // The root is never re-created on Vapor's own: the profile waits
+        // and asks. The reason names the decision.
+        for _ in 0..30 {
+            fixture.tick(6_000);
+        }
+        assert!(
+            !fixture.cloud_root.exists(),
+            "an adopted root is never re-created silently"
+        );
+        assert!(
+            first.is_file(),
+            "a missing root is never mirrored as deletions on this device"
+        );
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision(crate::root_identity::MISSING_DECISION_KIND, None)
+            .expect("query")
+            .expect("a root-missing decision is open");
+        assert_eq!(decision.evidence["side"], "cloud");
+        assert!(
+            fixture
+                .runtime
+                .app()
+                .snapshot()
+                .reason
+                .contains(&format!("decision #{}", decision.id)),
+            "reason: {}",
+            fixture.runtime.app().snapshot().reason
+        );
+
+        // The user asks for it back: the root is re-created, adopted
+        // afresh, and the reconcile re-uploads local content into it.
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "recreate", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
         let mut recovered = false;
-        for _ in 0..90 {
+        for _ in 0..30 {
             fixture.tick(6_000);
             if fixture.runtime.app().snapshot().run_state == RunState::Running {
                 recovered = true;
                 break;
             }
         }
-        assert!(recovered, "the ensure-retry loop must recreate the root");
+        assert!(recovered, "recreate must bring the profile back to Running");
         fixture.converge(60);
+        assert!(
+            first.is_file(),
+            "the deletion queued while the root was missing is not applied after recreate"
+        );
         assert_eq!(
             std::fs::read(fixture.cloud_root.join("kept.txt")).expect("re-uploaded"),
             b"survives the outage",
@@ -2903,6 +4247,125 @@ mod tests {
         assert_eq!(
             std::fs::read(fixture.cloud_root.join("during-outage.txt")).expect("uploaded"),
             b"written while root is gone",
+        );
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .open_decision(crate::root_identity::MISSING_DECISION_KIND, None)
+                .expect("query")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_cloud_root_that_returns_on_its_own_releases_the_hold_without_an_answer() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let first = fixture.watch_root.join("kept.txt");
+        std::fs::write(&first, b"kept").expect("seed local");
+        fixture.record_local_event(&first, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(12);
+        // The volume goes away and comes back with the same marker. A
+        // per-directory watcher reports the file under it as removed
+        // on the way out.
+        let parked = fixture._temp.path().join("parked");
+        std::fs::rename(&fixture.cloud_root, &parked).expect("unmount");
+        fixture.feed.emit_removed(
+            fixture.cloud_root.join("kept.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        for _ in 0..12 {
+            fixture.tick(6_000);
+        }
+        assert_eq!(fixture.runtime.app().snapshot().run_state, RunState::Error);
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .open_decision(crate::root_identity::MISSING_DECISION_KIND, None)
+                .expect("query")
+                .is_some()
+        );
+        std::fs::rename(&parked, &fixture.cloud_root).expect("mount again");
+        let mut recovered = false;
+        for _ in 0..30 {
+            fixture.tick(6_000);
+            if fixture.runtime.app().snapshot().run_state == RunState::Running {
+                recovered = true;
+                break;
+            }
+        }
+        assert!(
+            recovered,
+            "the original root returning resumes sync on its own"
+        );
+        fixture.converge(30);
+        assert!(
+            first.is_file() && fixture.cloud_root.join("kept.txt").is_file(),
+            "the removal the feed reported on the way out is the outage's, not the user's"
+        );
+        let closed = fixture
+            .runtime
+            .state_db()
+            .decisions(true)
+            .expect("decisions")
+            .into_iter()
+            .find(|decision| decision.kind == crate::root_identity::MISSING_DECISION_KIND)
+            .expect("the decision is kept in history");
+        assert_eq!(closed.choice.as_deref(), Some("withdrawn"));
+    }
+
+    #[test]
+    fn a_cloud_root_replaced_by_an_empty_folder_asks_before_syncing() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let first = fixture.watch_root.join("kept.txt");
+        std::fs::write(&first, b"kept").expect("seed local");
+        fixture.record_local_event(&first, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(12);
+        // A fresh, empty folder appears where the cloud root was.
+        std::fs::remove_dir_all(&fixture.cloud_root).expect("delete");
+        std::fs::create_dir_all(&fixture.cloud_root).expect("empty folder");
+        for _ in 0..12 {
+            fixture.tick(6_000);
+        }
+        assert_eq!(fixture.runtime.app().snapshot().run_state, RunState::Error);
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision(crate::root_identity::DECISION_KIND, None)
+            .expect("query")
+            .expect("a root-replaced decision is open");
+        assert_eq!(decision.evidence["side"], "cloud");
+        assert!(
+            !fixture.cloud_root.join("kept.txt").exists(),
+            "nothing is synced into a folder that was not adopted"
+        );
+        assert!(first.exists(), "and nothing is deleted on this device");
+
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "reattach", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
+        for _ in 0..30 {
+            fixture.tick(6_000);
+            if fixture.runtime.app().snapshot().run_state == RunState::Running {
+                break;
+            }
+        }
+        fixture.converge(60);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("kept.txt")).expect("merged up"),
+            b"kept"
+        );
+        assert!(
+            fixture
+                .cloud_root
+                .join(constants::provider::ROOT_MARKER_FILE_NAME)
+                .is_file(),
+            "the reattached folder carries a marker now"
         );
     }
 
@@ -3924,6 +5387,604 @@ mod tests {
         );
     }
 
+    /// Two daemon runs over one state DB with a gap between them where
+    /// no daemon watches either side.
+    struct OfflineFixture {
+        temp: TempDir,
+        watch_root: PathBuf,
+        cloud_root: PathBuf,
+        database_path: PathBuf,
+    }
+
+    impl OfflineFixture {
+        fn new() -> Self {
+            let temp = TempDir::new().expect("temp dir");
+            let watch_root = temp.path().join("watch");
+            let cloud_root = temp.path().join("cloud");
+            std::fs::create_dir_all(&watch_root).expect("watch root");
+            std::fs::create_dir_all(&cloud_root).expect("cloud root");
+            let watch_root =
+                vapor_shared::paths::canonicalize(&watch_root).expect("canonical watch root");
+            let database_path = temp.path().join("state/vapor.sqlite");
+            Self {
+                temp,
+                watch_root,
+                cloud_root,
+                database_path,
+            }
+        }
+
+        fn scope(&self) -> SyncScope {
+            SyncScope {
+                local_sync_directory: Some(self.watch_root.clone()),
+                cloud_sync_directory: self.cloud_root.to_string_lossy().into_owned(),
+                sync_mode: vapor_shared::SyncMode::TwoWay,
+            }
+        }
+
+        /// Builds a runtime on the shared DB, schedules the startup
+        /// reconcile, and drives it to quiescence.
+        fn run(&self, seed_uploads: &[&Path]) -> DaemonRuntime {
+            use crate::clock::Clock as _;
+            let mut state_db = DurableStateDb::open(&self.database_path).expect("open state db");
+            for path in seed_uploads {
+                state_db
+                    .enqueue_intent(path, PendingIntentKind::Upload, timestamp_ms(0))
+                    .expect("enqueue");
+            }
+            let clock = Arc::new(crate::clock::ManualClock::at_now());
+            let mut runtime = DaemonRuntime::build(
+                self.scope(),
+                EventPathFilterOptions::default(),
+                state_db,
+                Box::new(vapor_providers::FilesystemProvider::new()),
+                Arc::new(StaticMetricsSampler::default()),
+                clock.clone(),
+                false,
+            )
+            .expect("runtime");
+            runtime.attach_trash(crate::trash::LocalTrash::new(
+                "default",
+                self.temp.path().join("trash/default"),
+                crate::trash::TrashSettings::default(),
+                Arc::new(vapor_platform::InMemoryTrashBin::unsupported()),
+            ));
+            runtime
+                .enqueue_startup_reconstruction_reconcile(clock.now_system())
+                .expect("queue startup reconcile");
+            for _ in 0..400 {
+                clock.advance(Duration::from_millis(250));
+                clock.advance_system(Duration::from_millis(250));
+                runtime
+                    .tick_with_inputs(clock.now_system(), ThrottleInputs::default())
+                    .expect("tick");
+                if runtime.state_db().queue_depth().expect("depth") == 0
+                    && runtime.state_db().leased_depth().expect("leased") == 0
+                    && runtime.state_db().held_intent_count().expect("held") == 0
+                {
+                    break;
+                }
+            }
+            runtime
+        }
+
+        /// Pushes a file's mtime clearly past whatever the index saw.
+        fn touch_later(path: &Path) {
+            let later = std::fs::metadata(path)
+                .expect("metadata")
+                .modified()
+                .expect("mtime")
+                + Duration::from_secs(5);
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .expect("open for mtime")
+                .set_modified(later)
+                .expect("set mtime");
+        }
+    }
+
+    #[test]
+    fn a_file_deleted_here_while_no_daemon_ran_is_deleted_in_the_cloud() {
+        let fixture = OfflineFixture::new();
+        let local = fixture.watch_root.join("gone.txt");
+        std::fs::write(&local, b"deleted offline").expect("seed");
+        let first = fixture.run(&[&local]);
+        assert!(fixture.cloud_root.join("gone.txt").exists());
+        drop(first);
+
+        std::fs::remove_file(&local).expect("delete while away");
+        let second = fixture.run(&[]);
+        assert!(
+            !fixture.cloud_root.join("gone.txt").exists(),
+            "the offline deletion propagates to an unchanged cloud copy"
+        );
+        assert!(!local.exists(), "and is not resurrected");
+        assert_eq!(second.state_db().failed_depth().expect("failed"), 0);
+    }
+
+    #[test]
+    fn a_file_deleted_here_while_away_is_restored_when_the_cloud_copy_changed() {
+        let fixture = OfflineFixture::new();
+        let local = fixture.watch_root.join("gone.txt");
+        std::fs::write(&local, b"deleted offline").expect("seed");
+        drop(fixture.run(&[&local]));
+
+        std::fs::remove_file(&local).expect("delete while away");
+        let cloud = fixture.cloud_root.join("gone.txt");
+        std::fs::write(&cloud, b"but edited in the cloud meanwhile").expect("cloud edit");
+        OfflineFixture::touch_later(&cloud);
+        drop(fixture.run(&[]));
+        assert_eq!(
+            std::fs::read(&local).expect("restored"),
+            b"but edited in the cloud meanwhile",
+            "data preservation wins over a deletion the other side outran"
+        );
+        assert!(cloud.exists());
+    }
+
+    #[test]
+    fn a_file_deleted_in_the_cloud_while_no_daemon_ran_is_removed_here_into_the_trash() {
+        let fixture = OfflineFixture::new();
+        let local = fixture.watch_root.join("gone.txt");
+        std::fs::write(&local, b"deleted in the cloud offline").expect("seed");
+        drop(fixture.run(&[&local]));
+
+        std::fs::remove_file(fixture.cloud_root.join("gone.txt")).expect("cloud delete");
+        let second = fixture.run(&[]);
+        assert!(!local.exists(), "the offline cloud deletion applies here");
+        assert!(
+            !fixture.cloud_root.join("gone.txt").exists(),
+            "and the file is not re-uploaded"
+        );
+        let trashed = second.trash().expect("trash").list();
+        assert_eq!(trashed.len(), 1, "kept in the trash");
+        assert_eq!(trashed[0].original_path, local);
+    }
+
+    #[test]
+    fn a_file_deleted_in_the_cloud_while_away_is_reuploaded_when_the_local_copy_changed() {
+        let fixture = OfflineFixture::new();
+        let local = fixture.watch_root.join("gone.txt");
+        std::fs::write(&local, b"deleted in the cloud offline").expect("seed");
+        drop(fixture.run(&[&local]));
+
+        std::fs::remove_file(fixture.cloud_root.join("gone.txt")).expect("cloud delete");
+        std::fs::write(&local, b"edited here meanwhile, longer").expect("local edit");
+        OfflineFixture::touch_later(&local);
+        drop(fixture.run(&[]));
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("gone.txt")).expect("re-uploaded"),
+            b"edited here meanwhile, longer"
+        );
+        assert!(local.exists());
+    }
+
+    #[test]
+    fn a_merge_after_reattach_restores_instead_of_deleting() {
+        let fixture = OfflineFixture::new();
+        let local = fixture.watch_root.join("kept.txt");
+        std::fs::write(&local, b"kept").expect("seed");
+        drop(fixture.run(&[&local]));
+
+        std::fs::remove_file(&local).expect("delete while away");
+        {
+            let mut db = DurableStateDb::open(&fixture.database_path).expect("open");
+            db.set_state(
+                constants::state::MERGE_WITHOUT_DELETIONS_KEY,
+                "1",
+                timestamp_ms(0),
+            )
+            .expect("flag");
+        }
+        let second = fixture.run(&[]);
+        assert_eq!(
+            std::fs::read(&local).expect("restored by the merge"),
+            b"kept"
+        );
+        assert!(fixture.cloud_root.join("kept.txt").exists());
+        assert!(
+            second
+                .state_db()
+                .state(constants::state::MERGE_WITHOUT_DELETIONS_KEY)
+                .expect("read")
+                .is_none(),
+            "the flag covers one whole-scope walk"
+        );
+    }
+
+    /// A local file and a cloud directory under one name, or the
+    /// reverse: the pair the walk cannot decide on its own.
+    fn mismatched_pair(fixture: &OfflineFixture, local_is_dir: bool) -> PathBuf {
+        let local = fixture.watch_root.join("notes");
+        let cloud = fixture.cloud_root.join("notes");
+        if local_is_dir {
+            std::fs::create_dir_all(&local).expect("local dir");
+            std::fs::write(local.join("inner.txt"), b"inside the local folder").expect("inner");
+            std::fs::write(&cloud, b"the cloud file").expect("cloud file");
+        } else {
+            std::fs::write(&local, b"the local file").expect("local file");
+            std::fs::create_dir_all(&cloud).expect("cloud dir");
+            std::fs::write(cloud.join("inner.txt"), b"inside the cloud folder").expect("inner");
+        }
+        local
+    }
+
+    fn open_mismatch(runtime: &DaemonRuntime) -> crate::state_db::DecisionRecord {
+        runtime
+            .state_db()
+            .decisions(false)
+            .expect("decisions")
+            .into_iter()
+            .find(|decision| decision.kind == crate::type_mismatch::DECISION_KIND)
+            .expect("a type-mismatch decision is open")
+    }
+
+    #[test]
+    fn a_type_mismatch_asks_once_and_touches_nothing() {
+        let fixture = OfflineFixture::new();
+        let local = mismatched_pair(&fixture, false);
+        let runtime = fixture.run(&[]);
+        let decision = open_mismatch(&runtime);
+        assert_eq!(decision.path.as_deref(), Some(local.as_path()));
+        assert_eq!(decision.evidence["local"], "file");
+        assert_eq!(decision.evidence["cloud"], "directory");
+        assert_eq!(std::fs::read(&local).expect("local"), b"the local file");
+        assert!(fixture.cloud_root.join("notes/inner.txt").is_file());
+        drop(runtime);
+        // A second reconcile finds the question already open.
+        let runtime = fixture.run(&[]);
+        let open: Vec<_> = runtime
+            .state_db()
+            .decisions(false)
+            .expect("decisions")
+            .into_iter()
+            .filter(|decision| decision.kind == crate::type_mismatch::DECISION_KIND)
+            .collect();
+        assert_eq!(open.len(), 1, "asked once");
+    }
+
+    #[test]
+    fn keep_both_moves_the_local_side_aside_and_brings_the_cloud_side_down() {
+        let fixture = OfflineFixture::new();
+        let local = mismatched_pair(&fixture, false);
+        let runtime = fixture.run(&[]);
+        let decision = open_mismatch(&runtime);
+        drop(runtime);
+        {
+            let mut db = DurableStateDb::open(&fixture.database_path).expect("open");
+            db.resolve_decision(decision.id, "keep-both", timestamp_ms(1))
+                .expect("resolve");
+        }
+        let runtime = fixture.run(&[]);
+        // The local file lives on under a conflict name, on both sides.
+        let copies: Vec<PathBuf> = std::fs::read_dir(&fixture.watch_root)
+            .expect("list")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("notes~conflict-"))
+            })
+            .collect();
+        assert_eq!(copies.len(), 1, "one conflict copy: {copies:?}");
+        assert_eq!(std::fs::read(&copies[0]).expect("copy"), b"the local file");
+        let copy_name = copies[0].file_name().unwrap().to_owned();
+        assert!(
+            fixture.cloud_root.join(&copy_name).is_file(),
+            "the copy uploaded"
+        );
+        // The cloud folder came down under the original name.
+        assert!(local.is_dir(), "the cloud directory materialized locally");
+        assert_eq!(
+            std::fs::read(local.join("inner.txt")).expect("inner"),
+            b"inside the cloud folder"
+        );
+        assert!(fixture.cloud_root.join("notes/inner.txt").is_file());
+        assert!(
+            runtime
+                .state_db()
+                .decisions(false)
+                .expect("open")
+                .is_empty()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_cannot_be_synced_is_asked_about_once_and_withdrawn_when_renamed() {
+        use std::os::unix::ffi::OsStrExt;
+        let fixture = OfflineFixture::new();
+        let bad = fixture
+            .watch_root
+            .join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt"));
+        if std::fs::write(&bad, b"latin-1 name").is_err() {
+            // This filesystem refuses a name that is not UTF-8 (APFS
+            // does), so the case cannot arise here.
+            return;
+        }
+        std::fs::write(fixture.watch_root.join("fine.txt"), b"fine").expect("seed");
+
+        let runtime = fixture.run(&[]);
+        let open: Vec<_> = runtime
+            .state_db()
+            .decisions(false)
+            .expect("decisions")
+            .into_iter()
+            .filter(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+            .collect();
+        assert_eq!(open.len(), 1, "asked once: {open:?}");
+        assert!(
+            open[0].question.contains("not valid UTF-8"),
+            "{}",
+            open[0].question
+        );
+        assert!(fixture.cloud_root.join("fine.txt").is_file());
+        assert_eq!(
+            std::fs::read_dir(&fixture.cloud_root)
+                .expect("cloud")
+                .flatten()
+                .filter(|entry| entry.file_name().to_str().is_none())
+                .count(),
+            0,
+            "the name never reaches the cloud"
+        );
+        drop(runtime);
+
+        // Another walk asks nothing new.
+        let runtime = fixture.run(&[]);
+        assert_eq!(
+            runtime
+                .state_db()
+                .decisions(true)
+                .expect("history")
+                .iter()
+                .filter(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+                .count(),
+            1
+        );
+        drop(runtime);
+
+        // Renamed to something the model carries: the question goes
+        // and the file syncs.
+        std::fs::rename(&bad, fixture.watch_root.join("cafe.txt")).expect("rename");
+        let runtime = fixture.run(&[]);
+        let history: Vec<_> = runtime
+            .state_db()
+            .decisions(true)
+            .expect("history")
+            .into_iter()
+            .filter(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+            .collect();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].choice.as_deref(), Some("withdrawn"));
+        assert!(fixture.cloud_root.join("cafe.txt").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skipping_an_unsyncable_name_stops_the_asking() {
+        use std::os::unix::ffi::OsStrExt;
+        let fixture = OfflineFixture::new();
+        let bad = fixture
+            .watch_root
+            .join(std::ffi::OsStr::from_bytes(b"bad\xff.bin"));
+        if std::fs::write(&bad, b"x").is_err() {
+            return;
+        }
+        let runtime = fixture.run(&[]);
+        let decision = runtime
+            .state_db()
+            .decisions(false)
+            .expect("decisions")
+            .into_iter()
+            .find(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+            .expect("asked");
+        drop(runtime);
+        {
+            let mut db = DurableStateDb::open(&fixture.database_path).expect("open");
+            db.resolve_decision(decision.id, "skip", timestamp_ms(1))
+                .expect("resolve");
+        }
+        let runtime = fixture.run(&[]);
+        let all: Vec<_> = runtime
+            .state_db()
+            .decisions(true)
+            .expect("history")
+            .into_iter()
+            .filter(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+            .collect();
+        assert_eq!(all.len(), 1, "skip is honoured on the next walk: {all:?}");
+        assert!(all[0].applied_at.is_some(), "the skip answer is applied");
+    }
+
+    #[test]
+    fn prefer_cloud_trashes_the_local_side() {
+        let fixture = OfflineFixture::new();
+        let local = mismatched_pair(&fixture, true);
+        let runtime = fixture.run(&[]);
+        let decision = open_mismatch(&runtime);
+        assert_eq!(decision.evidence["local"], "directory");
+        drop(runtime);
+        {
+            let mut db = DurableStateDb::open(&fixture.database_path).expect("open");
+            db.resolve_decision(decision.id, "prefer-cloud", timestamp_ms(1))
+                .expect("resolve");
+        }
+        let runtime = fixture.run(&[]);
+        assert!(local.is_file(), "the cloud file took the name");
+        assert_eq!(std::fs::read(&local).expect("file"), b"the cloud file");
+        let trashed = runtime.trash().expect("trash").list();
+        assert_eq!(trashed.len(), 1);
+        assert_eq!(trashed[0].kind, "directory");
+        assert!(
+            runtime
+                .trash()
+                .expect("trash")
+                .root()
+                .join(&trashed[0].id)
+                .join("notes/inner.txt")
+                .is_file(),
+            "the local folder is whole in the trash"
+        );
+        assert!(
+            !fixture.cloud_root.join("notes/inner.txt").exists(),
+            "nothing of the local folder went up"
+        );
+    }
+
+    #[test]
+    fn prefer_local_removes_the_cloud_side_and_uploads_the_local_folder() {
+        let fixture = OfflineFixture::new();
+        let local = mismatched_pair(&fixture, true);
+        let runtime = fixture.run(&[]);
+        let decision = open_mismatch(&runtime);
+        drop(runtime);
+        {
+            let mut db = DurableStateDb::open(&fixture.database_path).expect("open");
+            db.resolve_decision(decision.id, "prefer-local", timestamp_ms(1))
+                .expect("resolve");
+        }
+        let runtime = fixture.run(&[]);
+        assert!(local.is_dir(), "the local folder stays");
+        assert!(
+            fixture.cloud_root.join("notes").is_dir(),
+            "the cloud file is gone and the folder went up"
+        );
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("notes/inner.txt")).expect("uploaded"),
+            b"inside the local folder"
+        );
+        assert!(
+            runtime
+                .state_db()
+                .decisions(false)
+                .expect("open")
+                .is_empty(),
+            "no second question while the answer lands"
+        );
+    }
+
+    #[test]
+    fn offline_same_size_cloud_edit_is_downloaded_by_the_startup_reconcile() {
+        // The mirror image: the cloud copy is rewritten with the same
+        // byte count while no daemon runs (the filesystem provider's
+        // changes cursor is process-local, so the feed never reports
+        // it). Only the remote mtime the index recorded can reveal it,
+        // and since the local copy is untouched the answer is a
+        // download, never a conflict copy.
+        let temp = TempDir::new().expect("temp dir");
+        let watch_root = temp.path().join("watch");
+        let cloud_root = temp.path().join("cloud");
+        std::fs::create_dir_all(&watch_root).expect("watch root");
+        std::fs::create_dir_all(&cloud_root).expect("cloud root");
+        let watch_root =
+            vapor_shared::paths::canonicalize(&watch_root).expect("canonical watch root");
+        let database_path = temp.path().join("state/vapor.sqlite");
+        let local_file = watch_root.join("notes.txt");
+        std::fs::write(&local_file, b"version-A").expect("seed local");
+
+        let sync_scope = || SyncScope {
+            local_sync_directory: Some(watch_root.clone()),
+            cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            sync_mode: vapor_shared::SyncMode::TwoWay,
+        };
+        use crate::clock::Clock as _;
+        let drive = |runtime: &mut DaemonRuntime, clock: &Arc<crate::clock::ManualClock>| {
+            for _ in 0..400 {
+                clock.advance(Duration::from_millis(250));
+                clock.advance_system(Duration::from_millis(250));
+                runtime
+                    .tick_with_inputs(clock.now_system(), ThrottleInputs::default())
+                    .expect("tick");
+                if runtime.state_db().queue_depth().expect("depth") == 0
+                    && runtime.state_db().leased_depth().expect("leased") == 0
+                {
+                    break;
+                }
+            }
+        };
+        {
+            let mut state_db = DurableStateDb::open(&database_path).expect("open state db");
+            state_db
+                .enqueue_intent(&local_file, PendingIntentKind::Upload, timestamp_ms(0))
+                .expect("enqueue");
+            let clock = Arc::new(crate::clock::ManualClock::at_now());
+            let mut runtime = DaemonRuntime::build(
+                sync_scope(),
+                EventPathFilterOptions::default(),
+                state_db,
+                Box::new(vapor_providers::FilesystemProvider::new()),
+                Arc::new(StaticMetricsSampler::default()),
+                clock.clone(),
+                false,
+            )
+            .expect("first runtime");
+            drive(&mut runtime, &clock);
+            let index = runtime
+                .state_db()
+                .sync_index(&local_file)
+                .expect("index")
+                .expect("indexed after upload");
+            assert!(
+                index.remote_modified_at.is_some(),
+                "an upload must record the remote mtime"
+            );
+        }
+
+        // The cloud side rewrites the file with the same length. The
+        // op-id tag survives an in-place write on this filesystem, so
+        // the tag alone would call the remote unchanged.
+        let cloud_file = cloud_root.join("notes.txt");
+        std::fs::write(&cloud_file, b"version-C").expect("edit cloud offline");
+        let later = std::fs::metadata(&cloud_file)
+            .expect("metadata")
+            .modified()
+            .expect("mtime")
+            + Duration::from_secs(5);
+        std::fs::File::options()
+            .write(true)
+            .open(&cloud_file)
+            .expect("open for mtime")
+            .set_modified(later)
+            .expect("set mtime");
+
+        let state_db = DurableStateDb::open(&database_path).expect("reopen state db");
+        let clock = Arc::new(crate::clock::ManualClock::at_now());
+        let mut runtime = DaemonRuntime::build(
+            sync_scope(),
+            EventPathFilterOptions::default(),
+            state_db,
+            Box::new(vapor_providers::FilesystemProvider::new()),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            false,
+        )
+        .expect("second runtime");
+        runtime
+            .enqueue_startup_reconstruction_reconcile(clock.now_system())
+            .expect("queue startup reconcile");
+        drive(&mut runtime, &clock);
+        assert_eq!(
+            std::fs::read(&local_file).expect("local copy"),
+            b"version-C",
+            "the offline same-size cloud edit must reach this device"
+        );
+        assert_eq!(
+            std::fs::read(&cloud_file).expect("cloud copy"),
+            b"version-C",
+            "the cloud copy must not be overwritten by the stale local one"
+        );
+        let entries: Vec<String> = std::fs::read_dir(&watch_root)
+            .expect("list")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| !vapor_providers::filesystem::is_internal_file_name(name))
+            .collect();
+        assert_eq!(entries, vec!["notes.txt".to_string()], "no conflict copy");
+    }
+
     #[test]
     fn paused_daemon_stops_admitting_new_work_and_resume_restores_it() {
         // Regression for the "pause is cosmetic" bug: `vapor pause` used
@@ -4415,6 +6476,91 @@ mod tests {
     }
 
     #[test]
+    fn a_renamed_directory_uploads_its_children_and_removes_the_old_tree_remotely() {
+        // A directory rename reaches the daemon as Removed(old) +
+        // Created(new) with no events for the children. The new
+        // directory's files must upload (reported as synthesized
+        // events) and the old remote tree must go, file by file, through
+        // the guarded delete path.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let old_dir = fixture.watch_root.join("folder");
+        std::fs::create_dir_all(old_dir.join("sub")).expect("dirs");
+        std::fs::write(old_dir.join("a.txt"), b"child a").expect("a");
+        std::fs::write(old_dir.join("sub/b.txt"), b"child b").expect("b");
+        for name in ["a.txt", "sub/b.txt"] {
+            fixture.record_local_event(&old_dir.join(name), FsEventKind::Created, fixture.now_ms);
+        }
+        fixture.converge(12);
+        assert!(
+            fixture.cloud_root.join("folder/sub/b.txt").is_file(),
+            "seed must upload"
+        );
+
+        let new_dir = fixture.watch_root.join("moved");
+        std::fs::rename(&old_dir, &new_dir).expect("rename directory");
+        fixture.record_local_event(&old_dir, FsEventKind::Removed, fixture.now_ms);
+        fixture.record_local_event(&new_dir, FsEventKind::Created, fixture.now_ms);
+        // Directory events debounce like any other; the synthesized
+        // child events then need their own window.
+        fixture.converge(24);
+
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("moved/a.txt")).expect("moved a"),
+            b"child a"
+        );
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("moved/sub/b.txt")).expect("moved b"),
+            b"child b"
+        );
+        assert!(
+            !fixture.cloud_root.join("folder").exists(),
+            "the old remote tree must be removed: {:?}",
+            files_in(&fixture.cloud_root)
+        );
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+    }
+
+    #[test]
+    fn shutdown_flush_persists_events_still_inside_their_debounce_window() {
+        // A write reported by the watcher moments before SIGTERM has not
+        // stabilized yet. The shutdown flush must turn it into a durable
+        // intent instead of leaving it in memory for the process to take
+        // with it.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let file = fixture.watch_root.join("late.txt");
+        std::fs::write(&file, b"written just before shutdown").expect("seed");
+        fixture.record_local_event(&file, FsEventKind::Created, fixture.now_ms);
+        // One immediate tick: the event is inside its quiet window, so
+        // nothing reaches the durable queue yet.
+        let report = fixture.tick(10);
+        assert_eq!(
+            report.durable_enqueues, 0,
+            "the event must still be debouncing"
+        );
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+
+        let flushed = fixture
+            .runtime
+            .flush_for_shutdown(timestamp_ms(fixture.now_ms + 20))
+            .expect("flush");
+        assert_eq!(flushed, 1);
+        assert_eq!(
+            fixture.runtime.state_db().pending_depth().expect("pending"),
+            1,
+            "the write is durable"
+        );
+        let diagnostics =
+            fixture
+                .runtime
+                .intent_diagnostics("default", 10, timestamp_ms(fixture.now_ms + 20));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].path, file.display().to_string());
+        assert_eq!(diagnostics[0].action, "upload");
+    }
+
+    #[test]
     fn editing_a_file_last_synced_from_an_external_write_uploads_without_conflict() {
         // Real-provider everyday shape: an external writer changes the
         // cloud file (no op-id tag), we download it, then the user edits
@@ -4464,61 +6610,745 @@ mod tests {
 
     // ---- Optional advanced safeguards ----
 
+    /// Seeds `count` synced files (uploaded, indexed) so a deletion
+    /// burst has a tree to be measured against.
+    fn seed_synced_files(fixture: &mut BidirectionalFixture, count: usize) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        for index in 0..count {
+            let path = fixture
+                .watch_root
+                .join(format!("d{}/f{index}.txt", index % 5));
+            std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+            std::fs::write(&path, format!("payload {index}")).expect("seed");
+            fixture.record_local_event(&path, FsEventKind::Created, fixture.now_ms);
+            paths.push(path);
+        }
+        fixture.converge(30);
+        assert_eq!(
+            fixture
+                .runtime
+                .state_db()
+                .sync_index_count()
+                .expect("index"),
+            count,
+            "every seeded file must be indexed"
+        );
+        paths
+    }
+
     #[test]
-    fn mass_deletion_storm_pauses_daemon_raises_alert_and_resume_rearms() {
+    fn a_local_deletion_burst_is_held_behind_a_decision_while_other_work_continues() {
         let mut fixture = BidirectionalFixture::new();
         let timeline = crate::timeline::TimelineBuffer::new(256);
         fixture.runtime.attach_timeline(timeline.clone());
-        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
-        fixture.runtime.attach_control(control.clone());
-        fixture.tick(6_000); // baseline
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        let paths = seed_synced_files(&mut fixture, 40);
 
-        // A deletion storm: threshold-many distinct paths removed inside
-        // one window. Spread across sibling directories so the storm
-        // compactor does not swallow them before they stabilize.
-        for index in 0..constants::engine::MASS_DELETE_THRESHOLD {
-            let path = fixture
-                .watch_root
-                .join(format!("dir-{}", index % 40))
-                .join(format!("victim-{index}.bin"));
-            fixture.record_local_event(&path, FsEventKind::Removed, fixture.now_ms);
+        // Twelve of forty files vanish at once: over a quarter of the
+        // tree, well under the absolute threshold.
+        for path in &paths[..12] {
+            std::fs::remove_file(path).expect("unlink");
+            fixture.record_local_event(path, FsEventKind::Removed, fixture.now_ms);
         }
-        fixture.tick(6_000); // stabilize the burst
+        // And an ordinary edit arrives with them.
+        let edited = &paths[30];
+        std::fs::write(edited, b"edited during the burst").expect("edit");
+        fixture.record_local_event(edited, FsEventKind::Modified, fixture.now_ms);
+        fixture.converge(30);
 
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision("mass-deletion", None)
+            .expect("query")
+            .expect("the burst must open a mass-deletion decision");
         assert_eq!(
-            fixture.runtime.app.snapshot().run_state,
-            RunState::Paused,
-            "guard must pause on a mass-deletion storm"
+            decision.held_intents, 12,
+            "the whole burst is held before any of it lands"
         );
         assert!(
-            fixture
-                .runtime
-                .app
-                .snapshot()
-                .reason
-                .contains("vapor resume"),
-            "pause reason must tell the user the way out"
+            decision.question.contains("12 of the 40 files"),
+            "the question names the whole burst: {}",
+            decision.question
         );
+        assert!(decision.question.contains("this device"));
         assert!(
             timeline
                 .snapshot(None)
                 .iter()
-                .any(|entry| entry.kind == "guard"),
-            "guard trip must land on the activity timeline"
+                .any(|entry| entry.kind == "decision"),
+            "the decision must land on the timeline"
         );
-
-        // Explicit resume re-arms the guard with an empty window: the
-        // daemon runs again and a single further delete does not re-trip.
-        control.request_resume();
-        fixture.tick(1_000);
+        // The daemon is not paused; the edit went through.
         assert_eq!(fixture.runtime.app.snapshot().run_state, RunState::Running);
-        let lone = fixture.watch_root.join("post-resume.bin");
-        fixture.record_local_event(&lone, FsEventKind::Removed, fixture.now_ms);
-        fixture.tick(6_000);
         assert_eq!(
-            fixture.runtime.app.snapshot().run_state,
-            RunState::Running,
-            "one delete after resume is normal use, not a storm"
+            std::fs::read(fixture.cloud_root.join("d0/f30.txt")).expect("cloud copy"),
+            b"edited during the burst"
+        );
+        // Held deletions have not touched the cloud.
+        let surviving = paths[..12]
+            .iter()
+            .filter(|path| {
+                fixture
+                    .cloud_root
+                    .join(path.strip_prefix(&fixture.watch_root).unwrap())
+                    .exists()
+            })
+            .count();
+        assert_eq!(surviving, 12, "held deletions must not propagate");
+
+        // Answer: apply. The held deletions release and propagate; the
+        // guard re-arms with an empty window.
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "apply", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
+        fixture.converge(30);
+        for path in &paths[..12] {
+            let cloud = fixture
+                .cloud_root
+                .join(path.strip_prefix(&fixture.watch_root).unwrap());
+            assert!(
+                !cloud.exists(),
+                "{} must be deleted after apply",
+                cloud.display()
+            );
+        }
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .open_decision("mass-deletion", None)
+                .expect("query")
+                .is_none(),
+            "the answered decision is closed"
+        );
+        assert!(!fixture.runtime.mass_change_guard.is_tripped());
+    }
+
+    #[test]
+    fn an_answer_given_the_moment_the_guard_trips_covers_the_whole_burst() {
+        // The user (or an app) answers as soon as the question appears,
+        // while most of the burst is still queued behind the first
+        // deletion. The answer must cover the burst the question
+        // counted: no second question for the stragglers.
+        let mut fixture = BidirectionalFixture::new();
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        let paths = seed_synced_files(&mut fixture, 40);
+        for path in &paths[..12] {
+            std::fs::remove_file(path).expect("unlink");
+            fixture.record_local_event(path, FsEventKind::Removed, fixture.now_ms);
+        }
+        let mut decision = None;
+        for _ in 0..40 {
+            fixture.tick(1_000);
+            decision = fixture
+                .runtime
+                .state_db()
+                .open_decision("mass-deletion", None)
+                .expect("query");
+            if decision.is_some() {
+                break;
+            }
+        }
+        let decision = decision.expect("the burst opens a decision");
+        assert_eq!(
+            decision.held_intents, 12,
+            "every queued deletion of the burst is held the moment the guard trips"
+        );
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "apply", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
+        fixture.converge(40);
+        for path in &paths[..12] {
+            let cloud = fixture
+                .cloud_root
+                .join(path.strip_prefix(&fixture.watch_root).unwrap());
+            assert!(!cloud.exists(), "{} must be deleted", cloud.display());
+        }
+        let asked = fixture
+            .runtime
+            .state_db()
+            .decisions(true)
+            .expect("history")
+            .into_iter()
+            .filter(|decision| decision.kind == "mass-deletion")
+            .count();
+        assert_eq!(asked, 1, "one burst, one question");
+    }
+
+    #[test]
+    fn a_hold_the_other_side_makes_moot_is_withdrawn_on_its_own() {
+        // A local burst is held; meanwhile the same files are deleted
+        // in the cloud (another device did the same cleanup). Nothing
+        // is left to decide: the hold empties and the question goes.
+        let mut fixture = BidirectionalFixture::new();
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        let paths = seed_synced_files(&mut fixture, 40);
+        for path in &paths[..12] {
+            std::fs::remove_file(path).expect("unlink");
+            fixture.record_local_event(path, FsEventKind::Removed, fixture.now_ms);
+        }
+        fixture.converge(30);
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision("mass-deletion", None)
+            .expect("query")
+            .expect("the burst opens a decision");
+        assert_eq!(decision.held_intents, 12);
+
+        for path in &paths[..12] {
+            let cloud = fixture
+                .cloud_root
+                .join(path.strip_prefix(&fixture.watch_root).unwrap());
+            std::fs::remove_file(&cloud).expect("cloud delete");
+            fixture
+                .feed
+                .emit_removed(cloud, timestamp_ms(fixture.now_ms));
+        }
+        // Held rows are not queued work, so the poll cadence, not the
+        // queue, decides when the feed is read.
+        for _ in 0..12 {
+            fixture.tick(6_000);
+        }
+        fixture.converge(30);
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .open_decision("mass-deletion", None)
+                .expect("query")
+                .is_none(),
+            "an emptied hold is withdrawn without an answer"
+        );
+        let withdrawn = fixture
+            .runtime
+            .state_db()
+            .decisions(true)
+            .expect("history")
+            .into_iter()
+            .find(|decision| decision.kind == "mass-deletion")
+            .expect("kept in history");
+        assert_eq!(withdrawn.choice.as_deref(), Some("withdrawn"));
+        assert_eq!(
+            fixture.runtime.state_db().queue_depth().expect("depth"),
+            0,
+            "nothing is left queued or held"
+        );
+        assert!(!fixture.runtime.mass_change_guard.is_tripped());
+    }
+
+    #[test]
+    fn discarding_a_held_deletion_burst_restores_the_files() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        let paths = seed_synced_files(&mut fixture, 40);
+        for path in &paths[..12] {
+            std::fs::remove_file(path).expect("unlink");
+            fixture.record_local_event(path, FsEventKind::Removed, fixture.now_ms);
+        }
+        fixture.converge(30);
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision("mass-deletion", None)
+            .expect("query")
+            .expect("decision");
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "discard", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
+        fixture.converge(30);
+        // Every held path is back on disk, downloaded from the cloud.
+        for path in &paths[..12] {
+            assert!(
+                path.exists(),
+                "{} must be restored after discard",
+                path.display()
+            );
+        }
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+    }
+
+    #[test]
+    fn a_cloud_deletion_burst_is_held_and_discarding_it_restores_the_cloud_copies() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        let paths = seed_synced_files(&mut fixture, 40);
+        let cloud_paths: Vec<PathBuf> = paths[..12]
+            .iter()
+            .map(|path| {
+                fixture
+                    .cloud_root
+                    .join(path.strip_prefix(&fixture.watch_root).unwrap())
+            })
+            .collect();
+        // Another device removes twelve files in the cloud at once.
+        for cloud in &cloud_paths {
+            std::fs::remove_file(cloud).expect("cloud unlink");
+            fixture
+                .feed
+                .emit_removed(cloud.clone(), timestamp_ms(fixture.now_ms));
+        }
+        fixture.converge(30);
+
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision("mass-deletion", None)
+            .expect("query")
+            .expect("the burst must open a mass-deletion decision");
+        assert_eq!(decision.held_intents, 12);
+        assert!(decision.question.contains("from the cloud"));
+        for path in &paths[..12] {
+            assert!(path.exists(), "{} must survive while held", path.display());
+        }
+
+        // The user did not mean it: the local copies go back up.
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "discard", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
+        fixture.converge(30);
+        for cloud in &cloud_paths {
+            assert!(
+                cloud.exists(),
+                "{} must be restored after discard",
+                cloud.display()
+            );
+        }
+        assert_eq!(
+            fixture
+                .runtime
+                .state_db()
+                .held_intent_count()
+                .expect("held"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_cloud_deletion_applied_locally_lands_in_the_trash_and_restores() {
+        let mut fixture = BidirectionalFixture::new();
+        let trash_root = fixture._temp.path().join("trash/default");
+        fixture.runtime.attach_trash(crate::trash::LocalTrash::new(
+            "default",
+            trash_root,
+            crate::trash::TrashSettings::default(),
+            Arc::new(vapor_platform::InMemoryTrashBin::unsupported()),
+        ));
+        fixture.tick(6_000);
+        let local = fixture.watch_root.join("docs/keep.txt");
+        std::fs::create_dir_all(local.parent().unwrap()).expect("dir");
+        std::fs::write(&local, b"worth keeping").expect("seed");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(20);
+        let cloud = fixture.cloud_root.join("docs/keep.txt");
+        assert!(cloud.exists());
+
+        // Another device deletes it in the cloud.
+        std::fs::remove_file(&cloud).expect("cloud unlink");
+        fixture
+            .feed
+            .emit_removed(cloud.clone(), timestamp_ms(fixture.now_ms));
+        fixture.converge(20);
+        if local.exists() {
+            let queue: Vec<_> = fixture
+                .runtime
+                .state_db()
+                .list_queue_intents(16)
+                .expect("queue")
+                .into_iter()
+                .map(|r| (r.kind, r.attempt_count, r.last_error, r.path))
+                .collect();
+            let failed = fixture.runtime.state_db().failed_depth().expect("failed");
+            let decisions: Vec<_> = fixture
+                .runtime
+                .state_db()
+                .decisions(true)
+                .expect("decisions")
+                .into_iter()
+                .map(|d| (d.kind, d.question))
+                .collect();
+            panic!(
+                "the deletion applies locally; queue={queue:?} failed={failed} decisions={decisions:?} local_root={:?} cloud_root={:?}",
+                fixture.watch_root, fixture.cloud_root
+            );
+        }
+        let entries = fixture.runtime.trash().expect("trash").list();
+        assert_eq!(entries.len(), 1, "the removed file is kept in the trash");
+        assert_eq!(entries[0].original_path, local);
+        assert_eq!(entries[0].reason, constants::trash::REASON_CLOUD_DELETION);
+
+        // The user brings it back; it syncs up like any other write.
+        let landed = fixture
+            .runtime
+            .trash()
+            .expect("trash")
+            .restore(&entries[0].id)
+            .expect("restore");
+        assert_eq!(landed, local);
+        assert_eq!(std::fs::read(&local).expect("restored"), b"worth keeping");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(20);
+        assert_eq!(
+            std::fs::read(&cloud).expect("re-uploaded"),
+            b"worth keeping"
+        );
+        assert!(fixture.runtime.trash().expect("trash").list().is_empty());
+    }
+
+    #[test]
+    fn a_pull_only_mirror_removal_lands_in_the_trash() {
+        let mut fixture = BidirectionalFixture::new_with_mode(vapor_shared::SyncMode::PullOnly);
+        let trash_root = fixture._temp.path().join("trash/default");
+        fixture.runtime.attach_trash(crate::trash::LocalTrash::new(
+            "default",
+            trash_root,
+            crate::trash::TrashSettings::default(),
+            Arc::new(vapor_platform::InMemoryTrashBin::unsupported()),
+        ));
+        let local_only = fixture.watch_root.join("only-here.txt");
+        std::fs::write(&local_only, b"not in the cloud").expect("seed");
+        fixture
+            .runtime
+            .enqueue_startup_reconstruction_reconcile(timestamp_ms(fixture.now_ms))
+            .expect("reconcile");
+        fixture.converge(30);
+        assert!(
+            !local_only.exists(),
+            "pull-only removes the local-only file"
+        );
+        let entries = fixture.runtime.trash().expect("trash").list();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].reason, constants::trash::REASON_MIRROR_REMOVAL);
+        assert_eq!(entries[0].original_path, local_only);
+    }
+
+    #[test]
+    fn a_local_rename_becomes_a_server_side_move_instead_of_a_reupload() {
+        let mut fixture = BidirectionalFixture::new();
+        let timeline = crate::timeline::TimelineBuffer::new(64);
+        fixture.runtime.attach_timeline(timeline.clone());
+        fixture.tick(6_000);
+        let before = fixture.watch_root.join("report-v1.bin");
+        let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&before, &payload).expect("seed");
+        fixture.record_local_event(&before, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(30);
+        assert!(fixture.cloud_root.join("report-v1.bin").exists());
+
+        // The user renames it. The watcher reports a delete and a create.
+        let after = fixture.watch_root.join("archive/report-final.bin");
+        std::fs::create_dir_all(after.parent().unwrap()).expect("dir");
+        std::fs::rename(&before, &after).expect("rename");
+        fixture.record_local_event(&before, FsEventKind::Removed, fixture.now_ms);
+        fixture.record_local_event(&after, FsEventKind::Created, fixture.now_ms);
+        let mut moves = 0;
+        for _ in 0..30 {
+            let report = fixture.tick(6_000);
+            moves += report.moves;
+            if report.staged_executor.active_total == 0
+                && fixture.runtime.state_db().queue_depth().expect("depth") == 0
+            {
+                break;
+            }
+        }
+        assert_eq!(moves, 1, "the rename is one server-side move");
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("archive/report-final.bin")).expect("moved"),
+            payload
+        );
+        assert!(!fixture.cloud_root.join("report-v1.bin").exists());
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .sync_index(&after)
+                .expect("index")
+                .is_some(),
+            "the moved file is indexed under its new path"
+        );
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .sync_index(&before)
+                .expect("index")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_cloud_rename_becomes_a_local_rename_instead_of_a_download() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let local = fixture.watch_root.join("photo.raw");
+        let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
+        std::fs::write(&local, &payload).expect("seed");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(30);
+        let cloud_before = fixture.cloud_root.join("photo.raw");
+        assert!(cloud_before.exists());
+
+        // Another device renames it in the cloud; the feed reports a
+        // removal and a creation.
+        let cloud_after = fixture.cloud_root.join("2026/photo-renamed.raw");
+        std::fs::create_dir_all(cloud_after.parent().unwrap()).expect("dir");
+        std::fs::rename(&cloud_before, &cloud_after).expect("cloud rename");
+        fixture
+            .feed
+            .emit_removed(cloud_before.clone(), timestamp_ms(fixture.now_ms));
+        fixture
+            .feed
+            .emit_created(cloud_after.clone(), timestamp_ms(fixture.now_ms));
+        let mut moves = 0;
+        for _ in 0..30 {
+            let report = fixture.tick(6_000);
+            moves += report.moves;
+            if report.staged_executor.active_total == 0
+                && fixture.runtime.state_db().queue_depth().expect("depth") == 0
+            {
+                break;
+            }
+        }
+        let local_after = fixture.watch_root.join("2026/photo-renamed.raw");
+        assert_eq!(moves, 1, "the cloud rename is one local rename");
+        assert_eq!(std::fs::read(&local_after).expect("renamed"), payload);
+        assert!(
+            !local.exists(),
+            "the old name is gone, not trashed as a deletion"
+        );
+        assert!(
+            fixture.runtime.trash().is_none()
+                || fixture.runtime.trash().expect("trash").list().is_empty()
+        );
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .sync_index(&local_after)
+                .expect("index")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn dropped_watcher_events_schedule_a_whole_scope_reconcile() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        fixture.converge(20);
+        // A file lands while the watcher's queue overflows: the only
+        // report the engine gets is "something changed" on the root.
+        std::fs::write(fixture.watch_root.join("missed.txt"), b"never reported").expect("seed");
+        let root = fixture.watch_root.clone();
+        fixture.record_local_event(&root, FsEventKind::Other, fixture.now_ms);
+        let mut scheduled = false;
+        for _ in 0..8 {
+            fixture.tick(6_000);
+            let queued = fixture
+                .runtime
+                .state_db()
+                .list_queue_intents(16)
+                .expect("queue")
+                .into_iter()
+                .any(|intent| {
+                    intent.kind == PendingIntentKind::ReconcileSubtree && intent.path == root
+                });
+            let running =
+                fixture.runtime.app().running_reconcile_root().as_deref() == Some(root.as_path());
+            if queued || running {
+                scheduled = true;
+                break;
+            }
+        }
+        assert!(
+            scheduled,
+            "a whole-scope reconcile is what answers dropped events"
+        );
+        fixture.converge(30);
+        assert!(
+            fixture.cloud_root.join("missed.txt").exists(),
+            "the whole-scope reconcile finds what the watcher dropped"
+        );
+    }
+
+    #[test]
+    fn a_watcher_event_for_the_root_itself_checks_the_root_before_reconciling() {
+        // FSEvents reports a root change as a rename-away and a mount
+        // as a create; inotify reports a deleted or moved root. None
+        // of it is a deletion to mirror, and a reconcile over a
+        // replacement folder would read that folder as deletions, so
+        // the root is checked first.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let kept = fixture.watch_root.join("kept.txt");
+        std::fs::write(&kept, b"kept").expect("seed");
+        fixture.record_local_event(&kept, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(12);
+        assert!(fixture.cloud_root.join("kept.txt").is_file());
+
+        // The adopted root is swapped for an empty folder, and the
+        // watcher reports the root removed.
+        let parked = fixture._temp.path().join("parked");
+        std::fs::rename(&fixture.watch_root, &parked).expect("swap out");
+        std::fs::create_dir_all(&fixture.watch_root).expect("empty replacement");
+        let root = fixture.watch_root.clone();
+        fixture.record_local_event(&root, FsEventKind::Removed, fixture.now_ms);
+        for _ in 0..12 {
+            fixture.tick(6_000);
+        }
+        assert!(
+            fixture.cloud_root.join("kept.txt").is_file(),
+            "the replacement folder is never mirrored as deletions"
+        );
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .decisions(false)
+                .expect("decisions")
+                .iter()
+                .any(|decision| decision.kind == crate::root_identity::DECISION_KIND),
+            "the replaced root is put to the user"
+        );
+        assert_eq!(fixture.runtime.app().snapshot().run_state, RunState::Error);
+        assert_eq!(
+            fixture
+                .runtime
+                .state_db()
+                .list_queue_intents(16)
+                .expect("queue")
+                .iter()
+                .filter(|record| record.kind == PendingIntentKind::Delete)
+                .count(),
+            0,
+            "no delete of the root or its files is queued"
+        );
+    }
+
+    #[test]
+    fn a_repeated_create_event_for_a_synced_file_never_rewrites_the_cloud_copy() {
+        // FSEvents can report a directory's creation after the file
+        // events inside it; the runtime then reports the directory's
+        // children again. A file that is already synced and unchanged
+        // must not be uploaded a second time: a rewrite races any
+        // cloud-side change of the same moment, and the changes feed
+        // reads the rewrite's own events as echoes.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let local = fixture.watch_root.join("docs/keep.txt");
+        std::fs::create_dir_all(local.parent().unwrap()).expect("dir");
+        std::fs::write(&local, b"worth keeping").expect("seed");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(20);
+        let cloud = fixture.cloud_root.join("docs/keep.txt");
+        let before = std::fs::metadata(&cloud).expect("cloud copy");
+
+        // The directory is reported again, and with it the file.
+        let docs = fixture.watch_root.join("docs");
+        fixture.record_local_event(&docs, FsEventKind::Created, fixture.now_ms);
+        let mut completed = 0;
+        for _ in 0..8 {
+            completed += fixture.tick(6_000).completed_intents;
+        }
+        assert!(completed >= 1, "the repeated event is worked, as a no-op");
+        let after = std::fs::metadata(&cloud).expect("cloud copy");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(after.ino(), before.ino(), "the cloud copy was rewritten");
+        }
+        assert_eq!(
+            after.modified().expect("mtime"),
+            before.modified().expect("mtime"),
+            "the cloud copy was rewritten"
+        );
+    }
+
+    #[test]
+    fn a_repeated_create_event_for_a_file_the_cloud_just_deleted_applies_the_deletion() {
+        // The same late directory report, but the cloud copy was
+        // deleted a moment earlier and the feed has not said so yet.
+        // The local copy is exactly what was last synced, so this is
+        // the cloud's deletion to apply here, not a modification to
+        // re-upload; a re-upload would undo the deletion and the feed
+        // would read its own events as echoes.
+        let mut fixture = BidirectionalFixture::new();
+        let trash_root = fixture._temp.path().join("trash/default");
+        fixture.runtime.attach_trash(crate::trash::LocalTrash::new(
+            "default",
+            trash_root,
+            crate::trash::TrashSettings::default(),
+            Arc::new(vapor_platform::InMemoryTrashBin::unsupported()),
+        ));
+        fixture.tick(6_000);
+        let local = fixture.watch_root.join("docs/keep.txt");
+        std::fs::create_dir_all(local.parent().unwrap()).expect("dir");
+        std::fs::write(&local, b"worth keeping").expect("seed");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(20);
+        let cloud = fixture.cloud_root.join("docs/keep.txt");
+        assert!(cloud.is_file());
+
+        std::fs::remove_file(&cloud).expect("cloud delete");
+        let docs = fixture.watch_root.join("docs");
+        fixture.record_local_event(&docs, FsEventKind::Created, fixture.now_ms);
+        for _ in 0..12 {
+            fixture.tick(6_000);
+        }
+        assert!(!cloud.exists(), "the deletion is not undone by a re-upload");
+        assert!(!local.exists(), "the deletion applies here");
+        assert_eq!(
+            fixture.runtime.trash().expect("trash").list().len(),
+            1,
+            "the removed copy is in the trash"
         );
     }
 

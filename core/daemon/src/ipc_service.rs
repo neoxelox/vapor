@@ -33,6 +33,7 @@ pub struct DaemonStatusSnapshot {
     pub throttle_reason: String,
     pub queue_depth: u64,
     pub failed_intents: u64,
+    pub decisions_pending: u64,
     pub loop_prevention_suppressions: u64,
     pub conflicts: u64,
     pub mirror_reverts: u64,
@@ -56,6 +57,7 @@ impl Default for DaemonStatusSnapshot {
             throttle_reason: String::new(),
             queue_depth: 0,
             failed_intents: 0,
+            decisions_pending: 0,
             loop_prevention_suppressions: 0,
             conflicts: 0,
             mirror_reverts: 0,
@@ -209,6 +211,7 @@ impl Service for DaemonIpcService {
             profiles: snapshot.profiles,
             resource_budget: snapshot.resource_budget,
             config_restart_required: snapshot.config_restart_required,
+            decisions_pending: snapshot.decisions_pending,
         }
     }
 

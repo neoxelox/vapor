@@ -14,6 +14,7 @@ public enum VaporConstants {
     public static let gdriveClientId = "VAPOR_GDRIVE_CLIENT_ID"
     public static let gdriveClientSecret = "VAPOR_GDRIVE_CLIENT_SECRET"
     public static let throttleInputs = "VAPOR_THROTTLE_INPUTS"
+    public static let secretsCommand = "VAPOR_SECRETS_COMMAND"
   }
 
   public enum Runtime {
@@ -180,6 +181,7 @@ public enum VaporConstants {
     public static let resourceLimits = "resourceLimits"
     public static let idleBoost = "idleBoost"
     public static let safeguards = "safeguards"
+    public static let trash = "trash"
   }
 
   /// Accepted `syncMode` values. Mirrors

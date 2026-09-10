@@ -33,6 +33,15 @@ Full checklist with acceptance criteria:
   reports `Progressed` or `Completed`. A step that moves zero bytes on a
   non-empty range must fail as transient, not report progress. Uploads
   honour `RemotePrecondition` (keep-both safety).
+- **Root identity and moves.** `root_identity` reports a stable
+  identity for the cloud root (a marker file the provider writes at
+  `adopt_root`, or the backend's folder id) and never creates the root;
+  `move_object` moves a file in one call when
+  `supports_server_side_move`, refusing an occupied destination with
+  `PreconditionFailed`. Both feed safety paths (`data-flow.md` §Root
+  identity, item 14 of §Local to remote), so their answers must be
+  exact, never a best guess. Every transfer outcome carries the remote
+  mtime when the backend has one.
 - **Errors.** Map every failure to `ProviderErrorKind` (`Transient`,
   `RateLimited { retry_after }`, `Authentication`, `PreconditionFailed`,
   `NotFound`, `Permanent`). The retry policy never parses messages.

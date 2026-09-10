@@ -81,6 +81,12 @@ struct FeedRing {
     /// Sequence the next appended change receives; the head cursor is
     /// `next_sequence - 1`.
     next_sequence: u64,
+    /// The watcher reported dropped events (a full kernel queue, an
+    /// FSEvents rescan flag), so the ring may be missing changes.
+    /// Every cursor from before is expired once, which makes the
+    /// engine re-baseline behind a whole-scope reconcile, the same
+    /// answer the local side gives the same signal.
+    lost_events: bool,
 }
 
 impl FeedRing {
@@ -117,6 +123,7 @@ impl ChangesFeed {
             ring: Mutex::new(FeedRing {
                 entries: VecDeque::new(),
                 next_sequence: 1,
+                lost_events: false,
             }),
         }
     }
@@ -168,15 +175,20 @@ impl ChangesFeed {
     ) -> Result<ChangesPoll, ProviderError> {
         self.drain_watch_events(root, tags);
 
-        let ring = self.ring.lock().expect("changes feed ring mutex poisoned");
+        let mut ring = self.ring.lock().expect("changes feed ring mutex poisoned");
         let Some(cursor) = cursor else {
             // Baseline: changes before this poll are the reconcile's
             // job; the feed starts reporting from "now".
+            ring.lost_events = false;
             return Ok(ChangesPoll::Page(RemoteChangesPage {
                 changes: Vec::new(),
                 next_cursor: ring.head_cursor().to_string(),
             }));
         };
+        if ring.lost_events {
+            ring.lost_events = false;
+            return Ok(ChangesPoll::CursorExpired);
+        }
 
         let Ok(cursor) = cursor.parse::<u64>() else {
             return Ok(ChangesPoll::CursorExpired);
@@ -217,10 +229,102 @@ impl ChangesFeed {
                     ("kind", format!("{:?}", event.kind)),
                 ],
             );
+            if event.path == root && event.kind == WatchEventKind::Other {
+                // Dropped events, or the root itself changed; either
+                // way the ring may be missing changes.
+                logging::info(
+                    "The cloud root watcher asked for a rescan; the next poll expires the cursor",
+                    &[("root", root.display().to_string())],
+                );
+                ring.lost_events = true;
+                continue;
+            }
+            if directory_appeared(root, &event) {
+                // A directory that appeared (created, renamed in) may
+                // already hold files the watcher never reported: on
+                // inotify anything that lands before the new watch is
+                // attached, on every backend the contents of a moved
+                // tree. Report them as the changes the watcher would
+                // have delivered one by one. A tree larger than the
+                // ring rolls the cursor over, which the engine answers
+                // with a reconcile.
+                let mut reported = 0usize;
+                report_directory_files(root, tags, &event.path, event.observed_at, &mut |change| {
+                    reported += 1;
+                    ring.push(change);
+                });
+                logging::debug(
+                    "Changes-feed directory appeared; reported its files",
+                    &[
+                        ("path", event.path.display().to_string()),
+                        ("files", reported.to_string()),
+                    ],
+                );
+                continue;
+            }
             if let Some(change) = normalize_watch_event(root, tags, event) {
                 ring.push(change);
             }
         }
+    }
+}
+
+/// A `Created`, `Renamed`, or `Other` event whose path is now a
+/// directory strictly inside the root.
+fn directory_appeared(root: &Path, event: &WatchEvent) -> bool {
+    matches!(
+        event.kind,
+        WatchEventKind::Created | WatchEventKind::Renamed | WatchEventKind::Other
+    ) && event.path != root
+        && event.path.starts_with(root)
+        && event
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| !is_internal_file_name(name))
+        && fs::symlink_metadata(&event.path).is_ok_and(|metadata| metadata.is_dir())
+}
+
+/// Walks `directory` and hands one `CreatedOrModified` change per
+/// regular file to `sink`, skipping symlinks and internal names.
+fn report_directory_files(
+    root: &Path,
+    tags: &OpIdTagStore,
+    directory: &Path,
+    observed_at: SystemTime,
+    sink: &mut dyn FnMut(RemoteChange),
+) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if is_internal_file_name(name) {
+            continue;
+        }
+        if metadata.is_dir() {
+            report_directory_files(root, tags, &path, observed_at, sink);
+            continue;
+        }
+        let Some(remote_path) = RemotePath::from_local(root, &path) else {
+            continue;
+        };
+        sink(RemoteChange {
+            path: remote_path,
+            kind: RemoteChangeKind::CreatedOrModified,
+            observed_at,
+            op_id: tags.read_op_id(&path),
+            content_hash: None,
+        });
     }
 }
 
@@ -249,6 +353,9 @@ fn normalize_watch_event(
         return None;
     }
     let remote_path = RemotePath::from_local(root, &event.path)?;
+    if super::has_internal_segment(&remote_path) {
+        return None;
+    }
 
     match fs::symlink_metadata(&event.path) {
         Ok(metadata) => {
@@ -264,13 +371,20 @@ fn normalize_watch_event(
                 content_hash: None,
             })
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Some(RemoteChange {
-            path: remote_path,
-            kind: RemoteChangeKind::Removed,
-            observed_at: event.observed_at,
-            op_id: None,
-            content_hash: None,
-        }),
+        // `NotADirectory` means an ancestor of the path is now a file, so
+        // the object cannot exist any more than a `NotFound` one can.
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                || error.kind() == io::ErrorKind::NotADirectory =>
+        {
+            Some(RemoteChange {
+                path: remote_path,
+                kind: RemoteChangeKind::Removed,
+                observed_at: event.observed_at,
+                op_id: None,
+                content_hash: None,
+            })
+        }
         // A transient stat failure (EACCES during a permission change,
         // EIO on a network mount) must not silently drop the change — the
         // event is already consumed from the watch channel, so dropping it
@@ -366,6 +480,117 @@ mod tests {
                 .expect("poll"),
         );
         assert_eq!(page.changes.len(), 1);
+        assert_eq!(page.changes[0].kind, RemoteChangeKind::Removed);
+    }
+
+    #[test]
+    fn anything_under_a_vapor_directory_is_invisible_to_the_feed() {
+        let (dir, feed, handle, tags) = feed_fixture();
+        let root = dir.path();
+        let baseline = expect_page(feed.poll(root, &tags, None, 100).expect("baseline"));
+
+        std::fs::create_dir_all(root.join(".vapor/trash/default/1-0000")).expect("dirs");
+        std::fs::write(root.join(".vapor/trash/default/1-0000/keep.txt"), b"x").expect("file");
+        std::fs::write(root.join(".vaporignore"), b"build/\n").expect("ignore file");
+        handle.emit_created(root.join(".vapor"), ts(1));
+        handle.emit_created(root.join(".vapor/trash/default/1-0000/keep.txt"), ts(2));
+        handle.emit_created(root.join(".vaporignore"), ts(3));
+
+        let page = expect_page(
+            feed.poll(root, &tags, Some(&baseline.next_cursor), 100)
+                .expect("poll"),
+        );
+        let paths: Vec<&str> = page
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect();
+        assert_eq!(paths, vec![".vaporignore"]);
+    }
+
+    #[test]
+    fn dropped_watcher_events_expire_the_cursor_once() {
+        let (dir, feed, handle, tags) = feed_fixture();
+        let root = dir.path();
+        let baseline = expect_page(feed.poll(root, &tags, None, 100).expect("baseline"));
+
+        handle.emit(root.to_path_buf(), WatchEventKind::Other, ts(1));
+        assert!(matches!(
+            feed.poll(root, &tags, Some(&baseline.next_cursor), 100)
+                .expect("poll"),
+            ChangesPoll::CursorExpired
+        ));
+        // The re-baseline clears it, and the feed is a feed again.
+        let fresh = expect_page(feed.poll(root, &tags, None, 100).expect("re-baseline"));
+        std::fs::write(root.join("after.txt"), b"x").expect("file");
+        handle.emit_created(root.join("after.txt"), ts(2));
+        let page = expect_page(
+            feed.poll(root, &tags, Some(&fresh.next_cursor), 100)
+                .expect("poll"),
+        );
+        assert_eq!(page.changes.len(), 1);
+        assert_eq!(page.changes[0].path.as_str(), "after.txt");
+    }
+
+    #[test]
+    fn a_directory_that_appeared_reports_its_files() {
+        // The watcher said only "2026 was created": the file moved
+        // into it landed before its watch existed. The feed reports
+        // what is inside, nested directories included, and skips the
+        // internal side-files.
+        let (dir, feed, handle, tags) = feed_fixture();
+        let root = dir.path();
+        let baseline = expect_page(feed.poll(root, &tags, None, 100).expect("baseline"));
+
+        std::fs::create_dir_all(root.join("2026/raw")).expect("dirs");
+        std::fs::write(root.join("2026/footage-renamed.raw"), b"frames").expect("file");
+        std::fs::write(root.join("2026/raw/take-2.raw"), b"more").expect("nested file");
+        std::fs::write(
+            root.join("2026")
+                .join(format!("{}scratch", constants::provider::TEMP_FILE_PREFIX)),
+            b"staging",
+        )
+        .expect("internal file");
+        handle.emit_created(root.join("2026"), ts(5));
+
+        let page = expect_page(
+            feed.poll(root, &tags, Some(&baseline.next_cursor), 100)
+                .expect("poll"),
+        );
+        let mut paths: Vec<&str> = page
+            .changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            vec!["2026/footage-renamed.raw", "2026/raw/take-2.raw"]
+        );
+        assert!(
+            page.changes
+                .iter()
+                .all(|change| change.kind == RemoteChangeKind::CreatedOrModified)
+        );
+    }
+
+    #[test]
+    fn a_path_under_what_became_a_file_surfaces_as_removed() {
+        // `tree` was a directory and is now a file: a stale event for
+        // `tree/deeper` cannot describe a live object (stat says
+        // NotADirectory), so it is a removal, not an optimistic write.
+        let (dir, feed, handle, tags) = feed_fixture();
+        let root = dir.path();
+        let baseline = expect_page(feed.poll(root, &tags, None, 100).expect("baseline"));
+
+        std::fs::write(root.join("tree"), b"now a file").expect("file");
+        handle.emit_created(root.join("tree/deeper"), ts(10));
+        let page = expect_page(
+            feed.poll(root, &tags, Some(&baseline.next_cursor), 100)
+                .expect("poll"),
+        );
+        assert_eq!(page.changes.len(), 1);
+        assert_eq!(page.changes[0].path.as_str(), "tree/deeper");
         assert_eq!(page.changes[0].kind, RemoteChangeKind::Removed);
     }
 

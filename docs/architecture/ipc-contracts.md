@@ -45,6 +45,12 @@ Source of truth: `core/shared/src/constants.rs::ipc`
   (`DiagnosticsResponse` / `IntentDiagnostic`); new `SetAutoLaunch` and
   `UpdateExcludes` control methods persist config through the daemon; and
   `TimelineEntry` carries `profile_id`.
+- **v2, later additions** (still additive, serde-defaulted):
+  `StatusResponse.decisions_pending` and `ProfileStatus.decisions_pending`
+  count the open decisions (`data-flow.md` §Decisions). The decisions
+  themselves are not served over IPC: `vapor decisions` reads and answers
+  them in the profile state DB directly, so the app can list and answer
+  them with the daemon stopped.
 
 ### Handshake
 
@@ -123,7 +129,11 @@ Concretely:
 
 - Running state, throttle state, throttle reason, queue depth (total +
   per-profile), last sync markers, effective resource ceilings
-  (cpu/memory/bandwidth), current utilization, idle-boost state and reason.
+  (cpu/memory/bandwidth), current utilization, idle-boost state and reason,
+  open decisions (total + per-profile). Each profile's `reason` is its
+  run-state reason (what is watched, what blocks sync, which decision is
+  waited on); the throttle reason is a separate field and never
+  overwrites it.
 
 ### Provider / auth
 
@@ -152,6 +162,8 @@ Concretely:
   four queue-state values that exist outside any executor stage. The
   complete set:
   - `Queued` — intent is in the durable pending queue, waiting to be leased.
+  - `Held` — intent is parked behind an open decision; the blocker names
+    the decision number. Not leased until the decision is answered.
   - `Planner` — leased and currently in the planner stage of the staged
     executor.
   - `WaitingForHash` — finished planner, blocked acquiring a hash permit

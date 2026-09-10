@@ -189,6 +189,23 @@ surface).
       lists from the CLI scan, so the timeline's 1000-event cap can never
       hide a conflict. Naming the file inside the notification depends on
       core.md C8-71.
+- [ ] M3-9 Decisions pane: the questions the daemon parked, driving
+      `vapor decisions list --json` / `show` / `resolve --json`
+      (`docs/architecture/data-flow.md` §Decisions): one row per open
+      decision with its plain-language question and its short option
+      list as buttons, a menubar badge and a native notification on
+      `decision` timeline events, and `decisions_pending` from
+      `vapor status --json` as the count. Kinds today: `mass-deletion`,
+      `root-missing`, `root-replaced`, `type-mismatch`.
+- [ ] M3-10 Trash pane: what Vapor removed on this device, driving
+      `vapor trash list --json` / `restore --json` / `empty --json`,
+      with the reason and the original path per row and a Restore
+      action; the `trash` settings (`enabled`, `retentionDays`,
+      `useSystemTrash`) in Settings.
+- [ ] M3-11 Root state: a profile held on a missing or replaced sync
+      root (`suspended_reason` / the run-state reason naming the
+      decision) shows as its own state with the decision's options,
+      not as a generic error.
 
 Exit gate:
 
@@ -196,6 +213,8 @@ Exit gate:
   shell access.
 - Unresolved conflicts are discoverable (badge + notification), listable,
   and resolvable entirely from the app.
+- Open decisions and the trash are discoverable, listable, and
+  answerable or restorable entirely from the app.
 
 ## Phase M4 - Profiles UX on macOS
 

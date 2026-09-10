@@ -6,10 +6,11 @@
 //! consumed directly by the daemon's throttle controller, so the platform
 //! layer and the engine can never drift structurally.
 //!
-//! macOS samples real host signals (`macos.rs`). Linux and Windows are
-//! not shipping surfaces yet; their `NativePlatformMetricsSampler`
-//! returns the static default inputs and reports
-//! `has_native_sampling() == false` so the daemon can say so in its log.
+//! macOS samples real host signals (`macos.rs`); Linux reads `/proc`
+//! and `/sys` (`linux.rs`). Windows is not a shipping surface yet; its
+//! `NativePlatformMetricsSampler` returns the static default inputs and
+//! reports `has_native_sampling() == false` so the daemon can say so in
+//! its log.
 
 use std::sync::Mutex;
 

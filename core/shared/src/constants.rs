@@ -15,9 +15,16 @@ pub mod env {
     pub const VAPOR_GDRIVE_CLIENT_SECRET: &str = "VAPOR_GDRIVE_CLIENT_SECRET";
     /// Where the daemon's throttle inputs come from: `host` (default)
     /// reads the native sampler and idle clock; `static` uses the
-    /// neutral defaults and zero idle time. Test harnesses set `static`
-    /// so a run is not shaped by whoever is typing on the machine.
+    /// neutral defaults and zero idle time; `file:<path>` re-reads a
+    /// JSON document every sample so a driver can script the inputs.
+    /// Test harnesses set `static` so a run is not shaped by whoever is
+    /// typing on the machine; the soak driver uses `file:`.
     pub const VAPOR_THROTTLE_INPUTS: &str = "VAPOR_THROTTLE_INPUTS";
+    /// An external secret manager on Linux (`pass`, a vault CLI, an
+    /// `age` wrapper): the program the secret store shells out to with
+    /// the verbs in `secrets::COMMAND_VERB_*`. Takes precedence over the
+    /// desktop Secret Service when set.
+    pub const VAPOR_SECRETS_COMMAND: &str = "VAPOR_SECRETS_COMMAND";
 }
 
 pub mod runtime {
@@ -29,6 +36,11 @@ pub mod runtime {
     pub const VAPOR_DIRECTORY_NAME: &str = ".vapor";
     pub const LOGS_DIRECTORY_NAME: &str = "logs";
     pub const STATE_DIRECTORY_NAME: &str = "state";
+    /// The managed trash: `vapor_dir/trash/<profile>/<entry>/`, one
+    /// directory per discarded item holding the payload under its
+    /// original name and a `meta.json` next to it.
+    pub const TRASH_DIRECTORY_NAME: &str = "trash";
+    pub const TRASH_ENTRY_META_FILE_NAME: &str = "meta.json";
     pub const CONFIGURATION_FILE_NAME: &str = "vapor.json";
     pub const SQLITE_DATABASE_FILE_NAME: &str = "vapor.sqlite";
     pub const APP_LOG_FILE_NAME: &str = "vapor.logs";
@@ -39,6 +51,8 @@ pub mod runtime {
     /// `docs/operations/macos/launchagent-policy.md`.
     pub const DAEMON_STDOUT_LOG_FILE_NAME: &str = "vapord.stdout.log";
     pub const DAEMON_STDERR_LOG_FILE_NAME: &str = "vapord.stderr.log";
+    /// The headless supervisor's output under the service manager.
+    pub const SUPERVISOR_LOG_FILE_NAME: &str = "vapor-supervisor.log";
     /// Advisory lock file inside `vapor_dir` that enforces the
     /// one-daemon-per-vapor-dir invariant. Held (via OS file locking)
     /// for the lifetime of the daemon process.
@@ -62,6 +76,13 @@ pub mod runtime {
 
 pub mod state {
     pub const RETRY_SLOWDOWN_UNTIL_KEY: &str = "queue.retry_slowdown_until_ms";
+    /// The root identities a profile adopted, checked at every start
+    /// and on a cadence so a replaced root is never mirrored blindly.
+    pub const LOCAL_ROOT_IDENTITY_KEY: &str = "root_identity.local";
+    pub const CLOUD_ROOT_IDENTITY_KEY: &str = "root_identity.cloud";
+    /// Set by a `reattach` answer: the next whole-scope reconcile merges
+    /// the two roots without propagating any deletion.
+    pub const MERGE_WITHOUT_DELETIONS_KEY: &str = "reconcile.merge_without_deletions";
     /// Tombstones older than this are pruned at daemon startup: after a
     /// month, a divergent replica reconciles through content comparison
     /// anyway, and unbounded tombstone growth would violate the memory
@@ -118,6 +139,8 @@ pub mod config {
     pub const KEY_IDLE_BOOST: &str = "idleBoost";
     /// Safeguards group; object with the `safeguards::KEY_*` fields.
     pub const KEY_SAFEGUARDS: &str = "safeguards";
+    /// Trash group; object with the `trash::KEY_*` fields.
+    pub const KEY_TRASH: &str = "trash";
 
     /// Keys a running daemon applies within one poll interval of the
     /// file changing, without a restart. The CLI tells the user which
@@ -131,6 +154,7 @@ pub mod config {
         KEY_RESOURCE_LIMITS,
         KEY_IDLE_BOOST,
         KEY_SAFEGUARDS,
+        KEY_TRASH,
     ];
 
     /// Keys that reshape the pipeline (roots, provider, direction,
@@ -165,6 +189,7 @@ pub mod config {
         KEY_RESOURCE_LIMITS,
         KEY_IDLE_BOOST,
         KEY_SAFEGUARDS,
+        KEY_TRASH,
     ];
 
     /// Default values for the config keys whose defaults are not already
@@ -206,6 +231,11 @@ pub mod provider {
     /// enumeration and every changes feed hide these; the local ingest
     /// path filter drops them unconditionally.
     pub const TEMP_FILE_PREFIX: &str = ".vapor-tmp-";
+    /// The root identity marker written once into a sync root when a
+    /// profile adopts it (`docs/architecture/data-flow.md` §Root
+    /// identity). Hidden from enumeration, feeds, and local ingest
+    /// like the other internal names; never synced.
+    pub const ROOT_MARKER_FILE_NAME: &str = ".vapor-root";
     /// A hidden `TEMP_FILE_PREFIX` staging file older than this is
     /// orphaned crash residue (an interrupted upload/download stage), not
     /// an in-flight transfer, and is reaped so it cannot accumulate in the
@@ -298,20 +328,49 @@ pub mod idle_boost {
 
 pub mod safeguards {
     /// Keys of the `safeguards` config group. The mass-delete guard
-    /// pauses all sync when local deletions inside a rolling window
-    /// exceed the threshold, until an explicit `vapor resume` —
-    /// the ransomware / bulk-mistake backstop. Configurable because a
+    /// holds a burst of deletions (in either direction) behind a
+    /// decision when the burst reaches the threshold or the ratio
+    /// inside a rolling window; the rest of the sync keeps flowing.
+    /// The ransomware / bulk-mistake backstop. Configurable because a
     /// workflow that legitimately unlinks many files (`rm -rf` of large
-    /// trees, big build cleans) may need a higher threshold; the
-    /// defaults stay conservative.
+    /// trees, big build cleans) may need a higher threshold.
     pub const KEY_MASS_DELETE_ENABLED: &str = "massDeleteEnabled";
     pub const KEY_MASS_DELETE_THRESHOLD: &str = "massDeleteThreshold";
     pub const KEY_MASS_DELETE_WINDOW_SECONDS: &str = "massDeleteWindowSeconds";
+    /// Share of the synced files (percent) whose deletion inside the
+    /// window is held for a decision even when the absolute threshold is
+    /// not reached, so a small tree is protected too.
+    pub const KEY_MASS_DELETE_RATIO_PERCENT: &str = "massDeleteRatioPercent";
     pub const DEFAULT_MASS_DELETE_ENABLED: bool = true;
     /// Floor clamps: a threshold/window too low would trip the guard on
-    /// ordinary work and train users to blind-resume it.
+    /// ordinary work and train users to blind-approve it.
     pub const MIN_MASS_DELETE_THRESHOLD: usize = 10;
     pub const MIN_MASS_DELETE_WINDOW_SECONDS: u64 = 5;
+    /// The ratio rule never holds fewer deletions than this, so a tree
+    /// of three files does not prompt on every second deletion.
+    pub const MIN_MASS_DELETE_RATIO_COUNT: usize = 10;
+}
+
+pub mod trash {
+    /// Keys of the `trash` config group. Every file Vapor itself
+    /// removes on this device (a deletion that arrived from the cloud,
+    /// a mirror removal in `pull-only`) goes to a trash instead of
+    /// being unlinked, so a wrong deletion can be undone here without
+    /// the cloud's own trash.
+    pub const KEY_ENABLED: &str = "enabled";
+    /// Days a managed-trash entry is kept before the daemon purges it.
+    pub const KEY_RETENTION_DAYS: &str = "retentionDays";
+    /// Try the user's own trash (the Finder's Trash on macOS) first and
+    /// fall back to the managed trash when that fails.
+    pub const KEY_USE_SYSTEM_TRASH: &str = "useSystemTrash";
+    pub const DEFAULT_ENABLED: bool = true;
+    pub const DEFAULT_RETENTION_DAYS: u32 = 7;
+    pub const DEFAULT_USE_SYSTEM_TRASH: bool = false;
+    /// How often a running daemon looks for expired entries.
+    pub const PURGE_INTERVAL_SECONDS: u64 = 1_800;
+    /// What a discarded item was to Vapor; recorded in `meta.json`.
+    pub const REASON_CLOUD_DELETION: &str = "deleted-in-cloud";
+    pub const REASON_MIRROR_REMOVAL: &str = "mirror-removal";
 }
 
 pub mod sync_mode {
@@ -336,6 +395,11 @@ pub mod service {
     /// unexpected daemon exits and route them through the crash-loop
     /// guard. Mirrored by the Swift constants file per AGENTS.md §8.6.
     pub const HEALTH_TICK_INTERVAL_SECONDS: u64 = 30;
+    /// The headless supervisor: a second service definition that runs
+    /// `vapor service check --loop` where no app surface does, so a
+    /// CLI-only install still restarts a crashed daemon under the
+    /// crash-loop guard's budget. Kept alive by the service manager.
+    pub const SUPERVISOR_LABEL: &str = "sh.arn.vapor.supervisor";
 }
 
 pub mod secrets {
@@ -346,6 +410,15 @@ pub mod secrets {
     /// inside that namespace, so a user can find and remove every Vapor
     /// item in the OS keychain UI by this one string.
     pub const STORE_NAMESPACE: &str = "sh.arn.vapor";
+    /// The command shim's verbs, for a Linux host where an external
+    /// secret manager holds the tokens: `<command> get <name>` prints
+    /// the secret, `<command> set <name>` reads it on stdin,
+    /// `<command> delete <name>`, `<command> list` prints one name per
+    /// line. Exit 0 on success, 1 when a secret is not found.
+    pub const COMMAND_VERB_GET: &str = "get";
+    pub const COMMAND_VERB_SET: &str = "set";
+    pub const COMMAND_VERB_DELETE: &str = "delete";
+    pub const COMMAND_VERB_LIST: &str = "list";
 }
 
 pub mod ipc {
@@ -400,8 +473,15 @@ pub mod filtering {
     /// prevention depends on these never becoming intents, so they are
     /// enforced in the path filter itself rather than the editable
     /// rule set.
-    pub const INTERNAL_IGNORE_FILE_PREFIXES: &[&str] = &[".vapor-tmp-"];
+    pub const INTERNAL_IGNORE_FILE_PREFIXES: &[&str] = &[".vapor-tmp-", ".vapor-root"];
     pub const INTERNAL_IGNORE_FILE_SUFFIXES: &[&str] = &[".vapor-meta.json"];
+    /// Directory names that are Vapor's own state wherever they sit
+    /// and never sync, with everything under them: the runtime
+    /// directory (`~/.vapor`, a `VAPOR_DIR` inside a sync root, a dev
+    /// checkout's `./.vapor` with its logs and e2e sandboxes) and the
+    /// trash a sync root's volume carries at `<volume root>/.vapor/trash/`.
+    /// Matched as a whole name only, so `.vaporignore` still syncs.
+    pub const INTERNAL_IGNORE_DIRECTORY_NAMES: &[&str] = &[".vapor"];
     pub const DEFAULT_LOCAL_SYNC_DIRECTORY: &str = "~/Vapor";
     pub const DEFAULT_CLOUD_SYNC_DIRECTORY: &str = "/Vapor";
     /// Baseline low-signal exclusions applied before discovered ignore
@@ -416,6 +496,17 @@ pub mod filtering {
         ".DS_Store",
         "Thumbs.db",
         "desktop.ini",
+        // What an OS keeps at the root of a volume, for a sync root that
+        // is a whole external drive
+        ".fseventsd/",
+        ".Spotlight-V100/",
+        ".Trashes/",
+        ".TemporaryItems/",
+        ".DocumentRevisions-V100/",
+        "System Volume Information/",
+        "$RECYCLE.BIN/",
+        "lost+found/",
+        ".Trash-*/",
         // Editor swap / temp / partial files
         "*.tmp",
         "*.temp",
@@ -519,6 +610,11 @@ pub mod engine {
     /// Accepted values of `VAPOR_THROTTLE_INPUTS`.
     pub const THROTTLE_INPUTS_HOST: &str = "host";
     pub const THROTTLE_INPUTS_STATIC: &str = "static";
+    /// `file:<path>`: every sample re-reads a JSON document at the path
+    /// (a `ThrottleInputs` object under `inputs`, plus `idle_seconds`),
+    /// so a test driver can walk the daemon through every throttle
+    /// state. Unreadable or missing files sample as the static defaults.
+    pub const THROTTLE_INPUTS_FILE_PREFIX: &str = "file:";
     /// A transfer session that reports progress without moving a byte
     /// this many times in a row is failed as transient, so a misbehaving
     /// endpoint cannot spin a worker at full speed forever.
@@ -587,10 +683,29 @@ pub mod engine {
     /// initial attempt failed. Sync work stays blocked (and
     /// intents accumulate durably) between attempts.
     pub const CLOUD_ROOT_ENSURE_RETRY_SECONDS: u64 = 60;
+    /// How often a running daemon re-checks both sync roots (present,
+    /// and carrying the identity the profile adopted).
+    pub const ROOT_CHECK_INTERVAL_SECONDS: u64 = 15;
+    /// After a path-scoped decision is applied, the reconcile walk gives
+    /// the answer this long to land before it may ask about the same
+    /// path again.
+    pub const DECISION_APPLY_GRACE_SECONDS: u64 = 600;
+    /// The deletion of a synced file may be half of a rename whose
+    /// create is still coming through the debounce. Its first planning
+    /// always waits this long, and later ones wait while a transfer of
+    /// the same size is queued, at most this many times in all, before
+    /// it proceeds as a deletion.
+    pub const MOVE_SETTLE_DELAY_SECONDS: u64 = 3;
+    pub const MOVE_SETTLE_MAX_DEFERRALS: u32 = 3;
     /// Directories the reconcile comparison walk processes per runtime
     /// tick while a reconcile slice is active. Bounds per-tick I/O so
     /// the slice checkpoints keep their interruptibility guarantee.
     pub const RECONCILE_DIRS_PER_CHECKPOINT: usize = 8;
+    /// Files a directory that appeared (created, renamed in) is
+    /// reported for, one synthesized watcher event each, before the
+    /// runtime gives up enumerating and leaves a subtree reconcile
+    /// marker instead. Keeps the tick-thread walk bounded.
+    pub const SYNTHESIZED_SUBTREE_EVENT_CAP: usize = 10_000;
     /// Per-tick directory budget for the reconcile walk (runs only under
     /// IdleDrain). Higher than the checkpoint granularity so a large tree
     /// converges quickly on a fast (filesystem) provider; the per-slice
@@ -619,11 +734,13 @@ pub mod engine {
     /// when no HID signal is available.
     pub const ACTIVE_CODING_WINDOW_SECONDS: u64 = 60;
     pub const ACTIVE_CODING_EVENT_THRESHOLD: usize = 5;
-    /// Mass-change guard: local deletions above this rate pause
-    /// the daemon and raise an alert instead of propagating what may be
-    /// ransomware or an accidental recursive delete.
+    /// Mass-change guard: deletions in either direction above this rate,
+    /// or above the ratio of the synced tree, are held behind a
+    /// decision instead of propagating what may be ransomware, an
+    /// accidental recursive delete, or a bad listing from the cloud.
     pub const MASS_DELETE_WINDOW_SECONDS: u64 = 60;
-    pub const MASS_DELETE_THRESHOLD: usize = 200;
+    pub const MASS_DELETE_THRESHOLD: usize = 1_000;
+    pub const MASS_DELETE_RATIO_PERCENT: u8 = 25;
     /// FlushNow boost window: after an explicit flush request
     /// the runtime releases deferred work eagerly for this long.
     pub const FLUSH_BOOST_SECONDS: u64 = 30;

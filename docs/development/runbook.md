@@ -2,7 +2,7 @@
 
 ## Repository bootstrap
 
-- Rust workspace: root `Cargo.toml` with crates in `core/daemon`, `core/providers`, `core/shared`, `core/ipc`, `core/platform`, `core/lifecycle`, and `core/cli`.
+- Rust workspace: root `Cargo.toml` with crates in `core/daemon`, `core/providers`, `core/shared`, `core/ipc`, `core/platform`, `core/lifecycle`, and `core/cli`, plus the development tools under `tools/` (`tools/e2e`, never shipped; see `tools/README.md`).
 - Daemon binary: `vapord`.
 - CLI binary: `vapor` (`core/cli`).
 - Swift package: `apps/macos/Package.swift` (`Vapor`, `VaporCore`) — macOS-only.
@@ -23,8 +23,10 @@
 - Sync locale catalogs into every app surface: `./scripts/locales.sh`
 - Install git pre-commit hook: `./scripts/hooks.sh` (uninstall: `./scripts/hooks.sh uninstall`)
 - Version helper: `./scripts/version.sh`
-- Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
-- End-to-end verification of the real binaries in a disposable sandbox: `./scripts/e2e.sh` (`--keep`, `--skip-build`; see `docs/development/e2e-verification.md`)
+- Release gate (format, lint, Tier 1, and the e2e suite once per provider; the Google Drive leg needs the test account signed in): `./scripts/release.sh`
+- Performance gate (one release-profile soak cell with SLO assertions): `./scripts/perf.sh` (`VAPOR_PERF_SOAK_DURATION`, `VAPOR_PERF_SOAK_SEED`)
+- Soak verification (Tier S): `./scripts/soak.sh` (`--duration`, `--seed`, `--mode`, `--load`, `--faults`, `--throttle`, `--release`, `--status`, `--verify`; see `docs/development/soak-testing.md`)
+- End-to-end verification of the real binaries in disposable sandboxes: `./scripts/e2e.sh` (`--only Sxx`, `--keep`, `--skip-build`, `--json`, `--list`, `--sandbox`, `--sandbox-stop`; see `docs/development/e2e-verification.md`)
 
 ## Stack helpers
 
@@ -85,7 +87,8 @@ Operational notes:
 - Override runtime root with `VAPOR_DIR=/path/to/vapor ./scripts/test.sh` (same for build, lint, and format).
 - `Vapor.app` is a single package that ships three executables: `Contents/MacOS/Vapor` (app), `Contents/MacOS/vapord` (daemon), and `Contents/Helpers/vapor` (CLI — it cannot live in `Contents/MacOS/` because the default macOS filesystem is case-insensitive and `vapor` would collide with `Vapor`).
 - Runtime daemon launch path is always the bundled `vapord`: a sibling of the launching binary, or `../MacOS/vapord` when resolved from the bundled CLI in `Contents/Helpers/`.
-- Daemon lifecycle (install/start/stop/supervision, crash-loop state) is driven through `vapor service` on every surface; `vapor service check` is one supervision tick, `vapor service acknowledge` clears a crash-loop pause, and durable crash-loop state lives at `<vapor_dir>/state/lifecycle.json`.
+- What the daemon parks for a person to answer lives in the profile state DB and is read and answered with `vapor decisions list|show|resolve <id> --choose <key>`, with or without a daemon; what the daemon removed on this device is listed and restored with `vapor trash list|restore|empty`. Both are the CLI surfaces the app shells drive with `--json`.
+- Daemon lifecycle (install/start/stop/supervision, crash-loop state) is driven through `vapor service` on every surface; `vapor service check` is one supervision tick (`--loop` keeps ticking, which is what `vapor service install --supervise` registers as the kept-alive `sh.arn.vapor.supervisor` job for installs without the app), `vapor service acknowledge` clears a crash-loop pause, and durable crash-loop state lives at `<vapor_dir>/state/lifecycle.json`.
 - Swift lint and format scripts intentionally use `swift format` only.
 - If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild build` in `./scripts/swift/build.sh`.
 
@@ -118,12 +121,38 @@ Fast facts for local dev:
   constants, UI rendering (SwiftUI, menubar, Dock, future GUI
   surfaces), interactive TTY behavior on the `vapor` CLI. See
   `AGENTS.md §9.3` and `docs/architecture/testing-strategy.md`.
-- **Performance SLO tests** run via `./scripts/perf.sh` (Tier 2;
-  release gate only, not a PR gate).
-- **End-to-end verification** runs via `./scripts/e2e.sh` (Tier E2E)
-  after Tier 1 passes, whenever a change alters runtime behavior a
-  user would observe through the daemon or CLI. Fully sandboxed under
-  `.vapor/e2e/`; see `docs/development/e2e-verification.md`.
+- **Performance SLO checks** run via `./scripts/perf.sh` (Tier 2;
+  release gate only, not a PR gate): one soak cell against the release
+  profile, its report asserted against the budgets.
+- **Soak verification** runs via `./scripts/soak.sh` (Tier S): hours
+  of seeded churn with faults and a model-checked oracle; nightly in
+  `soak.yml` and on demand; see `docs/development/soak-testing.md`.
+- **End-to-end verification** runs via `./scripts/e2e.sh` (Tier E2E,
+  the `tools/e2e` harness) after Tier 1 passes, whenever a change
+  alters runtime behavior a user would observe through the daemon or
+  CLI. One sandbox per scenario under `.vapor/e2e/`; `--only Sxx`
+  runs one scenario; see `docs/development/e2e-verification.md`.
+- **Linux from a macOS checkout.** The `core/platform` Linux
+  implementations and the daemon on inotify are verified in a
+  container over the same working tree. The target directory is a
+  named volume mounted outside the checkout, so the two toolchains
+  never overwrite each other's binaries and no mount point appears in
+  the repo, and a tmpfs covers `.vapor/`, because a Docker Desktop
+  bind mount refuses to bind the daemon's Unix socket. The image's
+  `rustup` follows `rust-toolchain.toml`, so the container lints with
+  the latest stable clippy, which is what CI runs too:
+
+  ```sh
+  docker run --rm -v "$PWD":/work -w /work \
+    -v vapor-linux-target:/target \
+    -v vapor-linux-cargo:/usr/local/cargo/registry \
+    --tmpfs /work/.vapor:rw,size=2g \
+    -e CARGO_TARGET_DIR=/target -e VAPOR_ENV=dev \
+    rust:slim sh -c 'apt-get update -qq && apt-get install -y -qq \
+      pkg-config libsqlite3-dev build-essential attr procps >/dev/null && \
+      cargo clippy --workspace --all-targets -- -D warnings && \
+      cargo test --workspace && ./scripts/e2e.sh'
+  ```
 
 ## Release build policy
 

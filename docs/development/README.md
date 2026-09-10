@@ -33,11 +33,18 @@ workspace.
   version, Rust/Cargo, Swift driver, Swift compiler). Pre-GA this is a
   reference, not a hard pin; the project targets latest stable by
   default.
+- `soak-testing.md` — the Tier S process: the real binaries under
+  hours of seeded file churn on both sides, fault injection, the model
+  and its oracle, the status and report files an agent reads, how to
+  triage the first violation, and where the long runs happen
+  (`./scripts/soak.sh`).
 - `e2e-verification.md` — the Tier E2E process: black-box verification
-  of the real `vapor`/`vapord` binaries inside a disposable
-  `.vapor/e2e/` sandbox (`./scripts/e2e.sh`). Covers the safety
-  contract, when a change requires an E2E run, the scenario catalog,
-  and the discipline rules for adding scenarios.
+  of the real `vapor`/`vapord` binaries by the `tools/e2e` harness,
+  one disposable `.vapor/e2e/` sandbox per scenario
+  (`./scripts/e2e.sh`). Covers the safety contract, the shared tree
+  oracle and log-hygiene checks, verdicts and known gaps, when a
+  change requires an E2E run, the scenario catalog, and the discipline
+  rules for adding scenarios.
 
 ## Related references
 

@@ -1,0 +1,32 @@
+[package]
+name = "vapor-soak"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Development tool, never shipped: hours of randomized file churn on both
+# sides of a real daemon, a model of what must survive, fault injection,
+# and a status file an agent can watch. Reuses the e2e harness library.
+
+[dependencies]
+clap = { version = "=4.5.50", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+vapor-e2e = { path = "../e2e" }
+vapor-ipc = { path = "../../core/ipc" }
+vapor-shared = { path = "../../core/shared" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.183"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "vapor-soak"
+path = "src/main.rs"

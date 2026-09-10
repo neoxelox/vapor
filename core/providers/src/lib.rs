@@ -22,6 +22,7 @@ pub mod gdrive;
 pub mod http;
 pub mod logging;
 mod paths;
+pub mod root_marker;
 pub mod tags;
 
 pub use bandwidth::BandwidthShaper;
@@ -114,6 +115,10 @@ pub struct ProviderCapabilities {
     /// echoes it back through entries and changes (loop prevention's
     /// primary correlator).
     pub supports_op_id_tags: bool,
+    /// Provider can move a remote object to another path without a
+    /// re-upload ([`Provider::move_object`]); the engine turns a
+    /// detected local rename into one call when this is set.
+    pub supports_server_side_move: bool,
     /// Provider reports content hashes in enumeration / changes
     /// metadata without a separate expensive call.
     pub supports_content_hashes_in_metadata: bool,
@@ -124,6 +129,7 @@ impl ProviderCapabilities {
         supports_remote_changes_feed: true,
         supports_write_preconditions: true,
         supports_op_id_tags: true,
+        supports_server_side_move: true,
         supports_content_hashes_in_metadata: false,
     };
 
@@ -131,6 +137,7 @@ impl ProviderCapabilities {
         supports_remote_changes_feed: true,
         supports_write_preconditions: true,
         supports_op_id_tags: true,
+        supports_server_side_move: true,
         supports_content_hashes_in_metadata: true,
     };
 }
@@ -204,6 +211,13 @@ pub struct TransferOutcome {
     /// Hash of the transferred content in the provider's
     /// [`HashAlgorithm`], hex-encoded.
     pub content_hash: String,
+    /// The remote object's modification time as the provider reports
+    /// it once the transfer has landed (for an upload, the time of the
+    /// object just written; for a download, the time of the object
+    /// read). The sync index records it so a later reconcile can tell
+    /// a remote edit that kept the byte count from an untouched
+    /// object. `None` when the provider cannot say.
+    pub remote_modified_at: Option<SystemTime>,
 }
 
 /// A chunked upload or download in flight. Sessions hold whatever
@@ -292,6 +306,33 @@ pub trait Provider: Send + Sync {
     /// with an actionable configuration error.
     fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), ProviderError>;
 
+    /// A stable identity for the cloud root, so a folder that merely
+    /// has the same path (a fresh mount, a re-created folder, an
+    /// emptied share) is told apart from the one the profile adopted.
+    /// Filesystem-backed roots read the `.vapor-root` marker
+    /// [`adopt_root`](Self::adopt_root) wrote; Drive-style backends
+    /// answer with the folder id. `Ok(None)` when the root exists but
+    /// carries no identity (no marker yet, or a backend without one);
+    /// `NotFound` when the root is missing. Never creates the root.
+    fn root_identity(&self, cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
+        let _ = cloud_sync_directory;
+        Ok(None)
+    }
+
+    /// Adopts the current root as the profile's root: writes the
+    /// marker where the backend needs one and returns the identity
+    /// [`root_identity`](Self::root_identity) will report from then on
+    /// (`None` for a backend without one). Called once, after
+    /// [`ensure_cloud_sync_directory`](Self::ensure_cloud_sync_directory).
+    fn adopt_root(
+        &self,
+        cloud_sync_directory: &str,
+        device_id: &str,
+    ) -> Result<Option<String>, ProviderError> {
+        let _ = device_id;
+        self.root_identity(cloud_sync_directory)
+    }
+
     /// Lists the immediate children of `directory` (non-recursive, so
     /// reconcile walks stay slice-interruptible). `directory` may be
     /// [`RemotePath::root`].
@@ -319,6 +360,23 @@ pub trait Provider: Send + Sync {
     /// [`ProviderErrorKind::NotFound`]; the engine treats that as
     /// convergence, not failure.
     fn delete(&self, path: &RemotePath, op_id: &str) -> Result<(), ProviderError>;
+
+    /// Moves a remote file from `from` to `to` in one call, keeping its
+    /// content and tagging it with `op_id`, when
+    /// `supports_server_side_move`. A missing source reports
+    /// `NotFound`; an occupied destination reports
+    /// `PreconditionFailed` so the engine never overwrites by moving.
+    fn move_object(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        op_id: &str,
+    ) -> Result<(), ProviderError> {
+        let _ = (from, to, op_id);
+        Err(ProviderError::permanent(
+            "this provider cannot move objects server-side",
+        ))
+    }
 
     /// Pulls the next page of remote changes after `cursor`.
     /// `cursor = None` baselines the feed: it returns an empty page
@@ -392,6 +450,7 @@ impl Provider for FilesystemStubProvider {
             supports_remote_changes_feed: false,
             supports_write_preconditions: false,
             supports_op_id_tags: false,
+            supports_server_side_move: false,
             supports_content_hashes_in_metadata: false,
         }
     }
@@ -404,6 +463,12 @@ impl Provider for FilesystemStubProvider {
             &[("cloud_sync_directory", cloud_sync_directory.to_string())],
         );
         Ok(())
+    }
+
+    fn root_identity(&self, _cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
+        // Always present, never identified: the stub has no cloud side
+        // to tell apart from another.
+        Ok(None)
     }
 
     fn enumerate(&self, _directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {
@@ -463,6 +528,7 @@ impl TransferSession for NoopTransferSession {
         Ok(TransferStep::Completed(TransferOutcome {
             bytes_total: 0,
             content_hash: filesystem::hash_hex_of_bytes(b""),
+            remote_modified_at: None,
         }))
     }
 

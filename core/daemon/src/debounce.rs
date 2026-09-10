@@ -202,6 +202,29 @@ impl DebounceLoop {
             .collect()
     }
 
+    /// Drains every pending record regardless of its quiet window.
+    /// Used once, at shutdown, so a change caught mid-window reaches
+    /// the durable queue instead of living only in memory.
+    pub fn drain_all_for_recorder(
+        &mut self,
+        recorder: &BoundedFsEventRecorder,
+        now: SystemTime,
+    ) -> Vec<StabilizedEvent> {
+        self.last_tick_at = Some(now);
+        self.last_tick_inst = Some(self.clock.now());
+        let records = recorder.with_mut_state(|maps| {
+            maps.drain_ready_events_with(|record| {
+                Some(self.windows.classify_path(record.path.as_path()))
+            })
+        });
+        records
+            .into_iter()
+            .map(|(record, (debounce_class, quiet_window))| {
+                self.build_stabilized_event(record, debounce_class, quiet_window)
+            })
+            .collect()
+    }
+
     fn tick_is_due(&self, now_inst: Instant) -> bool {
         // Monotonic Instant elapsed: wall-clock rewinds (DST / NTP / `date`)
         // cannot make the daemon spin extra ticks. The injected clock seam
@@ -618,8 +641,10 @@ mod tests {
         );
     }
 
+    /// A timing guard-rail (`testing-strategy.md`): a flake here means a
+    /// saturated host, not a logic failure, and is triaged as such.
     #[test]
-    fn debounce_tick_regression_stays_under_guardrail() {
+    fn timing_guardrail_debounce_tick_stays_under_budget() {
         let watch_root = PathBuf::from("/tmp/vapor-root");
         let mut maps = BoundedEventIntentMaps::with_limits_and_storm_thresholds(
             watch_root.clone(),

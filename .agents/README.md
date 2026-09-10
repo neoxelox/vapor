@@ -18,6 +18,7 @@ expects as a symlink, so there is one source of truth.
 | `unslop` | Writing anything a human will read: docs, commit messages, replies. Always. |
 | `vapor-validate` | Before committing a change under `core/*`, `apps/*`, or `scripts/*`; when a script run is red. |
 | `vapor-e2e` | A change alters daemon- or CLI-observable behaviour and Tier 1 is green; to watch a feature in the real product. |
+| `vapor-soak` | Proving the product is safe for real data: an hours-long seeded workload with faults and a no-loss oracle, watched on a loop, triaged at the first violation. |
 | `vapor-debug` | The daemon crashed, will not start, sync is stuck, or a status looks wrong. |
 | `vapor-config` | Adding or changing a `vapor.json` key, a `VAPOR_*` variable, a default, a path name, or a launch label. |
 | `vapor-provider` | Touching `core/providers` or adding a provider kind. |

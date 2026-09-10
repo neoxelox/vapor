@@ -1,10 +1,12 @@
 //! User-idle notifier trait, the fakes, and the per-OS native source.
 //!
 //! See `docs/architecture/platform-abstractions.md` §`IdleNotifier`.
-//! macOS reads the HID idle clock (`macos.rs`). Linux and Windows are
-//! not shipping surfaces yet; their `NativeIdleNotifier` reports zero
-//! idle time, which keeps idle boost off rather than running boosted
-//! ceilings on an unmeasured host.
+//! macOS reads the HID idle clock (`macos.rs`). Linux knows whether a
+//! graphical session exists at all (`linux.rs`): a headless host is
+//! idle, a desktop reports zero idle time until a display-server idle
+//! query is wired. Windows is not a shipping surface yet; its
+//! `NativeIdleNotifier` reports zero idle time, which keeps idle boost
+//! off rather than running boosted ceilings on an unmeasured host.
 
 use std::sync::Mutex;
 use std::time::Duration;

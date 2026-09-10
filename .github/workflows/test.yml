@@ -82,14 +82,34 @@ jobs:
         run: ./scripts/test.sh
 
       # Tier E2E: black-box run of the real vapor + vapord binaries in a
-      # sandbox under the repo-local .vapor/e2e/. macOS only — it drives
-      # the native FSEvents watcher, and macOS is the shipping surface.
-      # --full additionally runs the service lifecycle round-trip
-      # against the real launchd: it
-      # installs a real LaunchAgent, so that phase is opt-in and meant
+      # sandbox under the repo-local .vapor/e2e/, on every runner. The
+      # harness skips (and names) every scenario whose need the host
+      # cannot meet: Linux runs the daemon scenarios on inotify and
+      # skips the launchd and disk-image ones; on Windows the daemon
+      # scenarios skip until its native fs-watch ships. macOS adds
+      # --full, the service lifecycle round-trip against the real
+      # launchd: it installs a real LaunchAgent, so that phase is meant
       # for disposable runners like this one; contributors run plain
       # ./scripts/e2e.sh locally. See docs/development/e2e-verification.md.
       - name: Run e2e verification
-        if: matrix.scope == 'full'
         shell: bash
-        run: ./scripts/e2e.sh --full
+        run: |
+          if [[ "${{ matrix.scope }}" == "full" ]]; then
+            ./scripts/e2e.sh --full
+          else
+            ./scripts/e2e.sh
+          fi
+
+      # The report always; the daemon logs and outputs of the sandboxes
+      # the harness preserved (failed scenarios only), so a red run can
+      # be read without the runner.
+      - name: Upload e2e report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-report-${{ matrix.os }}
+          path: |
+            .vapor/e2e/**/*result.json
+            .vapor/e2e/**/logs/*
+            .vapor/e2e/**/*-daemon.out
+          if-no-files-found: ignore

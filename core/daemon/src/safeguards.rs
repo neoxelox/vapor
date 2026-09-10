@@ -137,8 +137,12 @@ impl ActiveCodingHeuristic {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MassDeleteGuardSettings {
     pub enabled: bool,
+    /// Absolute count inside the window that always holds.
     pub threshold: usize,
     pub window: Duration,
+    /// Share of the synced files (percent) inside the window that holds
+    /// too, so a small tree is protected before the absolute count.
+    pub ratio_percent: u8,
 }
 
 impl Default for MassDeleteGuardSettings {
@@ -147,6 +151,7 @@ impl Default for MassDeleteGuardSettings {
             enabled: constants::safeguards::DEFAULT_MASS_DELETE_ENABLED,
             threshold: constants::engine::MASS_DELETE_THRESHOLD,
             window: Duration::from_secs(constants::engine::MASS_DELETE_WINDOW_SECONDS),
+            ratio_percent: constants::engine::MASS_DELETE_RATIO_PERCENT,
         }
     }
 }
@@ -154,7 +159,7 @@ impl Default for MassDeleteGuardSettings {
 impl MassDeleteGuardSettings {
     /// Resolves the configured values, clamping to the floors with a
     /// logged warning (a too-low threshold would trip on ordinary work
-    /// and train users to blind-resume the guard).
+    /// and train users to blind-approve the guard).
     pub fn resolve(config: &vapor_shared::config::VaporConfig) -> Self {
         let configured = &config.safeguards;
         let threshold = usize::try_from(configured.mass_delete_threshold).unwrap_or(usize::MAX);
@@ -179,7 +184,7 @@ impl MassDeleteGuardSettings {
         }
         if !configured.mass_delete_enabled {
             crate::logging::warning(
-                "The mass-deletion guard is disabled by configuration; bulk local deletions will replicate without a pause",
+                "The mass-deletion guard is disabled by configuration; bulk deletions will replicate without a decision",
                 &[],
             );
         }
@@ -187,21 +192,25 @@ impl MassDeleteGuardSettings {
             enabled: configured.mass_delete_enabled,
             threshold: clamped_threshold,
             window: Duration::from_secs(clamped_window),
+            ratio_percent: configured.mass_delete_ratio_percent.min(100),
         }
     }
 }
 
 /// Mass-change / ransomware guard.
 ///
-/// Latches once tripped: the daemon stays paused (and the guard stays
-/// reported) until an explicit `vapor resume`, which calls
-/// [`MassChangeGuard::reset`]. Only *local* stabilized deletions that
-/// survived self-write-echo suppression count — remote deletions the
-/// engine applies locally are its own doing and never trip the guard.
+/// Counts deletions in both directions (a local delete about to remove
+/// a cloud object, a cloud delete about to remove a local file) at the
+/// moment the executor would make them irreversible. Once tripped it
+/// stays tripped, and every further deletion inside the window joins
+/// the held batch, until the decision that holds the batch is answered
+/// and the guard is reset. Deletions that turn out to be no-ops (the
+/// other side is already gone) never reach the guard.
 #[derive(Debug)]
 pub struct MassChangeGuard {
     counter: RollingWindowCounter,
     threshold: usize,
+    ratio_percent: u8,
     tripped: bool,
 }
 
@@ -216,22 +225,48 @@ impl Default for MassChangeGuard {
 
 impl MassChangeGuard {
     pub fn new(window: Duration, threshold: usize) -> Self {
+        Self::with_ratio(
+            window,
+            threshold,
+            constants::engine::MASS_DELETE_RATIO_PERCENT,
+        )
+    }
+
+    pub fn with_ratio(window: Duration, threshold: usize, ratio_percent: u8) -> Self {
         Self {
             counter: RollingWindowCounter::new(window, threshold.max(1)),
             threshold: threshold.max(1),
+            ratio_percent: ratio_percent.min(100),
             tripped: false,
         }
     }
 
-    /// Records one local deletion; returns `true` exactly once, on the
-    /// record that trips the guard (the caller pauses + alerts on that
-    /// edge, not on every subsequent deletion).
-    pub fn record_delete(&mut self, now: SystemTime) -> bool {
+    /// Records one deletion about to become irreversible; returns
+    /// `true` when it must be held: on the record that trips the guard
+    /// and on every record while the guard stays tripped.
+    /// `synced_files` is the size of the synced tree the ratio rule
+    /// measures against. `queued_behind` is the number of deletions in
+    /// the same direction still waiting in the queue: a burst is judged
+    /// as a whole, so the first deletion of a large batch is held
+    /// before any of it lands, instead of the batch propagating up to
+    /// the threshold and only the tail being held.
+    pub fn record_delete(
+        &mut self,
+        now: SystemTime,
+        synced_files: usize,
+        queued_behind: usize,
+    ) -> bool {
         self.counter.record(now);
         if self.tripped {
-            return false;
+            return true;
         }
-        if self.counter.count(now) >= self.threshold {
+        let count = self.counter.count(now).saturating_add(queued_behind);
+        let over_threshold = count >= self.threshold;
+        let over_ratio = self.ratio_percent > 0
+            && count >= constants::safeguards::MIN_MASS_DELETE_RATIO_COUNT
+            && count.saturating_mul(100)
+                >= synced_files.saturating_mul(usize::from(self.ratio_percent));
+        if over_threshold || over_ratio {
             self.tripped = true;
             return true;
         }
@@ -242,8 +277,14 @@ impl MassChangeGuard {
         self.tripped
     }
 
-    /// Explicit human reset (`vapor resume`); the window restarts empty
-    /// so an ongoing storm re-trips on fresh evidence only.
+    /// The count inside the window right now.
+    pub fn count(&mut self, now: SystemTime) -> usize {
+        self.counter.count(now)
+    }
+
+    /// Reset after the holding decision is answered; the window
+    /// restarts empty so an ongoing storm re-trips on fresh evidence
+    /// only.
     pub fn reset(&mut self) {
         self.tripped = false;
         self.counter.clear();
@@ -368,48 +409,90 @@ mod tests {
         // "inside the window" of a rewound clock without the fix, so a lone
         // post-rewind delete would spuriously trip the guard.
         let mut guard = MassChangeGuard::new(Duration::from_secs(60), 3);
-        assert!(!guard.record_delete(at(100_000)));
-        assert!(!guard.record_delete(at(100_001)));
+        assert!(!guard.record_delete(at(100_000), 1_000_000, 0));
+        assert!(!guard.record_delete(at(100_001), 1_000_000, 0));
         // NTP steps the clock back well before those events.
         assert!(
-            !guard.record_delete(at(10)),
+            !guard.record_delete(at(10), 1_000_000, 0),
             "future-dated events must be pruned, not counted after a rewind"
         );
         assert!(!guard.is_tripped());
     }
 
     #[test]
-    fn mass_change_guard_trips_exactly_once_and_latches() {
+    fn mass_change_guard_trips_and_holds_every_deletion_while_tripped() {
         let mut guard = MassChangeGuard::new(Duration::from_secs(60), 3);
-        assert!(!guard.record_delete(at(100)));
-        assert!(!guard.record_delete(at(101)));
-        assert!(guard.record_delete(at(102)), "third delete trips");
+        assert!(!guard.record_delete(at(100), 1_000_000, 0));
+        assert!(!guard.record_delete(at(101), 1_000_000, 0));
+        assert!(
+            guard.record_delete(at(102), 1_000_000, 0),
+            "third delete trips"
+        );
         assert!(guard.is_tripped());
-        // Latched: further deletions report no new edge.
-        assert!(!guard.record_delete(at(103)));
+        // Latched: further deletions join the held batch.
+        assert!(guard.record_delete(at(103), 1_000_000, 0));
         assert!(guard.is_tripped());
+    }
+
+    #[test]
+    fn mass_change_guard_judges_a_queued_batch_as_a_whole() {
+        // Twelve deletions of a forty-file tree land in the queue at
+        // once: the first one is held, none of them propagates.
+        let mut guard = MassChangeGuard::with_ratio(Duration::from_secs(60), 1_000, 25);
+        assert!(
+            guard.record_delete(at(100), 40, 11),
+            "the first of twelve is held"
+        );
+        // A lone deletion with nothing behind it is not a burst.
+        let mut lone = MassChangeGuard::with_ratio(Duration::from_secs(60), 1_000, 25);
+        assert!(!lone.record_delete(at(100), 40, 0));
+        // The absolute threshold counts the queue too.
+        let mut big = MassChangeGuard::with_ratio(Duration::from_secs(60), 1_000, 25);
+        assert!(big.record_delete(at(100), 2_000_000, 999));
+    }
+
+    #[test]
+    fn mass_change_guard_ratio_rule_protects_a_small_tree() {
+        // 40 synced files: a quarter is 10 deletions, exactly the floor
+        // the ratio rule never goes under.
+        let mut guard = MassChangeGuard::with_ratio(Duration::from_secs(60), 1_000, 25);
+        for second in 0..9 {
+            assert!(
+                !guard.record_delete(at(100 + second), 40, 0),
+                "delete {second}"
+            );
+        }
+        assert!(
+            guard.record_delete(at(110), 40, 0),
+            "the tenth deletion is a quarter of 40"
+        );
+        // A big tree needs the absolute threshold.
+        let mut big = MassChangeGuard::with_ratio(Duration::from_secs(60), 1_000, 25);
+        for second in 0..200 {
+            assert!(!big.record_delete(at(100 + second), 2_000_000, 0));
+        }
     }
 
     #[test]
     fn mass_change_guard_does_not_trip_on_slow_deletions() {
         let mut guard = MassChangeGuard::new(Duration::from_secs(60), 3);
-        assert!(!guard.record_delete(at(100)));
-        assert!(!guard.record_delete(at(200)));
-        assert!(!guard.record_delete(at(300)));
+        assert!(!guard.record_delete(at(100), 1_000_000, 0));
+        assert!(!guard.record_delete(at(200), 1_000_000, 0));
+        assert!(!guard.record_delete(at(300), 1_000_000, 0));
         assert!(!guard.is_tripped(), "one delete per 100s is normal use");
     }
 
     #[test]
     fn mass_change_guard_reset_rearms_with_an_empty_window() {
         let mut guard = MassChangeGuard::new(Duration::from_secs(60), 2);
-        guard.record_delete(at(100));
-        assert!(guard.record_delete(at(101)));
+        guard.record_delete(at(100), 1_000_000, 0);
+        assert!(guard.record_delete(at(101), 1_000_000, 0));
         guard.reset();
         assert!(!guard.is_tripped());
         // Old evidence is gone; a single fresh delete does not re-trip.
-        assert!(!guard.record_delete(at(102)));
+        assert!(!guard.record_delete(at(102), 1_000_000, 0));
         // But a fresh storm does.
-        assert!(guard.record_delete(at(103)));
+        assert!(guard.record_delete(at(103), 1_000_000, 0));
     }
 
     #[test]

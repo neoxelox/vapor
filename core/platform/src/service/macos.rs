@@ -20,9 +20,10 @@ use std::process::Command;
 use super::{ServiceDescriptor, ServiceInstallError, ServiceInstaller, ServiceStatus};
 
 /// macOS-native `ServiceInstaller` driving `launchctl` against a
-/// LaunchAgent plist. The plist policy (`KeepAlive=false`, etc.) is fixed
-/// per `docs/operations/macos/launchagent-policy.md` — callers cannot
-/// override it, since the policy is part of the contract.
+/// LaunchAgent plist. The plist policy is fixed per
+/// `docs/operations/macos/launchagent-policy.md`: the daemon's job is
+/// never kept alive by launchd (the crash-loop guard owns restarts),
+/// and only the headless supervisor's job is.
 #[derive(Debug)]
 pub struct NativeServiceInstaller {
     descriptor: ServiceDescriptor,
@@ -122,7 +123,7 @@ impl NativeServiceInstaller {
         buffer.push_str("  </array>\n");
 
         push_bool_entry(&mut buffer, "RunAtLoad", true);
-        push_bool_entry(&mut buffer, "KeepAlive", false);
+        push_bool_entry(&mut buffer, "KeepAlive", self.descriptor.keep_alive);
         push_string_entry(&mut buffer, "ProcessType", "Background");
 
         if !self.descriptor.environment.is_empty() {
@@ -323,6 +324,30 @@ mod tests {
     }
 
     #[test]
+    fn the_supervisor_job_is_the_only_one_launchd_keeps_alive() {
+        let temp = TempDir::new().expect("temp dir");
+        let executable = make_executable(&temp, "vapor");
+        let plist_path = temp.path().join("sh.arn.vapor.supervisor.plist");
+        let installer = NativeServiceInstaller::with_paths(
+            ServiceDescriptor {
+                label: "sh.arn.vapor.supervisor".to_string(),
+                executable_path: executable,
+                arguments: vec!["service".into(), "check".into(), "--loop".into()],
+                environment: vec![],
+                stdout_path: None,
+                stderr_path: None,
+                keep_alive: true,
+            },
+            plist_path.clone(),
+            501,
+        );
+        installer.write_plist().expect("write plist");
+        let contents = fs::read_to_string(&plist_path).expect("read plist");
+        assert!(contents.contains("<key>KeepAlive</key>\n  <true/>"));
+        assert!(contents.contains("<string>--loop</string>"));
+    }
+
+    #[test]
     fn write_plist_emits_policy_approved_keys_with_correct_values() {
         let temp = TempDir::new().expect("temp dir");
         let executable = make_executable(&temp, "vapord");
@@ -335,6 +360,7 @@ mod tests {
                 environment: vec![("VAPOR_DIR".to_string(), "/tmp/.vapor".to_string())],
                 stdout_path: Some(temp.path().join("vapord.stdout.log")),
                 stderr_path: Some(temp.path().join("vapord.stderr.log")),
+                keep_alive: false,
             },
             plist_path.clone(),
             501,
@@ -367,6 +393,7 @@ mod tests {
                 environment: vec![],
                 stdout_path: None,
                 stderr_path: None,
+                keep_alive: false,
             },
             temp.path().join("plist"),
             501,
@@ -394,6 +421,7 @@ mod tests {
                 environment: vec![],
                 stdout_path: None,
                 stderr_path: None,
+                keep_alive: false,
             },
             temp.path().join("plist"),
             501,

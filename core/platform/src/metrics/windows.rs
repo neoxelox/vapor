@@ -17,6 +17,11 @@ impl NativePlatformMetricsSampler {
     pub fn has_native_sampling() -> bool {
         false
     }
+
+    /// The inputs this host feeds the throttle, for logs and doctor.
+    pub fn input_sources() -> &'static str {
+        "none; every input is a placeholder on Windows"
+    }
 }
 
 impl PlatformMetricsSampler for NativePlatformMetricsSampler {

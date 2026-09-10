@@ -431,6 +431,11 @@ fn normalize_event_path(watch_root: &Path, event_path: &Path) -> Option<PathBuf>
 
     let candidate = normalize_absolute_path(candidate)?;
 
+    // A name that is not UTF-8 cannot be a sync path (the durable
+    // queue and the remote path model are UTF-8), so its events are
+    // dropped here; the reconcile walk asks the user about the file.
+    candidate.to_str()?;
+
     if candidate.starts_with(watch_root) {
         Some(candidate)
     } else {
@@ -584,6 +589,25 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, FsEventKind::Created);
         assert_eq!(events[0].path, watch_root.join("src/main.rs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn callback_drops_a_path_that_is_not_utf8() {
+        use std::os::unix::ffi::OsStrExt;
+        let watch_root = synthetic_watch_root();
+        let path_filter = test_path_filter(&watch_root);
+        let recorder = TestRecorder::default();
+        let event = WatchEvent {
+            path: watch_root.join(std::ffi::OsStr::from_bytes(b"caf\xe9.txt")),
+            kind: WatchEventKind::Created,
+            observed_at: SystemTime::now(),
+        };
+        record_watch_event(&watch_root, &path_filter, event, &recorder);
+        assert!(
+            recorder.events.lock().expect("events").is_empty(),
+            "a name the queue cannot store never becomes an event"
+        );
     }
 
     #[test]
@@ -801,8 +825,10 @@ mod tests {
         assert!(events.is_empty());
     }
 
+    /// A timing guard-rail (`testing-strategy.md`): a flake here means a
+    /// saturated host, not a logic failure, and is triaged as such.
     #[test]
-    fn callback_burst_regression_stays_under_guardrail() {
+    fn timing_guardrail_callback_burst_stays_under_budget() {
         let watch_root = synthetic_watch_root();
         let path_filter = test_path_filter(&watch_root);
         let recorder = TestRecorder::default();
@@ -827,8 +853,10 @@ mod tests {
         );
     }
 
+    /// A timing guard-rail (`testing-strategy.md`): a flake here means a
+    /// saturated host, not a logic failure, and is triaged as such.
     #[test]
-    fn callback_deep_path_regression_stays_under_guardrail() {
+    fn timing_guardrail_callback_deep_path_stays_under_budget() {
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         let mut deepest_directory = watch_root.clone();
