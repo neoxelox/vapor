@@ -262,6 +262,27 @@ landed).
   disconnect, multi-provider fan-out UI. Depends on C8-19 … C8-26 and the
   sync-modes workstream C8-59 … C8-66.
 
+### Wave 9.5 — First run and onboarding
+
+Status: pending. Depends on Wave 9's M4-5 (the strict-mirror
+confirmation the sync-mode step reuses) and the auth flow (Wave 7).
+
+- `core.md` OB-1 — an install with no sync scope composes no profile,
+  creates no folder, adopts no root, and says so in `vapor status`;
+  the first scope written composes without a restart.
+- `cli.md` L1-6 — `vapor profiles list|add|remove`, the headless
+  onboarding and the engine the app drives.
+- `macos.md` O-1 … O-4 — the first-run flow: provider for the first
+  profile, sign-in, roots, sync mode, start at login; the gate that
+  opens it while the install is unconfigured; re-entry from Settings
+  for a second profile; copy, logic tests, and the owner's manual
+  checklist.
+
+Order inside the wave: OB-1, then L1-6, then O-1 … O-4. The project
+owner's decision behind it: most real installs will use Google Drive,
+so a pair of filesystem folders created before anyone chose is the
+wrong first impression.
+
 ### Wave 10 — macOS distribution hardening
 
 Status: pending.
@@ -395,10 +416,8 @@ Separate from the Windows/Linux optional bucket above, each task file
 maintains its own deferred section for work that is intentionally out
 of the current wave:
 
-- `core.md` "Deferred tasks" — perf threshold tuning, production
-  onboarding clarification pass.
-- `macos.md` "macOS-specific deferred onboarding task" — onboarding UI
-  design.
+- `core.md` "Deferred tasks" — perf threshold tuning. Onboarding left
+  this list for Wave 9.5.
 
 Items in those sections are not part of any current wave; promote them
 into a wave above when they become active.

@@ -76,7 +76,11 @@ protection. `launchd` is intentionally passive (`KeepAlive = false`):
 1. On a clean exit (signal-driven shutdown from app menubar quit, or a
    fatal-but-expected classified error), `launchd` does nothing and the
    daemon stays stopped until the next user trigger (app launch, login,
-   explicit restart via menubar).
+   explicit restart via menubar). The menubar restart exists only while
+   the job is registered: with auto-launch off there is no job, `vapor
+   service restart` answers `not_installed`, and the app disables the
+   control with a hint that Start Vapor at login is what runs sync in
+   the background.
 2. On an unclean exit (panic, SIGSEGV, SIGKILL from external signal, OOM),
    the lifecycle owner registers the crash with the shared
    `CrashLoopGuard` and applies exponential backoff before attempting

@@ -11,7 +11,7 @@
 
 ## Product goals
 
-- Keep one selected local folder (default `~/Vapor`) bidirectionally synced with one selected provider folder (default `/Vapor`) with durable intent state.
+- Keep one selected local folder (default `~/Vapor`) bidirectionally synced with one selected provider folder (default `/Vapor` on a cloud provider, `~/cloud/Vapor` when a local folder plays the cloud) with durable intent state.
 - Scope sync strictly to that configured folder pair; Vapor is not intended to be full-device backup.
 - Stay low-impact during active development and heavy system load.
 - Defer expensive work under pressure while maintaining eventual consistency.

@@ -36,6 +36,9 @@ pub struct DaemonStatusSnapshot {
     pub decisions_pending: u64,
     pub loop_prevention_suppressions: u64,
     pub conflicts: u64,
+    pub conflicts_unresolved: u64,
+    pub reconcile_state: String,
+    pub reconcile_detail: String,
     pub mirror_reverts: u64,
     pub mirror_deletes: u64,
     pub dropped_incoming_events: u64,
@@ -60,6 +63,9 @@ impl Default for DaemonStatusSnapshot {
             decisions_pending: 0,
             loop_prevention_suppressions: 0,
             conflicts: 0,
+            conflicts_unresolved: 0,
+            reconcile_state: "idle".to_string(),
+            reconcile_detail: String::new(),
             mirror_reverts: 0,
             mirror_deletes: 0,
             dropped_incoming_events: 0,
@@ -212,6 +218,9 @@ impl Service for DaemonIpcService {
             resource_budget: snapshot.resource_budget,
             config_restart_required: snapshot.config_restart_required,
             decisions_pending: snapshot.decisions_pending,
+            conflicts_unresolved: snapshot.conflicts_unresolved,
+            reconcile_state: snapshot.reconcile_state,
+            reconcile_detail: snapshot.reconcile_detail,
         }
     }
 
@@ -238,6 +247,14 @@ impl Service for DaemonIpcService {
         Self::ack(
             true,
             "reconcile requested; runtime will enqueue on next tick",
+        )
+    }
+
+    fn sync_now(&self) -> AckResponse {
+        self.control.request_sync_now();
+        Self::ack(
+            true,
+            "sync requested; the scan runs under any throttle state but Suspended and deferred work is released",
         )
     }
 

@@ -40,6 +40,12 @@ or durable state in Swift.
 
 1. **SwiftUI app (`apps/macos`)**
    - Onboarding, profile management, provider auth UI, root folder selection.
+     The first run asks before it creates: the provider for the first
+     profile, sign-in when the provider needs it, the two roots, the
+     sync mode, start at login. Until the user finishes, the install is
+     unconfigured and the daemon creates no folder and adopts no root.
+     The filesystem provider is the CLI's and the test suite's default,
+     never the app's assumption.
    - Settings UI (app-global + per-profile overrides).
    - Menubar status: `Idle`, `Queued`, `Syncing`, `Throttled`, `Suspended`,
      `Error`.

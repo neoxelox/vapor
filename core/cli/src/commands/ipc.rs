@@ -146,6 +146,11 @@ pub fn reconcile() -> Result<AckResponse, IpcCliError> {
     client.reconcile().map_err(IpcCliError::from)
 }
 
+pub fn sync_now() -> Result<AckResponse, IpcCliError> {
+    let mut client = connect()?;
+    client.sync_now().map_err(IpcCliError::from)
+}
+
 pub fn timeline() -> Result<TimelineResponse, IpcCliError> {
     let mut client = connect()?;
     client.timeline().map_err(IpcCliError::from)
@@ -191,6 +196,20 @@ pub fn render_status(status: &StatusResponse) -> String {
             "\nDecisions waiting for you: {} (vapor decisions list)",
             status.decisions_pending
         ));
+    }
+    if status.conflicts_unresolved > 0 {
+        rendered.push_str(&format!(
+            "\nConflicts waiting for you: {} (vapor conflicts list)",
+            status.conflicts_unresolved
+        ));
+    }
+    match status.reconcile_state.as_str() {
+        "waiting" => rendered.push_str(&format!(
+            "\nScan: {} (vapor sync-now scans anyway)",
+            status.reconcile_detail
+        )),
+        "running" => rendered.push_str(&format!("\nScan: {}", status.reconcile_detail)),
+        _ => {}
     }
     for profile in &status.profiles {
         rendered.push_str(&format!(
@@ -391,6 +410,9 @@ mod tests {
             mirror_reverts: 1,
             mirror_deletes: 1,
             decisions_pending: 1,
+            conflicts_unresolved: 1,
+            reconcile_state: "waiting".to_string(),
+            reconcile_detail: "waiting for an idle moment: user activity is active".to_string(),
             profiles: vec![vapor_ipc::ProfileStatus {
                 id: "mirror".to_string(),
                 provider_name: "filesystem".to_string(),
@@ -411,6 +433,10 @@ mod tests {
         assert!(rendered.contains("Queue: 3 pending, 1 failed"));
         assert!(rendered.contains("Strict mirror: 1 reverts, 1 deletes"));
         assert!(rendered.contains("Decisions waiting for you: 1 (vapor decisions list)"));
+        assert!(rendered.contains("Conflicts waiting for you: 1 (vapor conflicts list)"));
+        assert!(rendered.contains(
+            "Scan: waiting for an idle moment: user activity is active (vapor sync-now scans anyway)"
+        ));
         assert!(rendered.contains("Profile mirror: Running (filesystem, pull-only)"));
     }
 
@@ -502,7 +528,27 @@ mod tests {
   "profiles": [],
   "resource_budget": null,
   "config_restart_required": null,
-  "decisions_pending": 0
+  "decisions_pending": 0,
+  "conflicts_unresolved": 0,
+  "reconcile_state": "",
+  "reconcile_detail": ""
+}"#
+        );
+    }
+
+    #[test]
+    fn ack_json_shape_is_stable() {
+        let ack = vapor_ipc::AckResponse {
+            schema_version: 2,
+            accepted: true,
+            note: "sync requested".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_string_pretty(&ack).expect("serialize"),
+            r#"{
+  "schema_version": 2,
+  "accepted": true,
+  "note": "sync requested"
 }"#
         );
     }

@@ -11,7 +11,7 @@ Tasks: `docs/tasks/cli.md`.
 
 `run`, `service install|uninstall|bootstrap|start|stop|restart|status|check|acknowledge`,
 `config get|set`, `auth login|logout|status`, `status`, `pause`, `resume`,
-`flush-now`, `reconcile`, `timeline`, `logs`, `diagnostics`,
+`flush-now`, `reconcile`, `sync-now`, `timeline`, `logs`, `diagnostics`,
 `conflicts list|resolve`, `support-bundle`, `doctor`, `version`. Every
 command that reports state takes `--json`; the shapes are locked by
 assertion tests in each command module. `vapor --help` is the reference.

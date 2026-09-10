@@ -14,6 +14,9 @@
 //!   opportunistically already.
 //! - `reconcile` — schedule a fresh whole-scope reconcile against the
 //!   local sync directory.
+//! - `sync_now` — the user's on-demand sync: a whole-scope reconcile
+//!   admitted under any throttle state but `Suspended`, plus the flush
+//!   boost, so what the scan finds moves at once.
 
 use std::sync::{Arc, Mutex};
 
@@ -31,6 +34,7 @@ struct RuntimeControlInner {
     pause_request: Option<bool>,
     flush_pending: bool,
     reconcile_pending: bool,
+    sync_now_pending: bool,
     /// Set by `DaemonRuntime::attach_control` so control requests wake
     /// the tick loop immediately instead of waiting out the sleep.
     waker: Option<Arc<TickWaker>>,
@@ -76,6 +80,11 @@ impl RuntimeControl {
         self.notify_waker();
     }
 
+    pub fn request_sync_now(&self) {
+        self.with_inner(|inner| inner.sync_now_pending = true);
+        self.notify_waker();
+    }
+
     /// Returns + clears any pending pause/resume request.
     pub fn take_pause_request(&self) -> Option<bool> {
         self.with_inner(|inner| inner.pause_request.take())
@@ -89,6 +98,11 @@ impl RuntimeControl {
     /// Returns + clears any pending reconcile request.
     pub fn take_reconcile_request(&self) -> bool {
         self.with_inner(|inner| std::mem::take(&mut inner.reconcile_pending))
+    }
+
+    /// Returns + clears any pending sync-now request.
+    pub fn take_sync_now_request(&self) -> bool {
+        self.with_inner(|inner| std::mem::take(&mut inner.sync_now_pending))
     }
 
     fn with_inner<R>(&self, body: impl FnOnce(&mut RuntimeControlInner) -> R) -> R {

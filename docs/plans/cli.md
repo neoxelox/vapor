@@ -57,6 +57,7 @@ vapor status [--json]                   # queue depth, throttle state, reason
 vapor pause|resume
 vapor flush-now                         # force-flush pending intents
 vapor reconcile                         # request whole-scope reconcile
+vapor sync-now [--json]                 # scan now: any throttle state but Suspended, plus the flush boost
 vapor timeline [--tail] [--json]        # diagnostics timeline
 vapor logs [--tail] [--level=debug]
 vapor diagnostics [--json]              # per-intent "why is this stuck"
@@ -78,6 +79,11 @@ vapor version
   `crash_loop_paused` (the crash-loop pause is overlaid from durable
   lifecycle state) plus `label`, `auto_launch`, and a `crash_loop`
   object with `--json`.
+- `service start` / `restart` — act on the registered service
+  definition only. With none registered (auto-launch off, or a host
+  that never ran `service install`) both answer `not_installed` with
+  exit 0 instead of asking the service manager to kick a job it does
+  not have; the text form names the command that registers one.
 - `service bootstrap` / `check` / `acknowledge` — the surfaces' shared
   lifecycle entry points (app startup, the periodic supervision tick,
   and clearing a crash-loop pause). All crash-loop policy runs in
@@ -86,9 +92,12 @@ vapor version
   the macOS app shells out to these same subcommands.
 - `auth login <provider>` — runs PKCE in the user's browser with a
   localhost-loopback redirect; stores tokens via `core/platform/secrets`.
-- `status`, `pause`, `resume`, `flush-now`, `reconcile` — talk to a running
-  daemon via the IPC channel (`docs/architecture/ipc-contracts.md`). Exit
-  non-zero with a clear message if no daemon is running; never hang.
+- `status`, `pause`, `resume`, `flush-now`, `reconcile`, `sync-now` — talk
+  to a running daemon via the IPC channel
+  (`docs/architecture/ipc-contracts.md`). Exit non-zero with a clear message
+  if no daemon is running; never hang. `sync-now` is the on-demand path
+  past the idle gate: the scan runs under any throttle state but
+  `Suspended`, and `--json` returns the daemon's ack for the app shim.
 - `doctor` — reports platform-specific sanity checks: inotify watch limits on
   Linux, Task Scheduler task presence on Windows, LaunchAgent plist presence
   on macOS, `VAPOR_DIR` permissions, daemon binary location + version.

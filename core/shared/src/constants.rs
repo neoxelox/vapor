@@ -483,7 +483,25 @@ pub mod filtering {
     /// Matched as a whole name only, so `.vaporignore` still syncs.
     pub const INTERNAL_IGNORE_DIRECTORY_NAMES: &[&str] = &[".vapor"];
     pub const DEFAULT_LOCAL_SYNC_DIRECTORY: &str = "~/Vapor";
+    /// The cloud root a remote provider uses when `cloudSyncDirectory`
+    /// is unset: a folder at the account root.
     pub const DEFAULT_CLOUD_SYNC_DIRECTORY: &str = "/Vapor";
+    /// The cloud root the filesystem provider uses when
+    /// `cloudSyncDirectory` is unset. It plays the cloud role from a
+    /// local folder, so the default is a folder under the home
+    /// directory that the daemon can create; a path at the filesystem
+    /// root would never be writable on a stock macOS install.
+    pub const DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY: &str = "~/cloud/Vapor";
+
+    /// The cloud root that applies when `cloudSyncDirectory` is unset,
+    /// by provider kind.
+    pub fn default_cloud_sync_directory(provider_kind: &str) -> &'static str {
+        if provider_kind.trim() == super::provider::FILESYSTEM {
+            DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY
+        } else {
+            DEFAULT_CLOUD_SYNC_DIRECTORY
+        }
+    }
     /// Baseline low-signal exclusions applied before discovered ignore
     /// files: OS junk, editor temp/partial files, and the common
     /// build / cache / dependency directories across ecosystems —

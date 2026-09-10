@@ -112,6 +112,18 @@ public struct AppShellState: Equatable, Codable, Sendable {
   public var syncDetail: String?
   /// The daemon's notice that a restart-required setting changed.
   public var configRestartRequired: String?
+  /// Questions the daemon parked until the user answers them
+  /// (`vapor decisions list`): a missing or replaced sync root, a
+  /// mass deletion, a file that changed type.
+  public var decisionsPending: UInt64
+  /// Keep-both conflict copies waiting for the user to pick a version
+  /// (`vapor conflicts list`).
+  public var conflictsUnresolved: UInt64
+  /// The whole-scope scan is queued but the throttle holds it (the
+  /// user is active, the machine is busy). Sync now runs it anyway.
+  public var scanIsWaiting: Bool
+  /// The whole-scope scan holds the reconcile permit right now.
+  public var scanIsRunning: Bool
 
   public init(
     syncState: SyncSurfaceState,
@@ -129,7 +141,11 @@ public struct AppShellState: Equatable, Codable, Sendable {
     crashLoopPaused: Bool = false,
     loginItemRequiresApproval: Bool = false,
     syncDetail: String? = nil,
-    configRestartRequired: String? = nil
+    configRestartRequired: String? = nil,
+    decisionsPending: UInt64 = 0,
+    conflictsUnresolved: UInt64 = 0,
+    scanIsWaiting: Bool = false,
+    scanIsRunning: Bool = false
   ) {
     self.syncState = syncState
     self.configurationIssuePath = configurationIssuePath
@@ -147,6 +163,32 @@ public struct AppShellState: Equatable, Codable, Sendable {
     self.loginItemRequiresApproval = loginItemRequiresApproval
     self.syncDetail = syncDetail
     self.configRestartRequired = configRestartRequired
+    self.decisionsPending = decisionsPending
+    self.conflictsUnresolved = conflictsUnresolved
+    self.scanIsWaiting = scanIsWaiting
+    self.scanIsRunning = scanIsRunning
+  }
+
+  /// The one line under the status label. Under Error or Paused the
+  /// run-state reason (a root that cannot be ensured, a decision waited
+  /// on) is what the user needs; a scan that waits or runs is next,
+  /// since it explains why a change has not moved yet; otherwise the
+  /// throttle reason explains the pace. `nil` when the daemon did not
+  /// answer or has nothing to say.
+  public static func syncDetail(
+    for syncState: SyncSurfaceState,
+    status: DaemonStatusSnapshot?
+  ) -> String? {
+    guard let status else {
+      return nil
+    }
+    if syncState == .error || syncState == .paused, let reason = status.runStateReason {
+      return reason
+    }
+    if (status.scanIsWaiting || status.scanIsRunning) && !status.reconcileDetail.isEmpty {
+      return status.reconcileDetail
+    }
+    return status.throttleReason.isEmpty ? nil : status.throttleReason
   }
 
   public static let initial = AppShellState(
@@ -168,5 +210,34 @@ public struct AppShellState: Equatable, Codable, Sendable {
 
   public var hasConfigurationIssue: Bool {
     configurationIssuePath != nil
+  }
+
+  /// A running daemon answered the last status read, so a control that
+  /// talks to it (Sync now) has someone to talk to.
+  public var daemonIsReachable: Bool {
+    switch syncState {
+    case .stopped:
+      return false
+    case .idle, .queued, .syncing, .throttled, .suspended, .paused, .error:
+      return !crashLoopPaused
+    }
+  }
+
+  /// True while Vapor is waiting on something only the user can do:
+  /// answer a parked question, pick a side of a conflict, acknowledge a
+  /// crash-loop pause, approve the login item, restart after a
+  /// restart-required setting, fix an unreadable config file, or look
+  /// at an Error state (a sync root the daemon cannot ensure, a failed
+  /// intent, a lifecycle command that failed), which the status text
+  /// already labels "Action required". The menu bar mark turns the
+  /// brand colour while this holds.
+  public var needsUserAction: Bool {
+    decisionsPending > 0
+      || conflictsUnresolved > 0
+      || crashLoopPaused
+      || loginItemRequiresApproval
+      || configRestartRequired != nil
+      || hasConfigurationIssue
+      || syncState == .error
   }
 }

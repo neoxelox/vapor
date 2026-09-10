@@ -34,7 +34,11 @@ pub struct VaporConfig {
     pub use_git_ignore: bool,
     pub use_vapor_ignore: bool,
     pub local_sync_directory: String,
-    pub cloud_sync_directory: String,
+    /// The cloud root, or `None` for the provider's own default
+    /// (`constants::filtering::default_cloud_sync_directory`), since a
+    /// remote provider and the filesystem provider need different
+    /// defaults; [`Self::effective_cloud_sync_directory`] resolves it.
+    pub cloud_sync_directory: Option<String>,
     pub pre_ignore_rules: String,
     pub post_ignore_rules: String,
     pub language_code: String,
@@ -308,6 +312,18 @@ pub struct ProfileConfig {
     pub idle_boost: Option<IdleBoostOverride>,
 }
 
+impl VaporConfig {
+    /// The cloud root this configuration syncs with: the configured
+    /// value, or the default for its provider when the key is unset.
+    pub fn effective_cloud_sync_directory(&self) -> &str {
+        self.cloud_sync_directory
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| constants::filtering::default_cloud_sync_directory(&self.provider))
+    }
+}
+
 impl Default for VaporConfig {
     fn default() -> Self {
         Self {
@@ -315,7 +331,7 @@ impl Default for VaporConfig {
             use_git_ignore: constants::config::DEFAULT_USE_GIT_IGNORE,
             use_vapor_ignore: constants::config::DEFAULT_USE_VAPOR_IGNORE,
             local_sync_directory: constants::filtering::DEFAULT_LOCAL_SYNC_DIRECTORY.to_string(),
-            cloud_sync_directory: constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY.to_string(),
+            cloud_sync_directory: None,
             pre_ignore_rules: default_pre_ignore_rules(),
             post_ignore_rules: String::new(),
             language_code: constants::config::DEFAULT_LANGUAGE_CODE.to_string(),
@@ -569,10 +585,27 @@ mod tests {
         assert_eq!(result.config.local_sync_directory, "~/Projects");
         assert!(!result.config.use_git_ignore);
         assert!(result.config.use_vapor_ignore);
+        assert_eq!(result.config.cloud_sync_directory, None);
+        // Unset means the provider's default; the filesystem provider
+        // gets a folder the daemon can create, a remote one the account
+        // root folder.
         assert_eq!(
-            result.config.cloud_sync_directory,
+            result.config.effective_cloud_sync_directory(),
+            constants::filtering::DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY
+        );
+        let mut remote = result.config.clone();
+        remote.provider = constants::provider::GDRIVE.to_string();
+        assert_eq!(
+            remote.effective_cloud_sync_directory(),
             constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY
         );
+        remote.cloud_sync_directory = Some("  ".to_string());
+        assert_eq!(
+            remote.effective_cloud_sync_directory(),
+            constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY
+        );
+        remote.cloud_sync_directory = Some("/Work".to_string());
+        assert_eq!(remote.effective_cloud_sync_directory(), "/Work");
     }
 
     #[test]

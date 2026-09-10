@@ -17,7 +17,11 @@
 //! form; treat key names and value enums as a versioned contract.
 //!
 //! The `restart` command is a stop-then-start sequence; both halves
-//! tolerate the daemon already being in the target state.
+//! tolerate the daemon already being in the target state. With no
+//! service definition registered, `start` and `restart` report
+//! `not_installed` instead of asking the service manager to kick a job
+//! it does not have; auto-launch (`vapor service install`) is what
+//! registers one.
 
 use std::error::Error;
 use std::fmt::{self, Display};
@@ -184,6 +188,11 @@ pub fn dispatch(
             Ok(ServiceCommandOutcome::Action(result))
         }
         ServiceCommand::Restart => {
+            if installer.status()? == ServiceStatus::NotInstalled {
+                return Ok(ServiceCommandOutcome::Action(
+                    DaemonLifecycleActionResult::NotInstalled,
+                ));
+            }
             manager.stop_daemon_for_termination(now)?;
             Ok(ServiceCommandOutcome::Action(
                 manager.start_daemon_if_allowed(now)?,
@@ -250,6 +259,9 @@ pub fn render_json(outcome: &ServiceCommandOutcome) -> serde_json::Value {
                     })
                 }
             }
+            DaemonLifecycleActionResult::NotInstalled => {
+                serde_json::json!({"result": "not_installed"})
+            }
         },
         ServiceCommandOutcome::Health(health) => match health {
             DaemonHealthCheckOutcome::Running => serde_json::json!({"health": "running"}),
@@ -304,6 +316,11 @@ pub fn render_text(outcome: &ServiceCommandOutcome) -> String {
                         remaining.as_secs_f64()
                     )
                 }
+            }
+            DaemonLifecycleActionResult::NotInstalled => {
+                "service: not installed — nothing to start; `vapor service install` \
+                 (or Start Vapor at login in the app) registers the background service"
+                    .to_string()
             }
         },
         ServiceCommandOutcome::Health(health) => match health {
@@ -724,6 +741,7 @@ mod tests {
         let installer = fake_installer();
         let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
         let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+        installer.set_status_for_testing(ServiceStatus::Stopped);
 
         dispatch(
             ServiceCommand::Start,
@@ -733,6 +751,38 @@ mod tests {
         )
         .expect("start");
         assert_eq!(installer.operations(), vec!["start"]);
+    }
+
+    #[test]
+    fn start_and_restart_report_not_installed_on_a_bare_host() {
+        let installer = fake_installer();
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(false)));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+
+        for command in [ServiceCommand::Start, ServiceCommand::Restart] {
+            let outcome =
+                dispatch(command, &manager, installer.as_ref(), Instant::now()).expect("dispatch");
+            assert_eq!(
+                outcome,
+                ServiceCommandOutcome::Action(DaemonLifecycleActionResult::NotInstalled)
+            );
+        }
+        // Neither half of a restart may touch a service manager that
+        // has no job to act on.
+        assert!(installer.operations().is_empty());
+        assert_eq!(
+            render_json(&ServiceCommandOutcome::Action(
+                DaemonLifecycleActionResult::NotInstalled
+            ))
+            .to_string(),
+            r#"{"result":"not_installed"}"#
+        );
+        assert!(
+            render_text(&ServiceCommandOutcome::Action(
+                DaemonLifecycleActionResult::NotInstalled
+            ))
+            .contains("vapor service install")
+        );
     }
 
     #[test]
@@ -782,6 +832,7 @@ mod tests {
         let installer = fake_installer();
         let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
         let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+        installer.set_status_for_testing(ServiceStatus::Running);
 
         dispatch(
             ServiceCommand::Restart,
@@ -878,6 +929,7 @@ mod tests {
         let manager = durable_manager(installer.clone(), store);
 
         let t0 = Instant::now();
+        installer.set_status_for_testing(ServiceStatus::Stopped);
         dispatch(ServiceCommand::Start, &manager, installer.as_ref(), t0).expect("start");
 
         // Healthy tick.

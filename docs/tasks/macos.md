@@ -160,6 +160,9 @@ surface).
 - [ ] M3-1 Replace placeholder app controls (`Pause/Resume`, `Flush now`)
       with real IPC-backed calls; hide any control that does not yet have a
       backing endpoint.
+      *(Landed: `Sync now` in the menu and on the Dashboard drives
+      `vapor sync-now --json`; the status detail names a scan the
+      throttle is holding. Pause/Resume and Flush now remain.)*
 - [ ] M3-2 Implement full menubar state model + reasoned status messages
       consumed via IPC.
       *(Partly landed in the full-repo review: the health tick reads
@@ -185,20 +188,25 @@ surface).
       actions via `vapor conflicts resolve --json`, plus a Reveal in
       Finder affordance. No scan or resolution logic in Swift; the CLI is
       the single engine (`docs/architecture/conflict-resolution.md`).
-- [ ] M3-8 Conflict notification: menubar badge + native user
-      notification on `conflict` timeline events, opening the M3-7 pane.
-      Timeline events are the trigger, never the ledger — the pane always
-      lists from the CLI scan, so the timeline's 1000-event cap can never
-      hide a conflict. Naming the file inside the notification depends on
+- [ ] M3-8 Conflict notification: native user notification on
+      `conflict` timeline events, opening the M3-7 pane. Timeline events
+      are the trigger, never the ledger — the pane always lists from the
+      CLI scan, so the timeline's 1000-event cap can never hide a
+      conflict. Naming the file inside the notification depends on
       core.md C8-71.
+      *(Landed: the menu bar mark turns the brand colour and the menu
+      counts the conflicts while `conflicts_unresolved` from
+      `vapor status --json` is non-zero; `AppShellState.needsUserAction`
+      is the one predicate every attention signal reads.)*
 - [ ] M3-9 Decisions pane: the questions the daemon parked, driving
       `vapor decisions list --json` / `show` / `resolve --json`
       (`docs/architecture/data-flow.md` §Decisions): one row per open
       decision with its plain-language question and its short option
-      list as buttons, a menubar badge and a native notification on
-      `decision` timeline events, and `decisions_pending` from
-      `vapor status --json` as the count. Kinds today: `mass-deletion`,
-      `root-missing`, `root-replaced`, `type-mismatch`.
+      list as buttons, and a native notification on `decision` timeline
+      events. Kinds today: `mass-deletion`, `root-missing`,
+      `root-replaced`, `type-mismatch`.
+      *(Landed: the menu bar mark turns the brand colour and the menu
+      counts the questions while `decisions_pending` is non-zero.)*
 - [ ] M3-10 Trash pane: what Vapor removed on this device, driving
       `vapor trash list --json` / `restore --json` / `empty --json`,
       with the reason and the original path per row and a Restore
@@ -225,7 +233,8 @@ C8-59..66.
 
 - [ ] M4-1 App UI flows to create, rename, select, enable/disable, and
       delete profiles; bind each profile to a provider + authenticated
-      account.
+      account. The create flow is the onboarding sequence re-entered
+      from Settings (M6, O-3); this task covers the rest.
 - [ ] M4-2 Settings UI for profile-scoped override knobs (sync roots,
       ignore rules, resource ceilings, idle-boost, and the per-profile
       `syncMode` selector: `two-way` / `pull-only` / `push-only`). Surface
@@ -263,6 +272,66 @@ Exit gate:
 
 - Every macOS release cycle validates the macOS trust chain automatically.
 
+## Phase M6 - First run and onboarding
+
+Depends on: `docs/tasks/core.md` OB-1 (an unconfigured install creates
+nothing), `docs/tasks/cli.md` L1-6 (the profiles command the flow
+drives, per the shim rule), C8-19 … C8-26, and the auth flow L4. Owned
+here even though the runtime underneath is cross-platform, because the
+onboarding UI is macOS-native; Windows and Linux get parallel tasks in
+their own lists once those apps start.
+
+Intent, from the project owner (2026-09-10): the first run of the app
+asks before it creates. The user picks the provider for the first
+profile, signs in when the provider needs it, confirms the two roots,
+and only then does Vapor create folders, adopt roots, and start
+syncing. The filesystem provider remains the default for the CLI and
+for tests; the app never assumes it.
+
+- [ ] O-1 Clarification pass, then the design: information
+      architecture, step sequence, copy, and every UX state (unsigned
+      account, folder picker cancelled, overlapping roots, provider
+      needing a client id, sign-in refused). The sequence to start
+      from: welcome; provider for the first profile (Filesystem, Google
+      Drive; the list comes from the CLI so a new provider appears
+      without app work); sign-in for a provider that needs an account,
+      driving `vapor auth login` and showing its result; local folder
+      (a native folder picker, default `~/Vapor`); cloud folder (the
+      provider-aware default, editable); sync mode, with the one-way
+      choice behind the strict-mirror confirmation from M4-5; start at
+      login, default on; a summary and a Start button. More settings
+      and options join the sequence as the owner defines them at the
+      pass. Follows Apple HIG for onboarding: a single window, native
+      controls, one decision per step, a Back path, no custom chrome.
+- [ ] O-2 The gate. When the runtime reports an unconfigured install
+      (OB-1), the app opens the onboarding window on its own instead of
+      the menubar-only surface; this is the one window that may appear
+      without the user asking, and only while unconfigured. The daemon
+      may already be bootstrapped, since it creates nothing until a
+      profile exists, so the status shown during the flow is live.
+      Finishing writes the first profile through `vapor profiles add
+      --json` (L1-6), which composes it in the running daemon; the app
+      then returns to menubar-first behaviour. Quitting mid-flow leaves
+      the install unconfigured and the next launch asks again.
+- [ ] O-3 Re-entry. "Add profile…" in Settings reuses the same steps
+      for a second profile (this is the create half of M4-1); the
+      provider list, the pickers, and the validation are shared, not
+      copied.
+- [ ] O-4 Copy in `assets/locales/en.json`, logic tests for the step
+      model and the gate (which state opens the window, what each
+      answer writes, what a cancel leaves behind), no UI tests, and the
+      manual verification checklist for the owner: fresh install shows
+      the flow, nothing exists under the home until Start, Google Drive
+      sign-in round-trips, the filesystem choice creates exactly the
+      two folders chosen.
+
+Exit gate:
+
+- A fresh install creates no folder, adopts no root, and syncs nothing
+  until the user finishes onboarding.
+- The first profile can be created for either provider without the
+  CLI, and the same flow adds a second one from Settings.
+
 ## Phase MT - Testing discipline (macOS surface)
 
 Policy: `AGENTS.md §9`. Full taxonomy:
@@ -285,13 +354,3 @@ Policy: `AGENTS.md §9`. Full taxonomy:
       tests, no keyboard-focus tests. UI correctness is verified by
       the project owner manually. Any PR adding such tests is
       rejected; the reviewer cites `AGENTS.md §9.3`.
-
-## macOS-specific deferred onboarding task
-
-- [ ] O-1 Design and implement the production onboarding flow (information
-      architecture, step sequence, copy, UX states). Run a clarification
-      pass with the project owner to define the onboarding structure before
-      implementation. This task is deliberately owned here even though the
-      runtime underneath is cross-platform, because the onboarding UI is
-      macOS-native. Windows/Linux app onboarding will have parallel tasks in
-      their own task lists once the apps start.

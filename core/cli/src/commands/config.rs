@@ -59,10 +59,24 @@ impl From<io::Error> for ConfigError {
 pub fn get(path: &Path, key: &str) -> Result<Option<String>, ConfigError> {
     validate_key(key)?;
     let document = read_or_empty_object(path)?;
-    Ok(document
-        .get(key)
-        .map(format_json_scalar)
-        .or_else(|| default_for_key(key).as_ref().map(format_json_scalar)))
+    if let Some(value) = document.get(key).filter(|value| !value.is_null()) {
+        return Ok(Some(format_json_scalar(value)));
+    }
+    // The cloud root's default depends on the provider the same file
+    // selects, so it is resolved here rather than read off the struct.
+    if key == constants::config::KEY_CLOUD_SYNC_DIRECTORY {
+        let provider = document
+            .get(constants::config::KEY_PROVIDER)
+            .and_then(Value::as_str)
+            .unwrap_or(constants::provider::DEFAULT);
+        return Ok(Some(
+            constants::filtering::default_cloud_sync_directory(provider).to_string(),
+        ));
+    }
+    Ok(default_for_key(key)
+        .filter(|value| !value.is_null())
+        .as_ref()
+        .map(format_json_scalar))
 }
 
 /// One line telling the user when the value takes effect, from the
@@ -266,6 +280,26 @@ mod tests {
             .expect("has a default");
         assert!(limits.contains("\"cpuPercent\":15"), "{limits}");
         assert_eq!(get(&config_path(&temp), "deviceId").expect("get"), None);
+    }
+
+    #[test]
+    fn get_renders_the_cloud_root_default_for_the_selected_provider() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        assert_eq!(
+            get(&path, "cloudSyncDirectory").expect("get"),
+            Some(constants::filtering::DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY.to_string())
+        );
+        set(&path, "provider", "gdrive").expect("set provider");
+        assert_eq!(
+            get(&path, "cloudSyncDirectory").expect("get"),
+            Some(constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY.to_string())
+        );
+        set(&path, "cloudSyncDirectory", "/Work").expect("set root");
+        assert_eq!(
+            get(&path, "cloudSyncDirectory").expect("get"),
+            Some("/Work".to_string())
+        );
     }
 
     #[test]

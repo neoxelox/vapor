@@ -182,6 +182,10 @@ impl Client {
         self.call_for_ack(Method::Reconcile)
     }
 
+    pub fn sync_now(&mut self) -> Result<AckResponse, ClientError> {
+        self.call_for_ack(Method::SyncNow)
+    }
+
     pub fn diagnostics(&mut self) -> Result<DiagnosticsResponse, ClientError> {
         match self.call(Method::Diagnostics)? {
             ResponseBody::Diagnostics(diagnostics) => Ok(diagnostics),

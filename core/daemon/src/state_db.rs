@@ -20,6 +20,15 @@ const STATE_LEASED: &str = "leased";
 /// An intent parked behind a pending decision: never leased until the
 /// decision is resolved, then released or dropped by its answer.
 const STATE_HELD: &str = "held";
+/// Candidate conflict copies: the marker match is what the partial
+/// indexes cover; the strict name grammar is applied in Rust so a user
+/// file that merely contains the marker text is not counted. The
+/// `LIKE` pattern is inlined (not bound) because the planner only uses
+/// a partial index when the query's predicate is the index's own.
+const UNRESOLVED_CONFLICT_COPY_QUERY: &str =
+    "SELECT path_text FROM sync_index WHERE path_text LIKE '%~conflict-%'
+     UNION
+     SELECT path_text FROM queue_intents WHERE path_text LIKE '%~conflict-%' AND kind = 'upload'";
 
 #[derive(Debug)]
 pub enum StateDbError {
@@ -1504,6 +1513,32 @@ impl DurableStateDb {
         Ok(count as usize)
     }
 
+    /// Keep-both conflict copies the user has not resolved: every path
+    /// the sync index knows whose file name parses as a conflict copy,
+    /// plus the copies still queued for their first upload (a copy
+    /// enters the index only once it has synced, and the user should
+    /// hear about it before that). The files on disk stay the ledger
+    /// (`vapor conflicts list` walks them); this is the cheap signal
+    /// the status endpoint can afford on every publish.
+    pub fn unresolved_conflict_copy_count(&self) -> Result<usize, StateDbError> {
+        let mut statement = self
+            .connection
+            .prepare_cached(UNRESOLVED_CONFLICT_COPY_QUERY)?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut count = 0;
+        for row in rows {
+            let path_text = row?;
+            let is_conflict_copy = Path::new(&path_text)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| crate::conflict::parse_conflict_copy_name(name).is_some());
+            if is_conflict_copy {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     /// Decisions the user answered that the daemon has not acted on.
     pub fn resolved_unapplied_decisions(&self) -> Result<Vec<DecisionRecord>, StateDbError> {
         self.decisions_where("resolved_at_ms IS NOT NULL AND applied_at_ms IS NULL", [])
@@ -2151,7 +2186,17 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
          CREATE INDEX IF NOT EXISTS idx_sync_index_content
              ON sync_index(content_hash, size_bytes);
          CREATE INDEX IF NOT EXISTS idx_sync_index_remote_state
-             ON sync_index(size_bytes, remote_modified_at_ms);",
+             ON sync_index(size_bytes, remote_modified_at_ms);
+         -- Partial indexes holding only the rows whose name carries the
+         -- conflict-copy marker, so counting unresolved conflicts for
+         -- every status publish reads a handful of rows instead of
+         -- scanning the whole index and queue. The predicate must be
+         -- spelled exactly as in `unresolved_conflict_copy_count` for
+         -- the planner to pick the index.
+         CREATE INDEX IF NOT EXISTS idx_sync_index_conflict_copy
+             ON sync_index(path_text) WHERE path_text LIKE '%~conflict-%';
+         CREATE INDEX IF NOT EXISTS idx_queue_intents_conflict_copy
+             ON queue_intents(path_text, kind) WHERE path_text LIKE '%~conflict-%';",
     )?;
 
     if read_schema_version(&transaction)?.is_none() {
@@ -4277,6 +4322,81 @@ mod tests {
             .expect("lease replayed")
             .expect("replayed record");
         assert_eq!(replayed.path, stale_path);
+    }
+
+    #[test]
+    fn unresolved_conflict_copies_count_indexed_and_queued_copies_once() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut db =
+            DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite")).expect("open");
+        let now = timestamp_ms(1_700_000_000_000);
+        assert_eq!(db.unresolved_conflict_copy_count().expect("count"), 0);
+
+        let root = temp_dir.path().join("local");
+        let synced_copy = root.join("report~conflict-mbp-1700000000000.md");
+        let queued_copy = root.join("notes~conflict-mbp-1700000000001.txt");
+        // Marker text without the machine grammar (no epoch timestamp)
+        // is a user file, never a conflict.
+        let lookalike = root.join("draft~conflict-notes.txt");
+        for path in [&root.join("report.md"), &synced_copy, &lookalike] {
+            db.set_sync_index(path, "hash", 1, None, None, "op", now)
+                .expect("index");
+        }
+        db.enqueue_intent(&queued_copy, PendingIntentKind::Upload, now)
+            .expect("queue upload");
+        // Queued and indexed at once still counts as one copy.
+        db.enqueue_intent(&synced_copy, PendingIntentKind::Upload, now)
+            .expect("queue upload");
+        // A queued deletion is the user resolving; only an upload
+        // announces a copy the index has not seen.
+        db.enqueue_intent(
+            &root.join("old~conflict-mbp-1700000000002.txt"),
+            PendingIntentKind::Delete,
+            now,
+        )
+        .expect("queue delete");
+        assert_eq!(db.unresolved_conflict_copy_count().expect("count"), 2);
+
+        db.remove_sync_index(&synced_copy).expect("remove");
+        // Still queued for upload, so still announced.
+        assert_eq!(db.unresolved_conflict_copy_count().expect("count"), 2);
+        for leased in db.lease_ready_batch(now, 8).expect("lease") {
+            assert!(db.complete_leased(leased.id).expect("complete"));
+        }
+        assert_eq!(db.unresolved_conflict_copy_count().expect("count"), 0);
+    }
+
+    #[test]
+    fn unresolved_conflict_copy_query_reads_only_the_partial_indexes() {
+        let marker = crate::conflict::CONFLICT_MARKER;
+        assert!(
+            UNRESOLVED_CONFLICT_COPY_QUERY.contains(&format!("LIKE '%{marker}%'")),
+            "the query must match on the conflict marker the copy paths carry"
+        );
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db = DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite")).expect("open");
+        let mut statement = db
+            .connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {UNRESOLVED_CONFLICT_COPY_QUERY}"
+            ))
+            .expect("plan");
+        let plan: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("plan rows")
+            .map(|row| row.expect("plan row"))
+            .collect();
+        let joined = plan.join("\n");
+        for index in [
+            "idx_sync_index_conflict_copy",
+            "idx_queue_intents_conflict_copy",
+        ] {
+            assert!(
+                joined.contains(&format!("USING COVERING INDEX {index}")),
+                "the count must stay a partial-index read, not a table scan: {joined}"
+            );
+        }
     }
 
     fn timestamp_ms(milliseconds: u64) -> SystemTime {

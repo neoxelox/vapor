@@ -40,6 +40,55 @@ pub const DEFAULT_PROFILE_ID: &str = "default";
 /// a structurally broken database fails fast after this many attempts.
 const MAX_CONSECUTIVE_TICK_ERRORS: u32 = 5;
 
+/// What the whole-scope reconcile is doing, as `vapor status` reports
+/// it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReconcileStatus {
+    /// Nothing queued or running.
+    Idle,
+    /// A scan is queued and the throttle is holding it; `reason`
+    /// names what it waits for.
+    Waiting { reason: String },
+    /// A scan holds the reconcile permit.
+    Running { root: String },
+}
+
+impl ReconcileStatus {
+    /// Wire label for the status payload.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Waiting { .. } => "waiting",
+            Self::Running { .. } => "running",
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Idle => String::new(),
+            Self::Waiting { reason } => reason.clone(),
+            Self::Running { root } => format!("scanning {root}"),
+        }
+    }
+
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Idle => 0,
+            Self::Waiting { .. } => 1,
+            Self::Running { .. } => 2,
+        }
+    }
+
+    /// The more active of two, for the daemon-wide summary.
+    pub fn more_active(self, other: Self) -> Self {
+        if other.rank() > self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum DaemonRuntimeError {
     Watcher(FsEventsWatcherError),
@@ -270,6 +319,10 @@ pub struct DaemonRuntime {
     last_throttle_sample_inst: Option<Instant>,
     last_stale_lease_sweep_inst: Option<Instant>,
     running_reconcile_intent_id: Option<i64>,
+    /// Set while a queued reconcile was refused a start because the
+    /// throttle is not idle; cleared the moment one starts. Carries
+    /// the throttle reason so status can say what it waits for.
+    reconcile_wait_reason: Option<String>,
     startup_reconstruction_barrier: bool,
     startup_barrier_expires_inst: Option<Instant>,
     tick_interval: Duration,
@@ -1202,6 +1255,7 @@ impl DaemonRuntime {
             last_throttle_sample_inst: None,
             last_stale_lease_sweep_inst: None,
             running_reconcile_intent_id: None,
+            reconcile_wait_reason: None,
             startup_reconstruction_barrier: false,
             startup_barrier_expires_inst: None,
             tick_interval,
@@ -1592,6 +1646,22 @@ impl DaemonRuntime {
     /// Cumulative keep-both conflict copies created since daemon start.
     pub fn conflict_count(&self) -> u64 {
         self.conflict_count
+    }
+
+    /// What the whole-scope scan is doing, for status: running,
+    /// waiting on the throttle (with the reason), or nothing pending.
+    pub fn reconcile_status(&self) -> ReconcileStatus {
+        if let Some(root) = self.app.running_reconcile_root() {
+            return ReconcileStatus::Running {
+                root: root.display().to_string(),
+            };
+        }
+        if let Some(reason) = &self.reconcile_wait_reason {
+            return ReconcileStatus::Waiting {
+                reason: reason.clone(),
+            };
+        }
+        ReconcileStatus::Idle
     }
 
     /// Cumulative count of strict-mirror reverts / deletions performed
@@ -2139,16 +2209,36 @@ impl DaemonRuntime {
         // Snapshot the pending requests up-front so we can drop the
         // immutable borrow on `self.runtime_control` before mutating
         // `self` via `enqueue_startup_reconstruction_reconcile`.
-        let (pause_request, reconcile_request, flush_request) = match self.runtime_control.as_ref()
-        {
-            Some(control) => {
-                let pause = control.take_pause_request();
-                let reconcile = control.take_reconcile_request();
-                let flush = control.take_flush_request();
-                (pause, reconcile, flush)
+        let (pause_request, reconcile_request, flush_request, sync_now_request) =
+            match self.runtime_control.as_ref() {
+                Some(control) => {
+                    let pause = control.take_pause_request();
+                    let reconcile = control.take_reconcile_request();
+                    let flush = control.take_flush_request();
+                    let sync_now = control.take_sync_now_request();
+                    (pause, reconcile, flush, sync_now)
+                }
+                None => (None, false, false, false),
+            };
+        // Sync now is a reconcile the throttle may not hold back plus
+        // the flush boost, so what the scan finds moves at once.
+        let reconcile_request = reconcile_request || sync_now_request;
+        let flush_request = flush_request || sync_now_request;
+        if sync_now_request {
+            self.app.request_on_demand_reconcile();
+            if let Some(timeline) = &self.timeline {
+                timeline.push(
+                    "sync-now",
+                    self.profile_id.as_str(),
+                    "sync requested by the user: the scan runs under any throttle state but Suspended",
+                    now,
+                );
             }
-            None => (None, false, false),
-        };
+            logging::info(
+                "Sync requested by the user; the scan will not wait for an idle moment",
+                &[],
+            );
+        }
 
         if let Some(pause) = pause_request {
             if pause {
@@ -3203,6 +3293,7 @@ impl DaemonRuntime {
                     match self.app.try_start_reconcile(&mut self.scheduler, now) {
                         Ok(Some(root)) => {
                             self.running_reconcile_intent_id = Some(intent.id);
+                            self.reconcile_wait_reason = None;
                             report.started_reconcile_root = Some(root);
                             if is_startup_root_reconcile {
                                 break;
@@ -3211,6 +3302,14 @@ impl DaemonRuntime {
                         }
                         Ok(None) => {
                             self.scheduler.discard_pending(&intent.path);
+                            let throttle_reason = self
+                                .app
+                                .throttle_decision()
+                                .map(|decision| decision.reason.clone())
+                                .filter(|reason| !reason.is_empty())
+                                .unwrap_or_else(|| "the throttle is not idle".to_string());
+                            self.reconcile_wait_reason =
+                                Some(format!("waiting for an idle moment: {throttle_reason}"));
                             self.requeue_runtime_intent(
                                 intent.id,
                                 now + blocked_intent_requeue_delay(),
@@ -4769,6 +4868,82 @@ mod tests {
             .unwrap_or_default();
         names.sort();
         names
+    }
+
+    #[test]
+    fn sync_now_runs_the_waiting_startup_scan_under_user_activity() {
+        // The manual-test shape: both roots hold a different `alex.txt`
+        // written while no daemon watched, the daemon starts, and the
+        // user keeps typing. The startup scan must say it is waiting
+        // and why; a sync-now request must run it anyway and keep both.
+        let mut fixture = BidirectionalFixture::new();
+        std::fs::write(fixture.watch_root.join("alex.txt"), b"local").expect("seed local");
+        std::fs::write(fixture.cloud_root.join("alex.txt"), b"cloud").expect("seed cloud");
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+        // The fixture builds watcher-less; the composed daemon queues
+        // this scan at start.
+        fixture
+            .runtime
+            .schedule_startup_reconcile(timestamp_ms(fixture.now_ms))
+            .expect("startup scan");
+
+        let active = || ThrottleInputs {
+            user_active: true,
+            ..ThrottleInputs::default()
+        };
+        for _ in 0..5 {
+            fixture.clock.advance(Duration::from_secs(6));
+            fixture.now_ms += 6_000;
+            let report = fixture
+                .runtime
+                .tick_with_inputs(timestamp_ms(fixture.now_ms), active())
+                .expect("tick");
+            assert!(report.started_reconcile_root.is_none());
+        }
+        match fixture.runtime.reconcile_status() {
+            ReconcileStatus::Waiting { reason } => assert_eq!(
+                reason, "waiting for an idle moment: user activity is active",
+                "status must name what the scan waits for"
+            ),
+            other => panic!("the startup scan must report itself as waiting: {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("alex.txt")).expect("local"),
+            b"local",
+            "nothing may move while the scan waits"
+        );
+
+        control.request_sync_now();
+        let mut converged = false;
+        for _ in 0..40 {
+            fixture.clock.advance(Duration::from_secs(6));
+            fixture.now_ms += 6_000;
+            fixture
+                .runtime
+                .tick_with_inputs(timestamp_ms(fixture.now_ms), active())
+                .expect("tick");
+            let local = files_in(&fixture.watch_root);
+            let cloud = files_in(&fixture.cloud_root);
+            if fixture.runtime.state_db().queue_depth().expect("depth") == 0
+                && local.iter().any(|name| name.starts_with("alex~conflict-"))
+                && cloud.iter().any(|name| name.starts_with("alex~conflict-"))
+            {
+                converged = true;
+                break;
+            }
+        }
+        assert!(
+            converged,
+            "sync-now must run the scan under user activity and keep both versions; local {:?} cloud {:?}",
+            files_in(&fixture.watch_root),
+            files_in(&fixture.cloud_root)
+        );
+        assert_eq!(fixture.runtime.reconcile_status(), ReconcileStatus::Idle);
+        assert!(
+            !fixture.runtime.app().on_demand_reconcile_pending(),
+            "the request is spent once the scan completes"
+        );
     }
 
     #[test]

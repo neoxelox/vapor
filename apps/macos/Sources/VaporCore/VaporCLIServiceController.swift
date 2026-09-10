@@ -219,8 +219,25 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
       providerName: response.providerName,
       queueDepth: response.queueDepth,
       failedIntents: response.failedIntents,
-      configRestartRequired: response.configRestartRequired
+      configRestartRequired: response.configRestartRequired,
+      decisionsPending: response.decisionsPending ?? 0,
+      conflictsUnresolved: response.conflictsUnresolved ?? 0,
+      runStateReason: response.runStateReason,
+      reconcileState: response.reconcileState ?? "",
+      reconcileDetail: response.reconcileDetail ?? ""
     )
+  }
+
+  public func syncNow() throws {
+    let arguments = ["sync-now", "--json"]
+    let data = try runExpectingSuccess(arguments: arguments)
+    let response: AckResponse = try decode(data: data, arguments: arguments)
+    guard response.accepted else {
+      throw VaporCLIServiceError.malformedResponse(
+        arguments: arguments,
+        detail: "daemon refused the sync: \(response.note ?? "")"
+      )
+    }
   }
 
   public func acknowledgeCrashLoopPause() throws {
@@ -245,6 +262,12 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
       case result
       case remainingSeconds = "remaining_seconds"
     }
+  }
+
+  /// Mirrors `core/ipc/src/protocol.rs::AckResponse`.
+  private struct AckResponse: Decodable {
+    let accepted: Bool
+    let note: String?
   }
 
   private struct HealthResponse: Decodable {
@@ -295,6 +318,11 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
     let queueDepth: UInt64
     let failedIntents: UInt64
     let configRestartRequired: String?
+    let decisionsPending: UInt64?
+    let conflictsUnresolved: UInt64?
+    let reconcileState: String?
+    let reconcileDetail: String?
+    let profiles: [ProfileResponse]?
 
     enum CodingKeys: String, CodingKey {
       case runState = "run_state"
@@ -304,6 +332,37 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
       case queueDepth = "queue_depth"
       case failedIntents = "failed_intents"
       case configRestartRequired = "config_restart_required"
+      case decisionsPending = "decisions_pending"
+      case conflictsUnresolved = "conflicts_unresolved"
+      case reconcileState = "reconcile_state"
+      case reconcileDetail = "reconcile_detail"
+      case profiles
+    }
+
+    struct ProfileResponse: Decodable {
+      let runState: String?
+      let reason: String?
+      let suspendedReason: String?
+
+      enum CodingKeys: String, CodingKey {
+        case runState = "run_state"
+        case reason
+        case suspendedReason = "suspended_reason"
+      }
+    }
+
+    /// The daemon-wide run state is the worst profile's; its reason is
+    /// the one to show. A suspension names itself first; otherwise the
+    /// first profile in the same state that gives a reason.
+    var runStateReason: String? {
+      let profiles = self.profiles ?? []
+      if let suspended = profiles.compactMap(\.suspendedReason).first(where: { !$0.isEmpty }) {
+        return suspended
+      }
+      return
+        profiles
+        .first { $0.runState == runState && !($0.reason ?? "").isEmpty }?
+        .reason
     }
   }
 
@@ -325,6 +384,8 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
       return .relaunchDeferred(response.remainingSeconds ?? 0)
     case "crash_loop_paused":
       return .relaunchDeferred(.infinity)
+    case "not_installed":
+      return .notInstalled
     default:
       throw VaporCLIServiceError.malformedResponse(
         arguments: arguments,

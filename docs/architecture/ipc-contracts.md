@@ -50,7 +50,22 @@ Source of truth: `core/shared/src/constants.rs::ipc`
   count the open decisions (`data-flow.md` §Decisions). The decisions
   themselves are not served over IPC: `vapor decisions` reads and answers
   them in the profile state DB directly, so the app can list and answer
-  them with the daemon stopped.
+  them with the daemon stopped. `StatusResponse.conflicts_unresolved` and
+  `ProfileStatus.conflicts_unresolved` count the keep-both conflict
+  copies the user has not resolved (the copies in the sync index plus
+  the ones queued for their first upload), so a surface can flag them
+  without walking the tree; unlike the cumulative `conflicts` counter it
+  returns to zero on resolution (`conflict-resolution.md` §Notify).
+  `StatusResponse.reconcile_state` / `reconcile_detail` (and the same
+  pair on `ProfileStatus`) say what the whole-scope scan is doing:
+  `idle`, `waiting` (queued, held by the throttle; the detail names
+  what it waits for, such as `waiting for an idle moment: user activity
+  is active`), or `running` (the detail names the root). The daemon-wide
+  pair is the most active profile's. New method `SyncNow`: the user's
+  on-demand sync, a whole-scope reconcile admitted under any throttle
+  state but `Suspended` plus the flush boost; answers with an `Ack`, and
+  a daemon that predates it answers `unsupported` like every unknown
+  control method (`data-flow.md` §Throttle states).
 
 ### Handshake
 

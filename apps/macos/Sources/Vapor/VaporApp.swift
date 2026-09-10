@@ -8,14 +8,14 @@ struct VaporApp: App {
 
   @StateObject private var viewModel: AppShellViewModel
   private let logger = StructuredLogger(component: "app-lifecycle")
-  private let menuBarIcon: NSImage?
+  private let menuBarIcons: MenuBarIconSet?
 
   init() {
     let viewModel = AppShellViewModel()
     _viewModel = StateObject(wrappedValue: viewModel)
     logger.info("Vapor app launched")
-    menuBarIcon = MenuBarIcon.load()
-    if menuBarIcon == nil {
+    menuBarIcons = MenuBarIcon.loadSet()
+    if menuBarIcons == nil {
       logger.warning(
         "Menu bar icon missing from the resource bundle; showing the system symbol instead",
         metadata: ["resource": MenuBarIcon.resourceName]
@@ -56,7 +56,11 @@ struct VaporApp: App {
         }
       )
     } label: {
-      MenuBarLabel(title: viewModel.localized("app_title"), icon: menuBarIcon)
+      MenuBarLabel(
+        title: viewModel.localized("app_title"),
+        icons: menuBarIcons,
+        needsUserAction: viewModel.state.needsUserAction
+      )
     }
   }
 }

@@ -156,6 +156,7 @@ private final class OrderedRecordingServiceController: LaunchAgentControlling {
       runState: "Running", throttleState: "IdleDrain", throttleReason: "",
       providerName: "filesystem", queueDepth: 0, failedIntents: 0)
   }
+  func syncNow() throws {}
 }
 
 @MainActor

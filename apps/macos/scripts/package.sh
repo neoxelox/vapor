@@ -8,6 +8,8 @@ BUNDLE_ID="${BUNDLE_ID:-sh.arn.vapor}"
 MIN_MACOS="${MIN_MACOS:-26.0}"
 ICON_DOCUMENT="${ICON_DOCUMENT:-assets/macos/Vapor.icon}"
 ICONSET_DIR="${ICONSET_DIR:-assets/macos/Vapor.iconset}"
+ASSET_CATALOG="${ASSET_CATALOG:-assets/macos/Vapor.xcassets}"
+ACCENT_COLOR_NAME="${ACCENT_COLOR_NAME:-AccentColor}"
 DIST_DIR="${DIST_DIR:-dist}"
 VAPOR_SIGN_IDENTITY="${VAPOR_SIGN_IDENTITY:-}"
 VAPOR_ENTITLEMENTS="${VAPOR_ENTITLEMENTS:-}"
@@ -26,6 +28,10 @@ fi
 
 if [[ "$ICONSET_DIR" != /* ]]; then
   ICONSET_DIR="$ROOT_DIR/$ICONSET_DIR"
+fi
+
+if [[ "$ASSET_CATALOG" != /* ]]; then
+  ASSET_CATALOG="$ROOT_DIR/$ASSET_CATALOG"
 fi
 
 if [[ "$DIST_DIR" != /* ]]; then
@@ -61,6 +67,15 @@ icon_name="$(basename "$ICON_DOCUMENT" .icon)"
 
 if [[ ! -f "$ICON_DOCUMENT/icon.json" ]]; then
   echo "[package] Missing app icon document at $ICON_DOCUMENT (expected icon.json inside)"
+  exit 1
+fi
+
+# The accent colour (the brand orange, assets/README.md) ships as a
+# colour set in the same asset catalog compile; NSAccentColorName in the
+# Info.plist points controls at it whenever the user's system accent is
+# the default multicolour.
+if [[ ! -f "$ASSET_CATALOG/$ACCENT_COLOR_NAME.colorset/Contents.json" ]]; then
+  echo "[package] Missing accent colour set at $ASSET_CATALOG/$ACCENT_COLOR_NAME.colorset"
   exit 1
 fi
 
@@ -206,6 +221,8 @@ cat >"$info_plist" <<EOF
   <string>$icon_name</string>
   <key>CFBundleIconName</key>
   <string>$icon_name</string>
+  <key>NSAccentColorName</key>
+  <string>$ACCENT_COLOR_NAME</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>LSUIElement</key>
@@ -219,23 +236,30 @@ EOF
 
 icon_compile_dir="$(mktemp -d)"
 actool_log="$icon_compile_dir/actool.log"
-if ! xcrun actool "$ICON_DOCUMENT" \
+if ! xcrun actool "$ICON_DOCUMENT" "$ASSET_CATALOG" \
   --compile "$icon_compile_dir" \
   --platform macosx \
   --minimum-deployment-target "$MIN_MACOS" \
   --app-icon "$icon_name" \
+  --accent-color "$ACCENT_COLOR_NAME" \
   --output-partial-info-plist "$icon_compile_dir/icon.plist" \
   --output-format human-readable-text >"$actool_log" 2>&1 \
   || grep -q "error:" "$actool_log" \
   || [[ ! -f "$icon_compile_dir/Assets.car" ]]; then
   cat "$actool_log"
-  echo "[package] Failed to compile the app icon document at $ICON_DOCUMENT"
+  echo "[package] Failed to compile the app icon document at $ICON_DOCUMENT and the asset catalog at $ASSET_CATALOG"
   exit 1
 fi
 
 compiled_icon_name="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$icon_compile_dir/icon.plist")"
 if [[ "$compiled_icon_name" != "$icon_name" ]]; then
   echo "[package] actool registered the app icon as '$compiled_icon_name', expected '$icon_name'"
+  exit 1
+fi
+
+compiled_accent_name="$(/usr/libexec/PlistBuddy -c "Print :NSAccentColorName" "$icon_compile_dir/icon.plist" 2>/dev/null || true)"
+if [[ "$compiled_accent_name" != "$ACCENT_COLOR_NAME" ]]; then
+  echo "[package] actool registered the accent colour as '$compiled_accent_name', expected '$ACCENT_COLOR_NAME'"
   exit 1
 fi
 

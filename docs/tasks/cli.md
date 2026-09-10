@@ -61,6 +61,22 @@ Depends on: `docs/tasks/core.md` C1–C3.
       actionable error. Ships with the C8-59 config surface; add the `--json`
       snapshot per LT-1. Per-profile editing arrives with the profiles CLI
       surface. Depends on `docs/tasks/core.md` C8-59.
+- [ ] L1-6 `vapor profiles list|add|remove` (`--json` on each): the
+      headless onboarding and the engine the app's first run drives.
+      `add` takes `--provider`, `--local`, `--cloud`, `--mode`, and a
+      `--name`; it fills the provider-aware defaults for what is not
+      given, refuses overlapping roots and an unknown provider with the
+      same errors the daemon would raise, runs `vapor auth login` for a
+      provider that needs an account (or points at it when stdin is not
+      a terminal), and writes the profile through the config lock so a
+      running daemon composes it. The first `add` on an unconfigured
+      install (core.md OB-1) is what turns the daemon from
+      `Unconfigured` to `Running`; `vapor status` and `vapor doctor` tell
+      an unconfigured install which command to run. `remove` reuses the
+      safe-disconnect flow (core.md C8-25). Shape-locked `--json`
+      output per LT-1 and an e2e scenario that onboards a fresh home
+      with the filesystem provider through this command alone. Depends
+      on core.md OB-1 and C8-19 … C8-26.
 
 ## Phase L2 - Service lifecycle (autolaunch on every OS)
 

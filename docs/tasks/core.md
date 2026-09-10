@@ -833,6 +833,40 @@ snapshot.
       (`{default, cpuPercent=5, memoryPercent=5}` x `{idle, active,
       storm}` x `{boost on, boost off}` x `{global, profile-lowered}`).
 
+## Onboarding prerequisites
+
+The app's first run (`macos.md` O-1) asks which provider the first
+profile uses before anything exists on disk. Today the runtime cannot
+wait for that answer: `vapor.json` always yields an implicit `default`
+profile from the top-level keys and their defaults, and the daemon
+adopts both roots on first contact, so `~/Vapor` and `~/cloud/Vapor`
+appear the moment the app bootstraps the daemon, before any screen
+could ask. Decision from the project owner (2026-09-10): a fresh
+install creates nothing until the user has chosen; most real installs
+will pick Google Drive, and a pair of filesystem folders nobody asked
+for is the wrong first impression.
+
+- [ ] OB-1 An install with no sync scope syncs nothing and creates
+      nothing. A `vapor.json` that names no sync scope (no `profiles`
+      entry, neither `localSyncDirectory` nor `cloudSyncDirectory`, no
+      `provider`) composes no profile. The daemon still starts, binds
+      the socket, and answers `vapor status` with a run state and reason
+      that say so (`Unconfigured`, "no sync profile yet"); it adopts no
+      root, writes no marker, opens no decision. The implicit `default`
+      profile built from the top-level keys stays as what a scope
+      written through `vapor config set` yields, so CLI users keep the
+      one-command path, and the provider-aware root defaults keep
+      applying once a provider or a root is named. Writing the first
+      scope composes the profile without a daemon restart (the scope
+      keys are restart-required today; the empty-to-one transition is
+      the exception, since there is nothing running to reshape), and
+      `vapor status --json` and `vapor doctor` name the state so the
+      app and the CLI can gate on it. Covered by a runtime test, a
+      `vapor status --json` shape lock, and an e2e scenario: fresh
+      home, daemon up, no folder under the home, status unconfigured;
+      then one `config set` per root and the profile composes and
+      adopts. Blocks `macos.md` O-2 and `cli.md` L1-6.
+
 ## Deferred tasks
 
 - [ ] PT-1 Tune the soak cell `scripts/perf.sh` gates on (duration,
@@ -844,10 +878,8 @@ snapshot.
       microbenches. Belongs to the `scripts/perf.sh` release-gate suite;
       Tier-1 guard-rails (storm bounds, burst admission) already cover
       the regression-catching role on every PR.
-- [ ] O-1 Design and implement the production onboarding flow
-      (information architecture, step sequence, copy, UX states). When this
-      starts, run a clarification pass with the project owner to define the
-      onboarding structure before implementation.
+- Onboarding is no longer parked: the runtime side is OB-1 above and
+  the flow itself is `macos.md` O-1 … O-4.
 - [ ] R-1 Write the incident runbooks `AGENTS.md §12` mandates under
       `docs/operations/`: daemon crash loops, auth/token refresh
       failures, provider rate-limit storms, schema migration failures,

@@ -16,12 +16,16 @@ func discoverSkipsBundlesWithoutTheMarker() throws {
   try fileManager.createDirectory(at: localesOnlyURL, withIntermediateDirectories: true)
   try Data("{}".utf8).write(to: localesOnlyURL.appendingPathComponent("en.json"))
 
+  // Foundation keeps every `Bundle` ever created in `allBundles`, and the
+  // real resolver searches that list, so the marker file must not share a
+  // name with a shipped resource: an empty `VaporMenuBarTemplate.png` here
+  // would be found by the menu bar icon tests running in the same process.
   let withImageURL = rootURL.appendingPathComponent("OtherVaporCore.bundle", isDirectory: true)
   try fileManager.createDirectory(at: withImageURL, withIntermediateDirectories: true)
-  try Data().write(to: withImageURL.appendingPathComponent("VaporMenuBarTemplate.png"))
+  try Data().write(to: withImageURL.appendingPathComponent("VaporTestMarker.png"))
 
   let hasMenuBarImage: (Bundle) -> Bool = { bundle in
-    bundle.url(forResource: "VaporMenuBarTemplate", withExtension: "png") != nil
+    bundle.url(forResource: "VaporTestMarker", withExtension: "png") != nil
   }
 
   let bundle = VaporResourceBundle.discover(
