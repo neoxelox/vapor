@@ -3291,6 +3291,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn path_to_text_returns_utf8_for_ascii_paths() {
         let path = PathBuf::from("/tmp/vapor/file.txt");
@@ -3640,11 +3641,18 @@ mod tests {
                  INSERT INTO queue_intents
                      (path_text, kind, state, priority_rank, enqueued_at_ms, available_at_ms)
                      VALUES ('/tmp/vapor-root/file.txt', 'upload', 'pending', 3, 100, 100);
-                 INSERT INTO sync_index
-                     (path_text, content_hash, size_bytes, local_modified_at_ms, last_op_id, updated_at_ms)
-                     VALUES ('/tmp/vapor-root/synced.txt', 'abc', 3, 50, 'op-1', 60);",
+                 ",
             )
             .expect("seed version five schema");
+        // The row's text is the spelling this OS stores for the path.
+        connection
+            .execute(
+                "INSERT INTO sync_index
+                     (path_text, content_hash, size_bytes, local_modified_at_ms, last_op_id, updated_at_ms)
+                     VALUES (?, 'abc', 3, 50, 'op-1', 60)",
+                params![path_to_text(Path::new("/tmp/vapor-root/synced.txt")).expect("text")],
+            )
+            .expect("seed the synced row");
         drop(connection);
 
         let mut migrated = DurableStateDb::open(&database_path)

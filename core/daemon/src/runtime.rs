@@ -298,6 +298,10 @@ pub struct DaemonRuntime {
     /// `root-replaced` decision is answered.
     root_hold: Option<RootHold>,
     last_root_check_inst: Option<Instant>,
+    /// A watcher signal asked for a whole-scope reconcile; it is
+    /// queued once the next root check finds the adopted root in
+    /// place.
+    reconcile_after_root_check: bool,
     /// Whether the provider-side sync root has been ensured. While
     /// `false`, no work is leased and the remote feed is not polled;
     /// ingest keeps capturing intent state durably.
@@ -1219,6 +1223,7 @@ impl DaemonRuntime {
             cloud_root_call: None,
             root_hold: None,
             last_root_check_inst: None,
+            reconcile_after_root_check: false,
             profile_id: DEFAULT_PROFILE_ID.to_string(),
             timeline_default_entries: None,
             cloud_root_ready,
@@ -2077,6 +2082,8 @@ impl DaemonRuntime {
                         self.release_root_hold(RootSide::Local, now);
                         self.enqueue_startup_reconstruction_reconcile(now)?;
                         self.restore_run_state_after_root_recovery("local sync directory is back");
+                    } else if std::mem::take(&mut self.reconcile_after_root_check) {
+                        self.enqueue_startup_reconstruction_reconcile(now)?;
                     }
                     // A `root-missing` question left by a start that found
                     // no folder is moot now that the folder is here.
@@ -2086,8 +2093,12 @@ impl DaemonRuntime {
                         now,
                     )?;
                 }
-                RootStatus::Missing => self.hold_for_missing_root(RootSide::Local, now)?,
+                RootStatus::Missing => {
+                    self.reconcile_after_root_check = false;
+                    self.hold_for_missing_root(RootSide::Local, now)?;
+                }
                 RootStatus::Replaced { found, .. } => {
+                    self.reconcile_after_root_check = false;
                     self.hold_for_replaced_root(RootSide::Local, found, now)?;
                 }
                 RootStatus::Unreachable(_) => {}
@@ -2496,19 +2507,24 @@ impl DaemonRuntime {
                 accepted += 1;
                 continue;
             }
-            if event.path == watch_root && event.last_event_kind == FsEventKind::Other {
-                // The watcher lost events (a full kernel queue): the
-                // only honest answer is to compare the whole scope.
-                logging::warning(
-                    "The filesystem watcher dropped events; scheduling a whole-scope reconcile",
+            if event.path == watch_root
+                && matches!(
+                    event.last_event_kind,
+                    FsEventKind::Other | FsEventKind::Removed | FsEventKind::Renamed
+                )
+            {
+                // The watcher lost events (a full kernel queue), or
+                // reported the root itself removed or renamed: never a
+                // deletion to mirror. The root identity check runs
+                // next, and only a root that is still the adopted one
+                // gets the whole-scope reconcile; a walk over a
+                // replacement folder would read it as deletions.
+                logging::info(
+                    "The filesystem watcher dropped events or reported the root itself; checking the root, then reconciling",
                     &[("watch_root", watch_root.display().to_string())],
                 );
-                if let Err(error) = self.enqueue_startup_reconstruction_reconcile(now) {
-                    logging::warning(
-                        "Could not schedule the reconcile after dropped watcher events",
-                        &[("error", format!("{error:?}"))],
-                    );
-                }
+                self.last_root_check_inst = None;
+                self.reconcile_after_root_check = true;
                 accepted += 1;
                 continue;
             }
@@ -7199,6 +7215,60 @@ mod tests {
         assert!(
             fixture.cloud_root.join("missed.txt").exists(),
             "the whole-scope reconcile finds what the watcher dropped"
+        );
+    }
+
+    #[test]
+    fn a_watcher_event_for_the_root_itself_checks_the_root_before_reconciling() {
+        // FSEvents reports a root change as a rename-away and a mount
+        // as a create; inotify reports a deleted or moved root. None
+        // of it is a deletion to mirror, and a reconcile over a
+        // replacement folder would read that folder as deletions, so
+        // the root is checked first.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let kept = fixture.watch_root.join("kept.txt");
+        std::fs::write(&kept, b"kept").expect("seed");
+        fixture.record_local_event(&kept, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(12);
+        assert!(fixture.cloud_root.join("kept.txt").is_file());
+
+        // The adopted root is swapped for an empty folder, and the
+        // watcher reports the root removed.
+        let parked = fixture._temp.path().join("parked");
+        std::fs::rename(&fixture.watch_root, &parked).expect("swap out");
+        std::fs::create_dir_all(&fixture.watch_root).expect("empty replacement");
+        let root = fixture.watch_root.clone();
+        fixture.record_local_event(&root, FsEventKind::Removed, fixture.now_ms);
+        for _ in 0..12 {
+            fixture.tick(6_000);
+        }
+        assert!(
+            fixture.cloud_root.join("kept.txt").is_file(),
+            "the replacement folder is never mirrored as deletions"
+        );
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .decisions(false)
+                .expect("decisions")
+                .iter()
+                .any(|decision| decision.kind == crate::root_identity::DECISION_KIND),
+            "the replaced root is put to the user"
+        );
+        assert_eq!(fixture.runtime.app().snapshot().run_state, RunState::Error);
+        assert_eq!(
+            fixture
+                .runtime
+                .state_db()
+                .list_queue_intents(16)
+                .expect("queue")
+                .iter()
+                .filter(|record| record.kind == PendingIntentKind::Delete)
+                .count(),
+            0,
+            "no delete of the root or its files is queued"
         );
     }
 

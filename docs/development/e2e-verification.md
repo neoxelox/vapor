@@ -175,9 +175,11 @@ Output is one line per scenario:
 
 On a failure the harness prints, for every home in the scenario,
 `vapor status --json` and `vapor diagnostics --json` (if the daemon is
-still up), the queue and failed-intent rows, the last 40 daemon log
-lines, and the daemon's stdout/stderr tail, then keeps the sandbox.
-Use the `vapor-debug` skill on the preserved directory.
+still up), the queue and failed-intent rows, the last 60 daemon log
+lines that say something (the polling chatter left out), and the
+daemon's stdout/stderr tail, then keeps the sandbox. Use the
+`vapor-debug` skill on the preserved directory; on CI the preserved
+sandboxes' logs ride along in the `e2e-report-<os>` artifact.
 
 The JSON report (`e2e-result.json`, schema version 1) carries the host
 facts, every scenario's verdict, reasons, seconds, notes, and preserved

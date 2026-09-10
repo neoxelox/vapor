@@ -166,7 +166,7 @@ fn forward_event(
     let uniform_kind = map_event_kind(&event.kind);
     let observed_at = SystemTime::now();
     for (index, path) in event.paths.into_iter().enumerate() {
-        let kind = if is_paired_rename {
+        let mut kind = if is_paired_rename {
             if index == 0 {
                 WatchEventKind::Removed
             } else {
@@ -175,6 +175,19 @@ fn forward_event(
         } else {
             uniform_kind
         };
+        // The root itself being removed, renamed, or (re)mounted is
+        // never a file operation to mirror (FSEvents reports a root
+        // change as a rename-away, a mount as a create); it is a
+        // reason to look at the whole scope again, and the root
+        // identity check decides what became of the root.
+        if path == watch_root
+            && matches!(
+                kind,
+                WatchEventKind::Removed | WatchEventKind::Renamed | WatchEventKind::Created
+            )
+        {
+            kind = WatchEventKind::Other;
+        }
         let _ = sender.send(WatchEvent {
             path,
             kind,
@@ -286,6 +299,30 @@ mod tests {
         let event = rx.try_recv().expect("an event for the root");
         assert_eq!(event.path, Path::new("/w"));
         assert_eq!(event.kind, WatchEventKind::Other);
+    }
+
+    #[test]
+    fn a_removal_or_rename_of_the_root_itself_is_a_rescan_not_a_delete() {
+        let (tx, rx) = mpsc::channel();
+        for kind in [
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+            EventKind::Remove(notify::event::RemoveKind::Other),
+            EventKind::Create(CreateKind::Other),
+        ] {
+            forward_event(
+                &tx,
+                Path::new("/w"),
+                None,
+                Ok(Event {
+                    kind,
+                    paths: vec![PathBuf::from("/w")],
+                    attrs: Default::default(),
+                }),
+            );
+            let event = rx.try_recv().expect("an event for the root");
+            assert_eq!(event.path, Path::new("/w"));
+            assert_eq!(event.kind, WatchEventKind::Other);
+        }
     }
 
     #[test]

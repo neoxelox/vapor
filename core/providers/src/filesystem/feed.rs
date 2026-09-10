@@ -81,6 +81,12 @@ struct FeedRing {
     /// Sequence the next appended change receives; the head cursor is
     /// `next_sequence - 1`.
     next_sequence: u64,
+    /// The watcher reported dropped events (a full kernel queue, an
+    /// FSEvents rescan flag), so the ring may be missing changes.
+    /// Every cursor from before is expired once, which makes the
+    /// engine re-baseline behind a whole-scope reconcile, the same
+    /// answer the local side gives the same signal.
+    lost_events: bool,
 }
 
 impl FeedRing {
@@ -117,6 +123,7 @@ impl ChangesFeed {
             ring: Mutex::new(FeedRing {
                 entries: VecDeque::new(),
                 next_sequence: 1,
+                lost_events: false,
             }),
         }
     }
@@ -168,15 +175,20 @@ impl ChangesFeed {
     ) -> Result<ChangesPoll, ProviderError> {
         self.drain_watch_events(root, tags);
 
-        let ring = self.ring.lock().expect("changes feed ring mutex poisoned");
+        let mut ring = self.ring.lock().expect("changes feed ring mutex poisoned");
         let Some(cursor) = cursor else {
             // Baseline: changes before this poll are the reconcile's
             // job; the feed starts reporting from "now".
+            ring.lost_events = false;
             return Ok(ChangesPoll::Page(RemoteChangesPage {
                 changes: Vec::new(),
                 next_cursor: ring.head_cursor().to_string(),
             }));
         };
+        if ring.lost_events {
+            ring.lost_events = false;
+            return Ok(ChangesPoll::CursorExpired);
+        }
 
         let Ok(cursor) = cursor.parse::<u64>() else {
             return Ok(ChangesPoll::CursorExpired);
@@ -217,6 +229,16 @@ impl ChangesFeed {
                     ("kind", format!("{:?}", event.kind)),
                 ],
             );
+            if event.path == root && event.kind == WatchEventKind::Other {
+                // Dropped events, or the root itself changed; either
+                // way the ring may be missing changes.
+                logging::info(
+                    "The cloud root watcher asked for a rescan; the next poll expires the cursor",
+                    &[("root", root.display().to_string())],
+                );
+                ring.lost_events = true;
+                continue;
+            }
             if directory_appeared(root, &event) {
                 // A directory that appeared (created, renamed in) may
                 // already hold files the watcher never reported: on
@@ -484,6 +506,30 @@ mod tests {
             .map(|change| change.path.as_str())
             .collect();
         assert_eq!(paths, vec![".vaporignore"]);
+    }
+
+    #[test]
+    fn dropped_watcher_events_expire_the_cursor_once() {
+        let (dir, feed, handle, tags) = feed_fixture();
+        let root = dir.path();
+        let baseline = expect_page(feed.poll(root, &tags, None, 100).expect("baseline"));
+
+        handle.emit(root.to_path_buf(), WatchEventKind::Other, ts(1));
+        assert!(matches!(
+            feed.poll(root, &tags, Some(&baseline.next_cursor), 100)
+                .expect("poll"),
+            ChangesPoll::CursorExpired
+        ));
+        // The re-baseline clears it, and the feed is a feed again.
+        let fresh = expect_page(feed.poll(root, &tags, None, 100).expect("re-baseline"));
+        std::fs::write(root.join("after.txt"), b"x").expect("file");
+        handle.emit_created(root.join("after.txt"), ts(2));
+        let page = expect_page(
+            feed.poll(root, &tags, Some(&fresh.next_cursor), 100)
+                .expect("poll"),
+        );
+        assert_eq!(page.changes.len(), 1);
+        assert_eq!(page.changes[0].path.as_str(), "after.txt");
     }
 
     #[test]

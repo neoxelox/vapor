@@ -302,7 +302,10 @@ impl RemotePoller {
                         &[("cursor_key", self.cursor_state_key.clone())],
                     );
                 } else {
-                    logging::warning(
+                    // The feed lost its place (a rescan signal, a ring
+                    // that rolled over); the reconcile repairs it on its
+                    // own, so this is routine.
+                    logging::info(
                         "Remote changes cursor expired; scheduling whole-scope reconcile and re-baselining",
                         &[("cursor_key", self.cursor_state_key.clone())],
                     );

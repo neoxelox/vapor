@@ -586,9 +586,9 @@ impl Ctx {
             }
             let log_path = home.daemon_log();
             if log_path.exists() {
-                out.push("last 40 daemon log lines:".to_string());
+                out.push("last 60 daemon log lines (polling chatter left out):".to_string());
                 out.extend(
-                    logs::tail(&log_path, 40)
+                    logs::tail_of_interest(&log_path, 60)
                         .into_iter()
                         .map(|line| format!("  {line}")),
                 );

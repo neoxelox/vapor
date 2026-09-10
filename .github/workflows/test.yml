@@ -100,10 +100,16 @@ jobs:
             ./scripts/e2e.sh
           fi
 
+      # The report always; the daemon logs and outputs of the sandboxes
+      # the harness preserved (failed scenarios only), so a red run can
+      # be read without the runner.
       - name: Upload e2e report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-report-${{ matrix.os }}
-          path: .vapor/e2e/**/*result.json
+          path: |
+            .vapor/e2e/**/*result.json
+            .vapor/e2e/**/logs/*
+            .vapor/e2e/**/*-daemon.out
           if-no-files-found: ignore

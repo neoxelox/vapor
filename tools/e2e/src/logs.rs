@@ -69,6 +69,24 @@ pub fn tail(path: &Path, n: usize) -> Vec<String> {
         .collect()
 }
 
+/// The last `n` lines that say something: the daemon's once-a-second
+/// polling-permission debug line is left out, since a tail made of it
+/// hides the events that matter.
+pub fn tail_of_interest(path: &Path, n: usize) -> Vec<String> {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let lines: Vec<&str> = contents
+        .lines()
+        .filter(|line| !line.contains("Evaluated remote polling permission"))
+        .collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..]
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect()
+}
+
 /// `true` when any line of the file contains `needle`.
 pub fn contains(path: &Path, needle: &str) -> bool {
     fs::read_to_string(path)

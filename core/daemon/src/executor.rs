@@ -4619,9 +4619,11 @@ mod tests {
         );
         // Op-id tagged for watcher-echo correlation.
         assert!(fixture.tags.read_op_id(&local_target).is_some());
-        // Local echo cache carries the write (hash matches content).
+        // Local echo cache carries the write (hash matches content),
+        // keyed by the spelling the durable queue handed the executor.
+        let stored: PathBuf = local_target.components().collect();
         assert!(fixture.local_echoes.matches_write(
-            &local_target.to_string_lossy(),
+            &stored.to_string_lossy(),
             fixture.tags.read_op_id(&local_target).as_deref(),
             None,
             timestamp_ms(1),
