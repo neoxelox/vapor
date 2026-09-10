@@ -27,7 +27,9 @@ struct ShellView: View {
               .font(.caption)
               .foregroundStyle(.secondary)
           }
+          SyncNowControl(viewModel: viewModel)
           RestartRequiredNotice(viewModel: viewModel)
+          UserActionNotice(viewModel: viewModel)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       }
@@ -62,7 +64,7 @@ struct ShellView: View {
       VStack(alignment: .leading, spacing: 4) {
         Text(viewModel.localized("login_item_requires_approval_detail"))
           .font(.caption)
-          .foregroundStyle(.orange)
+          .foregroundStyle(Color.vaporPrimary)
         Button(viewModel.localized("login_item_open_settings")) {
           viewModel.openLoginItemSettings()
         }
@@ -126,6 +128,7 @@ struct MenuBarContentView: View {
         Text(viewModel.localized(viewModel.state.syncState.detailLocalizationKey))
           .font(.subheadline)
           .foregroundStyle(.secondary)
+        UserActionNotice(viewModel: viewModel)
       }
       Divider()
       Button(viewModel.localized("menubar_open_vapor")) {
@@ -141,9 +144,16 @@ struct MenuBarContentView: View {
           viewModel.toggleAutoLaunch()
         }
       }
+      Button(viewModel.localized("menubar_sync_now")) {
+        viewModel.syncNow()
+      }
+      .disabled(!viewModel.state.daemonIsReachable)
+      .help(viewModel.localized("sync_now_hint"))
       Button(viewModel.localized("menubar_restart_daemon")) {
         viewModel.restartDaemon()
       }
+      .disabled(!viewModel.state.autoLaunchEnabled)
+      .help(viewModel.localized("restart_needs_auto_launch_hint"))
       Divider()
       Button(viewModel.localized("menubar_quit_vapor")) {
         quitVaporAction()
@@ -243,7 +253,7 @@ struct SettingsView: View {
       VStack(alignment: .leading, spacing: 4) {
         Text(viewModel.localized("login_item_requires_approval_detail"))
           .font(.caption)
-          .foregroundStyle(.orange)
+          .foregroundStyle(Color.vaporPrimary)
         Button(viewModel.localized("login_item_open_settings")) {
           viewModel.openLoginItemSettings()
         }
@@ -305,11 +315,76 @@ struct RestartRequiredNotice: View {
       VStack(alignment: .leading, spacing: 4) {
         Text(viewModel.localized("settings_restart_required_format", notice))
           .font(.caption)
-          .foregroundStyle(.orange)
+          .foregroundStyle(Color.vaporPrimary)
         Button(viewModel.localized("settings_restart_daemon")) {
           viewModel.restartDaemon()
         }
         .controlSize(.small)
+        .disabled(!viewModel.state.autoLaunchEnabled)
+        .help(viewModel.localized("restart_needs_auto_launch_hint"))
+      }
+    }
+  }
+}
+
+/// The questions and conflicts waiting on the user, as counted by the
+/// daemon's status. Empty when nothing is waiting. The counts are the
+/// signal; the CLI is the place to act until the app has panes for both.
+struct UserActionNotice: View {
+  @ObservedObject var viewModel: AppShellViewModel
+
+  var body: some View {
+    let decisions = viewModel.state.decisionsPending
+    let conflicts = viewModel.state.conflictsUnresolved
+    if decisions > 0 || conflicts > 0 {
+      VStack(alignment: .leading, spacing: 4) {
+        if decisions > 0 {
+          Text(
+            decisions == 1
+              ? viewModel.localized("attention_decision_one")
+              : viewModel.localized("attention_decisions_format", Int64(decisions))
+          )
+          .font(.caption)
+          .foregroundStyle(Color.vaporPrimary)
+        }
+        if conflicts > 0 {
+          Text(
+            conflicts == 1
+              ? viewModel.localized("attention_conflict_one")
+              : viewModel.localized("attention_conflicts_format", Int64(conflicts))
+          )
+          .font(.caption)
+          .foregroundStyle(Color.vaporPrimary)
+        }
+        Text(viewModel.localized("attention_cli_hint"))
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+      }
+    }
+  }
+}
+
+/// The on-demand sync on the Dashboard: a button, and while the scan
+/// is held by the throttle, one line saying the button is the way past
+/// it. Hidden while the daemon is not reachable, since there is nothing
+/// to ask.
+struct SyncNowControl: View {
+  @ObservedObject var viewModel: AppShellViewModel
+
+  var body: some View {
+    if viewModel.state.daemonIsReachable {
+      VStack(alignment: .leading, spacing: 4) {
+        if viewModel.state.scanIsWaiting {
+          Text(viewModel.localized("scan_waiting_hint"))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Button(viewModel.localized("menubar_sync_now")) {
+          viewModel.syncNow()
+        }
+        .controlSize(.small)
+        .disabled(viewModel.state.scanIsRunning)
+        .help(viewModel.localized("sync_now_hint"))
       }
     }
   }

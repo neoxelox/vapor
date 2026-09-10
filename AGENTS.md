@@ -110,7 +110,7 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 - All expensive work must be throttle-state gated.
 - Throttle states: `IdleDrain`, `Light`, `Throttled`, `Suspended`.
 - Under `Suspended`, uploads/hashing stop; only lightweight intent coalescing continues.
-- Reconcile scans are deferred and interruptible; run only when policy permits.
+- Reconcile scans are deferred and interruptible; run only when policy permits. The user's own request (`vapor sync-now`, the app's Sync now) is the one exception: it admits the next whole-scope scan under any state but `Suspended`, still within that state's caps and still interruptible, and it is spent when one scan completes.
 - Throttle inputs come from the host on macOS (CPU, power source, thermal state, Low Power Mode, memory, keyboard presence). Test harnesses pin neutral inputs with `VAPOR_THROTTLE_INPUTS=static`; never make that the production default.
 
 ## 4) Bidirectional sync safety requirements

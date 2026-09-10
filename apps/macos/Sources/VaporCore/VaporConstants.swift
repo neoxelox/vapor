@@ -34,7 +34,14 @@ public enum VaporConstants {
     public static let useGitIgnore = true
     public static let useVaporIgnore = true
     public static let localSyncDirectory = "~/Vapor"
+    /// The cloud root a remote provider uses while `cloudSyncDirectory`
+    /// is unset. Mirrors `constants.rs::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY`.
     public static let cloudSyncDirectory = "/Vapor"
+    /// The cloud root the filesystem provider uses while the key is
+    /// unset. Mirrors `DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY`; the
+    /// daemon picks between the two by provider, which is why the app
+    /// never writes a cloud root it did not read.
+    public static let filesystemCloudSyncDirectory = "~/cloud/Vapor"
     public static let postIgnoreRules = ""
     public static let languageCode = VaporConstants.Localization.defaultLanguageCode
     public static let timelineLimit = 1000
@@ -153,6 +160,21 @@ public enum VaporConstants {
         return other
       }
     }
+  }
+
+  /// Vapor's primary colour, Aerospace International Orange. The value
+  /// is documented in `assets/README.md` (Identity) and every brand
+  /// raster under `assets/` shades around it; this is the copy code
+  /// consumes. Use it wherever a surface needs a brand or accent colour:
+  /// the app accent colour set (`assets/macos/Vapor.xcassets`), the
+  /// menu bar mark while Vapor is waiting on the user, and any highlight
+  /// that should read as Vapor's own.
+  public enum Brand {
+    public static let primaryColorHex = "#FF4F00"
+    /// sRGB components of `primaryColorHex`, each in 0...1.
+    public static let primaryColorRed: Double = 1.0
+    public static let primaryColorGreen: Double = 79.0 / 255.0
+    public static let primaryColorBlue: Double = 0.0
   }
 
   public enum Daemon {

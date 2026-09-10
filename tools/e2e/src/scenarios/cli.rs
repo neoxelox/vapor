@@ -38,6 +38,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: conflict_tooling,
         },
         Scenario {
+            id: "S51",
+            name: "sync-now-under-user-activity",
+            proves: "a startup scan held by the throttle says so in status; vapor sync-now runs it under user activity and an offline divergence resolves as a keep-both copy",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: sync_now_under_user_activity,
+        },
+        Scenario {
             id: "S18",
             name: "sigpipe",
             proves: "a downstream reader that closes the pipe early does not make the CLI panic",
@@ -134,6 +142,20 @@ fn conflict_tooling(ctx: &mut Ctx) -> Result<(), Failure> {
         rendered.contains("\"deviceId\""),
         "conflict record is missing the origin device id"
     );
+    // The status endpoint carries the unresolved count so surfaces can
+    // flag the copy without walking the tree themselves.
+    let listed_count = listed["conflicts"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or_default() as u64;
+    let status = cli
+        .status()
+        .ok_or_else(|| Failure::new("status did not answer"))?;
+    ensure!(
+        status.conflicts_unresolved == listed_count,
+        "status counts {} unresolved conflicts while the list holds {listed_count}",
+        status.conflicts_unresolved
+    );
 
     let copies: Vec<_> = conflict_copies(&home.local, "doc").collect();
     let promoted = copies
@@ -190,6 +212,112 @@ fn conflict_tooling(ctx: &mut Ctx) -> Result<(), Failure> {
         empty,
         "conflicts list is not empty after resolution: {after}"
     );
+    let status = cli
+        .status()
+        .ok_or_else(|| Failure::new("status did not answer"))?;
+    ensure!(
+        status.conflicts_unresolved == 0,
+        "status still counts {} unresolved conflicts after resolution",
+        status.conflicts_unresolved
+    );
+    Ok(())
+}
+
+fn sync_now_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
+    // Throttle inputs from a file that says the user is typing, so the
+    // daemon sits in Throttled and the startup scan waits (the shape a
+    // developer machine produces with the host sampler).
+    let inputs_path = ctx.sandbox.root.join("throttle-inputs.json");
+    let inputs = vapor_shared::ThrottleInputs {
+        user_active: true,
+        ..vapor_shared::ThrottleInputs::default()
+    };
+    let document = serde_json::json!({ "inputs": inputs, "idle_seconds": 0 });
+    fs::write(&inputs_path, serde_json::to_string_pretty(&document)?)?;
+    let mut home = ctx.primary.clone();
+    home.extra_env.insert(
+        constants::env::VAPOR_THROTTLE_INPUTS.to_string(),
+        format!(
+            "{}{}",
+            constants::engine::THROTTLE_INPUTS_FILE_PREFIX,
+            inputs_path.display()
+        ),
+    );
+    ctx.register_home(home.clone());
+    ctx.configure_scope(&home)?;
+
+    // The same name written on both sides while no daemon watched.
+    fs::create_dir_all(&home.local)?;
+    fs::create_dir_all(&home.cloud)?;
+    write_file(&home.local.join("alex.txt"), "local\n")?;
+    write_file(&home.cloud.join("alex.txt"), "cloud\n")?;
+    let kind = ctx.paths.daemon_kind;
+    ctx.start_daemon_in(&home, kind, true)?;
+    let cli = ctx.cli_for(&home);
+
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "status to report the startup scan waiting on the throttle",
+        || {
+            cli.status()
+                .is_some_and(|status| status.reconcile_state == "waiting")
+        },
+    )?;
+    let status = cli
+        .status()
+        .ok_or_else(|| Failure::new("status did not answer"))?;
+    ensure!(
+        status.throttle_state == "Throttled",
+        "the file inputs must hold the daemon at Throttled, got {}",
+        status.throttle_state
+    );
+    ensure!(
+        status.reconcile_detail.contains("user activity is active"),
+        "the waiting scan must name what it waits for: {:?}",
+        status.reconcile_detail
+    );
+    ensure!(
+        read_string(&home.local.join("alex.txt"))? == "local\n"
+            && read_string(&home.cloud.join("alex.txt"))? == "cloud\n",
+        "nothing may move while the scan waits"
+    );
+
+    // The user asks for it: the scan runs although the user is active.
+    cli.ok(&["sync-now", "--json"])?;
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "the offline divergence to resolve as a keep-both copy on both sides",
+        || conflict_copy_exists(&home.local, "alex") && conflict_copy_exists(&home.cloud, "alex"),
+    )?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    for root in [&home.local, &home.cloud] {
+        let mut payloads: Vec<String> = fs::read_dir(root)?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("alex"))
+            })
+            .map(|path| read_string(&path))
+            .collect::<Result<_, _>>()?;
+        payloads.sort();
+        ensure!(
+            payloads == ["cloud\n", "local\n"],
+            "both versions must survive under {}: {payloads:?}",
+            root.display()
+        );
+    }
+    let status = cli
+        .status()
+        .ok_or_else(|| Failure::new("status did not answer"))?;
+    ensure!(
+        status.reconcile_state != "waiting" && status.conflicts_unresolved >= 1,
+        "after the requested scan status must count the copy and stop reporting a wait: state {} unresolved {}",
+        status.reconcile_state,
+        status.conflicts_unresolved
+    );
+    ctx.allow_warning("Resolved concurrent divergence by keeping both versions");
     Ok(())
 }
 

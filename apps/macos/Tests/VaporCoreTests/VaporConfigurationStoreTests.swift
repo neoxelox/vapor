@@ -20,7 +20,7 @@ func loadCreatesDefaultConfigurationAndRuntimeDirectories() throws {
   #expect(configuration.useGitIgnore == true)
   #expect(configuration.useVaporIgnore == true)
   #expect(configuration.localSyncDirectory == VaporConfiguration.defaultLocalSyncDirectory)
-  #expect(configuration.cloudSyncDirectory == VaporConfiguration.defaultCloudSyncDirectory)
+  #expect(configuration.cloudSyncDirectory == nil, "the provider's default is the daemon's call")
   #expect(configuration.preIgnoreRules == VaporConfiguration.defaultPreIgnoreRules)
   #expect(configuration.postIgnoreRules == VaporConfiguration.defaultPostIgnoreRules)
   #expect(configuration.languageCode == VaporConfiguration.defaultLanguageCode)

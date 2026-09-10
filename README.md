@@ -45,15 +45,17 @@ Available now:
 - 🧹 Ignore rules, including your existing gitignore files, keep build output and junk out of the sync.
 - ♻️ Settings apply while it runs. Ceilings, ignore rules, and safeguards change without a restart, and Vapor tells you when one is needed.
 - 🚀 Starts at login, restarts itself after a crash, and stops retrying when something is really broken instead of looping.
-- ⏯️ Pause and resume on demand. Changes made while paused sync when you resume.
+- ⏯️ Pause, resume, and sync on demand. Changes made while paused sync when you resume, and Sync now runs the scan without waiting for an idle moment.
 - 📈 Status with a reason, queue depth, a live activity timeline, per-file "why is this stuck", and a one-command support bundle.
 - ⌨️ A full command line for scripts and servers. Everything the app does, the terminal does too, including a headless supervisor that restarts a crashed sync where no app is running.
 - 🔐 Sign-in tokens live in the system keychain, logs never contain secrets, and nothing leaves your device except the files you chose to sync.
 - 🔕 Lives in the menu bar. No windows unless you ask for one.
+- 🟠 The menu bar mark turns orange only when Vapor needs you: a question to answer, a conflict to settle, a setting that wants a restart, a sync that stopped on an error.
 
 In flight and coming next:
 
 - 🪟 A diagnostics window in the Mac app with throttle reason, queue, conflicts, and timeline, plus live pause and flush controls.
+- 🚪 A first-run setup that asks which provider and which folders to use before creating anything.
 - 🔔 A notification when a conflict needs you.
 - 🖥️ Windows and Linux apps on the same runtime as the Mac app.
 - 📥 Standalone command-line downloads for every OS, with Docker and systemd recipes.
@@ -86,7 +88,7 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`. A running da
 | `useGitIgnore`       | `Bool`   | `true`                                              | Applies recursive `.gitignore` rules during local filtering.                             |
 | `useVaporIgnore`     | `Bool`   | `true`                                              | Applies recursive `.vaporignore` rules during local filtering.                           |
 | `localSyncDirectory` | `String` | `"~/Vapor"`                                         | Sets the local sync root; Vapor creates it if it does not exist yet.                     |
-| `cloudSyncDirectory` | `String` | `"/Vapor"`                                          | Sets the cloud sync root; Vapor creates it if it does not exist yet. With `provider: "filesystem"` this is a local directory path (`~` and relative paths resolve like `localSyncDirectory`), and it must not overlap the local sync root — overlapping roots refuse to sync. |
+| `cloudSyncDirectory` | `String` | Unset: `"~/cloud/Vapor"` with `provider: "filesystem"`, `"/Vapor"` otherwise | Sets the cloud sync root; Vapor creates it if it does not exist yet. With `provider: "filesystem"` this is a local directory path (`~` and relative paths resolve like `localSyncDirectory`), and it must not overlap the local sync root — overlapping roots refuse to sync. `vapor config get cloudSyncDirectory` prints the default that applies to the selected provider. |
 | `provider`           | `String` | `"filesystem"`                                      | Chooses the cloud backend: `filesystem` (a local folder acting as the cloud side) or `gdrive` (requires `vapor auth login gdrive`). Google Drive client credentials are supplied per deployment through the `VAPOR_GDRIVE_CLIENT_ID` / `VAPOR_GDRIVE_CLIENT_SECRET` environment variables (see `.env.example` and `docs/operations/provider-auth-operations.md`); user tokens are stored only in the platform secret store, never in `vapor.json`. |
 | `syncMode`           | `String` | `"two-way"`                                         | Chooses the sync direction: `two-way` (bidirectional), `pull-only` (cloud → local, a read-only local mirror), or `push-only` (local → cloud, a read-only cloud backup). |
 | `preIgnoreRules`     | `String` | Embedded `.gitignore`-like low-impact default rules | Provides the baseline ignore rules that run before discovered ignore files.              |

@@ -91,6 +91,19 @@ fn config_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     ctx.skip_oracle("no daemon runs; the scenario only exercises vapor config");
     let cli = ctx.cli();
     let home = ctx.primary.clone();
+    // Before anything is set, the cloud root default follows the
+    // provider: a folder the daemon can create when a local folder
+    // plays the cloud, the account root folder for a cloud provider.
+    ensure!(
+        cli.config_get("cloudSyncDirectory")? == "~/cloud/Vapor",
+        "unset cloudSyncDirectory must default to the filesystem provider's folder"
+    );
+    cli.config_set("provider", "gdrive")?;
+    ensure!(
+        cli.config_get("cloudSyncDirectory")? == "/Vapor",
+        "unset cloudSyncDirectory must default to the account root for a cloud provider"
+    );
+    cli.config_set("provider", "filesystem")?;
     ctx.configure_scope(&home)?;
     let local = cli.config_get("localSyncDirectory")?;
     ensure!(

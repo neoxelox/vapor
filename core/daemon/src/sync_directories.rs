@@ -98,16 +98,14 @@ fn resolve_scope(
         Some(config.local_sync_directory.as_str()),
         Some(constants::filtering::DEFAULT_LOCAL_SYNC_DIRECTORY),
     ]);
-    let cloud_raw = first_non_empty(&[
-        env_cloud,
-        Some(config.cloud_sync_directory.as_str()),
-        Some(constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY),
-    ]);
+    let cloud_raw = first_non_empty(&[env_cloud, Some(config.effective_cloud_sync_directory())]);
 
     let local_sync_directory =
         local_raw.and_then(|raw| resolve_local_directory(raw, current_directory, home_directory));
     let cloud_sync_directory = resolve_cloud_directory(
-        cloud_raw.unwrap_or(constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY),
+        cloud_raw.unwrap_or_else(|| {
+            constants::filtering::default_cloud_sync_directory(&config.provider)
+        }),
         &config.provider,
         current_directory,
         home_directory,
@@ -185,19 +183,25 @@ fn resolve_cloud_directory(
     home_directory: Option<&Path>,
 ) -> String {
     let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY.to_string();
-    }
+    let trimmed = if trimmed.is_empty() {
+        constants::filtering::default_cloud_sync_directory(provider_kind)
+    } else {
+        trimmed
+    };
 
     // The filesystem provider's "cloud" root is a local directory:
     // resolve it exactly like the local root (tilde expansion,
     // cwd-anchored relative paths). Blindly prefixing `/` turned
     // `~/x` into the unusable literal `/~/x`. Real cloud providers
     // keep the root-relative remote-path semantics below.
-    if provider_kind.trim() == constants::provider::FILESYSTEM
-        && let Some(path) = resolve_path(trimmed, current_directory, home_directory)
-    {
-        return path.to_string_lossy().into_owned();
+    if provider_kind.trim() == constants::provider::FILESYSTEM {
+        return match resolve_path(trimmed, current_directory, home_directory) {
+            Some(path) => path.to_string_lossy().into_owned(),
+            // A `~` path with no home to expand against stays as
+            // written; the root check reports it instead of a
+            // manufactured path.
+            None => trimmed.to_string(),
+        };
     }
 
     if trimmed.starts_with('/') {
@@ -307,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_home_vapor_and_cloud_vapor_directories() {
+    fn defaults_to_two_folders_under_home_for_the_filesystem_provider() {
         let (_guard, home) = create_test_directory();
 
         let scope = resolve_scope(
@@ -318,7 +322,14 @@ mod tests {
             Some(home.as_path()),
         );
         assert_eq!(scope.local_sync_directory, Some(home.join("Vapor")));
-        assert_eq!(scope.cloud_sync_directory, "/Vapor");
+        assert_eq!(
+            scope.cloud_sync_directory,
+            home.join("cloud/Vapor").to_string_lossy()
+        );
+        assert!(
+            filesystem_roots_overlap(&home.join("Vapor"), &scope.cloud_sync_directory).is_none(),
+            "the two defaults must never nest"
+        );
         assert!(
             !home.join("Vapor").exists(),
             "resolution names the root; the root identity check creates it"
@@ -326,10 +337,20 @@ mod tests {
     }
 
     #[test]
+    fn defaults_to_the_account_root_folder_for_a_remote_provider() {
+        let (_guard, home) = create_test_directory();
+        let mut config = default_config();
+        config.provider = constants::provider::GDRIVE.to_string();
+
+        let scope = resolve_scope(None, None, &config, Path::new("/tmp"), Some(home.as_path()));
+        assert_eq!(scope.cloud_sync_directory, "/Vapor");
+    }
+
+    #[test]
     fn filesystem_cloud_directory_expands_tilde_like_the_local_root() {
         let (_guard, home) = create_test_directory();
         let config = VaporConfig {
-            cloud_sync_directory: "~/Desktop/VaporCloud".to_string(),
+            cloud_sync_directory: Some("~/Desktop/VaporCloud".to_string()),
             ..VaporConfig::default()
         };
 
@@ -347,7 +368,7 @@ mod tests {
         let (_guard, home) = create_test_directory();
         let config = VaporConfig {
             provider: "gdrive".to_string(),
-            cloud_sync_directory: "Backups/Vapor".to_string(),
+            cloud_sync_directory: Some("Backups/Vapor".to_string()),
             ..VaporConfig::default()
         };
 
@@ -408,7 +429,7 @@ mod tests {
         let configured = root.join("from-config");
         let config = VaporConfig {
             local_sync_directory: configured.to_string_lossy().into_owned(),
-            cloud_sync_directory: "/FromConfig".to_string(),
+            cloud_sync_directory: Some("/FromConfig".to_string()),
             ..VaporConfig::default()
         };
 
@@ -424,7 +445,7 @@ mod tests {
         let from_env = root.join("from-env");
         let config = VaporConfig {
             local_sync_directory: root.join("from-config").to_string_lossy().into_owned(),
-            cloud_sync_directory: "/FromConfig".to_string(),
+            cloud_sync_directory: Some("/FromConfig".to_string()),
             ..VaporConfig::default()
         };
 
@@ -455,7 +476,12 @@ mod tests {
         let scope = resolve_scope(Some("   "), Some(""), &config, Path::new("/tmp"), None);
 
         assert_eq!(scope.local_sync_directory, Some(configured));
-        assert_eq!(scope.cloud_sync_directory, "/Vapor");
+        // No home directory to expand `~` against, so the filesystem
+        // default stays as written rather than becoming a bogus path.
+        assert_eq!(
+            scope.cloud_sync_directory,
+            constants::filtering::DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY
+        );
     }
 
     #[test]

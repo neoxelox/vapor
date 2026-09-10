@@ -14,6 +14,7 @@ its own copy of these files.
 | `locales/*.json` | UI copy catalogs, one per language | `scripts/swift/resources.sh` mirrors them into the macOS app (`AGENTS.md` §8.7) |
 | `macos/Vapor.icon/` | The Icon Composer document: the sculpture as one layer over a porcelain gradient, with a dark gradient for the dark appearance | `apps/macos/scripts/package.sh` compiles it with `actool` into the bundle's asset catalog; macOS 26 renders it |
 | `macos/Vapor.iconset/` | The flat fallback icon in the ten Apple-named slots, 16 to 1024 px | `package.sh` packs them into `Vapor.icns` with `iconutil` |
+| `macos/Vapor.xcassets/` | The asset catalog holding the `AccentColor` set: the primary colour as the app's accent | `package.sh` compiles it with `actool` in the same call as the icon document and names it in `NSAccentColorName` |
 | `macos/menubar/` | The status item mark: an editable 22 × 18 SVG, black template PNGs at 1x, 2x, 3x, and white previews | `scripts/swift/resources.sh` mirrors the 1x and 2x template PNGs into the macOS app |
 | `windows/` | `Vapor.ico` and `Vapor-unplated.ico` (15 sizes each), the same sizes as PNGs plus 512 and 1024, tray glyphs in black and white, and the MSIX asset family with its manifest fragment | The Windows app, when it ships |
 | `linux/` | A freedesktop `hicolor/` tree (12 raster sizes, a scalable flat SVG, a symbolic SVG), a desktop entry, and an icon install script | The Linux app, when it ships |
@@ -31,14 +32,40 @@ sculpted `Vapor` wordmark over a faint warm haze.
 
 | Role | Value |
 | --- | --- |
-| Brand orange (Aerospace International Orange) | `#FF4F00` |
+| Primary colour (Aerospace International Orange) | `#FF4F00` (sRGB 255, 79, 0) |
 | Light tile gradient | `#FFFFFF` to `#F1F0EE` (solid alternative `#FAF9F7`) |
 | Dark tile gradient | `#272A30` to `#15171B` (solid alternative `#17191D`) |
 | Light page surface | `#FAF9F7` |
 | Dark page surface | `#0D1117` |
 
-The rendered sculpture and the banners shade around the brand orange; the
-SVG marks and favicons use it flat.
+The rendered sculpture and the banners shade around the primary colour;
+the SVG marks and favicons use it flat.
+
+### The primary colour
+
+Aerospace International Orange, `#FF4F00`, is Vapor's one brand colour.
+Any place that needs a primary, accent, or highlight colour takes it from
+here rather than from a system palette: a new surface's accent colour, a
+"needs you" state, a link or a button that should read as Vapor's own.
+Where it lives today:
+
+- `assets/macos/Vapor.xcassets/AccentColor.colorset` is the macOS app's
+  accent colour. macOS applies it to controls whenever the user's system
+  accent is the default multicolour, and keeps the user's own choice
+  otherwise, which is the behaviour the Human Interface Guidelines ask
+  for; the app never overrides that with a tint of its own.
+- `VaporConstants.Brand` (`apps/macos/Sources/VaporCore/VaporConstants.swift`)
+  is the copy code reads: the hex and the sRGB components. The app's
+  `NSColor.vaporPrimary` and `Color.vaporPrimary` derive from it, and
+  every in-app highlight that used to be the system orange uses them.
+- The menu bar mark turns this colour while Vapor is waiting on the user
+  (below).
+- `marks/vapor-mark-orange.svg`, the favicons, and the masters under
+  `source/` carry the same value flat or shaded.
+
+A future Windows or Linux app mirrors the constant the same way and
+uses the colour for the same roles: its accent where the toolkit has
+one, its tray mark while a question or a conflict is waiting.
 
 ## macOS
 
@@ -76,9 +103,16 @@ there is no separate copy.
 app's resource bundle, and the app loads them by name through
 `MenuBarIcon` (`apps/macos/Sources/Vapor/MenuBarIcon.swift`). AppKit pairs
 the two scales into one image and, because the name ends in `Template`,
-tints it for the current menu bar appearance; the app never picks a
-colour. The `@3x` file and the white PNGs are previews and are not
-shipped, since macOS renders at 1x and 2x only.
+tints it for the current menu bar appearance. The mark has a second face
+for the moments Vapor is waiting on the user (a parked question, an
+unresolved conflict, a crash-loop pause, a blocked login item, a
+restart-required setting, an unreadable config file, a sync stopped on
+an error): the app fills the
+same shape with the primary colour at launch, once per scale, and shows
+that non-template image until nothing is waiting. There is no orange
+PNG to maintain; the template is the only source. The `@3x` file and
+the white PNGs are previews and are not shipped, since macOS renders at
+1x and 2x only.
 
 The template PNGs carry 72, 144, and 216 dpi so they load at 22 × 18
 points. Re-export them with the same values; a file tagged at a higher

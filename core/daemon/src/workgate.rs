@@ -182,11 +182,36 @@ impl ThrottleWorkgate {
             }
         };
 
+        Ok(self.admit(active_permit))
+    }
+
+    /// A reconcile permit for the user's on-demand scan. The state's
+    /// `allow_reconcile` gate is waived; its planner and read caps still
+    /// apply, so `Suspended`, whose caps are zero, still refuses.
+    pub fn try_acquire_on_demand_reconcile(&mut self) -> Result<WorkPermit, WorkPermitDenied> {
+        self.ensure_planner_capacity(WorkClass::Reconcile)?;
+        if self.active_read_tokens >= self.caps.read_tokens {
+            return Err(self.denied(
+                WorkClass::Reconcile,
+                WorkPermitDeniedReason::ReadTokensExhausted,
+            ));
+        }
+        Ok(self.admit(ActivePermit {
+            class: WorkClass::Reconcile,
+            uses_planner_slot: true,
+            uses_read_token: true,
+        }))
+    }
+
+    fn admit(&mut self, active_permit: ActivePermit) -> WorkPermit {
         let id = self.allocate_permit_id();
-        let permit = WorkPermit { id, class };
+        let permit = WorkPermit {
+            id,
+            class: active_permit.class,
+        };
         self.active_permits.insert(permit.id, active_permit);
         self.increment_counts(active_permit);
-        Ok(permit)
+        permit
     }
 
     /// Returns a permit id that does not collide with any currently-active
@@ -577,6 +602,33 @@ mod tests {
             ThrottleState::IdleDrain,
             controller.caps_for(ThrottleState::IdleDrain),
         )
+    }
+
+    fn gate_for(state: ThrottleState) -> ThrottleWorkgate {
+        let controller = ThrottleController::default();
+        ThrottleWorkgate::new(state, controller.caps_for(state))
+    }
+
+    #[test]
+    fn on_demand_reconcile_waives_the_idle_gate_but_not_suspended_caps() {
+        for state in [ThrottleState::Light, ThrottleState::Throttled] {
+            let mut gate = gate_for(state);
+            assert!(
+                gate.try_acquire(WorkClass::Reconcile).is_err(),
+                "{state:?} must refuse a scan nobody asked for"
+            );
+            let permit = gate
+                .try_acquire_on_demand_reconcile()
+                .expect("the user's scan is admitted");
+            // It still spends the state's planner slot and read token.
+            assert!(gate.try_acquire_on_demand_reconcile().is_err());
+            assert!(gate.release(permit));
+        }
+        let mut gate = gate_for(ThrottleState::Suspended);
+        assert!(
+            gate.try_acquire_on_demand_reconcile().is_err(),
+            "Suspended has no capacity to waive into"
+        );
     }
 
     #[test]

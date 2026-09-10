@@ -39,6 +39,10 @@ pub trait Service: Send + Sync {
         unsupported_ack("reconcile")
     }
 
+    fn sync_now(&self) -> AckResponse {
+        unsupported_ack("sync_now")
+    }
+
     fn diagnostics(&self) -> DiagnosticsResponse {
         let (current, _) = crate::daemon_supported_versions();
         DiagnosticsResponse {
@@ -254,6 +258,7 @@ fn dispatch_method(service: &dyn Service, method: Method) -> Response {
         Method::Resume => Response::Ok(ResponseBody::Ack(service.resume())),
         Method::FlushNow => Response::Ok(ResponseBody::Ack(service.flush_now())),
         Method::Reconcile => Response::Ok(ResponseBody::Ack(service.reconcile())),
+        Method::SyncNow => Response::Ok(ResponseBody::Ack(service.sync_now())),
         Method::Timeline => Response::Ok(ResponseBody::Timeline(service.timeline())),
         Method::Diagnostics => Response::Ok(ResponseBody::Diagnostics(service.diagnostics())),
         Method::SetAutoLaunch { enabled } => {

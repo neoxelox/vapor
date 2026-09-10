@@ -54,5 +54,14 @@
   "sync_state_stopped_detail": "The background service is not running",
   "sync_state_error_detail": "Action required",
   "login_item_requires_approval_detail": "macOS is blocking Vapor's login item, so the app will not open at login. Approve Vapor under System Settings › General › Login Items.",
-  "login_item_open_settings": "Open Login Items Settings…"
+  "login_item_open_settings": "Open Login Items Settings…",
+  "attention_decision_one": "1 question needs your answer",
+  "attention_decisions_format": "%lld questions need your answer",
+  "attention_conflict_one": "1 conflict needs your decision",
+  "attention_conflicts_format": "%lld conflicts need your decision",
+  "attention_cli_hint": "Until the app grows a pane for these, answer them in Terminal with vapor decisions list and vapor conflicts list.",
+  "restart_needs_auto_launch_hint": "Sync runs in the background only while Start Vapor at login is on.",
+  "menubar_sync_now": "Sync now",
+  "sync_now_hint": "Scans both folders right away instead of waiting for an idle moment.",
+  "scan_waiting_hint": "Vapor waits for an idle moment before scanning. Sync now scans anyway."
 }

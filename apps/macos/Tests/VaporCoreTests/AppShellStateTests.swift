@@ -81,3 +81,92 @@ func surfaceStateFollowsTheDaemonStatusWhenRunning() {
   #expect(SyncSurfaceState.from(health: .restartDeferred(30), status: nil) == .stopped)
   #expect(SyncSurfaceState.from(health: .crashLoopPaused, status: nil) == .error)
 }
+
+@Test
+func needsUserActionFollowsEveryStateOnlyTheUserCanClear() {
+  var state = AppShellState.initial
+  #expect(!state.needsUserAction)
+
+  state.decisionsPending = 1
+  #expect(state.needsUserAction)
+  state.decisionsPending = 0
+
+  state.conflictsUnresolved = 2
+  #expect(state.needsUserAction)
+  state.conflictsUnresolved = 0
+
+  state.crashLoopPaused = true
+  #expect(state.needsUserAction)
+  state.crashLoopPaused = false
+
+  state.loginItemRequiresApproval = true
+  #expect(state.needsUserAction)
+  state.loginItemRequiresApproval = false
+
+  state.configRestartRequired = "syncMode changed"
+  #expect(state.needsUserAction)
+  state.configRestartRequired = nil
+
+  state.configurationIssuePath = "/tmp/.vapor/vapor.json"
+  #expect(state.needsUserAction)
+  state.configurationIssuePath = nil
+
+  // The Error state's own copy says "Action required"; the mark agrees.
+  state.syncState = .error
+  #expect(state.needsUserAction)
+  state.syncState = .paused
+  #expect(!state.needsUserAction)
+}
+
+@Test
+func syncDetailPrefersTheReasonTheUserCanActOn() {
+  func status(
+    throttle: String = "user activity is active",
+    runStateReason: String? = nil,
+    scan: String = "",
+    scanDetail: String = ""
+  ) -> DaemonStatusSnapshot {
+    DaemonStatusSnapshot(
+      runState: "Running", throttleState: "Throttled", throttleReason: throttle,
+      providerName: "filesystem", queueDepth: 1, failedIntents: 0,
+      runStateReason: runStateReason, reconcileState: scan, reconcileDetail: scanDetail)
+  }
+  // Nothing answered: nothing to say.
+  #expect(AppShellState.syncDetail(for: .stopped, status: nil) == nil)
+  // The throttle explains the pace by default.
+  #expect(
+    AppShellState.syncDetail(for: .throttled, status: status()) == "user activity is active")
+  // A held or running scan explains why nothing has moved yet.
+  #expect(
+    AppShellState.syncDetail(
+      for: .throttled,
+      status: status(
+        scan: "waiting", scanDetail: "waiting for an idle moment: user activity is active")
+    ) == "waiting for an idle moment: user activity is active")
+  #expect(
+    AppShellState.syncDetail(
+      for: .syncing, status: status(scan: "running", scanDetail: "scanning /Users/alex/Vapor")
+    ) == "scanning /Users/alex/Vapor")
+  // Under Error the daemon's own reason wins over both.
+  #expect(
+    AppShellState.syncDetail(
+      for: .error,
+      status: status(
+        runStateReason: "cloud sync directory /Vapor is unavailable", scan: "waiting",
+        scanDetail: "waiting")
+    ) == "cloud sync directory /Vapor is unavailable")
+  // An empty throttle reason is no detail at all.
+  #expect(AppShellState.syncDetail(for: .idle, status: status(throttle: "")) == nil)
+}
+
+@Test
+func daemonIsReachableOnlyWhileTheDaemonAnswers() {
+  var state = AppShellState.initial
+  #expect(state.daemonIsReachable)
+  state.syncState = .stopped
+  #expect(!state.daemonIsReachable)
+  state.syncState = .error
+  #expect(state.daemonIsReachable)
+  state.crashLoopPaused = true
+  #expect(!state.daemonIsReachable)
+}

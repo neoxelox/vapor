@@ -334,6 +334,16 @@ impl DaemonApp {
         self.reconcile_controller.running_root().cloned()
     }
 
+    /// The user asked for a scan now: the next reconcile is admitted
+    /// under any throttle state but `Suspended`.
+    pub fn request_on_demand_reconcile(&mut self) {
+        self.reconcile_controller.request_on_demand();
+    }
+
+    pub fn on_demand_reconcile_pending(&self) -> bool {
+        self.reconcile_controller.on_demand()
+    }
+
     /// Aborts the running reconcile after a comparison-walk failure.
     pub fn abort_reconcile(
         &mut self,

@@ -840,6 +840,7 @@ impl MultiProfileRuntime {
         let pause = external.take_pause_request();
         let flush = external.take_flush_request();
         let reconcile = external.take_reconcile_request();
+        let sync_now = external.take_sync_now_request();
         for slot in &self.slots {
             match pause {
                 Some(true) => slot.control.request_pause(),
@@ -852,8 +853,11 @@ impl MultiProfileRuntime {
             if reconcile {
                 slot.control.request_reconcile();
             }
+            if sync_now {
+                slot.control.request_sync_now();
+            }
         }
-        pause.is_some() || flush || reconcile
+        pause.is_some() || flush || reconcile || sync_now
     }
 
     /// One status snapshot for the whole daemon: the most
@@ -908,13 +912,20 @@ impl MultiProfileRuntime {
         }
 
         let per_profile_cap = (DIAGNOSTICS_ROW_CAP / self.slots.len().max(1)).max(10);
+        let mut daemon_reconcile = crate::runtime::ReconcileStatus::Idle;
         for slot in &self.slots {
             let queue_depth = slot.runtime.state_db().queue_depth().unwrap_or(0) as u64;
             let failed_intents = slot.runtime.state_db().failed_depth().unwrap_or(0) as u64;
             let decisions_pending =
                 slot.runtime.state_db().open_decision_count().unwrap_or(0) as u64;
+            let conflicts_unresolved = slot
+                .runtime
+                .state_db()
+                .unresolved_conflict_copy_count()
+                .unwrap_or(0) as u64;
             let (mirror_reverts, mirror_deletes) = slot.runtime.mirror_counters();
             let conflicts = slot.runtime.conflict_count();
+            let reconcile = slot.runtime.reconcile_status();
             let app_snapshot = slot.runtime.app().snapshot();
             snapshot.profiles.push(vapor_ipc::ProfileStatus {
                 id: slot.profile.id.clone(),
@@ -930,10 +941,15 @@ impl MultiProfileRuntime {
                 mirror_deletes,
                 suspended_reason: slot.failed.clone(),
                 decisions_pending,
+                conflicts_unresolved,
+                reconcile_state: reconcile.label().to_string(),
+                reconcile_detail: reconcile.detail(),
             });
+            daemon_reconcile = daemon_reconcile.more_active(reconcile);
             snapshot.queue_depth += queue_depth;
             snapshot.failed_intents += failed_intents;
             snapshot.decisions_pending += decisions_pending;
+            snapshot.conflicts_unresolved += conflicts_unresolved;
             snapshot.conflicts += conflicts;
             snapshot.mirror_reverts += mirror_reverts;
             snapshot.mirror_deletes += mirror_deletes;
@@ -955,6 +971,8 @@ impl MultiProfileRuntime {
                 snapshot.diagnostics_truncated = true;
             }
         }
+        snapshot.reconcile_state = daemon_reconcile.label().to_string();
+        snapshot.reconcile_detail = daemon_reconcile.detail();
         snapshot
     }
 }

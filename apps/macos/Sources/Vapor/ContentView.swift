@@ -83,6 +83,7 @@ private struct DiagnosticsSummaryView: View {
           Text(viewModel.localized(viewModel.state.syncState.detailLocalizationKey))
             .font(.subheadline)
             .foregroundStyle(.secondary)
+          UserActionNotice(viewModel: viewModel)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       }

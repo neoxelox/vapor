@@ -8,6 +8,9 @@ public enum DaemonLifecycleActionResult: Equatable, Sendable {
   case started
   case stopped
   case relaunchDeferred(TimeInterval)
+  /// No service definition is registered, so there was nothing to
+  /// start or restart; turning auto-launch on is what registers one.
+  case notInstalled
 }
 
 /// Outcome of one `vapor service check` supervision tick.
@@ -54,6 +57,20 @@ public struct DaemonStatusSnapshot: Equatable, Sendable {
   /// Set when a restart-required key of `vapor.json` changed under the
   /// running daemon; the daemon phrases the notice.
   public var configRestartRequired: String?
+  /// Questions the daemon parked for the user (`vapor decisions list`).
+  public var decisionsPending: UInt64
+  /// Keep-both conflict copies the user has not resolved
+  /// (`vapor conflicts list`).
+  public var conflictsUnresolved: UInt64
+  /// Why the daemon is in its run state, when a profile says: a sync
+  /// root it cannot ensure, a decision it waits on, a suspension.
+  /// `nil` while every profile is simply running.
+  public var runStateReason: String?
+  /// What the whole-scope scan is doing: `waiting` (queued, held by
+  /// the throttle), `running`, or nothing (`idle` or empty).
+  public var reconcileState: String
+  /// Why the scan waits, or what it scans; empty otherwise.
+  public var reconcileDetail: String
 
   public init(
     runState: String,
@@ -62,7 +79,12 @@ public struct DaemonStatusSnapshot: Equatable, Sendable {
     providerName: String,
     queueDepth: UInt64,
     failedIntents: UInt64,
-    configRestartRequired: String? = nil
+    configRestartRequired: String? = nil,
+    decisionsPending: UInt64 = 0,
+    conflictsUnresolved: UInt64 = 0,
+    runStateReason: String? = nil,
+    reconcileState: String = "",
+    reconcileDetail: String = ""
   ) {
     self.runState = runState
     self.throttleState = throttleState
@@ -71,7 +93,16 @@ public struct DaemonStatusSnapshot: Equatable, Sendable {
     self.queueDepth = queueDepth
     self.failedIntents = failedIntents
     self.configRestartRequired = configRestartRequired
+    self.decisionsPending = decisionsPending
+    self.conflictsUnresolved = conflictsUnresolved
+    self.runStateReason = runStateReason
+    self.reconcileState = reconcileState
+    self.reconcileDetail = reconcileDetail
   }
+
+  /// The scan is queued but the throttle holds it.
+  public var scanIsWaiting: Bool { reconcileState == "waiting" }
+  public var scanIsRunning: Bool { reconcileState == "running" }
 }
 
 /// The app's seam onto daemon lifecycle operations. The
@@ -116,6 +147,10 @@ public protocol LaunchAgentControlling {
   /// Live daemon status over IPC (`vapor status --json`). Throws when
   /// the daemon is not running.
   func daemonStatus() throws -> DaemonStatusSnapshot
+  /// The user's on-demand sync (`vapor sync-now --json`): a scan of
+  /// both roots that does not wait for an idle moment, plus the flush
+  /// boost. Throws when the daemon is not running or refuses.
+  func syncNow() throws
 }
 
 /// Outcome of a login-item registration attempt, surfaced so the UI
@@ -190,6 +225,8 @@ public struct NoopLaunchAgentController: LaunchAgentControlling {
     struct NotRunning: Error {}
     throw NotRunning()
   }
+
+  public func syncNow() throws {}
 }
 
 /// Thin coordinator over the `LaunchAgentControlling` seam. Owns
@@ -360,6 +397,15 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
       let result = try launchAgentController.restartDaemon()
       logger.info("Requested daemon restart", metadata: ["result": String(describing: result)])
       return result
+    }
+  }
+
+  /// Asks the running daemon to scan both roots now, whatever the
+  /// throttle says short of Suspended.
+  public func syncNow() throws {
+    try stateQueue.sync {
+      try launchAgentController.syncNow()
+      logger.info("Requested an on-demand sync")
     }
   }
 

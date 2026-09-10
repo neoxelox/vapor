@@ -285,6 +285,7 @@ final class RecordingServiceController: LaunchAgentControlling {
     operations.append("status")
     return liveStatus
   }
+  func syncNow() throws {}
 }
 
 private struct ThrowingServiceController: LaunchAgentControlling {
@@ -311,6 +312,7 @@ private struct ThrowingServiceController: LaunchAgentControlling {
   func restartDaemon() throws -> DaemonLifecycleActionResult { throw ControllerError() }
 
   func daemonStatus() throws -> DaemonStatusSnapshot { throw ControllerError() }
+  func syncNow() throws { throw ControllerError() }
 }
 
 @Test

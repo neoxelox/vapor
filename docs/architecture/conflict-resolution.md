@@ -44,10 +44,19 @@ any surface.
 - The daemon pushes a `conflict` event onto the activity timeline in the
   tick that created a copy, and `vapor status` carries a cumulative
   conflict counter (IPC schema v2).
-- App surfaces treat the timeline event as the *trigger* (menubar badge,
-  native notification) and the CLI listing below as the *content*. The
-  timeline's cap is irrelevant here: a missed notification costs nothing,
-  because listing never depends on it.
+- `vapor status` also carries `conflicts_unresolved` (total and per
+  profile): the paths in the sync index whose name parses as a conflict
+  copy, plus the copies still queued for their first upload, so the
+  count covers a copy from the tick that created it until the user's
+  resolution has synced. Two partial indexes over the marker keep the
+  query a read of the matching rows, never a scan of the index or the
+  queue, which is what lets every status publish afford it. It is the
+  cheap signal; the files on disk stay the ledger.
+- App surfaces treat the count and the timeline event as the *trigger*
+  (the macOS menu bar mark turns the brand colour while the count is
+  non-zero, and the menu names the number) and the CLI listing below as
+  the *content*. The timeline's cap is irrelevant here: a missed
+  notification costs nothing, because listing never depends on it.
 
 ### 2. List
 
@@ -106,7 +115,7 @@ a file on disk and a decision is a row in the state DB.
 | Surface | Notify | List | Resolve |
 |---|---|---|---|
 | `vapor` CLI (shipped) | `vapor timeline` / `vapor status` counter | `vapor conflicts list [--json]` | `vapor conflicts resolve` |
-| macOS app (planned, `docs/tasks/macos.md`) | menubar badge + native notification on `conflict` timeline events | conflicts pane driving `vapor conflicts list --json` | per-row keep-canonical / keep-copy actions driving `vapor conflicts resolve --json` |
+| macOS app | the menu bar mark in the brand colour and a count in the menu while `conflicts_unresolved` is non-zero (shipped); native notification on `conflict` timeline events (planned, `docs/tasks/macos.md`) | conflicts pane driving `vapor conflicts list --json` (planned) | per-row keep-canonical / keep-copy actions driving `vapor conflicts resolve --json` (planned) |
 | Windows / Linux apps (future waves) | same model over the same CLI | same | same |
 
 App shells never reimplement scan or resolution logic — the CLI is the

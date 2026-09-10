@@ -85,6 +85,12 @@ enum Command {
     FlushNow,
     /// Request a fresh whole-scope reconcile.
     Reconcile,
+    /// Sync now: scan both roots without waiting for an idle moment
+    /// (any throttle state but Suspended) and release deferred work.
+    SyncNow {
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the diagnostics timeline.
     Timeline {
         #[arg(long)]
@@ -413,6 +419,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
         Command::Resume => dispatch_ack("resume", ipc_cmd::resume()),
         Command::FlushNow => dispatch_ack("flush-now", ipc_cmd::flush_now()),
         Command::Reconcile => dispatch_ack("reconcile", ipc_cmd::reconcile()),
+        Command::SyncNow { json } => dispatch_ack_json("sync-now", ipc_cmd::sync_now(), json),
         Command::Timeline { json } => dispatch_timeline(json),
         Command::Diagnostics { json } => dispatch_diagnostics(json),
         Command::Logs { tail } => dispatch_logs(tail),
@@ -632,6 +639,27 @@ fn dispatch_status(json: bool) -> Result<ExitCode, String> {
         println!("{}", ipc_cmd::render_status(&status));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `dispatch_ack` with a `--json` form for the app shim: the ack as the
+/// daemon sent it, exit 0 when accepted and 1 otherwise, like the text
+/// form.
+fn dispatch_ack_json(
+    command: &str,
+    result: Result<vapor_ipc::AckResponse, ipc_cmd::IpcCliError>,
+    json: bool,
+) -> Result<ExitCode, String> {
+    if !json {
+        return dispatch_ack(command, result);
+    }
+    let ack = result.map_err(|e| e.to_string())?;
+    let serialized = serde_json::to_string_pretty(&ack).map_err(|e| e.to_string())?;
+    println!("{serialized}");
+    Ok(if ack.accepted {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }
 
 fn dispatch_ack(

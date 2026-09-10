@@ -87,6 +87,11 @@ pub enum DaemonLifecycleActionResult {
     /// (`Duration::MAX` means paused indefinitely awaiting user
     /// acknowledgement).
     RelaunchDeferred(Duration),
+    /// No service definition is registered with the OS, so there is
+    /// nothing to start or restart. Auto-launch is what installs one;
+    /// an explicit start against a bare host reports this instead of
+    /// failing inside the service manager.
+    NotInstalled,
 }
 
 /// Outcome of one supervision tick ([`DaemonLifecycleManager::check_daemon_health`]).
@@ -338,11 +343,17 @@ impl DaemonLifecycleManager {
         })
     }
 
-    /// Mirrors `startDaemonIfAllowed(now:)`.
+    /// Mirrors `startDaemonIfAllowed(now:)`. An explicit start needs a
+    /// registered service definition; without one the answer is
+    /// [`DaemonLifecycleActionResult::NotInstalled`], and the guard's
+    /// bookkeeping stays untouched.
     pub fn start_daemon_if_allowed(
         &self,
         now: Instant,
     ) -> Result<DaemonLifecycleActionResult, DaemonLifecycleError> {
+        if self.installer.status()? == ServiceStatus::NotInstalled {
+            return Ok(DaemonLifecycleActionResult::NotInstalled);
+        }
         self.start_daemon_if_allowed_inner(now)
     }
 
@@ -506,6 +517,14 @@ mod tests {
         }
     }
 
+    /// A fake whose service definition is already registered, for the
+    /// tests that model a supervised daemon rather than a bare host.
+    fn installed_installer() -> Arc<InMemoryServiceInstaller> {
+        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        installer.set_status_for_testing(ServiceStatus::Stopped);
+        installer
+    }
+
     fn fixed_policy() -> CrashLoopPolicy {
         // Two free crashes, then 2s-base backoff capped at 32s.
         CrashLoopPolicy::new(
@@ -616,7 +635,7 @@ mod tests {
 
     #[test]
     fn crash_loop_defers_relaunch_with_exponential_backoff() {
-        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let installer = installed_installer();
         let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
         let manager = manager_with(installer.clone(), settings);
 
@@ -671,7 +690,7 @@ mod tests {
             1,
             3,
         );
-        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let installer = installed_installer();
         let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
         let manager =
             DaemonLifecycleManager::with_crash_loop_policy(installer.clone(), settings, policy);
@@ -751,7 +770,7 @@ mod tests {
 
     #[test]
     fn successful_start_persists_supervision_expectation() {
-        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let installer = installed_installer();
         let store = Arc::new(InMemoryLifecycleStateStore::new());
         let clock = Arc::new(FixedWallClock::at(1_000_000));
         let manager = durable_manager_with(installer, store.clone(), clock, fixed_policy());
@@ -795,7 +814,7 @@ mod tests {
             1,
             3,
         );
-        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let installer = installed_installer();
         let store = Arc::new(InMemoryLifecycleStateStore::new());
         let clock = Arc::new(FixedWallClock::at(1_000_000));
 
@@ -842,7 +861,7 @@ mod tests {
 
     #[test]
     fn backoff_window_survives_a_process_restart() {
-        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let installer = installed_installer();
         let store = Arc::new(InMemoryLifecycleStateStore::new());
         let clock = Arc::new(FixedWallClock::at(1_000_000));
 
@@ -943,7 +962,7 @@ mod tests {
 
     #[test]
     fn check_restarts_immediately_on_first_unexpected_exit() {
-        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let installer = installed_installer();
         let store = Arc::new(InMemoryLifecycleStateStore::new());
         let clock = Arc::new(FixedWallClock::at(10_000));
         let manager = durable_manager_with(installer.clone(), store.clone(), clock, check_policy());
@@ -967,7 +986,7 @@ mod tests {
 
     #[test]
     fn check_defers_restart_during_backoff_and_restarts_after_it_elapses() {
-        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let installer = installed_installer();
         let store = Arc::new(InMemoryLifecycleStateStore::new());
         let clock = Arc::new(FixedWallClock::at(10_000));
         let manager = durable_manager_with(installer.clone(), store.clone(), clock, check_policy());
@@ -1018,7 +1037,7 @@ mod tests {
 
     #[test]
     fn check_pauses_after_repeated_crashes_and_restarts_only_after_acknowledge() {
-        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let installer = installed_installer();
         let store = Arc::new(InMemoryLifecycleStateStore::new());
         let clock = Arc::new(FixedWallClock::at(10_000));
         let manager = durable_manager_with(installer.clone(), store.clone(), clock, check_policy());

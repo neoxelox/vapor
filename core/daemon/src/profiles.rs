@@ -78,7 +78,7 @@ pub fn resolve_profiles(config: &VaporConfig) -> Vec<ResolvedProfile> {
             effective.local_sync_directory = local.clone();
         }
         if let Some(cloud) = &profile.cloud_sync_directory {
-            effective.cloud_sync_directory = cloud.clone();
+            effective.cloud_sync_directory = Some(cloud.clone());
         }
         if let Some(sync_mode) = &profile.sync_mode {
             effective.sync_mode = sync_mode.clone();
@@ -210,7 +210,7 @@ mod tests {
     fn base_config() -> VaporConfig {
         VaporConfig {
             local_sync_directory: "/tmp/vapor-top-local".to_string(),
-            cloud_sync_directory: "/tmp/vapor-top-cloud".to_string(),
+            cloud_sync_directory: Some("/tmp/vapor-top-cloud".to_string()),
             sync_mode: "two-way".to_string(),
             ..VaporConfig::default()
         }

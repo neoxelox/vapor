@@ -218,8 +218,18 @@ final class AppShellViewModel: ObservableObject {
         if !self.state.hasConfigurationIssue {
           self.state.syncState = SyncSurfaceState.from(health: outcome, status: status)
         }
-        self.state.syncDetail = status.map(\.throttleReason).flatMap { $0.isEmpty ? nil : $0 }
+        self.state.syncDetail = AppShellState.syncDetail(for: self.state.syncState, status: status)
+        self.state.scanIsWaiting = status?.scanIsWaiting ?? false
+        self.state.scanIsRunning = status?.scanIsRunning ?? false
         self.state.configRestartRequired = status?.configRestartRequired
+        // Both counts are durable facts about the profile state, so a
+        // tick without a status answer (daemon stopped or restarting)
+        // keeps the last known values instead of pretending nothing is
+        // waiting.
+        if let status {
+          self.state.decisionsPending = status.decisionsPending
+          self.state.conflictsUnresolved = status.conflictsUnresolved
+        }
         if let status, !status.providerName.isEmpty {
           self.state.providerName = VaporConstants.Provider.displayName(
             forKind: status.providerName)
@@ -380,9 +390,33 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
+  /// The user's on-demand sync: the daemon scans both roots without
+  /// waiting for an idle moment and releases deferred work. Runs on the
+  /// lifecycle queue like every CLI round-trip; a refusal is logged and
+  /// the surface keeps showing what the daemon last reported.
+  func syncNow() {
+    logger.info("Requesting an on-demand sync")
+
+    let daemonLifecycleManager = self.daemonLifecycleManager
+    let logger = self.logger
+
+    lifecycleQueue.async {
+      do {
+        try daemonLifecycleManager.syncNow()
+      } catch {
+        logger.warning(
+          "On-demand sync was not accepted",
+          metadata: ["error": String(describing: error)]
+        )
+      }
+    }
+  }
+
   /// Stop and start the daemon on the lifecycle queue. Offered whenever
   /// the daemon reports a restart-required configuration change, and
-  /// always from the menu bar.
+  /// always from the menu bar while the background service exists.
+  /// With auto-launch off there is no service to restart; the CLI says
+  /// so and the surface shows the daemon as stopped rather than failed.
   func restartDaemon() {
     logger.info("Requesting daemon restart")
 
@@ -394,6 +428,13 @@ final class AppShellViewModel: ObservableObject {
         let result = try daemonLifecycleManager.restartDaemon()
         Task { @MainActor [weak self] in
           guard let self else {
+            return
+          }
+          if result == .notInstalled {
+            self.state.syncState = .stopped
+            logger.warning(
+              "Daemon restart requested with no background service registered; turn on auto-launch to run sync in the background"
+            )
             return
           }
           self.state.configRestartRequired = nil

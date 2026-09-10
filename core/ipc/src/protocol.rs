@@ -67,6 +67,10 @@ pub enum Method {
     /// Request a fresh whole-scope reconcile against the local sync
     /// directory.
     Reconcile,
+    /// The user's on-demand sync (schema v2, later addition): a
+    /// whole-scope reconcile admitted under any throttle state but
+    /// `Suspended`, plus the flush boost.
+    SyncNow,
     /// Read the bounded daemon activity timeline.
     Timeline,
     /// Per-intent "why stuck" diagnostics (schema v2).
@@ -257,6 +261,21 @@ pub struct StatusResponse {
     /// (`vapor decisions list`).
     #[serde(default)]
     pub decisions_pending: u64,
+    /// Keep-both conflict copies the user has not resolved yet, across
+    /// profiles: the copies the sync index knows about plus the ones
+    /// still queued for their first upload (`vapor conflicts list`).
+    /// Unlike `conflicts`, this goes back to zero when the user
+    /// resolves them.
+    #[serde(default)]
+    pub conflicts_unresolved: u64,
+    /// What the whole-scope scan is doing across profiles: `idle`,
+    /// `waiting` (queued, held by the throttle), or `running`. The
+    /// daemon-wide value is the most active profile's.
+    #[serde(default)]
+    pub reconcile_state: String,
+    /// Why the scan waits, or what it scans; empty when idle.
+    #[serde(default)]
+    pub reconcile_detail: String,
 }
 
 /// One profile's status row inside [`StatusResponse`] (schema v2).
@@ -289,6 +308,12 @@ pub struct ProfileStatus {
     pub suspended_reason: Option<String>,
     #[serde(default)]
     pub decisions_pending: u64,
+    #[serde(default)]
+    pub conflicts_unresolved: u64,
+    #[serde(default)]
+    pub reconcile_state: String,
+    #[serde(default)]
+    pub reconcile_detail: String,
 }
 
 /// Effective resource ceilings, measured utilization, and idle-boost
