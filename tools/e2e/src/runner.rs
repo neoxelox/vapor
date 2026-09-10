@@ -275,9 +275,10 @@ pub fn run(options: &RunOptions) -> Result<RunReport, Failure> {
 
 /// Runs every scenario, `jobs` at a time, and returns the results in
 /// catalog order. Disk-image scenarios take a lock among themselves
-/// (one `hdiutil` at a time); a scenario that needs launchd waits
-/// until every other one is done and then runs alone, since it
-/// mutates host state.
+/// (one `hdiutil` at a time). The launchd round-trip goes first: it
+/// is the longest scenario by far (real crash-loop backoff and the
+/// supervisor's tick), and its LaunchAgent points at its own sandbox,
+/// so it shares nothing with the others.
 fn run_all(
     scenarios: &[Scenario],
     jobs: usize,
@@ -287,26 +288,31 @@ fn run_all(
     run_root: &Path,
     keep: bool,
 ) -> Vec<ScenarioResult> {
-    let exclusive = |scenario: &Scenario| scenario.needs.contains(&Need::Launchd);
-    let mut shared: Vec<(usize, Scenario)> = scenarios
+    let mut ordered: Vec<(usize, Scenario)> = scenarios
         .iter()
         .enumerate()
-        .filter(|(_, scenario)| !exclusive(scenario))
         .map(|(index, scenario)| (index, *scenario))
         .collect();
-    // Longest first, by the previous run's clock; a scenario without a
-    // record goes ahead of the known short ones. Catalog order breaks
-    // ties, so a run with no history keeps it.
-    shared.sort_by(|(a_index, a), (b_index, b)| {
-        let seconds = |scenario: &Scenario| last_durations.get(scenario.id).copied();
-        let a_seconds = seconds(a).unwrap_or(f64::MAX);
-        let b_seconds = seconds(b).unwrap_or(f64::MAX);
-        b_seconds
-            .partial_cmp(&a_seconds)
+    // Longest first, by the previous run's clock; the launchd round-trip
+    // and then any scenario without a record go ahead of the known
+    // short ones. Catalog order breaks ties, so a run with no history
+    // keeps it.
+    ordered.sort_by(|(a_index, a), (b_index, b)| {
+        let seconds = |scenario: &Scenario| {
+            if scenario.needs.contains(&Need::Launchd) {
+                return f64::MAX;
+            }
+            last_durations
+                .get(scenario.id)
+                .copied()
+                .unwrap_or(f64::MAX / 2.0)
+        };
+        seconds(b)
+            .partial_cmp(&seconds(a))
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a_index.cmp(b_index))
     });
-    let queue = Mutex::new(VecDeque::from(shared));
+    let queue = Mutex::new(VecDeque::from(ordered));
     let results: Mutex<Vec<(usize, ScenarioResult)>> = Mutex::new(Vec::new());
     let disk_images = Mutex::new(());
     let workers = jobs.min(scenarios.len().max(1));
@@ -329,12 +335,6 @@ fn run_all(
             });
         }
     });
-    for (index, scenario) in scenarios.iter().enumerate() {
-        if exclusive(scenario) {
-            let result = run_one(scenario, host, paths, run_root, keep);
-            results.lock().expect("results").push((index, result));
-        }
-    }
     let mut results = results.into_inner().expect("results");
     results.sort_by_key(|(index, _)| *index);
     results.into_iter().map(|(_, result)| result).collect()

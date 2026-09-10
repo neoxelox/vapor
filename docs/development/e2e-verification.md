@@ -152,10 +152,12 @@ smaller computer for it: the daemon under test gets two concurrent
 transfers per direction, and every wait deadline grows by half per
 extra scenario running (a bound, so a green run costs nothing extra;
 a loaded host does not read as a failure). Scenarios that mount disk
-images take a lock among themselves, and the launchd round-trip runs
-alone after everything else, since it mutates host state. The queue
-starts with the scenarios the previous run found longest, read from
-the last report, so the tail is the slowest scenario and not the sum.
+images take a lock among themselves. The queue starts with the
+launchd round-trip when `--full` asks for it (the longest scenario by
+far: real crash-loop backoff and the supervisor's tick, in a sandbox
+of its own), then the scenarios the previous run found longest, read
+from the last report, so the tail is the slowest scenario and not the
+sum.
 The default suite takes about as long as its slowest scenario, a
 little over a minute on a twelve-core laptop and under two in a
 container, against nine and a half in sequence; the summary line
