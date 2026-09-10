@@ -346,7 +346,9 @@ Only if the project owner decides to ship a Windows GUI. Creates
 `docs/plans/windows.md` and `docs/tasks/windows.md` as new surfaces
 with their own plan + task list; picks the UI tech (WinUI 3, WPF, or
 Tauri — see `docs/plans/core.md §8`); `release-windows` GitHub
-Environment configured with EV cert secrets.
+Environment configured with EV cert secrets. The icon family is already
+in place under `assets/windows/` (ICO, PNG, tray glyphs, the MSIX asset
+set with its manifest fragment); see `assets/README.md`.
 
 ### Wave 16 — `apps/linux` app shell (optional)
 
@@ -354,7 +356,9 @@ Only if the project owner decides to ship a Linux GUI. Creates
 `docs/plans/linux.md` and `docs/tasks/linux.md` as new surfaces; picks
 the UI tech (GTK4-rs, Qt, or Tauri); `release-linux` GitHub
 Environment configured with GPG key secrets; AppImage first, then
-`.deb` / `.rpm` / Flatpak / Snap as demand surfaces.
+`.deb` / `.rpm` / Flatpak / Snap as demand surfaces. The icon theme
+tree, the desktop entry, and an icon install script are already in place
+under `assets/linux/`; see `assets/README.md`.
 
 ## Cross-phase validation (runs continuously)
 

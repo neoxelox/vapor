@@ -53,8 +53,12 @@ vapor-state/
 runtime/
 data/runtime/
 
-# --- Generated locale mirror (source-of-truth is assets/locales) ---
+# --- Generated resource mirrors (source of truth is assets/) ---
 apps/macos/Sources/VaporCore/Resources/locales/*.json
+apps/macos/Sources/VaporCore/Resources/*.png
+
+# --- Icon rebuild tool dependencies (assets/source/tools) ---
+assets/source/tools/node_modules/
 
 # SQLite sidecar files (allow explicit DB files if needed)
 *.sqlite-wal

@@ -79,7 +79,9 @@ Exit gate:
 - [x] M1.5-4 Deterministic `.app` bundle assembly in `dist/Vapor.app`.
 - [x] M1.5-5 `Info.plist` metadata with `LSMinimumSystemVersion=26.0` and
       deterministic version/build derivation.
-- [x] M1.5-6 `AppIcon.icns` from `assets/icon.png` via `sips` + `iconutil`.
+- [x] M1.5-6 App icon: the Icon Composer document under `assets/macos/`
+      compiled with `actool` for macOS 26, and the iconset packed into an
+      `.icns` with `iconutil` as the flat fallback.
 - [x] M1.5-7 Optional resource copy from `apps/macos/Resources/**`.
 - [x] M1.5-8 Signing modes: ad-hoc default; Developer ID + hardened runtime
       when `VAPOR_SIGN_IDENTITY` is set; optional entitlements.

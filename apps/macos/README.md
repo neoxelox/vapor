@@ -21,7 +21,7 @@ Current implementation notes:
 - `VaporCore` includes `AppLifecycleCoordinator` for app-window/menubar lifecycle actions (Dock presence, daemon stop on quit).
 - `VaporCore` includes `VaporConfigurationStore` + `VaporPaths` for runtime directory resolution and `vapor.json` persistence.
 - `VaporCore` includes `VaporLocalizationStore` for JSON-catalog UI copy lookup with device-language selection and English fallback.
-- Locale source-of-truth catalogs live in `assets/locales/*.json` and are synced by scripts into `Sources/VaporCore/Resources/locales/*.json` before Swift build/test/package.
+- Locale catalogs (`assets/locales/*.json`) and the menu bar image (`assets/macos/menubar/VaporMenuBarTemplate*.png`) are mirrored by `scripts/swift/resources.sh` into `Sources/VaporCore/Resources/` before every Swift build, test, and package run; the mirror is gitignored. `VaporResourceBundle` finds that bundle at runtime for both the localization store and the menu bar icon.
 - The LaunchAgent plist and `launchctl` interaction are owned by the Rust `NativeServiceInstaller` (`core/platform`), reached through `vapor service`; no Swift code writes the plist.
 - `AppShellViewModel` uses lifecycle defaults backed by `VaporCLIServiceController` and `SMAppService.mainApp` integration to restore Vapor at login in menubar-only mode.
 - Settings/config surface includes `useGitIgnore`, `useVaporIgnore`, `localSyncDirectory`, `cloudSyncDirectory`, `preIgnoreRules`, and `postIgnoreRules`, persisted in `vapor.json`. The running daemon applies ignore toggles and rules within a few seconds; roots, provider and profile changes need a restart, which the daemon reports in status and the app offers as "Restart sync" (the LaunchAgent environment carries only `VAPOR_DIR` + `VAPOR_ENV` pass-through, with `VAPOR_*` variables remaining per-field overrides).
@@ -35,7 +35,7 @@ Current implementation notes:
 - Distribution artifacts are produced by `apps/macos/scripts/package.sh` (source of truth for app packaging, signing, and optional notarization).
 - `Vapor.app` bundles three executables — `Contents/MacOS/Vapor` (app), `Contents/MacOS/vapord` (daemon), and `Contents/Helpers/vapor` (CLI); `package.sh` builds, copies, signs, and asserts all three. The CLI lives in `Contents/Helpers/` because the default macOS filesystem is case-insensitive, so `vapor` cannot sit next to `Vapor`; the CLI resolves `vapord` first as a sibling, then at `../MacOS/vapord`.
 - Bundle identifier baseline is `sh.arn.vapor`.
-- Icon source of truth is `assets/icon.png` (1024x1024).
+- The app icon has two sources, both documented in `assets/README.md`: `package.sh` compiles the Icon Composer document `assets/macos/Vapor.icon/` with `actool` into `Contents/Resources/Assets.car` (what macOS 26 renders, with `CFBundleIconName` in the Info.plist) and packs `assets/macos/Vapor.iconset/` into `Vapor.icns` with `iconutil` as the flat fallback behind `CFBundleIconFile`. The menu bar status item shows the template mark from `assets/macos/menubar/`, tinted by AppKit for the current appearance.
 
 ## App component model and lifecycle semantics
 

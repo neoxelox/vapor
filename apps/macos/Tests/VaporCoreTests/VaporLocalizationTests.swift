@@ -53,8 +53,9 @@ func discoverResourceBundleFindsSwiftPackageBundleByExactName() throws {
   try Data("{\"app_title\":\"Temp Vapor\"}".utf8).write(
     to: bundleURL.appendingPathComponent("en.json"))
 
-  let bundle = VaporLocalizationStore.discoverResourceBundle(
+  let bundle = VaporResourceBundle.discover(
     searchRoots: [rootURL],
+    containing: VaporLocalizationStore.hasDefaultCatalog(in:),
     fileManager: fileManager
   )
 
@@ -80,8 +81,9 @@ func discoverResourceBundleFindsLocalizedCatalogsInAlternateVaporCoreBundle() th
     to: localesURL.appendingPathComponent("en.json"))
 
   let bundle = try #require(
-    VaporLocalizationStore.discoverResourceBundle(
+    VaporResourceBundle.discover(
       searchRoots: [rootURL],
+      containing: VaporLocalizationStore.hasDefaultCatalog(in:),
       fileManager: fileManager
     )
   )

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Vapor
+Comment=Background cloud sync
+Exec=vapor
+Icon=vapor
+Terminal=false
+Categories=Utility;Network;
+StartupNotify=true

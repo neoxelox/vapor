@@ -345,7 +345,22 @@ how to read a red run: the `vapor-validate` skill.
 - When adding or changing user-facing UI text, contributors must update `en.json` (and any other available catalogs) in the same change set.
 - If a translation key is missing in a non-English catalog, fallback behavior must remain deterministic and resolve to English.
 
-## 8.8) Code comment policy
+## 8.8) Brand assets policy
+
+- Brand artwork (the app icons for macOS, Windows, and Linux, the menu
+  bar mark, README banners, social previews, favicons, the landing-site
+  metadata) lives under `assets/`, one directory per surface, with
+  `assets/README.md` as the guide. App surfaces consume it through the
+  resource sync (`scripts/resources.sh`) and the packaging scripts; no
+  surface keeps a private copy, and the generated mirrors under `apps/*`
+  stay gitignored.
+- Every desktop icon derives from the masters under `assets/source/`
+  through the rebuild tool there; a change to the sculpture goes into
+  the master and through the tool, never into one platform's export by
+  hand. A new raster joins the set with its generation prompt in
+  `assets/source/GENERATION-NOTES.md`.
+
+## 8.9) Code comment policy
 
 - Code comments must never reference internal task-list or roadmap
   identifiers: no task ids (`C8-12`, `M2-1`, `L3-7`, …), no wave or phase
@@ -368,7 +383,7 @@ how to read a red run: the `vapor-validate` skill.
 - A stale comment is a bug: when a change makes a nearby comment wrong or
   obsolete, update or delete it in the same change set.
 
-## 8.9) Agent knowledge files and skills
+## 8.10) Agent knowledge files and skills
 
 Vapor keeps the vendor-neutral filename as the real file and gives each
 agent tool its expected name as a symlink, so one source of truth serves

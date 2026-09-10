@@ -122,7 +122,7 @@ test's only failure mode is "I typo'd a default value", skip it.
 - Silent overwrite in `two-way` mode. Default conflict policy is keep
   both, always.
 - Comments referencing task ids, wave numbers, or `docs/tasks/*`
-  (`AGENTS.md` §8.8). Stable docs are fine to reference; the work
+  (`AGENTS.md` §8.9). Stable docs are fine to reference; the work
   schedule is not.
 - Hardcoded config keys, env var names, or defaults instead of the
   constants modules (`AGENTS.md` §8.6).
