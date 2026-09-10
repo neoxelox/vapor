@@ -4629,7 +4629,7 @@ mod tests {
             timestamp_ms(1),
         ));
         assert!(fixture.local_echoes.matches_write(
-            &local_target.to_string_lossy(),
+            &stored.to_string_lossy(),
             None,
             Some(&hash_hex_of_bytes(b"from the cloud")),
             timestamp_ms(1),

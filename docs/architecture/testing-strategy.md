@@ -226,7 +226,8 @@ runs against the release profile. Release gate only; not a PR gate.
 Tier 1 keeps a small number of cheap **guard-rail** timing tests,
 every one named `timing_guardrail_*` (the callback burst and deep-path
 budgets in `fs_events.rs`, the debounce tick, the scheduler superseding
-burst, the composed runtime tick, and the IPC connect timeout). These
+burst, the composed runtime tick, the IPC connect timeout, and the
+provider session overhead in the contract suite). These
 are not SLO tests; they exist to catch "someone accidentally made the
 callback 100× slower" before it reaches the release pipeline. The name
 is the triage rule: a flake in a `timing_guardrail_*` test on a
