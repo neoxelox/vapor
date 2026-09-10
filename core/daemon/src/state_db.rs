@@ -909,6 +909,20 @@ impl DurableStateDb {
         intents: &[(PathBuf, PendingIntentKind, SystemTime)],
         source: crate::safeguards::IntentSource,
     ) -> Result<usize, StateDbError> {
+        self.enqueue_intents_coalesced_with(intents, source, false)
+    }
+
+    /// Like [`Self::enqueue_intents_coalesced`], with `approved` set on
+    /// every row it inserts: the intent carries out a decision the user
+    /// made (a restore after `discard`, the merge after a root answer),
+    /// so no guard or planner second-guesses it. A row that already
+    /// existed keeps its own flag.
+    pub fn enqueue_intents_coalesced_with(
+        &mut self,
+        intents: &[(PathBuf, PendingIntentKind, SystemTime)],
+        source: crate::safeguards::IntentSource,
+        approved: bool,
+    ) -> Result<usize, StateDbError> {
         if intents.is_empty() {
             return Ok(0);
         }
@@ -940,7 +954,7 @@ impl DurableStateDb {
                 }
                 continue;
             }
-            insert_intent(
+            let id = insert_intent(
                 &transaction,
                 path,
                 *kind,
@@ -948,6 +962,12 @@ impl DurableStateDb {
                 *observed_at,
                 source,
             )?;
+            if approved {
+                transaction.execute(
+                    "UPDATE queue_intents SET approved = 1 WHERE id = ?",
+                    params![id],
+                )?;
+            }
             inserted += 1;
         }
         transaction.commit()?;

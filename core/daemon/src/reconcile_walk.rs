@@ -630,9 +630,13 @@ impl ReconcileWalker {
         }
 
         if !batch.is_empty() {
-            self.stats.intents_enqueued += state_db.enqueue_intents_coalesced(
+            // A merge after a root answer transfers every one-sided
+            // file on the user's say-so; its uploads must not be read
+            // as cloud deletions by the upload gate.
+            self.stats.intents_enqueued += state_db.enqueue_intents_coalesced_with(
                 &batch,
                 crate::safeguards::IntentSource::ReconcileBacklog,
+                self.merge_without_deletions,
             )?;
         }
         Ok(())

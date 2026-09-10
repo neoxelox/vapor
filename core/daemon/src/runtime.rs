@@ -2789,9 +2789,10 @@ impl DaemonRuntime {
                         restores.push((intent.path.clone(), restore, now));
                     }
                     let dropped = self.state_db.drop_held(decision.id)?;
-                    let enqueued = self.state_db.enqueue_intents_coalesced(
+                    let enqueued = self.state_db.enqueue_intents_coalesced_with(
                         &restores,
                         crate::safeguards::IntentSource::Fresh,
+                        true,
                     )?;
                     self.mass_change_guard.reset();
                     format!(
@@ -7269,6 +7270,96 @@ mod tests {
                 .count(),
             0,
             "no delete of the root or its files is queued"
+        );
+    }
+
+    #[test]
+    fn a_repeated_create_event_for_a_synced_file_never_rewrites_the_cloud_copy() {
+        // FSEvents can report a directory's creation after the file
+        // events inside it; the runtime then reports the directory's
+        // children again. A file that is already synced and unchanged
+        // must not be uploaded a second time: a rewrite races any
+        // cloud-side change of the same moment, and the changes feed
+        // reads the rewrite's own events as echoes.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let local = fixture.watch_root.join("docs/keep.txt");
+        std::fs::create_dir_all(local.parent().unwrap()).expect("dir");
+        std::fs::write(&local, b"worth keeping").expect("seed");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(20);
+        let cloud = fixture.cloud_root.join("docs/keep.txt");
+        let before = std::fs::metadata(&cloud).expect("cloud copy");
+        let inode_before = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                before.ino()
+            }
+            #[cfg(not(unix))]
+            {
+                0u64
+            }
+        };
+
+        // The directory is reported again, and with it the file.
+        let docs = fixture.watch_root.join("docs");
+        fixture.record_local_event(&docs, FsEventKind::Created, fixture.now_ms);
+        let mut completed = 0;
+        for _ in 0..8 {
+            completed += fixture.tick(6_000).completed_intents;
+        }
+        assert!(completed >= 1, "the repeated event is worked, as a no-op");
+        let after = std::fs::metadata(&cloud).expect("cloud copy");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(after.ino(), inode_before, "the cloud copy was rewritten");
+        }
+        assert_eq!(
+            after.modified().expect("mtime"),
+            before.modified().expect("mtime"),
+            "the cloud copy was rewritten"
+        );
+    }
+
+    #[test]
+    fn a_repeated_create_event_for_a_file_the_cloud_just_deleted_applies_the_deletion() {
+        // The same late directory report, but the cloud copy was
+        // deleted a moment earlier and the feed has not said so yet.
+        // The local copy is exactly what was last synced, so this is
+        // the cloud's deletion to apply here, not a modification to
+        // re-upload; a re-upload would undo the deletion and the feed
+        // would read its own events as echoes.
+        let mut fixture = BidirectionalFixture::new();
+        let trash_root = fixture._temp.path().join("trash/default");
+        fixture.runtime.attach_trash(crate::trash::LocalTrash::new(
+            "default",
+            trash_root,
+            crate::trash::TrashSettings::default(),
+            Arc::new(vapor_platform::InMemoryTrashBin::unsupported()),
+        ));
+        fixture.tick(6_000);
+        let local = fixture.watch_root.join("docs/keep.txt");
+        std::fs::create_dir_all(local.parent().unwrap()).expect("dir");
+        std::fs::write(&local, b"worth keeping").expect("seed");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(20);
+        let cloud = fixture.cloud_root.join("docs/keep.txt");
+        assert!(cloud.is_file());
+
+        std::fs::remove_file(&cloud).expect("cloud delete");
+        let docs = fixture.watch_root.join("docs");
+        fixture.record_local_event(&docs, FsEventKind::Created, fixture.now_ms);
+        for _ in 0..12 {
+            fixture.tick(6_000);
+        }
+        assert!(!cloud.exists(), "the deletion is not undone by a re-upload");
+        assert!(!local.exists(), "the deletion applies here");
+        assert_eq!(
+            fixture.runtime.trash().expect("trash").list().len(),
+            1,
+            "the removed copy is in the trash"
         );
     }
 

@@ -214,6 +214,12 @@ struct TransferPlan {
     /// The content hash the sync index recorded at the last transfer,
     /// when the path has one.
     last_synced_hash: Option<String>,
+    /// The planner found no remote object where the index says one was
+    /// synced. A local copy still equal to `last_synced_hash` then
+    /// means the cloud deleted the file and this device has not
+    /// touched it: the deletion applies here, nothing is re-uploaded.
+    /// A changed local copy is a modification, which wins.
+    remote_gone_since_sync: bool,
     /// (size, mtime) captured when the hash stage opened the file. Lets
     /// the post-upload index write detect a mid-transfer edit and decline
     /// to record a stale mtime.
@@ -1611,6 +1617,35 @@ impl StagedExecutor {
                 stage_started_inst: now_inst,
             }));
         }
+        if plan.remote_gone_since_sync
+            && !intent.approved
+            && env.sync_mode == vapor_shared::SyncMode::TwoWay
+            && plan.content_hash.is_some()
+            && plan.content_hash == plan.last_synced_hash
+        {
+            // The cloud removed a file this device has not changed
+            // since the last sync (a second event for an already
+            // synced file arrived just as the cloud deleted it). That
+            // is a deletion to apply here, through the guard and into
+            // the trash, never a re-upload that would undo it. An
+            // approved upload is the user's own restore or merge and
+            // goes through.
+            app.release_work(permit);
+            crate::logging::info(
+                "Cloud copy is gone and the local copy is unchanged since the last sync; applying the deletion here instead of re-uploading",
+                &[("path", plan.local_path.display().to_string())],
+            );
+            state_db.enqueue_intents_coalesced(
+                &[(
+                    plan.local_path.clone(),
+                    PendingIntentKind::ApplyRemoteDelete,
+                    now,
+                )],
+                crate::safeguards::IntentSource::Fresh,
+            )?;
+            self.complete(state_db, &intent, report)?;
+            return Ok(None);
+        }
         if let RemotePrecondition::HashEquals(expected) = &plan.precondition
             && plan.content_hash.as_deref() == Some(expected.as_str())
         {
@@ -2070,6 +2105,7 @@ fn plan_intent(
                 precondition: RemotePrecondition::None,
                 verify_remote_before_upload: false,
                 last_synced_hash: None,
+                remote_gone_since_sync: false,
                 hashed_local_state: None,
                 remote_op_id: None,
             };
@@ -2172,6 +2208,7 @@ fn plan_delete(
         precondition: RemotePrecondition::None,
         verify_remote_before_upload: false,
         last_synced_hash: None,
+        remote_gone_since_sync: false,
         hashed_local_state: None,
         remote_op_id: None,
     };
@@ -2666,6 +2703,7 @@ fn plan_upload(
         precondition: RemotePrecondition::None,
         verify_remote_before_upload: false,
         last_synced_hash: None,
+        remote_gone_since_sync: false,
         hashed_local_state: None,
         remote_op_id: None,
     };
@@ -2716,10 +2754,17 @@ fn continue_plan_upload(
     };
     match stat {
         Ok(None) => {
-            // Remote absent. With an index this is a delete/modify race:
-            // the modification wins over the deletion (data
-            // preservation); either way the upload is a guarded fresh create.
+            // Remote absent. With an index this is either a cloud
+            // deletion of a file this device has not touched, which the
+            // upload gate recognises once the local hash is known and
+            // applies here, or a delete/modify race, where the
+            // modification wins (data preservation). Either way the
+            // upload, if it happens, is a guarded fresh create.
             plan.precondition = RemotePrecondition::Absent;
+            if let Some(index) = index {
+                plan.last_synced_hash = Some(index.content_hash);
+                plan.remote_gone_since_sync = true;
+            }
             PlanOutcome::Upload(plan)
         }
         Ok(Some(remote_entry)) => match index {
