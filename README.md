@@ -1,6 +1,12 @@
-# Vapor 💨
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/github/vapor-banner-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="assets/github/vapor-banner-light.png">
+    <img src="assets/github/vapor-banner-light.png" alt="Vapor" width="100%">
+  </picture>
+</p>
 
-**`background cloud sync that won't melt your device 🔥`** - [**`vapor.arn.sh`**](https://vapor.arn.sh)
+<p align="center"><strong><code>background cloud sync that won't melt your device 🔥</code></strong> - <a href="https://vapor.arn.sh"><strong><code>vapor.arn.sh</code></strong></a></p>
 
 ## What
 
@@ -133,7 +139,7 @@ See `.env.example` for the available `VAPOR_*` environment variables used by app
 - Format check both stacks (included in lint): `./scripts/format.sh check`
 - Test both stacks: `./scripts/test.sh`
 - End-to-end verification in disposable repo-local sandboxes: `./scripts/e2e.sh` (one scenario: `--only Sxx`; manual sandbox: `--sandbox`; see `docs/development/e2e-verification.md`)
-- Sync locale catalogs into every app surface: `./scripts/locales.sh`
+- Sync `assets/` (locale catalogs, brand images) into every app surface: `./scripts/resources.sh`
 - Install git pre-commit hook (clean → lint → test → build): `./scripts/hooks.sh`
 - Remove the installed pre-commit hook: `./scripts/hooks.sh uninstall`
 - Version helper: `./scripts/version.sh`
@@ -149,7 +155,7 @@ Stack-specific helpers:
 - Swift format: `./scripts/swift/format.sh check`
 - Swift tests: `./scripts/swift/test.sh`
 - Swift build: `./scripts/swift/build.sh`
-- Swift locale sync: `./scripts/swift/locales.sh`
+- Swift resource sync: `./scripts/swift/resources.sh`
 - macOS app packaging: `apps/macos/scripts/package.sh`
 
 ### Releases

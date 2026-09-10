@@ -20,7 +20,7 @@
 - Format both stacks: `./scripts/format.sh`
 - Format check both stacks: `./scripts/format.sh check`
 - Test both stacks: `./scripts/test.sh`
-- Sync locale catalogs into every app surface: `./scripts/locales.sh`
+- Sync `assets/` (locale catalogs, brand images) into every app surface: `./scripts/resources.sh`
 - Install git pre-commit hook: `./scripts/hooks.sh` (uninstall: `./scripts/hooks.sh uninstall`)
 - Version helper: `./scripts/version.sh`
 - Release gate (format, lint, Tier 1, and the e2e suite once per provider; the Google Drive leg needs the test account signed in): `./scripts/release.sh`
@@ -38,7 +38,7 @@
 - Swift format: `./scripts/swift/format.sh check`
 - Swift tests: `./scripts/swift/test.sh`
 - Swift build: `./scripts/swift/build.sh`
-- Swift locale sync: `./scripts/swift/locales.sh` (mirrors `assets/locales/*.json` into the macOS app's `VaporCore/Resources/locales/`)
+- Swift resource sync: `./scripts/swift/resources.sh` (mirrors `assets/locales/*.json` and the menu bar template PNGs into the macOS app's `VaporCore/Resources/`)
 - macOS app packaging: `apps/macos/scripts/package.sh`
 
 ## Pre-commit hook (optional but recommended for agentic workflows)

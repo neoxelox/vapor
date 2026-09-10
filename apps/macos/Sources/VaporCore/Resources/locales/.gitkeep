@@ -1,2 +1,2 @@
 # Keeps the generated-locale mirror directory present in a fresh clone so
-# Package.swift .process("Resources") resolves before locales.sh runs.
+# Package.swift .process("Resources") resolves before resources.sh runs.

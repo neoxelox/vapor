@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import VaporCore
 
@@ -7,11 +8,19 @@ struct VaporApp: App {
 
   @StateObject private var viewModel: AppShellViewModel
   private let logger = StructuredLogger(component: "app-lifecycle")
+  private let menuBarIcon: NSImage?
 
   init() {
     let viewModel = AppShellViewModel()
     _viewModel = StateObject(wrappedValue: viewModel)
     logger.info("Vapor app launched")
+    menuBarIcon = MenuBarIcon.load()
+    if menuBarIcon == nil {
+      logger.warning(
+        "Menu bar icon missing from the resource bundle; showing the system symbol instead",
+        metadata: ["resource": MenuBarIcon.resourceName]
+      )
+    }
     viewModel.configureAppRuntimeControllerIfNeeded(MacAppRuntimeController())
     viewModel.prepareMenubarOnlyStartupSurface()
     viewModel.bootstrapDaemonLifecycleIfNeeded()
@@ -35,7 +44,7 @@ struct VaporApp: App {
       SettingsView(viewModel: viewModel)
     }
 
-    MenuBarExtra(viewModel.localized("app_title"), systemImage: "wind") {
+    MenuBarExtra {
       MenuBarContentView(
         viewModel: viewModel,
         mainWindowID: Self.mainWindowID,
@@ -46,6 +55,8 @@ struct VaporApp: App {
           Task { @MainActor in await viewModel.handleQuitFromMenuBar() }
         }
       )
+    } label: {
+      MenuBarLabel(title: viewModel.localized("app_title"), icon: menuBarIcon)
     }
   }
 }

@@ -1,0 +1,15 @@
+{
+  "private": true,
+  "name": "vapor-icon-tools",
+  "description": "Rebuilds the platform icon exports under assets/ from the shared masters.",
+  "scripts": {
+    "build": "node build-icons.cjs && node build-marketing.cjs && node make-previews.cjs",
+    "icons": "node build-icons.cjs",
+    "marketing": "node build-marketing.cjs",
+    "previews": "node make-previews.cjs",
+    "validate": "node validate-curve.cjs && python3 validate.py"
+  },
+  "dependencies": {
+    "sharp": "0.35.4"
+  }
+}

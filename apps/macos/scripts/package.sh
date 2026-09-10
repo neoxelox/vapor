@@ -6,7 +6,8 @@ APP_NAME="${APP_NAME:-Vapor}"
 EXECUTABLE_NAME="${EXECUTABLE_NAME:-Vapor}"
 BUNDLE_ID="${BUNDLE_ID:-sh.arn.vapor}"
 MIN_MACOS="${MIN_MACOS:-26.0}"
-ICON_PNG="${ICON_PNG:-assets/icon.png}"
+ICON_DOCUMENT="${ICON_DOCUMENT:-assets/macos/Vapor.icon}"
+ICONSET_DIR="${ICONSET_DIR:-assets/macos/Vapor.iconset}"
 DIST_DIR="${DIST_DIR:-dist}"
 VAPOR_SIGN_IDENTITY="${VAPOR_SIGN_IDENTITY:-}"
 VAPOR_ENTITLEMENTS="${VAPOR_ENTITLEMENTS:-}"
@@ -17,10 +18,14 @@ export VAPOR_ENV="${VAPOR_ENV:-prod}"
 "$ROOT_DIR/scripts/version.sh" check-sync >/dev/null
 eval "$("$ROOT_DIR/scripts/version.sh" metadata)"
 
-"$ROOT_DIR/scripts/swift/locales.sh"
+"$ROOT_DIR/scripts/swift/resources.sh"
 
-if [[ "$ICON_PNG" != /* ]]; then
-  ICON_PNG="$ROOT_DIR/$ICON_PNG"
+if [[ "$ICON_DOCUMENT" != /* ]]; then
+  ICON_DOCUMENT="$ROOT_DIR/$ICON_DOCUMENT"
+fi
+
+if [[ "$ICONSET_DIR" != /* ]]; then
+  ICONSET_DIR="$ROOT_DIR/$ICONSET_DIR"
 fi
 
 if [[ "$DIST_DIR" != /* ]]; then
@@ -46,26 +51,58 @@ assert_bundle_executable() {
   fi
 }
 
-if [[ ! -f "$ICON_PNG" ]]; then
-  echo "[package] Missing icon PNG at $ICON_PNG"
-  echo "[package] Expected source-of-truth icon at assets/icon.png"
+# The app icon has two sources (see assets/README.md). The Icon Composer
+# document is what macOS 26 renders: actool compiles its layers into the
+# bundle's asset catalog, and the system draws the glass, the dark and the
+# tinted variants from them. The iconset is the flat fallback, packed into
+# an .icns unchanged for anything that still reads CFBundleIconFile. Both
+# share one name so Info.plist points at both.
+icon_name="$(basename "$ICON_DOCUMENT" .icon)"
+
+if [[ ! -f "$ICON_DOCUMENT/icon.json" ]]; then
+  echo "[package] Missing app icon document at $ICON_DOCUMENT (expected icon.json inside)"
   exit 1
 fi
 
-if ! icon_width="$(sips -g pixelWidth "$ICON_PNG" 2>/dev/null | awk '/pixelWidth/ { print $2 }')"; then
-  echo "[package] Failed to inspect icon width at $ICON_PNG"
+iconset_slots=(
+  "icon_16x16.png:16"
+  "icon_16x16@2x.png:32"
+  "icon_32x32.png:32"
+  "icon_32x32@2x.png:64"
+  "icon_128x128.png:128"
+  "icon_128x128@2x.png:256"
+  "icon_256x256.png:256"
+  "icon_256x256@2x.png:512"
+  "icon_512x512.png:512"
+  "icon_512x512@2x.png:1024"
+)
+
+if [[ ! -d "$ICONSET_DIR" ]]; then
+  echo "[package] Missing app iconset at $ICONSET_DIR"
   exit 1
 fi
 
-if ! icon_height="$(sips -g pixelHeight "$ICON_PNG" 2>/dev/null | awk '/pixelHeight/ { print $2 }')"; then
-  echo "[package] Failed to inspect icon height at $ICON_PNG"
-  exit 1
-fi
+for slot in "${iconset_slots[@]}"; do
+  slot_file="${slot%%:*}"
+  slot_pixels="${slot##*:}"
+  slot_path="$ICONSET_DIR/$slot_file"
 
-if [[ "$icon_width" != "1024" || "$icon_height" != "1024" ]]; then
-  echo "[package] Icon must be 1024x1024 but is ${icon_width}x${icon_height}"
-  exit 1
-fi
+  if [[ ! -f "$slot_path" ]]; then
+    echo "[package] Missing iconset slot $slot_file in $ICONSET_DIR"
+    exit 1
+  fi
+
+  if ! slot_width="$(sips -g pixelWidth "$slot_path" 2>/dev/null | awk '/pixelWidth/ { print $2 }')"; then
+    echo "[package] Failed to inspect $slot_path"
+    exit 1
+  fi
+  slot_height="$(sips -g pixelHeight "$slot_path" 2>/dev/null | awk '/pixelHeight/ { print $2 }')"
+
+  if [[ "$slot_width" != "$slot_pixels" || "$slot_height" != "$slot_pixels" ]]; then
+    echo "[package] Iconset slot $slot_file must be ${slot_pixels}x${slot_pixels} but is ${slot_width}x${slot_height}"
+    exit 1
+  fi
+done
 
 short_version="$VAPOR_RELEASE_VERSION"
 build_version="$VAPOR_APPLE_BUILD_VERSION"
@@ -166,7 +203,9 @@ cat >"$info_plist" <<EOF
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_MACOS</string>
   <key>CFBundleIconFile</key>
-  <string>AppIcon</string>
+  <string>$icon_name</string>
+  <key>CFBundleIconName</key>
+  <string>$icon_name</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>LSUIElement</key>
@@ -178,29 +217,32 @@ EOF
 # flash before the runtime activation-policy flip); opening the main window
 # switches the activation policy to .regular at runtime.
 
-temp_dir="$(mktemp -d)"
-iconset_dir="$temp_dir/AppIcon.iconset"
-mkdir -p "$iconset_dir"
+icon_compile_dir="$(mktemp -d)"
+actool_log="$icon_compile_dir/actool.log"
+if ! xcrun actool "$ICON_DOCUMENT" \
+  --compile "$icon_compile_dir" \
+  --platform macosx \
+  --minimum-deployment-target "$MIN_MACOS" \
+  --app-icon "$icon_name" \
+  --output-partial-info-plist "$icon_compile_dir/icon.plist" \
+  --output-format human-readable-text >"$actool_log" 2>&1 \
+  || grep -q "error:" "$actool_log" \
+  || [[ ! -f "$icon_compile_dir/Assets.car" ]]; then
+  cat "$actool_log"
+  echo "[package] Failed to compile the app icon document at $ICON_DOCUMENT"
+  exit 1
+fi
 
-resize_icon() {
-  local size="$1"
-  local output_file="$2"
-  sips -z "$size" "$size" "$ICON_PNG" --out "$iconset_dir/$output_file" >/dev/null
-}
+compiled_icon_name="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIconName" "$icon_compile_dir/icon.plist")"
+if [[ "$compiled_icon_name" != "$icon_name" ]]; then
+  echo "[package] actool registered the app icon as '$compiled_icon_name', expected '$icon_name'"
+  exit 1
+fi
 
-resize_icon 16 "icon_16x16.png"
-resize_icon 32 "icon_16x16@2x.png"
-resize_icon 32 "icon_32x32.png"
-resize_icon 64 "icon_32x32@2x.png"
-resize_icon 128 "icon_128x128.png"
-resize_icon 256 "icon_128x128@2x.png"
-resize_icon 256 "icon_256x256.png"
-resize_icon 512 "icon_256x256@2x.png"
-resize_icon 512 "icon_512x512.png"
-resize_icon 1024 "icon_512x512@2x.png"
+cp "$icon_compile_dir/Assets.car" "$resources_dir/Assets.car"
+rm -rf "$icon_compile_dir"
 
-iconutil -c icns "$iconset_dir" -o "$resources_dir/AppIcon.icns"
-rm -rf "$temp_dir"
+iconutil -c icns "$ICONSET_DIR" -o "$resources_dir/$icon_name.icns"
 
 if [[ -d "$ROOT_DIR/apps/macos/Resources" ]]; then
   ditto "$ROOT_DIR/apps/macos/Resources" "$resources_dir"

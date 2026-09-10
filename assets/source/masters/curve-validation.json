@@ -1,0 +1,9 @@
+{
+  "shape": "Lame superellipse",
+  "exponent": 5,
+  "segments": 128,
+  "max_radial_error_px": 0.0013672593002533873,
+  "max_internal_join_angle_radians": 1.4751396978812924e-7,
+  "closed": true,
+  "official_apple_mask": false
+}

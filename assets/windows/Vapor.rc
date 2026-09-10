@@ -1,0 +1,2 @@
+// Include this resource in your Windows executable build.
+101 ICON "Vapor.ico"

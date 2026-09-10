@@ -124,8 +124,12 @@ Ordered steps:
    from root `VERSION`; `CFBundleVersion` from an Apple-valid mapping;
    `VaporVersion` + `VaporGitCommit` for provenance;
    `LSMinimumSystemVersion=26.0`).
-6. Build `AppIcon.icns` from `assets/icon.png` (1024x1024) via `sips` +
-   `iconutil`.
+6. Compile the Icon Composer document `assets/macos/Vapor.icon/` with
+   `actool` into `Contents/Resources/Assets.car` (macOS 26 renders it;
+   `CFBundleIconName` names it), and pack `assets/macos/Vapor.iconset/`
+   into `Vapor.icns` with `iconutil` as the flat fallback behind
+   `CFBundleIconFile`, after checking every slot is present at its pixel
+   size.
 7. Copy optional resources from `apps/macos/Resources`.
 8. Sign (ad-hoc default; Developer ID + hardened runtime when
    `VAPOR_SIGN_IDENTITY` is set; optional entitlements via
@@ -140,7 +144,8 @@ Required environment inputs:
 - `EXECUTABLE_NAME` (default `Vapor`)
 - `BUNDLE_ID` (default `sh.arn.vapor`)
 - `MIN_MACOS` (default `26.0`)
-- `ICON_PNG` (default `assets/icon.png`)
+- `ICON_DOCUMENT` (default `assets/macos/Vapor.icon`)
+- `ICONSET_DIR` (default `assets/macos/Vapor.iconset`)
 - `DIST_DIR` (default `dist`)
 - `VAPOR_SIGN_IDENTITY` (optional)
 - `VAPOR_ENTITLEMENTS` (optional)
@@ -169,8 +174,8 @@ Full policy in `docs/operations/macos/distribution-trust-chain.md`.
 
 - UI copy catalogs at `assets/locales/*.json` are synced into
   `apps/macos/Sources/VaporCore/Resources/locales/*.json` before
-  Swift build/test/package via `scripts/swift/locales.sh` (or the
-  cross-stack orchestrator `scripts/locales.sh`).
+  Swift build/test/package via `scripts/swift/resources.sh` (or the
+  cross-stack orchestrator `scripts/resources.sh`).
 - `languageCode` (persisted in `vapor.json`) defaults to `en` with English
   fallback when the requested catalog is unavailable.
 - Missing translation keys in non-English catalogs fall back deterministically

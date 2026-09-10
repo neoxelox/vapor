@@ -1,0 +1,19 @@
+{
+  "light": {
+    "solid_alternative": "#FAF9F7",
+    "gradient_top": "#FFFFFF",
+    "gradient_bottom": "#F1F0EE"
+  },
+  "dark": {
+    "solid_alternative": "#17191D",
+    "gradient_top": "#272A30",
+    "gradient_bottom": "#15171B"
+  },
+  "brand_orange": "#FF4F00",
+  "canvas": [
+    1024,
+    1024
+  ],
+  "background_is_full_bleed": true,
+  "foreground_is_straight_alpha": true
+}

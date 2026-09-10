@@ -1,0 +1,25 @@
+{
+  "canvas": [
+    1024,
+    1024
+  ],
+  "legacy_tile": {
+    "x": 100,
+    "y": 100,
+    "width": 824,
+    "height": 824,
+    "superellipse_exponent": 5,
+    "optical_corner_reference": 185,
+    "mask": "macos-legacy-mask.svg",
+    "outside_shadow": false,
+    "construction": "analytic Lame superellipse, 128 tangent-matched cubic segments; the native icon uses the system mask Icon Composer supplies"
+  },
+  "native": {
+    "canvas": [
+      1024,
+      1024
+    ],
+    "background": "full bleed, no rounded mask",
+    "foreground": "single sculpted PNG layer; no tile or cast shadow; mono and flat alternatives included"
+  }
+}
