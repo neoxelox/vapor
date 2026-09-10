@@ -36,8 +36,11 @@ surface produced by `core/platform/service::macos`.
   `<vapor_dir>/logs/vapord.stdout.log` and
   `<vapor_dir>/logs/vapord.stderr.log` respectively, created with `0o600`
   if absent.
-- `EnvironmentVariables`: pass-through of `VAPOR_DIR` and `VAPOR_ENV` only.
-  All other runtime behavior is code-defined or read from `vapor.json`
+- `EnvironmentVariables`: pass-through of `VAPOR_DIR`, plus `VAPOR_ENV`
+  and `VAPOR_THROTTLE_INPUTS` when the installing shell has them set
+  (the latter is how the e2e harness keeps a launchd-managed daemon on
+  neutral throttle inputs; an ordinary install never carries it). All
+  other runtime behavior is code-defined or read from `vapor.json`
   (the daemon loads `vapor.json` at startup; `VAPOR_*` variables remain
   per-field overrides).
 - The plist has a single writer: the Rust `NativeServiceInstaller` in

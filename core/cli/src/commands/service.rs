@@ -363,8 +363,8 @@ pub fn render_text(outcome: &ServiceCommandOutcome) -> String {
 /// The service descriptor follows
 /// `docs/operations/macos/launchagent-policy.md`: stdout/stderr are
 /// redirected under `<vapor_dir>/logs/`, and the environment carries
-/// only `VAPOR_DIR` (plus `VAPOR_ENV` when set in the invoking
-/// environment); every other setting reaches the daemon through
+/// only `VAPOR_DIR` (plus `VAPOR_ENV` and `VAPOR_THROTTLE_INPUTS` when
+/// set in the invoking environment); every other setting reaches the daemon through
 /// `vapor.json`. This keeps the definition identical no matter which
 /// surface (CLI or app shim) drives the install.
 ///
@@ -382,18 +382,7 @@ pub fn build_native(
 
     let vapor_directory = vapor_shared::runtime_paths::vapor_directory();
     let logs_directory = vapor_shared::runtime_paths::logs_directory();
-    let mut environment = vec![(
-        vapor_shared::constants::env::VAPOR_DIR.to_string(),
-        vapor_directory.display().to_string(),
-    )];
-    if let Ok(vapor_env) = std::env::var(vapor_shared::constants::env::VAPOR_ENV)
-        && !vapor_env.trim().is_empty()
-    {
-        environment.push((
-            vapor_shared::constants::env::VAPOR_ENV.to_string(),
-            vapor_env,
-        ));
-    }
+    let environment = service_environment(&vapor_directory);
 
     let descriptor = ServiceDescriptor {
         label: constants::service::DAEMON_LABEL.to_string(),
@@ -420,6 +409,31 @@ pub fn build_native(
     Ok((manager, installer))
 }
 
+/// The environment a service definition carries: the runtime directory
+/// always, and `VAPOR_ENV` and `VAPOR_THROTTLE_INPUTS` when the
+/// invoking environment sets them. Everything else the daemon reads
+/// from `vapor.json`. The throttle variable is what a test harness
+/// pins to keep a daemon on neutral inputs; a service installed from
+/// an ordinary shell never has it, so a real install samples the host.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn service_environment(vapor_directory: &std::path::Path) -> Vec<(String, String)> {
+    let mut environment = vec![(
+        vapor_shared::constants::env::VAPOR_DIR.to_string(),
+        vapor_directory.display().to_string(),
+    )];
+    for key in [
+        vapor_shared::constants::env::VAPOR_ENV,
+        vapor_shared::constants::env::VAPOR_THROTTLE_INPUTS,
+    ] {
+        if let Ok(value) = std::env::var(key)
+            && !value.trim().is_empty()
+        {
+            environment.push((key.to_string(), value));
+        }
+    }
+    environment
+}
+
 /// The headless supervisor's service definition: this very `vapor`
 /// binary running `service check --loop`, kept alive by the service
 /// manager, with the same runtime directory as the daemon.
@@ -430,18 +444,7 @@ pub fn supervisor_installer() -> Result<NativeServiceInstaller, ServiceCommandEr
     })?;
     let vapor_directory = vapor_shared::runtime_paths::vapor_directory();
     let logs_directory = vapor_shared::runtime_paths::logs_directory();
-    let mut environment = vec![(
-        vapor_shared::constants::env::VAPOR_DIR.to_string(),
-        vapor_directory.display().to_string(),
-    )];
-    if let Ok(vapor_env) = std::env::var(vapor_shared::constants::env::VAPOR_ENV)
-        && !vapor_env.trim().is_empty()
-    {
-        environment.push((
-            vapor_shared::constants::env::VAPOR_ENV.to_string(),
-            vapor_env,
-        ));
-    }
+    let environment = service_environment(&vapor_directory);
     let descriptor = ServiceDescriptor {
         label: constants::service::SUPERVISOR_LABEL.to_string(),
         executable_path: executable,
