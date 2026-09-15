@@ -162,10 +162,26 @@ The release procedure itself is the `vapor-release` skill and
 - Release artifacts are produced from a script-first pipeline, not an IDE
   archive flow. Every platform packaging script is CI-runnable.
 - Each shipping platform gets an isolated GitHub Environment holding
-  its release secrets (`release-macos` today; `release-windows` /
-  `release-linux` when those platforms ship), never repository-wide
-  secrets. Secrets never cross-leak between platform release jobs.
+  its release secrets (`release-macos`, `release-windows`, and
+  `release-linux` all exist and carry the same protection; a
+  platform's secrets go in when its surface ships), never
+  repository-wide secrets. Secrets never cross-leak between platform
+  release jobs.
   The `vapor` CLI has no environment of its own (§7.5).
+- Signing follows the tag, on every platform. A stable tag ships only
+  signed artifacts: the platform's `package` job refuses to run when its
+  signing material is missing (Developer ID and notarization on macOS,
+  the EV certificate on Windows, the GPG key on Linux). A prerelease tag
+  (`-alpha`, `-beta`, `-rc`) needs no signing material on any platform
+  and ships unsigned when none is configured; when it is, the artifacts
+  are signed all the same. The pre-GA tags are all prereleases, which is
+  why no environment holds a secret yet.
+- `release.yml` packages through one `package (<platform>)` matrix
+  entry per shipping platform, under that platform's environment, and
+  one shared `publish` job. A platform joins by adding its entry and
+  its steps in the same shape as the macOS ones; the recipe is
+  `docs/operations/release-process.md` ("Adding a platform to the
+  package matrix").
 - Every platform release environment must be protected **before** its
   secrets are added: deployments restricted to one `v*` tag rule with no
   branch rule, a required reviewer, and `can_admins_bypass` set to
@@ -516,13 +532,14 @@ If a test's failure mode is "I typo'd a default value", skip it.
 - **Tier 1**: `./scripts/test.sh` via `lint.yml` / `test.yml` /
   `workflow_call`. Runs on every PR; required check on `main`
   (`docs/ci/required-checks.md`). Budget: under 5 minutes per OS on CI.
-- **Tier 2**: `scripts/perf.sh` via `perf.yml`, release pipeline only.
+- **Tier 2**: `scripts/perf.sh` via `perf.yml`, a release gate and on
+  demand.
   One bounded soak cell against the release profile with the SLO
   checks asserted on its report; long-running property cases, fuzz
   corpora, and `loom`-backed concurrency tests as they land. Not a PR
   gate.
-- **Tier S**: `./scripts/soak.sh` (the `tools/soak` driver), on a
-  schedule in `soak.yml` and on demand. Hours of seeded file churn on
+- **Tier S**: `./scripts/soak.sh` (the `tools/soak` driver), a
+  release gate in `soak.yml` and on demand. Hours of seeded file churn on
   both sides of a real daemon, fault injection, and a model-checked
   oracle after every phase (nothing lost, nothing invented, both trees
   converged, one-way reverts honoured). The first violation freezes the

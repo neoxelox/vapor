@@ -19,12 +19,13 @@ triggers them, and which ones gate a release.
 ## Documents
 
 - `overview.md` — workflow catalog (`lint.yml`, `test.yml`, `build.yml`,
-  `perf.yml`, `release.yml`), triggers (`pull_request`, `push` to `main`,
-  `workflow_call`, `v*` tags), toolchain defaults (`macos-latest`,
+  `perf.yml`, `soak.yml`, `release.yml`), triggers (`pull_request`,
+  `push` to `main`, `workflow_call`, `workflow_dispatch`, `v*` tags),
+  toolchain defaults (`macos-latest`,
   latest-stable Xcode/Swift, stable Rust), pinned CI action versions,
   dependency caching strategy.
 - `required-checks.md` — the `main` ruleset (`lint`, `test`, and
-  `build` × macOS/Linux/Windows required on `main`; `perf`
+  `build` × macOS/Linux/Windows required on `main`; `perf` and `soak`
   release-only), how to inspect and recreate it, workflow-to-script
   mapping, local-parity command set.
 
@@ -38,10 +39,16 @@ Testing runs in three tiers. Authoritative definition:
   property + snapshot + guard-rail timing tests. **Budget: under
   5 minutes per OS on CI.** If a change pushes this past the budget,
   split slow tests out to Tier 2 or make them faster.
-- **Tier 2** — `perf.yml` (release gate only; no standalone triggers —
-  invoked solely by `release.yml`). Performance SLO tests, long-running
-  property cases (higher case counts), fuzz corpora, `loom`-backed
-  concurrency tests. **Not a PR gate.**
+- **Tier 2** — `perf.yml` (release gate, invoked by `release.yml`, and
+  `workflow_dispatch` for a run by hand; no schedule). Performance SLO
+  tests, long-running property cases (higher case counts), fuzz
+  corpora, `loom`-backed concurrency tests. **Not a PR gate.**
+- **Tier S** — `soak.yml` (release gate, invoked by `release.yml`, and
+  `workflow_dispatch` for a run by hand; no schedule). Five soak cells
+  across sync modes, loads, faults, and throttle walks, on macOS and
+  Linux (the disk-full cell on macOS only), each 45 minutes of seeded
+  churn against the real binaries with the no-loss oracle after every
+  phase. **Not a PR gate.**
 - **Tier E2E** — `./scripts/e2e.sh` at the end of every `test.yml`
   job, `--full` on the macOS one (every PR; part of the required
   `test` check). Black-box run of the real `vapor` + `vapord` binaries
@@ -67,7 +74,13 @@ machine never fails the suite.
 `lint.yml`, `test.yml`, and `build.yml` fan out over `macos-latest`,
 `ubuntu-latest`, and `windows-latest`. Swift runs only on the macOS leg
 because Swift code is macOS-only by policy (`AGENTS.md §8`); the other
-legs verify the Rust workspace. Per-platform release jobs each target
-their own protected GitHub Environment (`release-macos` today,
-`release-windows` / `release-linux` when those surfaces ship) — see
+legs verify the Rust workspace. `soak.yml` fans out over `macos-latest`
+and `ubuntu-latest`; `perf.yml` over `macos-latest`, where its budgets
+are measured. Windows joins both once its native watcher ships: the
+driver skips a cell by name on a host that cannot run it. The release
+pipeline's `package` job is a matrix too, one entry per shipping
+platform, each under its own protected GitHub Environment
+(`release-macos` in the matrix today; `release-windows` and
+`release-linux` exist with the same protection and join when those
+surfaces ship), feeding one `publish` job — see
 `docs/operations/release-process.md`.

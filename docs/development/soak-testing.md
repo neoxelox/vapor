@@ -191,9 +191,28 @@ sandbox with `hdiutil` and detached by the driver or by `clean.sh`.
 ## Where the long runs happen
 
 Locally, a run of a few minutes is a smoke check; the runs that find
-things are hours long. The scheduled `soak.yml` workflow runs a matrix
-of cells on the macOS runner; `scripts/perf.sh` runs one bounded cell
-in the release pipeline and asserts the SLO checks on its report. The
-driver runs on Linux too (the daemon does since its native traits
-landed); scheduled Linux cells with `tmpfs` and cgroup limits are
-still to come.
+things are long. The `soak.yml` workflow runs the five cells on
+`macos-latest` and four of them on `ubuntu-latest` (the disk-full
+cell needs the `hdiutil` image; a `tmpfs`-backed image for Linux is
+open work), 45 minutes each, as a gate of the release pipeline:
+`release.yml` calls it next to `lint`, `test`, and `perf`, and a tag
+ships only after every cell passed on every runner. It also runs by
+hand through `workflow_dispatch`, with a duration and a seed; it never
+runs on a schedule. `scripts/perf.sh` runs one bounded cell in the
+same pipeline and asserts the SLO checks on its report. Windows joins
+the matrix when the daemon's native watcher ships there.
+
+A host that cannot run a cell does not fail it. Before provisioning,
+the driver checks the needs the cell cannot do without (the daemon's
+native watcher, Unix signals for the crash and freeze faults, a disk
+image for the disk-full fault) and exits with code 3 naming each
+unmet one; `./scripts/soak.sh` reports the skip and exits clean, the
+way the e2e harness skips a scenario by name. Exit 1 is a run that
+found something, exit 2 a bad invocation or a provisioning failure.
+
+The first week of runs found five product bugs and one harness bug,
+all fixed: push-only could not remove a cloud-only folder, pull-only
+queued a download for a folder, a full cloud disk left an upload
+untagged, an in-place cloud edit passed as Vapor's own echo, and a
+conflict copy's upload was taken for a rename of the cloud canonical.
+Each fix carries a Tier 1 test named after the finding.

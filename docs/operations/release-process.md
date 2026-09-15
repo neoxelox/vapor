@@ -49,7 +49,12 @@ Release invariants:
   `release-linux` when those surfaces ship) exists, and its protections were
   applied **before** its secrets were added — see "GitHub release environment
   setup" below.
-- For stable releases:
+- Signing follows the tag, on every platform: a stable tag needs the
+  platform's full signing material and refuses to package without it; a
+  prerelease tag (`-alpha`, `-beta`, `-rc`) needs none and ships unsigned
+  when none is configured (signed when it is). The lists below are what a
+  stable tag requires per platform.
+- For stable releases on macOS:
   - `VAPOR_SIGN_IDENTITY` configured in the `release-macos` environment secrets.
   - `VAPOR_NOTARY_PROFILE` configured in the `release-macos` environment secrets.
   - `APPLE_DEVELOPER_ID_P12_BASE64` configured in the `release-macos` environment secrets.
@@ -58,6 +63,12 @@ Release invariants:
   - `APPLE_NOTARY_API_KEY_P8_BASE64` configured in the `release-macos` environment secrets.
   - `APPLE_NOTARY_KEY_ID` configured in the `release-macos` environment secrets.
   - `APPLE_NOTARY_ISSUER_ID` configured in the `release-macos` environment secrets when using an App Store Connect Team key; omit it for Individual keys.
+- For stable releases on Windows (when `apps/windows` ships): the EV
+  code-signing material named by the Windows trust chain doc, in the
+  `release-windows` environment secrets.
+- For stable releases on Linux (when `apps/linux` ships): the GPG signing
+  key material named by the Linux trust chain doc, in the `release-linux`
+  environment secrets.
 - Optional:
   - `VAPOR_ENTITLEMENTS` path override when needed.
 
@@ -76,8 +87,8 @@ is inherited from an already-configured platform.
 
 - Move each platform's signing and notarization secrets into its own environment instead of leaving them as repository-wide secrets.
 - Keep workflow permissions least-privilege:
-  - `contents: read` for preflight, lint, test, and perf
-  - `contents: write` only for the release publish job
+  - `contents: read` for preflight, lint, test, perf, soak, and package
+  - `contents: write` only for the `publish` job
 - Release preflight relies on the default authenticated checkout credentials for `git fetch origin main`.
 
 ### Required protections
@@ -140,8 +151,12 @@ gh api repos/neoxelox/vapor/environments/release-macos/deployment-branch-policie
   `neoxelox` as required reviewer, `prevent_self_review: false`, no wait
   timer, `can_admins_bypass: true`. Configured before any Apple secret was
   added; none is configured yet.
-- `release-windows` / `release-linux` — not created yet. Apply the full set
-  above when the corresponding surface ships.
+- `release-windows` / `release-linux` — created 2026-09-16 with the
+  identical protection (`v*` tag rule, `neoxelox` as required reviewer,
+  `prevent_self_review: false`, no wait timer, `can_admins_bypass: true`),
+  so the gate is in place before either platform's secrets exist. No
+  secret is configured in either; the platform's signing material goes
+  in when its surface ships, together with its `package` matrix entry.
 
 Note for whoever sets up the next platform environment: the required-reviewer
 and wait-timer rules are free only on public repositories. On a private
@@ -151,9 +166,9 @@ policy has no such restriction, so on a private repository apply the tag rule
 immediately and treat the reviewer gate as blocked rather than optional.
 
 With the reviewer gate active, a release no longer runs straight through:
-pushing the tag runs preflight, lint, test, and perf, then **pauses** for
-approval in the Actions UI before the release job starts and signing
-material is imported. A release that looks stuck at that point is waiting on
+pushing the tag runs preflight, lint, test, perf, and soak, then **pauses** for
+approval in the Actions UI before the platform's `package` job starts and
+signing material is imported. A release that looks stuck at that point is waiting on
 a human, not broken. This has not been exercised yet — the environment was
 created after the last release ran, so the next tagged release is the first
 one it gates.
@@ -210,16 +225,12 @@ one it gates.
 
 5. Workflow execution (`.github/workflows/release.yml`)
      - Triggered on `push.tags: ["v*"]`.
-     - Calls reusable `lint.yml`, `test.yml`, and `perf.yml` in parallel.
-     - Verifies the tag ref is valid, exactly matches `VERSION`, and the tag commit is reachable from `origin/main`.
-     - The `release` job declares `needs: [preflight, lint, test, perf]`, so packaging does not begin unless ref validation and all three gates pass.
-     - Imports the Developer ID certificate into a temporary keychain and creates the `notarytool` profile on-runner when signing/notarization is configured.
-     - Verifies the imported keychain actually contains `VAPOR_SIGN_IDENTITY` before packaging begins.
-     - Passes the temporary keychain path into packaging so `notarytool submit` resolves the stored profile explicitly.
-     - Runs `./scripts/build.sh package` on `macos-latest`.
-      - Validates artifact structure and changelog/version alignment.
-      - Generates SHA-256 checksums.
-      - Creates/updates GitHub Release and uploads assets with deterministic replacement (`--clobber`).
+     - Calls reusable `lint.yml`, `test.yml`, `perf.yml`, and `soak.yml` in parallel; the soak matrix takes about an hour.
+     - Preflight verifies the tag ref is valid, exactly matches `VERSION`, the tag commit is reachable from `origin/main`, and `CHANGELOG.md` holds the tag's section.
+     - `package (<platform>)` runs once per shipping platform (`macos` on `macos-latest` under the `release-macos` environment today; Windows and Linux entries join the matrix when those surfaces ship, each under its own environment) and declares `needs: [preflight, lint, test, perf, soak]`, so packaging does not begin unless ref validation and all four gates pass.
+     - The macOS entry imports the Developer ID certificate into a temporary keychain and creates the `notarytool` profile on-runner when signing/notarization is configured, verifies the imported keychain actually contains `VAPOR_SIGN_IDENTITY` before packaging begins, and passes the temporary keychain path into packaging so `notarytool submit` resolves the stored profile explicitly.
+     - Every entry runs `./scripts/build.sh package`, validates its own artifact structure, and uploads its assets as the `release-<platform>` workflow artifact.
+     - `publish` (on `ubuntu-latest`, the only job with `contents: write`) downloads every platform's assets into `dist/`, writes one `Checksums.txt` with a SHA-256 line per asset, extracts the release notes from the changelog, and creates/updates the GitHub Release, uploading assets with deterministic replacement (`--clobber`).
 
 6. Publish policy
    - Stable releases are created as drafts for operator verification before publishing.
@@ -228,12 +239,62 @@ one it gates.
 7. Post-run verification
      - Confirm release assets include:
        - `Vapor.zip`
-       - `Checksums.txt`
+       - `Checksums.txt` (one `sha256sum` line per asset, verifiable with `sha256sum -c` next to the downloaded files)
     - Confirm package contents include:
       - `Vapor.app/Contents/MacOS/Vapor`
       - `Vapor.app/Contents/MacOS/vapord`
       - `Vapor.app/Contents/Helpers/vapor`
     - Confirm release notes match `CHANGELOG.md` section for the tag.
+
+## Adding a platform to the package matrix
+
+`release.yml` packages through one `package (<platform>)` matrix entry
+per shipping platform and one shared `publish` job. Windows and Linux
+join the same way macOS is in today; nothing in `preflight`, the four
+gates, or `publish` changes. The environment for each already exists
+and is protected (see "Current status" above), so the order is: secrets
+into the environment, then the matrix entry, then the trust chain doc.
+
+1. **Matrix entry.** Add to `jobs.package.strategy.matrix.include`:
+   `platform` (`windows` or `linux`; it names the artifact
+   `release-<platform>` and gates the platform's steps), `os` (the
+   GitHub-hosted runner), `environment` (`release-windows` or
+   `release-linux`), and `assets` (the paths under `dist/` the packaging
+   writes, one per line). `fail-fast` stays off so one platform's
+   failure does not cancel another's.
+2. **Signing check, first.** Mirror the macOS "Validate signing and
+   notarization configuration" step, gated on `matrix.platform`: read
+   every secret the platform needs, set `enabled` to whether any is
+   present, fail when some but not all are present, and fail when
+   `RELEASE_STABLE` is `true` and none is. That step is what makes a
+   stable tag refuse to ship unsigned and lets a prerelease tag through
+   without material. Do not gate on the tag anywhere else.
+3. **Install the material**, gated on the platform and on `enabled`:
+   the EV certificate into the runner's certificate store on Windows
+   (Azure Key Vault or a USB HSM per `AGENTS.md` §7.3), the GPG key into
+   a throwaway keyring on Linux. Export whatever the packaging script
+   needs through `GITHUB_ENV`, as the macOS step does with the keychain
+   path.
+4. **Build** with `./scripts/build.sh package`, the same step for every
+   platform. Teach `scripts/<stack>/build.sh` to sign when the material
+   is present (`signtool` on Windows, a detached GPG signature next to
+   the AppImage on Linux) and to write the assets under `dist/`.
+5. **Validate outputs**, gated on the platform: the equivalent of the
+   macOS `test -x` lines for the installer or AppImage and, when
+   `enabled`, that the signature verifies.
+6. **Upload** is the shared step: `matrix.assets` goes up as
+   `release-<platform>`. `publish` picks it up, adds it to
+   `Checksums.txt`, and attaches it to the release without any change.
+7. **Clean up** the material, gated on the platform and `enabled`,
+   with `if: always()`, as the macOS step does with its keychain.
+8. **Docs in the same change set.** The platform's trust chain doc under
+   `docs/operations/<platform>/`, the "For stable releases" list above,
+   the release checklist, `docs/ci/overview.md`, and the incident
+   playbook's platform section.
+
+The first stable tag on a new platform is the first time its signing
+path runs in anger; rehearse it with a prerelease tag after the secrets
+are in, since a prerelease signs when the material is present.
 
 ## Deterministic rerun policy
 
@@ -260,7 +321,7 @@ one it gates.
 - [ ] `./scripts/release.sh` passed (`format`, `lint`, `test`, e2e for every provider).
 - [ ] `./scripts/version.sh ...` created commit `release: v$(cat VERSION)` and tag `v$(cat VERSION)`.
 - [ ] Release push command used: `git push origin "$(git branch --show-current)" --follow-tags`.
-- [ ] Release gates passed (`lint`, `test`, `perf` reusable workflows / local script equivalents).
+- [ ] Release gates passed (`lint`, `test`, `perf`, `soak` reusable workflows / local script equivalents).
 - [ ] Deployment to the platform release environment approved in the Actions
       UI (the run pauses there after the gates pass, before signing).
 - [ ] Release workflow succeeded.

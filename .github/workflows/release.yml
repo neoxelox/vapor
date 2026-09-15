@@ -13,8 +13,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Platform-neutral checks on the tag itself (git, bash, python3):
+  # nothing here needs a platform runner, and the per-platform work
+  # starts in the package matrix below.
   preflight:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       tag_name: ${{ steps.release_meta.outputs.tag_name }}
@@ -77,6 +80,31 @@ jobs:
             exit 1
           fi
 
+      - name: Validate changelog section matches tag
+        env:
+          RELEASE_VERSION: ${{ steps.release_meta.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ['RELEASE_VERSION']
+          changelog = Path('CHANGELOG.md').read_text(encoding='utf-8')
+          matches = re.findall(r"^## \[([^\]]+)\]", changelog, flags=re.MULTILINE)
+          if not matches:
+            raise SystemExit('[release] CHANGELOG.md has no version headers')
+
+          first_version = matches[0]
+          if first_version != 'Unreleased':
+            raise SystemExit('[release] first changelog section must be [Unreleased]')
+
+          if version not in matches:
+            raise SystemExit(f'[release] CHANGELOG.md missing section for [{version}]')
+          PY
+        shell: bash
+
   lint:
     needs: preflight
     uses: ./.github/workflows/lint.yml
@@ -89,13 +117,40 @@ jobs:
     needs: preflight
     uses: ./.github/workflows/perf.yml
 
-  release:
-    needs: [preflight, lint, test, perf]
-    runs-on: macos-latest
+  soak:
+    needs: preflight
+    uses: ./.github/workflows/soak.yml
+
+  # One packaging job per shipping platform. Each runs on that
+  # platform's runner under that platform's protected environment, which
+  # holds its signing secrets and nothing else, and pauses for the
+  # environment's reviewer before any secret is read. The assets it
+  # produces travel to the publish job as a workflow artifact.
+  package:
+    name: package (${{ matrix.platform }})
+    needs: [preflight, lint, test, perf, soak]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
-    environment: release-macos
-    permissions:
-      contents: write
+    environment: ${{ matrix.environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows and Linux join here when their surfaces ship, in the
+        # same shape as macOS: a runner, their own environment
+        # (release-windows and release-linux exist, protected like
+        # release-macos), the assets their packaging writes under dist/,
+        # and their own signing-check, install, validate, and clean-up
+        # steps gated on matrix.platform. The signing check carries the
+        # one rule every platform shares: a stable tag refuses to ship
+        # without the platform's signing material, a prerelease tag
+        # ships unsigned when none is configured. Recipe:
+        # docs/operations/release-process.md, "Adding a platform to the
+        # package matrix".
+        include:
+          - platform: macos
+            os: macos-latest
+            environment: release-macos
+            assets: dist/Vapor.zip
     env:
       TAG_NAME: ${{ needs.preflight.outputs.tag_name }}
       RELEASE_VERSION: ${{ needs.preflight.outputs.release_version }}
@@ -109,6 +164,7 @@ jobs:
           fetch-depth: 0
 
       - name: Select Xcode
+        if: matrix.platform == 'macos'
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
         with:
           xcode-version: latest-stable
@@ -130,12 +186,14 @@ jobs:
           key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache SwiftPM dependencies
+        if: matrix.platform == 'macos'
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: apps/macos/.build
           key: ${{ runner.os }}-spm-release-${{ hashFiles('**/Package.resolved') }}
 
       - name: Validate signing and notarization configuration
+        if: matrix.platform == 'macos'
         id: signing_config
         env:
           RELEASE_STABLE: ${{ needs.preflight.outputs.release_stable }}
@@ -177,7 +235,7 @@ jobs:
           echo "enabled=$signing_configured" >> "$GITHUB_OUTPUT"
 
       - name: Install signing certificate and notarization profile
-        if: steps.signing_config.outputs.enabled == 'true'
+        if: matrix.platform == 'macos' && steps.signing_config.outputs.enabled == 'true'
         env:
           VAPOR_SIGN_IDENTITY: ${{ secrets.VAPOR_SIGN_IDENTITY }}
           VAPOR_NOTARY_PROFILE: ${{ secrets.VAPOR_NOTARY_PROFILE }}
@@ -247,37 +305,18 @@ jobs:
             "${issuer_args[@]}" \
             --keychain "$KEYCHAIN_PATH"
 
-      - name: Validate changelog section matches tag
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          version = os.environ['RELEASE_VERSION']
-          changelog = Path('CHANGELOG.md').read_text(encoding='utf-8')
-          matches = re.findall(r"^## \[([^\]]+)\]", changelog, flags=re.MULTILINE)
-          if not matches:
-            raise SystemExit('[release] CHANGELOG.md has no version headers')
-
-          first_version = matches[0]
-          if first_version != 'Unreleased':
-            raise SystemExit('[release] first changelog section must be [Unreleased]')
-
-          if version not in matches:
-            raise SystemExit(f'[release] CHANGELOG.md missing section for [{version}]')
-          PY
-        shell: bash
-
+      # The same script on every platform: it packages what the host can
+      # build (the Rust binaries everywhere, the app bundle on macOS).
       - name: Build package artifacts
+        shell: bash
         env:
           VAPOR_SIGN_IDENTITY: ${{ secrets.VAPOR_SIGN_IDENTITY }}
           VAPOR_NOTARY_PROFILE: ${{ secrets.VAPOR_NOTARY_PROFILE }}
           VAPOR_ENTITLEMENTS: ${{ vars.VAPOR_ENTITLEMENTS }}
         run: ./scripts/build.sh package
 
-      - name: Validate packaged outputs
+      - name: Validate packaged outputs (macOS)
+        if: matrix.platform == 'macos'
         run: |
           set -euo pipefail
 
@@ -287,10 +326,57 @@ jobs:
           test -x dist/Vapor.app/Contents/MacOS/vapord
           test -x dist/Vapor.app/Contents/Helpers/vapor
 
+      - name: Upload package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.platform }}
+          path: ${{ matrix.assets }}
+          if-no-files-found: error
+
+      - name: Clean up signing material
+        if: ${{ always() && matrix.platform == 'macos' && steps.signing_config.outputs.enabled == 'true' }}
+        run: |
+          set -euo pipefail
+
+          rm -f "${VAPOR_RELEASE_CERT_PATH:-}" "${VAPOR_RELEASE_NOTARY_KEY_PATH:-}"
+
+          if [[ -n "${VAPOR_RELEASE_KEYCHAIN_PATH:-}" && -f "${VAPOR_RELEASE_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$VAPOR_RELEASE_KEYCHAIN_PATH" || rm -f "$VAPOR_RELEASE_KEYCHAIN_PATH"
+          fi
+
+  # One GitHub Release per tag, holding every platform's assets and one
+  # checksum file over all of them. No secrets beyond the workflow
+  # token: the release is created as a draft and published by hand.
+  publish:
+    needs: [preflight, package]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      TAG_NAME: ${{ needs.preflight.outputs.tag_name }}
+      RELEASE_VERSION: ${{ needs.preflight.outputs.release_version }}
+      RELEASE_PRERELEASE: ${{ needs.preflight.outputs.release_prerelease }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download package artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
       - name: Generate checksums
         run: |
           set -euo pipefail
-          shasum -a 256 dist/Vapor.zip > dist/Checksums.txt
+
+          ls -l dist
+          (cd dist && sha256sum -- * > "$RUNNER_TEMP/Checksums.txt")
+          mv "$RUNNER_TEMP/Checksums.txt" dist/Checksums.txt
+          cat dist/Checksums.txt
 
       - name: Extract release notes from changelog
         run: |
@@ -312,13 +398,12 @@ jobs:
 
           body = match.group(1).strip()
           note = f"## Release {version}\n\n{body}\n"
-          Path('dist/release-notes.md').write_text(note, encoding='utf-8')
+          Path(os.environ['RUNNER_TEMP'], 'release-notes.md').write_text(note, encoding='utf-8')
           PY
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
@@ -337,36 +422,23 @@ jobs:
             gh release edit "$TAG_NAME" \
               "${draft_flag[@]}" \
               "${prerelease_reconcile[@]}" \
-              --notes-file dist/release-notes.md
+              --notes-file "$RUNNER_TEMP/release-notes.md"
           else
             gh release create "$TAG_NAME" \
               --verify-tag \
               --draft \
               "${prerelease_reconcile[@]}" \
               --title "$TAG_NAME" \
-              --notes-file dist/release-notes.md
+              --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
 
-          echo "[release] created/updated release for $TAG_NAME —" \
+          echo "[release] created/updated release for $TAG_NAME;" \
             "a draft is created on first run; review the assets and publish manually."
 
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
-          assets=(dist/Vapor.zip dist/Checksums.txt)
-          gh release upload "$TAG_NAME" "${assets[@]}" --clobber
-
-      - name: Clean up signing material
-        if: ${{ always() && steps.signing_config.outputs.enabled == 'true' }}
-        run: |
-          set -euo pipefail
-
-          rm -f "${VAPOR_RELEASE_CERT_PATH:-}" "${VAPOR_RELEASE_NOTARY_KEY_PATH:-}"
-
-          if [[ -n "${VAPOR_RELEASE_KEYCHAIN_PATH:-}" && -f "${VAPOR_RELEASE_KEYCHAIN_PATH:-}" ]]; then
-            security delete-keychain "$VAPOR_RELEASE_KEYCHAIN_PATH" || rm -f "$VAPOR_RELEASE_KEYCHAIN_PATH"
-          fi
+          gh release upload "$TAG_NAME" dist/* --clobber

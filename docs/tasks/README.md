@@ -342,7 +342,8 @@ store that is either the `VAPOR_SECRETS_COMMAND` shim or the desktop
 Secret Service. Left before Linux is a shipping surface:
 
 - `core.md` C7-7, C7-8 — the Linux trust chain doc and the
-  `release-linux` environment.
+  `release-linux` environment's secrets (the environment itself exists,
+  protected like `release-macos`).
 - `cli.md` L2-6 — `vapor service install` round-trip automated on
   Linux CI (a `systemctl --user` session on the runner).
 - The open items inside C7-1 … C7-6: display-server idle, PSI, the
@@ -366,8 +367,9 @@ Depends on whichever of Waves 12, 13 has shipped.
 Only if the project owner decides to ship a Windows GUI. Creates
 `docs/plans/windows.md` and `docs/tasks/windows.md` as new surfaces
 with their own plan + task list; picks the UI tech (WinUI 3, WPF, or
-Tauri — see `docs/plans/core.md §8`); `release-windows` GitHub
-Environment configured with EV cert secrets. The icon family is already
+Tauri — see `docs/plans/core.md §8`); the `release-windows` GitHub
+Environment (already created and protected) loaded with EV cert secrets
+and a `package` matrix entry in `release.yml`. The icon family is already
 in place under `assets/windows/` (ICO, PNG, tray glyphs, the MSIX asset
 set with its manifest fragment); see `assets/README.md`.
 
@@ -375,8 +377,9 @@ set with its manifest fragment); see `assets/README.md`.
 
 Only if the project owner decides to ship a Linux GUI. Creates
 `docs/plans/linux.md` and `docs/tasks/linux.md` as new surfaces; picks
-the UI tech (GTK4-rs, Qt, or Tauri); `release-linux` GitHub
-Environment configured with GPG key secrets; AppImage first, then
+the UI tech (GTK4-rs, Qt, or Tauri); the `release-linux` GitHub
+Environment (already created and protected) loaded with GPG key secrets
+and a `package` matrix entry in `release.yml`; AppImage first, then
 `.deb` / `.rpm` / Flatpak / Snap as demand surfaces. The icon theme
 tree, the desktop entry, and an icon install script are already in place
 under `assets/linux/`; see `assets/README.md`.

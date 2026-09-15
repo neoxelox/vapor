@@ -13,7 +13,7 @@ use vapor_e2e::cli::Cli;
 use vapor_e2e::daemon::{Daemon, DaemonKind, Signal};
 use vapor_e2e::db::StateDb;
 use vapor_e2e::diskimage::{DiskImage, ImageFs};
-use vapor_e2e::host::{Host, Provider};
+use vapor_e2e::host::{Host, Need, Provider};
 use vapor_e2e::logs;
 use vapor_e2e::oracle::{FileFacts, OracleOptions, TreeOracle};
 use vapor_e2e::runner::{self, RunPaths};
@@ -165,6 +165,36 @@ pub struct Driver {
 impl Driver {
     /// Provisions the sandbox and starts the daemon. Nothing is written
     /// to the trees yet.
+    /// The host needs this cell cannot do without, each unmet one
+    /// named: the daemon's native watcher for the OS, Unix signals for
+    /// the crash and freeze faults, a disk image for the disk-full
+    /// fault. A runner that lacks one skips the cell by name, the way
+    /// the e2e harness skips a scenario, instead of failing it.
+    pub fn host_blockers(cfg: &Config) -> Vec<String> {
+        let root = runner::e2e_root(&cfg.repo_root);
+        let _ = fs::create_dir_all(&root);
+        let host = Host::detect(&root, false, Provider::Filesystem);
+        let mut needs = vec![Need::NativeWatcher];
+        if [
+            FaultKind::Crash,
+            FaultKind::CrashMidTransfer,
+            FaultKind::Freeze,
+            FaultKind::CloudRootPermissions,
+        ]
+        .into_iter()
+        .any(|kind| cfg.faults.has(kind))
+        {
+            needs.push(Need::Unix);
+        }
+        if cfg.cloud_image_mb.is_some() {
+            needs.push(Need::DiskImage);
+        }
+        needs
+            .into_iter()
+            .filter_map(|need| host.check(need).err())
+            .collect()
+    }
+
     pub fn provision(cfg: Config) -> Result<Self, Failure> {
         if !cfg.skip_build {
             runner::build_product_profile(&cfg.repo_root, cfg.release)?;
@@ -818,17 +848,6 @@ impl Driver {
             if self.cloud_unavailable() {
                 return Ok(());
             }
-            let write = |full: &Path, bytes: &[u8]| -> Result<(), Failure> {
-                let temp = full.with_extension("soak-tmp");
-                fs::write(&temp, bytes)?;
-                fs::rename(&temp, full)?;
-                Ok(())
-            };
-            if write(&local_full, &local_bytes).is_err()
-                || write(&cloud_full, &cloud_bytes).is_err()
-            {
-                continue;
-            }
             let expected = |version: u64, bytes: &[u8], writer: Side| Expected {
                 version,
                 size: bytes.len() as u64,
@@ -836,6 +855,38 @@ impl Driver {
                 executable: false,
                 writer,
             };
+            // The cloud side is the one a fault can fill up, so it goes
+            // first: a pair whose cloud write fails is skipped whole,
+            // with no local write the model would have to explain. A
+            // local write that fails after the cloud one landed leaves
+            // an ordinary cloud-side overwrite, recorded as such.
+            if let Err(error) = crate::workload::write_atomically(&cloud_full, &cloud_bytes) {
+                self.note(format!(
+                    "skipped conflict on {path}: cloud write failed: {error}"
+                ));
+                continue;
+            }
+            if let Err(error) = crate::workload::write_atomically(&local_full, &local_bytes) {
+                self.note(format!(
+                    "conflict on {path} became a cloud overwrite: local write failed: {error}"
+                ));
+                let op = Op::Overwrite {
+                    path: path.clone(),
+                    size: SizeClass::Small,
+                };
+                self.log_event(serde_json::json!({
+                    "side": Side::Cloud.label(), "op": op, "version": cloud_version,
+                    "size": cloud_bytes.len(), "sha256": sha256_hex(&cloud_bytes),
+                }));
+                self.model.record(
+                    Side::Cloud,
+                    &op,
+                    Some(expected(cloud_version, &cloud_bytes, Side::Cloud)),
+                );
+                self.ops_done += 1;
+                self.write_status(false)?;
+                continue;
+            }
             self.model.record_contested(
                 &path,
                 expected(local_version, &local_bytes, Side::Local),

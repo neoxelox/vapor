@@ -145,7 +145,7 @@ See `.env.example` for the available `VAPOR_*` environment variables used by app
 - Install git pre-commit hook (clean → lint → test → build): `./scripts/hooks.sh`
 - Remove the installed pre-commit hook: `./scripts/hooks.sh uninstall`
 - Version helper: `./scripts/version.sh`
-- Performance smoke thresholds: `./scripts/perf.sh` (`VAPOR_PERF_SMOKE_RUST_MAX_SECONDS`, `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS`)
+- Performance gate, one soak cell with the SLO checks: `./scripts/perf.sh` (`VAPOR_PERF_SOAK_DURATION`, default `12m`; `VAPOR_PERF_SOAK_SEED`, default `11`)
 
 Stack-specific helpers:
 

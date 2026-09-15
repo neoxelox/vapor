@@ -215,6 +215,15 @@ fn main() -> ExitCode {
                 },
                 converge_deadline,
             };
+            let blockers = Driver::host_blockers(&cfg);
+            if !blockers.is_empty() {
+                for reason in &blockers {
+                    eprintln!("[soak] skipped on {}: {reason}", std::env::consts::OS);
+                }
+                // Distinct from a failed run (1) and a bad invocation
+                // (2): the wrapper script turns it into a named skip.
+                return ExitCode::from(3);
+            }
             let mut driver = match Driver::provision(cfg) {
                 Ok(driver) => driver,
                 Err(error) => {
