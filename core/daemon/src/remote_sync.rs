@@ -381,10 +381,12 @@ impl RemotePoller {
                     }
                     match change.kind {
                         RemoteChangeKind::CreatedOrModified => {
-                            if remote_echoes.matches_write(
+                            if remote_echoes.matches_write_checked(
                                 change.path.as_str(),
                                 change.op_id.as_deref(),
                                 change.content_hash.as_deref(),
+                                change.size_bytes,
+                                change.modified_at,
                                 now,
                             ) || is_durable_self_write_echo(state_db, &local_target, change)
                             {
@@ -561,20 +563,32 @@ fn local_dir_exists(path: &Path) -> bool {
 /// reaches 60s under Throttled (and stops entirely under Suspended), so
 /// the daemon's own upload can be observed in the feed after its live
 /// record expired. The persisted sync index still holds the op-id and
-/// content hash we last wrote for the path: a change carrying either is
-/// our own write reflected back, so it is suppressed rather than
-/// re-downloaded.
+/// content hash we last wrote for the path: a change carrying the hash
+/// is our own bytes reflected back; a change carrying the op-id is our
+/// object, which an in-place edit (an append, a same-size rewrite)
+/// leaves tagged, so the op-id only counts when the size and mtime the
+/// feed reports still match what the index recorded at the transfer.
 fn is_durable_self_write_echo(
     state_db: &mut DurableStateDb,
     local_target: &Path,
     change: &vapor_providers::RemoteChange,
 ) -> bool {
-    match state_db.sync_index(local_target) {
-        Ok(Some(index)) => {
-            change.op_id.as_deref() == Some(index.last_op_id.as_str())
-                || change.content_hash.as_deref() == Some(index.content_hash.as_str())
+    let Ok(Some(index)) = state_db.sync_index(local_target) else {
+        return false;
+    };
+    if change.content_hash.as_deref() == Some(index.content_hash.as_str()) {
+        return true;
+    }
+    if change.op_id.as_deref() != Some(index.last_op_id.as_str()) {
+        return false;
+    }
+    match (change.size_bytes, change.modified_at) {
+        (Some(size), Some(modified_at)) => {
+            index.matches_remote(size, modified_at)
+                || (index.remote_modified_at.is_none() && size == index.size_bytes)
         }
-        _ => false,
+        (Some(size), None) => size == index.size_bytes,
+        (None, _) => true,
     }
 }
 
@@ -775,6 +789,7 @@ mod tests {
         fixture.remote_echoes.record_write(
             "ours.txt",
             Some("op-mine".to_string()),
+            None,
             None,
             None,
             ts(5),

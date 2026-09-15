@@ -47,10 +47,18 @@ form; the runbook wins on any disagreement.
 An explicit release request from the owner authorises exactly one push:
 `git push origin main --follow-tags` for the release-prep commit and its
 tag. Nothing else. The tag triggers `release.yml`: preflight (tag
-format, `VERSION` match, ancestry on `main`), then `lint`, `test`, and
-`perf` as reusable workflows, then the `release` job, which pauses for
-the environment's required reviewer before the signing certificate is
-imported. A paused run is not a broken run.
+format, `VERSION` match, ancestry on `main`, the changelog section),
+then `lint`, `test`, `perf`, and `soak` as reusable workflows, then one
+`package (<platform>)` job per shipping platform, each of which pauses
+for its environment's required reviewer before the signing certificate
+is imported, then `publish`, which assembles the draft release from
+every platform's assets. The soak is the long leg: nine cells of 45
+minutes side by side on macOS and Linux runners, so the gates take
+about an hour. A paused run is not a broken run. Signing follows the
+tag on every platform: a stable tag refuses to package without the
+platform's signing secrets, a prerelease tag ships unsigned when none
+is configured. Adding a platform to the package matrix follows the
+recipe in `docs/operations/release-process.md`.
 
 ## Post-run verification
 

@@ -70,17 +70,7 @@ impl HealthMonitor {
             _ => 0.0,
         };
         self.last_cpu = Some((now, cpu_time));
-        let threads = Command::new("ps")
-            .args(["-M", "-p", &pid.to_string()])
-            .output()
-            .ok()
-            .map(|output| {
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .count()
-                    .saturating_sub(1) as u64
-            })
-            .unwrap_or(0);
+        let threads = thread_count(pid);
         let open_files = if with_open_files {
             Command::new("lsof")
                 .args(["-p", &pid.to_string()])
@@ -162,6 +152,29 @@ fn parse_cputime(text: &str) -> Option<Duration> {
     Some(Duration::from_secs_f64(
         (days * 86_400 + hours * 3_600 + minutes * 60) as f64 + seconds,
     ))
+}
+
+/// Threads of `pid`. Linux `ps` reports the count as a column
+/// (`nlwp`); the BSD `ps` on macOS lists one line per thread under
+/// `-M`, where `-M` on Linux would mean something else entirely.
+fn thread_count(pid: u32) -> u64 {
+    let pid = pid.to_string();
+    let output = if cfg!(target_os = "linux") {
+        Command::new("ps")
+            .args(["-o", "nlwp=", "-p", &pid])
+            .output()
+    } else {
+        Command::new("ps").args(["-M", "-p", &pid]).output()
+    };
+    let Ok(output) = output else {
+        return 0;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    if cfg!(target_os = "linux") {
+        text.trim().parse().unwrap_or(0)
+    } else {
+        text.lines().count().saturating_sub(1) as u64
+    }
 }
 
 #[cfg(test)]

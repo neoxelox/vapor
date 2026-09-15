@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tier 2 performance gate (release pipeline only): one bounded soak cell
+# Tier 2 performance gate (a release gate, and on demand): one bounded soak cell
 # against the release profile, with the SLO checks from
 # docs/performance/acceptance-budgets-and-benchmark-harness.md asserted
 # on its report. Long property, fuzz, and loom runs join here as they
@@ -25,15 +25,20 @@ for marker in SLO-1 SLO-2 SLO-3 SLO-4 SLO-5; do
 done
 
 echo "[perf] soak cell: two-way, mixed load, crash faults, release profile, $DURATION, seed $SEED"
+report="$ROOT_DIR/.vapor/e2e/soak-last-report.json"
+# A stale report from an earlier run must never stand in for this one.
+rm -f "$report"
 # The wrapper unsets VAPOR_DIR for the driver: the daemon under test
-# lives in its own sandbox.
+# lives in its own sandbox. A host that cannot run the cell (the
+# driver's exit 3, turned into a clean exit by the wrapper) leaves no
+# report behind; the gate then reports the skip and exits clean, so a
+# platform whose daemon has not shipped yet does not block a release.
 "$ROOT_DIR/scripts/soak.sh" --duration "$DURATION" --seed "$SEED" --release \
   --mode two-way --load mixed --faults crash --throttle walk
 
-report="$ROOT_DIR/.vapor/e2e/soak-last-report.json"
 if [[ ! -f "$report" ]]; then
-  echo "[perf] soak report missing at $report"
-  exit 1
+  echo "[perf] skipped: this host cannot run the soak cell, so there is no report to check"
+  exit 0
 fi
 
 python3 - "$report" <<'PY'

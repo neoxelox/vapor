@@ -376,8 +376,12 @@ pub fn apply(root: &Path, op: &Op, seed: u64, version: u64, size: u64) -> Result
 }
 
 /// Writes through a temp file and a rename, like a careful editor, so
-/// the watcher never sees a half-written payload.
-fn write_atomically(target: &Path, bytes: &[u8]) -> Result<(), Failure> {
+/// the watcher never sees a half-written payload. The temp name ends
+/// in `.tmp`, which the daemon and the oracle both ignore by default,
+/// and a write that fails (a full disk) takes its half-written temp
+/// with it, so nothing the model never recorded is left for the
+/// daemon to sync.
+pub(crate) fn write_atomically(target: &Path, bytes: &[u8]) -> Result<(), Failure> {
     let parent = target
         .parent()
         .ok_or_else(|| Failure::new("target has no parent"))?;
@@ -386,8 +390,11 @@ fn write_atomically(target: &Path, bytes: &[u8]) -> Result<(), Failure> {
         .and_then(|name| name.to_str())
         .ok_or_else(|| Failure::new("target has no name"))?;
     let temp = parent.join(format!(".soak-write-{name}.tmp"));
-    fs::write(&temp, bytes)?;
-    fs::rename(&temp, target)?;
+    let written = fs::write(&temp, bytes).and_then(|()| fs::rename(&temp, target));
+    if let Err(error) = written {
+        let _ = fs::remove_file(&temp);
+        return Err(error.into());
+    }
     Ok(())
 }
 

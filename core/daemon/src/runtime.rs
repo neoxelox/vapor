@@ -2581,22 +2581,6 @@ impl DaemonRuntime {
                     ],
                 );
             }
-            if self.sync_scope.sync_mode == vapor_shared::SyncMode::PullOnly {
-                // Pull-only: local events never produce
-                // local-to-remote intents. A local change is divergence
-                // from the cloud source of truth, so it schedules a
-                // restore-from-cloud for that path instead: the download
-                // reverts edits, re-materializes deletions, and removes
-                // local-only files when no remote counterpart exists.
-                self.scheduler.upsert_intent(
-                    event.path.clone(),
-                    PendingIntentKind::Download,
-                    event.last_observed_at,
-                );
-                mirror_reverts += 1;
-                accepted += 1;
-                continue;
-            }
             if event.path == watch_root
                 && matches!(
                     event.last_event_kind,
@@ -2638,6 +2622,24 @@ impl DaemonRuntime {
                         ("files", synthesized.to_string()),
                     ],
                 );
+                accepted += 1;
+                continue;
+            }
+            if self.sync_scope.sync_mode == vapor_shared::SyncMode::PullOnly {
+                // Pull-only: local events never produce
+                // local-to-remote intents. A local change is divergence
+                // from the cloud source of truth, so it schedules a
+                // restore-from-cloud for that path instead: the download
+                // reverts edits, re-materializes deletions, and removes
+                // local-only files when no remote counterpart exists. A
+                // folder that appeared was expanded into its files above,
+                // so what reaches here is a file or a vanished path.
+                self.scheduler.upsert_intent(
+                    event.path.clone(),
+                    PendingIntentKind::Download,
+                    event.last_observed_at,
+                );
+                mirror_reverts += 1;
                 accepted += 1;
                 continue;
             }
@@ -4664,6 +4666,111 @@ mod tests {
         let (reverts, deletes) = fixture.runtime.mirror_counters();
         assert!(reverts >= 1, "the revert must be observable");
         assert!(deletes >= 1, "the removal must be observable");
+    }
+
+    #[test]
+    fn pull_only_removes_a_local_only_folder_without_a_folder_download() {
+        // A folder created locally in pull-only is local-only content:
+        // its files are removed one by one. The folder itself must
+        // never become a download (a directory has no payload, and the
+        // intent would retry forever, holding the queue open).
+        let mut fixture = BidirectionalFixture::new_with_mode(vapor_shared::SyncMode::PullOnly);
+        fixture.tick(6_000); // baseline
+        let folder = fixture.watch_root.join("scratch");
+        std::fs::create_dir_all(&folder).expect("local folder");
+        std::fs::write(folder.join("note.txt"), b"local only").expect("local file");
+        fixture.record_local_event(&folder, FsEventKind::Created, fixture.now_ms);
+        // The folder's event stabilizes on one tick and reports its
+        // file as a fresh watcher event, which stabilizes on the next.
+        for _ in 0..3 {
+            fixture.tick(6_000);
+        }
+        fixture.converge(16);
+        assert!(
+            !folder.join("note.txt").exists(),
+            "local-only content is removed in pull-only"
+        );
+        assert_eq!(
+            fixture.runtime.state_db().queue_depth().expect("depth"),
+            0,
+            "no intent may be left retrying"
+        );
+        assert!(
+            !fixture.cloud_root.join("scratch").exists(),
+            "pull-only never uploads"
+        );
+    }
+
+    #[test]
+    fn pull_only_restores_a_folder_this_device_removed() {
+        // Removing a synced folder locally is divergence from the cloud
+        // source of truth: the files come back. The folder's own
+        // vanish event reaches the queue as a download of a directory,
+        // which resolves into a walk instead of a transfer that can
+        // never complete.
+        let mut fixture = BidirectionalFixture::new_with_mode(vapor_shared::SyncMode::PullOnly);
+        std::fs::create_dir_all(fixture.cloud_root.join("keep")).expect("cloud folder");
+        std::fs::write(fixture.cloud_root.join("keep/a.txt"), b"canonical").expect("cloud file");
+        std::fs::create_dir_all(fixture.watch_root.join("keep")).expect("local folder");
+        std::fs::write(fixture.watch_root.join("keep/a.txt"), b"canonical").expect("local file");
+        fixture.tick(6_000); // baseline
+        fixture.converge(8);
+
+        std::fs::remove_dir_all(fixture.watch_root.join("keep")).expect("local removal");
+        fixture.record_local_event(
+            &fixture.watch_root.join("keep/a.txt"),
+            FsEventKind::Removed,
+            fixture.now_ms,
+        );
+        fixture.record_local_event(
+            &fixture.watch_root.join("keep"),
+            FsEventKind::Removed,
+            fixture.now_ms,
+        );
+        fixture.converge(16);
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("keep/a.txt")).expect("restored"),
+            b"canonical"
+        );
+        assert_eq!(
+            fixture.runtime.state_db().queue_depth().expect("depth"),
+            0,
+            "the folder's own event must not leave a download retrying"
+        );
+    }
+
+    #[test]
+    fn an_in_place_cloud_append_is_not_taken_for_the_daemons_own_write() {
+        // The op-id tag survives an append made in place on the cloud
+        // object, so the feed reports a change carrying Vapor's own
+        // op-id. The size no longer matches what the upload recorded:
+        // this is another writer's edit and it must reach this device.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let local = fixture.watch_root.join("log.txt");
+        std::fs::write(&local, b"line one\n").expect("seed local");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(16);
+        let cloud = fixture.cloud_root.join("log.txt");
+        assert_eq!(std::fs::read(&cloud).expect("uploaded"), b"line one\n");
+
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&cloud)
+                .expect("open the cloud object");
+            file.write_all(b"line two\n").expect("append in place");
+        }
+        fixture
+            .feed
+            .emit_modified(cloud.clone(), timestamp_ms(fixture.now_ms));
+        fixture.converge(16);
+        assert_eq!(
+            std::fs::read(&local).expect("local copy"),
+            b"line one\nline two\n",
+            "the cloud append must reach this device"
+        );
     }
 
     #[test]

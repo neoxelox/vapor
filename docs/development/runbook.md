@@ -121,12 +121,14 @@ Fast facts for local dev:
   constants, UI rendering (SwiftUI, menubar, Dock, future GUI
   surfaces), interactive TTY behavior on the `vapor` CLI. See
   `AGENTS.md §9.3` and `docs/architecture/testing-strategy.md`.
-- **Performance SLO checks** run via `./scripts/perf.sh` (Tier 2;
-  release gate only, not a PR gate): one soak cell against the release
-  profile, its report asserted against the budgets.
+- **Performance SLO checks** run via `./scripts/perf.sh` (Tier 2; a
+  release gate and on demand in `perf.yml`, not a PR gate): one soak
+  cell against the release profile, its report asserted against the
+  budgets.
 - **Soak verification** runs via `./scripts/soak.sh` (Tier S): hours
-  of seeded churn with faults and a model-checked oracle; nightly in
-  `soak.yml` and on demand; see `docs/development/soak-testing.md`.
+  of seeded churn with faults and a model-checked oracle; a release
+  gate in `soak.yml` and on demand; see
+  `docs/development/soak-testing.md`.
 - **End-to-end verification** runs via `./scripts/e2e.sh` (Tier E2E,
   the `tools/e2e` harness) after Tier 1 passes, whenever a change
   alters runtime behavior a user would observe through the daemon or
@@ -157,7 +159,7 @@ Fast facts for local dev:
 ## Release build policy
 
 - A single release mode is used and tuned for performance with safe optimizations.
-- The GitHub release pipeline validates the tag ref first, then runs `lint.yml`, `test.yml`, and `perf.yml` in parallel; the `release` job proceeds only with `needs: [preflight, lint, test, perf]`.
+- The GitHub release pipeline validates the tag ref first, then runs `lint.yml`, `test.yml`, `perf.yml`, and `soak.yml` in parallel; one `package (<platform>)` job per shipping platform proceeds only with `needs: [preflight, lint, test, perf, soak]`, and `publish` assembles the release from their assets.
 - Stable tag releases provision signing and notarization material on the runner before packaging.
 - Rust release profile uses `opt-level=3`, `lto=fat`, `codegen-units=1`, `panic=abort`, and `strip=symbols`.
 - Swift release build uses whole-module and cross-module optimization flags.

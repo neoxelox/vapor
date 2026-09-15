@@ -1,21 +1,32 @@
 name: soak
 
 # Tier S: the real vapor + vapord under hours of seeded file churn with
-# faults, on the shipping OS, checked by the model-based oracle after
-# every phase. Never a PR gate. Runs nightly and on demand; each cell is
-# one (mode, load, faults, throttle) combination from
-# docs/development/soak-testing.md.
+# faults, checked by the model-based oracle after every phase. A
+# release gate: release.yml calls it next to lint, test, and perf, so a
+# tag ships only after every cell passed on every runner. Runs on
+# demand through workflow_dispatch; never on a schedule, never a PR
+# gate. Each cell is one (mode, load, faults, throttle) combination
+# from docs/development/soak-testing.md.
 on:
-  schedule:
-    # 03:17 UTC, when the macOS runner pool is quiet.
-    - cron: "17 3 * * *"
+  workflow_call:
+    inputs:
+      duration:
+        description: "Planned length per cell (e.g. 45m, 2h)"
+        type: string
+        default: "45m"
+      seed:
+        description: "Workload seed (0 = derive from the run number)"
+        type: string
+        default: "0"
   workflow_dispatch:
     inputs:
       duration:
         description: "Planned length per cell (e.g. 45m, 2h)"
+        type: string
         default: "45m"
       seed:
         description: "Workload seed (0 = derive from the run number)"
+        type: string
         default: "0"
 
 permissions:
@@ -27,8 +38,8 @@ concurrency:
 
 jobs:
   soak:
-    name: soak (${{ matrix.cell.name }})
-    runs-on: macos-latest
+    name: soak (${{ matrix.os }}, ${{ matrix.cell }})
+    runs-on: ${{ matrix.os }}
     # A cell runs for its duration plus build, provisioning, and up to
     # one converge deadline per phase.
     timeout-minutes: 300
@@ -36,17 +47,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # macOS is the shipping OS; Linux runs the daemon on inotify
+        # since its native traits landed. Windows joins when its native
+        # watcher ships (docs/tasks/core.md): until then the driver
+        # would skip every cell by name, so it stays out of the matrix.
+        os: [macos-latest, ubuntu-latest]
         cell:
-          - name: two-way-mixed-all-faults
+          - two-way-mixed-all-faults
+          - two-way-coding-crash
+          - two-way-large-crash
+          - pull-only-bulk
+          - push-only-mixed
+        include:
+          - cell: two-way-mixed-all-faults
             args: --mode two-way --load mixed --faults all --throttle walk --cloud-image-mb 512
-          - name: two-way-coding-crash
+          - cell: two-way-coding-crash
             args: --mode two-way --load coding --faults crash
-          - name: two-way-large-crash
+          - cell: two-way-large-crash
             args: --mode two-way --load large --faults crash-mid-transfer,freeze
-          - name: pull-only-bulk
+          - cell: pull-only-bulk
             args: --mode pull-only --load bulk --faults pause-resume,config-reload
-          - name: push-only-mixed
+          - cell: push-only-mixed
             args: --mode push-only --load mixed --faults crash,cloud-root-vanish
+        exclude:
+          # The disk image behind the disk-full fault comes from hdiutil,
+          # macOS only; a tmpfs-backed image for Linux is open work.
+          - os: ubuntu-latest
+            cell: two-way-mixed-all-faults
 
     steps:
       - name: Checkout
@@ -73,8 +100,8 @@ jobs:
       - name: Run soak cell
         shell: bash
         env:
-          DURATION: ${{ github.event.inputs.duration || '45m' }}
-          SEED_INPUT: ${{ github.event.inputs.seed || '0' }}
+          DURATION: ${{ inputs.duration || '45m' }}
+          SEED_INPUT: ${{ inputs.seed || '0' }}
         run: |
           set -euo pipefail
           seed="$SEED_INPUT"
@@ -82,13 +109,13 @@ jobs:
             seed="$GITHUB_RUN_NUMBER"
           fi
           ./scripts/soak.sh --duration "$DURATION" --seed "$seed" --release --keep \
-            ${{ matrix.cell.args }}
+            ${{ matrix.args }}
 
       - name: Upload soak artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: soak-${{ matrix.cell.name }}
+          name: soak-${{ matrix.os }}-${{ matrix.cell }}
           path: |
             .vapor/e2e/soak-*/soak-report.json
             .vapor/e2e/soak-*/soak-status.json

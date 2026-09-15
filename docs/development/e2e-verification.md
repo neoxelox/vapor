@@ -323,6 +323,10 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S48 | renaming a synced file in the cloud renames the local file in place (same inode, no download) and leaves nothing in the trash |
 | S49 | a sync root that is a whole volume of its own gets its trash at `<volume>/.vapor/trash/`: a cloud deletion is a rename on that volume (same inode, no copy onto the runtime directory's volume), `vapor trash list` shows it, restore puts it back, and the `.vapor` directory inside the root never syncs (needs a disk image) |
 | S50 | a local file whose name is not valid UTF-8 opens an `unsyncable-name` decision, never reaches the cloud, and the question is withdrawn once the file is renamed; `skip` stops the asking (needs a filesystem that accepts such a name: Linux) |
+| S51 | a startup scan held by the throttle says so in status; `vapor sync-now` runs it under user activity and an offline divergence resolves as a keep-both copy |
+| S52 | push-only removes a cloud-only folder and everything under it, one entry at a time, and never leaves the delete retrying |
+| S53 | pull-only restores a synced folder removed on this device without leaving the folder's own event as a download that never completes, and removes a local-only folder file by file |
+| S54 | an append made in place on the cloud object, which keeps Vapor's op-id tag, reaches this device as the canonical file and is neither dropped as an echo nor turned into a conflict copy |
 | R01 | install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd, then the headless supervisor (`install --supervise`) restarting a killed daemon on its own (`--full`) |
 
 ## Extending the harness
@@ -386,7 +390,7 @@ Discipline rules:
 | Tier 1 | `./scripts/test.sh` | every PR | module + composed correctness, in-process |
 | Tier E2E | `./scripts/e2e.sh` | every PR (all three OS jobs; `--full` on macOS) + locally for runtime-affecting changes | the shipped binaries work black-box, end to end |
 | Tier 2 | `./scripts/perf.sh` | release pipeline | one soak cell with the SLO checks asserted on its report |
-| Tier S | `./scripts/soak.sh` | nightly + on demand | hours of churn with faults; nothing lost, both trees converged (`soak-testing.md`) |
+| Tier S | `./scripts/soak.sh` | release pipeline + on demand | five cells of churn with faults; nothing lost, both trees converged (`soak-testing.md`) |
 
 Tier E2E complements Tier 1; it never replaces the Tier 1 tests that
 `AGENTS.md §9.2` requires.

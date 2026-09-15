@@ -302,7 +302,8 @@ macOS app + CLI-on-macOS) is blocked by this phase. See
 - [ ] C6-8 Windows distribution trust chain doc:
       `docs/operations/windows/distribution-trust-chain.md` + task-scheduler
       policy in `docs/operations/windows/scheduled-task-policy.md`.
-- [ ] C6-9 Create and protect the `release-windows` GitHub Environment
+- [x] C6-9 (2026-09-16: created and protected, no secret yet) Create and
+      protect the `release-windows` GitHub Environment
       before any Windows signing secret is added to it: `v*` tag-only
       deployment policy, required reviewer, `prevent_self_review: false`.
       A new environment starts with zero protection and inherits nothing
@@ -357,7 +358,8 @@ shipping OS is below and in `docs/tasks/README.md` wave 13.
 - [ ] C7-7 Linux distribution trust chain doc:
       `docs/operations/linux/distribution-trust-chain.md` + systemd unit
       policy in `docs/operations/linux/systemd-unit-policy.md`.
-- [ ] C7-8 Create and protect the `release-linux` GitHub Environment
+- [x] C7-8 (2026-09-16: created and protected, no secret yet) Create and
+      protect the `release-linux` GitHub Environment
       before any Linux signing secret (GPG) is added to it: `v*` tag-only
       deployment policy, required reviewer, `prevent_self_review: false`.
       A new environment starts with zero protection and inherits nothing
@@ -776,8 +778,8 @@ introduces the code they apply to.
 
 ### Tier-2 release gate (deferred setup)
 
-Tier 2 runs only as part of the release pipeline (`perf.yml` invoked by
-`release.yml`; no standalone or scheduled triggers).
+Tier 2 runs as a release gate (`perf.yml` invoked by `release.yml`)
+and on demand through `workflow_dispatch`; never on a schedule.
 
 - [ ] CT-9 Add a `cargo-fuzz` harness for parsers: ignore-rule parser,
       IPC frame parser (once wave 6 lands), JSON config loader, path
@@ -978,11 +980,12 @@ Still open:
       oversight, `ops.jsonl`, freeze on first violation, `soak.yml`,
       and the Tier 2 SLO assertions in `scripts/perf.sh`.
       `docs/development/soak-testing.md`; the `vapor-soak` skill.
-- [ ] TR-10 Soak cells on Linux (`tmpfs` size limits for disk-full,
-      cgroup CPU and memory limits) now that the native Linux traits
-      are in, and the Google Drive soak mode once TR-8 lands. The e2e
-      suite already runs on the `ubuntu-latest` job; the soak schedule
-      is macOS-only.
+- [ ] TR-10 The rest of the Linux soak: a `tmpfs`-backed cloud volume
+      for the disk-full fault (the only cell still macOS-only in
+      `soak.yml`), cgroup CPU and memory limits, Linux budgets for
+      `perf.yml`, and the Google Drive soak mode once TR-8 lands. The
+      four cells without a disk image run on `ubuntu-latest` in the
+      release gate already.
 - [ ] TR-11 The rows of the 2026-09-06 review's coverage table that no
       scenario or soak fault exercises through the real binaries yet:
       a backward wall-clock step while the daemon runs (the mtime quick

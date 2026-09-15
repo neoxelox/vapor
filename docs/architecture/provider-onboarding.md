@@ -49,7 +49,10 @@ these flags (`ProviderCapabilities`):
 - `supports_op_id_tags` — the backend persists the engine's op-id tag
   (xattr / side-file / `appProperties`) and echoes it back through
   entries and changes. Loop prevention's primary correlator; without it
-  the content-hash fallback carries loop prevention alone.
+  the content-hash fallback carries loop prevention alone. A change
+  also carries the object's size and mtime when the backend reports
+  them (`RemoteChange::size_bytes`, `modified_at`); the engine needs
+  both to tell an in-place edit of a tagged object from an echo.
 - `supports_content_hash_in_listings` — entries carry a hash without an
   extra round trip.
 

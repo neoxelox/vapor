@@ -282,8 +282,9 @@ asks a model what both trees must hold: nothing lost, nothing
 invented, both trees converged, one-way reverts honoured, contested
 payloads both surviving. The first violation freezes the run with the
 sandbox intact; `ops.jsonl` and the daemon log carry the evidence. The
-driver (`tools/soak`) reuses the e2e harness library. Nightly matrix in
-`soak.yml`; one bounded cell is the Tier 2 release gate. Full process:
+driver (`tools/soak`) reuses the e2e harness library. The matrix in
+`soak.yml` is a release gate; one bounded cell is the Tier 2 gate
+next to it. Full process:
 `docs/development/soak-testing.md`. Never a PR gate: a soak is
 evidence for the cells it ran, and the model is never edited to make a
 run green.
@@ -382,11 +383,12 @@ value", the test is not worth writing.
   **5 minutes** per OS in the matrix.
 - **Tier 2** — `perf.yml`. Runs one soak cell with the SLO checks
   (`scripts/perf.sh`), and, as they land, long-running property cases
-  (higher case counts), fuzz corpora, and `loom`-backed tests. Release
-  gate only: `perf.yml` has no standalone triggers and is invoked
-  solely by `release.yml`.
-- **Tier S** — `soak.yml`, nightly and on demand, never a PR gate.
-  Long soak cells across modes, loads, faults, and throttle walks.
+  (higher case counts), fuzz corpora, and `loom`-backed tests. A
+  release gate (`release.yml` calls it) and on demand, never a PR
+  gate.
+- **Tier S** — `soak.yml`, a release gate (`release.yml` calls it)
+  and on demand, never a PR gate. Long soak cells across modes, loads,
+  faults, and throttle walks, on macOS and Linux runners.
 - **Tier E2E** — `scripts/e2e.sh`, at the end of every `test.yml`
   OS job (every PR; part of the required `test` check on `main`).
   Also part of the local contributor validation loop for

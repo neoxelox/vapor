@@ -55,4 +55,15 @@ if [[ "$skip_build" -eq 0 || ! -x "$SOAK_BIN" ]]; then
   cargo build --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -p vapor-soak
 fi
 
-exec "$SOAK_BIN" --repo-root "$ROOT_DIR" "$subcommand" ${args[@]+"${args[@]}"}
+# Exit 3 from the driver names a host need the cell cannot do without
+# (no native watcher on this OS, no disk image tool, no Unix signals).
+# That is a skip, not a failure: the run is reported as skipped and the
+# wrapper exits clean, the way the e2e harness treats a scenario whose
+# need the host cannot meet.
+status=0
+"$SOAK_BIN" --repo-root "$ROOT_DIR" "$subcommand" ${args[@]+"${args[@]}"} || status=$?
+if [[ "$subcommand" == "run" && "$status" -eq 3 ]]; then
+  echo "[soak] skipped: this host cannot run the cell (reasons above)"
+  exit 0
+fi
+exit "$status"

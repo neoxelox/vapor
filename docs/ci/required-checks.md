@@ -35,8 +35,8 @@ reports any more blocks every merge until an admin bypasses it.
 
 Release-only gates:
 
-- `lint`, `test`, and `perf` are reusable workflows invoked by `release.yml` for versioned releases.
-- `perf` is not a pull-request required status check.
+- `lint`, `test`, `perf`, and `soak` are reusable workflows invoked by `release.yml` for versioned releases.
+- `perf` and `soak` are not pull-request required status checks.
 
 ### Ruleset configuration
 
@@ -129,17 +129,20 @@ to scripts.
   - triggers: `pull_request`, `push` to `main`, `workflow_call`
   - `./scripts/build.sh`
 - Perf workflow (`.github/workflows/perf.yml`)
-  - trigger: `workflow_call` from `.github/workflows/release.yml`
-  - thresholds via env: `VAPOR_PERF_SMOKE_RUST_MAX_SECONDS` (default `600`), `VAPOR_PERF_SMOKE_SWIFT_MAX_SECONDS` (default `900`)
+  - triggers: `workflow_call` from `.github/workflows/release.yml`, `workflow_dispatch`
+  - runner matrix: `macos-latest` (platforms join as their budgets are calibrated)
+  - cell shape via env: `VAPOR_PERF_SOAK_DURATION` (default `12m`), `VAPOR_PERF_SOAK_SEED` (default `11`)
   - `./scripts/perf.sh`
+- Soak workflow (`.github/workflows/soak.yml`)
+  - triggers: `workflow_call` from `.github/workflows/release.yml`, `workflow_dispatch`
+  - runner matrix: `macos-latest` × five cells, `ubuntu-latest` × four (no disk image on Linux)
+  - `./scripts/soak.sh`, one cell per matrix entry
 - Release workflow (`.github/workflows/release.yml`)
   - trigger: pushed `v*` tags
-  - validates tag format, `VERSION` match, and tag ancestry on `main`
-  - calls `lint`, `test`, and `perf` in parallel
-  - `release` job declares `needs: [preflight, lint, test, perf]`
-  - `release` job targets GitHub Environment `release-macos`
-  - `./scripts/build.sh package`
-  - `gh release create/edit/upload`
+  - `preflight` validates tag format, `VERSION` match, tag ancestry on `main`, and the changelog section
+  - calls `lint`, `test`, `perf`, and `soak` in parallel
+  - `package (<platform>)` declares `needs: [preflight, lint, test, perf, soak]`, one matrix entry per shipping platform (`macos` on `macos-latest` under `release-macos` today), `./scripts/build.sh package`, assets uploaded as the `release-<platform>` artifact
+  - `publish` declares `needs: [preflight, package]`, downloads every platform's assets, writes `Checksums.txt`, `gh release create/edit/upload`
 
 ## Local parity command set
 

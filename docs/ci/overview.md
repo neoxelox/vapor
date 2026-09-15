@@ -13,15 +13,23 @@ GitHub Actions workflows are defined in `.github/workflows/`:
   harness and `S01` and picks up the daemon scenarios once its native
   traits ship.
 - `build.yml`: runs distribution builds via repository scripts.
-- `perf.yml`: reusable performance gate workflow invoked by the release
-  pipeline; runs one soak cell against the release profile and asserts
-  the SLO checks on its report (`scripts/perf.sh`).
-- `soak.yml`: Tier S, nightly and on demand, never a PR gate: a matrix
-  of soak cells (mode, load, faults, throttle) on the macOS runner, each
-  uploading its report, status, op log, model, and daemon log as the
-  `soak-<cell>` artifact. `workflow_dispatch` takes a duration and a
-  seed.
-- `release.yml`: runs tag-driven package and GitHub Release publication flow.
+- `perf.yml`: Tier 2, a release gate and on demand, never a PR gate:
+  one soak cell against the release profile with the SLO checks
+  asserted on its report (`scripts/perf.sh`), on a runner matrix that
+  holds `macos-latest` today. `release.yml` calls it through
+  `workflow_call`; `workflow_dispatch` takes a duration and a seed for
+  a run by hand, with the release numbers as defaults.
+- `soak.yml`: Tier S, a release gate and on demand, never a PR gate: a
+  matrix of soak cells (mode, load, faults, throttle) over
+  `macos-latest` and `ubuntu-latest`, each uploading its report,
+  status, op log, model, and daemon log as the `soak-<os>-<cell>`
+  artifact. The disk-full cell is macOS-only (its image comes from
+  `hdiutil`). `release.yml` calls it through `workflow_call`;
+  `workflow_dispatch` takes a duration and a seed for a run by hand.
+- `release.yml`: the tag-driven pipeline: preflight, the four gates,
+  one `package (<platform>)` job per shipping platform under that
+  platform's environment, then one `publish` job that assembles the
+  GitHub Release.
 
 ## Toolchain defaults in CI
 
@@ -42,7 +50,10 @@ and the repository enforces `sha_pinning_required`:
 - `maxim-lobanov/setup-xcode` v1.7.0
 - `actions-rust-lang/setup-rust-toolchain` v1.17.0
 - `actions/cache` v5.1.0 for Rust (`cargo`) and SwiftPM caches
-- `actions/upload-artifact` v4.6.2 for the Tier E2E report
+- `actions/upload-artifact` v4.6.2 for the Tier E2E report, the soak
+  and perf reports, and the release packages
+- `actions/download-artifact` v8.0.1 for the release packages in the
+  `publish` job
 
 ## Action allowlist
 
@@ -97,8 +108,8 @@ The `PUT` replaces the whole list, so send every pattern each time.
 
 Pull requests from forks do not start these workflows until a maintainer approves the run (repository setting *Approval for running fork pull request workflows from contributors* = **all external contributors**). Fork runs already get a read-only token and no secrets, but they still execute the PR's code on the runner, including `./scripts/e2e.sh --full`, which installs a real LaunchAgent; the approval step keeps that a deliberate act. Inspect or change it with `gh api repos/neoxelox/vapor/actions/permissions/fork-pr-contributor-approval`.
 
-`perf.yml` has no standalone triggers; `release.yml` calls it for versioned release runs.
+`perf.yml` and `soak.yml` have no schedule and no PR trigger: `release.yml` calls both through `workflow_call` for versioned release runs, and `workflow_dispatch` runs either by hand with a duration and a seed.
 
-`release.yml` runs on pushed tags matching `v*`, validates that the tag exactly matches `VERSION` and that the tagged commit is on `main`, invokes `lint.yml`, `test.yml`, and `perf.yml` in parallel, and then runs the `release` job only after all three succeed. The publish job targets the GitHub `release-macos` environment, and packaging still uses `./scripts/build.sh package` as the source of truth.
+`release.yml` runs on pushed tags matching `v*`. Preflight validates that the tag exactly matches `VERSION`, that the tagged commit is on `main`, and that `CHANGELOG.md` has the tag's section; then `lint.yml`, `test.yml`, `perf.yml`, and `soak.yml` run in parallel. The soak matrix is the long leg: nine cells of 45 minutes each, side by side. After all four gates pass, `package (<platform>)` runs once per shipping platform, on that platform's runner and under its protected environment (`release-macos` in the matrix today; `release-windows` and `release-linux` exist with the same protection and join the matrix when those surfaces ship), and uploads its assets as the `release-<platform>` artifact; `./scripts/build.sh package` stays the source of truth. The `publish` job then downloads every platform's assets, writes one `Checksums.txt` over all of them, and creates or updates the draft GitHub Release. Preflight and `publish` run on `ubuntu-latest`: nothing in them is platform work.
 
 The `main` ruleset (required checks, bypass policy, how to inspect and recreate it) is documented in `docs/ci/required-checks.md`.

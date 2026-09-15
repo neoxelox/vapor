@@ -1,26 +1,58 @@
 name: perf
 
-# No standalone triggers: the performance gate runs only as part of the
-# release pipeline (release.yml invokes it via workflow_call).
+# Tier 2: one bounded soak cell against the release profile with the
+# SLO checks asserted on its report. A release gate: release.yml calls
+# it next to lint, test, and soak. Runs on demand through
+# workflow_dispatch; never on a schedule, never a PR gate. The defaults
+# are the release numbers (a fixed seed and length keep CPU and memory
+# readings comparable from one release to the next); a run by hand may
+# pick others.
 on:
   workflow_call:
+    inputs:
+      duration:
+        description: "Planned length of the cell (e.g. 12m, 45m)"
+        type: string
+        default: "12m"
+      seed:
+        description: "Workload seed"
+        type: string
+        default: "11"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Planned length of the cell (e.g. 12m, 45m)"
+        type: string
+        default: "12m"
+      seed:
+        description: "Workload seed"
+        type: string
+        default: "11"
 
 permissions:
   contents: read
 
 jobs:
   perf:
-    runs-on: macos-latest
+    name: perf (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # The budgets in docs/performance/acceptance-budgets-and-benchmark-harness.md
+        # are measured on macOS, the shipping OS. A platform joins this
+        # list when its surface ships and its budgets are calibrated.
+        # The same scripts/perf.sh runs on every runner; on a host whose
+        # daemon cannot run yet, the driver skips the cell by name and
+        # the gate reports the skip.
+        include:
+          - os: macos-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Select Xcode
-        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1.7.0
-        with:
-          xcode-version: latest-stable
 
       - name: Set up Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
@@ -36,30 +68,24 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-perf-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Cache SwiftPM dependencies
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: apps/macos/.build
-          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-spm-
+            ${{ runner.os }}-cargo-perf-
 
       # One bounded soak cell against the release profile; the SLO checks
       # are asserted on its report. See docs/development/soak-testing.md.
       - name: Run performance gate
+        shell: bash
         env:
-          VAPOR_PERF_SOAK_DURATION: "12m"
+          VAPOR_PERF_SOAK_DURATION: ${{ inputs.duration || '12m' }}
+          VAPOR_PERF_SOAK_SEED: ${{ inputs.seed || '11' }}
         run: ./scripts/perf.sh
 
       - name: Upload soak report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: perf-soak-report
+          name: perf-soak-report-${{ matrix.os }}
           path: |
             .vapor/e2e/soak-last-report.json
             .vapor/e2e/soak-*/soak-report.json
