@@ -947,16 +947,25 @@ impl FilesystemUploadSession {
         // 0755 script into a 0644 file on the other replica.
         copy_permissions_from_handle(&self.source, &self.temp_path);
 
-        self.commit()?;
-        if needs_side_file {
-            self.tags
-                .write_op_id(&self.target, &self.op_id)
-                .map_err(|error| {
-                    ProviderError::transient(format!(
-                        "uploaded {} but could not record its op-id tag: {error}",
-                        self.remote_path
-                    ))
-                })?;
+        // Every write that can fail happens before the rename. An object
+        // that lands must land tagged: a tag written after the commit
+        // can fail on a full disk, and the retry then finds the bytes
+        // already there, so the untagged object comes back through the
+        // changes feed as another writer's edit.
+        if needs_side_file && let Err(error) = self.tags.write_side_file(&self.target, &self.op_id)
+        {
+            let _ = fs::remove_file(&self.temp_path);
+            self.finished = true;
+            return Err(ProviderError::transient(format!(
+                "cannot record the op-id tag for {}: {error}",
+                self.remote_path
+            )));
+        }
+        if let Err(error) = self.commit() {
+            if needs_side_file {
+                let _ = self.tags.remove_side_file(&self.target);
+            }
+            return Err(error);
         }
 
         self.finished = true;
@@ -1357,6 +1366,78 @@ mod tests {
             })
             .collect();
         assert!(leftovers.is_empty(), "temp files must not survive");
+    }
+
+    #[test]
+    fn upload_side_file_tag_lands_before_the_rename_and_leaves_with_a_failed_commit() {
+        // Without xattr support the op-id lives in a side-file. It is
+        // written before the payload is renamed into place, so a tag
+        // write that fails (a full disk) aborts the upload and no
+        // object ever lands untagged; a commit that fails takes the
+        // side-file with it.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cloud = dir.path().join("cloud");
+        fs::create_dir_all(&cloud).expect("cloud root");
+        let caps = Arc::new(InMemoryFilesystemCapabilities::new(
+            false,
+            CaseSensitivity::Sensitive,
+        ));
+        let (provider, _feed) =
+            FilesystemProvider::with_manual_feed(&cloud, caps).expect("provider");
+        let source = dir.path().join("source.txt");
+        fs::write(&source, b"payload").expect("seed source");
+        let request = |name: &str| UploadRequest {
+            local_source: source.clone(),
+            remote_path: RemotePath::new(name).expect("remote path"),
+            op_id: "op-side".to_string(),
+            precondition: RemotePrecondition::Absent,
+        };
+
+        let outcome = drive_to_completion(
+            provider
+                .begin_upload(request("landed.txt"))
+                .expect("session"),
+        );
+        assert_eq!(outcome.bytes_total, 7);
+        let landed = cloud.join("landed.txt");
+        assert!(
+            crate::tags::OpIdTagStore::side_file_path(&landed).exists(),
+            "the tag lands with the object"
+        );
+        assert_eq!(
+            provider.tag_store().read_op_id(&landed),
+            Some("op-side".to_string())
+        );
+
+        // Another writer lands the target during the transfer: the
+        // no-clobber commit refuses, and nothing of ours stays behind.
+        let mut session = provider
+            .begin_upload(request("taken.txt"))
+            .expect("session");
+        let taken = cloud.join("taken.txt");
+        fs::write(&taken, b"theirs").expect("other writer");
+        let error = loop {
+            match session.step(8 * 1024) {
+                Ok(TransferStep::Progressed { .. }) => continue,
+                Ok(TransferStep::Completed(_)) => {
+                    panic!("the commit must refuse an occupied target")
+                }
+                Err(error) => break error,
+            }
+        };
+        assert_eq!(
+            error.kind,
+            vapor_shared::ProviderErrorKind::PreconditionFailed
+        );
+        assert_eq!(
+            fs::read(&taken).expect("the other writer's file"),
+            b"theirs"
+        );
+        assert!(
+            !crate::tags::OpIdTagStore::side_file_path(&taken).exists(),
+            "a failed commit leaves no side-file"
+        );
+        assert!(provider.tag_store().read_op_id(&taken).is_none());
     }
 
     #[test]

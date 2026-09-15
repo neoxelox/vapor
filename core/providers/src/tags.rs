@@ -140,7 +140,26 @@ impl OpIdTagStore {
         fs::rename(source, destination)
     }
 
-    fn write_side_file(&self, path: &Path, op_id: &str) -> io::Result<()> {
+    /// Removes the side-file tag for `path` and nothing else: the xattr
+    /// of whatever stands at `path` is left alone, so a failed commit
+    /// can undo its own bookkeeping without touching another writer's
+    /// object.
+    pub fn remove_side_file(&self, path: &Path) -> io::Result<()> {
+        let side_file = Self::side_file_path(path);
+        if !Self::is_owned_side_file(&side_file) {
+            return Ok(());
+        }
+        match fs::remove_file(&side_file) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Writes the side-file tag directly, for a payload that has not
+    /// landed at `path` yet (the xattr needs the object; the side-file
+    /// only needs its name).
+    pub fn write_side_file(&self, path: &Path, op_id: &str) -> io::Result<()> {
         let side_file = Self::side_file_path(path);
         // The atomic rename below would overwrite whatever sits here; a
         // user file that merely shares the reserved suffix must not be

@@ -40,6 +40,22 @@ pub fn scenarios() -> Vec<Scenario> {
             run: pull_only_mirror,
         },
         Scenario {
+            id: "S53",
+            name: "pull-only-folder-removed-here",
+            proves: "pull-only restores a synced folder removed on this device without leaving the folder's own event as a download that never completes, and removes a local-only folder file by file",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: pull_only_folder_removed_here,
+        },
+        Scenario {
+            id: "S54",
+            name: "cloud-in-place-append",
+            proves: "an append made in place on the cloud object, which keeps Vapor's op-id tag, reaches this device as the canonical file and is neither dropped as an echo nor turned into a conflict copy",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: cloud_in_place_append,
+        },
+        Scenario {
             id: "S14",
             name: "symmetric-ignore",
             proves: "ignored names never sync in either direction and never manufacture a conflict copy",
@@ -166,6 +182,81 @@ fn keep_both_conflict(ctx: &mut Ctx) -> Result<(), Failure> {
         "the cloud edit was lost"
     );
     ctx.allow_warning("Resolved concurrent divergence by keeping both versions");
+    Ok(())
+}
+
+fn pull_only_folder_removed_here(ctx: &mut Ctx) -> Result<(), Failure> {
+    // Removing a synced folder on this device in pull-only is
+    // divergence from the cloud: its files come back. The watcher
+    // also reports the folder itself gone, and that event used to
+    // become a download of a directory, which retried forever and
+    // held the queue open. A local-only folder created afterwards is
+    // removed file by file, never uploaded.
+    let home = ctx.primary.clone();
+    fs::create_dir_all(home.cloud.join("shared/inner"))?;
+    write_file(&home.cloud.join("shared/doc.txt"), "cloud canonical\n")?;
+    write_file(
+        &home.cloud.join("shared/inner/deep.txt"),
+        "deeper canonical\n",
+    )?;
+    ctx.configure_scope(&home)?;
+    ctx.cli().config_set("syncMode", "pull-only")?;
+    ctx.start_daemon()?;
+    ctx.wait_exists(&home.local.join("shared/inner/deep.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    fs::remove_dir_all(home.local.join("shared"))?;
+    ctx.wait_exists(&home.local.join("shared/doc.txt"), CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.local.join("shared/inner/deep.txt"), CONVERGE_TIMEOUT)?;
+    ensure!(
+        read_string(&home.local.join("shared/doc.txt"))? == "cloud canonical\n",
+        "the removed folder did not come back from the cloud"
+    );
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    fs::create_dir_all(home.local.join("scratch"))?;
+    write_file(&home.local.join("scratch/note.txt"), "local intruder\n")?;
+    ctx.wait_absent(&home.local.join("scratch/note.txt"), CONVERGE_TIMEOUT)?;
+    ensure!(
+        !home.cloud.join("scratch").exists(),
+        "pull-only mode uploaded a local folder"
+    );
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    Ok(())
+}
+
+fn cloud_in_place_append(ctx: &mut Ctx) -> Result<(), Failure> {
+    // An append made in place on the cloud object keeps the op-id tag
+    // Vapor wrote at upload time. The change is another writer's edit
+    // all the same, and it has to reach this device as the canonical,
+    // not be dropped as an echo and not become a conflict copy.
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    write_file(&home.local.join("log.txt"), "line one\n")?;
+    ctx.wait_exists(&home.cloud.join("log.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(home.cloud.join("log.txt"))?;
+        file.write_all(b"line two\n")?;
+        file.sync_all()?;
+    }
+    ctx.wait_same_content(
+        &home.local.join("log.txt"),
+        &home.cloud.join("log.txt"),
+        CONVERGE_TIMEOUT,
+    )?;
+    ensure!(
+        read_string(&home.local.join("log.txt"))? == "line one\nline two\n",
+        "the cloud append did not reach the local file"
+    );
+    ensure!(
+        !conflict_copy_exists(&home.local, "log") && !conflict_copy_exists(&home.cloud, "log"),
+        "an in-place cloud append was resolved as a conflict"
+    );
+    ctx.settle(CONVERGE_TIMEOUT)?;
     Ok(())
 }
 

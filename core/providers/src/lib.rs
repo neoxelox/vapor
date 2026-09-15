@@ -252,6 +252,14 @@ pub struct RemoteChange {
     /// Content hash when available in feed metadata (fallback
     /// correlator).
     pub content_hash: Option<String>,
+    /// The object's size as the feed reports it (`None` for removals
+    /// and for feeds without metadata). Loop prevention checks it
+    /// against the size the daemon wrote: an op-id tag survives an
+    /// in-place edit, so the tag alone does not prove an echo.
+    pub size_bytes: Option<u64>,
+    /// The object's mtime as the feed reports it, the second half of
+    /// that quick check.
+    pub modified_at: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -43,6 +43,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: push_only_mirror,
         },
         Scenario {
+            id: "S52",
+            name: "push-only-cloud-only-folder",
+            proves: "push-only removes a cloud-only folder and everything under it, one entry at a time, and never leaves the delete retrying",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: push_only_cloud_only_folder,
+        },
+        Scenario {
             id: "S37",
             name: "push-only-same-size-divergence",
             proves: "push-only overwrites a cloud edit that kept the byte count even when the daemon has no index row for the pair",
@@ -261,6 +269,32 @@ fn push_only_mirror(ctx: &mut Ctx) -> Result<(), Failure> {
         !tree_contains_content(&home.local, b"the cloud version of shared\n")
             && !tree_contains_content(&home.cloud, b"the cloud version of shared\n"),
         "push-only kept the cloud version somewhere (strict mirror must not)"
+    );
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    Ok(())
+}
+
+fn push_only_cloud_only_folder(ctx: &mut Ctx) -> Result<(), Failure> {
+    // No provider deletes a tree in one call, so a cloud-only folder
+    // is only ever removed by expanding it into its entries. The
+    // one-way planner used to send the folder itself, which the
+    // provider refused as non-empty, forever.
+    let home = ctx.primary.clone();
+    fs::create_dir_all(home.cloud.join("stale/deep"))?;
+    write_file(&home.cloud.join("stale/one.txt"), "cloud only\n")?;
+    write_file(&home.cloud.join("stale/deep/two.txt"), "cloud only too\n")?;
+    fs::create_dir_all(&home.local)?;
+    write_file(&home.local.join("keep.txt"), "local canonical\n")?;
+    ctx.configure_scope(&home)?;
+    ctx.cli().config_set("syncMode", "push-only")?;
+    ctx.start_daemon()?;
+    ctx.wait_exists(&home.cloud.join("keep.txt"), CONVERGE_TIMEOUT)?;
+    ctx.wait_absent(&home.cloud.join("stale/deep/two.txt"), CONVERGE_TIMEOUT)?;
+    ctx.wait_absent(&home.cloud.join("stale/one.txt"), CONVERGE_TIMEOUT)?;
+    ctx.wait_absent(&home.cloud.join("stale"), CONVERGE_TIMEOUT)?;
+    ensure!(
+        !home.local.join("stale").exists(),
+        "push-only brought a cloud-only folder down"
     );
     ctx.settle(CONVERGE_TIMEOUT)?;
     Ok(())

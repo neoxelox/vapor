@@ -324,6 +324,8 @@ fn report_directory_files(
             observed_at,
             op_id: tags.read_op_id(&path),
             content_hash: None,
+            size_bytes: Some(metadata.len()),
+            modified_at: metadata.modified().ok(),
         });
     }
 }
@@ -369,6 +371,8 @@ fn normalize_watch_event(
                 observed_at: event.observed_at,
                 op_id,
                 content_hash: None,
+                size_bytes: Some(metadata.len()),
+                modified_at: metadata.modified().ok(),
             })
         }
         // `NotADirectory` means an ancestor of the path is now a file, so
@@ -383,6 +387,8 @@ fn normalize_watch_event(
                 observed_at: event.observed_at,
                 op_id: None,
                 content_hash: None,
+                size_bytes: None,
+                modified_at: None,
             })
         }
         // A transient stat failure (EACCES during a permission change,
@@ -404,6 +410,8 @@ fn normalize_watch_event(
                 observed_at: event.observed_at,
                 op_id: None,
                 content_hash: None,
+                size_bytes: None,
+                modified_at: None,
             })
         }
     }

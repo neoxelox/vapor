@@ -315,6 +315,24 @@ impl DurableStateDb {
         Ok(paths)
     }
 
+    /// Kinds of the queued intents (pending or leased) at exactly
+    /// `path`. The move detector reads it: a path with a restore
+    /// queued is being put back, not renamed away.
+    pub fn queued_kinds_at(&self, path: &Path) -> Result<Vec<PendingIntentKind>, StateDbError> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT kind FROM queue_intents WHERE path_text = ? AND state IN (?, ?)")?;
+        let rows = statement.query_map(
+            params![path_to_text(path)?, STATE_PENDING, STATE_LEASED],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut kinds = Vec::new();
+        for row in rows {
+            kinds.push(intent_kind_from_label(&row?)?);
+        }
+        Ok(kinds)
+    }
+
     /// Number of queued intents (pending or leased) whose path lies
     /// strictly under `directory`, excluding `except_id`. A directory
     /// delete uses it to tell "children still being worked on" from

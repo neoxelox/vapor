@@ -618,8 +618,9 @@ impl ReconcileWalker {
                         },
                         SyncMode::PushOnly => {
                             // Strict mirror: cloud-only content does not
-                            // exist at the local source of truth — remove it
-                            // (provider delete handles directories).
+                            // exist at the local source of truth — remove it.
+                            // A directory expands into per-entry deletes in
+                            // the executor; no provider deletes a tree.
                             batch.push((local_path, PendingIntentKind::Delete, now));
                             self.stats.mirror_deletes += 1;
                         }

@@ -1060,6 +1060,8 @@ impl Provider for GoogleDriveProvider {
                     observed_at: now,
                     op_id: None,
                     content_hash: None,
+                    size_bytes: None,
+                    modified_at: None,
                 });
                 continue;
             }
@@ -1084,6 +1086,8 @@ impl Provider for GoogleDriveProvider {
                     observed_at: now,
                     op_id: None,
                     content_hash: None,
+                    size_bytes: None,
+                    modified_at: None,
                 });
             }
             let Ok(remote_path) = RemotePath::new(resolved.new_path) else {
@@ -1099,6 +1103,8 @@ impl Provider for GoogleDriveProvider {
                     .and_then(|properties| properties.get(OP_ID_PROPERTY))
                     .cloned(),
                 content_hash: file.md5_checksum.clone(),
+                size_bytes: file.size.as_deref().and_then(|size| size.parse().ok()),
+                modified_at: file.modified_time.as_deref().and_then(parse_rfc3339_millis),
             });
         }
 
