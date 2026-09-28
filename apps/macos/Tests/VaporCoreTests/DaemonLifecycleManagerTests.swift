@@ -286,6 +286,8 @@ final class RecordingServiceController: LaunchAgentControlling {
     return liveStatus
   }
   func syncNow() throws {}
+
+  func signIn(provider _: String, profile _: String) throws {}
 }
 
 private struct ThrowingServiceController: LaunchAgentControlling {
@@ -313,6 +315,8 @@ private struct ThrowingServiceController: LaunchAgentControlling {
 
   func daemonStatus() throws -> DaemonStatusSnapshot { throw ControllerError() }
   func syncNow() throws { throw ControllerError() }
+
+  func signIn(provider _: String, profile _: String) throws { throw ControllerError() }
 }
 
 @Test

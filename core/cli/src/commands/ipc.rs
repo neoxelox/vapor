@@ -203,6 +203,12 @@ pub fn render_status(status: &StatusResponse) -> String {
             status.conflicts_unresolved
         ));
     }
+    for profile in status.profiles.iter().filter(|p| p.sign_in_required) {
+        rendered.push_str(&format!(
+            "\nSign-in required: profile {} is on hold (vapor auth login {} --profile {})",
+            profile.id, profile.provider_name, profile.id
+        ));
+    }
     match status.reconcile_state.as_str() {
         "waiting" => rendered.push_str(&format!(
             "\nScan: {} (vapor sync-now scans anyway)",
@@ -413,15 +419,25 @@ mod tests {
             conflicts_unresolved: 1,
             reconcile_state: "waiting".to_string(),
             reconcile_detail: "waiting for an idle moment: user activity is active".to_string(),
-            profiles: vec![vapor_ipc::ProfileStatus {
-                id: "mirror".to_string(),
-                provider_name: "filesystem".to_string(),
-                sync_mode: "pull-only".to_string(),
-                run_state: "Running".to_string(),
-                queue_depth: 3,
-                failed_intents: 1,
-                ..vapor_ipc::ProfileStatus::default()
-            }],
+            profiles: vec![
+                vapor_ipc::ProfileStatus {
+                    id: "mirror".to_string(),
+                    provider_name: "filesystem".to_string(),
+                    sync_mode: "pull-only".to_string(),
+                    run_state: "Running".to_string(),
+                    queue_depth: 3,
+                    failed_intents: 1,
+                    ..vapor_ipc::ProfileStatus::default()
+                },
+                vapor_ipc::ProfileStatus {
+                    id: "work".to_string(),
+                    provider_name: "gdrive".to_string(),
+                    sync_mode: "two-way".to_string(),
+                    run_state: "Error".to_string(),
+                    sign_in_required: true,
+                    ..vapor_ipc::ProfileStatus::default()
+                },
+            ],
             ..StatusResponse::default()
         };
         let rendered = render_status(&status);
@@ -438,6 +454,10 @@ mod tests {
             "Scan: waiting for an idle moment: user activity is active (vapor sync-now scans anyway)"
         ));
         assert!(rendered.contains("Profile mirror: Running (filesystem, pull-only)"));
+        assert!(rendered.contains(
+            "Sign-in required: profile work is on hold (vapor auth login gdrive --profile work)"
+        ));
+        assert!(!rendered.contains("profile mirror is on hold"));
     }
 
     #[test]
@@ -532,6 +552,40 @@ mod tests {
   "conflicts_unresolved": 0,
   "reconcile_state": "",
   "reconcile_detail": ""
+}"#
+        );
+    }
+
+    #[test]
+    fn profile_status_json_shape_is_stable() {
+        let profile = vapor_ipc::ProfileStatus {
+            id: "work".to_string(),
+            provider_name: "gdrive".to_string(),
+            sync_mode: "two-way".to_string(),
+            run_state: "Error".to_string(),
+            sign_in_required: true,
+            ..vapor_ipc::ProfileStatus::default()
+        };
+        assert_eq!(
+            serde_json::to_string_pretty(&profile).expect("serialize"),
+            r#"{
+  "id": "work",
+  "display_name": "",
+  "provider_name": "gdrive",
+  "sync_mode": "two-way",
+  "run_state": "Error",
+  "reason": "",
+  "queue_depth": 0,
+  "failed_intents": 0,
+  "conflicts": 0,
+  "mirror_reverts": 0,
+  "mirror_deletes": 0,
+  "suspended_reason": null,
+  "decisions_pending": 0,
+  "conflicts_unresolved": 0,
+  "reconcile_state": "",
+  "reconcile_detail": "",
+  "sign_in_required": true
 }"#
         );
     }

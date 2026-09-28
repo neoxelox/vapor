@@ -12,6 +12,8 @@
 //! - `vapord_binary` is discoverable next to the CLI, inside the app
 //!   bundle, or on `PATH` (one resolver shared with `vapor service`).
 //! - `secret_store` reports whether provider tokens persist on this OS.
+//! - `gdrive_oauth_client` names the Google Drive OAuth client a sign-in
+//!   would use: built in, from the environment, or none.
 //! - `throttle_inputs` reports where the daemon's throttle signals come
 //!   from on this host.
 //! - `host_launch_agent_plist` (macOS) is present at the documented path.
@@ -96,6 +98,7 @@ pub fn run() -> DoctorReport {
         check_ipc_socket_path(&vapor_shared::runtime_paths::ipc_socket_location()),
         check_daemon_binary(daemon_binary::locate()),
         check_secret_store(),
+        check_gdrive_oauth_client(vapor_providers::gdrive::oauth::client_credentials()),
         check_throttle_inputs(std::env::var(constants::env::VAPOR_THROTTLE_INPUTS).ok()),
     ];
     if cfg!(target_os = "macos") {
@@ -249,6 +252,48 @@ fn check_secret_store() -> DoctorCheck {
             status: DoctorCheckStatus::Warning,
             detail: format!(
                 "no native secret store on this OS ({error}); `vapor auth login` keeps tokens in memory only"
+            ),
+        },
+    }
+}
+
+/// Which OAuth client a Google Drive sign-in would present. Names the
+/// client id (public by design) so a build can be checked against the
+/// console; never the secret.
+fn check_gdrive_oauth_client(
+    client: Option<vapor_providers::gdrive::oauth::ClientCredentials>,
+) -> DoctorCheck {
+    use vapor_providers::gdrive::oauth::ClientSource;
+    let name = "gdrive_oauth_client".to_string();
+    match client {
+        Some(client) => {
+            let source = match client.source {
+                ClientSource::BuiltIn => "built into this build".to_string(),
+                ClientSource::Environment => format!(
+                    "from {} (overrides any built-in client)",
+                    constants::env::VAPOR_GDRIVE_CLIENT_ID
+                ),
+            };
+            DoctorCheck {
+                name,
+                status: DoctorCheckStatus::Ok,
+                detail: format!(
+                    "{source}: {}{}",
+                    client.client_id,
+                    if client.client_secret.is_some() {
+                        " (with a client secret)"
+                    } else {
+                        ""
+                    }
+                ),
+            }
+        }
+        None => DoctorCheck {
+            name,
+            status: DoctorCheckStatus::Warning,
+            detail: format!(
+                "none: this build has no Google Drive OAuth client and {} is not set, so Google Drive sign-in is unavailable",
+                constants::env::VAPOR_GDRIVE_CLIENT_ID
             ),
         },
     }
@@ -483,6 +528,28 @@ mod tests {
         let scripted = check_throttle_inputs(Some("file:/tmp/inputs.json".to_string()));
         assert_eq!(scripted.status, DoctorCheckStatus::Ok);
         assert!(scripted.detail.contains("/tmp/inputs.json"));
+    }
+
+    #[test]
+    fn gdrive_client_check_names_the_source_and_never_the_secret() {
+        use vapor_providers::gdrive::oauth::{ClientCredentials, ClientSource};
+        let built_in = check_gdrive_oauth_client(Some(ClientCredentials {
+            client_id: "123.apps.googleusercontent.com".to_string(),
+            client_secret: Some("GOCSPX-hidden".to_string()),
+            source: ClientSource::BuiltIn,
+        }));
+        assert_eq!(built_in.status, DoctorCheckStatus::Ok);
+        assert!(built_in.detail.contains("built into this build"));
+        assert!(built_in.detail.contains("123.apps.googleusercontent.com"));
+        assert!(!built_in.detail.contains("GOCSPX-hidden"));
+
+        let missing = check_gdrive_oauth_client(None);
+        assert_eq!(missing.status, DoctorCheckStatus::Warning);
+        assert!(
+            missing
+                .detail
+                .contains(constants::env::VAPOR_GDRIVE_CLIENT_ID)
+        );
     }
 
     #[test]

@@ -62,6 +62,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: misconfigured_daemon,
         },
         Scenario {
+            id: "S55",
+            name: "sign-in-required-holds-the-queue",
+            proves: "a gdrive profile with no stored sign-in holds its queue instead of failing it, and status names the profile and the command that ends the hold",
+            needs: &[Need::NativeWatcher, Need::Filesystem, Need::SecretStore],
+            expect: Expect::Pass,
+            run: sign_in_required_holds_the_queue,
+        },
+        Scenario {
             id: "S22",
             name: "live-config-reload",
             proves: "a resource ceiling set with vapor config reaches the running daemon; a restart-required key is reported in status",
@@ -392,6 +400,83 @@ fn misconfigured_daemon(ctx: &mut Ctx) -> Result<(), Failure> {
     ctx.allow_error("Profile has an invalid provider; suspending it until the config is fixed");
     ctx.allow_error("Every profile is suspended by its configuration; serving status only");
     ctx.set_oracle(OracleMode::Skip("no sync scope was composed".to_string()));
+    Ok(())
+}
+
+/// A profile id no `vapor auth login` on a developer machine uses, so
+/// the daemon's keychain lookup finds nothing and no request is made.
+const SIGNED_OUT_PROFILE: &str = "e2e-signed-out";
+
+fn sign_in_required_holds_the_queue(ctx: &mut Ctx) -> Result<(), Failure> {
+    let mut home = ctx.primary.clone();
+    // A client id is enough to build the provider; with no token stored
+    // for the profile every call fails before it reaches the network.
+    home.extra_env.insert(
+        constants::env::VAPOR_GDRIVE_CLIENT_ID.to_string(),
+        "e2e-placeholder.apps.googleusercontent.com".to_string(),
+    );
+    home.removed_env
+        .push(constants::env::VAPOR_GDRIVE_CLIENT_SECRET.to_string());
+    ctx.register_home(home.clone());
+    let cli = ctx.cli_for(&home);
+    let profiles = serde_json::json!([{
+        constants::profile::KEY_ID: SIGNED_OUT_PROFILE,
+        constants::profile::KEY_NAME: "Signed out",
+        constants::profile::KEY_ENABLED: true,
+        constants::profile::KEY_PROVIDER: constants::provider::GDRIVE,
+        constants::profile::KEY_LOCAL_SYNC_DIRECTORY: home.local.to_string_lossy(),
+        constants::profile::KEY_CLOUD_SYNC_DIRECTORY: "/VaporE2E",
+    }]);
+    cli.config_set("profiles", &profiles.to_string())?;
+    ctx.start_daemon_in(&home, DaemonKind::CliRun, false)?;
+
+    let command = format!("vapor auth login gdrive --profile {SIGNED_OUT_PROFILE}");
+    wait::wait_until(
+        CONVERGE_TIMEOUT,
+        "the profile to report that it needs a sign-in",
+        || {
+            cli.status().is_some_and(|status| {
+                status.profiles.iter().any(|profile| {
+                    profile.id == SIGNED_OUT_PROFILE
+                        && profile.sign_in_required
+                        && profile.run_state == "Error"
+                        && profile.reason.contains(&command)
+                })
+            })
+        },
+    )?;
+
+    // A change made while signed out waits in the queue.
+    write_file(&home.local.join("draft.txt"), "written while signed out\n")?;
+    let db = crate::db::StateDb::at(&home.profile_state_db(SIGNED_OUT_PROFILE));
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "the change to reach the durable queue",
+        || db.pending_intents().is_some_and(|pending| pending >= 1),
+    )?;
+    wait::hold_for(
+        Duration::from_secs(3),
+        "the change stays queued and nothing fails",
+        || {
+            db.failed_intents() == Some(0)
+                && db.pending_intents().is_some_and(|pending| pending >= 1)
+        },
+    )?;
+
+    let text = cli.ok(&["status"])?;
+    ensure!(
+        text.contains(&format!(
+            "Sign-in required: profile {SIGNED_OUT_PROFILE} is on hold ({command})"
+        )),
+        "vapor status does not name the sign-in: {text}"
+    );
+
+    ctx.allow_warning(
+        "The provider refused the sign-in; sync is on hold until the user signs in again",
+    );
+    ctx.set_oracle(OracleMode::Skip(
+        "the profile syncs to Google Drive and is held before any transfer".to_string(),
+    ));
     Ok(())
 }
 

@@ -3,8 +3,8 @@
 # maintainer's machine before the version bump is committed. Format,
 # lint, the Tier 1 suite, and the e2e suite once per provider the
 # harness knows. The Google Drive leg needs the dedicated test account
-# signed in (`vapor auth login gdrive`) and VAPOR_GDRIVE_CLIENT_ID set;
-# it never runs in CI and never against a personal account. A missing
+# signed in (`vapor auth login gdrive`) and VAPOR_GDRIVE_CLIENT_ID set,
+# exported or in .env; it never runs in CI and never against a personal account. A missing
 # leg fails the gate: a release is not good to go until every provider
 # has run. Process: docs/operations/release-process.md.
 set -euo pipefail
@@ -30,6 +30,11 @@ providers="$("$ROOT_DIR/scripts/e2e.sh" --providers)"
 
 for provider in $providers; do
   if [[ "$provider" == "gdrive" ]]; then
+    # The harness builds without a client, so the leg's daemon takes it
+    # from the environment at run time.
+    # shellcheck source=scripts/dotenv.sh
+    source "$ROOT_DIR/scripts/dotenv.sh"
+    vapor_load_build_env "$ROOT_DIR"
     if [[ -z "${VAPOR_GDRIVE_CLIENT_ID:-}" ]]; then
       echo "[release] the Google Drive leg needs VAPOR_GDRIVE_CLIENT_ID (and the test account signed in with 'vapor auth login gdrive')"
       exit 1

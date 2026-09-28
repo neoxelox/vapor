@@ -18,6 +18,7 @@ else
 fi
 
 bash "$ROOT_DIR/scripts/tests/version.sh"
+bash "$ROOT_DIR/scripts/tests/dotenv.sh"
 
 # Tier 1 budget (AGENTS.md §9.1): CI sets VAPOR_TEST_MAX_SECONDS so a suite
 # that outgrows its budget fails loudly instead of eroding the feedback

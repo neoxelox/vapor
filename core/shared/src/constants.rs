@@ -1,3 +1,20 @@
+/// Names of the variables a build also reads at compile time.
+/// `option_env!` accepts only a literal or a macro that expands to one,
+/// so these macros hold the literal and `env::*` expands them.
+#[macro_export]
+macro_rules! gdrive_client_id_env {
+    () => {
+        "VAPOR_GDRIVE_CLIENT_ID"
+    };
+}
+
+#[macro_export]
+macro_rules! gdrive_client_secret_env {
+    () => {
+        "VAPOR_GDRIVE_CLIENT_SECRET"
+    };
+}
+
 pub mod env {
     pub const VAPOR_DIR: &str = "VAPOR_DIR";
     pub const VAPOR_ENV: &str = "VAPOR_ENV";
@@ -9,10 +26,12 @@ pub mod env {
     pub const VAPOR_PRE_IGNORE_RULES: &str = "VAPOR_PRE_IGNORE_RULES";
     pub const VAPOR_POST_IGNORE_RULES: &str = "VAPOR_POST_IGNORE_RULES";
     /// OAuth client credentials for the Google Drive provider
-    /// (installed-app PKCE; per-deployment, never baked into the
-    /// binary). See `docs/operations/provider-auth-operations.md`.
-    pub const VAPOR_GDRIVE_CLIENT_ID: &str = "VAPOR_GDRIVE_CLIENT_ID";
-    pub const VAPOR_GDRIVE_CLIENT_SECRET: &str = "VAPOR_GDRIVE_CLIENT_SECRET";
+    /// (installed-app PKCE). Read twice: at compile time, so a build
+    /// carries the client it was built with, and at run time, where a
+    /// set value overrides the built-in client. See
+    /// `docs/operations/provider-auth-operations.md`.
+    pub const VAPOR_GDRIVE_CLIENT_ID: &str = crate::gdrive_client_id_env!();
+    pub const VAPOR_GDRIVE_CLIENT_SECRET: &str = crate::gdrive_client_secret_env!();
     /// Where the daemon's throttle inputs come from: `host` (default)
     /// reads the native sampler and idle clock; `static` uses the
     /// neutral defaults and zero idle time; `file:<path>` re-reads a
@@ -260,6 +279,10 @@ pub mod provider {
     /// past this and erroring (rather than silently truncating) keeps a
     /// mis-ranged full-file download from completing as a corrupt file.
     pub const MAX_HTTP_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
+    /// How long `vapor auth login` waits for the browser consent before
+    /// giving up. The app's Sign in button waits a little longer than
+    /// this for the CLI to answer.
+    pub const BROWSER_SIGN_IN_TIMEOUT_SECONDS: u64 = 300;
 }
 
 pub mod profile {

@@ -13,6 +13,9 @@ final class AppShellViewModel: ObservableObject {
   private var localization: VaporLocalizedCatalog
   private let logger = StructuredLogger(component: "app-shell")
   private let lifecycleQueue = DispatchQueue(label: "sh.arn.vapor.lifecycle", qos: .utility)
+  /// The browser sign-in waits on the user for minutes, so it gets its
+  /// own queue instead of holding the lifecycle queue.
+  private let signInQueue = DispatchQueue(label: "sh.arn.vapor.sign-in", qos: .userInitiated)
   private var runtimeController: (any AppRuntimeControlling)?
   private var lifecycleCoordinator: AppLifecycleCoordinator?
   private var hasScheduledBootstrap = false
@@ -229,6 +232,7 @@ final class AppShellViewModel: ObservableObject {
         if let status {
           self.state.decisionsPending = status.decisionsPending
           self.state.conflictsUnresolved = status.conflictsUnresolved
+          self.state.signInRequired = status.signInRequired
         }
         if let status, !status.providerName.isEmpty {
           self.state.providerName = VaporConstants.Provider.displayName(
@@ -408,6 +412,43 @@ final class AppShellViewModel: ObservableObject {
           "On-demand sync was not accepted",
           metadata: ["error": String(describing: error)]
         )
+      }
+    }
+  }
+
+  /// Signs every held profile in again, one browser consent each. The
+  /// daemon picks the new sign-in up by itself within a root check, and
+  /// the next health tick clears the notice; a failure or a closed
+  /// browser tab leaves the notice up so the user can try again.
+  func signIn() {
+    guard !state.signInInProgress, !state.signInRequired.isEmpty else {
+      return
+    }
+    state.signInInProgress = true
+    let requests = state.signInRequired
+    let daemonLifecycleManager = self.daemonLifecycleManager
+    let logger = self.logger
+
+    signInQueue.async { [weak self] in
+      for request in requests {
+        do {
+          try daemonLifecycleManager.signIn(
+            provider: request.providerKind,
+            profile: request.profileId
+          )
+        } catch {
+          logger.warning(
+            "Browser sign-in did not complete",
+            metadata: [
+              "provider": request.providerKind,
+              "profile": request.profileId,
+              "error": String(describing: error),
+            ]
+          )
+        }
+      }
+      Task { @MainActor [weak self] in
+        self?.state.signInInProgress = false
       }
     }
   }

@@ -208,7 +208,9 @@ this OS), `unix`, `fifo`, `posix-mode`, `xattr`, `launchd` (with
 `case-insensitive-fs`, `case-sensitive-fs`, `disk-image` (macOS
 `hdiutil`, used to mount a case-sensitive or tiny volume),
 `non-utf8-names` (the sandbox filesystem accepts a file name that is
-not UTF-8: ext4 and tmpfs do, APFS refuses).
+not UTF-8: ext4 and tmpfs do, APFS refuses), `secret-store` (the
+daemon can read tokens: always on macOS, on Linux only with
+`VAPOR_SECRETS_COMMAND` or a Secret Service session).
 
 ## Manual sandbox
 
@@ -248,6 +250,14 @@ covers this; `vapor doctor` explains it when active).
 
 `--provider filesystem` (default) needs nothing: the cloud root is a
 directory and scenarios write to it directly to play "another device".
+The harness builds `vapor` and `vapord` without a Google Drive OAuth
+client and refuses a filesystem run over binaries that carry one
+(`vapor doctor` reports it). Tokens live in the login keychain rather
+than under the sandbox's `VAPOR_DIR`, so a daemon with a built-in
+client and a `gdrive` profile would find the developer's own sign-in.
+S21 and S55 use `gdrive` profiles for that reason with no client or a
+placeholder one, and S55 names a profile no real sign-in uses, so
+neither reaches the network.
 
 `--provider gdrive` runs the same catalog against a real Google Drive
 with real credentials. It is a release-gate leg, run by hand on the
@@ -327,6 +337,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S52 | push-only removes a cloud-only folder and everything under it, one entry at a time, and never leaves the delete retrying |
 | S53 | pull-only restores a synced folder removed on this device without leaving the folder's own event as a download that never completes, and removes a local-only folder file by file |
 | S54 | an append made in place on the cloud object, which keeps Vapor's op-id tag, reaches this device as the canonical file and is neither dropped as an echo nor turned into a conflict copy |
+| S55 | a `gdrive` profile with no stored sign-in holds its queue instead of failing it, and `vapor status` names the profile and the command that ends the hold (needs a secret store) |
 | R01 | install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd, then the headless supervisor (`install --supervise`) restarting a killed daemon on its own (`--full`) |
 
 ## Extending the harness

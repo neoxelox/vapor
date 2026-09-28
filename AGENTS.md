@@ -175,7 +175,14 @@ The release procedure itself is the `vapor-release` skill and
   (`-alpha`, `-beta`, `-rc`) needs no signing material on any platform
   and ships unsigned when none is configured; when it is, the artifacts
   are signed all the same. The pre-GA tags are all prereleases, which is
-  why no environment holds a secret yet.
+  why no environment holds signing material yet.
+- The Google Drive OAuth client is compiled into `vapor` and `vapord`
+  from the platform environment's `VAPOR_GDRIVE_CLIENT_ID` and
+  `VAPOR_GDRIVE_CLIENT_SECRET`, under the same tag rule: a stable tag
+  refuses to package without the pair, a prerelease ships without Drive
+  sign-in. The pair never enters the repository; local builds read it
+  from the gitignored `.env`, and test builds leave it out
+  (`docs/operations/provider-auth-operations.md`).
 - `release.yml` packages through one `package (<platform>)` matrix
   entry per shipping platform, under that platform's environment, and
   one shared `publish` job. A platform joins by adding its entry and

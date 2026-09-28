@@ -52,6 +52,10 @@ pub struct RemotePollReport {
     /// differently-cased local file. The paths are kept by the poller
     /// (`take_name_collisions`) for the timeline.
     pub name_collisions: usize,
+    /// The provider refused the sign-in; the runtime holds the profile
+    /// until the user signs in again. The message is kept by the poller
+    /// (`take_refused_sign_in`).
+    pub sign_in_refused: bool,
 }
 
 pub struct RemotePoller {
@@ -76,6 +80,9 @@ pub struct RemotePoller {
     /// next poll is a baseline poll, and a page from before the flag
     /// is discarded when harvested.
     discard_history: bool,
+    /// The provider's message from the last poll it refused for the
+    /// sign-in, until the runtime takes it.
+    refused_sign_in: Option<String>,
 }
 
 impl RemotePoller {
@@ -93,6 +100,7 @@ impl RemotePoller {
             name_collisions: Vec::new(),
             reported_collisions: std::collections::BTreeSet::new(),
             discard_history: false,
+            refused_sign_in: None,
         }
     }
 
@@ -111,6 +119,11 @@ impl RemotePoller {
     /// Collisions found since the last call, for the timeline.
     pub fn take_name_collisions(&mut self) -> Vec<(PathBuf, PathBuf)> {
         std::mem::take(&mut self.name_collisions)
+    }
+
+    /// The provider's message from a poll it refused for the sign-in.
+    pub fn take_refused_sign_in(&mut self) -> Option<String> {
+        self.refused_sign_in.take()
     }
 
     /// Poll cadence for the current throttle state; `None` means the
@@ -171,7 +184,7 @@ impl RemotePoller {
                 return Ok(report);
             }
             report.polled = true;
-            if let Some(poll) = Self::unwrap_poll(result) {
+            if let Some(poll) = self.unwrap_poll(result, &mut report) {
                 self.apply_poll(
                     poll,
                     app,
@@ -235,7 +248,7 @@ impl RemotePoller {
             return Ok(report);
         };
         report.polled = true;
-        if let Some(poll) = Self::unwrap_poll(result) {
+        if let Some(poll) = self.unwrap_poll(result, &mut report) {
             self.apply_poll(
                 poll,
                 app,
@@ -252,12 +265,20 @@ impl RemotePoller {
     }
 
     /// Logs a failed poll (provider error or a panic on the poll thread)
-    /// and yields `None`; the next cadence retries.
+    /// and yields `None`; the next cadence retries. A refused sign-in is
+    /// handed to the runtime instead of logged: it holds the profile.
     fn unwrap_poll(
+        &mut self,
         result: Result<Result<ChangesPoll, ProviderError>, String>,
+        report: &mut RemotePollReport,
     ) -> Option<ChangesPoll> {
         match result {
             Ok(Ok(poll)) => Some(poll),
+            Ok(Err(error)) if error.kind == vapor_shared::ProviderErrorKind::Authentication => {
+                report.sign_in_refused = true;
+                self.refused_sign_in = Some(error.message);
+                None
+            }
             Ok(Err(error)) => {
                 logging::warning(
                     "Remote changes poll failed; will retry on the next cadence",

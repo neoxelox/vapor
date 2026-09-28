@@ -28,6 +28,7 @@ struct ShellView: View {
               .foregroundStyle(.secondary)
           }
           SyncNowControl(viewModel: viewModel)
+          SignInNotice(viewModel: viewModel)
           RestartRequiredNotice(viewModel: viewModel)
           UserActionNotice(viewModel: viewModel)
         }
@@ -128,6 +129,7 @@ struct MenuBarContentView: View {
         Text(viewModel.localized(viewModel.state.syncState.detailLocalizationKey))
           .font(.subheadline)
           .foregroundStyle(.secondary)
+        SignInNotice(viewModel: viewModel)
         UserActionNotice(viewModel: viewModel)
       }
       Divider()
@@ -322,6 +324,37 @@ struct RestartRequiredNotice: View {
         .controlSize(.small)
         .disabled(!viewModel.state.autoLaunchEnabled)
         .help(viewModel.localized("restart_needs_auto_launch_hint"))
+      }
+    }
+  }
+}
+
+/// Shown while a provider refused the sign-in: what happened, that
+/// nothing is lost, and the button that opens the consent page. The
+/// daemon notices the new sign-in by itself, so the notice clears on a
+/// later status read rather than when the button returns.
+struct SignInNotice: View {
+  @ObservedObject var viewModel: AppShellViewModel
+
+  var body: some View {
+    if let providerName = viewModel.state.signInProviderName {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(viewModel.localized("sign_in_required_format", providerName))
+          .font(.caption)
+          .foregroundStyle(Color.vaporPrimary)
+        Text(viewModel.localized("sign_in_required_detail"))
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+        Button(
+          viewModel.localized(
+            viewModel.state.signInInProgress ? "sign_in_waiting_for_browser" : "sign_in_button"
+          )
+        ) {
+          viewModel.signIn()
+        }
+        .controlSize(.small)
+        .disabled(viewModel.state.signInInProgress)
+        .help(viewModel.localized("sign_in_hint"))
       }
     }
   }

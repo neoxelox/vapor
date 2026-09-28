@@ -157,6 +157,8 @@ private final class OrderedRecordingServiceController: LaunchAgentControlling {
       providerName: "filesystem", queueDepth: 0, failedIntents: 0)
   }
   func syncNow() throws {}
+
+  func signIn(provider _: String, profile _: String) throws {}
 }
 
 @MainActor

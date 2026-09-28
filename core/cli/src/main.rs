@@ -239,6 +239,11 @@ enum AuthAction {
         /// implicit `default` profile.
         #[arg(long, default_value = "default")]
         profile: String,
+        /// Run the `gdrive` browser flow even when stdin is not a
+        /// terminal. The app's Sign in button uses this; without it a
+        /// non-interactive login reads the token from stdin.
+        #[arg(long, conflicts_with = "token")]
+        browser: bool,
     },
     /// Remove the stored token for `provider`.
     Logout {
@@ -744,17 +749,19 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
             provider,
             token,
             profile,
+            browser,
         } => {
             // Google Drive without an explicit --token runs the full
             // OAuth-PKCE browser flow — but only interactively. When stdin
             // is not a TTY (`echo "$TOKEN" | vapor auth login gdrive`, CI,
             // automation) fall back to the documented stdin read instead of
             // binding a loopback listener and blocking forever on a browser
-            // redirect that will never come.
+            // redirect that will never come. `--browser` is the caller
+            // saying a person is at the browser (the app's Sign in button).
             use std::io::IsTerminal;
             let interactive_gdrive = provider == vapor_shared::constants::provider::GDRIVE
                 && token.is_none()
-                && std::io::stdin().is_terminal();
+                && (browser || std::io::stdin().is_terminal());
             let token = if interactive_gdrive {
                 auth_cmd::run_gdrive_pkce_flow()?
             } else {

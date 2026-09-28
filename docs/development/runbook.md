@@ -41,6 +41,27 @@
 - Swift resource sync: `./scripts/swift/resources.sh` (mirrors `assets/locales/*.json` and the menu bar template PNGs into the macOS app's `VaporCore/Resources/`)
 - macOS app packaging: `apps/macos/scripts/package.sh`
 
+## Google Drive in a local build
+
+`vapor` and `vapord` carry the Google Drive OAuth client they were
+compiled with. Put the client in the gitignored `.env` at the
+repository root:
+
+```
+VAPOR_GDRIVE_CLIENT_ID=<id>.apps.googleusercontent.com
+VAPOR_GDRIVE_CLIENT_SECRET=<secret>
+```
+
+`./scripts/build.sh` (through `scripts/rust/build.sh`) and
+`apps/macos/scripts/package.sh` source `scripts/dotenv.sh`, which reads
+these two keys and nothing else from `.env`; a value already exported
+wins. Each build prints the client it compiles in, and
+`vapor doctor` shows it afterwards (`gdrive_oauth_client`). A plain
+`cargo build` sees only the shell's environment. Test and e2e builds
+leave the client out on purpose; see
+`docs/operations/provider-auth-operations.md` for the client, the
+consent screen, and what happens when a sign-in expires.
+
 ## Pre-commit hook (optional but recommended for agentic workflows)
 
 `./scripts/hooks.sh` installs a git `pre-commit` hook into the local

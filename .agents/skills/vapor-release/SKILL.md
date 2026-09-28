@@ -20,14 +20,19 @@ form; the runbook wins on any disagreement.
 3. `./scripts/release.sh` green on the commit being released:
    format, lint, Tier 1, and the e2e suite once per provider. The
    Google Drive leg runs only here, by hand, with the dedicated test
-   account signed in and `VAPOR_GDRIVE_CLIENT_ID` set; it never runs
-   in CI and never against a personal account.
+   account signed in and `VAPOR_GDRIVE_CLIENT_ID` set (exported or in
+   `.env`); it never runs in CI and never against a personal account.
 4. The release environment is protected before any secret is added:
    one `v*` tag rule and no branch rule, a required reviewer, and
    `can_admins_bypass` set to `false` once a second admin exists. New
    environments are created unprotected and nothing warns you. Check
    with the `gh api` commands in the runbook.
-5. Every third-party action a workflow references is on the repository
+5. A stable tag needs `VAPOR_GDRIVE_CLIENT_ID` and
+   `VAPOR_GDRIVE_CLIENT_SECRET` in the platform's release environment:
+   the package job compiles them into the binaries and refuses a stable
+   tag without them. A prerelease without them ships without Google
+   Drive sign-in.
+6. Every third-party action a workflow references is on the repository
    allowlist and SHA-pinned; add the pattern before the workflow
    references it, including actions nested in a composite action.
 

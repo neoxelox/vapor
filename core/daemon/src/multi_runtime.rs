@@ -944,6 +944,7 @@ impl MultiProfileRuntime {
                 conflicts_unresolved,
                 reconcile_state: reconcile.label().to_string(),
                 reconcile_detail: reconcile.detail(),
+                sign_in_required: slot.runtime.sign_in_required(),
             });
             daemon_reconcile = daemon_reconcile.more_active(reconcile);
             snapshot.queue_depth += queue_depth;

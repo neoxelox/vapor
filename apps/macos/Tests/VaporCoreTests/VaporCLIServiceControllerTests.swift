@@ -184,6 +184,8 @@ func unknownResultValueSurfacesAsMalformedResponse() {
 
 private final class ScriptedCLIRunner: VaporCLIRunning {
   var invocations: [[String]] = []
+  /// The bound each invocation asked for; `nil` for the default one.
+  var timeouts: [Int?] = []
   var standardOutput: String
   var standardError: String
   var exitCode: Int32
@@ -196,11 +198,18 @@ private final class ScriptedCLIRunner: VaporCLIRunning {
 
   func run(arguments: [String]) throws -> VaporCLIResult {
     invocations.append(arguments)
+    timeouts.append(nil)
     return VaporCLIResult(
       exitCode: exitCode,
       standardOutput: standardOutput,
       standardError: standardError
     )
+  }
+
+  func run(arguments: [String], timeoutSeconds: Int) throws -> VaporCLIResult {
+    let result = try run(arguments: arguments)
+    timeouts[timeouts.count - 1] = timeoutSeconds
+    return result
   }
 }
 
@@ -340,5 +349,48 @@ func daemonStatusDecodesTheScanStateAndSyncNowDrivesTheCLI() throws {
   runner.standardOutput = #"{"schema_version":2,"accepted":false,"note":"unsupported"}"#
   #expect(throws: (any Error).self) {
     try controller.syncNow()
+  }
+}
+
+@Test
+func daemonStatusListsTheProfilesWaitingOnASignIn() throws {
+  let runner = ScriptedCLIRunner(
+    standardOutput: """
+      {
+        "run_state": "Error",
+        "throttle_state": "Light",
+        "throttle_reason": "",
+        "provider_name": "gdrive",
+        "queue_depth": 2,
+        "failed_intents": 0,
+        "profiles": [
+          {"id": "docs", "provider_name": "filesystem", "run_state": "Running"},
+          {"id": "default", "provider_name": "gdrive", "run_state": "Error", "sign_in_required": true}
+        ]
+      }
+      """)
+  let controller = VaporCLIServiceController(runner: runner)
+
+  let snapshot = try controller.daemonStatus()
+
+  #expect(snapshot.signInRequired == [SignInRequest(providerKind: "gdrive", profileId: "default")])
+}
+
+@Test
+func signInRunsTheBrowserLoginWithTheLongerBound() throws {
+  let runner = ScriptedCLIRunner(
+    standardOutput: "auth login: stored token for gdrive (profile work)")
+  let controller = VaporCLIServiceController(runner: runner)
+
+  try controller.signIn(provider: "gdrive", profile: "work")
+
+  #expect(runner.invocations == [["auth", "login", "gdrive", "--profile", "work", "--browser"]])
+  let bound = try #require(runner.timeouts.first ?? nil)
+  #expect(bound > VaporConstants.Provider.browserSignInTimeoutSeconds)
+
+  runner.exitCode = 1
+  runner.standardError = "vapor: authorization was denied by the user: access_denied"
+  #expect(throws: VaporCLIServiceError.self) {
+    try controller.signIn(provider: "gdrive", profile: "work")
   }
 }

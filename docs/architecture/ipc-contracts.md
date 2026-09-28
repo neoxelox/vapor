@@ -66,6 +66,11 @@ Source of truth: `core/shared/src/constants.rs::ipc`
   state but `Suspended` plus the flush boost; answers with an `Ack`, and
   a daemon that predates it answers `unsupported` like every unknown
   control method (`data-flow.md` §Throttle states).
+  `ProfileStatus.sign_in_required` is `true` while the provider refuses
+  that profile's sign-in and the profile is on hold; the way out is
+  `vapor auth login <provider_name> --profile <id>`
+  (`operations/provider-auth-operations.md` §Failure behavior). A
+  daemon that predates it sends nothing, which reads as `false`.
 
 ### Handshake
 
