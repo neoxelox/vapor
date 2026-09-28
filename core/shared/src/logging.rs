@@ -474,7 +474,7 @@ mod tests {
     #[test]
     fn rotation_moves_the_full_file_aside_and_reopens_empty() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let path = dir.path().join("vapord.logs");
+        let path = dir.path().join("vapord.log");
         std::fs::write(&path, b"first generation\n").expect("seed");
 
         let mut sink = open_sink(&path);
@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn rotation_cascades_generations_and_drops_the_oldest() {
         let dir = tempfile::TempDir::new().expect("temp dir");
-        let path = dir.path().join("vapord.logs");
+        let path = dir.path().join("vapord.log");
         let generations = constants::runtime::LOG_FILE_GENERATIONS;
 
         // Rotate one more time than we keep, tagging each live file so we

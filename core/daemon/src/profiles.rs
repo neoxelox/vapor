@@ -24,7 +24,7 @@ pub struct ResolvedProfile {
     /// Stable filesystem-safe slug: names the per-profile state
     /// directory and namespaces secrets.
     pub id: String,
-    pub display_name: String,
+    pub name: String,
     /// Provider selection for this profile (`filesystem` /
     /// `gdrive`).
     pub provider_kind: String,
@@ -74,11 +74,11 @@ pub fn resolve_profiles(config: &VaporConfig) -> Vec<ResolvedProfile> {
         if let Some(provider) = &profile.provider {
             effective.provider = provider.clone();
         }
-        if let Some(local) = &profile.local_sync_directory {
-            effective.local_sync_directory = local.clone();
+        if let Some(local) = &profile.local_root {
+            effective.local_root = local.clone();
         }
-        if let Some(cloud) = &profile.cloud_sync_directory {
-            effective.cloud_sync_directory = Some(cloud.clone());
+        if let Some(cloud) = &profile.cloud_root {
+            effective.cloud_root = Some(cloud.clone());
         }
         if let Some(sync_mode) = &profile.sync_mode {
             effective.sync_mode = sync_mode.clone();
@@ -102,17 +102,13 @@ pub fn resolve_profiles(config: &VaporConfig) -> Vec<ResolvedProfile> {
 
         resolved.push(ResolvedProfile {
             id: id.to_string(),
-            display_name: profile
+            name: profile
                 .name
                 .clone()
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or_else(|| id.to_string()),
             provider_kind: effective.provider.clone(),
-            scope: sync_directories::resolve_profile_scope(
-                &effective,
-                profile.local_sync_directory.is_some(),
-                profile.cloud_sync_directory.is_some(),
-            ),
+            scope: sync_directories::resolve_with_config(&effective),
             enabled: profile.enabled.unwrap_or(true),
         });
     }
@@ -130,7 +126,7 @@ pub fn resolve_profiles(config: &VaporConfig) -> Vec<ResolvedProfile> {
 fn implicit_default_profile(config: &VaporConfig) -> ResolvedProfile {
     ResolvedProfile {
         id: constants::profile::DEFAULT_PROFILE_ID.to_string(),
-        display_name: constants::profile::DEFAULT_PROFILE_ID.to_string(),
+        name: constants::profile::DEFAULT_PROFILE_ID.to_string(),
         provider_kind: config.provider.clone(),
         scope: sync_directories::resolve_with_config(config),
         enabled: true,
@@ -209,8 +205,8 @@ mod tests {
 
     fn base_config() -> VaporConfig {
         VaporConfig {
-            local_sync_directory: "/tmp/vapor-top-local".to_string(),
-            cloud_sync_directory: Some("/tmp/vapor-top-cloud".to_string()),
+            local_root: "/tmp/vapor-top-local".to_string(),
+            cloud_root: Some("/tmp/vapor-top-cloud".to_string()),
             sync_mode: "two-way".to_string(),
             ..VaporConfig::default()
         }
@@ -233,7 +229,7 @@ mod tests {
             ProfileConfig {
                 id: "mirror".to_string(),
                 name: Some("Cloud Mirror".to_string()),
-                local_sync_directory: Some("/tmp/vapor-mirror".to_string()),
+                local_root: Some("/tmp/vapor-mirror".to_string()),
                 sync_mode: Some("pull-only".to_string()),
                 ..ProfileConfig::default()
             },
@@ -246,13 +242,13 @@ mod tests {
         let profiles = resolve_profiles(&config);
         assert_eq!(profiles.len(), 2);
         let mirror = &profiles[0];
-        assert_eq!(mirror.display_name, "Cloud Mirror");
+        assert_eq!(mirror.name, "Cloud Mirror");
         assert_eq!(mirror.scope.sync_mode, SyncMode::PullOnly, "override wins");
         // Windows absolutizes "/tmp/…" against the current drive, so
         // assert resolution shape rather than a Unix-literal path.
         let mirror_local = mirror
             .scope
-            .local_sync_directory
+            .local_root
             .as_deref()
             .expect("override resolves a local root");
         assert!(mirror_local.is_absolute());
@@ -262,7 +258,7 @@ mod tests {
         );
         // Same drive-letter caveat for the filesystem provider's cloud root,
         // which resolves like a local path.
-        let mirror_cloud = std::path::Path::new(mirror.scope.cloud_sync_directory.as_str());
+        let mirror_cloud = std::path::Path::new(mirror.scope.cloud_root.as_str());
         assert!(mirror_cloud.is_absolute());
         assert!(
             mirror_cloud.ends_with("tmp/vapor-top-cloud"),
@@ -270,7 +266,7 @@ mod tests {
         );
         let docs = &profiles[1];
         assert_eq!(docs.scope.sync_mode, SyncMode::TwoWay, "inherits default");
-        assert_eq!(docs.display_name, "docs", "name defaults to the id");
+        assert_eq!(docs.name, "docs", "name defaults to the id");
     }
 
     #[test]

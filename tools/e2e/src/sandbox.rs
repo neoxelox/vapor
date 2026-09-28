@@ -13,18 +13,6 @@ use vapor_shared::constants;
 
 use crate::Failure;
 
-/// Environment variables the sandbox never lets a child inherit from
-/// the invoking shell: config must flow through `vapor config set` so
-/// the run covers the `vapor.json` loader.
-pub const SCRUBBED_ENV: &[&str] = &[
-    constants::env::VAPOR_LOCAL_SYNC_DIRECTORY,
-    constants::env::VAPOR_CLOUD_SYNC_DIRECTORY,
-    constants::env::VAPOR_USE_GITIGNORE,
-    constants::env::VAPOR_USE_VAPORIGNORE,
-    constants::env::VAPOR_PRE_IGNORE_RULES,
-    constants::env::VAPOR_POST_IGNORE_RULES,
-];
-
 #[derive(Clone, Debug)]
 pub struct Home {
     /// Short label used in diagnostics (`primary`, `pull`, `deep`).
@@ -38,7 +26,7 @@ pub struct Home {
     /// Extra environment for every process bound to this home.
     pub extra_env: BTreeMap<String, String>,
     /// Environment variables removed for every process bound to this
-    /// home, on top of [`SCRUBBED_ENV`].
+    /// home.
     pub removed_env: Vec<String>,
 }
 
@@ -81,12 +69,9 @@ impl Home {
     }
 
     /// Applies the sandbox environment to a command: `VAPOR_DIR`,
-    /// `VAPOR_ENV=dev`, debug logging, static throttle inputs, the
-    /// scrub list, then this home's own additions and removals.
+    /// `VAPOR_ENV=dev`, debug logging, static throttle inputs, then this
+    /// home's own additions and removals.
     pub fn apply_env(&self, command: &mut Command) {
-        for name in SCRUBBED_ENV {
-            command.env_remove(name);
-        }
         for name in &self.removed_env {
             command.env_remove(name);
         }
@@ -141,7 +126,7 @@ impl Sandbox {
         };
         fs::create_dir_all(&dir)?;
         // The cloud parent exists; the cloud root itself is created by
-        // the provider (`ensure_cloud_sync_directory`) unless a scenario
+        // the provider (`ensure_cloud_root`) unless a scenario
         // seeds it first, and the local root by the daemon.
         if let Some(parent) = cloud.parent() {
             fs::create_dir_all(parent)?;

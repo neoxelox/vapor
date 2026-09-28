@@ -35,7 +35,7 @@ pub struct EffectiveBudgetConfig {
     pub bandwidth_percent: u8,
     /// Optional user ceiling on concurrent uploads / downloads (each
     /// direction). `None` = automatic (core-derived throttle tier).
-    pub max_concurrent_transfers: Option<usize>,
+    pub concurrent_transfers: Option<usize>,
     pub boost_enabled: bool,
     pub min_idle: Duration,
     pub boost_cpu_percent: u8,
@@ -56,8 +56,8 @@ impl EffectiveBudgetConfig {
         let mut limits = clamp_limits(&config.resource_limits, "top-level");
         let mut boost = config.idle_boost.clone();
         let mut boost_enabled = boost.enabled;
-        let mut max_concurrent_transfers =
-            clamp_transfer_ceiling(config.resource_limits.max_concurrent_transfers, "top-level");
+        let mut concurrent_transfers =
+            clamp_transfer_ceiling(config.resource_limits.concurrent_transfers, "top-level");
 
         for profile in &config.profiles {
             if !profile.enabled.unwrap_or(true) {
@@ -87,12 +87,12 @@ impl EffectiveBudgetConfig {
                     ));
                 }
                 if let Some(profile_ceiling) =
-                    clamp_transfer_ceiling(profile_limits.max_concurrent_transfers, &profile.id)
+                    clamp_transfer_ceiling(profile_limits.concurrent_transfers, &profile.id)
                 {
                     // Ceilings are MIN-lowered like the percent limits: a
                     // profile can only tighten the daemon-wide value.
-                    max_concurrent_transfers = Some(
-                        max_concurrent_transfers
+                    concurrent_transfers = Some(
+                        concurrent_transfers
                             .map_or(profile_ceiling, |current| current.min(profile_ceiling)),
                     );
                 }
@@ -104,14 +104,14 @@ impl EffectiveBudgetConfig {
                 if profile_boost.enabled == Some(false) {
                     boost_enabled = false;
                 }
-                if let Some(value) = profile_boost.boost_cpu_percent {
-                    boost.boost_cpu_percent = boost.boost_cpu_percent.min(value);
+                if let Some(value) = profile_boost.cpu_percent {
+                    boost.cpu_percent = boost.cpu_percent.min(value);
                 }
-                if let Some(value) = profile_boost.boost_memory_percent {
-                    boost.boost_memory_percent = boost.boost_memory_percent.min(value);
+                if let Some(value) = profile_boost.memory_percent {
+                    boost.memory_percent = boost.memory_percent.min(value);
                 }
-                if let Some(value) = profile_boost.boost_bandwidth_percent {
-                    boost.boost_bandwidth_percent = boost.boost_bandwidth_percent.min(value);
+                if let Some(value) = profile_boost.bandwidth_percent {
+                    boost.bandwidth_percent = boost.bandwidth_percent.min(value);
                 }
                 if let Some(value) = profile_boost.headroom_cpu_percent {
                     boost.headroom_cpu_percent = boost.headroom_cpu_percent.min(value);
@@ -130,11 +130,11 @@ impl EffectiveBudgetConfig {
 
         // Boost ceilings below their base ceiling are contradictions:
         // clamp up with a warning at load time.
-        let boost_cpu = ensure_boost_at_least(boost.boost_cpu_percent, limits.cpu_percent, "cpu");
+        let boost_cpu = ensure_boost_at_least(boost.cpu_percent, limits.cpu_percent, "cpu");
         let boost_memory =
-            ensure_boost_at_least(boost.boost_memory_percent, limits.memory_percent, "memory");
+            ensure_boost_at_least(boost.memory_percent, limits.memory_percent, "memory");
         let boost_bandwidth = ensure_boost_at_least(
-            boost.boost_bandwidth_percent,
+            boost.bandwidth_percent,
             limits.bandwidth_percent,
             "bandwidth",
         );
@@ -153,7 +153,7 @@ impl EffectiveBudgetConfig {
             cpu_percent: limits.cpu_percent,
             memory_percent: limits.memory_percent,
             bandwidth_percent: limits.bandwidth_percent,
-            max_concurrent_transfers,
+            concurrent_transfers,
             boost_enabled,
             min_idle: Duration::from_secs(boost.min_idle_seconds),
             boost_cpu_percent: boost_cpu.clamp(1, 100),
@@ -176,7 +176,7 @@ fn clamp_transfer_ceiling(configured: Option<u8>, source: &str) -> Option<usize>
     );
     if clamped != configured {
         logging::warning(
-            "Clamped resourceLimits.maxConcurrentTransfers into the accepted range",
+            "Clamped resourceLimits.concurrentTransfers into the accepted range",
             &[
                 ("source", source.to_string()),
                 ("configured", configured.to_string()),
@@ -231,7 +231,7 @@ fn clamp_limits(limits: &ResourceLimitsConfig, origin: &str) -> ResourceLimitsCo
         bandwidth_percent: clamp(limits.bandwidth_percent, "bandwidthPercent"),
         // Clamped separately (`clamp_transfer_ceiling`); passed through
         // here so callers holding the clamped struct keep the raw value.
-        max_concurrent_transfers: limits.max_concurrent_transfers,
+        concurrent_transfers: limits.concurrent_transfers,
     }
 }
 
@@ -349,7 +349,7 @@ impl ResourceBudget {
             BoostState::RampingUp { started } => {
                 if throttle_state != ThrottleState::IdleDrain {
                     // §Ceiling transitions rule 1: snap, no down-ramp.
-                    self.snap_to_base("throttle left IdleDrain; snapped to base ceilings");
+                    self.snap_to_base("throttle left idle-drain; snapped to base ceilings");
                 } else if !gates_pass {
                     self.state = BoostState::RampingDown {
                         started: now_inst,
@@ -371,7 +371,7 @@ impl ResourceBudget {
             }
             BoostState::Active => {
                 if throttle_state != ThrottleState::IdleDrain {
-                    self.snap_to_base("throttle left IdleDrain; snapped to base ceilings");
+                    self.snap_to_base("throttle left idle-drain; snapped to base ceilings");
                 } else if !gates_pass {
                     self.state = BoostState::RampingDown {
                         started: now_inst,
@@ -382,7 +382,7 @@ impl ResourceBudget {
             }
             BoostState::RampingDown { started, from_cpu } => {
                 if throttle_state != ThrottleState::IdleDrain {
-                    self.snap_to_base("throttle left IdleDrain; snapped to base ceilings");
+                    self.snap_to_base("throttle left idle-drain; snapped to base ceilings");
                 } else if gates_pass {
                     // Headroom recovered mid-descent (e.g. a 1s background
                     // CPU blip). Re-checking the gate here — instead of
@@ -446,10 +446,10 @@ impl ResourceBudget {
             memory_percent: self.current_memory,
             bandwidth_percent: self.current_bandwidth,
             boost_state: match self.state {
-                BoostState::Off => "off",
-                BoostState::RampingUp { .. } => "ramping-up",
-                BoostState::Active => "active",
-                BoostState::RampingDown { .. } => "ramping-down",
+                BoostState::Off => constants::idle_boost_state::OFF,
+                BoostState::RampingUp { .. } => constants::idle_boost_state::RAMPING_UP,
+                BoostState::Active => constants::idle_boost_state::ACTIVE,
+                BoostState::RampingDown { .. } => constants::idle_boost_state::RAMPING_DOWN,
             },
             reason: self.last_reason.clone(),
         }
@@ -476,7 +476,10 @@ impl ResourceBudget {
         if !self.config.boost_enabled {
             "idle boost disabled by configuration".to_string()
         } else if throttle_state != ThrottleState::IdleDrain {
-            format!("throttle state is {throttle_state:?}; boost requires IdleDrain")
+            format!(
+                "throttle state is {}; boost requires idle-drain",
+                throttle_state.wire_name()
+            )
         } else if idle_for < self.config.min_idle {
             format!(
                 "user idle for {}s of the required {}s",
@@ -600,7 +603,7 @@ mod tests {
                     cpu_percent: Some(5),
                     memory_percent: Some(50),
                     bandwidth_percent: Some(10),
-                    max_concurrent_transfers: None,
+                    concurrent_transfers: None,
                 }),
                 ..ProfileConfig::default()
             },
@@ -630,7 +633,7 @@ mod tests {
                 cpu_percent: Some(1),
                 memory_percent: Some(1),
                 bandwidth_percent: Some(1),
-                max_concurrent_transfers: None,
+                concurrent_transfers: None,
             }),
             ..ProfileConfig::default()
         }];
@@ -683,7 +686,7 @@ mod tests {
     #[test]
     fn boost_below_base_is_clamped_up() {
         let mut config = VaporConfig::default();
-        config.idle_boost.boost_cpu_percent = 5; // below the 15% base
+        config.idle_boost.cpu_percent = 5; // below the 15% base
         let resolved = EffectiveBudgetConfig::resolve(&config);
         assert_eq!(resolved.boost_cpu_percent, 15);
     }

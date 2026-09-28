@@ -276,7 +276,7 @@ fn manual_sandbox(
     std::mem::forget(daemon);
     fs::write(root.join("daemon.pid"), pid.to_string())?;
     ctx.cli()
-        .wait_run_state("Running", vapor_e2e::scenario::STARTUP_TIMEOUT)?;
+        .wait_run_state("running", vapor_e2e::scenario::STARTUP_TIMEOUT)?;
     println!(
         "[e2e] sandbox ready — daemon running (pid {pid})
 
@@ -291,8 +291,7 @@ fn manual_sandbox(
   $vapor status --json          live daemon state
   $vapor logs --tail 50         recent daemon log lines
   $vapor pause / resume         flip work admission
-  $vapor flush-now              hint a queue drain
-  $vapor reconcile              request a whole-scope reconcile
+  $vapor reconcile              compare both roots now and sync the difference
   $vapor doctor                 sanity checks
   echo hi > \"{local}/f.txt\"    feed the watcher a change
   {e2e} verify-trees \"{local}\" \"{cloud}\"   compare the two trees

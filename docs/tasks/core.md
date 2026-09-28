@@ -256,7 +256,7 @@ Exit gate:
       `core/ipc` crate) that both the `vapor` CLI and future apps consume.
       *(Lands in a new `core/ipc` crate.)*
 - [x] C5-4 Wire the status/control endpoints: `Status`, `Pause`, `Resume`,
-      `FlushNow`, `Reconcile`, `Timeline`, `AutoLaunchToggle`,
+      `Reconcile`, `Timeline`, `AutoLaunchToggle`,
       `ConfigUpdate` (subset — full surface aligns with
       `docs/architecture/ipc-contracts.md`). *(Wave 6 phase 2 ships
       `Status` only; the control endpoints land alongside the L3
@@ -390,7 +390,7 @@ inherits it.
       `Transient`, `RateLimited`, `Authentication`, `PreconditionFailed`,
       `NotFound`, `Permanent`.
 - [x] C8-2 `provider` config field (`filesystem` default, `gdrive`
-      accepted but inert). Document `cloudSyncDirectory` reinterpretation
+      accepted but inert). Document `cloudRoot` reinterpretation
       when `provider = "filesystem"`. Mirror constant in
       `apps/macos/Sources/VaporCore/VaporConstants.swift` and
       `core/shared/src/constants.rs`.
@@ -484,7 +484,7 @@ inherits it.
 ### IPC / diagnostics UX
 
 - [x] C8-27 Finalize IPC schema (continues C5) with every control endpoint
-      (`Pause/Resume`, `FlushNow`, `AutoLaunchToggle`, excludes updates).
+      (`Pause/Resume`, `Reconcile`, `AutoLaunchToggle`, excludes updates).
 - [x] C8-28 Full menubar state model and reasoned status messages (consumed
       by every app surface; provided via IPC).
       *Scope note:* the daemon/IPC side (reasoned run/throttle state,
@@ -552,7 +552,7 @@ inherits it.
       `core/platform/secrets`, refresh handling per
       `docs/operations/provider-auth-operations.md`.
 - [x] C8-49 Authenticated Google Drive folder lookup/create for
-      `cloudSyncDirectory` before sync starts.
+      `cloudRoot` before sync starts.
 - [x] C8-50 Block normal sync until the cloud root exists or the provider
       returns an actionable initialization error.
 - [x] C8-51 Upload paths (multipart small, resumable large) behind the
@@ -672,12 +672,12 @@ Design: `docs/architecture/conflict-resolution.md`.
       maps to `Delete` regardless of fs-watch fragment order (FSEvents
       flag coalescing made real deletions plan as uploads that no-op'd
       "vanished before upload", leaving remote copies immortal); the
-      mass-deletion guard taps the same classification decision. E2E S16.
+      mass-delete guard taps the same classification decision. E2E S16.
 - [x] C8-69 Conflict-copy name parser
       (`conflict::parse_conflict_copy_name`, strict inverse of the
       generator, rejects marker-lookalike user files) + `CONFLICT_MARKER`.
 - [x] C8-70 `vapor conflicts list [--json]` + `vapor conflicts resolve
-      <copy> --keep <canonical|copy>` (cli.md L3-8): files-as-registry
+      <copy> --choose <original|copy>` (cli.md L3-8): files-as-registry
       scan pruned by the ignore rules, locked JSON contract for app
       surfaces, resolution via plain file operations that sync like user
       edits and work with the daemon stopped. E2E S15.
@@ -850,7 +850,7 @@ for is the wrong first impression.
 
 - [ ] OB-1 An install with no sync scope syncs nothing and creates
       nothing. A `vapor.json` that names no sync scope (no `profiles`
-      entry, neither `localSyncDirectory` nor `cloudSyncDirectory`, no
+      entry, neither `localRoot` nor `cloudRoot`, no
       `provider`) composes no profile. The daemon still starts, binds
       the socket, and answers `vapor status` with a run state and reason
       that say so (`Unconfigured`, "no sync profile yet"); it adopts no
@@ -1014,12 +1014,12 @@ it is answered. Whole-profile stops are limited to the conditions in
 Landed:
 
 - [x] SF-1 Decisions: durable `pending_decisions`, the `held` queue
-      state, `vapor decisions list|show|resolve`, `decisions_pending`
+      state, `vapor decisions list|show|resolve`, `decisionsPending`
       in status, `Held` rows in diagnostics, timeline entries, and the
-      applier loop in the runtime. The mass-deletion guard is the first
+      applier loop in the runtime. The mass-delete guard is the first
       kind: both directions, the whole burst judged before its first
       member lands (queued deletions count), threshold 1000 or
-      `massDeleteRatioPercent` (25%, floor 10), `apply` releases,
+      `massDelete.ratioPercent` (25%, floor 10), `apply` releases,
       `discard` restores. Scenarios S31 and S40; the soak driver
       answers the decisions its subtree removals provoke.
 
@@ -1058,7 +1058,7 @@ Still open, in order:
       open an `unsyncable-name` decision with `skip`, withdrawn when
       the name goes; watcher events for such a path are dropped at the
       bridge instead of failing the tick. S50 on Linux.
-- [x] SF-11 The mass-deletion guard holds the whole queued burst the
+- [x] SF-11 The mass-delete guard holds the whole queued burst the
       moment it trips, so one answer covers the question's count, and
       withdraws a hold the other side made moot.
 - [x] SF-7 Headless supervision: `vapor service check --loop` and

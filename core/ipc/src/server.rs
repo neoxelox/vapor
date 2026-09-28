@@ -31,16 +31,8 @@ pub trait Service: Send + Sync {
         unsupported_ack("resume")
     }
 
-    fn flush_now(&self) -> AckResponse {
-        unsupported_ack("flush_now")
-    }
-
     fn reconcile(&self) -> AckResponse {
         unsupported_ack("reconcile")
-    }
-
-    fn sync_now(&self) -> AckResponse {
-        unsupported_ack("sync_now")
     }
 
     fn diagnostics(&self) -> DiagnosticsResponse {
@@ -256,9 +248,7 @@ fn dispatch_method(service: &dyn Service, method: Method) -> Response {
         Method::Status => Response::Ok(ResponseBody::Status(service.status())),
         Method::Pause => Response::Ok(ResponseBody::Ack(service.pause())),
         Method::Resume => Response::Ok(ResponseBody::Ack(service.resume())),
-        Method::FlushNow => Response::Ok(ResponseBody::Ack(service.flush_now())),
         Method::Reconcile => Response::Ok(ResponseBody::Ack(service.reconcile())),
-        Method::SyncNow => Response::Ok(ResponseBody::Ack(service.sync_now())),
         Method::Timeline => Response::Ok(ResponseBody::Timeline(service.timeline())),
         Method::Diagnostics => Response::Ok(ResponseBody::Diagnostics(service.diagnostics())),
         Method::SetAutoLaunch { enabled } => {
@@ -345,10 +335,10 @@ mod tests {
 
     fn fixture_status() -> StatusResponse {
         StatusResponse {
-            schema_version: 1,
-            run_state: "Running".to_string(),
-            throttle_state: "IdleDrain".to_string(),
-            provider_name: "Filesystem (stub)".to_string(),
+            schema_version: 3,
+            run_state: "running".to_string(),
+            throttle_state: "idle-drain".to_string(),
+            provider: "Filesystem (stub)".to_string(),
             throttle_reason: "idle, plugged in, and cool".to_string(),
             daemon_id: "vapord/1".to_string(),
             ..StatusResponse::default()
@@ -377,8 +367,8 @@ mod tests {
         write_request_frame(
             &mut request_buf,
             &Request::Hello(Hello {
-                schema_version: 1,
-                supported_min_version: 1,
+                schema_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
+                supported_min_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
                 client_id: "vapor-cli/test".to_string(),
             }),
         );
@@ -424,8 +414,8 @@ mod tests {
         write_request_frame(
             &mut request_buf,
             &Request::Hello(Hello {
-                schema_version: 1,
-                supported_min_version: 1,
+                schema_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
+                supported_min_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
                 client_id: "vapor-cli/test".to_string(),
             }),
         );
@@ -446,7 +436,7 @@ mod tests {
         let status = read_response_frame(&mut response_reader);
         match status {
             Response::Ok(ResponseBody::Status(value)) => {
-                assert_eq!(value.run_state, "Running");
+                assert_eq!(value.run_state, "running");
             }
             other => panic!("expected Status, got {other:?}"),
         }
@@ -461,8 +451,8 @@ mod tests {
         write_request_frame(
             &mut request_buf,
             &Request::Hello(Hello {
-                schema_version: 1,
-                supported_min_version: 1,
+                schema_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
+                supported_min_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
                 client_id: "vapor-cli/test".to_string(),
             }),
         );
@@ -492,8 +482,8 @@ mod tests {
         write_request_frame(
             &mut request_buf,
             &Request::Hello(Hello {
-                schema_version: 3,
-                supported_min_version: 3,
+                schema_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT + 2,
+                supported_min_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT + 2,
                 client_id: "vapor-cli/future".to_string(),
             }),
         );
@@ -513,10 +503,9 @@ mod tests {
     }
 
     #[test]
-    fn handshake_rejects_peer_two_versions_behind_with_incompatible_error() {
-        // Daemon at v1; peer sets supported_min_version=3 → it can't
-        // talk to anything below 3, but the daemon is at 1. Skew check
-        // catches it.
+    fn handshake_rejects_a_peer_whose_floor_is_above_the_daemon() {
+        // The peer can't talk to anything below current + 2, and the
+        // daemon is at current. The skew check catches it.
         let service = StaticService {
             status: fixture_status(),
         };
@@ -524,8 +513,8 @@ mod tests {
         write_request_frame(
             &mut request_buf,
             &Request::Hello(Hello {
-                schema_version: 1,
-                supported_min_version: 3,
+                schema_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT + 2,
+                supported_min_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT + 2,
                 client_id: "vapor-cli/test".to_string(),
             }),
         );
@@ -538,8 +527,8 @@ mod tests {
 
     #[test]
     fn handshake_accepts_peer_one_version_ahead() {
-        // Pre-GA tolerance is `|N - M| <= 1`. Daemon at 1, peer at 2
-        // is allowed.
+        // Pre-GA tolerance is `|N - M| <= 1`: a peer one version ahead
+        // whose floor is the daemon's version is allowed.
         let service = StaticService {
             status: fixture_status(),
         };
@@ -547,8 +536,8 @@ mod tests {
         write_request_frame(
             &mut request_buf,
             &Request::Hello(Hello {
-                schema_version: 2,
-                supported_min_version: 1,
+                schema_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT + 1,
+                supported_min_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
                 client_id: "vapor-cli/next".to_string(),
             }),
         );
@@ -606,16 +595,16 @@ mod tests {
         write_request_frame(
             &mut request_buf,
             &Request::Hello(Hello {
-                schema_version: 1,
-                supported_min_version: 1,
+                schema_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
+                supported_min_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
                 client_id: "vapor-cli/test".to_string(),
             }),
         );
         write_request_frame(
             &mut request_buf,
             &Request::Hello(Hello {
-                schema_version: 1,
-                supported_min_version: 1,
+                schema_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
+                supported_min_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
                 client_id: "vapor-cli/test".to_string(),
             }),
         );
@@ -636,10 +625,10 @@ mod tests {
         let payload = br#"{
             "kind": "Hello",
             "payload": {
-                "schema_version": 1,
-                "supported_min_version": 1,
-                "client_id": "vapor-cli/future",
-                "future_field": "not yet defined"
+                "schemaVersion": 3,
+                "supportedMinVersion": 3,
+                "clientId": "vapor-cli/future",
+                "futureField": "not yet defined"
             }
         }"#;
         let mut request_buf = Vec::new();

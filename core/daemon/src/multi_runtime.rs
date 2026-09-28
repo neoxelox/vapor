@@ -103,7 +103,7 @@ pub enum AllSuspended {
     AtComposition,
     /// At least one profile was suspended by a runtime failure.
     AtRuntime,
-    /// Every profile is parked on a local sync directory that is not
+    /// Every profile is parked on a local root that is not
     /// there; each is composed again when its folder returns.
     WaitingForRoots,
 }
@@ -262,7 +262,7 @@ impl MultiProfileRuntime {
         )));
         // Daemon-wide resource management: one budget,
         // one bandwidth shaper, one tuned step knob for every profile.
-        let max_concurrent_transfers = budget_config.max_concurrent_transfers;
+        let concurrent_transfers = budget_config.concurrent_transfers;
         let shared_budget = Arc::new(Mutex::new(crate::resource_budget::ResourceBudget::new(
             budget_config,
         )));
@@ -285,7 +285,7 @@ impl MultiProfileRuntime {
             shared_shaper,
             shared_step: shared_step.clone(),
             idle_notifier,
-            max_concurrent_transfers,
+            concurrent_transfers,
             mass_delete_settings,
             trash_settings: crate::trash::TrashSettings::default(),
             filters_by_root: BTreeMap::new(),
@@ -354,7 +354,7 @@ impl MultiProfileRuntime {
             if recreate {
                 if let Err(error) = std::fs::create_dir_all(&root) {
                     logging::warning(
-                        "Could not re-create the local sync directory",
+                        "Could not re-create the local root",
                         &[
                             ("profile_id", profile.id.clone()),
                             ("path", root.display().to_string()),
@@ -381,7 +381,7 @@ impl MultiProfileRuntime {
                 continue;
             }
             logging::info(
-                "Local sync directory is back; composing the profile again",
+                "Local root is back; composing the profile again",
                 &[
                     ("profile_id", profile.id.clone()),
                     ("path", root.display().to_string()),
@@ -399,7 +399,7 @@ impl MultiProfileRuntime {
                 {
                     let _ = state_db.withdraw_decision(decision.id, now);
                     self.timeline.push(
-                        "decision",
+                        constants::timeline::KIND_DECISION,
                         profile.id.clone(),
                         format!(
                             "Decision {} (root-missing) withdrawn: the local root is back",
@@ -437,7 +437,7 @@ impl MultiProfileRuntime {
             Some(decision) => {
                 let _ = state_db.mark_decision_applied(decision.id, now);
                 self.timeline.push(
-                    "decision",
+                    constants::timeline::KIND_DECISION,
                     profile_id.to_string(),
                     format!(
                         "Decision {} (root-missing) recreate: re-creating {} and merging without deletions",
@@ -482,13 +482,13 @@ impl MultiProfileRuntime {
         }) || change.restart.contains(&keys::KEY_PROFILES)
         {
             let budget = crate::resource_budget::EffectiveBudgetConfig::resolve(&config);
-            let ceiling = budget.max_concurrent_transfers;
+            let ceiling = budget.concurrent_transfers;
             self.shared_budget
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .replace_config(budget);
             for slot in &mut self.slots {
-                slot.runtime.set_max_concurrent_transfers(ceiling);
+                slot.runtime.set_concurrent_transfers(ceiling);
             }
         }
         if change.live.contains(&keys::KEY_SAFEGUARDS) {
@@ -508,13 +508,13 @@ impl MultiProfileRuntime {
         if change.live.iter().any(|key| {
             matches!(
                 *key,
-                keys::KEY_USE_GIT_IGNORE
-                    | keys::KEY_USE_VAPOR_IGNORE
+                keys::KEY_USE_GITIGNORE
+                    | keys::KEY_USE_VAPORIGNORE
                     | keys::KEY_PRE_IGNORE_RULES
                     | keys::KEY_POST_IGNORE_RULES
             )
         }) {
-            let options = EventPathFilterOptions::from_environment_and_config(&config);
+            let options = EventPathFilterOptions::from_config(&config);
             let mut seen: Vec<*const crate::fs_events::SharedEventPathFilter> = Vec::new();
             for slot in &self.slots {
                 if let Some(filter) = slot.runtime.shared_path_filter() {
@@ -536,7 +536,7 @@ impl MultiProfileRuntime {
                 &[("keys", live_keys.join(","))],
             );
             self.timeline.push(
-                "config",
+                constants::timeline::KIND_CONFIG,
                 "daemon",
                 format!("applied live settings: {}", live_keys.join(", ")),
                 self.clock.now_system(),
@@ -587,7 +587,7 @@ impl MultiProfileRuntime {
                 let (mirror_reverts, mirror_deletes) = slot.runtime.mirror_counters();
                 ProfileSummary {
                     id: slot.profile.id.clone(),
-                    display_name: slot.profile.display_name.clone(),
+                    name: slot.profile.name.clone(),
                     provider_kind: slot.profile.provider_kind.clone(),
                     sync_mode: slot.profile.scope.sync_mode,
                     run_state: slot.runtime.app().snapshot().run_state,
@@ -645,7 +645,7 @@ impl MultiProfileRuntime {
                     );
                     if slot.consecutive_tick_errors >= MAX_CONSECUTIVE_PROFILE_TICK_ERRORS {
                         self.timeline.push(
-                            "profile",
+                            constants::timeline::KIND_PROFILE,
                             slot.profile.id.clone(),
                             "profile suspended after repeated tick failures",
                             now,
@@ -657,7 +657,7 @@ impl MultiProfileRuntime {
                 Err(panic) => {
                     let reason = panic_message(panic);
                     self.timeline.push(
-                        "profile",
+                        constants::timeline::KIND_PROFILE,
                         slot.profile.id.clone(),
                         format!("profile suspended after panic: {reason}"),
                         now,
@@ -770,7 +770,7 @@ impl MultiProfileRuntime {
                 Some(AllSuspended::WaitingForRoots) if !reported_all_suspended => {
                     reported_all_suspended = true;
                     logging::info(
-                        "Every profile is waiting for its local sync directory; serving status until one returns",
+                        "Every profile is waiting for its local root; serving status until one returns",
                         &[],
                     );
                 }
@@ -838,26 +838,18 @@ impl MultiProfileRuntime {
             return false;
         };
         let pause = external.take_pause_request();
-        let flush = external.take_flush_request();
         let reconcile = external.take_reconcile_request();
-        let sync_now = external.take_sync_now_request();
         for slot in &self.slots {
             match pause {
                 Some(true) => slot.control.request_pause(),
                 Some(false) => slot.control.request_resume(),
                 None => {}
             }
-            if flush {
-                slot.control.request_flush();
-            }
             if reconcile {
                 slot.control.request_reconcile();
             }
-            if sync_now {
-                slot.control.request_sync_now();
-            }
         }
-        pause.is_some() || flush || reconcile || sync_now
+        pause.is_some() || reconcile
     }
 
     /// One status snapshot for the whole daemon: the most
@@ -881,9 +873,9 @@ impl MultiProfileRuntime {
         }
         let Some(worst) = worst else {
             return DaemonStatusSnapshot {
-                run_state: format!("{:?}", RunState::Error),
+                run_state: RunState::Error.wire_name().to_string(),
                 throttle_state: ThrottleState::Suspended,
-                provider_name: "none".to_string(),
+                provider: "none".to_string(),
                 throttle_reason: "no enabled profiles".to_string(),
                 ..DaemonStatusSnapshot::default()
             };
@@ -896,7 +888,7 @@ impl MultiProfileRuntime {
                 self.restart_required.join(", ")
             )
         });
-        snapshot.run_state = format!("{:?}", slot_effective_run_state(worst));
+        snapshot.run_state = slot_effective_run_state(worst).wire_name().to_string();
         snapshot.resource_budget = self
             .slots
             .iter()
@@ -929,10 +921,10 @@ impl MultiProfileRuntime {
             let app_snapshot = slot.runtime.app().snapshot();
             snapshot.profiles.push(vapor_ipc::ProfileStatus {
                 id: slot.profile.id.clone(),
-                display_name: slot.profile.display_name.clone(),
-                provider_name: slot.profile.provider_kind.clone(),
+                name: slot.profile.name.clone(),
+                provider: slot.profile.provider_kind.clone(),
                 sync_mode: slot.profile.scope.sync_mode.as_config_value().to_string(),
-                run_state: format!("{:?}", slot_effective_run_state(slot)),
+                run_state: slot_effective_run_state(slot).wire_name().to_string(),
                 reason: app_snapshot.reason.clone(),
                 queue_depth,
                 failed_intents,
@@ -1045,7 +1037,7 @@ struct SlotComposer {
     shared_shaper: Arc<Mutex<vapor_providers::BandwidthShaper>>,
     shared_step: Arc<std::sync::atomic::AtomicU64>,
     idle_notifier: Arc<dyn vapor_platform::IdleNotifier>,
-    max_concurrent_transfers: Option<usize>,
+    concurrent_transfers: Option<usize>,
     mass_delete_settings: crate::safeguards::MassDeleteGuardSettings,
     trash_settings: crate::trash::TrashSettings,
     /// One ignore-rule filter per canonical local root: profiles that
@@ -1108,11 +1100,11 @@ fn compose_slot(
     // (creates) the misconfigured cloud root.
     let overlap_failure = if profile.provider_kind.trim()
         == vapor_shared::constants::provider::FILESYSTEM
-        && let Some(local_root) = profile.scope.local_sync_directory.as_deref()
+        && let Some(local_root) = profile.scope.local_root.as_deref()
     {
         crate::sync_directories::filesystem_roots_overlap(
             local_root,
-            profile.scope.cloud_sync_directory.as_str(),
+            profile.scope.cloud_root.as_str(),
         )
         .map(|reason| format!("invalid sync directories: {reason}"))
     } else {
@@ -1174,7 +1166,7 @@ fn compose_slot(
             // composed again when it returns or when the user asks
             // for it to be re-created.
             logging::warning(
-                "Local sync directory is missing; holding the profile until it returns",
+                "Local root is missing; holding the profile until it returns",
                 &[
                     ("profile_id", profile.id.clone()),
                     ("path", root.display().to_string()),
@@ -1215,9 +1207,9 @@ fn compose_slot(
             composer.trash_settings,
             Arc::new(vapor_platform::NativeTrashBin::for_current_host()),
         )
-        .with_sync_root(profile.scope.local_sync_directory.clone()),
+        .with_sync_root(profile.scope.local_root.clone()),
     );
-    runtime.set_max_concurrent_transfers(composer.max_concurrent_transfers);
+    runtime.set_concurrent_transfers(composer.concurrent_transfers);
     runtime.attach_timeline(composer.timeline.clone());
     runtime.attach_resource_management(
         composer.shared_budget.clone(),
@@ -1268,7 +1260,7 @@ fn missing_root_placeholder(
     now: SystemTime,
 ) -> ProfileSlot {
     let reason = format!(
-        "local sync directory {} is missing; Vapor waits for it and never re-creates a folder it synced before (answer the root-missing decision to re-create it)",
+        "local root {} is missing; Vapor waits for it and never re-creates a folder it synced before (answer the root-missing decision to re-create it)",
         root.display()
     );
     let database_path = composer.database_path(&profile.id);
@@ -1298,7 +1290,7 @@ fn missing_root_placeholder(
                     now,
                 ) {
                     Ok(id) => composer.timeline.push(
-                        "decision",
+                        constants::timeline::KIND_DECISION,
                         profile.id.clone(),
                         format!("Decision {id} (root-missing) opened: {question}"),
                         now,
@@ -1317,7 +1309,7 @@ fn missing_root_placeholder(
     }
     let state_db = DurableStateDb::open(&database_path).ok();
     let scope = SyncScope {
-        local_sync_directory: None,
+        local_root: None,
         ..profile.scope.clone()
     };
     let app = DaemonApp::new_with_shared_workgate(
@@ -1348,7 +1340,7 @@ fn missing_root_placeholder(
             );
             DaemonRuntime::build_with_app(
                 SyncScope {
-                    local_sync_directory: None,
+                    local_root: None,
                     ..profile.scope.clone()
                 },
                 composer.filter_options.clone(),
@@ -1396,7 +1388,7 @@ fn start_deduplicated_watchers(
         if slot.failed.is_some() {
             continue;
         }
-        let Some(root) = slot.profile.scope.local_sync_directory.clone() else {
+        let Some(root) = slot.profile.scope.local_root.clone() else {
             continue;
         };
         let Some(recorder) = slot.runtime.event_recorder() else {
@@ -1531,11 +1523,11 @@ mod tests {
                 );
                 profiles.push(ResolvedProfile {
                     id: id.to_string(),
-                    display_name: id.to_string(),
+                    name: id.to_string(),
                     provider_kind: "filesystem".to_string(),
                     scope: SyncScope {
-                        local_sync_directory: Some(local_root),
-                        cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+                        local_root: Some(local_root),
+                        cloud_root: cloud_root.to_string_lossy().into_owned(),
                         sync_mode: *mode,
                     },
                     enabled: true,
@@ -1631,11 +1623,11 @@ mod tests {
         std::fs::create_dir_all(&cloud_root).expect("cloud root");
         let profile = || ResolvedProfile {
             id: "default".to_string(),
-            display_name: "default".to_string(),
+            name: "default".to_string(),
             provider_kind: "filesystem".to_string(),
             scope: SyncScope {
-                local_sync_directory: Some(local_root.clone()),
-                cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+                local_root: Some(local_root.clone()),
+                cloud_root: cloud_root.to_string_lossy().into_owned(),
                 sync_mode: SyncMode::TwoWay,
             },
             enabled: true,
@@ -1947,22 +1939,22 @@ mod tests {
         let profiles = vec![
             ResolvedProfile {
                 id: "overlap".to_string(),
-                display_name: "overlap".to_string(),
+                name: "overlap".to_string(),
                 provider_kind: "filesystem".to_string(),
                 scope: SyncScope {
-                    local_sync_directory: Some(local.clone()),
-                    cloud_sync_directory: nested_cloud.to_string_lossy().into_owned(),
+                    local_root: Some(local.clone()),
+                    cloud_root: nested_cloud.to_string_lossy().into_owned(),
                     sync_mode: SyncMode::TwoWay,
                 },
                 enabled: true,
             },
             ResolvedProfile {
                 id: "good".to_string(),
-                display_name: "good".to_string(),
+                name: "good".to_string(),
                 provider_kind: "filesystem".to_string(),
                 scope: SyncScope {
-                    local_sync_directory: Some(good_local.clone()),
-                    cloud_sync_directory: good_cloud.to_string_lossy().into_owned(),
+                    local_root: Some(good_local.clone()),
+                    cloud_root: good_cloud.to_string_lossy().into_owned(),
                     sync_mode: SyncMode::TwoWay,
                 },
                 enabled: true,
@@ -2037,22 +2029,22 @@ mod tests {
         let profiles = vec![
             ResolvedProfile {
                 id: "bad".to_string(),
-                display_name: "bad".to_string(),
+                name: "bad".to_string(),
                 provider_kind: "gdrvie".to_string(),
                 scope: SyncScope {
-                    local_sync_directory: Some(bad_local.clone()),
-                    cloud_sync_directory: bad_cloud.to_string_lossy().into_owned(),
+                    local_root: Some(bad_local.clone()),
+                    cloud_root: bad_cloud.to_string_lossy().into_owned(),
                     sync_mode: SyncMode::PullOnly,
                 },
                 enabled: true,
             },
             ResolvedProfile {
                 id: "good".to_string(),
-                display_name: "good".to_string(),
+                name: "good".to_string(),
                 provider_kind: "filesystem".to_string(),
                 scope: SyncScope {
-                    local_sync_directory: Some(good_local.clone()),
-                    cloud_sync_directory: good_cloud.to_string_lossy().into_owned(),
+                    local_root: Some(good_local.clone()),
+                    cloud_root: good_cloud.to_string_lossy().into_owned(),
                     sync_mode: SyncMode::TwoWay,
                 },
                 enabled: true,
@@ -2100,9 +2092,9 @@ mod tests {
         fn capabilities(&self) -> vapor_providers::ProviderCapabilities {
             vapor_providers::ProviderCapabilities::FILESYSTEM
         }
-        fn ensure_cloud_sync_directory(
+        fn ensure_cloud_root(
             &self,
-            _cloud_sync_directory: &str,
+            _cloud_root: &str,
         ) -> Result<(), vapor_providers::ProviderError> {
             Ok(())
         }
@@ -2188,11 +2180,11 @@ mod tests {
 
         let profiles = vec![ResolvedProfile {
             id: "default".to_string(),
-            display_name: "default".to_string(),
+            name: "default".to_string(),
             provider_kind: "filesystem".to_string(),
             scope: SyncScope {
-                local_sync_directory: Some(local.clone()),
-                cloud_sync_directory: cloud.to_string_lossy().into_owned(),
+                local_root: Some(local.clone()),
+                cloud_root: cloud.to_string_lossy().into_owned(),
                 sync_mode: SyncMode::TwoWay,
             },
             enabled: true,
@@ -2281,11 +2273,11 @@ mod tests {
         std::fs::create_dir_all(&local).expect("local");
         let profiles = vec![ResolvedProfile {
             id: "only".to_string(),
-            display_name: "only".to_string(),
+            name: "only".to_string(),
             provider_kind: "gdrvie".to_string(),
             scope: SyncScope {
-                local_sync_directory: Some(local),
-                cloud_sync_directory: "/Vapor".to_string(),
+                local_root: Some(local),
+                cloud_root: "/Vapor".to_string(),
                 sync_mode: SyncMode::TwoWay,
             },
             enabled: true,
@@ -2491,7 +2483,7 @@ mod tests {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProfileSummary {
     pub id: String,
-    pub display_name: String,
+    pub name: String,
     pub provider_kind: String,
     pub sync_mode: vapor_shared::SyncMode,
     pub run_state: RunState,

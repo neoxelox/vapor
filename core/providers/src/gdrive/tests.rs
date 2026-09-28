@@ -37,9 +37,7 @@ fn ensured_provider(transport: Arc<ScriptedHttpTransport>) -> GoogleDriveProvide
         r#"{"files":[{"id":"root-folder","name":"Vapor","mimeType":"application/vnd.google-apps.folder"}]}"#,
     );
     let provider = provider_with(transport);
-    provider
-        .ensure_cloud_sync_directory("/Vapor")
-        .expect("ensure");
+    provider.ensure_cloud_root("/Vapor").expect("ensure");
     provider
 }
 
@@ -54,7 +52,7 @@ fn ensure_creates_missing_folder_chain() {
 
     let provider = provider_with(transport.clone());
     provider
-        .ensure_cloud_sync_directory("/Vapor/Docs")
+        .ensure_cloud_root("/Vapor/Docs")
         .expect("ensure creates the chain");
 
     let requests = transport.recorded_requests();
@@ -655,10 +653,10 @@ fn missing_credentials_surface_an_actionable_auth_error() {
         transport,
     );
     let error = provider
-        .ensure_cloud_sync_directory("/Vapor")
+        .ensure_cloud_root("/Vapor")
         .expect_err("no credentials must fail");
     assert_eq!(error.kind, ProviderErrorKind::Authentication);
-    assert!(error.message.contains("vapor auth login gdrive"));
+    assert!(error.message.contains("vapor auth login"));
     assert!(error.message.contains("workp"), "names the profile");
 }
 
@@ -686,21 +684,17 @@ fn a_refused_sign_in_stops_token_requests_until_a_new_sign_in_lands() {
     // week): Google answers invalid_grant.
     transport.push_response(400, r#"{"error":"invalid_grant"}"#);
     let error = provider
-        .ensure_cloud_sync_directory("/Vapor")
+        .ensure_cloud_root("/Vapor")
         .expect_err("a refused refresh must fail");
     assert_eq!(error.kind, ProviderErrorKind::Authentication);
 
     // While the store still holds the refused token, a retry fails
     // without asking Google again.
     let error = provider
-        .ensure_cloud_sync_directory("/Vapor")
+        .ensure_cloud_root("/Vapor")
         .expect_err("still signed out");
     assert_eq!(error.kind, ProviderErrorKind::Authentication);
-    assert!(
-        error
-            .message
-            .contains("vapor auth login gdrive --profile default")
-    );
+    assert!(error.message.contains("vapor auth login --profile default"));
     assert_eq!(transport.recorded_requests().len(), 1);
 
     // `vapor auth login` stores a new token set; the same provider
@@ -719,7 +713,7 @@ fn a_refused_sign_in_stops_token_requests_until_a_new_sign_in_lands() {
         r#"{"files":[{"id":"root-folder","name":"Vapor","mimeType":"application/vnd.google-apps.folder"}]}"#,
     );
     provider
-        .ensure_cloud_sync_directory("/Vapor")
+        .ensure_cloud_root("/Vapor")
         .expect("the new sign-in works");
     let requests = transport.recorded_requests();
     assert_eq!(requests.len(), 2);

@@ -64,13 +64,13 @@ pub fn get(path: &Path, key: &str) -> Result<Option<String>, ConfigError> {
     }
     // The cloud root's default depends on the provider the same file
     // selects, so it is resolved here rather than read off the struct.
-    if key == constants::config::KEY_CLOUD_SYNC_DIRECTORY {
+    if key == constants::config::KEY_CLOUD_ROOT {
         let provider = document
             .get(constants::config::KEY_PROVIDER)
             .and_then(Value::as_str)
             .unwrap_or(constants::provider::DEFAULT);
         return Ok(Some(
-            constants::filtering::default_cloud_sync_directory(provider).to_string(),
+            constants::filtering::default_cloud_root(provider).to_string(),
         ));
     }
     Ok(default_for_key(key)
@@ -142,12 +142,12 @@ fn read_or_empty_object(path: &Path) -> Result<Value, ConfigError> {
 fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
     use constants::config::{
         KEY_AUTO_LAUNCH, KEY_IDLE_BOOST, KEY_PROFILES, KEY_PROVIDER, KEY_RESOURCE_LIMITS,
-        KEY_SAFEGUARDS, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT, KEY_TRASH, KEY_USE_GIT_IGNORE,
-        KEY_USE_VAPOR_IGNORE,
+        KEY_SAFEGUARDS, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT, KEY_TRASH, KEY_USE_GITIGNORE,
+        KEY_USE_VAPORIGNORE,
     };
     if matches!(
         key,
-        KEY_AUTO_LAUNCH | KEY_USE_GIT_IGNORE | KEY_USE_VAPOR_IGNORE
+        KEY_AUTO_LAUNCH | KEY_USE_GITIGNORE | KEY_USE_VAPORIGNORE
     ) {
         return match raw {
             "true" => Ok(Value::Bool(true)),
@@ -202,7 +202,7 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
         return parse_json_value::<vapor_shared::config::SafeguardsConfig>(
             key,
             raw,
-            "a JSON object such as {\"massDeleteThreshold\": 500}",
+            "a JSON object such as {\"massDelete\": {\"threshold\": 500}}",
         );
     }
     if key == KEY_TRASH {
@@ -287,17 +287,17 @@ mod tests {
         let temp = TempDir::new().expect("temp");
         let path = config_path(&temp);
         assert_eq!(
-            get(&path, "cloudSyncDirectory").expect("get"),
-            Some(constants::filtering::DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY.to_string())
+            get(&path, "cloudRoot").expect("get"),
+            Some(constants::filtering::DEFAULT_FILESYSTEM_CLOUD_ROOT.to_string())
         );
         set(&path, "provider", "gdrive").expect("set provider");
         assert_eq!(
-            get(&path, "cloudSyncDirectory").expect("get"),
-            Some(constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY.to_string())
+            get(&path, "cloudRoot").expect("get"),
+            Some(constants::filtering::DEFAULT_CLOUD_ROOT.to_string())
         );
-        set(&path, "cloudSyncDirectory", "/Work").expect("set root");
+        set(&path, "cloudRoot", "/Work").expect("set root");
         assert_eq!(
-            get(&path, "cloudSyncDirectory").expect("get"),
+            get(&path, "cloudRoot").expect("get"),
             Some("/Work".to_string())
         );
     }
@@ -320,7 +320,7 @@ mod tests {
         let contents = fs::read_to_string(&path).expect("file");
         // Stored as JSON, not as a string containing JSON.
         assert!(contents.contains("\"profiles\": ["), "{contents}");
-        let error = set(&path, "safeguards", "massDeleteThreshold=500").expect_err("not JSON");
+        let error = set(&path, "safeguards", "massDelete.threshold=500").expect_err("not JSON");
         assert!(matches!(error, ConfigError::Parse(_)));
         let error = set(&path, "profiles", r#"{"id": "x"}"#).expect_err("wrong shape");
         assert!(error.to_string().contains("profiles"), "{error}");
@@ -360,11 +360,11 @@ mod tests {
         )
         .expect("seed");
 
-        set(&path, "useGitIgnore", "false").expect("set");
+        set(&path, "useGitignore", "false").expect("set");
         let contents = fs::read_to_string(&path).expect("file");
         assert!(contents.contains("\"autoLaunch\": true"));
         assert!(contents.contains("\"languageCode\": \"en\""));
-        assert!(contents.contains("\"useGitIgnore\": false"));
+        assert!(contents.contains("\"useGitignore\": false"));
     }
 
     #[test]

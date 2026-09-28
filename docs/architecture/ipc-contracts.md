@@ -24,8 +24,12 @@ macOS-only connotation.
 
 ## Contract versioning rules
 
-Every request and response payload carries an explicit `schema_version: u32`
-field at the top level. The concrete version handshake and skew tolerance
+Every request and response payload carries an explicit `schemaVersion: u32`
+field at the top level. Keys are camelCase and every value that names a
+state or a choice is kebab-case (`runState: "running"`,
+`throttleState: "idle-drain"`), the same shape `vapor … --json` prints;
+the values come from the vocabulary modules in
+`core/shared/src/constants.rs`. The concrete version handshake and skew tolerance
 rules below are pre-GA; backward-compat guarantees tighten at GA.
 
 ### Schema history
@@ -36,7 +40,7 @@ Source of truth: `core/shared/src/constants.rs::ipc`
 
 - **v1** — Wave 7 baseline: `Hello`/`HelloAck`, `Status`, `Pause`,
   `Resume`, `FlushNow`, `Reconcile`, `Timeline`, `Logs` seam.
-- **v2** (current; min supported v1) — Wave 8 finalisation, all additive
+- **v2** — Wave 8 finalisation, all additive
   (every new field is serde-defaulted so a v1 peer's frames still parse):
   `StatusResponse` gains sync-scope/provider/sync-mode fields, per-profile
   summaries (`ProfileStatus`), effective resource ceilings + idle-boost
@@ -71,16 +75,29 @@ Source of truth: `core/shared/src/constants.rs::ipc`
   `vapor auth login <provider_name> --profile <id>`
   (`operations/provider-auth-operations.md` §Failure behavior). A
   daemon that predates it sends nothing, which reads as `false`.
+- **v3** (current; min supported v3) — the naming pass, a breaking
+  change. Every key became camelCase (`schemaVersion`, `runState`,
+  `queueDepth`, `profileId`) and every state value kebab-case
+  (`running`, `idle-drain`, diagnostics stages such as
+  `waiting-to-upload`, actions such as `cloud-delete`); `ProfileStatus`
+  `display_name` became `name` and `provider_name` became `provider`,
+  on `StatusResponse` too. `FlushNow` and `SyncNow` are gone: `Reconcile`
+  now carries the on-demand semantics `SyncNow` had (a scan admitted
+  under any throttle state but `suspended`, plus the boost that releases
+  deferred work). `sign_in_required` is `signInRequired`, and the way
+  out it names is `vapor auth login --profile <id>`, since the profile
+  decides the provider. A v2 peer would read v3 frames as defaults, so
+  the floor moved to 3 and the handshake refuses it.
 
 ### Handshake
 
 - On connection, the app sends a
-  `Hello { schema_version, supported_min_version, client_id }` request.
+  `Hello { schemaVersion, supportedMinVersion, clientId }` request.
   The daemon responds with
-  `HelloAck { schema_version, supported_min_version, server_id }`.
+  `HelloAck { schemaVersion, supportedMinVersion, serverId }`.
 - If `app_schema_version < daemon.supported_min_version` or
   `daemon_schema_version < app.supported_min_version`, the handshake fails
-  with `IncompatibleVersion { peer_version, required_min }`. Both sides log
+  with `IncompatibleVersion { peerVersion, requiredMin, localVersion }`. Both sides log
   a structured diagnostic (`ipc.handshake.incompatible` with both versions)
   and the app surfaces an actionable "Please update Vapor" state. The
   daemon does not accept further requests from that session.
@@ -167,41 +184,41 @@ Concretely:
 
 ### Controls
 
-- `Pause` / `Resume`, `FlushNow`, excludes update, auto-launch toggle,
-  config reload trigger.
+- `Pause` / `Resume`, `Reconcile` (the user's on-demand scan), excludes
+  update, auto-launch toggle, config reload trigger.
 
 ### Diagnostics (per-intent)
 
-- For each pending durable intent the daemon exposes: `intent_id`,
-  `profile_id`, `path`, `action`, current `stage`, elapsed-in-stage,
-  attempt count, last-error classification, and a human-readable
-  `blocker_reason` (e.g., "Throttle Suspended: no uploads allowed", "Hash
-  worker cap 2/2 in use", "Rate-limit slowdown until {iso8601}"). This is
-  the data source for the diagnostics "why is this intent stuck" surface.
-- The `stage` enum mirrors the staged-executor's own `ExecutionStage` plus
-  four queue-state values that exist outside any executor stage. The
-  complete set:
-  - `Queued` — intent is in the durable pending queue, waiting to be leased.
-  - `Held` — intent is parked behind an open decision; the blocker names
-    the decision number. Not leased until the decision is answered.
-  - `Planner` — leased and currently in the planner stage of the staged
-    executor.
-  - `WaitingForHash` — finished planner, blocked acquiring a hash permit
-    (workgate cap exhausted or throttle disallows hashing).
-  - `Hash` — currently hashing.
-  - `WaitingForUpload` — finished hashing (or skipped hashing for
-    non-content-bearing actions), blocked acquiring an upload permit.
-  - `Upload` — currently uploading.
-  - `WaitingForDownload` — remote-apply intent waiting for a download
-    permit.
-  - `Download` — currently downloading remote content.
-  - `Retrying` — leased intent that hit a transient/rate-limited failure
-    and was requeued with backoff; resurfaces as `Queued` once
-    `available_at` elapses.
-  - `DeferredReconcile` — storm-compacted subtree marker waiting on its
-    `available_at`.
-- Diagnostics also expose the `BoundedFsEventRecorder`
-  `dropped_incoming_event_count` so users can detect prolonged callback-vs-
+- For each pending durable intent the daemon exposes `intentId`,
+  `profileId`, `path`, `action`, `stage`, `elapsedInStageMs`,
+  `attemptCount`, `lastError`, and a human-readable `blockerReason`
+  (for example "hash workers 2/2 and read tokens 1/1 in use", "retry
+  backoff active (attempt 3)", "waiting for decision #4"). This is the
+  data source for the "why is this stuck" surface.
+- `action` says what the item does (`constants::intent::ACTION_*`):
+  - `upload` / `download` — content moving to or from the cloud.
+  - `rename` — a local rename carried to the cloud.
+  - `local-delete` — a delete made on this device, carried to the cloud.
+  - `cloud-delete` — a delete made in the cloud, applied on this device.
+  - `reconcile` — a subtree the reconcile walk still has to compare.
+- `stage` says where it is (`constants::intent::STAGE_*`). Three values
+  describe the durable queue, the rest mirror the staged executor:
+  - `queued` — in the durable queue, waiting to be leased.
+  - `retrying` — hit a transient or rate-limited failure and waits out
+    its backoff; it reads `queued` again once the backoff elapses.
+  - `held` — parked behind an open decision; the blocker names the
+    decision number. Not leased until the decision is answered.
+  - `planning` — leased and in the planner.
+  - `waiting-to-hash` — planned, waiting for a hash permit (workgate cap
+    exhausted, or the throttle disallows hashing).
+  - `hashing` — being hashed.
+  - `waiting-to-upload` — hashed (or needing no hash), waiting for an
+    upload permit.
+  - `uploading` — being uploaded.
+  - `waiting-to-download` — a cloud change waiting for a download permit.
+  - `downloading` — being downloaded.
+- Diagnostics also expose the `BoundedFsEventRecorder` drop count as
+  `droppedIncomingEvents`, so users can detect prolonged callback-vs-
   runtime backpressure (a non-zero value means raw fs-watch callbacks pushed
   faster than the runtime drained, and some events were dropped at the
   queue boundary rather than allowed to grow the queue without bound).
@@ -215,7 +232,7 @@ The IPC implementation must include:
   `IncompatibleVersion`).
 - Field omission: request serialized without an N-only field is handled by
   daemon-N without error and uses default values.
-- Unknown field: request carrying a synthetic `future_field` is handled
+- Unknown field: request carrying a synthetic `futureField` is handled
   without error and logged at debug level.
 - Payload bounds: a `payload_bytes` value above the cap is rejected before
   deserialization.

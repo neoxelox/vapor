@@ -76,9 +76,9 @@ pub struct DaemonApp {
     /// the default ceiling.
     resource_cpu_ceiling_percent: Option<u8>,
     /// Explicit user ceiling on concurrent uploads / downloads
-    /// (`resourceLimits.maxConcurrentTransfers`); `None` = automatic
+    /// (`resourceLimits.concurrentTransfers`); `None` = automatic
     /// (the core-derived throttle tier decides).
-    max_concurrent_transfers: Option<usize>,
+    concurrent_transfers: Option<usize>,
     reconcile_controller: ReconcileController,
     /// Shared behind a mutex so multiple profile runtimes gate against
     /// ONE daemon-level cap set (`data-flow.md §Multi-profile watch
@@ -97,7 +97,7 @@ impl std::fmt::Debug for DaemonApp {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DaemonApp")
             .field("snapshot", &self.snapshot)
-            .field("provider_name", &self.provider.name())
+            .field("provider", &self.provider.name())
             .field("last_throttle_decision", &self.last_throttle_decision)
             .field("retry_slowdown_until", &self.retry_slowdown_until)
             .field("reconcile_controller", &self.reconcile_controller)
@@ -140,7 +140,7 @@ impl DaemonApp {
             last_throttle_decision: None,
             retry_slowdown_until: None,
             resource_cpu_ceiling_percent: None,
-            max_concurrent_transfers: None,
+            concurrent_transfers: None,
             reconcile_controller: ReconcileController::with_clock(clock),
             workgate,
         }
@@ -161,14 +161,14 @@ impl DaemonApp {
         self.refresh_workgate_caps(now);
     }
 
-    /// Applies the explicit `resourceLimits.maxConcurrentTransfers`
+    /// Applies the explicit `resourceLimits.concurrentTransfers`
     /// ceiling (already clamped by the budget resolve). A hard user
     /// limit: it caps every throttle tier, including idle boost.
-    pub fn set_max_concurrent_transfers(&mut self, ceiling: Option<usize>) {
-        if self.max_concurrent_transfers == ceiling {
+    pub fn set_concurrent_transfers(&mut self, ceiling: Option<usize>) {
+        if self.concurrent_transfers == ceiling {
             return;
         }
-        self.max_concurrent_transfers = ceiling;
+        self.concurrent_transfers = ceiling;
         self.refresh_workgate_caps(SystemTime::now());
     }
 
@@ -430,26 +430,23 @@ impl DaemonApp {
     /// actionable error when it cannot; the runtime blocks regular sync
     /// work until a later attempt succeeds — intents keep
     /// accumulating durably, they are never dropped.
-    pub fn ensure_cloud_sync_directory(
+    pub fn ensure_cloud_root(
         &self,
-        cloud_sync_directory: &str,
+        cloud_root: &str,
     ) -> Result<(), vapor_providers::ProviderError> {
-        match self
-            .provider
-            .ensure_cloud_sync_directory(cloud_sync_directory)
-        {
+        match self.provider.ensure_cloud_root(cloud_root) {
             Ok(_) => {
                 logging::info(
-                    "Cloud sync directory is ready",
-                    &[("cloud_sync_directory", cloud_sync_directory.to_string())],
+                    "Cloud root is ready",
+                    &[("cloud_root", cloud_root.to_string())],
                 );
                 Ok(())
             }
             Err(error) => {
                 logging::error(
-                    "Failed to ensure cloud sync directory",
+                    "Failed to ensure cloud root",
                     &[
-                        ("cloud_sync_directory", cloud_sync_directory.to_string()),
+                        ("cloud_root", cloud_root.to_string()),
                         ("failure_kind", error.kind.label().to_string()),
                         ("error", error.message.clone()),
                     ],
@@ -495,7 +492,7 @@ impl DaemonApp {
             caps.upload_concurrency = scale_cap(caps.upload_concurrency);
             caps.download_concurrency = scale_cap(caps.download_concurrency);
         }
-        if let Some(ceiling) = self.max_concurrent_transfers {
+        if let Some(ceiling) = self.concurrent_transfers {
             // A hard user ceiling: applied last so neither the CPU
             // scale nor idle boost can exceed it. A throttle-imposed
             // zero (Suspended) stays zero.
@@ -566,7 +563,7 @@ mod tests {
         let unlimited = app.workgate_snapshot().caps;
         assert!(unlimited.upload_concurrency >= 4);
 
-        app.set_max_concurrent_transfers(Some(1));
+        app.set_concurrent_transfers(Some(1));
         app.apply_throttle_inputs(ThrottleInputs::default());
         let capped = app.workgate_snapshot().caps;
         assert_eq!(capped.upload_concurrency, 1);
@@ -670,10 +667,10 @@ mod tests {
     }
 
     #[test]
-    fn ensure_cloud_sync_directory_does_not_panic() {
+    fn ensure_cloud_root_does_not_panic() {
         let app = DaemonApp::default();
         // The stub provider treats the cloud root as always present.
-        assert!(app.ensure_cloud_sync_directory("/Vapor").is_ok());
+        assert!(app.ensure_cloud_root("/Vapor").is_ok());
     }
 
     #[test]

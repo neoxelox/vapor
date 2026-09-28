@@ -78,7 +78,7 @@ protection. `launchd` is intentionally passive (`KeepAlive = false`):
    daemon stays stopped until the next user trigger (app launch, login,
    explicit restart via menubar). The menubar restart exists only while
    the job is registered: with auto-launch off there is no job, `vapor
-   service restart` answers `not_installed`, and the app disables the
+   service restart` answers `not-installed`, and the app disables the
    control with a hint that Start Vapor at login is what runs sync in
    the background.
 2. On an unclean exit (panic, SIGSEGV, SIGKILL from external signal, OOM),
@@ -110,7 +110,7 @@ protection. `launchd` is intentionally passive (`KeepAlive = false`):
 3. After 5 consecutive crashes within the `failureWindow` (default 10
    minutes), the guard enters a durable `CrashLoopPaused` state, stops
    attempting auto-restart (`vapor service status` reports
-   `crash_loop_paused`), and the app surfaces a reasoned diagnostic to
+   `crash-loop-paused`), and the app surfaces a reasoned diagnostic to
    the menubar ("Vapor paused: repeated crashes, click to inspect
    logs"). The user must explicitly acknowledge (via `vapor service
    acknowledge`, which the menubar action invokes) before restarts
@@ -131,7 +131,7 @@ This job is the one job launchd keeps alive (`KeepAlive = true`): it is
 the supervisor, not the daemon, so the crash-loop guard still owns
 every daemon restart and its budget. Its output lands in
 `<vapor_dir>/logs/vapor-supervisor.log`. `vapor service status` reports
-`supervisor_installed`, and `vapor service uninstall` removes both jobs.
+`supervisorInstalled`, and `vapor service uninstall` removes both jobs.
 The `--full` e2e run installs it, kills the daemon, and asserts the
 supervisor alone brings it back.
 

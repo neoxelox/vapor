@@ -366,7 +366,7 @@ jobs:
           set -euo pipefail
 
           status="$(VAPOR_DIR="$RUNNER_TEMP/vapor-doctor" dist/Vapor.app/Contents/Helpers/vapor doctor --json |
-            python3 -c 'import json,sys; print(next(c["status"] for c in json.load(sys.stdin)["checks"] if c["name"] == "gdrive_oauth_client"))')"
+            python3 -c 'import json,sys; print(next(c["status"] for c in json.load(sys.stdin)["checks"] if c["name"] == "gdrive-oauth-client"))')"
           if [[ "$CLIENT_CONFIGURED" == "true" && "$status" != "ok" ]]; then
             echo "[release] the packaged vapor has no built-in Google Drive client"
             exit 1

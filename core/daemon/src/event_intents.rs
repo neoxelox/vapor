@@ -82,6 +82,19 @@ pub enum PendingIntentKind {
 }
 
 impl PendingIntentKind {
+    /// The action name `vapor diagnostics` prints for this kind.
+    pub fn wire_action(self) -> &'static str {
+        use vapor_shared::constants::intent;
+        match self {
+            Self::Upload => intent::ACTION_UPLOAD,
+            Self::Delete => intent::ACTION_LOCAL_DELETE,
+            Self::Rename => intent::ACTION_RENAME,
+            Self::Download => intent::ACTION_DOWNLOAD,
+            Self::ApplyRemoteDelete => intent::ACTION_CLOUD_DELETE,
+            Self::ReconcileSubtree => intent::ACTION_RECONCILE,
+        }
+    }
+
     /// Whether this intent originated from the remote changes feed
     /// (the remote→local pipeline) rather than local fs events.
     pub fn is_remote_sourced(self) -> bool {

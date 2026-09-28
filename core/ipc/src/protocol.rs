@@ -1,10 +1,11 @@
 //! Wire-format types for the Vapor IPC channel.
 //!
-//! All payloads are JSON. Top-level types carry an explicit
-//! `schema_version: u32` per `docs/architecture/ipc-contracts.md`. We
-//! use `serde(default)` on every optional field so peer N-1 can omit
-//! fields peer N introduced without forcing a hard parse error — the
-//! "field omission tolerance" rule from the contracts doc.
+//! All payloads are JSON with camelCase keys and kebab-case values, the
+//! same shape `vapor … --json` prints. Top-level types carry an explicit
+//! `schemaVersion` per `docs/architecture/ipc-contracts.md`. We use
+//! `serde(default)` on every optional field so peer N-1 can omit fields
+//! peer N introduced without forcing a hard parse error — the "field
+//! omission tolerance" rule from the contracts doc.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +22,7 @@ pub fn daemon_supported_versions() -> (u32, u32) {
 /// First message every client sends. The server matches the version
 /// against its own support window and responds with [`HelloAck`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Hello {
     pub schema_version: u32,
     pub supported_min_version: u32,
@@ -32,6 +34,7 @@ pub struct Hello {
 
 /// Server's reply to [`Hello`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HelloAck {
     pub schema_version: u32,
     pub supported_min_version: u32,
@@ -43,6 +46,7 @@ pub struct HelloAck {
 /// supported window. Mirrors the `IncompatibleVersion` error in the
 /// contracts doc.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IncompatibleVersion {
     pub peer_version: u32,
     pub required_min: u32,
@@ -60,17 +64,10 @@ pub enum Method {
     Pause,
     /// Flip `RunState` back to `Running` — idempotent.
     Resume,
-    /// Hint the runtime to drain pending work as fast as the throttle
-    /// allows. The engine already drains opportunistically; this is
-    /// effectively an acknowledgement.
-    FlushNow,
-    /// Request a fresh whole-scope reconcile against the local sync
-    /// directory.
+    /// The user's on-demand sync: a whole-scope reconcile admitted
+    /// under any throttle state but `Suspended`, and deferred work
+    /// released for a short window so what the scan finds moves at once.
     Reconcile,
-    /// The user's on-demand sync (schema v2, later addition): a
-    /// whole-scope reconcile admitted under any throttle state but
-    /// `Suspended`, plus the flush boost.
-    SyncNow,
     /// Read the bounded daemon activity timeline.
     Timeline,
     /// Per-intent "why stuck" diagnostics (schema v2).
@@ -106,7 +103,7 @@ pub enum ResponseBody {
     IncompatibleVersion(IncompatibleVersion),
     Status(StatusResponse),
     /// Generic acknowledgement for fire-and-forget control endpoints
-    /// (Pause / Resume / FlushNow / Reconcile). The `accepted` flag
+    /// (Pause / Resume / Reconcile). The `accepted` flag
     /// reflects whether the request actually changed any state — the
     /// daemon currently always returns `true` once the request reaches
     /// the runtime, but
@@ -118,6 +115,7 @@ pub enum ResponseBody {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AckResponse {
     pub schema_version: u32,
     pub accepted: bool,
@@ -126,6 +124,7 @@ pub struct AckResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TimelineEntry {
     pub timestamp_ms: u64,
     pub kind: String,
@@ -138,17 +137,15 @@ pub struct TimelineEntry {
 /// One pending or in-flight intent with its "why stuck" context
 /// (schema v2).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IntentDiagnostic {
     pub intent_id: i64,
     #[serde(default)]
     pub profile_id: String,
     pub path: String,
-    /// Intent kind label (`upload`, `download`, `delete`,
-    /// `apply_remote_delete`, `rename`, `reconcile_subtree`).
+    /// What the item does: one of `constants::intent::ACTION_*`.
     pub action: String,
-    /// Current stage (`Queued`, `Retrying`, `Planner`, `Hash`,
-    /// `WaitingForUpload`, `Upload`, `WaitingForDownload`, `Download`,
-    /// ...).
+    /// Where it is: one of `constants::intent::STAGE_*`.
     pub stage: String,
     #[serde(default)]
     pub elapsed_in_stage_ms: u64,
@@ -162,6 +159,7 @@ pub struct IntentDiagnostic {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiagnosticsResponse {
     pub schema_version: u32,
     #[serde(default)]
@@ -176,6 +174,7 @@ pub struct DiagnosticsResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TimelineResponse {
     pub schema_version: u32,
     #[serde(default)]
@@ -213,11 +212,16 @@ pub enum ErrorBody {
 /// last decision reason — and expanded over time (queue depth,
 /// ceilings, idle-boost state, etc.) per the contracts doc.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StatusResponse {
     pub schema_version: u32,
+    /// One of `constants::run_state::*`.
     pub run_state: String,
+    /// One of `constants::throttle_state::*`.
     pub throttle_state: String,
-    pub provider_name: String,
+    /// The provider of the profile the daemon-wide state comes from
+    /// (`filesystem`, `gdrive`); `none` when no profile is enabled.
+    pub provider: String,
     /// Latest throttle reason string (`"idle, plugged in, and cool"`,
     /// etc.). Empty when no decision has been recorded yet.
     #[serde(default)]
@@ -280,12 +284,13 @@ pub struct StatusResponse {
 
 /// One profile's status row inside [`StatusResponse`] (schema v2).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileStatus {
     pub id: String,
     #[serde(default)]
-    pub display_name: String,
+    pub name: String,
     #[serde(default)]
-    pub provider_name: String,
+    pub provider: String,
     /// `two-way` / `pull-only` / `push-only`.
     #[serde(default)]
     pub sync_mode: String,
@@ -316,8 +321,7 @@ pub struct ProfileStatus {
     pub reconcile_detail: String,
     /// The provider refused this profile's sign-in (expired, revoked, or
     /// never stored). Sync is on hold until the user runs
-    /// `vapor auth login <provider_name> --profile <id>`; queued work is
-    /// kept.
+    /// `vapor auth login --profile <id>`; queued work is kept.
     #[serde(default)]
     pub sign_in_required: bool,
 }
@@ -325,6 +329,7 @@ pub struct ProfileStatus {
 /// Effective resource ceilings, measured utilization, and idle-boost
 /// state (schema v2).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ResourceBudgetStatus {
     #[serde(default)]
     pub effective_cpu_percent: u8,
@@ -363,7 +368,7 @@ mod tests {
 
     #[test]
     fn hello_tolerates_missing_client_id_field() {
-        let raw = r#"{"schema_version":1,"supported_min_version":1}"#;
+        let raw = r#"{"schemaVersion":3,"supportedMinVersion":3}"#;
         let decoded: Hello = serde_json::from_str(raw).expect("deserialize without client_id");
         assert_eq!(decoded.client_id, "");
     }
@@ -373,13 +378,13 @@ mod tests {
         // C5 forward-compat rule: a future field appended by peer N+1
         // must not break peer N's parser.
         let raw = r#"{
-            "schema_version": 1,
-            "supported_min_version": 1,
-            "client_id": "vapor-cli/test",
-            "future_field": ["data", 42]
+            "schemaVersion": 3,
+            "supportedMinVersion": 3,
+            "clientId": "vapor-cli/test",
+            "futureField": ["data", 42]
         }"#;
         let decoded: Hello = serde_json::from_str(raw).expect("deserialize with future field");
-        assert_eq!(decoded.schema_version, 1);
+        assert_eq!(decoded.schema_version, 3);
     }
 
     #[test]
@@ -396,9 +401,9 @@ mod tests {
     fn response_envelope_round_trips_ok_and_err_variants() {
         let ok = Response::Ok(ResponseBody::Status(StatusResponse {
             schema_version: 1,
-            run_state: "Running".to_string(),
-            throttle_state: "IdleDrain".to_string(),
-            provider_name: "Filesystem (stub)".to_string(),
+            run_state: "running".to_string(),
+            throttle_state: "idle-drain".to_string(),
+            provider: "Filesystem (stub)".to_string(),
             throttle_reason: "idle, plugged in, and cool".to_string(),
             daemon_id: "vapord/test".to_string(),
             ..StatusResponse::default()
@@ -418,26 +423,26 @@ mod tests {
     }
 
     #[test]
-    fn v1_status_payload_without_v2_fields_parses_with_defaults() {
-        // Field-omission tolerance across the v1 -> v2 bump: a v1
-        // daemon's status omits every v2 field; a v2 client must read
-        // it with defaults instead of failing.
+    fn status_payload_missing_later_fields_parses_with_defaults() {
+        // Field-omission tolerance: a peer that omits fields added later
+        // is read with defaults instead of failing.
         let raw = r#"{
-            "schema_version": 1,
-            "run_state": "Running",
-            "throttle_state": "IdleDrain",
-            "provider_name": "filesystem",
-            "throttle_reason": "idle",
-            "daemon_id": "vapord/old"
+            "schemaVersion": 3,
+            "runState": "running",
+            "throttleState": "idle-drain",
+            "provider": "filesystem",
+            "throttleReason": "idle",
+            "daemonId": "vapord/old"
         }"#;
-        let decoded: StatusResponse = serde_json::from_str(raw).expect("v1 payload parses");
+        let decoded: StatusResponse = serde_json::from_str(raw).expect("payload parses");
+        assert_eq!(decoded.run_state, "running");
         assert_eq!(decoded.queue_depth, 0);
         assert!(decoded.profiles.is_empty());
         assert!(decoded.resource_budget.is_none());
     }
 
     #[test]
-    fn v2_method_payloads_round_trip() {
+    fn method_payloads_round_trip() {
         let set = Request::Call {
             method: Method::SetAutoLaunch { enabled: false },
         };

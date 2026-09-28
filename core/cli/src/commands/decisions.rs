@@ -264,7 +264,7 @@ mod tests {
             decisions: vec![DecisionJson {
                 profile_id: "default".into(),
                 id: 7,
-                kind: "mass-deletion".into(),
+                kind: "mass-delete".into(),
                 scope: "batch".into(),
                 path: None,
                 question: "Apply 240 deletions?".into(),
@@ -289,7 +289,7 @@ mod tests {
     {
       "profileId": "default",
       "id": 7,
-      "kind": "mass-deletion",
+      "kind": "mass-delete",
       "scope": "batch",
       "path": null,
       "question": "Apply 240 deletions?",

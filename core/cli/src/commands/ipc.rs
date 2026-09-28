@@ -1,6 +1,6 @@
 //! IPC-backed L3 CLI commands.
 //!
-//! `vapor status / pause / resume / flush-now / reconcile / timeline`
+//! `vapor status / pause / resume / reconcile / timeline`
 //! all share the same shape: connect to the daemon's UDS endpoint at
 //! `<vapor_dir>/vapord.sock` (relocated under the OS temp directory
 //! when that path would exceed the socket-address budget — the CLI and
@@ -136,19 +136,9 @@ pub fn resume() -> Result<AckResponse, IpcCliError> {
     client.resume().map_err(IpcCliError::from)
 }
 
-pub fn flush_now() -> Result<AckResponse, IpcCliError> {
-    let mut client = connect()?;
-    client.flush_now().map_err(IpcCliError::from)
-}
-
 pub fn reconcile() -> Result<AckResponse, IpcCliError> {
     let mut client = connect()?;
     client.reconcile().map_err(IpcCliError::from)
-}
-
-pub fn sync_now() -> Result<AckResponse, IpcCliError> {
-    let mut client = connect()?;
-    client.sync_now().map_err(IpcCliError::from)
 }
 
 pub fn timeline() -> Result<TimelineResponse, IpcCliError> {
@@ -174,7 +164,7 @@ pub fn render_status(status: &StatusResponse) -> String {
         } else {
             status.throttle_reason.clone()
         },
-        status.provider_name,
+        status.provider,
         status.daemon_id,
         status.schema_version,
         status.queue_depth,
@@ -205,13 +195,13 @@ pub fn render_status(status: &StatusResponse) -> String {
     }
     for profile in status.profiles.iter().filter(|p| p.sign_in_required) {
         rendered.push_str(&format!(
-            "\nSign-in required: profile {} is on hold (vapor auth login {} --profile {})",
-            profile.id, profile.provider_name, profile.id
+            "\nSign-in required: profile {} is on hold (vapor auth login --profile {})",
+            profile.id, profile.id
         ));
     }
     match status.reconcile_state.as_str() {
         "waiting" => rendered.push_str(&format!(
-            "\nScan: {} (vapor sync-now scans anyway)",
+            "\nScan: {} (vapor reconcile scans anyway)",
             status.reconcile_detail
         )),
         "running" => rendered.push_str(&format!("\nScan: {}", status.reconcile_detail)),
@@ -222,7 +212,7 @@ pub fn render_status(status: &StatusResponse) -> String {
             "\nProfile {}: {} ({}, {}) queue {} failed {}{}",
             profile.id,
             profile.run_state,
-            profile.provider_name,
+            profile.provider,
             profile.sync_mode,
             profile.queue_depth,
             profile.failed_intents,
@@ -279,7 +269,7 @@ pub fn render_diagnostics(diagnostics: &DiagnosticsResponse) -> String {
     rendered
 }
 
-/// Tail the daemon log file at `<vapor_dir>/logs/vapord.logs`.
+/// Tail the daemon log file at `<vapor_dir>/logs/vapord.log`.
 /// Reads the file directly rather than going through IPC since
 /// the log lines already include redaction. Returns the last `tail`
 /// lines (or the whole file when `tail` is `None`).
@@ -405,9 +395,9 @@ mod tests {
     fn render_status_includes_every_stable_field() {
         let status = StatusResponse {
             schema_version: 2,
-            run_state: "Running".to_string(),
-            throttle_state: "IdleDrain".to_string(),
-            provider_name: "Filesystem (stub)".to_string(),
+            run_state: "running".to_string(),
+            throttle_state: "idle-drain".to_string(),
+            provider: "Filesystem (stub)".to_string(),
             throttle_reason: "idle, plugged in, and cool".to_string(),
             daemon_id: "vapord/0.2.0-alpha.3".to_string(),
             queue_depth: 3,
@@ -422,18 +412,18 @@ mod tests {
             profiles: vec![
                 vapor_ipc::ProfileStatus {
                     id: "mirror".to_string(),
-                    provider_name: "filesystem".to_string(),
+                    provider: "filesystem".to_string(),
                     sync_mode: "pull-only".to_string(),
-                    run_state: "Running".to_string(),
+                    run_state: "running".to_string(),
                     queue_depth: 3,
                     failed_intents: 1,
                     ..vapor_ipc::ProfileStatus::default()
                 },
                 vapor_ipc::ProfileStatus {
                     id: "work".to_string(),
-                    provider_name: "gdrive".to_string(),
+                    provider: "gdrive".to_string(),
                     sync_mode: "two-way".to_string(),
-                    run_state: "Error".to_string(),
+                    run_state: "error".to_string(),
                     sign_in_required: true,
                     ..vapor_ipc::ProfileStatus::default()
                 },
@@ -441,8 +431,8 @@ mod tests {
             ..StatusResponse::default()
         };
         let rendered = render_status(&status);
-        assert!(rendered.contains("Run state: Running"));
-        assert!(rendered.contains("Throttle: IdleDrain"));
+        assert!(rendered.contains("Run state: running"));
+        assert!(rendered.contains("Throttle: idle-drain"));
         assert!(rendered.contains("Provider: Filesystem (stub)"));
         assert!(rendered.contains("Daemon: vapord/0.2.0-alpha.3"));
         assert!(rendered.contains("IPC schema: 2"));
@@ -451,11 +441,11 @@ mod tests {
         assert!(rendered.contains("Decisions waiting for you: 1 (vapor decisions list)"));
         assert!(rendered.contains("Conflicts waiting for you: 1 (vapor conflicts list)"));
         assert!(rendered.contains(
-            "Scan: waiting for an idle moment: user activity is active (vapor sync-now scans anyway)"
+            "Scan: waiting for an idle moment: user activity is active (vapor reconcile scans anyway)"
         ));
-        assert!(rendered.contains("Profile mirror: Running (filesystem, pull-only)"));
+        assert!(rendered.contains("Profile mirror: running (filesystem, pull-only)"));
         assert!(rendered.contains(
-            "Sign-in required: profile work is on hold (vapor auth login gdrive --profile work)"
+            "Sign-in required: profile work is on hold (vapor auth login --profile work)"
         ));
         assert!(!rendered.contains("profile mirror is on hold"));
     }
@@ -469,7 +459,7 @@ mod tests {
                 profile_id: "default".to_string(),
                 path: "/watch/big.bin".to_string(),
                 action: "upload".to_string(),
-                stage: "Retrying".to_string(),
+                stage: "retrying".to_string(),
                 elapsed_in_stage_ms: 12_000,
                 attempt_count: 3,
                 last_error: "transient provider failure: timeout".to_string(),
@@ -480,7 +470,7 @@ mod tests {
         };
         let rendered = render_diagnostics(&diagnostics);
         assert!(rendered.contains("#42 [default] upload /watch/big.bin"));
-        assert!(rendered.contains("stage Retrying"));
+        assert!(rendered.contains("stage retrying"));
         assert!(rendered.contains("retry backoff active"));
         assert!(rendered.contains("dropped ingest events: 2"));
     }
@@ -499,7 +489,7 @@ mod tests {
     #[test]
     fn read_last_lines_returns_exactly_the_requested_tail() {
         let temp = tempfile::TempDir::new().expect("temp");
-        let path = temp.path().join("vapord.logs");
+        let path = temp.path().join("vapord.log");
         let contents: String = (0..1_000).map(|index| format!("line-{index}\n")).collect();
         std::fs::write(&path, contents).expect("seed log");
 
@@ -521,10 +511,10 @@ mod tests {
     #[test]
     fn status_json_shape_is_stable() {
         let status = StatusResponse {
-            schema_version: 2,
-            run_state: "Running".to_string(),
-            throttle_state: "IdleDrain".to_string(),
-            provider_name: "Filesystem (stub)".to_string(),
+            schema_version: 3,
+            run_state: "running".to_string(),
+            throttle_state: "idle-drain".to_string(),
+            provider: "filesystem".to_string(),
             throttle_reason: "idle, plugged in, and cool".to_string(),
             daemon_id: "vapord/0.0.0-test".to_string(),
             ..StatusResponse::default()
@@ -533,25 +523,25 @@ mod tests {
         assert_eq!(
             rendered,
             r#"{
-  "schema_version": 2,
-  "run_state": "Running",
-  "throttle_state": "IdleDrain",
-  "provider_name": "Filesystem (stub)",
-  "throttle_reason": "idle, plugged in, and cool",
-  "daemon_id": "vapord/0.0.0-test",
-  "queue_depth": 0,
-  "failed_intents": 0,
-  "loop_prevention_suppressions": 0,
+  "schemaVersion": 3,
+  "runState": "running",
+  "throttleState": "idle-drain",
+  "provider": "filesystem",
+  "throttleReason": "idle, plugged in, and cool",
+  "daemonId": "vapord/0.0.0-test",
+  "queueDepth": 0,
+  "failedIntents": 0,
+  "loopPreventionSuppressions": 0,
   "conflicts": 0,
-  "mirror_reverts": 0,
-  "mirror_deletes": 0,
+  "mirrorReverts": 0,
+  "mirrorDeletes": 0,
   "profiles": [],
-  "resource_budget": null,
-  "config_restart_required": null,
-  "decisions_pending": 0,
-  "conflicts_unresolved": 0,
-  "reconcile_state": "",
-  "reconcile_detail": ""
+  "resourceBudget": null,
+  "configRestartRequired": null,
+  "decisionsPending": 0,
+  "conflictsUnresolved": 0,
+  "reconcileState": "",
+  "reconcileDetail": ""
 }"#
         );
     }
@@ -560,9 +550,9 @@ mod tests {
     fn profile_status_json_shape_is_stable() {
         let profile = vapor_ipc::ProfileStatus {
             id: "work".to_string(),
-            provider_name: "gdrive".to_string(),
+            provider: "gdrive".to_string(),
             sync_mode: "two-way".to_string(),
-            run_state: "Error".to_string(),
+            run_state: "error".to_string(),
             sign_in_required: true,
             ..vapor_ipc::ProfileStatus::default()
         };
@@ -570,22 +560,22 @@ mod tests {
             serde_json::to_string_pretty(&profile).expect("serialize"),
             r#"{
   "id": "work",
-  "display_name": "",
-  "provider_name": "gdrive",
-  "sync_mode": "two-way",
-  "run_state": "Error",
+  "name": "",
+  "provider": "gdrive",
+  "syncMode": "two-way",
+  "runState": "error",
   "reason": "",
-  "queue_depth": 0,
-  "failed_intents": 0,
+  "queueDepth": 0,
+  "failedIntents": 0,
   "conflicts": 0,
-  "mirror_reverts": 0,
-  "mirror_deletes": 0,
-  "suspended_reason": null,
-  "decisions_pending": 0,
-  "conflicts_unresolved": 0,
-  "reconcile_state": "",
-  "reconcile_detail": "",
-  "sign_in_required": true
+  "mirrorReverts": 0,
+  "mirrorDeletes": 0,
+  "suspendedReason": null,
+  "decisionsPending": 0,
+  "conflictsUnresolved": 0,
+  "reconcileState": "",
+  "reconcileDetail": "",
+  "signInRequired": true
 }"#
         );
     }
@@ -593,16 +583,16 @@ mod tests {
     #[test]
     fn ack_json_shape_is_stable() {
         let ack = vapor_ipc::AckResponse {
-            schema_version: 2,
+            schema_version: 3,
             accepted: true,
-            note: "sync requested".to_string(),
+            note: "reconcile requested".to_string(),
         };
         assert_eq!(
             serde_json::to_string_pretty(&ack).expect("serialize"),
             r#"{
-  "schema_version": 2,
+  "schemaVersion": 3,
   "accepted": true,
-  "note": "sync requested"
+  "note": "reconcile requested"
 }"#
         );
     }
@@ -610,11 +600,11 @@ mod tests {
     #[test]
     fn timeline_json_shape_is_stable() {
         let timeline = TimelineResponse {
-            schema_version: 2,
+            schema_version: 3,
             entries: vec![vapor_ipc::TimelineEntry {
                 timestamp_ms: 1_700_000_000_000,
                 kind: "throttle".to_string(),
-                message: "entered IdleDrain".to_string(),
+                message: "entered idle-drain".to_string(),
                 profile_id: "default".to_string(),
             }],
         };
@@ -622,13 +612,13 @@ mod tests {
         assert_eq!(
             rendered,
             r#"{
-  "schema_version": 2,
+  "schemaVersion": 3,
   "entries": [
     {
-      "timestamp_ms": 1700000000000,
+      "timestampMs": 1700000000000,
       "kind": "throttle",
-      "message": "entered IdleDrain",
-      "profile_id": "default"
+      "message": "entered idle-drain",
+      "profileId": "default"
     }
   ]
 }"#

@@ -50,12 +50,12 @@ public enum JSONValue: Codable, Equatable, Sendable {
 
 public struct VaporConfiguration: Codable, Equatable, Sendable {
   public var autoLaunch: Bool
-  public var useGitIgnore: Bool
-  public var useVaporIgnore: Bool
-  public var localSyncDirectory: String
+  public var useGitignore: Bool
+  public var useVaporignore: Bool
+  public var localRoot: String
   /// The cloud root, or `nil` while the file leaves it to the provider's
   /// default (the daemon resolves that; the app never writes one).
-  public var cloudSyncDirectory: String?
+  public var cloudRoot: String?
   public var preIgnoreRules: String
   public var postIgnoreRules: String
   public var languageCode: String
@@ -83,17 +83,17 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   }
 
   public static let defaultPreIgnoreRuleLines = VaporConstants.Defaults.preIgnoreRuleLines
-  public static let defaultLocalSyncDirectory = VaporConstants.Defaults.localSyncDirectory
+  public static let defaultLocalRoot = VaporConstants.Defaults.localRoot
   public static let defaultPreIgnoreRules = VaporConstants.Defaults.preIgnoreRules
   public static let defaultPostIgnoreRules = VaporConstants.Defaults.postIgnoreRules
   public static let defaultLanguageCode = VaporConstants.Defaults.languageCode
 
   public init(
     autoLaunch: Bool = VaporConstants.Defaults.autoLaunch,
-    useGitIgnore: Bool = VaporConstants.Defaults.useGitIgnore,
-    useVaporIgnore: Bool = VaporConstants.Defaults.useVaporIgnore,
-    localSyncDirectory: String = defaultLocalSyncDirectory,
-    cloudSyncDirectory: String? = nil,
+    useGitignore: Bool = VaporConstants.Defaults.useGitignore,
+    useVaporignore: Bool = VaporConstants.Defaults.useVaporignore,
+    localRoot: String = defaultLocalRoot,
+    cloudRoot: String? = nil,
     preIgnoreRules: String = defaultPreIgnoreRules,
     postIgnoreRules: String = defaultPostIgnoreRules,
     languageCode: String = defaultLanguageCode,
@@ -102,10 +102,10 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     additionalKeys: [String: JSONValue] = [:]
   ) {
     self.autoLaunch = autoLaunch
-    self.useGitIgnore = useGitIgnore
-    self.useVaporIgnore = useVaporIgnore
-    self.localSyncDirectory = localSyncDirectory
-    self.cloudSyncDirectory = cloudSyncDirectory
+    self.useGitignore = useGitignore
+    self.useVaporignore = useVaporignore
+    self.localRoot = localRoot
+    self.cloudRoot = cloudRoot
     self.preIgnoreRules = preIgnoreRules
     self.postIgnoreRules = postIgnoreRules
     self.languageCode = Self.normalizedLanguageCode(languageCode)
@@ -116,10 +116,10 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
 
   enum CodingKeys: String, CodingKey, CaseIterable {
     case autoLaunch
-    case useGitIgnore
-    case useVaporIgnore
-    case localSyncDirectory
-    case cloudSyncDirectory
+    case useGitignore
+    case useVaporignore
+    case localRoot
+    case cloudRoot
     case preIgnoreRules
     case postIgnoreRules
     case languageCode
@@ -148,13 +148,13 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     self.init(
       autoLaunch: try container.decodeIfPresent(Bool.self, forKey: .autoLaunch)
         ?? VaporConstants.Defaults.autoLaunch,
-      useGitIgnore: try container.decodeIfPresent(Bool.self, forKey: .useGitIgnore)
-        ?? VaporConstants.Defaults.useGitIgnore,
-      useVaporIgnore: try container.decodeIfPresent(Bool.self, forKey: .useVaporIgnore)
-        ?? VaporConstants.Defaults.useVaporIgnore,
-      localSyncDirectory: try container.decodeIfPresent(String.self, forKey: .localSyncDirectory)
-        ?? Self.defaultLocalSyncDirectory,
-      cloudSyncDirectory: try container.decodeIfPresent(String.self, forKey: .cloudSyncDirectory),
+      useGitignore: try container.decodeIfPresent(Bool.self, forKey: .useGitignore)
+        ?? VaporConstants.Defaults.useGitignore,
+      useVaporignore: try container.decodeIfPresent(Bool.self, forKey: .useVaporignore)
+        ?? VaporConstants.Defaults.useVaporignore,
+      localRoot: try container.decodeIfPresent(String.self, forKey: .localRoot)
+        ?? Self.defaultLocalRoot,
+      cloudRoot: try container.decodeIfPresent(String.self, forKey: .cloudRoot),
       preIgnoreRules: try container.decodeIfPresent(String.self, forKey: .preIgnoreRules)
         ?? Self.defaultPreIgnoreRules,
       postIgnoreRules: try container.decodeIfPresent(String.self, forKey: .postIgnoreRules)
@@ -171,10 +171,10 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   public func encode(to encoder: any Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
     try container.encode(autoLaunch, forKey: .autoLaunch)
-    try container.encode(useGitIgnore, forKey: .useGitIgnore)
-    try container.encode(useVaporIgnore, forKey: .useVaporIgnore)
-    try container.encode(localSyncDirectory, forKey: .localSyncDirectory)
-    try container.encodeIfPresent(cloudSyncDirectory, forKey: .cloudSyncDirectory)
+    try container.encode(useGitignore, forKey: .useGitignore)
+    try container.encode(useVaporignore, forKey: .useVaporignore)
+    try container.encode(localRoot, forKey: .localRoot)
+    try container.encodeIfPresent(cloudRoot, forKey: .cloudRoot)
     try container.encode(preIgnoreRules, forKey: .preIgnoreRules)
     try container.encode(postIgnoreRules, forKey: .postIgnoreRules)
     try container.encode(languageCode, forKey: .languageCode)

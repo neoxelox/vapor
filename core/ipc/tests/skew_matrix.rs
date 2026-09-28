@@ -35,9 +35,9 @@ impl Service for StaticService {
 fn fixture_status() -> StatusResponse {
     StatusResponse {
         schema_version: daemon_supported_versions().0,
-        run_state: "Running".to_string(),
-        throttle_state: "IdleDrain".to_string(),
-        provider_name: "Filesystem (stub)".to_string(),
+        run_state: "running".to_string(),
+        throttle_state: "idle-drain".to_string(),
+        provider: "Filesystem (stub)".to_string(),
         throttle_reason: "idle, plugged in, and cool".to_string(),
         daemon_id: "vapord/test".to_string(),
         ..StatusResponse::default()
@@ -119,17 +119,18 @@ fn handshake_n_n_succeeds_and_status_round_trips() {
 
     let mut client = Client::connect(&handle.socket_path, "vapor-cli/test").expect("connect");
     let status = client.status().expect("status");
-    assert_eq!(status.run_state, "Running");
+    assert_eq!(status.run_state, "running");
 
     handle.shutdown();
 }
 
 #[test]
-fn handshake_n_minus_1_n_succeeds_when_within_skew_window() {
-    // Client says it speaks version (current - 1) but supports a min
-    // of (current - 1). Daemon at `current` accepts, since
-    // `|current - (current - 1)| = 1`.
-    let (current, _min) = daemon_supported_versions();
+fn handshake_n_minus_1_follows_the_support_window() {
+    // Client says it speaks version (current - 1) and supports a min of
+    // (current - 1). The daemon accepts it when (current - 1) is inside
+    // its support window and refuses it with IncompatibleVersion when a
+    // breaking bump moved the window's floor up to `current`.
+    let (current, min) = daemon_supported_versions();
     if current < 2 {
         // No way to construct N-1 when N == 1; skip in that case.
         return;
@@ -156,7 +157,14 @@ fn handshake_n_minus_1_n_succeeds_when_within_skew_window() {
     let mut payload = vec![0u8; len as usize];
     stream.read_exact(&mut payload).expect("ack payload");
     let response: Response = serde_json::from_slice(&payload).expect("ack");
-    assert!(matches!(response, Response::Ok(ResponseBody::HelloAck(_))));
+    if current > min {
+        assert!(matches!(response, Response::Ok(ResponseBody::HelloAck(_))));
+    } else {
+        assert!(
+            format!("{response:?}").contains("IncompatibleVersion"),
+            "a peer below the window must be refused, got {response:?}"
+        );
+    }
 
     drop(stream);
     handle.shutdown();

@@ -144,7 +144,7 @@ impl RemotePoller {
     }
 
     /// Clears the poll cadence so the next tick polls immediately.
-    /// Used by the flush boost: `vapor flush` should surface
+    /// Used by the reconcile boost: `vapor reconcile` should surface
     /// pending remote changes now, not at the next scheduled poll.
     pub fn request_immediate_poll(&mut self) {
         self.last_poll_inst = None;
@@ -479,7 +479,7 @@ impl RemotePoller {
                                 continue;
                             }
                             // A deletion of this path held behind the
-                            // mass-deletion decision has nothing left to
+                            // mass-delete decision has nothing left to
                             // do: the cloud copy is already gone.
                             if state_db
                                 .drop_held_at(&local_target, PendingIntentKind::Delete)?

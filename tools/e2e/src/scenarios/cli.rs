@@ -24,7 +24,7 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             id: "S13",
             name: "observability",
-            proves: "diagnostics answers over IPC and the support bundle exports config, logs, and live captures with a manifest",
+            proves: "diagnostics answers over IPC and vapor report exports config, logs, and live captures with a manifest",
             needs: &[Need::NativeWatcher],
             expect: Expect::Pass,
             run: observability,
@@ -32,18 +32,18 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             id: "S15",
             name: "conflict-tooling",
-            proves: "conflicts list finds a keep-both copy from the files, resolve --keep copy promotes it, the resolution syncs, the list drains",
+            proves: "conflicts list finds a keep-both copy from the files, resolve --choose copy promotes it, the resolution syncs, the list drains",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
             run: conflict_tooling,
         },
         Scenario {
             id: "S51",
-            name: "sync-now-under-user-activity",
-            proves: "a startup scan held by the throttle says so in status; vapor sync-now runs it under user activity and an offline divergence resolves as a keep-both copy",
+            name: "reconcile-under-user-activity",
+            proves: "a startup scan held by the throttle says so in status; vapor reconcile runs it under user activity and an offline divergence resolves as a keep-both copy",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
-            run: sync_now_under_user_activity,
+            run: reconcile_under_user_activity,
         },
         Scenario {
             id: "S18",
@@ -86,33 +86,33 @@ fn observability(ctx: &mut Ctx) -> Result<(), Failure> {
     let cli = ctx.cli();
     let diagnostics = cli.json(&["diagnostics", "--json"])?;
     ensure!(
-        diagnostics.get("schema_version").is_some(),
-        "diagnostics --json lacks schema_version: {diagnostics}"
+        diagnostics.get("schemaVersion").is_some(),
+        "diagnostics --json lacks schemaVersion: {diagnostics}"
     );
-    let output_dir = ctx.sandbox.root.join("support");
-    let bundle = cli.json(&[
-        "support-bundle",
+    let output_dir = ctx.sandbox.root.join("reports");
+    let report = cli.json(&[
+        "report",
         "--output",
         &output_dir.to_string_lossy(),
         "--json",
     ])?;
     ensure!(
-        bundle.get("daemonReachable") == Some(&serde_json::Value::Bool(true)),
-        "support bundle did not capture the live daemon: {bundle}"
+        report.get("daemonReachable") == Some(&serde_json::Value::Bool(true)),
+        "the support report did not capture the live daemon: {report}"
     );
-    let bundle_dir = fs::read_dir(&output_dir)?
+    let report_dir = fs::read_dir(&output_dir)?
         .flatten()
         .map(|entry| entry.path())
         .find(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("vapor-support-"))
+                .is_some_and(|name| name.starts_with("vapor-report-"))
         })
-        .ok_or_else(|| Failure::new("support bundle directory missing"))?;
+        .ok_or_else(|| Failure::new("support report directory missing"))?;
     for required in ["manifest.json", "status.json"] {
         ensure!(
-            bundle_dir.join(required).is_file(),
-            "support bundle lacks {required}"
+            report_dir.join(required).is_file(),
+            "the support report lacks {required}"
         );
     }
     let _ = home;
@@ -176,12 +176,12 @@ fn conflict_tooling(ctx: &mut Ctx) -> Result<(), Failure> {
         "conflicts",
         "resolve",
         &promoted.to_string_lossy(),
-        "--keep",
+        "--choose",
         "copy",
     ])?;
     ensure!(
         read_string(&home.local.join("doc.txt"))? == kept_payload,
-        "the kept copy's payload did not become the canonical content"
+        "the kept copy's payload did not become the original's content"
     );
     ensure!(
         !promoted.exists(),
@@ -194,8 +194,8 @@ fn conflict_tooling(ctx: &mut Ctx) -> Result<(), Failure> {
             "conflicts",
             "resolve",
             &leftover.to_string_lossy(),
-            "--keep",
-            "canonical",
+            "--choose",
+            "original",
         ])?;
     }
     // At least the promotion (a rename) produced intents.
@@ -231,7 +231,7 @@ fn conflict_tooling(ctx: &mut Ctx) -> Result<(), Failure> {
     Ok(())
 }
 
-fn sync_now_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
+fn reconcile_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
     // Throttle inputs from a file that says the user is typing, so the
     // daemon sits in Throttled and the startup scan waits (the shape a
     // developer machine produces with the host sampler).
@@ -275,7 +275,7 @@ fn sync_now_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
         .status()
         .ok_or_else(|| Failure::new("status did not answer"))?;
     ensure!(
-        status.throttle_state == "Throttled",
+        status.throttle_state == "throttled",
         "the file inputs must hold the daemon at Throttled, got {}",
         status.throttle_state
     );
@@ -291,7 +291,7 @@ fn sync_now_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
     );
 
     // The user asks for it: the scan runs although the user is active.
-    cli.ok(&["sync-now", "--json"])?;
+    cli.ok(&["reconcile", "--json"])?;
     ctx.wait_until(
         CONVERGE_TIMEOUT,
         "the offline divergence to resolve as a keep-both copy on both sides",
@@ -369,8 +369,8 @@ fn misconfigured_daemon(ctx: &mut Ctx) -> Result<(), Failure> {
         .push(constants::env::VAPOR_GDRIVE_CLIENT_ID.to_string());
     ctx.register_home(home.clone());
     let cli = ctx.cli_for(&home);
-    cli.config_set("localSyncDirectory", &home.local.to_string_lossy())?;
-    cli.config_set("cloudSyncDirectory", "/VaporBad")?;
+    cli.config_set("localRoot", &home.local.to_string_lossy())?;
+    cli.config_set("cloudRoot", "/VaporBad")?;
     cli.config_set("provider", "gdrive")?;
     let daemon = ctx.start_daemon_in(&home, DaemonKind::CliRun, false)?;
     wait::wait_until(
@@ -424,13 +424,13 @@ fn sign_in_required_holds_the_queue(ctx: &mut Ctx) -> Result<(), Failure> {
         constants::profile::KEY_NAME: "Signed out",
         constants::profile::KEY_ENABLED: true,
         constants::profile::KEY_PROVIDER: constants::provider::GDRIVE,
-        constants::profile::KEY_LOCAL_SYNC_DIRECTORY: home.local.to_string_lossy(),
-        constants::profile::KEY_CLOUD_SYNC_DIRECTORY: "/VaporE2E",
+        constants::profile::KEY_LOCAL_ROOT: home.local.to_string_lossy(),
+        constants::profile::KEY_CLOUD_ROOT: "/VaporE2E",
     }]);
     cli.config_set("profiles", &profiles.to_string())?;
     ctx.start_daemon_in(&home, DaemonKind::CliRun, false)?;
 
-    let command = format!("vapor auth login gdrive --profile {SIGNED_OUT_PROFILE}");
+    let command = format!("vapor auth login --profile {SIGNED_OUT_PROFILE}");
     wait::wait_until(
         CONVERGE_TIMEOUT,
         "the profile to report that it needs a sign-in",
@@ -439,7 +439,7 @@ fn sign_in_required_holds_the_queue(ctx: &mut Ctx) -> Result<(), Failure> {
                 status.profiles.iter().any(|profile| {
                     profile.id == SIGNED_OUT_PROFILE
                         && profile.sign_in_required
-                        && profile.run_state == "Error"
+                        && profile.run_state == constants::run_state::ERROR
                         && profile.reason.contains(&command)
                 })
             })

@@ -188,8 +188,8 @@ struct SettingsView: View {
 
       Toggle(viewModel.localized("settings_start_at_login"), isOn: autoLaunchBinding)
       loginItemApprovalHint
-      Toggle(viewModel.localized("settings_use_gitignore"), isOn: useGitIgnoreBinding)
-      Toggle(viewModel.localized("settings_use_vaporignore"), isOn: useVaporIgnoreBinding)
+      Toggle(viewModel.localized("settings_use_gitignore"), isOn: useGitignoreBinding)
+      Toggle(viewModel.localized("settings_use_vaporignore"), isOn: useVaporignoreBinding)
 
       Section(viewModel.localized("settings_user_ignore_rules")) {
         VStack(alignment: .leading, spacing: 6) {
@@ -271,17 +271,17 @@ struct SettingsView: View {
     )
   }
 
-  private var useGitIgnoreBinding: Binding<Bool> {
+  private var useGitignoreBinding: Binding<Bool> {
     Binding(
-      get: { viewModel.state.useGitIgnore },
-      set: { viewModel.setUseGitIgnore($0) }
+      get: { viewModel.state.useGitignore },
+      set: { viewModel.setUseGitignore($0) }
     )
   }
 
-  private var useVaporIgnoreBinding: Binding<Bool> {
+  private var useVaporignoreBinding: Binding<Bool> {
     Binding(
-      get: { viewModel.state.useVaporIgnore },
-      set: { viewModel.setUseVaporIgnore($0) }
+      get: { viewModel.state.useVaporignore },
+      set: { viewModel.setUseVaporignore($0) }
     )
   }
 

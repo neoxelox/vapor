@@ -154,7 +154,7 @@ impl Svc<'_> {
         // spawn stage; wait for the daemon to answer over IPC so the
         // crash we simulate is the crash of a running daemon.
         self.cli
-            .wait_run_state("Running", Duration::from_secs(30))
+            .wait_run_state("running", Duration::from_secs(30))
             .map_err(|error| Failure::new(format!("{step}: before the crash, {error}")))?;
         let pid = daemon_pid_from_launchd()
             .ok_or_else(|| Failure::new(format!("{step}: daemon pid not found via launchctl")))?;
@@ -194,8 +194,8 @@ fn service_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     };
     let svc = Svc { cli: &cli };
 
-    // R1: a fresh runner reports not_installed.
-    svc.expect("R1", &["status"], "status", "not_installed")?;
+    // R1: a fresh runner reports not-installed.
+    svc.expect("R1", &["status"], "status", "not-installed")?;
 
     // R2: install writes the plist, the daemon runs inside the sandbox.
     svc.expect("R2", &["install"], "result", "started")?;
@@ -204,7 +204,7 @@ fn service_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
         "R2: LaunchAgent plist not written"
     );
     svc.wait_status("running", Duration::from_secs(30), "R2")?;
-    cli.wait_run_state("Running", Duration::from_secs(30))?;
+    cli.wait_run_state("running", Duration::from_secs(30))?;
     svc.expect("R2", &["check"], "health", "running")?;
     // The launchd daemon syncs like any other.
     let mark = ctx.mark();
@@ -214,46 +214,46 @@ fn service_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
 
     // R3: crash 1 restarts immediately.
     svc.crash("R3")?;
-    svc.expect("R3", &["check"], "health", "restarted_after_crash")?;
+    svc.expect("R3", &["check"], "health", "restarted-after-crash")?;
     svc.wait_status("running", Duration::from_secs(30), "R3")?;
 
     // R4: crash 2 defers, a repeat check does not double-count, then
     // the restart happens once the backoff elapses.
     svc.crash("R4")?;
-    svc.expect("R4", &["check"], "health", "restart_deferred")?;
+    svc.expect("R4", &["check"], "health", "restart-deferred")?;
     let status = svc.json("R4", &["status"])?;
     ensure!(
-        status.pointer("/crash_loop/consecutive_crashes") == Some(&serde_json::json!(2)),
+        status.pointer("/crashLoop/consecutiveCrashes") == Some(&serde_json::json!(2)),
         "R4: expected consecutive_crashes 2 in {status}"
     );
-    svc.expect("R4", &["check"], "health", "restart_deferred")?;
+    svc.expect("R4", &["check"], "health", "restart-deferred")?;
     let status = svc.json("R4", &["status"])?;
     ensure!(
-        status.pointer("/crash_loop/consecutive_crashes") == Some(&serde_json::json!(2)),
+        status.pointer("/crashLoop/consecutiveCrashes") == Some(&serde_json::json!(2)),
         "R4: repeat check double-counted: {status}"
     );
-    svc.wait_health("restarted_after_crash", Duration::from_secs(15), "R4")?;
+    svc.wait_health("restarted-after-crash", Duration::from_secs(15), "R4")?;
     svc.wait_status("running", Duration::from_secs(30), "R4")?;
 
     // R5: crashes 3 and 4 walk the backoff schedule.
     svc.crash("R5")?;
-    svc.expect("R5", &["check"], "health", "restart_deferred")?;
-    svc.wait_health("restarted_after_crash", Duration::from_secs(20), "R5")?;
+    svc.expect("R5", &["check"], "health", "restart-deferred")?;
+    svc.wait_health("restarted-after-crash", Duration::from_secs(20), "R5")?;
     svc.wait_status("running", Duration::from_secs(30), "R5")?;
     svc.crash("R5")?;
-    svc.expect("R5", &["check"], "health", "restart_deferred")?;
-    svc.wait_health("restarted_after_crash", Duration::from_secs(30), "R5")?;
+    svc.expect("R5", &["check"], "health", "restart-deferred")?;
+    svc.wait_health("restarted-after-crash", Duration::from_secs(30), "R5")?;
     svc.wait_status("running", Duration::from_secs(30), "R5")?;
 
     // R6: crash 5 engages the durable pause; start refuses.
     svc.crash("R6")?;
-    svc.expect("R6", &["check"], "health", "crash_loop_paused")?;
-    let status = svc.expect("R6", &["status"], "status", "crash_loop_paused")?;
+    svc.expect("R6", &["check"], "health", "crash-loop-paused")?;
+    let status = svc.expect("R6", &["status"], "status", "crash-loop-paused")?;
     ensure!(
-        status.pointer("/crash_loop/paused") == Some(&serde_json::json!(true)),
-        "R6: crash_loop.paused not true in {status}"
+        status.pointer("/crashLoop/paused") == Some(&serde_json::json!(true)),
+        "R6: crashLoop.paused not true in {status}"
     );
-    svc.expect("R6", &["start"], "result", "crash_loop_paused")?;
+    svc.expect("R6", &["start"], "result", "crash-loop-paused")?;
     let lifecycle = fs::read_to_string(home.lifecycle_state())?;
     ensure!(
         lifecycle.contains("\"paused_indefinitely\": true"),
@@ -268,7 +268,7 @@ fn service_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     // R8: an expected stop is not a crash.
     svc.expect("R8", &["stop"], "result", "stopped")?;
     svc.wait_status("stopped", Duration::from_secs(15), "R8")?;
-    svc.expect("R8", &["check"], "health", "stopped_expected")?;
+    svc.expect("R8", &["check"], "health", "stopped-expected")?;
 
     // R9: uninstall removes the plist.
     svc.expect("R9", &["uninstall"], "result", "unchanged")
@@ -277,8 +277,8 @@ fn service_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
         !launch_agent_plist_path().exists(),
         "R9: plist still present after uninstall"
     );
-    svc.expect("R9", &["status"], "status", "not_installed")?;
-    svc.expect("R9", &["check"], "health", "not_installed")?;
+    svc.expect("R9", &["status"], "status", "not-installed")?;
+    svc.expect("R9", &["check"], "health", "not-installed")?;
 
     // R10: the headless supervisor. Installed alongside the daemon, it
     // restarts a crashed daemon with nobody running `service check`.
@@ -289,20 +289,20 @@ fn service_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     );
     let status = svc.json("R10", &["status"])?;
     ensure!(
-        status["supervisor_installed"] == true,
+        status["supervisorInstalled"] == true,
         "R10: status must report the supervisor: {status}"
     );
     svc.wait_status("running", Duration::from_secs(30), "R10")?;
-    cli.wait_run_state("Running", Duration::from_secs(30))?;
+    cli.wait_run_state("running", Duration::from_secs(30))?;
     // The crash counter starts fresh after the acknowledge above, so
     // this crash restarts immediately, by the supervisor alone.
-    cli.wait_run_state("Running", Duration::from_secs(30))?;
+    cli.wait_run_state("running", Duration::from_secs(30))?;
     let pid = daemon_pid_from_launchd()
         .ok_or_else(|| Failure::new("R10: daemon pid not found via launchctl"))?;
     let killed = Command::new("kill").args(["-KILL", &pid]).status()?;
     ensure!(killed.success(), "R10: could not SIGKILL pid {pid}");
     svc.wait_status("running", Duration::from_secs(90), "R10")?;
-    cli.wait_run_state("Running", Duration::from_secs(30))?;
+    cli.wait_run_state("running", Duration::from_secs(30))?;
     let restarted = daemon_pid_from_launchd()
         .ok_or_else(|| Failure::new("R10: daemon pid not found after the restart"))?;
     ensure!(restarted != pid, "R10: the daemon was not restarted");
@@ -321,7 +321,7 @@ fn service_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     );
     let status = svc.json("R11", &["status"])?;
     ensure!(
-        status["supervisor_installed"] == false,
+        status["supervisorInstalled"] == false,
         "R11: status still reports the supervisor: {status}"
     );
 

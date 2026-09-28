@@ -45,8 +45,8 @@ Available now:
 - 🧹 Ignore rules, including your existing gitignore files, keep build output and junk out of the sync.
 - ♻️ Settings apply while it runs. Ceilings, ignore rules, and safeguards change without a restart, and Vapor tells you when one is needed.
 - 🚀 Starts at login, restarts itself after a crash, and stops retrying when something is really broken instead of looping.
-- ⏯️ Pause, resume, and sync on demand. Changes made while paused sync when you resume, and Sync now runs the scan without waiting for an idle moment.
-- 📈 Status with a reason, queue depth, a live activity timeline, per-file "why is this stuck", and a one-command support bundle.
+- ⏯️ Pause, resume, and sync on demand. Changes made while paused sync when you resume, and `vapor reconcile` (Sync now in the app) compares both folders without waiting for an idle moment.
+- 📈 Status with a reason, queue depth, a live activity timeline, per-file "why is this stuck", and a one-command support report.
 - ⌨️ A full command line for scripts and servers. Everything the app does, the terminal does too, including a headless supervisor that restarts a crashed sync where no app is running.
 - 🔐 Sign-in tokens live in the system keychain, logs never contain secrets, and nothing leaves your device except the files you chose to sync.
 - 🔑 An expired or revoked cloud sign-in puts sync on hold instead of failing it. Your changes wait in the queue, one click in the app signs you back in, and sync picks up where it stopped.
@@ -55,7 +55,7 @@ Available now:
 
 In flight and coming next:
 
-- 🪟 A diagnostics window in the Mac app with throttle reason, queue, conflicts, and timeline, plus live pause and flush controls.
+- 🪟 A diagnostics window in the Mac app with throttle reason, queue, conflicts, and timeline, plus live pause and resume controls.
 - 🚪 A first-run setup that asks which provider and which folders to use before creating anything.
 - 🔔 A notification when a conflict needs you.
 - 🖥️ Windows and Linux apps on the same runtime as the Mac app.
@@ -67,7 +67,7 @@ In flight and coming next:
 Available now:
 
 - [File System](https://github.com/neoxelox/vapor/tree/main/core/providers/src/filesystem) — any locally mounted folder (external drives, network mounts, another directory).
-- [Google Drive](https://workspace.google.com/intl/es/products/drive) — OAuth sign-in via `vapor auth login gdrive`.
+- [Google Drive](https://workspace.google.com/intl/es/products/drive) — OAuth sign-in via `vapor auth login`.
 
 In flight and coming next:
 
@@ -79,29 +79,41 @@ In flight and coming next:
 
 ## Configuration
 
-All user-facing configuration is documented here with meaning and defaults.
+All persisted configuration lives in `<vapor_dir>/vapor.json`. Keys are camelCase; every value that names a choice is kebab-case. A running daemon picks up changes to the ignore, timeline, resource, idle-boost, safeguard, and trash keys within a few seconds. The keys that reshape the pipeline (`localRoot`, `cloudRoot`, `provider`, `syncMode`, `profiles`, `deviceId`) take effect on the next start, and `vapor status` says so until then (`vapor service restart` applies them). `vapor config set` prints which case applies. No environment variable overrides a key: `vapor.json` is the one place a setting lives.
 
-All persisted user configuration lives in `<vapor_dir>/vapor.json`. A running daemon picks up changes to the resource, idle-boost, safeguard, ignore and timeline keys within a few seconds; the keys that reshape the pipeline (`localSyncDirectory`, `cloudSyncDirectory`, `provider`, `syncMode`, `profiles`, `deviceId`) take effect on the next start, and `vapor status` says so until then (`vapor service restart` applies them). `vapor config set` prints which case applies. Some keys can also be set via a matching `VAPOR_*` environment variable, which takes priority over the file.
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `autoLaunch` | `Bool` | `true` | Starts Vapor at login and keeps the daemon running in the background. |
+| `provider` | `String` | `"filesystem"` | The cloud backend: `filesystem` (a local folder plays the cloud side) or `gdrive` (sign in with `vapor auth login`, or Sign In in the app). The build carries the Google Drive OAuth client (see `VAPOR_GDRIVE_CLIENT_ID` below and `docs/operations/provider-auth-operations.md`); tokens live only in the platform secret store, never in `vapor.json`. |
+| `syncMode` | `String` | `"two-way"` | The sync direction: `two-way`, `pull-only` (cloud to local, a read-only local mirror), or `push-only` (local to cloud, a read-only cloud backup). |
+| `localRoot` | `String` | `"~/Vapor"` | The folder on this device that Vapor syncs. Vapor creates it on first contact. |
+| `cloudRoot` | `String` | Unset: `"~/cloud/Vapor"` with `provider: "filesystem"`, `"/Vapor"` otherwise | The folder on the provider side. Vapor creates it on first contact. With `provider: "filesystem"` this is a local path (`~` and relative paths resolve like `localRoot`), and it must not overlap `localRoot`; overlapping roots refuse to sync. `vapor config get cloudRoot` prints the default for the selected provider. |
+| `useGitignore` | `Bool` | `true` | Applies `.gitignore` files found under the local root. |
+| `useVaporignore` | `Bool` | `true` | Applies `.vaporignore` files found under the local root. |
+| `preIgnoreRules` | `String` | Built-in rules for build output and junk | Rules in `.gitignore` format, one per line, applied before the ignore files. |
+| `postIgnoreRules` | `String` | `""` | Rules in `.gitignore` format, one per line, applied after the ignore files; `!pattern` here wins over everything. |
+| `timelineLimit` | `Int` | `1000` | How many entries the in-memory activity timeline keeps. |
+| `languageCode` | `String` | `"en"` | The app's UI language. |
+| `deviceId` | `String` | Derived from the hostname on first run | This device's name in conflict-copy names (`report~conflict-mac-studio-….pdf`). The daemon writes it once and never regenerates it. |
+| `profiles` | `Array` | Absent: one implicit profile named `default` | Named sync profiles. Each entry has an `id` and optionally `name`, `enabled`, `provider`, `localRoot`, `cloudRoot`, `syncMode`, `resourceLimits`, and `idleBoost`, and runs as an isolated pipeline with its own state. Unset fields inherit the top-level value. The two resource groups merge per field and only toward caution: a profile's `resourceLimits` value can only lower the top-level one; in `idleBoost`, `enabled: false` wins daemon-wide, the three `*Percent` ceilings, `headroomCpuPercent`, and `rampDownSeconds` can only shrink, and `minIdleSeconds` and `rampUpSeconds` can only grow. |
+| `resourceLimits` | `Object` | `{ cpuPercent: 15, memoryPercent: 10, bandwidthPercent: 25 }` | Hard ceilings on the daemon's CPU (share of the whole device), memory (resident size as a share of physical memory), and measured bandwidth. `concurrentTransfers` (`1` to `16`, absent means automatic) also caps parallel uploads and parallel downloads; when absent, the idle width follows the core count (4 to 8 per direction) and always collapses while you use the device. |
+| `idleBoost` | `Object` | `{ enabled: true, minIdleSeconds: 300, cpuPercent: 50, memoryPercent: 20, bandwidthPercent: 80, headroomCpuPercent: 30, rampUpSeconds: 30, rampDownSeconds: 10 }` | Raises the ceilings to its own `cpuPercent`, `memoryPercent`, and `bandwidthPercent` while the device is idle: throttle state `idle-drain`, no input for `minIdleSeconds`, and other processes using at most `headroomCpuPercent` of the CPU. A boost ceiling below its `resourceLimits` counterpart counts as equal to it. Ramping down is faster than ramping up, so a returning user never meets a busy daemon. |
+| `safeguards` | `Object` | `{ massDelete: { enabled: true, threshold: 1000, windowSeconds: 60, ratioPercent: 25 } }` | `massDelete` is the ransomware and bulk-mistake backstop. A burst of deletes in either direction that reaches `threshold` inside `windowSeconds`, or `ratioPercent` of the synced files (never fewer than 10), is held whole behind a `mass-delete` decision before any of it reaches the other side; everything else keeps syncing. `vapor decisions resolve <id> --choose apply` lets the deletes through, `--choose discard` restores the files from the side that still has them. Values below the floors (10 deletes, 5 seconds) are raised to them; `ratioPercent: 0` turns the ratio rule off; `enabled: false` turns the guard off, and the daemon logs a warning. |
+| `trash` | `Object` | `{ enabled: true, retentionDays: 7, useSystem: false }` | Where a file Vapor removes from this device goes (a delete made in the cloud, a `pull-only` mirror removal): the managed trash under `<vapor_dir>/trash/<profile>/`, or `<volume root>/.vapor/trash/<profile>/` when the sync root is on another volume, listed and restored with `vapor trash list` and `vapor trash restore <id>`, purged after `retentionDays`. `useSystem: true` tries the system trash first (the Finder's Trash on macOS, the freedesktop trash on Linux). `enabled: false` deletes for good. |
 
-| Key                  | Type     | Default                                             | Description                                                                              |
-| -------------------- | -------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `autoLaunch`         | `Bool`   | `true`                                              | Starts Vapor automatically at login and keeps the daemon bootstrapped in the background. |
-| `useGitIgnore`       | `Bool`   | `true`                                              | Applies recursive `.gitignore` rules during local filtering.                             |
-| `useVaporIgnore`     | `Bool`   | `true`                                              | Applies recursive `.vaporignore` rules during local filtering.                           |
-| `localSyncDirectory` | `String` | `"~/Vapor"`                                         | Sets the local sync root; Vapor creates it if it does not exist yet.                     |
-| `cloudSyncDirectory` | `String` | Unset: `"~/cloud/Vapor"` with `provider: "filesystem"`, `"/Vapor"` otherwise | Sets the cloud sync root; Vapor creates it if it does not exist yet. With `provider: "filesystem"` this is a local directory path (`~` and relative paths resolve like `localSyncDirectory`), and it must not overlap the local sync root — overlapping roots refuse to sync. `vapor config get cloudSyncDirectory` prints the default that applies to the selected provider. |
-| `provider`           | `String` | `"filesystem"`                                      | Chooses the cloud backend: `filesystem` (a local folder acting as the cloud side) or `gdrive` (requires `vapor auth login gdrive`, or Sign In in the app). The Google Drive OAuth client is compiled into the build from `VAPOR_GDRIVE_CLIENT_ID` / `VAPOR_GDRIVE_CLIENT_SECRET` (the build scripts read them from `.env`); the same variables at run time override it, and `vapor doctor` names the client in use (see `.env.example` and `docs/operations/provider-auth-operations.md`). User tokens are stored only in the platform secret store, never in `vapor.json`. |
-| `syncMode`           | `String` | `"two-way"`                                         | Chooses the sync direction: `two-way` (bidirectional), `pull-only` (cloud → local, a read-only local mirror), or `push-only` (local → cloud, a read-only cloud backup). |
-| `preIgnoreRules`     | `String` | Embedded `.gitignore`-like low-impact default rules | Provides the baseline ignore rules that run before discovered ignore files.              |
-| `postIgnoreRules`    | `String` | Empty string                                        | Provides the final override rules that run after discovered ignore files.                |
-| `languageCode`       | `String` | `"en"`                                              | Selects the UI language catalog to load.                                                 |
-| `timelineLimit` | `Int`    | `1000`                                              | Caps the in-memory timeline length shown in diagnostics.                                 |
-| `deviceId`           | `String` | Derived from the hostname on first run              | Stable per-device identifier used in conflict-copy names (for example `report~conflict-mac-studio-....pdf`). Written by the daemon; never regenerated silently. |
-| `profiles`           | `Array`  | Absent (single implicit profile)                    | Optional named sync profiles. Each entry (`id`, `name`, `enabled`, plus optional `provider`, `localSyncDirectory`, `cloudSyncDirectory`, `syncMode`, `resourceLimits`, `idleBoost` overrides) runs as an isolated pipeline with its own durable state; unset fields inherit the top-level values. The two resource groups merge per field and only toward caution: a `resourceLimits` value can only lower the top-level one, `idleBoost.enabled: false` wins daemon-wide, `boost*Percent`, `headroomCpuPercent` and `rampDownSeconds` can only shrink, `minIdleSeconds` and `rampUpSeconds` can only grow. Fields a profile does not name keep the top-level value. |
-| `resourceLimits`     | `Object` | `{ cpuPercent: 15, memoryPercent: 10, bandwidthPercent: 25 }` | Sets hard ceilings on daemon CPU (share of the whole device), device memory (resident size as a share of physical memory), and measured bandwidth. Honored by the throttle controller and auto-tuner. Profile overrides may only lower these values. The optional `maxConcurrentTransfers` (`1..16`, absent = automatic) additionally caps parallel uploads and downloads; when absent, the idle transfer width derives from the machine's core count (4–8 per direction) and always collapses while you are actively using the device. |
-| `idleBoost`          | `Object` | `{ enabled: true, minIdleSeconds: 300, headroomCpuPercent: 30, boostCpuPercent: 50, boostMemoryPercent: 20, boostBandwidthPercent: 80, rampUpSeconds: 30, rampDownSeconds: 10 }` | Dynamically raises effective ceilings when the device is user-idle with measured resource headroom. Boost requires all of: throttle state `IdleDrain`, user-idle for at least `minIdleSeconds`, and non-Vapor CPU utilization at or below `headroomCpuPercent`. Each `boost*Percent` must be `>=` the matching `resourceLimits.*Percent` (lower values are treated as equal to the base ceiling). Ramp-down is deliberately faster than ramp-up so returning to your device is never met with a busy daemon. Setting `enabled: false` in any enabled profile disables boost daemon-wide. |
-| `safeguards`         | `Object` | `{ massDeleteEnabled: true, massDeleteThreshold: 1000, massDeleteWindowSeconds: 60, massDeleteRatioPercent: 25 }` | Tunes the mass-deletion guard, the ransomware and bulk-mistake backstop. A burst of deletions in either direction (files vanishing from this device, or from the cloud) that reaches `massDeleteThreshold` inside the rolling window, or `massDeleteRatioPercent` of the files Vapor syncs (never fewer than 10), is held whole behind a decision before any of it lands on the other side; everything else keeps syncing. `vapor decisions list` shows the question, `vapor decisions resolve <id> --choose apply` lets the deletions through, `--choose discard` restores the files from the side that still has them. Values below the floors (`10` deletions / `5` seconds) are clamped up; `massDeleteRatioPercent: 0` turns the ratio rule off and leaves the absolute threshold; `massDeleteEnabled: false` turns the guard off, which the daemon logs as a warning. |
-| `trash`              | `Object` | `{ enabled: true, retentionDays: 7, useSystemTrash: false }` | Where a file Vapor removes on this device goes (a deletion that arrived from the cloud, a `pull-only` mirror removal): the managed trash under `<vapor_dir>/trash/<profile>/`, or `<volume root>/.vapor/trash/<profile>/` when the sync root is on another volume so the move never copies, listed and restored with `vapor trash list` and `vapor trash restore <id>`, purged after `retentionDays`. `useSystemTrash: true` tries the system trash first (the Finder's Trash on macOS, the freedesktop trash on Linux) and falls back to the managed one. `enabled: false` unlinks. Applies live. |
+### Environment variables
+
+| Variable | Description |
+| --- | --- |
+| `VAPOR_DIR` | The runtime directory (config, logs, state). Default `~/.vapor`. |
+| `VAPOR_ENV` | `dev` switches the default runtime directory to `./.vapor` and the default log level to `debug`; `prod` keeps `~/.vapor` and `info`. Unset, a truthy `CI` counts as `dev`. The repository scripts set `dev`. |
+| `VAPOR_LOG_LEVEL` | `debug`, `info`, `warning`, or `error`; overrides the level `VAPOR_ENV` picks. |
+| `VAPOR_GDRIVE_CLIENT_ID` | The Google OAuth client id. Read at build time, so `vapor` and `vapord` carry the client they were built with (the build scripts load it from `.env`); set at run time, it overrides the built-in client. `vapor doctor` names the client in use. |
+| `VAPOR_GDRIVE_CLIENT_SECRET` | The matching client secret, read the same two ways. |
+| `VAPOR_SECRETS_COMMAND` | Linux only: a program that stores Vapor's secrets (`pass`, a vault CLI), used instead of the desktop Secret Service. |
+| `VAPOR_THROTTLE_INPUTS` | For test harnesses: `host` (default), `static`, or `file:<path>`. Never set it on a real install. |
+
+The build, release, and test variables are in `.env.example`.
 
 ### Ignore rules
 

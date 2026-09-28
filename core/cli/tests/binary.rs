@@ -14,8 +14,6 @@ fn vapor(home: &Path, args: &[&str]) -> Output {
         .args(args)
         .env("VAPOR_DIR", home)
         .env("VAPOR_ENV", "dev")
-        .env_remove("VAPOR_LOCAL_SYNC_DIRECTORY")
-        .env_remove("VAPOR_CLOUD_SYNC_DIRECTORY")
         .output()
         .expect("vapor binary runs")
 }
@@ -64,7 +62,7 @@ fn help_names_every_command() {
         "decisions",
         "trash",
         "doctor",
-        "support-bundle",
+        "report",
     ] {
         assert!(help.contains(command), "help lacks {command}: {help}");
     }
@@ -181,9 +179,9 @@ fn doctor_json_is_a_check_list_with_a_worst_status() {
         assert!(check["name"].is_string(), "{check}");
         assert!(check["status"].is_string(), "{check}");
     }
-    assert!(report["worst_status"].is_string(), "{report}");
+    assert!(report["worstStatus"].is_string(), "{report}");
     // The exit code follows the worst check, never the JSON rendering.
-    let expected = if report["worst_status"] == "failure" {
+    let expected = if report["worstStatus"] == "failure" {
         Some(1)
     } else {
         Some(0)
@@ -202,8 +200,8 @@ fn conflicts_refuse_to_touch_a_file_that_is_not_a_conflict_copy() {
             "conflicts",
             "resolve",
             plain.to_str().expect("utf-8"),
-            "--keep",
-            "canonical",
+            "--choose",
+            "original",
         ],
     );
     assert_eq!(output.status.code(), Some(1));

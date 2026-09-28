@@ -23,25 +23,26 @@ use vapor_daemon::conflict::parse_conflict_copy_name;
 use vapor_daemon::path_filter::{EventPathFilter, EventPathFilterOptions};
 use vapor_daemon::profiles::resolve_profiles;
 use vapor_shared::config::VaporConfig;
+use vapor_shared::constants;
 
-/// One unresolved keep-both conflict: a canonical path plus the
+/// One unresolved keep-both conflict: the original file plus the
 /// divergent copy preserved next to it.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConflictRecord {
     pub profile_id: String,
-    pub canonical_path: PathBuf,
-    pub conflict_path: PathBuf,
+    pub original_path: PathBuf,
+    pub copy_path: PathBuf,
     /// Device whose divergent version the copy preserves.
     pub device_id: String,
     /// When the divergence was observed (epoch milliseconds).
     pub diverged_at_ms: u64,
     pub copy_size_bytes: u64,
-    /// The canonical file can be gone (deleted after the conflict);
+    /// The original can be gone (deleted after the conflict);
     /// the copy still lists so the preserved version is not orphaned
     /// silently.
-    pub canonical_exists: bool,
-    pub canonical_size_bytes: Option<u64>,
+    pub original_exists: bool,
+    pub original_size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,7 +66,7 @@ pub struct ConflictListReport {
 /// subtrees (conflict copies cannot exist there — ignored names never
 /// sync).
 pub fn list_conflicts(config: &VaporConfig) -> ConflictListReport {
-    let filter_options = EventPathFilterOptions::from_environment_and_config(config);
+    let filter_options = EventPathFilterOptions::from_config(config);
     let mut conflicts = Vec::new();
     let mut skipped_roots = Vec::new();
     let mut skipped_directories = Vec::new();
@@ -74,7 +75,7 @@ pub fn list_conflicts(config: &VaporConfig) -> ConflictListReport {
         .into_iter()
         .filter(|profile| profile.enabled)
     {
-        let Some(root) = profile.scope.local_sync_directory else {
+        let Some(root) = profile.scope.local_root else {
             continue;
         };
         if !root.exists() {
@@ -96,7 +97,7 @@ pub fn list_conflicts(config: &VaporConfig) -> ConflictListReport {
         );
     }
 
-    conflicts.sort_by(|a, b| a.conflict_path.cmp(&b.conflict_path));
+    conflicts.sort_by(|a, b| a.copy_path.cmp(&b.copy_path));
     skipped_directories.sort();
     ConflictListReport {
         conflicts,
@@ -145,42 +146,42 @@ fn scan_root(
             let Some(parsed) = parse_conflict_copy_name(name) else {
                 continue;
             };
-            let canonical_path = path.with_file_name(&parsed.canonical_file_name);
-            let canonical_size_bytes = fs::metadata(&canonical_path)
+            let original_path = path.with_file_name(&parsed.canonical_file_name);
+            let original_size_bytes = fs::metadata(&original_path)
                 .ok()
                 .filter(|meta| meta.is_file())
                 .map(|meta| meta.len());
             conflicts.push(ConflictRecord {
                 profile_id: profile_id.to_string(),
-                canonical_path,
-                conflict_path: path,
+                original_path,
+                copy_path: path,
                 device_id: parsed.device_id,
                 diverged_at_ms: parsed.timestamp_ms,
                 copy_size_bytes: metadata.len(),
-                canonical_exists: canonical_size_bytes.is_some(),
-                canonical_size_bytes,
+                original_exists: original_size_bytes.is_some(),
+                original_size_bytes,
             });
         }
     }
 }
 
-/// Which version survives under the canonical name.
+/// Which version survives under the original name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeepSide {
-    /// Keep the canonical file; delete the conflict copy.
-    Canonical,
-    /// The copy becomes the canonical content (atomic rename where the
-    /// OS allows); the previous canonical version is discarded.
+    /// Keep the original; delete the conflict copy.
+    Original,
+    /// The copy moves over the original (atomic rename where the OS
+    /// allows); the previous original is discarded.
     Copy,
 }
 
 impl KeepSide {
     pub fn parse(raw: &str) -> Result<Self, String> {
         match raw {
-            "canonical" => Ok(Self::Canonical),
-            "copy" => Ok(Self::Copy),
+            constants::conflict::CHOICE_ORIGINAL => Ok(Self::Original),
+            constants::conflict::CHOICE_COPY => Ok(Self::Copy),
             other => Err(format!(
-                "unknown --keep value '{other}'; expected 'canonical' or 'copy'"
+                "unknown --choose value '{other}'; expected 'original' or 'copy'"
             )),
         }
     }
@@ -189,76 +190,76 @@ impl KeepSide {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolutionReport {
-    pub canonical_path: PathBuf,
-    pub removed_conflict_path: PathBuf,
+    pub original_path: PathBuf,
+    pub copy_path: PathBuf,
     pub kept: &'static str,
 }
 
 /// Resolves one conflict with plain file operations. Refuses paths
 /// whose name does not match the machine-generated conflict grammar so
 /// the command can never be talked into deleting an arbitrary file.
-pub fn resolve_conflict(conflict_path: &Path, keep: KeepSide) -> Result<ResolutionReport, String> {
-    let name = conflict_path
+pub fn resolve_conflict(copy_path: &Path, keep: KeepSide) -> Result<ResolutionReport, String> {
+    let name = copy_path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("{} has no file name", conflict_path.display()))?;
+        .ok_or_else(|| format!("{} has no file name", copy_path.display()))?;
     let parsed = parse_conflict_copy_name(name).ok_or_else(|| {
         format!("{name} is not a Vapor conflict copy (expected the ~conflict-… name pattern)")
     })?;
-    if !conflict_path.is_file() {
+    if !copy_path.is_file() {
         return Err(format!(
             "{} does not exist or is not a regular file",
-            conflict_path.display()
+            copy_path.display()
         ));
     }
-    let canonical_path = conflict_path.with_file_name(&parsed.canonical_file_name);
+    let original_path = copy_path.with_file_name(&parsed.canonical_file_name);
     if keep == KeepSide::Copy
-        && let Some(existing) = vapor_daemon::name_collision::colliding_local_path(&canonical_path)
+        && let Some(existing) = vapor_daemon::name_collision::colliding_local_path(&original_path)
     {
         // The copy stands in for a cloud name this filesystem cannot
-        // hold next to `existing`; renaming it over the canonical name
+        // hold next to `existing`; renaming it over the original name
         // would only swap which cloud object is stranded.
         return Err(format!(
             "{} is a name clash with {}: the two cloud files differ only in spelling this filesystem \
-             folds together. Keep the canonical side to drop the cloud's other copy, or rename the \
+             folds together. Choose the original to drop the cloud's other copy, or rename the \
              files apart in the cloud",
-            conflict_path.display(),
+            copy_path.display(),
             existing.display()
         ));
     }
 
     match keep {
-        KeepSide::Canonical => {
-            fs::remove_file(conflict_path)
-                .map_err(|error| format!("cannot remove {}: {error}", conflict_path.display()))?;
+        KeepSide::Original => {
+            fs::remove_file(copy_path)
+                .map_err(|error| format!("cannot remove {}: {error}", copy_path.display()))?;
         }
         KeepSide::Copy => {
             // Same-directory rename: atomic replace on Unix. Windows
             // refuses to rename onto an existing file, so fall back to
             // remove-then-rename there — the version being kept (the
             // copy) is never the one at risk in that window.
-            if let Err(error) = fs::rename(conflict_path, &canonical_path) {
+            if let Err(error) = fs::rename(copy_path, &original_path) {
                 // Only the Windows destination-exists collision warrants
-                // deleting the canonical file first. Any other error
+                // deleting the original first. Any other error
                 // (read-only remount, immutable flag, EIO) must NOT remove
-                // the canonical version inside a failing path — the retry
+                // the original version inside a failing path — the retry
                 // would still fail and we'd have destroyed it for nothing.
                 if error.kind() == io::ErrorKind::AlreadyExists {
-                    fs::remove_file(&canonical_path).map_err(|error| {
-                        format!("cannot replace {}: {error}", canonical_path.display())
+                    fs::remove_file(&original_path).map_err(|error| {
+                        format!("cannot replace {}: {error}", original_path.display())
                     })?;
-                    fs::rename(conflict_path, &canonical_path).map_err(|error| {
+                    fs::rename(copy_path, &original_path).map_err(|error| {
                         format!(
                             "cannot rename {} over {}: {error}",
-                            conflict_path.display(),
-                            canonical_path.display()
+                            copy_path.display(),
+                            original_path.display()
                         )
                     })?;
                 } else {
                     return Err(format!(
                         "cannot rename {} over {}: {error}",
-                        conflict_path.display(),
-                        canonical_path.display()
+                        copy_path.display(),
+                        original_path.display()
                     ));
                 }
             }
@@ -266,11 +267,11 @@ pub fn resolve_conflict(conflict_path: &Path, keep: KeepSide) -> Result<Resoluti
     }
 
     Ok(ResolutionReport {
-        canonical_path,
-        removed_conflict_path: conflict_path.to_path_buf(),
+        original_path,
+        copy_path: copy_path.to_path_buf(),
         kept: match keep {
-            KeepSide::Canonical => "canonical",
-            KeepSide::Copy => "copy",
+            KeepSide::Original => constants::conflict::CHOICE_ORIGINAL,
+            KeepSide::Copy => constants::conflict::CHOICE_COPY,
         },
     })
 }
@@ -294,14 +295,14 @@ pub fn render_list(report: &ConflictListReport) -> String {
             out.push_str(&format!(
                 "  [{}] {}\n      copy: {} ({} bytes, from device {})\n",
                 record.profile_id,
-                record.canonical_path.display(),
-                record.conflict_path.display(),
+                record.original_path.display(),
+                record.copy_path.display(),
                 record.copy_size_bytes,
                 record.device_id,
             ));
         }
         out.push_str(
-            "\nResolve with: vapor conflicts resolve <copy-path> --keep <canonical|copy>\n",
+            "\nResolve with: vapor conflicts resolve <copy-path> --choose <original|copy>\n",
         );
     }
     for root in &report.skipped_roots {
@@ -320,8 +321,8 @@ pub fn render_resolution(report: &ResolutionReport) -> String {
     format!(
         "Resolved: kept the {} version at {} (removed {}).",
         report.kept,
-        report.canonical_path.display(),
-        report.removed_conflict_path.display(),
+        report.original_path.display(),
+        report.copy_path.display(),
     )
 }
 
@@ -333,22 +334,22 @@ mod tests {
     /// Config pointing the implicit default profile at `root`.
     fn config_for(root: &Path) -> VaporConfig {
         VaporConfig {
-            local_sync_directory: root.to_string_lossy().into_owned(),
+            local_root: root.to_string_lossy().into_owned(),
             ..VaporConfig::default()
         }
     }
 
-    fn seed_conflict(root: &Path, canonical: &str, copy_name: &str) -> PathBuf {
-        let canonical_path = root.join(canonical);
-        fs::create_dir_all(canonical_path.parent().unwrap()).expect("dirs");
-        fs::write(&canonical_path, b"canonical bytes").expect("seed canonical");
-        let copy = canonical_path.with_file_name(copy_name);
+    fn seed_conflict(root: &Path, original: &str, copy_name: &str) -> PathBuf {
+        let original_path = root.join(original);
+        fs::create_dir_all(original_path.parent().unwrap()).expect("dirs");
+        fs::write(&original_path, b"original bytes").expect("seed original");
+        let copy = original_path.with_file_name(copy_name);
         fs::write(&copy, b"divergent copy bytes!").expect("seed copy");
         copy
     }
 
     #[test]
-    fn list_finds_conflict_copies_and_pairs_canonicals() {
+    fn list_finds_conflict_copies_and_pairs_originals() {
         let temp = TempDir::new().expect("temp");
         let root = temp.path().join("local");
         fs::create_dir_all(&root).expect("root");
@@ -371,11 +372,11 @@ mod tests {
         assert_eq!(report.conflicts.len(), 1);
         let record = &report.conflicts[0];
         assert_eq!(record.profile_id, "default");
-        assert!(record.canonical_path.ends_with("docs/report.md"));
+        assert!(record.original_path.ends_with("docs/report.md"));
         assert_eq!(record.device_id, "other-mac");
         assert_eq!(record.diverged_at_ms, 1_750_000_000_123);
-        assert!(record.canonical_exists);
-        assert_eq!(record.canonical_size_bytes, Some(15));
+        assert!(record.original_exists);
+        assert_eq!(record.original_size_bytes, Some(14));
         assert_eq!(record.copy_size_bytes, 21);
         assert!(report.skipped_roots.is_empty());
     }
@@ -394,17 +395,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_keep_canonical_deletes_only_the_copy() {
+    fn resolve_keep_original_deletes_only_the_copy() {
         let temp = TempDir::new().expect("temp");
         let root = temp.path().to_path_buf();
         let copy = seed_conflict(&root, "a.txt", "a~conflict-dev-1750000000123.txt");
 
-        let report = resolve_conflict(&copy, KeepSide::Canonical).expect("resolve");
-        assert_eq!(report.kept, "canonical");
+        let report = resolve_conflict(&copy, KeepSide::Original).expect("resolve");
+        assert_eq!(report.kept, "original");
         assert!(!copy.exists());
         assert_eq!(
             fs::read(root.join("a.txt")).expect("read"),
-            b"canonical bytes"
+            b"original bytes"
         );
     }
 
@@ -429,7 +430,7 @@ mod tests {
         let victim = temp.path().join("precious.txt");
         fs::write(&victim, b"do not delete").expect("seed");
 
-        let error = resolve_conflict(&victim, KeepSide::Canonical).expect_err("must refuse");
+        let error = resolve_conflict(&victim, KeepSide::Original).expect_err("must refuse");
         assert!(error.contains("not a Vapor conflict copy"));
         assert!(victim.exists());
     }
@@ -440,13 +441,13 @@ mod tests {
         let report = ConflictListReport {
             conflicts: vec![ConflictRecord {
                 profile_id: "default".to_string(),
-                canonical_path: PathBuf::from("/r/a.txt"),
-                conflict_path: PathBuf::from("/r/a~conflict-dev-1750000000123.txt"),
+                original_path: PathBuf::from("/r/a.txt"),
+                copy_path: PathBuf::from("/r/a~conflict-dev-1750000000123.txt"),
                 device_id: "dev".to_string(),
                 diverged_at_ms: 1_750_000_000_123,
                 copy_size_bytes: 21,
-                canonical_exists: true,
-                canonical_size_bytes: Some(15),
+                original_exists: true,
+                original_size_bytes: Some(15),
             }],
             skipped_roots: vec![],
             skipped_directories: vec![PathBuf::from("/r/locked")],
@@ -456,13 +457,13 @@ mod tests {
   "conflicts": [
     {
       "profileId": "default",
-      "canonicalPath": "/r/a.txt",
-      "conflictPath": "/r/a~conflict-dev-1750000000123.txt",
+      "originalPath": "/r/a.txt",
+      "copyPath": "/r/a~conflict-dev-1750000000123.txt",
       "deviceId": "dev",
       "divergedAtMs": 1750000000123,
       "copySizeBytes": 21,
-      "canonicalExists": true,
-      "canonicalSizeBytes": 15
+      "originalExists": true,
+      "originalSizeBytes": 15
     }
   ],
   "skippedRoots": [],

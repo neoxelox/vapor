@@ -73,8 +73,8 @@ final class AppShellViewModel: ObservableObject {
     // with the diagnostics work.
     state.providerName = VaporConstants.Provider.displayName(
       forKind: self.configuration.providerKind)
-    state.useGitIgnore = self.configuration.useGitIgnore
-    state.useVaporIgnore = self.configuration.useVaporIgnore
+    state.useGitignore = self.configuration.useGitignore
+    state.useVaporignore = self.configuration.useVaporignore
     state.preIgnoreRules = self.configuration.preIgnoreRules
     state.postIgnoreRules = self.configuration.postIgnoreRules
     state.languageCode = self.configuration.languageCode
@@ -101,8 +101,8 @@ final class AppShellViewModel: ObservableObject {
       "Initialized app shell state",
       metadata: [
         "auto_launch_enabled": String(state.autoLaunchEnabled),
-        "use_gitignore": String(state.useGitIgnore),
-        "use_vaporignore": String(state.useVaporIgnore),
+        "use_gitignore": String(state.useGitignore),
+        "use_vaporignore": String(state.useVaporignore),
         "language_code": state.languageCode,
         "effective_language": state.effectiveLanguageCode,
         "version": VaporBuildInfo.version,
@@ -234,9 +234,9 @@ final class AppShellViewModel: ObservableObject {
           self.state.conflictsUnresolved = status.conflictsUnresolved
           self.state.signInRequired = status.signInRequired
         }
-        if let status, !status.providerName.isEmpty {
+        if let status, !status.provider.isEmpty {
           self.state.providerName = VaporConstants.Provider.displayName(
-            forKind: status.providerName)
+            forKind: status.provider)
         }
       }
     }
@@ -406,7 +406,7 @@ final class AppShellViewModel: ObservableObject {
 
     lifecycleQueue.async {
       do {
-        try daemonLifecycleManager.syncNow()
+        try daemonLifecycleManager.reconcile()
       } catch {
         logger.warning(
           "On-demand sync was not accepted",
@@ -432,10 +432,7 @@ final class AppShellViewModel: ObservableObject {
     signInQueue.async { [weak self] in
       for request in requests {
         do {
-          try daemonLifecycleManager.signIn(
-            provider: request.providerKind,
-            profile: request.profileId
-          )
+          try daemonLifecycleManager.signIn(profile: request.profileId)
         } catch {
           logger.warning(
             "Browser sign-in did not complete",
@@ -534,20 +531,20 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
-  func setUseGitIgnore(_ enabled: Bool) {
-    guard configuration.useGitIgnore != enabled else {
+  func setUseGitignore(_ enabled: Bool) {
+    guard configuration.useGitignore != enabled else {
       return
     }
 
-    configuration.useGitIgnore = enabled
-    state.useGitIgnore = enabled
+    configuration.useGitignore = enabled
+    state.useGitignore = enabled
 
     do {
       try configurationStore.save(configuration)
       refreshDaemonLifecycleManagerForCurrentConfiguration()
       clearConfigurationIssueIfResolved()
       logger.info(
-        "Updated useGitIgnore setting",
+        "Updated useGitignore setting",
         metadata: [
           "use_gitignore": String(enabled),
           "note": "persisted to vapor.json; the daemon reads it on next start",
@@ -556,26 +553,26 @@ final class AppShellViewModel: ObservableObject {
     } catch {
       state.syncState = .error
       logger.error(
-        "Failed to persist useGitIgnore setting",
+        "Failed to persist useGitignore setting",
         metadata: ["error": String(describing: error)]
       )
     }
   }
 
-  func setUseVaporIgnore(_ enabled: Bool) {
-    guard configuration.useVaporIgnore != enabled else {
+  func setUseVaporignore(_ enabled: Bool) {
+    guard configuration.useVaporignore != enabled else {
       return
     }
 
-    configuration.useVaporIgnore = enabled
-    state.useVaporIgnore = enabled
+    configuration.useVaporignore = enabled
+    state.useVaporignore = enabled
 
     do {
       try configurationStore.save(configuration)
       refreshDaemonLifecycleManagerForCurrentConfiguration()
       clearConfigurationIssueIfResolved()
       logger.info(
-        "Updated useVaporIgnore setting",
+        "Updated useVaporignore setting",
         metadata: [
           "use_vaporignore": String(enabled),
           "note": "persisted to vapor.json; the daemon reads it on next start",
@@ -584,7 +581,7 @@ final class AppShellViewModel: ObservableObject {
     } catch {
       state.syncState = .error
       logger.error(
-        "Failed to persist useVaporIgnore setting",
+        "Failed to persist useVaporignore setting",
         metadata: ["error": String(describing: error)]
       )
     }

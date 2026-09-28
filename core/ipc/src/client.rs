@@ -3,7 +3,7 @@
 //!
 //! The surface is intentionally minimal: a handshake, a `status()`
 //! call, and the IPC-driven control commands (`pause`, `resume`,
-//! `flush-now`, etc.).
+//! `reconcile`, etc.).
 
 use std::error::Error;
 use std::fmt::{self, Display};
@@ -174,16 +174,8 @@ impl Client {
         self.call_for_ack(Method::Resume)
     }
 
-    pub fn flush_now(&mut self) -> Result<AckResponse, ClientError> {
-        self.call_for_ack(Method::FlushNow)
-    }
-
     pub fn reconcile(&mut self) -> Result<AckResponse, ClientError> {
         self.call_for_ack(Method::Reconcile)
-    }
-
-    pub fn sync_now(&mut self) -> Result<AckResponse, ClientError> {
-        self.call_for_ack(Method::SyncNow)
     }
 
     pub fn diagnostics(&mut self) -> Result<DiagnosticsResponse, ClientError> {

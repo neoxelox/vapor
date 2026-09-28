@@ -68,7 +68,7 @@ order and quote what you find:
 
 1. `grep '<path>' <sandbox>/ops.jsonl`: which side wrote which version
    when, and which faults fired around it.
-2. `<sandbox>/home/logs/vapord.logs` around those timestamps: what the
+2. `<sandbox>/home/logs/vapord.log` around those timestamps: what the
    daemon decided. Then `export VAPOR_DIR=<sandbox>/home` and
    `target/debug/vapor diagnostics --json` against the frozen daemon.
 3. The file's first line names its seed, path, version, and size.
@@ -77,7 +77,7 @@ order and quote what you find:
    skill for the product side.
 
 States the driver expects and you should not mistake for findings: a
-`guard-trip` fault event (the mass-deletion guard held a subtree
+`guard-trip` fault event (the mass-delete guard held a subtree
 removal and the driver answered `apply`), a `root-missing` decision
 while the driver has the cloud root parked (it withdraws itself on
 restore), and the daemon in `Error` during that parking. A daemon that

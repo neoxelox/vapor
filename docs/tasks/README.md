@@ -177,8 +177,8 @@ Status: complete (against the filesystem-provider no-op auth path; the
 OAuth-PKCE browser flow lands with Wave 8 / C8-48). Required Wave 6
 (IPC).
 
-- `cli.md` L3-1 … L3-7 — `vapor status / pause / resume / flush-now /
-  reconcile / timeline / logs`. All IPC-backed. `--json` stable; never
+- `cli.md` L3-1 … L3-7 — `vapor status / pause / resume / reconcile /
+  timeline / logs`. All IPC-backed. `--json` stable; never
   hang when no daemon is running.
 - `cli.md` L4-1 … L4-3 — `vapor auth login / logout / status` via PKCE.
   Depends on `SecretStore` from Wave 4 and a provider with an OAuth
@@ -228,7 +228,7 @@ IDs stable; they do not imply low priority.)
 
 Status: **complete** (SF-1 … SF-9 in `core.md` "Sync safety
 follow-ups", landed 2026-09-06 and 2026-09-07): decisions and the
-two-direction mass-deletion guard, the local trash, root identity,
+two-direction mass-delete guard, the local trash, root identity,
 offline deletions through the index, the type-mismatch decision,
 collisions as aliased conflict copies, the headless supervisor,
 hash-based move detection, and the knowledge base for each. Wave 9

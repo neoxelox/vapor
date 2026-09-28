@@ -42,7 +42,7 @@ pub struct ThrottleCaps {
 /// `[IDLE_DRAIN_CONCURRENCY_MIN, IDLE_DRAIN_CONCURRENCY_MAX]`. A
 /// 16-core desktop drains at 8-wide while a small laptop keeps the
 /// classic 4 — the throttle ladder still collapses this whenever the
-/// user is active, and `resourceLimits.maxConcurrentTransfers` caps it
+/// user is active, and `resourceLimits.concurrentTransfers` caps it
 /// explicitly.
 pub fn idle_drain_concurrency() -> usize {
     static TIER: std::sync::OnceLock<usize> = std::sync::OnceLock::new();

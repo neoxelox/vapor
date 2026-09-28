@@ -59,6 +59,22 @@ pub enum ExecutionStage {
     Download,
 }
 
+impl ExecutionStage {
+    /// The stage name `vapor diagnostics` prints.
+    pub fn wire_name(self) -> &'static str {
+        use vapor_shared::constants::intent;
+        match self {
+            Self::Planner => intent::STAGE_PLANNING,
+            Self::WaitingForHash => intent::STAGE_WAITING_TO_HASH,
+            Self::Hash => intent::STAGE_HASHING,
+            Self::WaitingForUpload => intent::STAGE_WAITING_TO_UPLOAD,
+            Self::Upload => intent::STAGE_UPLOADING,
+            Self::WaitingForDownload => intent::STAGE_WAITING_TO_DOWNLOAD,
+            Self::Download => intent::STAGE_DOWNLOADING,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StagedExecutorSnapshot {
     pub active_total: usize,
@@ -2021,7 +2037,7 @@ fn plan_intent(
     let Some(local_root) = env.local_root else {
         return PlanOutcome::Fail {
             failure: RetryFailureKind::Permanent,
-            message: "no local sync directory configured".to_string(),
+            message: "no local root configured".to_string(),
         };
     };
     // The cloud object of a local file normally lives at the mirror of
@@ -2604,13 +2620,12 @@ impl DeletionDirection {
     }
 }
 
-const MASS_DELETION_DECISION_KIND: &str = "mass-deletion";
-/// Paths listed in a mass-deletion decision's evidence.
+/// Paths listed in a mass-delete decision's evidence.
 const MASS_DELETION_EVIDENCE_PATHS: usize = 50;
 
 /// Consults the deletion guard the moment a deletion would become
 /// irreversible. When the guard holds, the intent is parked behind the
-/// profile's open mass-deletion decision (created on the first hold)
+/// profile's open mass-delete decision (created on the first hold)
 /// and `true` is returned; the caller then stops working on it. An
 /// intent the user already approved through a decision passes.
 fn hold_if_mass_deletion(
@@ -2635,7 +2650,7 @@ fn hold_if_mass_deletion(
     // The burst as the user will see it: what already landed inside
     // the window plus what is still queued behind this one.
     let count = guard.count(now).saturating_add(queued_behind);
-    let existing = state_db.open_decision(MASS_DELETION_DECISION_KIND, None)?;
+    let existing = state_db.open_decision(constants::decision::KIND_MASS_DELETE, None)?;
     let decision_id = match existing {
         Some(decision) => decision.id,
         None => {
@@ -2651,11 +2666,11 @@ fn hold_if_mass_deletion(
             );
             let options = [
                 crate::state_db::DecisionOption {
-                    key: "apply".to_string(),
+                    key: constants::decision::OPTION_APPLY.to_string(),
                     label: "Apply the deletions".to_string(),
                 },
                 crate::state_db::DecisionOption {
-                    key: "discard".to_string(),
+                    key: constants::decision::OPTION_DISCARD.to_string(),
                     label: format!(
                         "Discard them and restore the files from {}",
                         direction.origin()
@@ -2669,7 +2684,7 @@ fn hold_if_mass_deletion(
                 "paths": Vec::<String>::new(),
             });
             let id = state_db.create_decision(
-                MASS_DELETION_DECISION_KIND,
+                constants::decision::KIND_MASS_DELETE,
                 crate::state_db::DecisionScope::Batch,
                 None,
                 &question,
@@ -2707,7 +2722,7 @@ fn hold_if_mass_deletion(
     }
     report.held += queued.len();
     crate::logging::info(
-        "Held a deletion behind the mass-deletion decision",
+        "Held a deletion behind the mass-delete decision",
         &[
             ("decision_id", decision_id.to_string()),
             ("path", intent.path.display().to_string()),
@@ -3679,9 +3694,9 @@ fn discard_local(env: &ExecutionEnv<'_>, path: &Path, now: SystemTime) -> std::i
         };
     };
     let reason = if env.sync_mode == vapor_shared::SyncMode::TwoWay {
-        constants::trash::REASON_CLOUD_DELETION
+        constants::trash::REASON_CLOUD_DELETE
     } else {
-        constants::trash::REASON_MIRROR_REMOVAL
+        constants::trash::REASON_MIRROR_DELETE
     };
     match trash.discard(path, reason, now)? {
         crate::trash::Disposition::Managed(id) => crate::logging::info(
@@ -5255,11 +5270,8 @@ mod tests {
         fn capabilities(&self) -> vapor_providers::ProviderCapabilities {
             self.inner.capabilities()
         }
-        fn ensure_cloud_sync_directory(
-            &self,
-            dir: &str,
-        ) -> Result<(), vapor_providers::ProviderError> {
-            self.inner.ensure_cloud_sync_directory(dir)
+        fn ensure_cloud_root(&self, dir: &str) -> Result<(), vapor_providers::ProviderError> {
+            self.inner.ensure_cloud_root(dir)
         }
         fn enumerate(
             &self,

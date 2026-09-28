@@ -197,17 +197,17 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
     let data = try runExpectingSuccess(arguments: arguments)
     let response: HealthResponse = try decode(data: data, arguments: arguments)
     switch response.health {
-    case "running":
+    case VaporConstants.ServiceHealth.running:
       return .running
-    case "not_installed":
+    case VaporConstants.ServiceHealth.notInstalled:
       return .notInstalled
-    case "stopped_expected":
+    case VaporConstants.ServiceHealth.stoppedExpected:
       return .stoppedExpected
-    case "restarted_after_crash":
+    case VaporConstants.ServiceHealth.restartedAfterCrash:
       return .restartedAfterCrash
-    case "restart_deferred":
+    case VaporConstants.ServiceHealth.restartDeferred:
       return .restartDeferred(response.remainingSeconds ?? 0)
-    case "crash_loop_paused":
+    case VaporConstants.ServiceHealth.crashLoopPaused:
       return .crashLoopPaused
     default:
       throw VaporCLIServiceError.malformedResponse(
@@ -229,7 +229,7 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
       runState: response.runState,
       throttleState: response.throttleState,
       throttleReason: response.throttleReason,
-      providerName: response.providerName,
+      provider: response.provider,
       queueDepth: response.queueDepth,
       failedIntents: response.failedIntents,
       configRestartRequired: response.configRestartRequired,
@@ -245,22 +245,22 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
   /// Runs the browser sign-in. The CLI gives the consent
   /// `browserSignInTimeoutSeconds`; the extra margin lets it report its
   /// own timeout instead of being killed first.
-  public func signIn(provider: String, profile: String) throws {
-    let arguments = ["auth", "login", provider, "--profile", profile, "--browser"]
+  public func signIn(profile: String) throws {
+    let arguments = ["auth", "login", "--profile", profile, "--browser"]
     _ = try runExpectingSuccess(
       arguments: arguments,
       timeoutSeconds: VaporConstants.Provider.browserSignInTimeoutSeconds + 30
     )
   }
 
-  public func syncNow() throws {
-    let arguments = ["sync-now", "--json"]
+  public func reconcile() throws {
+    let arguments = ["reconcile", "--json"]
     let data = try runExpectingSuccess(arguments: arguments)
     let response: AckResponse = try decode(data: data, arguments: arguments)
     guard response.accepted else {
       throw VaporCLIServiceError.malformedResponse(
         arguments: arguments,
-        detail: "daemon refused the sync: \(response.note ?? "")"
+        detail: "daemon refused the reconcile: \(response.note ?? "")"
       )
     }
   }
@@ -269,7 +269,7 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
     let arguments = ["service", "acknowledge", "--json"]
     let data = try runExpectingSuccess(arguments: arguments)
     let response: ActionResponse = try decode(data: data, arguments: arguments)
-    guard response.result == "acknowledged" else {
+    guard response.result == VaporConstants.ServiceResult.acknowledged else {
       throw VaporCLIServiceError.malformedResponse(
         arguments: arguments,
         detail: "unexpected acknowledge result \"\(response.result)\""
@@ -277,16 +277,13 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
     }
   }
 
-  // MARK: - JSON contract (mirrors core/cli/src/commands/service.rs)
+  // MARK: - JSON contract (mirrors core/cli/src/commands/service.rs and
+  // core/ipc/src/protocol.rs; keys are camelCase, so the property names
+  // are the keys)
 
   private struct ActionResponse: Decodable {
     let result: String
     let remainingSeconds: Double?
-
-    enum CodingKeys: String, CodingKey {
-      case result
-      case remainingSeconds = "remaining_seconds"
-    }
   }
 
   /// Mirrors `core/ipc/src/protocol.rs::AckResponse`.
@@ -298,39 +295,20 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
   private struct HealthResponse: Decodable {
     let health: String
     let remainingSeconds: Double?
-
-    enum CodingKeys: String, CodingKey {
-      case health
-      case remainingSeconds = "remaining_seconds"
-    }
   }
 
   private struct StatusResponse: Decodable {
     struct CrashLoop: Decodable {
       let paused: Bool
       let consecutiveCrashes: Int
-      let lastCrashAtMilliseconds: UInt64?
+      let lastCrashAtMs: UInt64?
       let awaitingRestart: Bool
-
-      enum CodingKeys: String, CodingKey {
-        case paused
-        case consecutiveCrashes = "consecutive_crashes"
-        case lastCrashAtMilliseconds = "last_crash_at_ms"
-        case awaitingRestart = "awaiting_restart"
-      }
     }
 
     let status: String
     let label: String
     let autoLaunch: Bool
     let crashLoop: CrashLoop
-
-    enum CodingKeys: String, CodingKey {
-      case status
-      case label
-      case autoLaunch = "auto_launch"
-      case crashLoop = "crash_loop"
-    }
   }
 
   /// Mirrors `core/ipc/src/protocol.rs::StatusResponse` (the fields the
@@ -339,7 +317,7 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
     let runState: String
     let throttleState: String
     let throttleReason: String
-    let providerName: String
+    let provider: String
     let queueDepth: UInt64
     let failedIntents: UInt64
     let configRestartRequired: String?
@@ -349,44 +327,20 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
     let reconcileDetail: String?
     let profiles: [ProfileResponse]?
 
-    enum CodingKeys: String, CodingKey {
-      case runState = "run_state"
-      case throttleState = "throttle_state"
-      case throttleReason = "throttle_reason"
-      case providerName = "provider_name"
-      case queueDepth = "queue_depth"
-      case failedIntents = "failed_intents"
-      case configRestartRequired = "config_restart_required"
-      case decisionsPending = "decisions_pending"
-      case conflictsUnresolved = "conflicts_unresolved"
-      case reconcileState = "reconcile_state"
-      case reconcileDetail = "reconcile_detail"
-      case profiles
-    }
-
     struct ProfileResponse: Decodable {
       let id: String?
-      let providerName: String?
+      let provider: String?
       let runState: String?
       let reason: String?
       let suspendedReason: String?
       let signInRequired: Bool?
-
-      enum CodingKeys: String, CodingKey {
-        case id
-        case providerName = "provider_name"
-        case runState = "run_state"
-        case reason
-        case suspendedReason = "suspended_reason"
-        case signInRequired = "sign_in_required"
-      }
     }
 
     /// The profiles whose provider refused the sign-in.
     var signInRequired: [SignInRequest] {
       (profiles ?? []).compactMap { profile in
         guard profile.signInRequired == true, let id = profile.id,
-          let provider = profile.providerName
+          let provider = profile.provider
         else {
           return nil
         }
@@ -417,17 +371,17 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
   private func decodeAction(data: Data, arguments: [String]) throws -> DaemonLifecycleActionResult {
     let response: ActionResponse = try decode(data: data, arguments: arguments)
     switch response.result {
-    case "unchanged":
+    case VaporConstants.ServiceResult.unchanged:
       return .unchanged
-    case "started":
+    case VaporConstants.ServiceResult.started:
       return .started
-    case "stopped":
+    case VaporConstants.ServiceResult.stopped:
       return .stopped
-    case "relaunch_deferred":
+    case VaporConstants.ServiceResult.relaunchDeferred:
       return .relaunchDeferred(response.remainingSeconds ?? 0)
-    case "crash_loop_paused":
+    case VaporConstants.ServiceResult.crashLoopPaused:
       return .relaunchDeferred(.infinity)
-    case "not_installed":
+    case VaporConstants.ServiceResult.notInstalled:
       return .notInstalled
     default:
       throw VaporCLIServiceError.malformedResponse(

@@ -25,7 +25,7 @@ table, quarantine folder, or database:
   filesystem simply is it.
 - **The name is machine-parseable.** `vapor_daemon::conflict::
   parse_conflict_copy_name` is the strict inverse of the generator: it
-  recovers the canonical name, origin device, divergence timestamp, and
+  recovers the original name, origin device, divergence timestamp, and
   collision sequence, and rejects user files that merely contain the
   marker text (the timestamp segment must be a 12+ digit epoch-ms value).
 
@@ -44,7 +44,7 @@ any surface.
 - The daemon pushes a `conflict` event onto the activity timeline in the
   tick that created a copy, and `vapor status` carries a cumulative
   conflict counter (IPC schema v2).
-- `vapor status` also carries `conflicts_unresolved` (total and per
+- `vapor status` also carries `conflictsUnresolved` (total and per
   profile): the paths in the sync index whose name parses as a conflict
   copy, plus the copies still queued for their first upload, so the
   count covers a copy from the tick that created it until the user's
@@ -61,9 +61,9 @@ any surface.
 ### 2. List
 
 `vapor conflicts list [--json]` scans every enabled profile's local root
-and reports, per conflict: profile, canonical path, copy path, origin
-device, divergence time, both sizes, and whether the canonical file still
-exists. It reads config directly, so it works with the daemon stopped, and
+and reports, per conflict: profile, the original's path (`originalPath`),
+the copy's path (`copyPath`), origin device, divergence time, both sizes,
+and whether the original still exists. It reads config directly, so it works with the daemon stopped, and
 it reports unreadable roots (`skippedRoots`) and unreadable
 subdirectories encountered mid-walk (`skippedDirectories`) explicitly
 rather than returning a silently incomplete empty list.
@@ -75,10 +75,12 @@ for lifecycle (`vapor service … --json`).
 
 ### 3. Resolve
 
-`vapor conflicts resolve <copy-path> --keep <canonical|copy>`:
+`vapor conflicts resolve <copy-path> --choose <original|copy>`. The
+original is the file at the path both sides edited; it holds the version
+that reached the cloud first. The copy is the other version.
 
-- `--keep canonical` deletes the copy.
-- `--keep copy` renames the copy over the canonical name (atomic on Unix;
+- `--choose original` keeps the original and deletes the copy.
+- `--choose copy` moves the copy over the original (atomic on Unix;
   remove-then-rename on Windows, where the at-risk window only ever holds
   the version being discarded).
 
@@ -97,8 +99,8 @@ locally.
 Name-clash copies: a copy that stands in for a cloud name this
 filesystem folds onto another local name (`data-flow.md` §Directory and
 symlink semantics, name collisions) is aliased to its own cloud
-object. `--keep canonical` drops that cloud object through the normal
-delete path; `--keep copy` is refused with the reason, since renaming
+object. `--choose original` drops that cloud object through the normal
+delete path; `--choose copy` is refused with the reason, since renaming
 the copy over the kept name would only swap which cloud object is
 stranded.
 
@@ -115,7 +117,7 @@ a file on disk and a decision is a row in the state DB.
 | Surface | Notify | List | Resolve |
 |---|---|---|---|
 | `vapor` CLI (shipped) | `vapor timeline` / `vapor status` counter | `vapor conflicts list [--json]` | `vapor conflicts resolve` |
-| macOS app | the menu bar mark in the brand colour and a count in the menu while `conflicts_unresolved` is non-zero (shipped); native notification on `conflict` timeline events (planned, `docs/tasks/macos.md`) | conflicts pane driving `vapor conflicts list --json` (planned) | per-row keep-canonical / keep-copy actions driving `vapor conflicts resolve --json` (planned) |
+| macOS app | the menu bar mark in the brand colour and a count in the menu while `conflictsUnresolved` is non-zero (shipped); native notification on `conflict` timeline events (planned, `docs/tasks/macos.md`) | conflicts pane driving `vapor conflicts list --json` (planned) | per-row keep-original / keep-copy actions driving `vapor conflicts resolve --json` (planned) |
 | Windows / Linux apps (future waves) | same model over the same CLI | same | same |
 
 App shells never reimplement scan or resolution logic — the CLI is the

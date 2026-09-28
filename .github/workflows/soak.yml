@@ -121,6 +121,6 @@ jobs:
             .vapor/e2e/soak-*/soak-status.json
             .vapor/e2e/soak-*/ops.jsonl
             .vapor/e2e/soak-*/model.json
-            .vapor/e2e/soak-*/home/logs/vapord.logs
+            .vapor/e2e/soak-*/home/logs/vapord.log
             .vapor/e2e/soak-last-report.json
           if-no-files-found: ignore

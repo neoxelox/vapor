@@ -221,7 +221,7 @@ mod tests {
             &path,
             r#"{
   "autoLaunch": false,
-  "useGitIgnore": true,
+  "useGitignore": true,
   "languageCode": "en"
 }
 "#,
@@ -233,7 +233,7 @@ mod tests {
 
         let contents = fs::read_to_string(&path).expect("file");
         assert!(contents.contains("\"autoLaunch\": true"));
-        assert!(contents.contains("\"useGitIgnore\": true"));
+        assert!(contents.contains("\"useGitignore\": true"));
         assert!(contents.contains("\"languageCode\": \"en\""));
     }
 
@@ -241,12 +241,12 @@ mod tests {
     fn json_file_store_inserts_auto_launch_when_only_other_keys_exist() {
         let temp = TempDir::new().expect("temp");
         let path = temp.path().join("vapor.json");
-        fs::write(&path, "{ \"useGitIgnore\": true }\n").expect("seed file");
+        fs::write(&path, "{ \"useGitignore\": true }\n").expect("seed file");
         let store = JsonFileAutoLaunchSettingStore::new(path.clone());
         store.write(false).expect("write");
         let contents = fs::read_to_string(&path).expect("file");
         assert!(contents.contains("\"autoLaunch\": false"));
-        assert!(contents.contains("\"useGitIgnore\": true"));
+        assert!(contents.contains("\"useGitignore\": true"));
     }
 
     #[test]

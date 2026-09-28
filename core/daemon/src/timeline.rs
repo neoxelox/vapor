@@ -136,14 +136,14 @@ mod tests {
     #[test]
     fn entries_are_ordered_and_sequenced() {
         let buffer = TimelineBuffer::new(10);
-        buffer.push("run_state", "default", "Running", ts(1));
-        buffer.push("throttle", "default", "IdleDrain", ts(2));
+        buffer.push("run-state", "default", "running", ts(1));
+        buffer.push("throttle", "default", "idle-drain", ts(2));
 
         let entries = buffer.snapshot(None);
         assert_eq!(entries.len(), 2);
         assert!(entries[0].sequence < entries[1].sequence);
         assert!(entries[0].timestamp <= entries[1].timestamp);
-        assert_eq!(entries[0].kind, "run_state");
+        assert_eq!(entries[0].kind, "run-state");
     }
 
     #[test]

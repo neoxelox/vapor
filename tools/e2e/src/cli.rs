@@ -126,11 +126,6 @@ impl Cli {
         )
     }
 
-    /// A drain hint; allowed to fail benignly when it races a state flip.
-    pub fn flush_now(&self) {
-        let _ = self.run(&["flush-now"]);
-    }
-
     pub fn reconcile(&self) -> Result<(), Failure> {
         self.ok(&["reconcile"]).map(|_| ())
     }

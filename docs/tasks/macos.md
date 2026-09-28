@@ -157,12 +157,13 @@ Exit gate:
 Depends on: `docs/tasks/core.md` C5 (IPC channel) and C8-27..31 (diagnostics
 surface).
 
-- [ ] M3-1 Replace placeholder app controls (`Pause/Resume`, `Flush now`)
+- [ ] M3-1 Replace placeholder app controls (`Pause/Resume`)
       with real IPC-backed calls; hide any control that does not yet have a
       backing endpoint.
       *(Landed: `Sync now` in the menu and on the Dashboard drives
-      `vapor sync-now --json`; the status detail names a scan the
-      throttle is holding. Pause/Resume and Flush now remain.)*
+      `vapor reconcile --json`; the status detail names a scan the
+      throttle is holding. Pause/Resume remain, driving
+      `vapor pause --json` / `vapor resume --json`.)*
 - [ ] M3-2 Implement full menubar state model + reasoned status messages
       consumed via IPC.
       *(Partly landed in the full-repo review: the health tick reads
@@ -177,15 +178,15 @@ surface).
 - [ ] M3-4 Implement per-intent "why stuck" diagnostics UI per
       `docs/architecture/ipc-contracts.md` diagnostics section (filterable
       list + per-row drill-down; surface
-      `dropped_incoming_event_count`).
+      `droppedIncomingEvents`).
 - [ ] M3-5 Implement the live timeline tab (bounded buffer; default 1000
       events; non-persistent across relaunch).
 - [ ] M3-6 Tests for timeline ordering, truncation at max length,
       IPC field-omission.
 - [ ] M3-7 Conflicts pane: list unresolved keep-both conflicts by driving
       the bundled CLI (`vapor conflicts list --json` — the same shim
-      pattern as lifecycle) with per-row keep-canonical / keep-copy
-      actions via `vapor conflicts resolve --json`, plus a Reveal in
+      pattern as lifecycle) with per-row keep-original / keep-copy
+      actions via `vapor conflicts resolve --choose … --json`, plus a Reveal in
       Finder affordance. No scan or resolution logic in Swift; the CLI is
       the single engine (`docs/architecture/conflict-resolution.md`).
 - [ ] M3-8 Conflict notification: native user notification on
@@ -195,7 +196,7 @@ surface).
       conflict. Naming the file inside the notification depends on
       core.md C8-71.
       *(Landed: the menu bar mark turns the brand colour and the menu
-      counts the conflicts while `conflicts_unresolved` from
+      counts the conflicts while `conflictsUnresolved` from
       `vapor status --json` is non-zero; `AppShellState.needsUserAction`
       is the one predicate every attention signal reads.)*
 - [ ] M3-9 Decisions pane: the questions the daemon parked, driving
@@ -203,24 +204,24 @@ surface).
       (`docs/architecture/data-flow.md` §Decisions): one row per open
       decision with its plain-language question and its short option
       list as buttons, and a native notification on `decision` timeline
-      events. Kinds today: `mass-deletion`, `root-missing`,
+      events. Kinds today: `mass-delete`, `root-missing`,
       `root-replaced`, `type-mismatch`.
       *(Landed: the menu bar mark turns the brand colour and the menu
-      counts the questions while `decisions_pending` is non-zero.)*
+      counts the questions while `decisionsPending` is non-zero.)*
 - [ ] M3-10 Trash pane: what Vapor removed on this device, driving
       `vapor trash list --json` / `restore --json` / `empty --json`,
       with the reason and the original path per row and a Restore
       action; the `trash` settings (`enabled`, `retentionDays`,
-      `useSystemTrash`) in Settings.
+      `useSystem`) in Settings.
 - [ ] M3-11 Root state: a profile held on a missing or replaced sync
-      root (`suspended_reason` / the run-state reason naming the
+      root (`suspendedReason` / the run-state reason naming the
       decision) shows as its own state with the decision's options,
       not as a generic error.
 - [x] M3-12 Sign-in state: a profile whose provider refused the sign-in
-      (`sign_in_required` on its `vapor status --json` row) turns the
+      (`signInRequired` on its `vapor status --json` row) turns the
       menu bar mark the brand colour and shows a notice on the Dashboard
       and in the menu with a `Sign In…` button that runs
-      `vapor auth login <provider> --profile <id> --browser` through the
+      `vapor auth login --profile <id> --browser` through the
       bundled CLI off the lifecycle queue. The daemon holds the profile
       and lifts the hold on its own once the sign-in lands
       (`docs/operations/provider-auth-operations.md`).

@@ -286,7 +286,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S01 | config set/get round-trips through `vapor.json`; structured keys are stored as JSON |
 | S02 | daemon reaches Running, creates the missing local sync root, binds the IPC socket |
 | S03 | local writes become durable intents and drain; the cloud root matches byte for byte |
-| S04 | pause flips run_state over IPC, resume restores it, the paused backlog drains |
+| S04 | pause flips runState over IPC, resume restores it, the paused backlog drains |
 | S05 | a second daemon on the same `VAPOR_DIR` exits non-zero saying one is already running |
 | S06 | `vapor doctor` reports no failures inside the sandbox, in text and `--json` |
 | S07 | clean SIGTERM shutdown, restart on the same state DB, post-restart writes converge |
@@ -295,7 +295,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S10 | uploads land byte for byte, a cloud-born file downloads through reconcile, POSIX modes survive |
 | S11 | a path that diverged on both sides while the daemon was down keeps both payloads |
 | S12 | pull-only materializes cloud content locally and removes a local-only file without uploading |
-| S13 | diagnostics answers over IPC; the support bundle exports config, logs, live captures, manifest |
+| S13 | diagnostics answers over IPC; `vapor report` exports config, logs, live captures, manifest |
 | S14 | ignored names never sync in either direction and never manufacture a conflict copy |
 | S15 | conflicts list finds a keep-both copy; resolve promotes it; the resolution syncs; the list drains |
 | S16 | a plain local rm removes the cloud copy |
@@ -313,7 +313,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S28 | a file deleted in the cloud while the daemon was down is removed here into the trash on restart when the local copy is unchanged, and re-uploaded when the local copy changed meanwhile |
 | S29 | push-only uploads, overwrites a divergent cloud edit, removes a cloud-only file, never downloads |
 | S30 | two profiles in one daemon sync their own roots with their own durable state and never cross |
-| S31 | a burst of local deletions is held whole behind a `mass-deletion` decision while other work continues; `vapor decisions resolve --choose apply` releases it |
+| S31 | a burst of local deletions is held whole behind a `mass-delete` decision while other work continues; `vapor decisions resolve --choose apply` releases it |
 | S32 | with the state DB deleted, a restart rebuilds the index from both trees without loss or invented conflicts |
 | S33 | two cloud files differing only by case both materialize locally, the second as a conflict copy aliased to its own cloud object; an edit to the copy reaches that object and the cloud gains no third file |
 | S34 | the cloud root disappears mid-run: sync blocks with Error; it returns: work resumes and converges |
@@ -333,7 +333,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S48 | renaming a synced file in the cloud renames the local file in place (same inode, no download) and leaves nothing in the trash |
 | S49 | a sync root that is a whole volume of its own gets its trash at `<volume>/.vapor/trash/`: a cloud deletion is a rename on that volume (same inode, no copy onto the runtime directory's volume), `vapor trash list` shows it, restore puts it back, and the `.vapor` directory inside the root never syncs (needs a disk image) |
 | S50 | a local file whose name is not valid UTF-8 opens an `unsyncable-name` decision, never reaches the cloud, and the question is withdrawn once the file is renamed; `skip` stops the asking (needs a filesystem that accepts such a name: Linux) |
-| S51 | a startup scan held by the throttle says so in status; `vapor sync-now` runs it under user activity and an offline divergence resolves as a keep-both copy |
+| S51 | a startup scan held by the throttle says so in status; `vapor reconcile` runs it under user activity and an offline divergence resolves as a keep-both copy |
 | S52 | push-only removes a cloud-only folder and everything under it, one entry at a time, and never leaves the delete retrying |
 | S53 | pull-only restores a synced folder removed on this device without leaving the folder's own event as a download that never completes, and removes a local-only folder file by file |
 | S54 | an append made in place on the cloud object, which keeps Vapor's op-id tag, reaches this device as the canonical file and is neither dropped as an echo nor turned into a conflict copy |

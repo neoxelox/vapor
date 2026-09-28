@@ -1768,7 +1768,7 @@ impl DurableStateDb {
     }
 
     /// Parks every pending intent of `kind` behind `decision_id` and
-    /// returns their paths. The mass-deletion guard calls this when it
+    /// returns their paths. The mass-delete guard calls this when it
     /// trips, so the decision holds the whole burst the question
     /// describes, not only the deletions that reached the executor.
     pub fn hold_pending_of_kind(
@@ -3777,7 +3777,7 @@ mod tests {
             .expect("leased");
         let decision = db
             .create_decision(
-                "mass-deletion",
+                "mass-delete",
                 DecisionScope::Batch,
                 None,
                 "Apply 1 deletion?",
@@ -3808,7 +3808,7 @@ mod tests {
         // Startup recovery leaves held rows alone.
         assert_eq!(db.recover_leased(timestamp_ms(100)).expect("recover"), 0);
         let open = db
-            .open_decision("mass-deletion", None)
+            .open_decision("mass-delete", None)
             .expect("open")
             .expect("exists");
         assert_eq!(open.id, decision);
@@ -3869,7 +3869,7 @@ mod tests {
             DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite")).expect("open");
         let decision = db
             .create_decision(
-                "mass-deletion",
+                "mass-delete",
                 DecisionScope::Batch,
                 None,
                 "?",

@@ -56,8 +56,8 @@ Most valuable to look at:
   writes a token to disk, a log, or an argv is a real finding.
 - **Log redaction** — `core/shared/src/logging.rs` and
   `core/providers/src/logging.rs` must keep tokens, auth headers, and
-  sensitive identifiers out of logs and support bundles
-  (`vapor support-bundle`).
+  sensitive identifiers out of logs and support reports
+  (`vapor report`).
 - **OAuth flow** — `core/providers/src/gdrive/oauth.rs`: PKCE handling,
   the loopback redirect, state validation, refresh handling.
 - **IPC** — `core/ipc/*`. The daemon listens on a Unix domain socket.
@@ -67,7 +67,7 @@ Most valuable to look at:
   `core/providers/src/paths.rs`. Vapor must never read or write outside
   the configured local and cloud roots. Path traversal, symlink
   escapes, and `..` handling all count.
-- **Data-destroying behaviour** — the mass-deletion guard
+- **Data-destroying behaviour** — the mass-delete guard
   (`core/daemon/src/safeguards.rs`), conflict resolution
   (`core/daemon/src/conflict.rs`), and loop prevention
   (`core/daemon/src/self_write_cache.rs`). Anything that silently

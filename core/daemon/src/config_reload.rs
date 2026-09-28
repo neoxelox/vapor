@@ -49,12 +49,12 @@ pub fn diff(applied: &VaporConfig, fresh: &VaporConfig) -> ConfigChange {
         }
     };
     live(
-        applied.use_git_ignore != fresh.use_git_ignore,
-        keys::KEY_USE_GIT_IGNORE,
+        applied.use_gitignore != fresh.use_gitignore,
+        keys::KEY_USE_GITIGNORE,
     );
     live(
-        applied.use_vapor_ignore != fresh.use_vapor_ignore,
-        keys::KEY_USE_VAPOR_IGNORE,
+        applied.use_vaporignore != fresh.use_vaporignore,
+        keys::KEY_USE_VAPORIGNORE,
     );
     live(
         applied.pre_ignore_rules != fresh.pre_ignore_rules,
@@ -81,14 +81,8 @@ pub fn diff(applied: &VaporConfig, fresh: &VaporConfig) -> ConfigChange {
             change.restart.push(key);
         }
     };
-    restart(
-        applied.local_sync_directory != fresh.local_sync_directory,
-        keys::KEY_LOCAL_SYNC_DIRECTORY,
-    );
-    restart(
-        applied.cloud_sync_directory != fresh.cloud_sync_directory,
-        keys::KEY_CLOUD_SYNC_DIRECTORY,
-    );
+    restart(applied.local_root != fresh.local_root, keys::KEY_LOCAL_ROOT);
+    restart(applied.cloud_root != fresh.cloud_root, keys::KEY_CLOUD_ROOT);
     restart(applied.provider != fresh.provider, keys::KEY_PROVIDER);
     restart(applied.sync_mode != fresh.sync_mode, keys::KEY_SYNC_MODE);
     restart(applied.profiles != fresh.profiles, keys::KEY_PROFILES);

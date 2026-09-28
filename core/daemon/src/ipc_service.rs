@@ -29,7 +29,7 @@ use crate::timeline::TimelineBuffer;
 pub struct DaemonStatusSnapshot {
     pub run_state: String,
     pub throttle_state: ThrottleState,
-    pub provider_name: String,
+    pub provider: String,
     pub throttle_reason: String,
     pub queue_depth: u64,
     pub failed_intents: u64,
@@ -56,7 +56,7 @@ impl Default for DaemonStatusSnapshot {
         Self {
             run_state: String::new(),
             throttle_state: ThrottleState::Light,
-            provider_name: String::new(),
+            provider: String::new(),
             throttle_reason: String::new(),
             queue_depth: 0,
             failed_intents: 0,
@@ -86,9 +86,9 @@ impl DaemonStatusSnapshot {
             .map(|decision| decision.reason.clone())
             .unwrap_or_default();
         Self {
-            run_state: format!("{:?}", snapshot.run_state),
+            run_state: snapshot.run_state.wire_name().to_string(),
             throttle_state: snapshot.throttle_state,
-            provider_name: app.provider_name().to_string(),
+            provider: app.provider_name().to_string(),
             throttle_reason,
             ..Self::default()
         }
@@ -204,8 +204,8 @@ impl Service for DaemonIpcService {
         StatusResponse {
             schema_version: current,
             run_state: snapshot.run_state.clone(),
-            throttle_state: format!("{:?}", snapshot.throttle_state),
-            provider_name: snapshot.provider_name.clone(),
+            throttle_state: snapshot.throttle_state.wire_name().to_string(),
+            provider: snapshot.provider.clone(),
             throttle_reason: snapshot.throttle_reason.clone(),
             daemon_id: format!("vapord/{}", crate::build_info::VERSION),
             queue_depth: snapshot.queue_depth,
@@ -234,27 +234,11 @@ impl Service for DaemonIpcService {
         Self::ack(true, "resume requested; runtime will apply on next tick")
     }
 
-    fn flush_now(&self) -> AckResponse {
-        self.control.request_flush();
-        Self::ack(
-            true,
-            "flush hint recorded; runtime drains opportunistically already",
-        )
-    }
-
     fn reconcile(&self) -> AckResponse {
         self.control.request_reconcile();
         Self::ack(
             true,
-            "reconcile requested; runtime will enqueue on next tick",
-        )
-    }
-
-    fn sync_now(&self) -> AckResponse {
-        self.control.request_sync_now();
-        Self::ack(
-            true,
-            "sync requested; the scan runs under any throttle state but Suspended and deferred work is released",
+            "reconcile requested; the scan runs under any throttle state but suspended and deferred work is released",
         )
     }
 
@@ -351,7 +335,7 @@ mod tests {
         DaemonStatusSnapshot {
             run_state: run_state.to_string(),
             throttle_state: throttle,
-            provider_name: "filesystem".to_string(),
+            provider: "filesystem".to_string(),
             throttle_reason: reason.to_string(),
             ..DaemonStatusSnapshot::default()
         }
@@ -361,15 +345,15 @@ mod tests {
     fn status_response_uses_published_snapshot() {
         let service = DaemonIpcService::new(
             snapshot(
-                "Running",
+                "running",
                 ThrottleState::IdleDrain,
                 "idle, plugged in, and cool",
             ),
             Arc::new(RuntimeControl::new()),
         );
         let status = service.status();
-        assert_eq!(status.run_state, "Running");
-        assert_eq!(status.throttle_state, "IdleDrain");
+        assert_eq!(status.run_state, "running");
+        assert_eq!(status.throttle_state, "idle-drain");
         assert!(status.daemon_id.starts_with("vapord/"));
     }
 
@@ -377,7 +361,7 @@ mod tests {
     fn pause_records_pause_request_on_runtime_control() {
         let control = Arc::new(RuntimeControl::new());
         let service = DaemonIpcService::new(
-            snapshot("Running", ThrottleState::IdleDrain, "idle"),
+            snapshot("running", ThrottleState::IdleDrain, "idle"),
             control.clone(),
         );
         let ack = service.pause();
@@ -389,7 +373,7 @@ mod tests {
     fn resume_records_resume_request_on_runtime_control() {
         let control = Arc::new(RuntimeControl::new());
         let service = DaemonIpcService::new(
-            snapshot("Paused", ThrottleState::IdleDrain, "user pause"),
+            snapshot("paused", ThrottleState::IdleDrain, "user pause"),
             control.clone(),
         );
         let ack = service.resume();
@@ -398,15 +382,13 @@ mod tests {
     }
 
     #[test]
-    fn flush_now_and_reconcile_set_their_respective_flags() {
+    fn reconcile_sets_the_reconcile_flag() {
         let control = Arc::new(RuntimeControl::new());
         let service = DaemonIpcService::new(
-            snapshot("Running", ThrottleState::IdleDrain, "idle"),
+            snapshot("running", ThrottleState::IdleDrain, "idle"),
             control.clone(),
         );
-        let _ = service.flush_now();
         let _ = service.reconcile();
-        assert!(control.take_flush_request());
         assert!(control.take_reconcile_request());
     }
 
@@ -414,9 +396,9 @@ mod tests {
     fn timeline_serves_the_shared_buffer_in_order() {
         let timeline = TimelineBuffer::new(10);
         timeline.push(
-            "run_state",
+            "run-state",
             "default",
-            "Running",
+            "running",
             SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_000),
         );
         timeline.push(
@@ -426,13 +408,13 @@ mod tests {
             SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(2_000),
         );
         let service = DaemonIpcService::with_timeline(
-            snapshot("Running", ThrottleState::IdleDrain, "idle"),
+            snapshot("running", ThrottleState::IdleDrain, "idle"),
             Arc::new(RuntimeControl::new()),
             timeline,
         );
         let response = service.timeline();
         assert_eq!(response.entries.len(), 2);
-        assert_eq!(response.entries[0].kind, "run_state");
+        assert_eq!(response.entries[0].kind, "run-state");
         assert_eq!(response.entries[1].kind, "conflict");
         assert!(response.entries[0].timestamp_ms < response.entries[1].timestamp_ms);
         assert_eq!(response.entries[0].profile_id, "default");
@@ -440,13 +422,13 @@ mod tests {
 
     #[test]
     fn diagnostics_serves_the_published_intent_rows() {
-        let mut published = snapshot("Running", ThrottleState::IdleDrain, "idle");
+        let mut published = snapshot("running", ThrottleState::IdleDrain, "idle");
         published.intent_diagnostics = vec![IntentDiagnostic {
             intent_id: 7,
             profile_id: "default".to_string(),
             path: "/tmp/x.txt".to_string(),
             action: "upload".to_string(),
-            stage: "Retrying".to_string(),
+            stage: "retrying".to_string(),
             elapsed_in_stage_ms: 1_500,
             attempt_count: 3,
             last_error: "transient provider failure".to_string(),
@@ -456,23 +438,23 @@ mod tests {
         let service = DaemonIpcService::new(published, Arc::new(RuntimeControl::new()));
         let diagnostics = service.diagnostics();
         assert_eq!(diagnostics.intents.len(), 1);
-        assert_eq!(diagnostics.intents[0].stage, "Retrying");
+        assert_eq!(diagnostics.intents[0].stage, "retrying");
         assert_eq!(diagnostics.dropped_incoming_events, 4);
     }
 
     #[test]
     fn publish_updates_subsequent_status_calls() {
         let service = DaemonIpcService::new(
-            snapshot("Running", ThrottleState::IdleDrain, "idle"),
+            snapshot("running", ThrottleState::IdleDrain, "idle"),
             Arc::new(RuntimeControl::new()),
         );
         service.publish(snapshot(
-            "Paused",
+            "paused",
             ThrottleState::Throttled,
             "user activity is active",
         ));
         let status = service.status();
-        assert_eq!(status.run_state, "Paused");
-        assert_eq!(status.throttle_state, "Throttled");
+        assert_eq!(status.run_state, "paused");
+        assert_eq!(status.throttle_state, "throttled");
     }
 }

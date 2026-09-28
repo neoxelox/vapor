@@ -93,7 +93,7 @@ echo hi > "<printed local root>/demo.txt"    # feed the watcher
 $vapor status --json                         # daemon state
 $vapor diagnostics --json                    # why an intent is stuck
 $vapor logs --tail 50                        # watch the pipeline react
-$vapor pause / resume / flush-now / reconcile
+$vapor pause / resume / reconcile
 target/debug/vapor-e2e verify-trees "<local>" "<cloud>"   # tree oracle by hand
 ```
 
@@ -128,11 +128,11 @@ Things the product does on purpose that a scenario must account for:
 
 - A deletion of a synced file waits one settle window (3 s) before it
   lands, so a rename can be recognised as a move; budget for it in
-  waits, and expect a delete burst to join a `mass-deletion` hold over
+  waits, and expect a delete burst to join a `mass-delete` hold over
   a few ticks rather than at once.
 - A decision (`vapor decisions list --json`) holds only its scope and
-  never pauses the daemon: assert `run_state` stays `Running` and
-  `decisions_pending` counts it; answer with `vapor decisions resolve`.
+  never pauses the daemon: assert `runState` stays `running` and
+  `decisionsPending` counts it; answer with `vapor decisions resolve`.
   While a sync root is missing or replaced the profile holds instead
   (`Error`, with a `root-missing` or `root-replaced` decision), and the
   daemon starts in `Error` when a local root is missing: use

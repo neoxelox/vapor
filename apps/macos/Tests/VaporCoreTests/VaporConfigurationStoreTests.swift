@@ -17,10 +17,10 @@ func loadCreatesDefaultConfigurationAndRuntimeDirectories() throws {
   let configuration = store.load()
 
   #expect(configuration.autoLaunch == true)
-  #expect(configuration.useGitIgnore == true)
-  #expect(configuration.useVaporIgnore == true)
-  #expect(configuration.localSyncDirectory == VaporConfiguration.defaultLocalSyncDirectory)
-  #expect(configuration.cloudSyncDirectory == nil, "the provider's default is the daemon's call")
+  #expect(configuration.useGitignore == true)
+  #expect(configuration.useVaporignore == true)
+  #expect(configuration.localRoot == VaporConfiguration.defaultLocalRoot)
+  #expect(configuration.cloudRoot == nil, "the provider's default is the daemon's call")
   #expect(configuration.preIgnoreRules == VaporConfiguration.defaultPreIgnoreRules)
   #expect(configuration.postIgnoreRules == VaporConfiguration.defaultPostIgnoreRules)
   #expect(configuration.languageCode == VaporConfiguration.defaultLanguageCode)
@@ -49,10 +49,10 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
 
   let configuration = VaporConfiguration(
     autoLaunch: false,
-    useGitIgnore: false,
-    useVaporIgnore: false,
-    localSyncDirectory: "~/Desktop/Vapor",
-    cloudSyncDirectory: "/RemoteVapor",
+    useGitignore: false,
+    useVaporignore: false,
+    localRoot: "~/Desktop/Vapor",
+    cloudRoot: "/RemoteVapor",
     preIgnoreRules: "",
     postIgnoreRules: "*.bak",
     languageCode: "en",
@@ -63,10 +63,10 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
   let loaded = store.load()
 
   #expect(loaded.autoLaunch == false)
-  #expect(loaded.useGitIgnore == false)
-  #expect(loaded.useVaporIgnore == false)
-  #expect(loaded.localSyncDirectory == "~/Desktop/Vapor")
-  #expect(loaded.cloudSyncDirectory == "/RemoteVapor")
+  #expect(loaded.useGitignore == false)
+  #expect(loaded.useVaporignore == false)
+  #expect(loaded.localRoot == "~/Desktop/Vapor")
+  #expect(loaded.cloudRoot == "/RemoteVapor")
   #expect(loaded.preIgnoreRules.isEmpty)
   #expect(loaded.postIgnoreRules == "*.bak")
   #expect(loaded.languageCode == "en")
@@ -94,8 +94,8 @@ func loadDefaultsMissingKeysWithoutDroppingOtherSavedValues() throws {
   let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL)
   let partialConfiguration = try JSONSerialization.data(
     withJSONObject: [
-      "useGitIgnore": false,
-      "localSyncDirectory": "~/Projects/Vapor",
+      "useGitignore": false,
+      "localRoot": "~/Projects/Vapor",
       "postIgnoreRules": "*.bak",
       "timelineLimit": 42,
     ],
@@ -106,8 +106,8 @@ func loadDefaultsMissingKeysWithoutDroppingOtherSavedValues() throws {
   let configuration = store.load()
 
   #expect(configuration.autoLaunch == true)
-  #expect(configuration.useGitIgnore == false)
-  #expect(configuration.localSyncDirectory == "~/Projects/Vapor")
+  #expect(configuration.useGitignore == false)
+  #expect(configuration.localRoot == "~/Projects/Vapor")
   #expect(configuration.postIgnoreRules == "*.bak")
   #expect(configuration.languageCode == "en")
   #expect(configuration.timelineLimit == 42)
@@ -128,7 +128,7 @@ func loadResultPreservesMalformedConfigurationFileAndReportsIssue() throws {
 
   try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
   let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL)
-  let malformedContents = "{\n  \"autoLaunch\": true,\n  \"useGitIgnore\":\n".data(using: .utf8)!
+  let malformedContents = "{\n  \"autoLaunch\": true,\n  \"useGitignore\":\n".data(using: .utf8)!
   try malformedContents.write(to: configurationURL, options: .atomic)
 
   let result = store.loadResult()
@@ -158,7 +158,7 @@ func loadSaveRoundTripPreservesRuntimeOwnedKeysAndDeviceId() throws {
       "deviceId": "mac-studio-01",
       "provider": "gdrive",
       "syncMode": "pull-only",
-      "profiles": [{"id": "work", "localSyncDirectory": "~/Work"}],
+      "profiles": [{"id": "work", "localRoot": "~/Work"}],
       "resourceLimits": {"cpuPercent": 20},
       "idleBoost": {"enabled": false}
     }
@@ -234,12 +234,12 @@ func saveMergesOntoDiskAndPreservesDaemonOwnedKeys() throws {
   try Data(daemonWritten.utf8).write(to: configURL)
 
   // The app saves its (stale) snapshot after a settings toggle.
-  appConfig.useGitIgnore = false
+  appConfig.useGitignore = false
   try store.save(appConfig)
 
   let reloaded = store.load()
   // The app-modeled change applied...
-  #expect(reloaded.useGitIgnore == false)
+  #expect(reloaded.useGitignore == false)
   // ...and the daemon-owned keys survived (not clobbered by the stale
   // snapshot).
   #expect(reloaded.deviceId == "device-xyz")

@@ -10,13 +10,10 @@
 //! The first batch of control requests:
 //!
 //! - `pause` / `resume` — flip the run-state.
-//! - `flush_now` — informational nudge; the runtime drains
-//!   opportunistically already.
-//! - `reconcile` — schedule a fresh whole-scope reconcile against the
-//!   local sync directory.
-//! - `sync_now` — the user's on-demand sync: a whole-scope reconcile
-//!   admitted under any throttle state but `Suspended`, plus the flush
-//!   boost, so what the scan finds moves at once.
+//! - `reconcile` — the user's on-demand sync: a whole-scope reconcile
+//!   admitted under any throttle state but `Suspended`, plus a short
+//!   boost that releases deferred work, so what the scan finds moves at
+//!   once.
 
 use std::sync::{Arc, Mutex};
 
@@ -32,9 +29,7 @@ struct RuntimeControlInner {
     /// `Some(true)` to flip the run-state to `Paused`; `Some(false)`
     /// to flip back to `Running`. `None` means no pending request.
     pause_request: Option<bool>,
-    flush_pending: bool,
     reconcile_pending: bool,
-    sync_now_pending: bool,
     /// Set by `DaemonRuntime::attach_control` so control requests wake
     /// the tick loop immediately instead of waiting out the sleep.
     waker: Option<Arc<TickWaker>>,
@@ -70,18 +65,8 @@ impl RuntimeControl {
         self.notify_waker();
     }
 
-    pub fn request_flush(&self) {
-        self.with_inner(|inner| inner.flush_pending = true);
-        self.notify_waker();
-    }
-
     pub fn request_reconcile(&self) {
         self.with_inner(|inner| inner.reconcile_pending = true);
-        self.notify_waker();
-    }
-
-    pub fn request_sync_now(&self) {
-        self.with_inner(|inner| inner.sync_now_pending = true);
         self.notify_waker();
     }
 
@@ -90,19 +75,9 @@ impl RuntimeControl {
         self.with_inner(|inner| inner.pause_request.take())
     }
 
-    /// Returns + clears any pending flush request.
-    pub fn take_flush_request(&self) -> bool {
-        self.with_inner(|inner| std::mem::take(&mut inner.flush_pending))
-    }
-
     /// Returns + clears any pending reconcile request.
     pub fn take_reconcile_request(&self) -> bool {
         self.with_inner(|inner| std::mem::take(&mut inner.reconcile_pending))
-    }
-
-    /// Returns + clears any pending sync-now request.
-    pub fn take_sync_now_request(&self) -> bool {
-        self.with_inner(|inner| std::mem::take(&mut inner.sync_now_pending))
     }
 
     fn with_inner<R>(&self, body: impl FnOnce(&mut RuntimeControlInner) -> R) -> R {
@@ -130,14 +105,6 @@ mod tests {
         control.request_pause();
         control.request_resume();
         assert_eq!(control.take_pause_request(), Some(false));
-    }
-
-    #[test]
-    fn flush_request_clears_after_take() {
-        let control = RuntimeControl::new();
-        control.request_flush();
-        assert!(control.take_flush_request());
-        assert!(!control.take_flush_request());
     }
 
     #[test]

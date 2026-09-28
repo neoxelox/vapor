@@ -8,7 +8,7 @@
   - local dev plus tests/CI via repository scripts: `./.vapor`
 - Runtime layout:
   - config: `<vapor_dir>/vapor.json`
-  - logs: `<vapor_dir>/logs/vapor.logs` (app), `<vapor_dir>/logs/vapord.logs`
+  - logs: `<vapor_dir>/logs/vapor.log` (app), `<vapor_dir>/logs/vapord.log`
     (daemon), plus the service manager's `vapord.stdout.log` /
     `vapord.stderr.log` redirects; each rotates at 8 MiB keeping three
     generations

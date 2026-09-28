@@ -15,7 +15,7 @@ pub struct ReconcileController {
     slice_budget: Duration,
     running: Option<RunningReconcile>,
     clock: Arc<dyn Clock>,
-    /// The user asked for a scan now (`vapor sync-now`, the app's Sync
+    /// The user asked for a scan now (`vapor reconcile`, the app's Sync
     /// now). While set, admission and the checkpoint accept every
     /// throttle state but `Suspended`, which still stops everything;
     /// the slice budget keeps the walk interruptible. Cleared when a

@@ -31,21 +31,21 @@ use crate::constants;
 #[serde(rename_all = "camelCase")]
 pub struct VaporConfig {
     pub auto_launch: bool,
-    pub use_git_ignore: bool,
-    pub use_vapor_ignore: bool,
-    pub local_sync_directory: String,
+    pub use_gitignore: bool,
+    pub use_vaporignore: bool,
+    pub local_root: String,
     /// The cloud root, or `None` for the provider's own default
-    /// (`constants::filtering::default_cloud_sync_directory`), since a
+    /// (`constants::filtering::default_cloud_root`), since a
     /// remote provider and the filesystem provider need different
-    /// defaults; [`Self::effective_cloud_sync_directory`] resolves it.
-    pub cloud_sync_directory: Option<String>,
+    /// defaults; [`Self::effective_cloud_root`] resolves it.
+    pub cloud_root: Option<String>,
     pub pre_ignore_rules: String,
     pub post_ignore_rules: String,
     pub language_code: String,
     pub timeline_limit: i64,
     /// Provider selection: `filesystem` (default pre-GA) or
     /// `gdrive`. When `filesystem` is selected,
-    /// `cloud_sync_directory` is reinterpreted as an absolute local
+    /// `cloud_root` is reinterpreted as an absolute local
     /// directory that plays the cloud role.
     pub provider: String,
     /// Sync direction selector: `two-way` (default),
@@ -65,7 +65,7 @@ pub struct VaporConfig {
     /// config load — so a non-daemon consumer of `load_from` sees the raw
     /// values.
     pub resource_limits: ResourceLimitsConfig,
-    /// Idle-boost group. `boost*Percent` values below their matching
+    /// Idle-boost group. `*Percent` ceilings below their matching
     /// `resourceLimits` ceiling are clamped up at daemon budget-resolve
     /// time (same place as `resource_limits`), not at config load.
     pub idle_boost: IdleBoostConfig,
@@ -84,8 +84,8 @@ pub struct TrashConfig {
     pub enabled: bool,
     #[serde(default = "default_trash_retention_days")]
     pub retention_days: u32,
-    #[serde(default = "default_trash_use_system_trash")]
-    pub use_system_trash: bool,
+    #[serde(default = "default_trash_use_system")]
+    pub use_system: bool,
 }
 
 fn default_trash_enabled() -> bool {
@@ -96,8 +96,8 @@ fn default_trash_retention_days() -> u32 {
     constants::trash::DEFAULT_RETENTION_DAYS
 }
 
-fn default_trash_use_system_trash() -> bool {
-    constants::trash::DEFAULT_USE_SYSTEM_TRASH
+fn default_trash_use_system() -> bool {
+    constants::trash::DEFAULT_USE_SYSTEM
 }
 
 impl Default for TrashConfig {
@@ -105,7 +105,7 @@ impl Default for TrashConfig {
         Self {
             enabled: default_trash_enabled(),
             retention_days: default_trash_retention_days(),
-            use_system_trash: default_trash_use_system_trash(),
+            use_system: default_trash_use_system(),
         }
     }
 }
@@ -125,7 +125,7 @@ pub struct ResourceLimitsConfig {
     /// the throttle ladder derives its ceiling from the machine's core
     /// count. Clamped into `1..=16` at daemon budget-resolve time.
     #[serde(default)]
-    pub max_concurrent_transfers: Option<u8>,
+    pub concurrent_transfers: Option<u8>,
 }
 
 fn default_cpu_percent() -> u8 {
@@ -144,47 +144,56 @@ impl Default for ResourceLimitsConfig {
             cpu_percent: default_cpu_percent(),
             memory_percent: default_memory_percent(),
             bandwidth_percent: default_bandwidth_percent(),
-            max_concurrent_transfers: None,
+            concurrent_transfers: None,
         }
     }
 }
 
-/// The `safeguards` config group. Values are clamped to their floors at
-/// daemon resolve time (`core/daemon/src/safeguards.rs`), not at load,
-/// so non-daemon consumers see the raw values.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+/// The `safeguards` config group: one object per safeguard. Values are
+/// clamped to their floors at daemon resolve time
+/// (`core/daemon/src/safeguards.rs`), not at load, so non-daemon
+/// consumers see the raw values.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SafeguardsConfig {
+    #[serde(default)]
+    pub mass_delete: MassDeleteConfig,
+}
+
+/// `safeguards.massDelete`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MassDeleteConfig {
     #[serde(default = "default_mass_delete_enabled")]
-    pub mass_delete_enabled: bool,
+    pub enabled: bool,
     #[serde(default = "default_mass_delete_threshold")]
-    pub mass_delete_threshold: u64,
+    pub threshold: u64,
     #[serde(default = "default_mass_delete_window_seconds")]
-    pub mass_delete_window_seconds: u64,
+    pub window_seconds: u64,
     #[serde(default = "default_mass_delete_ratio_percent")]
-    pub mass_delete_ratio_percent: u8,
+    pub ratio_percent: u8,
 }
 
 fn default_mass_delete_ratio_percent() -> u8 {
-    constants::engine::MASS_DELETE_RATIO_PERCENT
+    constants::safeguards::DEFAULT_MASS_DELETE_RATIO_PERCENT
 }
 fn default_mass_delete_enabled() -> bool {
     constants::safeguards::DEFAULT_MASS_DELETE_ENABLED
 }
 fn default_mass_delete_threshold() -> u64 {
-    constants::engine::MASS_DELETE_THRESHOLD as u64
+    constants::safeguards::DEFAULT_MASS_DELETE_THRESHOLD as u64
 }
 fn default_mass_delete_window_seconds() -> u64 {
-    constants::engine::MASS_DELETE_WINDOW_SECONDS
+    constants::safeguards::DEFAULT_MASS_DELETE_WINDOW_SECONDS
 }
 
-impl Default for SafeguardsConfig {
+impl Default for MassDeleteConfig {
     fn default() -> Self {
         Self {
-            mass_delete_enabled: default_mass_delete_enabled(),
-            mass_delete_threshold: default_mass_delete_threshold(),
-            mass_delete_window_seconds: default_mass_delete_window_seconds(),
-            mass_delete_ratio_percent: default_mass_delete_ratio_percent(),
+            enabled: default_mass_delete_enabled(),
+            threshold: default_mass_delete_threshold(),
+            window_seconds: default_mass_delete_window_seconds(),
+            ratio_percent: default_mass_delete_ratio_percent(),
         }
     }
 }
@@ -198,11 +207,11 @@ pub struct IdleBoostConfig {
     #[serde(default = "default_min_idle_seconds")]
     pub min_idle_seconds: u64,
     #[serde(default = "default_boost_cpu")]
-    pub boost_cpu_percent: u8,
+    pub cpu_percent: u8,
     #[serde(default = "default_boost_memory")]
-    pub boost_memory_percent: u8,
+    pub memory_percent: u8,
     #[serde(default = "default_boost_bandwidth")]
-    pub boost_bandwidth_percent: u8,
+    pub bandwidth_percent: u8,
     #[serde(default = "default_headroom_cpu")]
     pub headroom_cpu_percent: u8,
     #[serde(default = "default_ramp_up")]
@@ -218,13 +227,13 @@ fn default_min_idle_seconds() -> u64 {
     constants::idle_boost::DEFAULT_MIN_IDLE_SECONDS
 }
 fn default_boost_cpu() -> u8 {
-    constants::idle_boost::DEFAULT_BOOST_CPU_PERCENT
+    constants::idle_boost::DEFAULT_CPU_PERCENT
 }
 fn default_boost_memory() -> u8 {
-    constants::idle_boost::DEFAULT_BOOST_MEMORY_PERCENT
+    constants::idle_boost::DEFAULT_MEMORY_PERCENT
 }
 fn default_boost_bandwidth() -> u8 {
-    constants::idle_boost::DEFAULT_BOOST_BANDWIDTH_PERCENT
+    constants::idle_boost::DEFAULT_BANDWIDTH_PERCENT
 }
 fn default_headroom_cpu() -> u8 {
     constants::idle_boost::DEFAULT_HEADROOM_CPU_PERCENT
@@ -241,9 +250,9 @@ impl Default for IdleBoostConfig {
         Self {
             enabled: default_boost_enabled(),
             min_idle_seconds: default_min_idle_seconds(),
-            boost_cpu_percent: default_boost_cpu(),
-            boost_memory_percent: default_boost_memory(),
-            boost_bandwidth_percent: default_boost_bandwidth(),
+            cpu_percent: default_boost_cpu(),
+            memory_percent: default_boost_memory(),
+            bandwidth_percent: default_boost_bandwidth(),
             headroom_cpu_percent: default_headroom_cpu(),
             ramp_up_seconds: default_ramp_up(),
             ramp_down_seconds: default_ramp_down(),
@@ -260,22 +269,22 @@ pub struct ResourceLimitsOverride {
     pub cpu_percent: Option<u8>,
     pub memory_percent: Option<u8>,
     pub bandwidth_percent: Option<u8>,
-    pub max_concurrent_transfers: Option<u8>,
+    pub concurrent_transfers: Option<u8>,
 }
 
 /// Per-profile `idleBoost`. Every field is optional; the daemon merges
 /// each named value in the direction that makes boost more cautious:
-/// `enabled: false` wins daemon-wide, `boost*Percent`, `headroomCpuPercent`
-/// and `rampDownSeconds` are MIN-lowered, `minIdleSeconds` and
-/// `rampUpSeconds` are MAX-raised.
+/// `enabled: false` wins daemon-wide, the three `*Percent` ceilings,
+/// `headroomCpuPercent` and `rampDownSeconds` are MIN-lowered,
+/// `minIdleSeconds` and `rampUpSeconds` are MAX-raised.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct IdleBoostOverride {
     pub enabled: Option<bool>,
     pub min_idle_seconds: Option<u64>,
-    pub boost_cpu_percent: Option<u8>,
-    pub boost_memory_percent: Option<u8>,
-    pub boost_bandwidth_percent: Option<u8>,
+    pub cpu_percent: Option<u8>,
+    pub memory_percent: Option<u8>,
+    pub bandwidth_percent: Option<u8>,
     pub headroom_cpu_percent: Option<u8>,
     pub ramp_up_seconds: Option<u64>,
     pub ramp_down_seconds: Option<u64>,
@@ -295,9 +304,9 @@ pub struct ProfileConfig {
     #[serde(default)]
     pub provider: Option<String>,
     #[serde(default)]
-    pub local_sync_directory: Option<String>,
+    pub local_root: Option<String>,
     #[serde(default)]
-    pub cloud_sync_directory: Option<String>,
+    pub cloud_root: Option<String>,
     #[serde(default)]
     pub sync_mode: Option<String>,
     #[serde(default)]
@@ -315,12 +324,12 @@ pub struct ProfileConfig {
 impl VaporConfig {
     /// The cloud root this configuration syncs with: the configured
     /// value, or the default for its provider when the key is unset.
-    pub fn effective_cloud_sync_directory(&self) -> &str {
-        self.cloud_sync_directory
+    pub fn effective_cloud_root(&self) -> &str {
+        self.cloud_root
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| constants::filtering::default_cloud_sync_directory(&self.provider))
+            .unwrap_or_else(|| constants::filtering::default_cloud_root(&self.provider))
     }
 }
 
@@ -328,10 +337,10 @@ impl Default for VaporConfig {
     fn default() -> Self {
         Self {
             auto_launch: constants::config::DEFAULT_AUTO_LAUNCH,
-            use_git_ignore: constants::config::DEFAULT_USE_GIT_IGNORE,
-            use_vapor_ignore: constants::config::DEFAULT_USE_VAPOR_IGNORE,
-            local_sync_directory: constants::filtering::DEFAULT_LOCAL_SYNC_DIRECTORY.to_string(),
-            cloud_sync_directory: None,
+            use_gitignore: constants::config::DEFAULT_USE_GITIGNORE,
+            use_vaporignore: constants::config::DEFAULT_USE_VAPORIGNORE,
+            local_root: constants::filtering::DEFAULT_LOCAL_ROOT.to_string(),
+            cloud_root: None,
             pre_ignore_rules: default_pre_ignore_rules(),
             post_ignore_rules: String::new(),
             language_code: constants::config::DEFAULT_LANGUAGE_CODE.to_string(),
@@ -448,30 +457,20 @@ fn config_from_object(map: &serde_json::Map<String, serde_json::Value>) -> Vapor
             defaults.auto_launch,
             &mut issues,
         ),
-        use_git_ignore: field(
+        use_gitignore: field(
             map,
-            keys::KEY_USE_GIT_IGNORE,
-            defaults.use_git_ignore,
+            keys::KEY_USE_GITIGNORE,
+            defaults.use_gitignore,
             &mut issues,
         ),
-        use_vapor_ignore: field(
+        use_vaporignore: field(
             map,
-            keys::KEY_USE_VAPOR_IGNORE,
-            defaults.use_vapor_ignore,
+            keys::KEY_USE_VAPORIGNORE,
+            defaults.use_vaporignore,
             &mut issues,
         ),
-        local_sync_directory: field(
-            map,
-            keys::KEY_LOCAL_SYNC_DIRECTORY,
-            defaults.local_sync_directory,
-            &mut issues,
-        ),
-        cloud_sync_directory: field(
-            map,
-            keys::KEY_CLOUD_SYNC_DIRECTORY,
-            defaults.cloud_sync_directory,
-            &mut issues,
-        ),
+        local_root: field(map, keys::KEY_LOCAL_ROOT, defaults.local_root, &mut issues),
+        cloud_root: field(map, keys::KEY_CLOUD_ROOT, defaults.cloud_root, &mut issues),
         pre_ignore_rules: field(
             map,
             keys::KEY_PRE_IGNORE_RULES,
@@ -534,8 +533,8 @@ mod tests {
         std::fs::write(
             &path,
             r#"{
-                "safeguards": { "massDeleteThreshold": 1000 },
-                "resourceLimits": { "maxConcurrentTransfers": 2 },
+                "safeguards": { "massDelete": { "threshold": 1000 } },
+                "resourceLimits": { "concurrentTransfers": 2 },
                 "trash": { "retentionDays": 7 }
             }"#,
         )
@@ -543,21 +542,16 @@ mod tests {
 
         let result = load_from(&path);
         assert!(result.load_issue.is_none(), "{:?}", result.load_issue);
-        assert_eq!(result.config.safeguards.mass_delete_threshold, 1_000);
+        assert_eq!(result.config.safeguards.mass_delete.threshold, 1_000);
         // Unset group members keep their defaults.
-        assert!(result.config.safeguards.mass_delete_enabled);
+        assert!(result.config.safeguards.mass_delete.enabled);
         assert_eq!(result.config.trash.retention_days, 7);
         assert!(result.config.trash.enabled);
-        assert!(!result.config.trash.use_system_trash);
-        assert_eq!(
-            result.config.resource_limits.max_concurrent_transfers,
-            Some(2)
-        );
+        assert!(!result.config.trash.use_system);
+        assert_eq!(result.config.resource_limits.concurrent_transfers, Some(2));
         // Absent means automatic.
         assert_eq!(
-            VaporConfig::default()
-                .resource_limits
-                .max_concurrent_transfers,
+            VaporConfig::default().resource_limits.concurrent_transfers,
             None
         );
     }
@@ -576,36 +570,36 @@ mod tests {
         let path = temp.path().join("vapor.json");
         std::fs::write(
             &path,
-            r#"{ "localSyncDirectory": "~/Projects", "useGitIgnore": false }"#,
+            r#"{ "localRoot": "~/Projects", "useGitignore": false }"#,
         )
         .expect("seed config");
 
         let result = load_from(&path);
         assert!(result.load_issue.is_none());
-        assert_eq!(result.config.local_sync_directory, "~/Projects");
-        assert!(!result.config.use_git_ignore);
-        assert!(result.config.use_vapor_ignore);
-        assert_eq!(result.config.cloud_sync_directory, None);
+        assert_eq!(result.config.local_root, "~/Projects");
+        assert!(!result.config.use_gitignore);
+        assert!(result.config.use_vaporignore);
+        assert_eq!(result.config.cloud_root, None);
         // Unset means the provider's default; the filesystem provider
         // gets a folder the daemon can create, a remote one the account
         // root folder.
         assert_eq!(
-            result.config.effective_cloud_sync_directory(),
-            constants::filtering::DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY
+            result.config.effective_cloud_root(),
+            constants::filtering::DEFAULT_FILESYSTEM_CLOUD_ROOT
         );
         let mut remote = result.config.clone();
         remote.provider = constants::provider::GDRIVE.to_string();
         assert_eq!(
-            remote.effective_cloud_sync_directory(),
-            constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY
+            remote.effective_cloud_root(),
+            constants::filtering::DEFAULT_CLOUD_ROOT
         );
-        remote.cloud_sync_directory = Some("  ".to_string());
+        remote.cloud_root = Some("  ".to_string());
         assert_eq!(
-            remote.effective_cloud_sync_directory(),
-            constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY
+            remote.effective_cloud_root(),
+            constants::filtering::DEFAULT_CLOUD_ROOT
         );
-        remote.cloud_sync_directory = Some("/Work".to_string());
-        assert_eq!(remote.effective_cloud_sync_directory(), "/Work");
+        remote.cloud_root = Some("/Work".to_string());
+        assert_eq!(remote.effective_cloud_root(), "/Work");
     }
 
     #[test]
@@ -628,16 +622,16 @@ mod tests {
     fn one_malformed_field_reverts_only_that_field_not_the_whole_config() {
         let temp = TempDir::new().expect("temp dir");
         let path = temp.path().join("vapor.json");
-        // `timelineLimit` has the wrong type; `localSyncDirectory` is valid.
+        // `timelineLimit` has the wrong type; `localRoot` is valid.
         std::fs::write(
             &path,
-            r#"{ "timelineLimit": "oops", "localSyncDirectory": "~/Keep" }"#,
+            r#"{ "timelineLimit": "oops", "localRoot": "~/Keep" }"#,
         )
         .expect("seed config");
 
         let result = load_from(&path);
         // The valid field is preserved (not discarded to defaults)...
-        assert_eq!(result.config.local_sync_directory, "~/Keep");
+        assert_eq!(result.config.local_root, "~/Keep");
         // ...the bad field falls back to its default...
         assert_eq!(
             result.config.timeline_limit,

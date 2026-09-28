@@ -69,20 +69,20 @@ public enum SyncSurfaceState: String, CaseIterable, Codable, Sendable {
       return .stopped
     }
     switch status.runState {
-    case "Error":
+    case VaporConstants.RunState.error:
       return .error
-    case "Paused":
+    case VaporConstants.RunState.paused:
       return .paused
     default:
       break
     }
-    if status.throttleState == "Suspended" {
+    if status.throttleState == VaporConstants.ThrottleState.suspended {
       return .suspended
     }
     if status.queueDepth == 0 {
       return status.failedIntents > 0 ? .error : .idle
     }
-    if status.throttleState == "Throttled" {
+    if status.throttleState == VaporConstants.ThrottleState.throttled {
       return .throttled
     }
     return .syncing
@@ -94,8 +94,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
   public var configurationIssuePath: String?
   public var configurationIssueReason: String?
   public var autoLaunchEnabled: Bool
-  public var useGitIgnore: Bool
-  public var useVaporIgnore: Bool
+  public var useGitignore: Bool
+  public var useVaporignore: Bool
   public var preIgnoreRules: String
   public var postIgnoreRules: String
   public var languageCode: String
@@ -135,8 +135,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     configurationIssuePath: String?,
     configurationIssueReason: String?,
     autoLaunchEnabled: Bool,
-    useGitIgnore: Bool,
-    useVaporIgnore: Bool,
+    useGitignore: Bool,
+    useVaporignore: Bool,
     preIgnoreRules: String,
     postIgnoreRules: String,
     languageCode: String,
@@ -158,8 +158,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     self.configurationIssuePath = configurationIssuePath
     self.configurationIssueReason = configurationIssueReason
     self.autoLaunchEnabled = autoLaunchEnabled
-    self.useGitIgnore = useGitIgnore
-    self.useVaporIgnore = useVaporIgnore
+    self.useGitignore = useGitignore
+    self.useVaporignore = useVaporignore
     self.preIgnoreRules = preIgnoreRules
     self.postIgnoreRules = postIgnoreRules
     self.languageCode = languageCode
@@ -205,8 +205,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     configurationIssuePath: nil,
     configurationIssueReason: nil,
     autoLaunchEnabled: true,
-    useGitIgnore: true,
-    useVaporIgnore: true,
+    useGitignore: true,
+    useVaporignore: true,
     preIgnoreRules: VaporConfiguration.defaultPreIgnoreRules,
     postIgnoreRules: VaporConfiguration.defaultPostIgnoreRules,
     languageCode: VaporConfiguration.defaultLanguageCode,
