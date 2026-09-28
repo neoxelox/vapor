@@ -171,23 +171,28 @@ impl Host {
 /// The same choice `core/platform/src/secrets` makes when it picks a
 /// backend, from the outside: the harness never opens a store itself.
 fn probe_secret_store() -> bool {
-    if cfg!(target_os = "macos") {
-        return true;
+    #[cfg(target_os = "macos")]
+    {
+        true
     }
-    if !cfg!(target_os = "linux") {
-        return false;
+    #[cfg(target_os = "linux")]
+    {
+        let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+        if set(vapor_shared::constants::env::VAPOR_SECRETS_COMMAND) {
+            return true;
+        }
+        set("DBUS_SESSION_BUS_ADDRESS")
+            && Command::new("secret-tool")
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok()
     }
-    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
-    if set(vapor_shared::constants::env::VAPOR_SECRETS_COMMAND) {
-        return true;
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        false
     }
-    set("DBUS_SESSION_BUS_ADDRESS")
-        && Command::new("secret-tool")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok()
 }
 
 fn probe_fifo(root: &Path) -> bool {
