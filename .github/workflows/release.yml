@@ -192,6 +192,34 @@ jobs:
           path: apps/macos/.build
           key: ${{ runner.os }}-spm-release-${{ hashFiles('**/Package.resolved') }}
 
+      # The Google Drive OAuth client is compiled into vapor and vapord
+      # from these two secrets. Google treats an installed app's client
+      # secret as public, but the repository is public too, so the pair
+      # lives in the environment rather than in the source. Same rule as
+      # signing: a stable tag refuses to ship without it, a prerelease
+      # ships without Drive sign-in and says so.
+      - name: Validate the Google Drive OAuth client
+        env:
+          RELEASE_STABLE: ${{ needs.preflight.outputs.release_stable }}
+          VAPOR_GDRIVE_CLIENT_ID: ${{ secrets.VAPOR_GDRIVE_CLIENT_ID }}
+          VAPOR_GDRIVE_CLIENT_SECRET: ${{ secrets.VAPOR_GDRIVE_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "$VAPOR_GDRIVE_CLIENT_ID" && -n "$VAPOR_GDRIVE_CLIENT_SECRET" ]]; then
+            echo "[release] Google Drive OAuth client configured"
+            exit 0
+          fi
+          if [[ -n "$VAPOR_GDRIVE_CLIENT_ID" || -n "$VAPOR_GDRIVE_CLIENT_SECRET" ]]; then
+            echo "[release] VAPOR_GDRIVE_CLIENT_ID and VAPOR_GDRIVE_CLIENT_SECRET must be set together"
+            exit 1
+          fi
+          if [[ "$RELEASE_STABLE" == "true" ]]; then
+            echo "[release] stable release requires VAPOR_GDRIVE_CLIENT_ID and VAPOR_GDRIVE_CLIENT_SECRET in the ${{ matrix.environment }} environment"
+            exit 1
+          fi
+          echo "::warning::No Google Drive OAuth client in ${{ matrix.environment }}; this prerelease ships without Google Drive sign-in"
+
       - name: Validate signing and notarization configuration
         if: matrix.platform == 'macos'
         id: signing_config
@@ -313,6 +341,8 @@ jobs:
           VAPOR_SIGN_IDENTITY: ${{ secrets.VAPOR_SIGN_IDENTITY }}
           VAPOR_NOTARY_PROFILE: ${{ secrets.VAPOR_NOTARY_PROFILE }}
           VAPOR_ENTITLEMENTS: ${{ vars.VAPOR_ENTITLEMENTS }}
+          VAPOR_GDRIVE_CLIENT_ID: ${{ secrets.VAPOR_GDRIVE_CLIENT_ID }}
+          VAPOR_GDRIVE_CLIENT_SECRET: ${{ secrets.VAPOR_GDRIVE_CLIENT_SECRET }}
         run: ./scripts/build.sh package
 
       - name: Validate packaged outputs (macOS)
@@ -325,6 +355,23 @@ jobs:
           test -x dist/Vapor.app/Contents/MacOS/Vapor
           test -x dist/Vapor.app/Contents/MacOS/vapord
           test -x dist/Vapor.app/Contents/Helpers/vapor
+
+      # The shipped CLI reports a built-in client exactly when the
+      # environment provided one (the runtime override is unset here).
+      - name: Validate the built-in Google Drive client (macOS)
+        if: matrix.platform == 'macos'
+        env:
+          CLIENT_CONFIGURED: ${{ secrets.VAPOR_GDRIVE_CLIENT_ID != '' }}
+        run: |
+          set -euo pipefail
+
+          status="$(VAPOR_DIR="$RUNNER_TEMP/vapor-doctor" dist/Vapor.app/Contents/Helpers/vapor doctor --json |
+            python3 -c 'import json,sys; print(next(c["status"] for c in json.load(sys.stdin)["checks"] if c["name"] == "gdrive_oauth_client"))')"
+          if [[ "$CLIENT_CONFIGURED" == "true" && "$status" != "ok" ]]; then
+            echo "[release] the packaged vapor has no built-in Google Drive client"
+            exit 1
+          fi
+          echo "[release] packaged Google Drive client status: $status"
 
       - name: Upload package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

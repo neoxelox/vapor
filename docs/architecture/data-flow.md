@@ -309,7 +309,8 @@ the sync running.
 |---|---|---|
 | A sync root is missing (a volume unplugged, a folder deleted or moved) | profile holds; nothing is created or deleted anywhere; a `root-missing` decision is open | the root comes back (the hold lifts on its own), or `recreate` |
 | A sync root is replaced (a different folder at the same path, an emptied one) | profile holds; nothing is synced into the stranger; a `root-replaced` decision is open | the original root comes back, or `reattach` (merge, no deletions) |
-| The cloud is unreachable, refuses the credentials, or is out of quota | profile waits and retries with backoff; intents keep accumulating durably | connectivity, `vapor auth login`, freeing space |
+| The cloud is unreachable or out of quota | profile waits and retries with backoff; intents keep accumulating durably | connectivity, freeing space |
+| The provider refuses the sign-in (an expired or revoked token, none stored) | profile holds; nothing is leased and the feed is not polled; an intent that hit the refusal returns to the queue without spending an attempt; status sets `sign_in_required` | `vapor auth login <provider> --profile <id>` or Sign In in the app; the next root check lifts the hold and the queue resumes as it stood (`operations/provider-auth-operations.md`) |
 | The configuration is invalid | the daemon keeps the last valid configuration and reports the error | `vapor config` fixes it; live reload picks it up |
 | The daemon crash-loops | the lifecycle guard stops restarting it | `vapor service` after the cause is fixed |
 | The user pauses (`vapor pause`) | the profile stops; ingest keeps capturing intent durably | `vapor resume` |

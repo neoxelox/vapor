@@ -663,6 +663,75 @@ fn missing_credentials_surface_an_actionable_auth_error() {
 }
 
 #[test]
+fn a_refused_sign_in_stops_token_requests_until_a_new_sign_in_lands() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let secrets = Arc::new(InMemorySecretStore::new());
+    secrets
+        .set(
+            "auth.default.gdrive.token",
+            r#"{"accessToken":"ya29.old","refreshToken":"1//dead","expiresAtMs":0}"#,
+        )
+        .expect("seed expired tokens");
+    let provider = GoogleDriveProvider::new(
+        GdriveConfig {
+            client_id: "client".to_string(),
+            client_secret: None,
+            profile_id: "default".to_string(),
+        },
+        secrets.clone(),
+        transport.clone(),
+    );
+
+    // The refresh token expired (a Testing-mode client drops it after a
+    // week): Google answers invalid_grant.
+    transport.push_response(400, r#"{"error":"invalid_grant"}"#);
+    let error = provider
+        .ensure_cloud_sync_directory("/Vapor")
+        .expect_err("a refused refresh must fail");
+    assert_eq!(error.kind, ProviderErrorKind::Authentication);
+
+    // While the store still holds the refused token, a retry fails
+    // without asking Google again.
+    let error = provider
+        .ensure_cloud_sync_directory("/Vapor")
+        .expect_err("still signed out");
+    assert_eq!(error.kind, ProviderErrorKind::Authentication);
+    assert!(
+        error
+            .message
+            .contains("vapor auth login gdrive --profile default")
+    );
+    assert_eq!(transport.recorded_requests().len(), 1);
+
+    // `vapor auth login` stores a new token set; the same provider
+    // instance uses it on its next call, without a restart.
+    secrets
+        .set(
+            "auth.default.gdrive.token",
+            &format!(
+                r#"{{"accessToken":"ya29.new","refreshToken":"1//new","expiresAtMs":{}}}"#,
+                u64::MAX / 2
+            ),
+        )
+        .expect("store the new sign-in");
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"root-folder","name":"Vapor","mimeType":"application/vnd.google-apps.folder"}]}"#,
+    );
+    provider
+        .ensure_cloud_sync_directory("/Vapor")
+        .expect("the new sign-in works");
+    let requests = transport.recorded_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1]
+            .headers
+            .iter()
+            .any(|(name, value)| name == "Authorization" && value == "Bearer ya29.new")
+    );
+}
+
+#[test]
 fn upload_precondition_absent_fails_when_the_target_exists() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = ensured_provider(transport.clone());

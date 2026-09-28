@@ -17,6 +17,15 @@ public struct VaporCLIResult: Equatable, Sendable {
 /// that returns canned JSON; production uses `ProcessVaporCLIRunner`.
 public protocol VaporCLIRunning {
   func run(arguments: [String]) throws -> VaporCLIResult
+  /// The same, for the one command that waits on a person (the browser
+  /// sign-in) and needs a longer bound than a lifecycle round trip.
+  func run(arguments: [String], timeoutSeconds: Int) throws -> VaporCLIResult
+}
+
+extension VaporCLIRunning {
+  public func run(arguments: [String], timeoutSeconds _: Int) throws -> VaporCLIResult {
+    try run(arguments: arguments)
+  }
 }
 
 public enum VaporCLIServiceError: Error, Equatable {
@@ -46,6 +55,10 @@ public struct ProcessVaporCLIRunner: VaporCLIRunning {
   static let timeoutSeconds = 30
 
   public func run(arguments: [String]) throws -> VaporCLIResult {
+    try run(arguments: arguments, timeoutSeconds: Self.timeoutSeconds)
+  }
+
+  public func run(arguments: [String], timeoutSeconds: Int) throws -> VaporCLIResult {
     guard fileManager.isExecutableFile(atPath: cliExecutableURL.path) else {
       throw VaporCLIServiceError.cliExecutableMissing(path: cliExecutableURL.path)
     }
@@ -89,7 +102,7 @@ public struct ProcessVaporCLIRunner: VaporCLIRunning {
 
     // Bounded wait; kill a wedged CLI so a hung invocation cannot hang the
     // lifecycle queue (and, transitively, Quit Vapor) forever.
-    let timedOut = exited.wait(timeout: .now() + .seconds(Self.timeoutSeconds)) == .timedOut
+    let timedOut = exited.wait(timeout: .now() + .seconds(timeoutSeconds)) == .timedOut
     if timedOut {
       process.terminate()
       exited.wait()
@@ -99,7 +112,7 @@ public struct ProcessVaporCLIRunner: VaporCLIRunning {
     drains.wait()
 
     if timedOut {
-      throw VaporCLIServiceError.timedOut(arguments: arguments, seconds: Self.timeoutSeconds)
+      throw VaporCLIServiceError.timedOut(arguments: arguments, seconds: timeoutSeconds)
     }
 
     return VaporCLIResult(
@@ -224,7 +237,19 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
       conflictsUnresolved: response.conflictsUnresolved ?? 0,
       runStateReason: response.runStateReason,
       reconcileState: response.reconcileState ?? "",
-      reconcileDetail: response.reconcileDetail ?? ""
+      reconcileDetail: response.reconcileDetail ?? "",
+      signInRequired: response.signInRequired
+    )
+  }
+
+  /// Runs the browser sign-in. The CLI gives the consent
+  /// `browserSignInTimeoutSeconds`; the extra margin lets it report its
+  /// own timeout instead of being killed first.
+  public func signIn(provider: String, profile: String) throws {
+    let arguments = ["auth", "login", provider, "--profile", profile, "--browser"]
+    _ = try runExpectingSuccess(
+      arguments: arguments,
+      timeoutSeconds: VaporConstants.Provider.browserSignInTimeoutSeconds + 30
     )
   }
 
@@ -340,14 +365,32 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
     }
 
     struct ProfileResponse: Decodable {
+      let id: String?
+      let providerName: String?
       let runState: String?
       let reason: String?
       let suspendedReason: String?
+      let signInRequired: Bool?
 
       enum CodingKeys: String, CodingKey {
+        case id
+        case providerName = "provider_name"
         case runState = "run_state"
         case reason
         case suspendedReason = "suspended_reason"
+        case signInRequired = "sign_in_required"
+      }
+    }
+
+    /// The profiles whose provider refused the sign-in.
+    var signInRequired: [SignInRequest] {
+      (profiles ?? []).compactMap { profile in
+        guard profile.signInRequired == true, let id = profile.id,
+          let provider = profile.providerName
+        else {
+          return nil
+        }
+        return SignInRequest(providerKind: provider, profileId: id)
       }
     }
 
@@ -405,12 +448,17 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
     }
   }
 
-  private func runExpectingSuccess(arguments: [String]) throws -> Data {
+  private func runExpectingSuccess(arguments: [String], timeoutSeconds: Int? = nil) throws -> Data {
     logger.debug(
       "Running vapor CLI command",
       metadata: ["arguments": arguments.joined(separator: " ")]
     )
-    let result = try runner.run(arguments: arguments)
+    let result =
+      if let timeoutSeconds {
+        try runner.run(arguments: arguments, timeoutSeconds: timeoutSeconds)
+      } else {
+        try runner.run(arguments: arguments)
+      }
     guard result.exitCode == 0 else {
       logger.error(
         "vapor CLI command failed",

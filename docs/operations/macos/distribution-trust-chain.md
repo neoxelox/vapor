@@ -46,8 +46,11 @@ Implementation requirements:
 ## Secrets management
 
 Signing identities, notarization profile, and keychain access live in the
-GitHub Environment `release-macos` (not repository-wide secrets). See
-`AGENTS.md §7` for the general policy.
+GitHub Environment `release-macos` (not repository-wide secrets), next
+to the Google Drive OAuth client (`VAPOR_GDRIVE_CLIENT_ID`,
+`VAPOR_GDRIVE_CLIENT_SECRET`) that the package job compiles into
+`vapor` and `vapord`. See `AGENTS.md §7` for the general policy and
+`../provider-auth-operations.md` for the client.
 
 ## Validation checklist
 

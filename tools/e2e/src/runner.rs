@@ -95,6 +95,11 @@ pub fn build_product_profile(repo_root: &Path, release: bool) -> Result<(), Fail
     if release {
         command.arg("--release");
     }
+    // The binaries under test never carry a built-in Google Drive
+    // client (see `refuse_built_in_oauth_client`).
+    for name in GDRIVE_CLIENT_ENV {
+        command.env_remove(name);
+    }
     let status = command
         .arg("--manifest-path")
         .arg(repo_root.join("Cargo.toml"))
@@ -102,6 +107,47 @@ pub fn build_product_profile(repo_root: &Path, release: bool) -> Result<(), Fail
         .map_err(|error| Failure::new(format!("cannot run cargo: {error}")))?;
     if !status.success() {
         return Err(Failure::new("cargo build of vapor + vapord failed"));
+    }
+    Ok(())
+}
+
+const GDRIVE_CLIENT_ENV: [&str; 2] = [
+    vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID,
+    vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_SECRET,
+];
+
+/// Refuses a `vapor` binary that was built with a Google Drive OAuth
+/// client. Tokens live in the login keychain, not under `VAPOR_DIR`, so
+/// a sandboxed daemon with a built-in client and a `gdrive` profile
+/// would find the developer's real sign-in and reach their Drive. The
+/// harness builds without one; this catches `--skip-build` over
+/// binaries built some other way. With the runtime override removed,
+/// an `ok` doctor row can only mean a built-in client.
+pub fn refuse_built_in_oauth_client(cli_bin: &Path, scratch: &Path) -> Result<(), Failure> {
+    let mut command = Command::new(cli_bin);
+    command
+        .args(["doctor", "--json"])
+        .env(vapor_shared::constants::env::VAPOR_DIR, scratch);
+    for name in GDRIVE_CLIENT_ENV {
+        command.env_remove(name);
+    }
+    let output = command
+        .output()
+        .map_err(|error| Failure::new(format!("cannot run vapor doctor: {error}")))?;
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| Failure::new(format!("vapor doctor --json is not JSON: {error}")))?;
+    let built_in = report["checks"].as_array().is_some_and(|checks| {
+        checks
+            .iter()
+            .any(|check| check["name"] == "gdrive_oauth_client" && check["status"] == "ok")
+    });
+    if built_in {
+        return Err(Failure::new(format!(
+            "{} carries a built-in Google Drive OAuth client; e2e binaries must not. \
+             Rebuild without {} in the build environment (./scripts/e2e.sh without --skip-build does)",
+            cli_bin.display(),
+            vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID
+        )));
     }
     Ok(())
 }
@@ -184,6 +230,9 @@ pub fn run(options: &RunOptions) -> Result<RunReport, Failure> {
         build_product(&options.repo_root)?;
     }
     let paths = product_paths(&options.repo_root, options.daemon_kind)?;
+    if options.provider == Provider::Filesystem {
+        refuse_built_in_oauth_client(&paths.cli_bin, &run_root)?;
+    }
     let host = Host::detect(&run_root, options.full, options.provider);
     if options.full
         && !host.launchd

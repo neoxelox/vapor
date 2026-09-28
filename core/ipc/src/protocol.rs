@@ -314,6 +314,12 @@ pub struct ProfileStatus {
     pub reconcile_state: String,
     #[serde(default)]
     pub reconcile_detail: String,
+    /// The provider refused this profile's sign-in (expired, revoked, or
+    /// never stored). Sync is on hold until the user runs
+    /// `vapor auth login <provider_name> --profile <id>`; queued work is
+    /// kept.
+    #[serde(default)]
+    pub sign_in_required: bool,
 }
 
 /// Effective resource ceilings, measured utilization, and idle-boost

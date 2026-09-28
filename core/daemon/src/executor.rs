@@ -95,6 +95,10 @@ pub struct StagedExecutorReport {
     /// gone. The runtime reacts by blocking admission and re-ensuring
     /// the root (self-healing), so these intents retry rather than fail.
     pub cloud_root_unavailable: usize,
+    /// The provider's message when it refused the sign-in during this
+    /// advance. The runtime holds the profile until the user signs in
+    /// again; the intents involved went back to the queue.
+    pub authentication_required: Option<String>,
 }
 
 /// Everything stage work needs beyond the app + durable queue. The
@@ -1858,6 +1862,22 @@ impl StagedExecutor {
         report: &mut StagedExecutorReport,
     ) -> Result<(), StateDbError> {
         match failure {
+            // The provider refused the sign-in. No retry fixes that and
+            // the intent did not cause it: the runtime holds the profile
+            // until the user signs in again, and the intent goes back to
+            // the queue without spending an attempt.
+            RetryFailureKind::Authentication => {
+                if report.authentication_required.is_none() {
+                    report.authentication_required = Some(message.to_string());
+                }
+                if !state_db.requeue_leased(intent.id, now, Some(message))? {
+                    crate::logging::warning(
+                        "Durable intent was not leased when its sign-in failed; dropping it",
+                        &[("intent_id", intent.id.to_string())],
+                    );
+                }
+                report.retried += 1;
+            }
             // Retry budget exhausted: finalize as a permanent failure
             // rather than calling schedule_retry (which refuses past the
             // cap) and letting the stale-lease sweep re-pend it forever.
@@ -1889,7 +1909,7 @@ impl StagedExecutor {
                 app.schedule_retry(state_db, intent.id, failure, message, now)?;
                 report.retried += 1;
             }
-            RetryFailureKind::Authentication | RetryFailureKind::Permanent => {
+            RetryFailureKind::Permanent => {
                 app.finalize_failure(state_db, intent.id, failure, message, now)?;
                 report.failed += 1;
                 crate::logging::error(

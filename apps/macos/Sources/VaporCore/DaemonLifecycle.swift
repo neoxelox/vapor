@@ -46,6 +46,19 @@ public struct ServiceStatusSnapshot: Equatable, Sendable {
   }
 }
 
+/// A profile whose provider refused the sign-in: sync waits until the
+/// user signs in again (`vapor auth login <providerKind> --profile
+/// <profileId>`).
+public struct SignInRequest: Equatable, Hashable, Codable, Sendable {
+  public var providerKind: String
+  public var profileId: String
+
+  public init(providerKind: String, profileId: String) {
+    self.providerKind = providerKind
+    self.profileId = profileId
+  }
+}
+
 /// Decoded `vapor status --json`: the subset the app renders.
 public struct DaemonStatusSnapshot: Equatable, Sendable {
   public var runState: String
@@ -71,6 +84,8 @@ public struct DaemonStatusSnapshot: Equatable, Sendable {
   public var reconcileState: String
   /// Why the scan waits, or what it scans; empty otherwise.
   public var reconcileDetail: String
+  /// Profiles on hold until the user signs in again.
+  public var signInRequired: [SignInRequest]
 
   public init(
     runState: String,
@@ -84,7 +99,8 @@ public struct DaemonStatusSnapshot: Equatable, Sendable {
     conflictsUnresolved: UInt64 = 0,
     runStateReason: String? = nil,
     reconcileState: String = "",
-    reconcileDetail: String = ""
+    reconcileDetail: String = "",
+    signInRequired: [SignInRequest] = []
   ) {
     self.runState = runState
     self.throttleState = throttleState
@@ -98,6 +114,7 @@ public struct DaemonStatusSnapshot: Equatable, Sendable {
     self.runStateReason = runStateReason
     self.reconcileState = reconcileState
     self.reconcileDetail = reconcileDetail
+    self.signInRequired = signInRequired
   }
 
   /// The scan is queued but the throttle holds it.
@@ -151,6 +168,11 @@ public protocol LaunchAgentControlling {
   /// both roots that does not wait for an idle moment, plus the flush
   /// boost. Throws when the daemon is not running or refuses.
   func syncNow() throws
+  /// Signs the profile in to its provider again (`vapor auth login
+  /// <provider> --profile <profile> --browser`): the CLI opens the
+  /// consent page and blocks until the browser answers or its deadline
+  /// passes. The running daemon notices the new sign-in on its own.
+  func signIn(provider: String, profile: String) throws
 }
 
 /// Outcome of a login-item registration attempt, surfaced so the UI
@@ -227,6 +249,8 @@ public struct NoopLaunchAgentController: LaunchAgentControlling {
   }
 
   public func syncNow() throws {}
+
+  public func signIn(provider _: String, profile _: String) throws {}
 }
 
 /// Thin coordinator over the `LaunchAgentControlling` seam. Owns
@@ -407,6 +431,18 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
       try launchAgentController.syncNow()
       logger.info("Requested an on-demand sync")
     }
+  }
+
+  /// Signs a profile in to its provider again. Stays off the lifecycle
+  /// queue: the browser consent can take minutes, and supervision must
+  /// keep ticking while the user is in the browser.
+  public func signIn(provider: String, profile: String) throws {
+    logger.info(
+      "Starting a browser sign-in",
+      metadata: ["provider": provider, "profile": profile]
+    )
+    try launchAgentController.signIn(provider: provider, profile: profile)
+    logger.info("Sign-in stored", metadata: ["provider": provider, "profile": profile])
   }
 
   /// Last login-item registration outcome. Read after

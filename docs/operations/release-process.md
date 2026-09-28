@@ -63,6 +63,14 @@ Release invariants:
   - `APPLE_NOTARY_API_KEY_P8_BASE64` configured in the `release-macos` environment secrets.
   - `APPLE_NOTARY_KEY_ID` configured in the `release-macos` environment secrets.
   - `APPLE_NOTARY_ISSUER_ID` configured in the `release-macos` environment secrets when using an App Store Connect Team key; omit it for Individual keys.
+- The Google Drive OAuth client follows the same rule on every
+  platform. `VAPOR_GDRIVE_CLIENT_ID` and `VAPOR_GDRIVE_CLIENT_SECRET` in
+  the platform's environment secrets are compiled into `vapor` and
+  `vapord`; the two must be set together, a stable tag refuses to
+  package without them, and a prerelease without them ships without
+  Google Drive sign-in behind a workflow warning. On macOS the
+  packaged CLI's `vapor doctor` confirms the built-in client
+  (`provider-auth-operations.md` §The OAuth client).
 - For stable releases on Windows (when `apps/windows` ships): the EV
   code-signing material named by the Windows trust chain doc, in the
   `release-windows` environment secrets.
@@ -149,8 +157,10 @@ gh api repos/neoxelox/vapor/environments/release-macos/deployment-branch-policie
 
 - `release-macos` — fully protected: `v*` tag-only deployment policy,
   `neoxelox` as required reviewer, `prevent_self_review: false`, no wait
-  timer, `can_admins_bypass: true`. Configured before any Apple secret was
-  added; none is configured yet.
+  timer, `can_admins_bypass: true`. Configured before any secret was
+  added. No Apple secret is configured yet; the Google Drive OAuth
+  client (`VAPOR_GDRIVE_CLIENT_ID`, `VAPOR_GDRIVE_CLIENT_SECRET`) is the
+  first pair to go in.
 - `release-windows` / `release-linux` — created 2026-09-16 with the
   identical protection (`v*` tag rule, `neoxelox` as required reviewer,
   `prevent_self_review: false`, no wait timer, `can_admins_bypass: true`),
@@ -209,8 +219,10 @@ one it gates.
      harness knows (`./scripts/e2e.sh --providers`). The Google Drive
      leg runs only here, never in CI: it needs the dedicated test
      account signed in (`vapor auth login gdrive`) and
-     `VAPOR_GDRIVE_CLIENT_ID` in the environment, and a missing leg
-     fails the gate.
+     `VAPOR_GDRIVE_CLIENT_ID` in the environment or in `.env`, and a
+     missing leg fails the gate. The harness builds its binaries
+     without a client, so the leg's daemon takes it from the
+     environment at run time.
    - Commit any non-`CHANGELOG.md` fixes produced by validation.
    - Confirm only `CHANGELOG.md` remains dirty before release preparation.
    - Optionally run local package rehearsal: `./scripts/build.sh package`.
@@ -325,6 +337,8 @@ are in, since a prerelease signs when the material is present.
 - [ ] Deployment to the platform release environment approved in the Actions
       UI (the run pauses there after the gates pass, before signing).
 - [ ] Release workflow succeeded.
+- [ ] A stable tag's packaged `vapor doctor` shows the built-in Google
+      Drive client (the macOS package job checks it).
 - [ ] Stable release zip was built from the signed, stapled app bundle.
 - [ ] Checksums present and verified.
 - [ ] Draft reviewed and published by maintainer.

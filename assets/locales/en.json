@@ -63,5 +63,10 @@
   "restart_needs_auto_launch_hint": "Sync runs in the background only while Start Vapor at login is on.",
   "menubar_sync_now": "Sync now",
   "sync_now_hint": "Scans both folders right away instead of waiting for an idle moment.",
-  "scan_waiting_hint": "Vapor waits for an idle moment before scanning. Sync now scans anyway."
+  "scan_waiting_hint": "Vapor waits for an idle moment before scanning. Sync now scans anyway.",
+  "sign_in_required_format": "Vapor needs to sign in to %@ again to keep syncing.",
+  "sign_in_required_detail": "Nothing is lost: your changes wait and sync as soon as you are back in.",
+  "sign_in_button": "Sign In…",
+  "sign_in_waiting_for_browser": "Finish signing in in your browser…",
+  "sign_in_hint": "Opens the sign-in page in your browser."
 }

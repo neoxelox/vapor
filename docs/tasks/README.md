@@ -242,7 +242,7 @@ the native Linux traits.
 Status: pending — **now unblocked** (every Wave 8 dependency below has
 landed).
 
-- `macos.md` M3-1 … M3-11 — diagnostics UX in the macOS app: real
+- `macos.md` M3-1 … M3-13 — diagnostics UX in the macOS app: real
   IPC-backed controls (`Pause`/`Resume`/`Flush now`), full menubar
   state model, diagnostics panel with throttle reason + queue depth +
   conflicts + failures + effective ceilings + utilization + idle-boost
@@ -251,7 +251,9 @@ landed).
   shipped `vapor conflicts` CLI per
   `docs/architecture/conflict-resolution.md`), and the decisions pane,
   trash pane, and root-state display (M3-9 … M3-11, driving the shipped
-  `vapor decisions` and `vapor trash` commands). Depends on C8-27 …
+  `vapor decisions` and `vapor trash` commands), and the sign-in
+  notification (M3-13; the sign-in notice and button, M3-12, landed).
+  Depends on C8-27 …
   C8-31, the post-Wave-8 follow-ups C8-67 … C8-70, and the sync safety
   block SF-1 … SF-9 (all landed; C8-71 per-path timeline detail is the
   one open core dependency, only for naming files inside

@@ -173,18 +173,16 @@ pub fn run_gdrive_pkce_flow() -> Result<String, String> {
     use std::io::{BufRead, BufReader};
     use vapor_providers::gdrive::oauth;
 
-    let client_id = std::env::var(vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            format!(
-                "{} is not set. Create an OAuth client id (Desktop app) in the Google Cloud console and export it; see docs/operations/provider-auth-operations.md",
-                vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID
-            )
-        })?;
-    let client_secret = std::env::var(vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_SECRET)
-        .ok()
-        .filter(|value| !value.trim().is_empty());
+    let oauth::ClientCredentials {
+        client_id,
+        client_secret,
+        ..
+    } = oauth::client_credentials().ok_or_else(|| {
+        format!(
+            "this build has no Google Drive OAuth client and {} is not set. Create an OAuth client (Desktop app) in the Google Cloud console and export it, or build with it set; see docs/operations/provider-auth-operations.md",
+            vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID
+        )
+    })?;
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .map_err(|error| format!("cannot bind the loopback redirect listener: {error}"))?;
@@ -223,7 +221,10 @@ pub fn run_gdrive_pkce_flow() -> Result<String, String> {
     listener
         .set_nonblocking(true)
         .map_err(|error| format!("cannot configure the redirect listener: {error}"))?;
-    let overall_deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let overall_deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(
+            vapor_shared::constants::provider::BROWSER_SIGN_IN_TIMEOUT_SECONDS,
+        );
     let code = loop {
         if std::time::Instant::now() >= overall_deadline {
             return Err(

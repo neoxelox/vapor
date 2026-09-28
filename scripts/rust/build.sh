@@ -20,6 +20,10 @@ if [[ "$MODE" != "build" && "$MODE" != "package" ]]; then
 fi
 
 if [[ -f "$ROOT_DIR/Cargo.toml" ]]; then
+  # shellcheck source=scripts/dotenv.sh
+  source "$ROOT_DIR/scripts/dotenv.sh"
+  vapor_load_build_env "$ROOT_DIR"
+  vapor_report_build_env "rust-build"
   echo "[rust-build] cargo build --workspace --release"
   cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --workspace --release
 

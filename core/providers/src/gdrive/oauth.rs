@@ -18,6 +18,86 @@ pub const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 /// may also write, which the per-app `drive.file` scope cannot see.
 pub const DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive";
 
+/// The OAuth client this build was compiled with. Google treats an
+/// installed app's client secret as public, so shipping it inside the
+/// binary is the documented model; the release pipeline injects both
+/// values from its environment so they stay out of the repository.
+const BUILT_IN_CLIENT_ID: Option<&str> = option_env!(vapor_shared::gdrive_client_id_env!());
+const BUILT_IN_CLIENT_SECRET: Option<&str> = option_env!(vapor_shared::gdrive_client_secret_env!());
+
+/// The OAuth client a sign-in or a token refresh presents to Google.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClientCredentials {
+    pub client_id: String,
+    pub client_secret: Option<String>,
+    pub source: ClientSource,
+}
+
+impl std::fmt::Debug for ClientCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientCredentials")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("source", &self.source)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClientSource {
+    /// Compiled into this build.
+    BuiltIn,
+    /// `VAPOR_GDRIVE_CLIENT_ID` in the process environment.
+    Environment,
+}
+
+/// The client to use: the environment's when `VAPOR_GDRIVE_CLIENT_ID`
+/// is set, otherwise the built-in one, otherwise `None`.
+pub fn client_credentials() -> Option<ClientCredentials> {
+    use vapor_shared::constants::env;
+    resolve_client_credentials(
+        std::env::var(env::VAPOR_GDRIVE_CLIENT_ID).ok().as_deref(),
+        std::env::var(env::VAPOR_GDRIVE_CLIENT_SECRET)
+            .ok()
+            .as_deref(),
+        BUILT_IN_CLIENT_ID,
+        BUILT_IN_CLIENT_SECRET,
+    )
+}
+
+/// An id and its secret always come from the same place: a secret
+/// belongs to one client, and pairing the environment's id with the
+/// built-in secret would fail every token request with
+/// `invalid_client`. A blank value counts as unset.
+fn resolve_client_credentials(
+    environment_id: Option<&str>,
+    environment_secret: Option<&str>,
+    built_in_id: Option<&str>,
+    built_in_secret: Option<&str>,
+) -> Option<ClientCredentials> {
+    let present = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    if let Some(client_id) = present(environment_id) {
+        return Some(ClientCredentials {
+            client_id,
+            client_secret: present(environment_secret),
+            source: ClientSource::Environment,
+        });
+    }
+    present(built_in_id).map(|client_id| ClientCredentials {
+        client_id,
+        client_secret: present(built_in_secret),
+        source: ClientSource::BuiltIn,
+    })
+}
+
 /// Stored token set (JSON in the secret store). The manual `Debug` below
 /// redacts the token fields so a stray `{:?}` cannot bypass the logging
 /// redaction layer and print live credentials.
@@ -335,6 +415,45 @@ mod tests {
         transport.push_response(200, r#"{"access_token":"ya29.new","expires_in":100}"#);
         let tokens = refresh_tokens(&transport, "client", None, "1//old", 0).expect("refresh");
         assert_eq!(tokens.refresh_token.as_deref(), Some("1//old"));
+    }
+
+    #[test]
+    fn the_environment_client_overrides_the_built_in_one_as_a_pair() {
+        let resolved = resolve_client_credentials(
+            Some("env-id"),
+            None,
+            Some("built-in-id"),
+            Some("built-in-secret"),
+        )
+        .expect("a client");
+        assert_eq!(resolved.client_id, "env-id");
+        assert_eq!(resolved.source, ClientSource::Environment);
+        // The built-in secret belongs to the built-in id; lending it to
+        // another client would fail every token request.
+        assert_eq!(resolved.client_secret, None);
+    }
+
+    #[test]
+    fn a_blank_environment_id_falls_back_to_the_built_in_client() {
+        let resolved = resolve_client_credentials(
+            Some("  "),
+            Some("env-secret"),
+            Some("built-in-id"),
+            Some("built-in-secret"),
+        )
+        .expect("a client");
+        assert_eq!(resolved.client_id, "built-in-id");
+        assert_eq!(resolved.client_secret.as_deref(), Some("built-in-secret"));
+        assert_eq!(resolved.source, ClientSource::BuiltIn);
+    }
+
+    #[test]
+    fn no_client_anywhere_resolves_to_none() {
+        assert_eq!(resolve_client_credentials(None, None, None, None), None);
+        assert_eq!(
+            resolve_client_credentials(None, Some("orphan-secret"), Some(""), None),
+            None
+        );
     }
 
     #[test]

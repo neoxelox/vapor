@@ -124,6 +124,11 @@ public struct AppShellState: Equatable, Codable, Sendable {
   public var scanIsWaiting: Bool
   /// The whole-scope scan holds the reconcile permit right now.
   public var scanIsRunning: Bool
+  /// Profiles whose provider refused the sign-in (an expired or revoked
+  /// token). Sync is on hold for each until the user signs in again.
+  public var signInRequired: [SignInRequest]
+  /// A browser sign-in started from the app is waiting for the user.
+  public var signInInProgress: Bool
 
   public init(
     syncState: SyncSurfaceState,
@@ -145,7 +150,9 @@ public struct AppShellState: Equatable, Codable, Sendable {
     decisionsPending: UInt64 = 0,
     conflictsUnresolved: UInt64 = 0,
     scanIsWaiting: Bool = false,
-    scanIsRunning: Bool = false
+    scanIsRunning: Bool = false,
+    signInRequired: [SignInRequest] = [],
+    signInInProgress: Bool = false
   ) {
     self.syncState = syncState
     self.configurationIssuePath = configurationIssuePath
@@ -167,6 +174,8 @@ public struct AppShellState: Equatable, Codable, Sendable {
     self.conflictsUnresolved = conflictsUnresolved
     self.scanIsWaiting = scanIsWaiting
     self.scanIsRunning = scanIsRunning
+    self.signInRequired = signInRequired
+    self.signInInProgress = signInInProgress
   }
 
   /// The one line under the status label. Under Error or Paused the
@@ -208,6 +217,12 @@ public struct AppShellState: Equatable, Codable, Sendable {
     crashLoopPaused: false
   )
 
+  /// The provider to name in the sign-in notice, `nil` while no
+  /// profile waits on a sign-in.
+  public var signInProviderName: String? {
+    signInRequired.first.map { VaporConstants.Provider.displayName(forKind: $0.providerKind) }
+  }
+
   public var hasConfigurationIssue: Bool {
     configurationIssuePath != nil
   }
@@ -224,15 +239,16 @@ public struct AppShellState: Equatable, Codable, Sendable {
   }
 
   /// True while Vapor is waiting on something only the user can do:
-  /// answer a parked question, pick a side of a conflict, acknowledge a
-  /// crash-loop pause, approve the login item, restart after a
-  /// restart-required setting, fix an unreadable config file, or look
-  /// at an Error state (a sync root the daemon cannot ensure, a failed
-  /// intent, a lifecycle command that failed), which the status text
-  /// already labels "Action required". The menu bar mark turns the
-  /// brand colour while this holds.
+  /// sign in again, answer a parked question, pick a side of a
+  /// conflict, acknowledge a crash-loop pause, approve the login item,
+  /// restart after a restart-required setting, fix an unreadable config
+  /// file, or look at an Error state (a sync root the daemon cannot
+  /// ensure, a failed intent, a lifecycle command that failed), which
+  /// the status text already labels "Action required". The menu bar
+  /// mark turns the brand colour while this holds.
   public var needsUserAction: Bool {
-    decisionsPending > 0
+    !signInRequired.isEmpty
+      || decisionsPending > 0
       || conflictsUnresolved > 0
       || crashLoopPaused
       || loginItemRequiresApproval

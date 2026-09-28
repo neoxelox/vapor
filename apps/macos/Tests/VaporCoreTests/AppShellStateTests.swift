@@ -87,6 +87,12 @@ func needsUserActionFollowsEveryStateOnlyTheUserCanClear() {
   var state = AppShellState.initial
   #expect(!state.needsUserAction)
 
+  state.signInRequired = [SignInRequest(providerKind: "gdrive", profileId: "default")]
+  #expect(state.needsUserAction)
+  #expect(state.signInProviderName == "Google Drive")
+  state.signInRequired = []
+  #expect(state.signInProviderName == nil)
+
   state.decisionsPending = 1
   #expect(state.needsUserAction)
   state.decisionsPending = 0

@@ -203,6 +203,7 @@ impl Driver {
         let run_id = runner::new_run_id("soak");
         let root = runner::e2e_root(&cfg.repo_root).join(&run_id);
         let sandbox = Sandbox::create(&root)?;
+        runner::refuse_built_in_oauth_client(&paths.cli_bin, &root)?;
         let _host = Host::detect(&root, false, Provider::Filesystem);
         let mut home = sandbox.home("primary")?;
 

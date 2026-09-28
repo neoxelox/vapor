@@ -216,6 +216,18 @@ surface).
       root (`suspended_reason` / the run-state reason naming the
       decision) shows as its own state with the decision's options,
       not as a generic error.
+- [x] M3-12 Sign-in state: a profile whose provider refused the sign-in
+      (`sign_in_required` on its `vapor status --json` row) turns the
+      menu bar mark the brand colour and shows a notice on the Dashboard
+      and in the menu with a `Sign In…` button that runs
+      `vapor auth login <provider> --profile <id> --browser` through the
+      bundled CLI off the lifecycle queue. The daemon holds the profile
+      and lifts the hold on its own once the sign-in lands
+      (`docs/operations/provider-auth-operations.md`).
+- [ ] M3-13 Sign-in notification: a native user notification when a
+      profile starts needing a sign-in (the `sign-in` timeline event),
+      opening the app at the M3-12 notice. Shares the notification
+      plumbing with M3-8 and M3-9.
 
 Exit gate:
 
@@ -295,7 +307,8 @@ for tests; the app never assumes it.
       from: welcome; provider for the first profile (Filesystem, Google
       Drive; the list comes from the CLI so a new provider appears
       without app work); sign-in for a provider that needs an account,
-      driving `vapor auth login` and showing its result; local folder
+      driving `vapor auth login --browser` (the path the M3-12 Sign In
+      button already uses) and showing its result; local folder
       (a native folder picker, default `~/Vapor`); cloud folder (the
       provider-aware default, editable); sync mode, with the one-way
       choice behind the strict-mirror confirmation from M4-5; start at

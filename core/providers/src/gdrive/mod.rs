@@ -103,6 +103,10 @@ struct TokenManager {
     secrets: Arc<dyn SecretStore>,
     transport: Arc<dyn HttpTransport>,
     cached: Mutex<Option<StoredTokens>>,
+    /// The refresh token Google last refused. While the secret store
+    /// still holds it, a call fails without another token request; a
+    /// new sign-in stores a different one and the next call uses it.
+    rejected_refresh_token: Mutex<Option<String>>,
 }
 
 impl TokenManager {
@@ -127,14 +131,16 @@ impl TokenManager {
             .get(&self.config.token_secret_name())
             .map_err(|_| {
                 ProviderError::authentication(format!(
-                    "no Google Drive credentials for profile '{}'; run `vapor auth login gdrive --profile {}`",
-                    self.config.profile_id, self.config.profile_id
+                    "no Google Drive credentials for profile '{}'; {}",
+                    self.config.profile_id,
+                    self.sign_in_hint()
                 ))
             })?;
         let tokens: StoredTokens = serde_json::from_str(&raw).map_err(|_| {
-            ProviderError::authentication(
-                "stored Google Drive credentials are unreadable; run `vapor auth login gdrive`",
-            )
+            ProviderError::authentication(format!(
+                "stored Google Drive credentials are unreadable; {}",
+                self.sign_in_hint()
+            ))
         })?;
         *self
             .cached
@@ -169,21 +175,60 @@ impl TokenManager {
         self.force_refresh(&tokens)
     }
 
+    /// Refreshes the access token. When Google refuses the refresh
+    /// token, the cache is dropped so the next call reads the secret
+    /// store again: that is how a daemon picks up a new
+    /// `vapor auth login` without a restart.
     fn force_refresh(&self, current: &StoredTokens) -> Result<String, ProviderError> {
         let Some(refresh_token) = current.refresh_token.as_deref() else {
-            return Err(ProviderError::authentication(
-                "Google Drive access token expired and no refresh token is stored; run `vapor auth login gdrive`",
-            ));
+            self.invalidate();
+            return Err(ProviderError::authentication(format!(
+                "Google Drive access token expired and no refresh token is stored; {}",
+                self.sign_in_hint()
+            )));
         };
-        let refreshed = oauth::refresh_tokens(
+        if self
+            .rejected_refresh_token
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            == Some(refresh_token)
+        {
+            self.invalidate();
+            return Err(ProviderError::authentication(format!(
+                "Google Drive refused this sign-in; {}",
+                self.sign_in_hint()
+            )));
+        }
+        let refreshed = match oauth::refresh_tokens(
             self.transport.as_ref(),
             &self.config.client_id,
             self.config.client_secret.as_deref(),
             refresh_token,
             Self::now_ms(),
-        )?;
+        ) {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                if error.kind == vapor_shared::ProviderErrorKind::Authentication {
+                    *self
+                        .rejected_refresh_token
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(refresh_token.to_string());
+                    self.invalidate();
+                }
+                return Err(error);
+            }
+        };
         self.store(&refreshed);
         Ok(refreshed.access_token)
+    }
+
+    fn sign_in_hint(&self) -> String {
+        format!(
+            "sign in again with `vapor auth login gdrive --profile {}`",
+            self.config.profile_id
+        )
     }
 
     fn invalidate(&self) {
@@ -288,6 +333,7 @@ impl GoogleDriveProvider {
                 secrets,
                 transport,
                 cached: Mutex::new(None),
+                rejected_refresh_token: Mutex::new(None),
             }),
             root_id: Mutex::new(None),
             id_by_path: Mutex::new(BTreeMap::new()),
@@ -298,22 +344,16 @@ impl GoogleDriveProvider {
     }
 
     /// Production constructor: native transport + native secret store,
-    /// client credentials from the environment (installed-app PKCE has
-    /// no embeddable secret; the id is per-deployment, see
+    /// and the OAuth client from [`oauth::client_credentials`] (built
+    /// in, or overridden by the environment; see
     /// `docs/operations/provider-auth-operations.md`).
     pub fn for_profile(profile_id: &str) -> Result<Self, ProviderError> {
-        let client_id = std::env::var(vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                ProviderError::authentication(format!(
-                    "{} is not set; the Google Drive provider needs an OAuth client id",
-                    vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID
-                ))
-            })?;
-        let client_secret = std::env::var(vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_SECRET)
-            .ok()
-            .filter(|value| !value.trim().is_empty());
+        let client = oauth::client_credentials().ok_or_else(|| {
+            ProviderError::authentication(format!(
+                "this build has no Google Drive OAuth client and {} is not set",
+                vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID
+            ))
+        })?;
         let secrets = vapor_platform::NativeSecretStore::for_current_user()
             .map(|store| Arc::new(store) as Arc<dyn SecretStore>)
             .map_err(|error| {
@@ -321,8 +361,8 @@ impl GoogleDriveProvider {
             })?;
         Ok(Self::new(
             GdriveConfig {
-                client_id,
-                client_secret,
+                client_id: client.client_id,
+                client_secret: client.client_secret,
                 profile_id: profile_id.to_string(),
             },
             secrets,

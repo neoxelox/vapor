@@ -118,6 +118,9 @@ enum CloudRootOutcome {
     Replaced {
         found: Option<String>,
     },
+    /// The provider refused the sign-in, so nothing about the root is
+    /// known. Carries the provider's message.
+    SignInRequired(String),
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +146,13 @@ fn probe_cloud_root(
     device_id: &str,
 ) -> CloudRootOutcome {
     use crate::root_identity::{RootStatus, classify_cloud_probe};
+    let unreachable = |error: vapor_providers::ProviderError| {
+        if error.kind == vapor_shared::ProviderErrorKind::Authentication {
+            CloudRootOutcome::SignInRequired(error.message)
+        } else {
+            CloudRootOutcome::Unreachable(error.message)
+        }
+    };
     match recorded {
         None => match provider.ensure_cloud_sync_directory(cloud_root) {
             Ok(()) => match provider.adopt_root(cloud_root, device_id) {
@@ -161,20 +171,27 @@ fn probe_cloud_root(
                         adopted: Some(identity.unwrap_or_default()),
                     }
                 }
-                Err(error) => CloudRootOutcome::Unreachable(error.message),
+                Err(error) => unreachable(error),
             },
-            Err(error) => CloudRootOutcome::Unreachable(error.message),
+            Err(error) => unreachable(error),
         },
-        Some(recorded) => match classify_cloud_probe(&recorded, provider.root_identity(cloud_root))
-        {
-            RootStatus::Ready => match provider.ensure_cloud_sync_directory(cloud_root) {
-                Ok(()) => CloudRootOutcome::Ready { adopted: None },
-                Err(error) => CloudRootOutcome::Unreachable(error.message),
-            },
-            RootStatus::Missing => CloudRootOutcome::Missing,
-            RootStatus::Unreachable(message) => CloudRootOutcome::Unreachable(message),
-            RootStatus::Replaced { found, .. } => CloudRootOutcome::Replaced { found },
-        },
+        Some(recorded) => {
+            let probe = match provider.root_identity(cloud_root) {
+                Err(error) if error.kind == vapor_shared::ProviderErrorKind::Authentication => {
+                    return CloudRootOutcome::SignInRequired(error.message);
+                }
+                probe => probe,
+            };
+            match classify_cloud_probe(&recorded, probe) {
+                RootStatus::Ready => match provider.ensure_cloud_sync_directory(cloud_root) {
+                    Ok(()) => CloudRootOutcome::Ready { adopted: None },
+                    Err(error) => unreachable(error),
+                },
+                RootStatus::Missing => CloudRootOutcome::Missing,
+                RootStatus::Unreachable(message) => CloudRootOutcome::Unreachable(message),
+                RootStatus::Replaced { found, .. } => CloudRootOutcome::Replaced { found },
+            }
+        }
     }
 }
 
@@ -360,6 +377,11 @@ pub struct DaemonRuntime {
     /// ingest keeps capturing intent state durably.
     cloud_root_ready: bool,
     last_cloud_root_attempt_inst: Option<Instant>,
+    /// The provider refused the sign-in. Like an unavailable root it
+    /// stops admission and the changes poll while ingest keeps
+    /// recording intents; unlike one, nothing about the tree is in
+    /// doubt, so release resumes the queue as it stands.
+    sign_in_hold: bool,
     /// Incremental comparison walk of the currently-running reconcile.
     /// Survives slice pauses so a large tree converges across slices
     /// instead of restarting from scratch (strict mirror).
@@ -615,7 +637,8 @@ impl DaemonRuntime {
         // admission in the same tick that detected the storm.
         let paused = self.app.snapshot().run_state == RunState::Paused
             || !self.cloud_root_ready
-            || self.root_hold.is_some();
+            || self.root_hold.is_some()
+            || self.sign_in_hold;
         self.mirror_revert_count += stabilize_mirror_reverts as u64;
         let mut report = RuntimeTickReport {
             released_deferred_reconciles: if paused {
@@ -650,6 +673,11 @@ impl DaemonRuntime {
             )?;
             report.mirror_reverts += report.remote_poll.mirror_reverts;
             report.mirror_deletes += report.remote_poll.mirror_deletes;
+            if report.remote_poll.sign_in_refused
+                && let Some(message) = self.remote_poller.take_refused_sign_in()
+            {
+                self.mark_sign_in_required(&message, now);
+            }
             if report.remote_poll.name_collisions > 0
                 && let Some(timeline) = &self.timeline
             {
@@ -698,6 +726,9 @@ impl DaemonRuntime {
         if staged_report.cloud_root_unavailable > 0 {
             self.mark_cloud_root_unavailable("a provider transfer reported the root missing", now);
         }
+        if let Some(message) = &staged_report.authentication_required {
+            self.mark_sign_in_required(message, now);
+        }
 
         if let Some(reconcile_intent_id) = self.running_reconcile_intent_id {
             // A running reconcile performs one bounded chunk of real
@@ -714,6 +745,11 @@ impl DaemonRuntime {
                         // Block admission and let the ensure-retry loop
                         // recreate it instead of retrying the walk forever.
                         self.mark_cloud_root_unavailable(&provider_error.message, now);
+                    } else if let crate::reconcile_walk::WalkError::Provider(provider_error) =
+                        &walk_error
+                        && provider_error.kind == vapor_shared::ProviderErrorKind::Authentication
+                    {
+                        self.mark_sign_in_required(&provider_error.message, now);
                     } else {
                         logging::warning(
                             "Reconcile comparison walk failed; yielding and retrying later",
@@ -866,6 +902,9 @@ impl DaemonRuntime {
                         "a provider transfer reported the root missing",
                         now,
                     );
+                }
+                if let Some(message) = &admission_report.authentication_required {
+                    self.mark_sign_in_required(message, now);
                 }
             }
         }
@@ -1140,6 +1179,7 @@ impl DaemonRuntime {
         };
         let mut cloud_replacement: Option<Option<String>> = None;
         let mut cloud_missing = false;
+        let mut startup_sign_in_hold: Option<String> = None;
         let cloud_root_ready = match cloud_outcome {
             CloudRootOutcome::Ready { adopted } => {
                 if let Some(identity) = adopted {
@@ -1161,6 +1201,10 @@ impl DaemonRuntime {
                 false
             }
             CloudRootOutcome::Unreachable(_) => false,
+            CloudRootOutcome::SignInRequired(message) => {
+                startup_sign_in_hold = Some(message);
+                false
+            }
         };
 
         let tick_waker = Arc::new(TickWaker::default());
@@ -1282,6 +1326,7 @@ impl DaemonRuntime {
             timeline_default_entries: None,
             cloud_root_ready,
             last_cloud_root_attempt_inst: None,
+            sign_in_hold: false,
             reconcile_walker: None,
             mirror_revert_count: 0,
             mirror_delete_count: 0,
@@ -1315,6 +1360,8 @@ impl DaemonRuntime {
             runtime.hold_for_replaced_root(crate::root_identity::RootSide::Cloud, found, now)?;
         } else if cloud_missing {
             runtime.hold_for_missing_root(crate::root_identity::RootSide::Cloud, now)?;
+        } else if let Some(message) = startup_sign_in_hold {
+            runtime.mark_sign_in_required(&message, now);
         }
         if !cloud_root_ready {
             runtime.last_cloud_root_attempt_inst = Some(runtime.clock.now());
@@ -1513,6 +1560,8 @@ impl DaemonRuntime {
                 format!("waiting for decision #{decision} (vapor decisions list)")
             } else if paused {
                 "daemon is paused".to_string()
+            } else if let Some(reason) = self.sign_in_reason() {
+                reason
             } else if !self.cloud_root_ready {
                 "cloud sync directory is unavailable".to_string()
             } else if self.startup_reconstruction_barrier {
@@ -1641,6 +1690,93 @@ impl DaemonRuntime {
         let profile_id = profile_id.into();
         self.remote_poller = RemotePoller::new(&profile_id);
         self.profile_id = profile_id;
+        // A hold found at startup was phrased before the id was known.
+        if self.app.snapshot().run_state != RunState::Paused
+            && let Some(reason) = self.sign_in_reason()
+        {
+            self.app.set_run_state(RunState::Error, reason);
+        }
+    }
+
+    /// The provider refused the sign-in and the profile waits for the
+    /// user to sign in again.
+    pub fn sign_in_required(&self) -> bool {
+        self.sign_in_hold
+    }
+
+    /// The run-state reason while the sign-in hold is on: what happened
+    /// and the command that ends it.
+    fn sign_in_reason(&self) -> Option<String> {
+        self.sign_in_hold.then(|| {
+            let provider = self.app.provider_name();
+            format!(
+                "Vapor needs to sign in to {provider} again: sync is on hold until then \
+                 (vapor auth login {provider} --profile {})",
+                self.profile_id
+            )
+        })
+    }
+
+    /// Holds the profile because the provider refused the sign-in (an
+    /// expired or revoked token, no token at all). Admission and the
+    /// changes poll stop; the root check keeps probing, and the first
+    /// probe that gets through releases the hold.
+    fn mark_sign_in_required(&mut self, message: &str, now: SystemTime) {
+        if self.sign_in_hold {
+            return;
+        }
+        self.sign_in_hold = true;
+        logging::warning(
+            "The provider refused the sign-in; sync is on hold until the user signs in again",
+            &[
+                ("profile_id", self.profile_id.clone()),
+                ("provider", self.app.provider_name().to_string()),
+                ("error", message.to_string()),
+            ],
+        );
+        if self.app.snapshot().run_state != RunState::Paused
+            && let Some(reason) = self.sign_in_reason()
+        {
+            self.app.set_run_state(RunState::Error, reason);
+        }
+        if let Some(timeline) = &self.timeline {
+            timeline.push(
+                "sign-in",
+                self.profile_id.clone(),
+                format!(
+                    "Vapor needs to sign in to {} again; sync is on hold until then",
+                    self.app.provider_name()
+                ),
+                now,
+            );
+        }
+    }
+
+    /// Ends the sign-in hold after a provider call got through. Returns
+    /// whether a hold was released; the caller re-derives the run state.
+    fn release_sign_in_hold(&mut self, now: SystemTime) -> bool {
+        if !std::mem::take(&mut self.sign_in_hold) {
+            return false;
+        }
+        logging::info(
+            "Signed in again; sync resumes",
+            &[
+                ("profile_id", self.profile_id.clone()),
+                ("provider", self.app.provider_name().to_string()),
+            ],
+        );
+        if let Some(timeline) = &self.timeline {
+            timeline.push(
+                "sign-in",
+                self.profile_id.clone(),
+                format!(
+                    "signed in to {} again; sync resumes",
+                    self.app.provider_name()
+                ),
+                now,
+            );
+        }
+        true
     }
 
     /// Cumulative keep-both conflict copies created since daemon start.
@@ -1724,8 +1860,10 @@ impl DaemonRuntime {
         let now_inst = self.clock.now();
         // A root that was adopted is probed at the root-check cadence
         // (a stat, cheap); creating one that never existed retries at
-        // the slower ensure cadence.
-        let interval = if self.root_hold.is_some() {
+        // the slower ensure cadence. A probe held by the sign-in fails
+        // before any request, so it runs at the fast cadence too and a
+        // new sign-in is noticed quickly.
+        let interval = if self.root_hold.is_some() || self.sign_in_hold {
             Duration::from_secs(constants::engine::ROOT_CHECK_INTERVAL_SECONDS)
         } else {
             Duration::from_secs(constants::engine::CLOUD_ROOT_ENSURE_RETRY_SECONDS)
@@ -1750,6 +1888,7 @@ impl DaemonRuntime {
                     );
                 }
                 self.cloud_root_ready = true;
+                self.release_sign_in_hold(now);
                 self.release_root_hold(crate::root_identity::RootSide::Cloud, now);
                 if let Err(error) = self.forget_the_outage() {
                     logging::warning(
@@ -1788,6 +1927,7 @@ impl DaemonRuntime {
                 "Cloud root probe failed; retrying at the ensure cadence",
                 &[("error", message)],
             ),
+            CloudRootOutcome::SignInRequired(message) => self.mark_sign_in_required(&message, now),
         }
         Ok(())
     }
@@ -1849,6 +1989,12 @@ impl DaemonRuntime {
     /// Re-derives the run state once a root is back. An explicit pause
     /// (the user's) stays a pause: recovery never resumes silently.
     fn restore_run_state_after_root_recovery(&mut self, what: &str) {
+        if self.app.snapshot().run_state != RunState::Paused
+            && let Some(reason) = self.sign_in_reason()
+        {
+            self.app.set_run_state(RunState::Error, reason);
+            return;
+        }
         if self.root_hold.is_some() {
             let reason = self
                 .root_hold
@@ -2182,7 +2328,14 @@ impl DaemonRuntime {
             && let Some(outcome) = self.harvest_or_start_cloud_probe(now_inst, interval)
         {
             match outcome {
-                CloudRootOutcome::Ready { .. } => {}
+                CloudRootOutcome::Ready { .. } => {
+                    if self.release_sign_in_hold(now) {
+                        self.restore_run_state_after_root_recovery("signed in again");
+                    }
+                }
+                CloudRootOutcome::SignInRequired(message) => {
+                    self.mark_sign_in_required(&message, now);
+                }
                 CloudRootOutcome::Unreachable(message) => logging::debug(
                     "Cloud root check failed; keeping the last known state",
                     &[("error", message)],
@@ -2249,7 +2402,9 @@ impl DaemonRuntime {
                 // work: resuming while the cloud root is unavailable must
                 // not report Running (which would mask the real blocker),
                 // since the tick loop still leases nothing.
-                if !self.cloud_root_ready {
+                if let Some(reason) = self.sign_in_reason() {
+                    self.app.set_run_state(RunState::Error, reason);
+                } else if !self.cloud_root_ready {
                     self.app.set_run_state(
                         RunState::Error,
                         format!(
@@ -4098,6 +4253,27 @@ mod tests {
         }
 
         fn new_with_mode(sync_mode: vapor_shared::SyncMode) -> Self {
+            Self::new_with_provider(sync_mode, |provider| Box::new(provider))
+        }
+
+        /// A fixture whose provider can be signed out and back in.
+        fn new_signing_out(signed_out: bool) -> (Self, Arc<std::sync::atomic::AtomicBool>) {
+            let flag = Arc::new(std::sync::atomic::AtomicBool::new(signed_out));
+            let handle = flag.clone();
+            let fixture =
+                Self::new_with_provider(vapor_shared::SyncMode::TwoWay, move |provider| {
+                    Box::new(SigningOutProvider {
+                        inner: provider,
+                        signed_out: flag,
+                    })
+                });
+            (fixture, handle)
+        }
+
+        fn new_with_provider(
+            sync_mode: vapor_shared::SyncMode,
+            wrap: impl FnOnce(vapor_providers::FilesystemProvider) -> Box<dyn Provider>,
+        ) -> Self {
             let temp = TempDir::new().expect("temp dir");
             let watch_root = temp.path().join("watch");
             let cloud_root = temp.path().join("cloud");
@@ -4122,7 +4298,7 @@ mod tests {
                 sync_scope,
                 EventPathFilterOptions::default(),
                 state_db,
-                Box::new(provider),
+                wrap(provider),
                 Arc::new(StaticMetricsSampler::default()),
                 clock.clone(),
                 false,
@@ -4181,6 +4357,214 @@ mod tests {
                 },
             );
         }
+    }
+
+    /// The filesystem provider behind a sign-in switch: while signed
+    /// out every call fails the way an expired or revoked token does.
+    struct SigningOutProvider {
+        inner: vapor_providers::FilesystemProvider,
+        signed_out: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl SigningOutProvider {
+        fn gate(&self) -> Result<(), vapor_providers::ProviderError> {
+            if self.signed_out.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(vapor_providers::ProviderError::authentication(
+                    "authorization is no longer valid (invalid_grant)",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Provider for SigningOutProvider {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+        fn capabilities(&self) -> vapor_providers::ProviderCapabilities {
+            self.inner.capabilities()
+        }
+        fn content_hash_algorithm(&self) -> vapor_providers::HashAlgorithm {
+            self.inner.content_hash_algorithm()
+        }
+        fn ensure_cloud_sync_directory(
+            &self,
+            dir: &str,
+        ) -> Result<(), vapor_providers::ProviderError> {
+            self.gate()?;
+            self.inner.ensure_cloud_sync_directory(dir)
+        }
+        fn root_identity(
+            &self,
+            dir: &str,
+        ) -> Result<Option<String>, vapor_providers::ProviderError> {
+            self.gate()?;
+            self.inner.root_identity(dir)
+        }
+        fn adopt_root(
+            &self,
+            dir: &str,
+            device_id: &str,
+        ) -> Result<Option<String>, vapor_providers::ProviderError> {
+            self.gate()?;
+            self.inner.adopt_root(dir, device_id)
+        }
+        fn enumerate(
+            &self,
+            directory: &vapor_providers::RemotePath,
+        ) -> Result<Vec<vapor_providers::RemoteEntry>, vapor_providers::ProviderError> {
+            self.gate()?;
+            self.inner.enumerate(directory)
+        }
+        fn stat(
+            &self,
+            path: &vapor_providers::RemotePath,
+        ) -> Result<Option<vapor_providers::RemoteEntry>, vapor_providers::ProviderError> {
+            self.gate()?;
+            self.inner.stat(path)
+        }
+        fn content_hash(
+            &self,
+            path: &vapor_providers::RemotePath,
+        ) -> Result<String, vapor_providers::ProviderError> {
+            self.gate()?;
+            self.inner.content_hash(path)
+        }
+        fn begin_upload(
+            &self,
+            request: vapor_providers::UploadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, vapor_providers::ProviderError>
+        {
+            self.gate()?;
+            self.inner.begin_upload(request)
+        }
+        fn begin_download(
+            &self,
+            request: vapor_providers::DownloadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, vapor_providers::ProviderError>
+        {
+            self.gate()?;
+            self.inner.begin_download(request)
+        }
+        fn delete(
+            &self,
+            path: &vapor_providers::RemotePath,
+            op_id: &str,
+        ) -> Result<(), vapor_providers::ProviderError> {
+            self.gate()?;
+            self.inner.delete(path, op_id)
+        }
+        fn move_object(
+            &self,
+            from: &vapor_providers::RemotePath,
+            to: &vapor_providers::RemotePath,
+            op_id: &str,
+        ) -> Result<(), vapor_providers::ProviderError> {
+            self.gate()?;
+            self.inner.move_object(from, to, op_id)
+        }
+        fn poll_changes(
+            &self,
+            cursor: Option<&str>,
+            max: usize,
+        ) -> Result<vapor_providers::ChangesPoll, vapor_providers::ProviderError> {
+            self.gate()?;
+            self.inner.poll_changes(cursor, max)
+        }
+    }
+
+    #[test]
+    fn a_refused_sign_in_holds_the_queue_and_signing_in_again_resumes_it() {
+        let (mut fixture, signed_out) = BidirectionalFixture::new_signing_out(false);
+        fixture.tick(6_000);
+        let kept = fixture.watch_root.join("kept.txt");
+        std::fs::write(&kept, b"synced before the sign-in expired").expect("seed");
+        fixture.record_local_event(&kept, FsEventKind::Created, fixture.now_ms);
+        assert!(fixture.converge(12) >= 1, "baseline upload");
+        let cloud_kept = fixture.cloud_root.join("kept.txt");
+        assert!(cloud_kept.is_file());
+
+        // The token expires. A new file and a deletion arrive while the
+        // provider refuses every call.
+        signed_out.store(true, std::sync::atomic::Ordering::SeqCst);
+        let fresh = fixture.watch_root.join("fresh.txt");
+        std::fs::write(&fresh, b"written while signed out").expect("seed");
+        fixture.record_local_event(&fresh, FsEventKind::Created, fixture.now_ms);
+        std::fs::remove_file(&kept).expect("local delete");
+        fixture.record_local_event(&kept, FsEventKind::Removed, fixture.now_ms);
+        for _ in 0..8 {
+            fixture.tick(6_000);
+        }
+
+        assert!(fixture.runtime.sign_in_required());
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0,
+            "a refused sign-in never fails an intent"
+        );
+        assert!(
+            fixture.runtime.state_db().queue_depth().expect("depth") >= 2,
+            "both changes wait in the queue"
+        );
+        let snapshot = fixture.runtime.app().snapshot();
+        assert_eq!(snapshot.run_state, RunState::Error);
+        assert!(
+            snapshot
+                .reason
+                .contains("vapor auth login filesystem --profile default"),
+            "the reason names the command that ends the hold: {}",
+            snapshot.reason
+        );
+        assert!(!fixture.cloud_root.join("fresh.txt").exists());
+
+        // The user signs in again. The next root check gets through,
+        // the hold lifts, and both changes land: the deletion made
+        // during the hold is not forgotten.
+        signed_out.store(false, std::sync::atomic::Ordering::SeqCst);
+        fixture.converge(24);
+        assert!(!fixture.runtime.sign_in_required());
+        assert_eq!(
+            fixture.runtime.app().snapshot().run_state,
+            RunState::Running
+        );
+        assert!(fixture.cloud_root.join("fresh.txt").is_file());
+        assert!(!cloud_kept.exists(), "the held deletion propagated");
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_starts_signed_out_waits_for_the_sign_in() {
+        let (mut fixture, signed_out) = BidirectionalFixture::new_signing_out(true);
+        fixture.runtime.set_profile_id("work");
+        assert!(fixture.runtime.sign_in_required());
+        let snapshot = fixture.runtime.app().snapshot();
+        assert_eq!(snapshot.run_state, RunState::Error);
+        assert!(
+            snapshot.reason.contains("--profile work"),
+            "the startup reason names the profile once it is known: {}",
+            snapshot.reason
+        );
+
+        let local = fixture.watch_root.join("draft.txt");
+        std::fs::write(&local, b"queued at startup").expect("seed");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        for _ in 0..4 {
+            fixture.tick(6_000);
+        }
+        assert!(!fixture.cloud_root.join("draft.txt").exists());
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0
+        );
+
+        signed_out.store(false, std::sync::atomic::Ordering::SeqCst);
+        fixture.converge(24);
+        assert!(!fixture.runtime.sign_in_required());
+        assert!(fixture.cloud_root.join("draft.txt").is_file());
     }
 
     #[test]

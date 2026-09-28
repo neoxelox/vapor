@@ -49,8 +49,9 @@ Available now:
 - 📈 Status with a reason, queue depth, a live activity timeline, per-file "why is this stuck", and a one-command support bundle.
 - ⌨️ A full command line for scripts and servers. Everything the app does, the terminal does too, including a headless supervisor that restarts a crashed sync where no app is running.
 - 🔐 Sign-in tokens live in the system keychain, logs never contain secrets, and nothing leaves your device except the files you chose to sync.
+- 🔑 An expired or revoked cloud sign-in puts sync on hold instead of failing it. Your changes wait in the queue, one click in the app signs you back in, and sync picks up where it stopped.
 - 🔕 Lives in the menu bar. No windows unless you ask for one.
-- 🟠 The menu bar mark turns orange only when Vapor needs you: a question to answer, a conflict to settle, a setting that wants a restart, a sync that stopped on an error.
+- 🟠 The menu bar mark turns orange only when Vapor needs you: a sign-in to renew, a question to answer, a conflict to settle, a setting that wants a restart, a sync that stopped on an error.
 
 In flight and coming next:
 
@@ -89,7 +90,7 @@ All persisted user configuration lives in `<vapor_dir>/vapor.json`. A running da
 | `useVaporIgnore`     | `Bool`   | `true`                                              | Applies recursive `.vaporignore` rules during local filtering.                           |
 | `localSyncDirectory` | `String` | `"~/Vapor"`                                         | Sets the local sync root; Vapor creates it if it does not exist yet.                     |
 | `cloudSyncDirectory` | `String` | Unset: `"~/cloud/Vapor"` with `provider: "filesystem"`, `"/Vapor"` otherwise | Sets the cloud sync root; Vapor creates it if it does not exist yet. With `provider: "filesystem"` this is a local directory path (`~` and relative paths resolve like `localSyncDirectory`), and it must not overlap the local sync root — overlapping roots refuse to sync. `vapor config get cloudSyncDirectory` prints the default that applies to the selected provider. |
-| `provider`           | `String` | `"filesystem"`                                      | Chooses the cloud backend: `filesystem` (a local folder acting as the cloud side) or `gdrive` (requires `vapor auth login gdrive`). Google Drive client credentials are supplied per deployment through the `VAPOR_GDRIVE_CLIENT_ID` / `VAPOR_GDRIVE_CLIENT_SECRET` environment variables (see `.env.example` and `docs/operations/provider-auth-operations.md`); user tokens are stored only in the platform secret store, never in `vapor.json`. |
+| `provider`           | `String` | `"filesystem"`                                      | Chooses the cloud backend: `filesystem` (a local folder acting as the cloud side) or `gdrive` (requires `vapor auth login gdrive`, or Sign In in the app). The Google Drive OAuth client is compiled into the build from `VAPOR_GDRIVE_CLIENT_ID` / `VAPOR_GDRIVE_CLIENT_SECRET` (the build scripts read them from `.env`); the same variables at run time override it, and `vapor doctor` names the client in use (see `.env.example` and `docs/operations/provider-auth-operations.md`). User tokens are stored only in the platform secret store, never in `vapor.json`. |
 | `syncMode`           | `String` | `"two-way"`                                         | Chooses the sync direction: `two-way` (bidirectional), `pull-only` (cloud → local, a read-only local mirror), or `push-only` (local → cloud, a read-only cloud backup). |
 | `preIgnoreRules`     | `String` | Embedded `.gitignore`-like low-impact default rules | Provides the baseline ignore rules that run before discovered ignore files.              |
 | `postIgnoreRules`    | `String` | Empty string                                        | Provides the final override rules that run after discovered ignore files.                |

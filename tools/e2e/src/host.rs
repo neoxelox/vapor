@@ -42,6 +42,10 @@ pub enum Need {
     /// The sandbox filesystem accepts a file name that is not UTF-8
     /// (ext4 and tmpfs do; APFS refuses).
     NonUtf8Names,
+    /// The platform secret store the daemon reads tokens from is
+    /// usable: always on macOS; on Linux only with
+    /// `VAPOR_SECRETS_COMMAND` or a Secret Service session.
+    SecretStore,
 }
 
 impl Need {
@@ -60,6 +64,7 @@ impl Need {
             Need::CaseSensitiveFs => "case-sensitive-fs",
             Need::DiskImage => "disk-image",
             Need::NonUtf8Names => "non-utf8-names",
+            Need::SecretStore => "secret-store",
         }
     }
 }
@@ -96,6 +101,7 @@ pub struct Host {
     pub case_insensitive_fs: bool,
     pub disk_image: bool,
     pub non_utf8_names: bool,
+    pub secret_store: bool,
     pub full: bool,
     pub provider: Provider,
 }
@@ -121,6 +127,7 @@ impl Host {
             case_insensitive_fs: probe_case_insensitive(sandbox_root),
             disk_image: crate::diskimage::DiskImage::available(),
             non_utf8_names: probe_non_utf8_names(sandbox_root),
+            secret_store: probe_secret_store(),
             full,
             provider,
         }
@@ -142,6 +149,7 @@ impl Host {
             Need::CaseSensitiveFs => !self.case_insensitive_fs,
             Need::DiskImage => self.disk_image,
             Need::NonUtf8Names => self.non_utf8_names,
+            Need::SecretStore => self.secret_store,
         };
         if ok {
             Ok(())
@@ -158,6 +166,28 @@ impl Host {
             Err(format!("needs {}: {detail}", need.label()))
         }
     }
+}
+
+/// The same choice `core/platform/src/secrets` makes when it picks a
+/// backend, from the outside: the harness never opens a store itself.
+fn probe_secret_store() -> bool {
+    if cfg!(target_os = "macos") {
+        return true;
+    }
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    if set(vapor_shared::constants::env::VAPOR_SECRETS_COMMAND) {
+        return true;
+    }
+    set("DBUS_SESSION_BUS_ADDRESS")
+        && Command::new("secret-tool")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
 }
 
 fn probe_fifo(root: &Path) -> bool {

@@ -134,6 +134,10 @@ swift build \
   -Xswiftc -cross-module-optimization
 
 echo "[package] Building release daemon + CLI executables"
+# shellcheck source=scripts/dotenv.sh
+source "$ROOT_DIR/scripts/dotenv.sh"
+vapor_load_build_env "$ROOT_DIR"
+vapor_report_build_env "package"
 cargo build --manifest-path "$ROOT_DIR/Cargo.toml" \
   --package vapor-daemon --bin vapord \
   --package vapor-cli --bin vapor \
