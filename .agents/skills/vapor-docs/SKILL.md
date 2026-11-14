@@ -1,6 +1,6 @@
 ---
 name: vapor-docs
-description: Keeps Vapor's documentation in step with a change (CHANGELOG Unreleased line, root README Features and Configuration, the owning docs/ file, group README entrypoints, plans and tasks, AGENTS.md when a rule changes), and applies the writing rules for each document class. Use for any non-trivial change and whenever a file is added, removed, or renamed under docs/.
+description: Keeps Vapor's documentation in step with a change (CHANGELOG Unreleased line, root README Features and Configuration, the owning docs/ file, group README entrypoints, plans, tasks, and specs, AGENTS.md when a rule changes), and applies the writing rules for each document class. Use for any non-trivial change and whenever a file is added, removed, or renamed under docs/.
 license: GPL-3.0-only
 ---
 
@@ -25,11 +25,16 @@ describe the new behaviour. Do this before the commit, not after.
    it. Shortened README content moves into `docs/`, never disappears.
 4. `docs/tasks/<surface>.md` and `docs/tasks/README.md`: close or add
    the task, and update the wave orchestrator when a wave opens, closes,
-   or changes dependencies.
+   or changes dependencies. `docs/plans/<surface>.md` when the scope, a
+   principle, or a non-goal of a surface changes.
 5. `AGENTS.md` when a durable rule, invariant, or contributor policy
    changes. Edit `AGENTS.md` and `.agents/` only; `CLAUDE.md` and
    `.claude/skills/*` are symlinks.
-6. macOS UI changes: state the intended experience and its HIG
+6. `docs/specs/` when the change builds a spec (`vapor-design`): set
+   the spec's status and add what was verified, in the same change
+   set. The spec records why; the owning document under `docs/` still
+   describes the new behaviour on its own.
+7. macOS UI changes: state the intended experience and its HIG
    alignment in the change, and hand the owner a manual checklist.
 
 ## The sweep for stale mentions
@@ -40,11 +45,12 @@ scenario id, decision kind, or tier name, search the whole knowledge
 base for every old and new spelling and fix each stale mention:
 
 ```sh
-grep -rn "<old spelling>\|<new spelling>" AGENTS.md .agents README.md docs CHANGELOG.md .env.example
+git grep -n -e "<old spelling>" -e "<new spelling>" -- '*.md' .env.example
 ```
 
-That covers `AGENTS.md`, every `.agents/skills/*/SKILL.md`,
-`.agents/README.md`, root `README.md`, `docs/**`, and the CHANGELOG.
+That covers every tracked Markdown file at every level (`AGENTS.md`,
+the skills, each README, `CONTRIBUTING.md`, `SECURITY.md`, `docs/**`,
+the CHANGELOG) and `.env.example`.
 A default that changed shows up as a number, so search for the old
 value too. A mention in a document that describes history (an older
 CHANGELOG release, a dated task entry) stays; a mention in a document
@@ -59,12 +65,17 @@ change set as any file added, removed, or renamed there.
 
 ## Writing rules
 
+- Which style applies to which reader: `AGENTS.md` §8.11. Specs and PR
+  descriptions use Simplified Technical English; the root README keeps
+  its voice.
 - Root `README.md` is product-facing: concise, scannable, one emoji per
   Features bullet, user outcomes over internals, provider-agnostic
   wording, "device" not "laptop", no duplicated section content.
-- Everything else may be technical, but no task ids or wave numbers in
-  architecture, operations, development, or CI prose; those live in
-  `docs/tasks/`. Pointers to `docs/tasks/` files are fine.
+- Everything else may be technical, but no task ids, wave numbers, or
+  spec decision numbers in architecture, operations, development, or
+  CI prose; those live in `docs/tasks/` and `docs/specs/`. Pointers to
+  `docs/tasks/` files are fine. A system doc may link a spec file; a
+  code comment may not (`AGENTS.md` §8.9).
 - Present tense for shipped behaviour; "planned" or "open work" with a
   task pointer for anything else. A document that says "will" about
   something that exists is a bug.

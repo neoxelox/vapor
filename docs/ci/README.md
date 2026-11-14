@@ -26,8 +26,8 @@ triggers them, and which ones gate a release.
   dependency caching strategy.
 - `required-checks.md` — the `main` ruleset (`lint`, `test`, and
   `build` × macOS/Linux/Windows required on `main`; `perf` and `soak`
-  release-only), how to inspect and recreate it, workflow-to-script
-  mapping, local-parity command set.
+  release-only), how to inspect and recreate it, the squash-only merge
+  method, workflow-to-script mapping, local-parity command set.
 
 ## Test tier model
 

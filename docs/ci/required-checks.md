@@ -113,6 +113,22 @@ EOF
 
 `actor_id: 5` is GitHub's fixed id for the *Repository admin* role.
 
+### Merge method
+
+The repository allows squash merges only; merge commits and rebase
+merges are off. A pull request lands on `main` as one commit. GitHub
+takes its subject from the pull request title, or from the commit when
+the pull request has only one, which is why both follow the
+Conventional Commit form (`AGENTS.md` §10). This is a repository
+setting, not part of the ruleset.
+
+Inspect it, and set it again on a fresh repository:
+
+```bash
+gh api repos/neoxelox/vapor --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge}'
+gh api -X PATCH repos/neoxelox/vapor -F allow_squash_merge=true -F allow_merge_commit=false -F allow_rebase_merge=false
+```
+
 ## Workflow to script mapping
 
 Runners, toolchains, pinned action versions, caches, and dependency
