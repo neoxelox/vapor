@@ -5,8 +5,8 @@ native implementations. This document is what a contributor adding a new
 platform reads to understand exactly what they must implement.
 
 Governing plan: `docs/plans/core.md`
-Tasks: `docs/tasks/core.md` Phase C3 (traits + macOS impls), Phase C6
-(Windows impls), Phase C7 (Linux impls).
+Tasks: `docs/tasks/core.md` (the traits, and the macOS, Windows, and
+Linux implementations).
 
 Status: every trait below ships with a Rust trait definition, an
 in-memory fake usable on every OS, and native macOS and Linux

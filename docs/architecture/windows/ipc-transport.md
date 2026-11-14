@@ -3,7 +3,8 @@
 The contract surface is defined in `docs/architecture/ipc-contracts.md`
 (transport-agnostic). This document covers the Windows-specific
 transport choice. The native implementation is open work (the
-named-pipe transport in `docs/tasks/core.md`); until then
+named-pipe transport, listed with the Windows work in
+`docs/tasks/README.md`); until then
 `vapor_ipc::transport::bind_listener` returns
 `TransportError::Unsupported` on Windows.
 

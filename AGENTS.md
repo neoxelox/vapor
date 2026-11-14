@@ -184,8 +184,9 @@ PR descriptions and comments.
 
 - Never commit personal information: private email addresses, phone
   numbers, home addresses, account or resource IDs, tokens, secrets,
-  environment variable values, paths copied from a real machine, the
-  contents of private conversations or private repositories, and
+  environment variable values, paths copied from a real machine (a
+  working directory, a real folder layout), the contents of private
+  conversations or private repositories, and
   details of the owner's accounts, plans, or billing. What the
   repository already publishes (the maintainer's name and GitHub
   handle, the `arn.sh` domain, project names) is fine. So is an
@@ -454,9 +455,10 @@ how to read a red run: the `vapor-validate` skill.
   `docs/tasks/`; a code comment must stand on its own for a reader who has
   never seen the task lists. The same applies to strings that surface to
   users or logs (e.g. `unimplemented!()` messages).
-- Prose in architecture, operations, development, and CI docs carries
-  no task id and no wave or phase number either. It may point at a
-  task file (`docs/tasks/core.md`) for open work (owner, 2026-11-14).
+- Prose in architecture, operations, development, and CI docs, and in
+  the READMEs next to the code, carries no task id and no wave or
+  phase number either. It may point at a task file
+  (`docs/tasks/core.md`) for open work (owner, 2026-11-14).
 - The same holds for spec decision numbers (`D7`): none in code
   comments, in strings, or in system docs. A code comment does not
   point at `docs/specs/*` either; a system doc may link the spec that
@@ -593,8 +595,9 @@ of the following:
   value (path normalization, scheduler superseding, throttle
   monotonicity, retry backoff monotonicity, conflict-suffix determinism,
   durable-queue FIFO, ignore-rule precedence, IPC handshake skew
-  matrix). `proptest` adoption is open work (`docs/tasks/core.md` CT-1);
-  until it lands these invariants are covered by explicit cases.
+  matrix). `proptest` covers path normalization, scheduler superseding,
+  and retry backoff (`core/daemon/tests/properties.rs`); explicit cases
+  cover the rest until their properties land (`docs/tasks/core.md`).
 - **Platform-trait contract tests.** Each trait's test body runs against
   the in-memory fake and the native impl on the shipping OS (the secret
   store does this today; extending it to every trait is
@@ -759,9 +762,12 @@ The invariants behind them:
   nothing else. An explicit release request counts as asking for the
   one push the release flow requires; it does not authorize any other
   push.
-- Never commit, rebase, or push on `main` outside the release flow. A
-  branch that was rewritten on purpose is pushed with
-  `--force-with-lease`, never `--force`.
+- Never commit, rebase, or push on `main` outside the release flow.
+  The release flow puts one commit there, the release-prep commit,
+  with its tag. A fix that the release gate finds goes through a pull
+  request like any other change (owner, 2026-11-14). A branch that was
+  rewritten on purpose is pushed with `--force-with-lease`, never
+  `--force`.
 - A branch is one commit when its PR opens, and the PR title is that
   commit's subject. The owner merges, as a squash, the only method the
   repository allows, so that subject is the commit on `main`. Agents

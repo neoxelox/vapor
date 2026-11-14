@@ -1092,15 +1092,18 @@ pull-request skills. Each one is older than that change.
       (owner, 2026-11-14): they stay. `AGENTS.md` §6.1 now allows an
       invented example path and bars only a path copied from a real
       machine.
-- [ ] PF-2 The release runbook (`docs/operations/release-process.md`,
-      "End-to-end flow", steps 1 and 2) commits non-release changes and
-      validation fixes straight on `main`. They then reach GitHub with
-      no pull request, no required checks, and no review, which
-      `AGENTS.md` §10 asks of every change. Decide whether those steps
-      move to a pull request before the release starts.
+- [x] PF-2 The release runbook (`docs/operations/release-process.md`,
+      "End-to-end flow", steps 1 and 2) committed non-release changes
+      and validation fixes straight on `main`, so they reached GitHub
+      with no pull request, no required checks, and no review. Decided
+      (owner, 2026-11-14): a fix that the release gate finds goes
+      through a pull request, and the release starts again from the
+      merged `main`. The runbook, the `vapor-release` skill, and
+      `AGENTS.md` §10 say so.
 - [x] PF-3 `AGENTS.md` §8.9 and the `vapor-docs` skill disagreed on
       pointers to `docs/tasks/*` in architecture, operations,
       development, and CI prose. Decided (owner, 2026-11-14): that
       prose may point at a task file for open work, with no task id
-      and no wave number. §8.9 says so, and the wave numbers are gone
-      from those documents.
+      and no wave number. §8.9 says so, and the wave numbers, phase
+      numbers, and task ids are gone from those documents and from the
+      READMEs next to the code.

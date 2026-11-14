@@ -24,8 +24,9 @@ shapes are locked by assertion tests in each command module. `vapor
 cargo install --path core/cli
 ```
 
-Drops the `vapor` binary into `~/.cargo/bin`. Pre-Wave-11 there is no
-signed release artifact yet; build-from-source is the supported path.
+Drops the `vapor` binary into `~/.cargo/bin`. There is no signed
+standalone release artifact yet; build-from-source is the supported
+path.
 
 ## Layout
 

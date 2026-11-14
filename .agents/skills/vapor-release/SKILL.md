@@ -22,6 +22,8 @@ form; the runbook wins on any disagreement.
    Google Drive leg runs only here, by hand, with the dedicated test
    account signed in and `VAPOR_GDRIVE_CLIENT_ID` set (exported or in
    `.env`); it never runs in CI and never against a personal account.
+   A red gate stops the release: the fix goes through a pull request
+   (`vapor-pr`), and the release starts again from the merged `main`.
 4. The release environment is protected before any secret is added:
    one `v*` tag rule and no branch rule, a required reviewer, and
    `can_admins_bypass` set to `false` once a second admin exists. New
