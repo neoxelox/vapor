@@ -202,7 +202,7 @@ mod tests {
 
     fn seed_vapor_dir(root: &Path) {
         fs::create_dir_all(root.join("logs")).expect("logs dir");
-        fs::write(root.join("vapor.json"), "{\"languageCode\":\"en\"}").expect("config");
+        fs::write(root.join("vapor.json"), "{\"language\":\"en\"}").expect("config");
         fs::write(root.join("logs/vapord.log"), "line-1\n").expect("log file");
         fs::write(root.join("logs/vapor.log"), "line-2\n").expect("log file");
     }
@@ -239,8 +239,8 @@ mod tests {
         seed_vapor_dir(vapor_dir.path());
 
         let live = LiveCaptures {
-            status_json: Some("{\"runState\":\"Running\"}".to_string()),
-            diagnostics_json: Some("{\"intents\":[]}".to_string()),
+            status_json: Some("{\"run\":{\"state\":\"running\"}}".to_string()),
+            diagnostics_json: Some("{\"items\":[]}".to_string()),
             timeline_json: Some("{\"entries\":[]}".to_string()),
             capture_errors: Vec::new(),
         };
@@ -262,8 +262,8 @@ mod tests {
 
         // status succeeded; timeline failed mid-capture.
         let live = LiveCaptures {
-            status_json: Some("{\"runState\":\"Running\"}".to_string()),
-            diagnostics_json: Some("{\"intents\":[]}".to_string()),
+            status_json: Some("{\"run\":{\"state\":\"running\"}}".to_string()),
+            diagnostics_json: Some("{\"items\":[]}".to_string()),
             timeline_json: None,
             capture_errors: vec!["timeline: daemon not responding".to_string()],
         };

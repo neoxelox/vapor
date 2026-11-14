@@ -45,8 +45,7 @@ recompile + CI job once those waves land, not a rewrite.
 vapor status [--json]                   # what the daemon does and why
 vapor pause|resume [--json]
 vapor reconcile [--json]                # scan now: any throttle state but suspended, plus the boost
-vapor conflicts list|resolve            # keep-both conflict copies (resolve --choose original|copy)
-vapor decisions list|show|resolve       # questions the daemon parked (resolve --choose <option>)
+vapor decisions list|show|resolve       # conflicts and parked questions (resolve --choose <option>)
 vapor trash list|restore|empty          # what Vapor removed from this device
 vapor config get|set <key> [value]      # edits vapor.json
 vapor auth login [--profile <id>]       # signs the profile in to its provider

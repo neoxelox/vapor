@@ -224,11 +224,11 @@ final class RecordingServiceController: LaunchAgentControlling {
   var healthOutcome: ServiceHealthOutcome = .running
   var liveStatus = DaemonStatusSnapshot(
     runState: "running",
-    throttleState: "idle-drain",
+    throttleState: "idle",
     throttleReason: "idle and cool",
     provider: "filesystem",
-    queueDepth: 0,
-    failedIntents: 0
+    queued: 0,
+    failed: 0
   )
   var statusSnapshot = ServiceStatusSnapshot(
     status: "running",

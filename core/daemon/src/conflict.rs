@@ -1,21 +1,34 @@
-//! Keep-both conflict-copy path derivation.
+//! Keep-both conflicts: the copy names, and the question a conflict
+//! puts to the user.
 //!
-//! Template per `docs/architecture/data-flow.md §Conflict handling`:
-//! `{stem}~conflict-{device_id}-{timestamp_ms}{ext}`, where the split
-//! happens at the last `.` of the basename. When the derived path
-//! already exists, `-{seq}` (starting at 2) appends before the
+//! Copy template per `docs/architecture/data-flow.md §Conflict
+//! handling`: `{stem}~conflict-{device_id}-{timestamp_ms}{ext}`, where
+//! the split happens at the last `.` of the basename. When the derived
+//! path already exists, `-{seq}` (starting at 2) appends before the
 //! extension until a free path is found. Every input is derivable from
 //! durable state (device id from `vapor.json`, timestamp from the
 //! intent's event time), so the same conflict replayed on the same
 //! device lands on the same conflict path across restarts.
+//!
+//! The cloud settles who keeps the name: the first edit to reach it
+//! stays under the file's name, and each device whose edit lost the
+//! race moves it to a copy named after that device. Three devices
+//! editing one file leave the file plus two copies. A [`Conflict`] is
+//! all the versions of one file; it is put to the user as one
+//! `conflict` decision (`vapor decisions`), answered with [`keep`], and
+//! closes when no copy is left, however the copies went.
 
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
+use vapor_shared::constants;
+
+use crate::state_db::DecisionOption;
+
 /// The marker every keep-both conflict copy carries in its file name.
-/// Surfaces that list or resolve conflicts (the `vapor conflicts`
-/// command, and the app UIs driving it) recognize copies by this
-/// marker via [`parse_conflict_copy_name`].
-pub const CONFLICT_MARKER: &str = "~conflict-";
+/// The daemon recognizes copies by it through [`parse_conflict_copy_name`].
+pub const CONFLICT_MARKER: &str = constants::conflict::COPY_MARKER;
 
 /// Derives the keep-both conflict-copy path for `original`.
 /// `path_exists` abstracts the existence probe so derivation stays
@@ -118,9 +131,412 @@ pub fn parse_conflict_copy_name(file_name: &str) -> Option<ConflictCopyName> {
     })
 }
 
+/// The original a conflict copy belongs to.
+pub fn original_path(copy_path: &Path) -> Option<PathBuf> {
+    let name = copy_path.file_name()?.to_str()?;
+    let parsed = parse_conflict_copy_name(name)?;
+    Some(copy_path.with_file_name(parsed.canonical_file_name))
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Every version of one conflicted file, as found on disk.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Conflict {
+    /// The path every version competes for.
+    pub original: PathBuf,
+    /// The local file holding a spelling of `original` that this
+    /// filesystem folds onto it (`readme.md` for a cloud `Readme.md`).
+    /// The copies then stand in for other cloud files rather than for
+    /// edits of this one, so only this file can be kept.
+    pub clash: Option<PathBuf>,
+    /// The file under the name first, when there is one, then the
+    /// copies, oldest first.
+    pub versions: Vec<PathBuf>,
+}
+
+impl Conflict {
+    /// The conflict over `original`, or `None` while no copy of it
+    /// exists. A folder is never in conflict: a copy next to one is the
+    /// `keep-both` answer to a file/folder clash, not a question.
+    pub fn find(original: &Path) -> Option<Self> {
+        if original.is_dir() {
+            return None;
+        }
+        let wanted = original.file_name()?.to_str()?;
+        let mut copies: Vec<(u64, u64, PathBuf)> = fs::read_dir(original.parent()?)
+            .ok()?
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let parsed = parse_conflict_copy_name(name.to_str()?)?;
+                let path = entry.path();
+                (parsed.canonical_file_name == wanted && path.is_file())
+                    .then(|| (parsed.timestamp_ms, parsed.sequence.unwrap_or(1), path))
+            })
+            .collect();
+        if copies.is_empty() {
+            return None;
+        }
+        copies.sort();
+        let clash = crate::name_collision::colliding_local_path(original);
+        let under_the_name = match &clash {
+            Some(sibling) => Some(sibling.clone()),
+            None => original.is_file().then(|| original.to_path_buf()),
+        };
+        let versions = under_the_name
+            .into_iter()
+            .chain(copies.into_iter().map(|(_, _, path)| path))
+            .collect();
+        Some(Self {
+            original: original.to_path_buf(),
+            clash,
+            versions,
+        })
+    }
+
+    /// The versions the user may keep.
+    pub fn keepable(&self) -> &[PathBuf] {
+        match &self.clash {
+            Some(_) => &self.versions[..1],
+            None => &self.versions,
+        }
+    }
+
+    /// Where the kept version ends up.
+    fn destination(&self) -> &Path {
+        self.clash.as_deref().unwrap_or(&self.original)
+    }
+
+    fn under_the_name(&self) -> Option<&Path> {
+        self.versions
+            .first()
+            .filter(|first| parse_conflict_copy_name(&file_name(first)).is_none())
+            .map(PathBuf::as_path)
+    }
+}
+
+/// Why an answer to a conflict could not be applied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum KeepError {
+    /// The chosen file is not a version that can be kept: it is gone,
+    /// or it stands in for another cloud file.
+    NotAVersion(String),
+    /// A file operation failed; trying again may work.
+    Io(String),
+}
+
+impl std::fmt::Display for KeepError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAVersion(message) | Self::Io(message) => f.write_str(message),
+        }
+    }
+}
+
+/// Keeps the version whose file name is `choice` under the file's name
+/// and hands every other version to `discard` (the trash). Every path
+/// touched comes from [`Conflict::find`], the file under the name and
+/// the machine-named copies of it, so an answer can never reach any
+/// other file. The daemon syncs the result like any user edit.
+pub fn keep(
+    conflict: &Conflict,
+    choice: &str,
+    mut discard: impl FnMut(&Path) -> io::Result<()>,
+) -> Result<(), KeepError> {
+    let kept = conflict
+        .keepable()
+        .iter()
+        .find(|version| file_name(version) == choice)
+        .ok_or_else(|| {
+            KeepError::NotAVersion(format!(
+                "{choice} is not a version of {} that can be kept; choose one of {}",
+                conflict.original.display(),
+                conflict
+                    .keepable()
+                    .iter()
+                    .map(|version| file_name(version))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+    for version in conflict.versions.iter().filter(|version| *version != kept) {
+        match discard(version) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(KeepError::Io(format!(
+                    "cannot move {} to the trash: {error}",
+                    version.display()
+                )));
+            }
+        }
+    }
+    let destination = conflict.destination();
+    if kept != destination {
+        fs::rename(kept, destination).map_err(|error| {
+            KeepError::Io(format!(
+                "cannot move {} to {}: {error}",
+                kept.display(),
+                destination.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// What a `conflict` decision asks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConflictQuestion {
+    pub question: String,
+    pub options: Vec<DecisionOption>,
+    pub evidence: serde_json::Value,
+}
+
+/// The question for `conflict`. One option per version that can be
+/// kept, keyed by its file name. `this_device` is the local
+/// `deviceId`, so a label can say "this device's edit";
+/// `trash_enabled` says where the other versions go.
+pub fn question(conflict: &Conflict, this_device: &str, trash_enabled: bool) -> ConflictQuestion {
+    let device_of = |path: &Path| parse_conflict_copy_name(&file_name(path)).map(|p| p.device_id);
+    let evidence = serde_json::json!({
+        "versions": conflict
+            .versions
+            .iter()
+            .map(|version| {
+                let metadata = fs::metadata(version).ok();
+                serde_json::json!({
+                    "file": file_name(version),
+                    "device": device_of(version),
+                    "sizeBytes": metadata.as_ref().map(fs::Metadata::len),
+                    "modifiedAtMs": metadata
+                        .and_then(|metadata| metadata.modified().ok())
+                        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|age| age.as_millis() as u64),
+                })
+            })
+            .collect::<Vec<_>>(),
+    });
+    let options = conflict
+        .keepable()
+        .iter()
+        .map(|version| DecisionOption {
+            key: file_name(version),
+            label: match (&conflict.clash, device_of(version)) {
+                (Some(_), _) => format!("Keep only {}", file_name(version)),
+                (None, None) => "Keep the version already under the name".to_string(),
+                (None, Some(device)) if device == this_device => {
+                    "Keep this device's edit".to_string()
+                }
+                (None, Some(device)) => format!("Keep the edit made on {device}"),
+            },
+        })
+        .collect();
+    let original = conflict.original.display();
+    let total = conflict.versions.len();
+    let question = if let Some(sibling) = &conflict.clash {
+        let removed = if trash_enabled {
+            "The copies go to the trash and their cloud files are deleted."
+        } else {
+            "The copies and their cloud files are deleted."
+        };
+        format!(
+            "The cloud has {total} files named like {original} that differ only in case or \
+             accents. This device can hold one of them, {}, so the others are here as \
+             conflict copies. Keep only {}? {removed}",
+            sibling.display(),
+            file_name(sibling),
+        )
+    } else {
+        let others = if trash_enabled {
+            "The others go to the trash."
+        } else {
+            "The others are deleted (the trash is turned off)."
+        };
+        match (conflict.under_the_name(), conflict.versions.as_slice()) {
+            (Some(_), _) => format!(
+                "{original} was changed in more than one place before the changes synced, so \
+                 Vapor kept all {total} versions. Which one stays? {others}"
+            ),
+            (None, [only]) => format!(
+                "{original} is gone, but its conflict copy {} is still here. Keep it under the \
+                 name?",
+                file_name(only)
+            ),
+            (None, _) => format!(
+                "{original} is gone, and Vapor kept {total} conflicting versions of it. Which \
+                 one takes the name? {others}"
+            ),
+        }
+    };
+    ConflictQuestion {
+        question,
+        options,
+        evidence,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    const MINE: &str = "report~conflict-this-mac-1750000000123.md";
+    const THEIRS: &str = "report~conflict-other-mac-1750000000456.md";
+
+    /// `report.md` plus one copy per name in `copies`, each holding its
+    /// own name as content.
+    fn seed(root: &Path, copies: &[&str]) -> PathBuf {
+        let original = root.join("docs").join("report.md");
+        fs::create_dir_all(original.parent().expect("parent")).expect("dirs");
+        fs::write(&original, b"report.md").expect("seed original");
+        for copy in copies {
+            fs::write(original.with_file_name(copy), copy.as_bytes()).expect("seed copy");
+        }
+        original
+    }
+
+    fn trash_into(bin: &Path) -> impl FnMut(&Path) -> io::Result<()> + '_ {
+        move |path: &Path| {
+            fs::create_dir_all(bin)?;
+            fs::rename(path, bin.join(path.file_name().expect("name")))
+        }
+    }
+
+    fn names(paths: &[PathBuf]) -> Vec<String> {
+        paths.iter().map(|path| file_name(path)).collect()
+    }
+
+    #[test]
+    fn every_copy_of_a_file_belongs_to_one_conflict() {
+        let temp = TempDir::new().expect("temp");
+        let original = seed(
+            temp.path(),
+            &[THEIRS, MINE, "notes~conflict-x-1750000000999.md"],
+        );
+
+        let conflict = Conflict::find(&original).expect("a conflict");
+        assert_eq!(names(&conflict.versions), vec!["report.md", MINE, THEIRS]);
+        assert_eq!(conflict.keepable().len(), 3);
+        assert!(Conflict::find(&original.with_file_name("plain.md")).is_none());
+
+        fs::remove_file(original.with_file_name(MINE)).expect("resolve by hand");
+        fs::remove_file(original.with_file_name(THEIRS)).expect("resolve by hand");
+        assert!(Conflict::find(&original).is_none(), "no copy, no conflict");
+    }
+
+    #[test]
+    fn the_question_offers_every_version_and_says_whose_edit_each_holds() {
+        let temp = TempDir::new().expect("temp");
+        let original = seed(temp.path(), &[MINE, THEIRS]);
+        let conflict = Conflict::find(&original).expect("a conflict");
+
+        let asked = question(&conflict, "this-mac", true);
+        assert!(
+            asked.question.contains("all 3 versions"),
+            "{}",
+            asked.question
+        );
+        assert!(
+            asked.question.contains("go to the trash"),
+            "{}",
+            asked.question
+        );
+        let options: Vec<_> = asked
+            .options
+            .iter()
+            .map(|option| (option.key.as_str(), option.label.as_str()))
+            .collect();
+        assert_eq!(
+            options,
+            vec![
+                ("report.md", "Keep the version already under the name"),
+                (MINE, "Keep this device's edit"),
+                (THEIRS, "Keep the edit made on other-mac"),
+            ]
+        );
+        let versions = asked.evidence["versions"].as_array().expect("versions");
+        assert_eq!(versions[0]["device"], serde_json::Value::Null);
+        assert_eq!(versions[1]["device"], "this-mac");
+        assert_eq!(versions[2]["sizeBytes"], THEIRS.len() as u64);
+    }
+
+    #[test]
+    fn keeping_a_copy_moves_it_under_the_name_and_trashes_the_rest() {
+        let temp = TempDir::new().expect("temp");
+        let original = seed(temp.path(), &[MINE, THEIRS]);
+        let bin = temp.path().join("bin");
+        let conflict = Conflict::find(&original).expect("a conflict");
+
+        keep(&conflict, THEIRS, trash_into(&bin)).expect("keep");
+
+        assert_eq!(fs::read(&original).expect("read"), THEIRS.as_bytes());
+        assert!(Conflict::find(&original).is_none());
+        let mut trashed: Vec<_> = fs::read_dir(&bin)
+            .expect("bin")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        trashed.sort();
+        assert_eq!(trashed, vec!["report.md", MINE]);
+    }
+
+    #[test]
+    fn keeping_the_file_under_the_name_trashes_every_copy() {
+        let temp = TempDir::new().expect("temp");
+        let original = seed(temp.path(), &[MINE, THEIRS]);
+        let bin = temp.path().join("bin");
+        let conflict = Conflict::find(&original).expect("a conflict");
+
+        keep(&conflict, "report.md", trash_into(&bin)).expect("keep");
+
+        assert_eq!(fs::read(&original).expect("read"), b"report.md");
+        assert_eq!(fs::read_dir(&bin).expect("bin").count(), 2);
+    }
+
+    #[test]
+    fn an_answer_never_reaches_a_file_outside_the_conflict() {
+        let temp = TempDir::new().expect("temp");
+        let original = seed(temp.path(), &[MINE]);
+        let bystander = original.with_file_name("precious.md");
+        fs::write(&bystander, b"do not touch").expect("seed");
+        let conflict = Conflict::find(&original).expect("a conflict");
+
+        let refused = keep(&conflict, "precious.md", |_| panic!("nothing is discarded"));
+        assert!(
+            matches!(refused, Err(KeepError::NotAVersion(_))),
+            "{refused:?}"
+        );
+        assert!(bystander.exists());
+        assert!(original.with_file_name(MINE).exists());
+    }
+
+    #[test]
+    fn a_lone_copy_of_a_deleted_file_is_offered_the_name() {
+        let temp = TempDir::new().expect("temp");
+        let original = seed(temp.path(), &[THEIRS]);
+        fs::remove_file(&original).expect("delete the original");
+        let conflict = Conflict::find(&original).expect("a conflict");
+
+        let asked = question(&conflict, "this-mac", true);
+        assert!(asked.question.contains("is gone"), "{}", asked.question);
+        assert_eq!(asked.options.len(), 1);
+        keep(&conflict, THEIRS, |_| panic!("nothing else to discard")).expect("keep");
+        assert_eq!(fs::read(&original).expect("read"), THEIRS.as_bytes());
+    }
+
+    #[test]
+    fn a_copy_next_to_a_folder_is_not_a_conflict() {
+        let temp = TempDir::new().expect("temp");
+        let folder = temp.path().join("report.md");
+        fs::create_dir_all(&folder).expect("folder");
+        fs::write(temp.path().join(MINE), b"file").expect("copy");
+        assert!(Conflict::find(&folder).is_none());
+    }
 
     fn never_exists(_: &Path) -> bool {
         false

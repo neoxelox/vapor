@@ -1037,6 +1037,11 @@ impl Driver {
             {
                 continue;
             }
+            // Keep-both copies are part of what the model checks (both
+            // contested payloads survive), so their questions stay open.
+            if kind == "conflict" {
+                continue;
+            }
             if kind != "mass-delete" {
                 return Err(Failure::new(format!(
                     "the daemon opened a {kind} decision (#{id}) the driver cannot answer: {}",
@@ -1047,7 +1052,7 @@ impl Driver {
                 "guard-trip",
                 format!(
                     "mass-delete guard held {} deletion(s) behind decision #{id}; applying ({})",
-                    decision["heldIntents"].as_u64().unwrap_or_default(),
+                    decision["held"].as_u64().unwrap_or_default(),
                     decision["question"].as_str().unwrap_or_default()
                 ),
             );

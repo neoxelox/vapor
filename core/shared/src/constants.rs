@@ -131,7 +131,7 @@ pub mod config {
     pub const KEY_CLOUD_ROOT: &str = "cloudRoot";
     pub const KEY_PRE_IGNORE_RULES: &str = "preIgnoreRules";
     pub const KEY_POST_IGNORE_RULES: &str = "postIgnoreRules";
-    pub const KEY_LANGUAGE_CODE: &str = "languageCode";
+    pub const KEY_LANGUAGE: &str = "language";
     pub const KEY_TIMELINE_LIMIT: &str = "timelineLimit";
     /// Provider selection: `filesystem` (default pre-GA) or
     /// `gdrive`. See `provider::*` for the accepted values.
@@ -176,8 +176,8 @@ pub mod config {
 
     /// Keys that reshape the pipeline (roots, provider, direction,
     /// profile set) and therefore take effect on the next daemon start;
-    /// a running daemon reports them as `config_restart_required` in
-    /// status until it is restarted.
+    /// a running daemon reports them as `restartRequired` in status
+    /// until it is restarted.
     pub const RESTART_REQUIRED_KEYS: &[&str] = &[
         KEY_LOCAL_ROOT,
         KEY_CLOUD_ROOT,
@@ -197,7 +197,7 @@ pub mod config {
         KEY_CLOUD_ROOT,
         KEY_PRE_IGNORE_RULES,
         KEY_POST_IGNORE_RULES,
-        KEY_LANGUAGE_CODE,
+        KEY_LANGUAGE,
         KEY_TIMELINE_LIMIT,
         KEY_PROVIDER,
         KEY_SYNC_MODE,
@@ -217,7 +217,7 @@ pub mod config {
     pub const DEFAULT_AUTO_LAUNCH: bool = true;
     pub const DEFAULT_USE_GITIGNORE: bool = true;
     pub const DEFAULT_USE_VAPORIGNORE: bool = true;
-    pub const DEFAULT_LANGUAGE_CODE: &str = "en";
+    pub const DEFAULT_LANGUAGE: &str = "en";
     pub const DEFAULT_TIMELINE_LIMIT: i64 = 1_000;
 }
 
@@ -408,6 +408,8 @@ pub mod trash {
     /// source does not have.
     pub const REASON_CLOUD_DELETE: &str = "cloud-delete";
     pub const REASON_MIRROR_DELETE: &str = "mirror-delete";
+    /// A version of a conflicted file the user did not keep.
+    pub const REASON_CONFLICT: &str = "conflict";
 }
 
 pub mod sync_mode {
@@ -436,7 +438,7 @@ pub mod run_state {
 
 pub mod throttle_state {
     /// The device is idle: queued work drains at full width.
-    pub const IDLE_DRAIN: &str = "idle-drain";
+    pub const IDLE: &str = "idle";
     /// Some load or a user at the keyboard: reduced width.
     pub const LIGHT: &str = "light";
     /// Heavy load, battery, heat, or an active user: one transfer at a
@@ -447,7 +449,7 @@ pub mod throttle_state {
     pub const SUSPENDED: &str = "suspended";
 }
 
-/// What the whole-scope reconcile is doing (`reconcileState`).
+/// What the whole-scope reconcile is doing (`reconcile.state` in status).
 pub mod reconcile_state {
     pub const IDLE: &str = "idle";
     pub const WAITING: &str = "waiting";
@@ -502,6 +504,9 @@ pub mod decision {
     pub const KIND_TYPE_MISMATCH: &str = "type-mismatch";
     /// A local name the cloud cannot store (not valid UTF-8).
     pub const KIND_UNSYNCABLE_NAME: &str = "unsyncable-name";
+    /// A file changed in more than one place before the changes synced;
+    /// Vapor kept every version, and one has to stay.
+    pub const KIND_CONFLICT: &str = "conflict";
 
     /// `mass-delete`: let the deletes through, or put the files back.
     pub const OPTION_APPLY: &str = "apply";
@@ -519,6 +524,8 @@ pub mod decision {
     pub const OPTION_PREFER_CLOUD: &str = "prefer-cloud";
     /// `unsyncable-name`: leave the file out of sync.
     pub const OPTION_SKIP: &str = "skip";
+    // A `conflict` has one option per version, keyed by the version's
+    // file name, so it has no fixed option keys.
 
     /// What a decision covers.
     pub const SCOPE_PATH: &str = "path";
@@ -526,17 +533,17 @@ pub mod decision {
     pub const SCOPE_PROFILE: &str = "profile";
 }
 
-/// Keep-both conflicts (`vapor conflicts`). The original is the file at
-/// the path both sides edited, holding the version that reached the
-/// cloud first; the copy is the other version, saved next to it as
-/// `{stem}~conflict-{deviceId}-{ms}{ext}`.
+/// Keep-both conflicts. The original is the file at the path both sides
+/// edited; the copy is the other version, saved next to it as
+/// `{stem}~conflict-{deviceId}-{ms}{ext}` and holding the edit of the
+/// device it names. Each copy is a `conflict` decision.
 pub mod conflict {
     pub const COPY_MARKER: &str = "~conflict-";
-    /// `vapor conflicts resolve --choose original`: keep the original
-    /// and delete the copy.
-    pub const CHOICE_ORIGINAL: &str = "original";
-    /// `--choose copy`: move the copy over the original.
-    pub const CHOICE_COPY: &str = "copy";
+    /// How often a running daemon matches the open `conflict` decisions
+    /// to the copies on disk: a file with copies gets a question, one
+    /// whose versions changed gets the question rewritten, and one with
+    /// no copy left has its question closed.
+    pub const DECISION_SYNC_SECONDS: u64 = 5;
 }
 
 /// Kinds of the entries in the activity timeline (`vapor timeline`).
@@ -551,7 +558,8 @@ pub mod timeline {
     /// differently-cased local file.
     pub const KIND_COLLISION: &str = "collision";
     pub const KIND_MIRROR: &str = "mirror";
-    pub const KIND_INTENT_FAILED: &str = "intent-failed";
+    /// Work that failed for good (retries exhausted or a permanent error).
+    pub const KIND_FAILURE: &str = "failure";
     pub const KIND_RECONCILE: &str = "reconcile";
     /// The cloud changes feed.
     pub const KIND_FEED: &str = "feed";
@@ -653,14 +661,14 @@ pub mod ipc {
     /// Windows / Linux apps, the daemon). Bump on any backwards-
     /// incompatible payload shape change. Pre-GA the sliding tolerance
     /// is `|N - M| <= 1`; see `docs/architecture/ipc-contracts.md`.
-    pub const SCHEMA_VERSION_CURRENT: u32 = 3;
+    pub const SCHEMA_VERSION_CURRENT: u32 = 4;
     /// Minimum peer schema version this build can interoperate with.
     /// Together with [`SCHEMA_VERSION_CURRENT`] this defines the local
     /// support window; the handshake fails when both sides cannot find
-    /// an overlapping version. Version 3 renamed every payload key to
-    /// camelCase and every value to kebab-case, so a version 2 peer
-    /// would misread it: the window starts at 3.
-    pub const SCHEMA_VERSION_MIN_SUPPORTED: u32 = 3;
+    /// an overlapping version. Version 4 regrouped the status payload
+    /// (`run`, `throttle`, `reconcile`, `resources`, `mirror`), so a
+    /// version 3 peer would misread it: the window starts at 4.
+    pub const SCHEMA_VERSION_MIN_SUPPORTED: u32 = 4;
     /// Maximum size of a single IPC frame in bytes. Frames whose
     /// declared length exceeds this cap are rejected before any
     /// deserialization attempt.
@@ -880,15 +888,15 @@ pub mod engine {
     pub const THROTTLED_NETWORK_ERROR_RATE_PERCENT: u8 = 25;
     pub const LIGHT_NETWORK_THROUGHPUT_KBPS: u32 = 512;
     pub const THROTTLED_NETWORK_THROUGHPUT_KBPS: u32 = 128;
-    /// IdleDrain concurrency tier bounds. The effective tier derives
+    /// Idle concurrency tier bounds. The effective tier derives
     /// from the machine's available parallelism (half the cores),
     /// clamped into `[MIN, MAX]` — a 16-core desktop drains faster than
     /// a 2-core laptop without oversubscribing either. Light/Throttled
     /// tiers stay fixed: they bound device impact while the user is
     /// active, where core count is not the limit that matters.
-    pub const IDLE_DRAIN_CONCURRENCY_MIN: usize = 4;
-    pub const IDLE_DRAIN_CONCURRENCY_MAX: usize = 8;
-    pub const IDLE_DRAIN_READ_TOKENS: usize = 2;
+    pub const IDLE_CONCURRENCY_MIN: usize = 4;
+    pub const IDLE_CONCURRENCY_MAX: usize = 8;
+    pub const IDLE_READ_TOKENS: usize = 2;
     pub const LIGHT_PLANNER_WORKERS: usize = 2;
     pub const LIGHT_HASH_WORKERS: usize = 2;
     pub const LIGHT_READ_TOKENS: usize = 1;
@@ -911,7 +919,7 @@ pub mod engine {
     pub const TRANSFER_STAGE_STEP_BYTES: u64 = 8 * 1024 * 1024;
     /// Bounds on worker threads running blocking provider I/O (probes,
     /// transfer sessions, remote deletes) off the runtime tick thread.
-    /// The effective cap is twice the IdleDrain concurrency tier,
+    /// The effective cap is twice the Idle concurrency tier,
     /// clamped into `[MIN, MAX]`, so upload + download can both run at
     /// full width. Threads spawn lazily per in-flight job and sit
     /// parked on a channel otherwise; the throttle workgate, not this
@@ -920,7 +928,7 @@ pub mod engine {
     pub const PROVIDER_JOB_WORKERS_MAX: usize = 16;
     /// Remote changes-feed poll cadence per throttle state; Google
     /// Drive follows the same discipline. Suspended never polls.
-    pub const REMOTE_POLL_IDLE_DRAIN_SECONDS: u64 = 5;
+    pub const REMOTE_POLL_IDLE_SECONDS: u64 = 5;
     pub const REMOTE_POLL_LIGHT_SECONDS: u64 = 15;
     pub const REMOTE_POLL_THROTTLED_SECONDS: u64 = 60;
     /// Maximum remote changes consumed per poll page.
@@ -953,11 +961,11 @@ pub mod engine {
     /// marker instead. Keeps the tick-thread walk bounded.
     pub const SYNTHESIZED_SUBTREE_EVENT_CAP: usize = 10_000;
     /// Per-tick directory budget for the reconcile walk (runs only under
-    /// IdleDrain). Higher than the checkpoint granularity so a large tree
+    /// Idle). Higher than the checkpoint granularity so a large tree
     /// converges quickly on a fast (filesystem) provider; the per-slice
     /// wall-clock deadline caps the cost when the provider's enumerate is
     /// a slow network call.
-    pub const RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN: usize = 64;
+    pub const RECONCILE_DIRS_PER_SLICE_IDLE: usize = 64;
     /// Assumed link capacity when the platform sampler reports no
     /// measured throughput; the bandwidth ceiling applies against this
     /// until a real measurement exists.
@@ -999,7 +1007,7 @@ pub mod engine {
     pub const STORM_GLOBAL_PENDING_EVENT_COUNT_THRESHOLD: usize = 5_000;
     pub const DEFERRED_RECONCILE_DELAY_MILLIS: u64 = 30_000;
     /// Early-release path for a storm-deferred reconcile: once the
-    /// device is already idle (`IdleDrain`) and the storm has been
+    /// device is already idle (`Idle`) and the storm has been
     /// quiet this long, waiting out the full deferral only delays
     /// convergence the user is watching for (a repo clone appearing in
     /// the cloud folder). The full delay still applies while the user

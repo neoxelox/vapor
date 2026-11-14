@@ -8,8 +8,8 @@
 4. Per-directory 2s storm thresholds (200 unique paths or 600 events) compact noisy subtrees strictly *below* the watch root into deferred `RECONCILE_SUBTREE` markers so storms stop per-path fan-out early; the watch root itself compacts only via the separate 5000-pending global trigger, so a busy-but-healthy tree cannot collapse the whole scope. Continued churn defers a subtree's reconcile until quiet, bounded by `DEFERRED_RECONCILE_MAX_DELAY_MILLIS` from first detection so a permanently-busy subtree still converges.
 5. A 250ms debounce/coalesce tick emits stabilized events after conservative per-path quiet windows (shorter for key configs, longer for lockfiles and other unmatched paths).
 6. A keyed latest-wins scheduler keeps one intent per path, supersedes stale actions, and requeues dirty paths after in-flight work finishes.
-7. A throttle controller evaluates 1s power, thermal, load, disk, network, and activity samples to select `IdleDrain`, `Light`, `Throttled`, or `Suspended`.
-8. Planner, hash, upload, and reconcile stages acquire strict throttle-gated work permits before starting; reconcile only starts in `IdleDrain`, yields on slice expiry or throttle changes, and clears compacted subtree boundaries after successful quiet completion. The one exception is the user's own request: `vapor reconcile` (the app's Sync now) admits the next whole-scope reconcile under any state but `Suspended`, spending that state's planner slot and read token, and the walk still yields on its slice budget; the request is spent when one reconcile completes. While a queued scan is held, `vapor status` reports `reconcileState: waiting` with the throttle reason, so a machine in use never looks stuck without saying why.
+7. A throttle controller evaluates 1s power, thermal, load, disk, network, and activity samples to select `Idle`, `Light`, `Throttled`, or `Suspended`.
+8. Planner, hash, upload, and reconcile stages acquire strict throttle-gated work permits before starting; reconcile only starts in `Idle`, yields on slice expiry or throttle changes, and clears compacted subtree boundaries after successful quiet completion. The one exception is the user's own request: `vapor reconcile` (the app's Sync now) admits the next whole-scope reconcile under any state but `Suspended`, spending that state's planner slot and read token, and the walk still yields on its slice budget; the request is spent when one reconcile completes. While a queued scan is held, `vapor status` reports `reconcileState: waiting` with the throttle reason, so a machine in use never looks stuck without saying why.
 9. A live daemon runtime loop wires watcher ingest -> incoming queue drain + symlink resolution -> debounce -> scheduler -> durable queue -> workgate -> reconcile, so the local engine runs as one composed pipeline instead of isolated primitives. The loop is event-nudged: fs-event callbacks and IPC control requests signal a tick waker, and a fully idle daemon relaxes from the 250 ms work cadence to a 1 s cadence. Exactly one daemon may serve a `vapor_dir` (an OS advisory lock on `vapord.lock` enforces it). On a shutdown signal the loop stabilizes every local event still inside its debounce window and writes the resulting intents to the durable queue before exiting (`intents_flushed` in the shutdown log line), so a change reported moments before SIGTERM does not depend on the next startup reconcile to be found. `Pause` semantics: ingest/debounce/durable-flush keep capturing intent state and in-flight work finishes, but no new work is released or leased until `Resume`.
 10. A SQLite durable queue/state DB (WAL, `synchronous = NORMAL`) persists pending and leased intents, recovers interrupted leases on startup (resetting `attempt_count` for leases older than `LEASE_TIMEOUT_MILLIS`) and sweeps stale leases periodically in-run, coalesces scheduler flushes per `(path, kind)` against already-pending rows inside one transaction, requeues retryable failures with exponential backoff/jitter/slower rate-limit delays (with `attempt_count` incremented only by the retry path, not by leasing), durably finalizes terminal failures, and injects a whole-scope startup reconcile (bounded by `STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS` to avoid starving non-reconcile work) so volatile pre-DB intent loss is reconstructed conservatively after restart.
 11. Provider selection is injected at runtime startup per profile, so daemon orchestration uses the provider trait boundary instead of hardcoding any cloud type in core engine state. `provider = "filesystem"` (default) selects the real filesystem provider; `provider = "gdrive"` selects `GoogleDriveProvider`. New backends onboard through the checklist in `provider-onboarding.md`.
@@ -108,7 +108,7 @@ Resolution and enforcement sequence on every tick:
 
 1. Resolve effective ceilings by taking the MIN of the global values and each enabled profile's override; any enabled profile with `idleBoost.enabled = false` disables boost daemon-wide. Profile overrides can only *lower* effective ceilings relative to global values.
 2. Sample device-level CPU, memory, and network utilization plus user-idle duration at the same 1s cadence as the throttle controller.
-3. Run the idle-boost state machine. Boost engages only when: throttle state is `IdleDrain`, user has been idle for at least `minIdleSeconds`, and non-Vapor utilization is at or below each `headroom*Percent`. Effective ceilings linearly ramp from `resourceLimits.*Percent` toward `idleBoost.*Percent` over `rampUpSeconds`; any condition break ramps back down over `rampDownSeconds` (bounded to `<= rampUpSeconds` so activity resumption is non-invasive).
+3. Run the idle-boost state machine. Boost engages only when: throttle state is `Idle`, user has been idle for at least `minIdleSeconds`, and non-Vapor utilization is at or below each `headroom*Percent`. Effective ceilings linearly ramp from `resourceLimits.*Percent` toward `idleBoost.*Percent` over `rampUpSeconds`; any condition break ramps back down over `rampDownSeconds` (bounded to `<= rampUpSeconds` so activity resumption is non-invasive).
 4. Publish effective ceilings and reason codes to: the workgate (CPU ceiling scales planner/hash/upload/download concurrency caps), the provider-neutral bandwidth shaper in `core/providers` (bandwidth ceiling sets a bytes/sec token bucket shared across upload and download, capped at `bandwidthPercent` of measured link capacity so non-Vapor traffic always retains at least `100 - bandwidthPercent` of the link by construction), and the memory-reactive caches. The memory ceiling is a share of device memory; while the daemon's resident size sits above it, or while the cache population outgrows an entry budget derived from it, `self_write_cache` TTLs and the timeline buffer trim to their documented floors, restoring once usage falls below half the budget.
 5. Auto-tuning decisions (60-120s cadence) are constrained to stay inside current effective ceilings and must absorb ceiling changes within one cycle without oscillation.
 
@@ -123,9 +123,9 @@ Invariants:
 
 Idle-boost and the throttle controller update asynchronously on the same 1s cadence, so a mid-ramp throttle transition must be resolved deterministically:
 
-1. **Throttle exit from `IdleDrain`.** When throttle state transitions from `IdleDrain` to `Light`, `Throttled`, or `Suspended` while boost is active or mid-ramp, the effective ceiling snaps immediately to `min(current_ramped_value, resourceLimits.*Percent)` and boost is marked disengaged. No down-ramp occurs in this path; the cap collapses to the base ceiling in the same tick to guarantee the post-IdleDrain throttle state never runs against boosted caps.
-2. **Throttle return to `IdleDrain`.** When throttle returns to `IdleDrain` after having left it, boost is not auto-resumed. The idle-boost state machine re-evaluates all gating conditions (`minIdleSeconds` since last user input, `headroom*Percent` samples, `idleBoost.enabled`) from scratch and, if they pass, starts a fresh up-ramp from `resourceLimits.*Percent`. This prevents boost from re-engaging off stale conditions after even a brief throttle excursion.
-3. **Graceful boost exit (throttle stays `IdleDrain`, gating condition fails).** If boost is active and a non-throttle condition breaks (user HID input, non-Vapor utilization exceeds headroom, `idleBoost.enabled` flips to `false` via config reload), ceilings ramp down linearly over `rampDownSeconds` back to `resourceLimits.*Percent`. `rampDownSeconds` must be `<= rampUpSeconds` so activity resumption is non-invasive.
+1. **Throttle exit from `Idle`.** When throttle state transitions from `Idle` to `Light`, `Throttled`, or `Suspended` while boost is active or mid-ramp, the effective ceiling snaps immediately to `min(current_ramped_value, resourceLimits.*Percent)` and boost is marked disengaged. No down-ramp occurs in this path; the cap collapses to the base ceiling in the same tick to guarantee the post-Idle throttle state never runs against boosted caps.
+2. **Throttle return to `Idle`.** When throttle returns to `Idle` after having left it, boost is not auto-resumed. The idle-boost state machine re-evaluates all gating conditions (`minIdleSeconds` since last user input, `headroom*Percent` samples, `idleBoost.enabled`) from scratch and, if they pass, starts a fresh up-ramp from `resourceLimits.*Percent`. This prevents boost from re-engaging off stale conditions after even a brief throttle excursion.
+3. **Graceful boost exit (throttle stays `Idle`, gating condition fails).** If boost is active and a non-throttle condition breaks (user HID input, non-Vapor utilization exceeds headroom, `idleBoost.enabled` flips to `false` via config reload), ceilings ramp down linearly over `rampDownSeconds` back to `resourceLimits.*Percent`. `rampDownSeconds` must be `<= rampUpSeconds` so activity resumption is non-invasive.
 4. **Config reload mid-ramp.** Lowering `resourceLimits.*Percent` mid-ramp immediately clamps the current ramped value to the new (lower) base ceiling; raising it does not retroactively raise the ramp target, which remains the original `boost*Percent`. Changing `boost*Percent` or `rampUpSeconds` mid-ramp snaps the in-progress ramp to the new targets on the next tick (no restart, no glitch).
 5. **In-flight work during snap-down.** When the effective ceiling drops below current in-flight concurrency as a result of any of the above, no new work is admitted but running work proceeds to its next slice checkpoint before yielding — same discipline as §"Invariants" above.
 
@@ -201,10 +201,10 @@ keeps its two objects; the device holds the kept name and the copy, and
 a `collision` timeline event names both. Among remote-only names that
 fold to one key the lexically first one takes the name and the rest are
 materialized the same way. A colliding *directory* has no copy to make
-and is reported and left untouched. `vapor conflicts resolve --choose
-original` on such a copy removes the cloud's other object; `--choose
-copy` is refused, since renaming the copy over the kept name would only
-swap which cloud object is stranded.
+and is reported and left untouched. Such a copy's `conflict` decision
+offers only the local file that holds the folded name, and answering it
+removes the cloud's other object; moving the copy onto the kept name
+would only swap which cloud object is stranded.
 
 **Special files (FIFOs, sockets, device nodes) are inert.** The executor
 refuses them at planning and the reconcile walk skips them — this must
@@ -237,12 +237,12 @@ resolved in favor of the authoritative side with no conflict copy (see
 default mode.
 
 This section owns conflict *creation*. Everything after a copy exists —
-notification, listing, and resolution through `vapor conflicts` and the
-app surfaces — lives in `conflict-resolution.md`.
+notification, listing, and resolution as a `conflict` decision through
+`vapor decisions` and the app surfaces — lives in `conflict-resolution.md`.
 
 When local and remote versions of the same path diverge (both sides modified, or rename collides with an existing name), the default policy is "keep both; never silent overwrite." Concrete mechanics:
 
-- **Winner and loser.** The side whose provider op-id completes first retains the canonical path. The losing side is renamed in-place to a derived "conflict copy" path.
+- **Winner and loser.** The side whose provider op-id completes first retains the canonical path. The losing side is renamed in-place to a derived "conflict copy" path. On the device that detects the conflict, that is its own edit: the local version moves to the copy, named with this device's `deviceId`, and the cloud's version comes down under the original name. With more than two devices, each losing device makes its own copy, so N concurrent edits leave the file plus N-1 copies, all of them one `conflict` decision.
 - **Suffix template.** `{stem}~conflict-{device_id}-{timestamp_ms}{ext}` where `{stem}` and `{ext}` are the original basename split at the last `.`, `{device_id}` is a hostname-derived stable identifier persisted once at first-run under `vapor.json`, and `{timestamp_ms}` is the event time in UTC milliseconds (monotonic-within-device).
 - **Device identifier.** Sourced at first-run from `gethostname()` normalized to `[a-z0-9-]` (non-matching characters stripped, length capped at 32). If empty after normalization, fall back to a generated UUIDv4 truncated to 12 characters. The resolved value is persisted in `vapor.json` as `deviceId` and never silently regenerated; changing machine hostnames does not change `deviceId` once persisted.
 - **Collision-avoidance fallback.** If the derived conflict path already exists (on either side), append `-{seq}` starting at `2` and increment until free. Fallback template becomes `{stem}~conflict-{device_id}-{timestamp_ms}-{seq}{ext}`.
@@ -263,13 +263,13 @@ say which reading is right. The rules:
   (`pending_decisions`), with its kind, scope, question, a short option
   list, and JSON evidence. `vapor decisions list|show` read it with or
   without a daemon; the app drives the same command. `vapor status`
-  reports the open count (`decisionsPending`), and a `decision`
-  timeline entry marks both the opening and the outcome.
+  reports the open count (`decisions`), and a `decision` timeline entry
+  marks both the opening and the outcome.
 - **Held intents.** The intents the decision holds move to the `held`
   queue state, tied to the decision by `decision_id`. Held rows are not
   queued work: they are not leased, not counted in the queue depth, and
-  they survive restarts. `vapor diagnostics` shows them as `Held` with
-  the decision number as the blocker.
+  they survive restarts. `vapor diagnostics` shows them in the `held`
+  stage with the decision number as the reason.
 - **Answering.** `vapor decisions resolve <id> --choose <key>` records
   the answer in the DB; the daemon applies it on its next tick, or at
   its next start, and marks it applied. Each kind has one applier; an
@@ -296,8 +296,14 @@ say which reading is right. The rules:
   next whole-scope walk finds the name gone and withdraws the
   question; `skip` stops the asking for that name. Watcher events for
   such a path are dropped at the callback bridge, since the durable
-  queue is UTF-8. Further kinds land with the feature that needs them
-  and are listed here.
+  queue is UTF-8. `conflict` (path scope, the conflicted file) for a
+  file with keep-both copies, with one option per version keyed by its
+  file name; the versions not kept go to the trash. Nothing is held, the
+  files are the record, the decision is rewritten in place when a
+  version arrives or goes, and it closes when no copy is left however
+  they went. `vapor decisions resolve` applies a conflict answer itself,
+  since it is local file operations (`conflict-resolution.md`). Further
+  kinds land with the feature that needs them and are listed here.
 
 ### What stops a whole profile
 

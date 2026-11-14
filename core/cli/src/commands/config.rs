@@ -141,9 +141,9 @@ fn read_or_empty_object(path: &Path) -> Result<Value, ConfigError> {
 
 fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
     use constants::config::{
-        KEY_AUTO_LAUNCH, KEY_IDLE_BOOST, KEY_PROFILES, KEY_PROVIDER, KEY_RESOURCE_LIMITS,
-        KEY_SAFEGUARDS, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT, KEY_TRASH, KEY_USE_GITIGNORE,
-        KEY_USE_VAPORIGNORE,
+        KEY_AUTO_LAUNCH, KEY_IDLE_BOOST, KEY_POST_IGNORE_RULES, KEY_PRE_IGNORE_RULES, KEY_PROFILES,
+        KEY_PROVIDER, KEY_RESOURCE_LIMITS, KEY_SAFEGUARDS, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT,
+        KEY_TRASH, KEY_USE_GITIGNORE, KEY_USE_VAPORIGNORE,
     };
     if matches!(
         key,
@@ -176,6 +176,13 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
     }
     if key == KEY_SYNC_MODE {
         return parse_enum_value(key, raw, constants::sync_mode::ALL);
+    }
+    if matches!(key, KEY_PRE_IGNORE_RULES | KEY_POST_IGNORE_RULES) {
+        return parse_json_value::<Vec<String>>(
+            key,
+            raw,
+            "a JSON array of rules such as [\"build/\", \"*.log\"]",
+        );
     }
     if key == KEY_PROFILES {
         return parse_json_value::<Vec<vapor_shared::config::ProfileConfig>>(
@@ -354,7 +361,7 @@ mod tests {
             &path,
             r#"{
   "autoLaunch": true,
-  "languageCode": "en"
+  "language": "en"
 }
 "#,
         )
@@ -363,7 +370,7 @@ mod tests {
         set(&path, "useGitignore", "false").expect("set");
         let contents = fs::read_to_string(&path).expect("file");
         assert!(contents.contains("\"autoLaunch\": true"));
-        assert!(contents.contains("\"languageCode\": \"en\""));
+        assert!(contents.contains("\"language\": \"en\""));
         assert!(contents.contains("\"useGitignore\": false"));
     }
 
@@ -375,14 +382,24 @@ mod tests {
     }
 
     #[test]
+    fn ignore_rules_are_set_as_a_json_list() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        set(&path, "postIgnoreRules", r#"["build/", "*.log"]"#).expect("set");
+        assert_eq!(
+            get(&path, "postIgnoreRules").expect("get"),
+            Some(r#"["build/","*.log"]"#.to_string())
+        );
+        let error = set(&path, "postIgnoreRules", "build/").expect_err("not a list");
+        assert!(error.to_string().contains("JSON array"), "{error}");
+    }
+
+    #[test]
     fn set_persists_string_keys_verbatim() {
         let temp = TempDir::new().expect("temp");
         let path = config_path(&temp);
-        set(&path, "languageCode", "es").expect("set");
-        assert_eq!(
-            get(&path, "languageCode").expect("get"),
-            Some("es".to_string())
-        );
+        set(&path, "language", "es").expect("set");
+        assert_eq!(get(&path, "language").expect("get"), Some("es".to_string()));
     }
 
     #[test]

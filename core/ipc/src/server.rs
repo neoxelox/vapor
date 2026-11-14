@@ -39,22 +39,11 @@ pub trait Service: Send + Sync {
         let (current, _) = crate::daemon_supported_versions();
         DiagnosticsResponse {
             schema_version: current,
-            intents: Vec::new(),
+            items: Vec::new(),
             truncated: false,
-            dropped_incoming_events: 0,
+            dropped_events: 0,
+            suppressed_echoes: 0,
         }
-    }
-
-    fn set_auto_launch(&self, _enabled: bool) -> AckResponse {
-        unsupported_ack("set_auto_launch")
-    }
-
-    fn update_excludes(
-        &self,
-        _pre_ignore_rules: Option<String>,
-        _post_ignore_rules: Option<String>,
-    ) -> AckResponse {
-        unsupported_ack("update_excludes")
     }
 
     fn timeline(&self) -> TimelineResponse {
@@ -251,15 +240,6 @@ fn dispatch_method(service: &dyn Service, method: Method) -> Response {
         Method::Reconcile => Response::Ok(ResponseBody::Ack(service.reconcile())),
         Method::Timeline => Response::Ok(ResponseBody::Timeline(service.timeline())),
         Method::Diagnostics => Response::Ok(ResponseBody::Diagnostics(service.diagnostics())),
-        Method::SetAutoLaunch { enabled } => {
-            Response::Ok(ResponseBody::Ack(service.set_auto_launch(enabled)))
-        }
-        Method::UpdateExcludes {
-            pre_ignore_rules,
-            post_ignore_rules,
-        } => Response::Ok(ResponseBody::Ack(
-            service.update_excludes(pre_ignore_rules, post_ignore_rules),
-        )),
     }
 }
 
@@ -320,7 +300,7 @@ fn check_skew(hello: Hello, local_current: u32, local_min: u32) -> Option<Incomp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::Hello;
+    use crate::protocol::{Hello, StateReason};
     use std::io::Cursor;
 
     struct StaticService {
@@ -336,11 +316,16 @@ mod tests {
     fn fixture_status() -> StatusResponse {
         StatusResponse {
             schema_version: 3,
-            run_state: "running".to_string(),
-            throttle_state: "idle-drain".to_string(),
+            daemon: "vapord/1".to_string(),
             provider: "Filesystem (stub)".to_string(),
-            throttle_reason: "idle, plugged in, and cool".to_string(),
-            daemon_id: "vapord/1".to_string(),
+            run: StateReason {
+                state: "running".to_string(),
+                reason: String::new(),
+            },
+            throttle: StateReason {
+                state: "idle".to_string(),
+                reason: "idle, plugged in, and cool".to_string(),
+            },
             ..StatusResponse::default()
         }
     }
@@ -436,7 +421,7 @@ mod tests {
         let status = read_response_frame(&mut response_reader);
         match status {
             Response::Ok(ResponseBody::Status(value)) => {
-                assert_eq!(value.run_state, "running");
+                assert_eq!(value.run.state, "running");
             }
             other => panic!("expected Status, got {other:?}"),
         }
@@ -625,8 +610,8 @@ mod tests {
         let payload = br#"{
             "kind": "Hello",
             "payload": {
-                "schemaVersion": 3,
-                "supportedMinVersion": 3,
+                "schemaVersion": 4,
+                "supportedMinVersion": 4,
                 "clientId": "vapor-cli/future",
                 "futureField": "not yet defined"
             }

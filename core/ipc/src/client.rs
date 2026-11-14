@@ -185,21 +185,6 @@ impl Client {
         }
     }
 
-    pub fn set_auto_launch(&mut self, enabled: bool) -> Result<AckResponse, ClientError> {
-        self.call_for_ack(Method::SetAutoLaunch { enabled })
-    }
-
-    pub fn update_excludes(
-        &mut self,
-        pre_ignore_rules: Option<String>,
-        post_ignore_rules: Option<String>,
-    ) -> Result<AckResponse, ClientError> {
-        self.call_for_ack(Method::UpdateExcludes {
-            pre_ignore_rules,
-            post_ignore_rules,
-        })
-    }
-
     pub fn timeline(&mut self) -> Result<TimelineResponse, ClientError> {
         match self.call(Method::Timeline)? {
             ResponseBody::Timeline(value) => Ok(value),

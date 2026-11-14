@@ -177,44 +177,42 @@ surface).
       reason).
 - [ ] M3-4 Implement per-intent "why stuck" diagnostics UI per
       `docs/architecture/ipc-contracts.md` diagnostics section (filterable
-      list + per-row drill-down; surface
-      `droppedIncomingEvents`).
+      list + per-row drill-down; surface `droppedEvents` and
+      `suppressedEchoes`).
 - [ ] M3-5 Implement the live timeline tab (bounded buffer; default 1000
       events; non-persistent across relaunch).
 - [ ] M3-6 Tests for timeline ordering, truncation at max length,
       IPC field-omission.
-- [ ] M3-7 Conflicts pane: list unresolved keep-both conflicts by driving
-      the bundled CLI (`vapor conflicts list --json` — the same shim
-      pattern as lifecycle) with per-row keep-original / keep-copy
-      actions via `vapor conflicts resolve --choose … --json`, plus a Reveal in
-      Finder affordance. No scan or resolution logic in Swift; the CLI is
-      the single engine (`docs/architecture/conflict-resolution.md`).
+- [x] M3-7 Folded into M3-9: keep-both conflicts are `conflict`
+      decisions, listed and answered through `vapor decisions`.
 - [ ] M3-8 Conflict notification: native user notification on
-      `conflict` timeline events, opening the M3-7 pane. Timeline events
-      are the trigger, never the ledger — the pane always lists from the
-      CLI scan, so the timeline's 1000-event cap can never hide a
-      conflict. Naming the file inside the notification depends on
-      core.md C8-71.
-      *(Landed: the menu bar mark turns the brand colour and the menu
-      counts the conflicts while `conflictsUnresolved` from
-      `vapor status --json` is non-zero; `AppShellState.needsUserAction`
-      is the one predicate every attention signal reads.)*
-- [ ] M3-9 Decisions pane: the questions the daemon parked, driving
+      `conflict` timeline events, opening the M3-9 pane. Timeline events
+      are the trigger, never the ledger: the pane always lists from
+      `vapor decisions list`, so the timeline's 1000-event cap can never
+      hide a conflict. Naming the file inside the notification depends
+      on core.md C8-71.
+- [ ] M3-9 Decisions pane: every question waiting on the user, driving
       `vapor decisions list --json` / `show` / `resolve --json`
       (`docs/architecture/data-flow.md` §Decisions): one row per open
       decision with its plain-language question and its short option
-      list as buttons, and a native notification on `decision` timeline
-      events. Kinds today: `mass-delete`, `root-missing`,
-      `root-replaced`, `type-mismatch`.
+      list as buttons, a Reveal in Finder affordance for a `conflict`
+      row (its `evidence` names the original and the copy), and a native
+      notification on `decision` timeline events. Kinds today:
+      `conflict`, `mass-delete`, `root-missing`, `root-replaced`,
+      `type-mismatch`, `unsyncable-name`. No matching or resolution
+      logic in Swift; the CLI and the daemon are the single engine
+      (`docs/architecture/conflict-resolution.md`).
       *(Landed: the menu bar mark turns the brand colour and the menu
-      counts the questions while `decisionsPending` is non-zero.)*
+      counts the questions while `decisions` in `vapor status --json` is
+      non-zero; `AppShellState.needsUserAction` is the one predicate
+      every attention signal reads.)*
 - [ ] M3-10 Trash pane: what Vapor removed on this device, driving
       `vapor trash list --json` / `restore --json` / `empty --json`,
       with the reason and the original path per row and a Restore
       action; the `trash` settings (`enabled`, `retentionDays`,
       `useSystem`) in Settings.
 - [ ] M3-11 Root state: a profile held on a missing or replaced sync
-      root (`suspendedReason` / the run-state reason naming the
+      root (`run.reason` naming the
       decision) shows as its own state with the decision's options,
       not as a generic error.
 - [x] M3-12 Sign-in state: a profile whose provider refused the sign-in

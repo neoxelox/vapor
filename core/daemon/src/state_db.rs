@@ -1535,26 +1535,25 @@ impl DurableStateDb {
     /// the sync index knows whose file name parses as a conflict copy,
     /// plus the copies still queued for their first upload (a copy
     /// enters the index only once it has synced, and the user should
-    /// hear about it before that). The files on disk stay the ledger
-    /// (`vapor conflicts list` walks them); this is the cheap signal
-    /// the status endpoint can afford on every publish.
-    pub fn unresolved_conflict_copy_count(&self) -> Result<usize, StateDbError> {
+    /// hear about it before that). Two partial indexes over the marker
+    /// keep this a read of the matching rows.
+    pub fn conflict_copy_paths(&self) -> Result<Vec<PathBuf>, StateDbError> {
         let mut statement = self
             .connection
             .prepare_cached(UNRESOLVED_CONFLICT_COPY_QUERY)?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        let mut count = 0;
+        let mut paths = Vec::new();
         for row in rows {
-            let path_text = row?;
-            let is_conflict_copy = Path::new(&path_text)
+            let path = path_from_text(row?);
+            let is_conflict_copy = path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| crate::conflict::parse_conflict_copy_name(name).is_some());
             if is_conflict_copy {
-                count += 1;
+                paths.push(path);
             }
         }
-        Ok(count)
+        Ok(paths)
     }
 
     /// Decisions the user answered that the daemon has not acted on.
@@ -1711,6 +1710,28 @@ impl DurableStateDb {
              SET resolved_at_ms = ?, choice = 'withdrawn', applied_at_ms = ?
              WHERE id = ? AND resolved_at_ms IS NULL",
             params![now_ms, now_ms, id],
+        )?;
+        Ok(())
+    }
+
+    /// Rewrites an open decision's question, options, and evidence in
+    /// place, so the id the user already saw stays valid while what it
+    /// asks about changes (a conflict gaining or losing a version).
+    pub fn update_open_decision(
+        &mut self,
+        id: i64,
+        question: &str,
+        options: &[DecisionOption],
+        evidence: &serde_json::Value,
+    ) -> Result<(), StateDbError> {
+        let options_json = serde_json::to_string(options)
+            .map_err(|error| StateDbError::InvalidStateValue(error.to_string()))?;
+        let evidence_json = serde_json::to_string(evidence)
+            .map_err(|error| StateDbError::InvalidStateValue(error.to_string()))?;
+        self.connection.execute(
+            "UPDATE pending_decisions SET question = ?, options_json = ?, evidence_json = ?
+             WHERE id = ? AND resolved_at_ms IS NULL",
+            params![question, options_json, evidence_json, id],
         )?;
         Ok(())
     }
@@ -2209,7 +2230,7 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
          -- conflict-copy marker, so counting unresolved conflicts for
          -- every status publish reads a handful of rows instead of
          -- scanning the whole index and queue. The predicate must be
-         -- spelled exactly as in `unresolved_conflict_copy_count` for
+         -- spelled exactly as in `conflict_copy_paths` for
          -- the planner to pick the index.
          CREATE INDEX IF NOT EXISTS idx_sync_index_conflict_copy
              ON sync_index(path_text) WHERE path_text LIKE '%~conflict-%';
@@ -4348,7 +4369,12 @@ mod tests {
         let mut db =
             DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite")).expect("open");
         let now = timestamp_ms(1_700_000_000_000);
-        assert_eq!(db.unresolved_conflict_copy_count().expect("count"), 0);
+        assert_eq!(
+            db.conflict_copy_paths()
+                .map(|paths| paths.len())
+                .expect("count"),
+            0
+        );
 
         let root = temp_dir.path().join("local");
         let synced_copy = root.join("report~conflict-mbp-1700000000000.md");
@@ -4373,15 +4399,30 @@ mod tests {
             now,
         )
         .expect("queue delete");
-        assert_eq!(db.unresolved_conflict_copy_count().expect("count"), 2);
+        assert_eq!(
+            db.conflict_copy_paths()
+                .map(|paths| paths.len())
+                .expect("count"),
+            2
+        );
 
         db.remove_sync_index(&synced_copy).expect("remove");
         // Still queued for upload, so still announced.
-        assert_eq!(db.unresolved_conflict_copy_count().expect("count"), 2);
+        assert_eq!(
+            db.conflict_copy_paths()
+                .map(|paths| paths.len())
+                .expect("count"),
+            2
+        );
         for leased in db.lease_ready_batch(now, 8).expect("lease") {
             assert!(db.complete_leased(leased.id).expect("complete"));
         }
-        assert_eq!(db.unresolved_conflict_copy_count().expect("count"), 0);
+        assert_eq!(
+            db.conflict_copy_paths()
+                .map(|paths| paths.len())
+                .expect("count"),
+            0
+        );
     }
 
     #[test]

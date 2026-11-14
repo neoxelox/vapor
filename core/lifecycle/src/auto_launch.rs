@@ -222,7 +222,7 @@ mod tests {
             r#"{
   "autoLaunch": false,
   "useGitignore": true,
-  "languageCode": "en"
+  "language": "en"
 }
 "#,
         )
@@ -234,7 +234,7 @@ mod tests {
         let contents = fs::read_to_string(&path).expect("file");
         assert!(contents.contains("\"autoLaunch\": true"));
         assert!(contents.contains("\"useGitignore\": true"));
-        assert!(contents.contains("\"languageCode\": \"en\""));
+        assert!(contents.contains("\"language\": \"en\""));
     }
 
     #[test]

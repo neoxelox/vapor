@@ -409,10 +409,10 @@ impl StagedExecutor {
     /// harvests promptly. Must be called before any intent starts.
     pub fn enable_worker_threads(&mut self, waker: Option<Arc<crate::runtime::TickWaker>>) {
         debug_assert!(self.active.is_empty());
-        // Twice the IdleDrain tier so upload + download can both run at
+        // Twice the Idle tier so upload + download can both run at
         // full width, bounded so a many-core machine cannot spawn an
         // unreasonable thread count (threads are lazy + parked anyway).
-        let worker_cap = (2 * crate::throttle::idle_drain_concurrency()).clamp(
+        let worker_cap = (2 * crate::throttle::idle_concurrency()).clamp(
             constants::engine::PROVIDER_JOB_WORKERS_MIN,
             constants::engine::PROVIDER_JOB_WORKERS_MAX,
         );

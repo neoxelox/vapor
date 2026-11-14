@@ -156,41 +156,38 @@ pub fn diagnostics() -> Result<DiagnosticsResponse, IpcCliError> {
 /// the default for plain-text output.
 pub fn render_status(status: &StatusResponse) -> String {
     let mut rendered = format!(
-        "Run state: {}\nThrottle: {} ({})\nProvider: {}\nDaemon: {}\nIPC schema: {}\nQueue: {} pending, {} failed\nLoop prevention: {} suppressed echoes\nConflicts kept-both: {}",
-        status.run_state,
-        status.throttle_state,
-        if status.throttle_reason.is_empty() {
+        "Run state: {}{}\nThrottle: {} ({})\nProvider: {}\nDaemon: {}\nIPC schema: {}\nQueue: {} queued, {} failed",
+        status.run.state,
+        if status.run.reason.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", status.run.reason)
+        },
+        status.throttle.state,
+        if status.throttle.reason.is_empty() {
             "no decision yet".to_string()
         } else {
-            status.throttle_reason.clone()
+            status.throttle.reason.clone()
         },
         status.provider,
-        status.daemon_id,
+        status.daemon,
         status.schema_version,
-        status.queue_depth,
-        status.failed_intents,
-        status.loop_prevention_suppressions,
-        status.conflicts,
+        status.queued,
+        status.failed,
     );
-    if status.mirror_reverts > 0 || status.mirror_deletes > 0 {
+    if status.mirror.reverts > 0 || status.mirror.deletes > 0 {
         rendered.push_str(&format!(
             "\nStrict mirror: {} reverts, {} deletes",
-            status.mirror_reverts, status.mirror_deletes
+            status.mirror.reverts, status.mirror.deletes
         ));
     }
-    if let Some(notice) = &status.config_restart_required {
+    if let Some(notice) = &status.restart_required {
         rendered.push_str(&format!("\nRestart required: {notice}"));
     }
-    if status.decisions_pending > 0 {
+    if status.decisions > 0 {
         rendered.push_str(&format!(
             "\nDecisions waiting for you: {} (vapor decisions list)",
-            status.decisions_pending
-        ));
-    }
-    if status.conflicts_unresolved > 0 {
-        rendered.push_str(&format!(
-            "\nConflicts waiting for you: {} (vapor conflicts list)",
-            status.conflicts_unresolved
+            status.decisions
         ));
     }
     for profile in status.profiles.iter().filter(|p| p.sign_in_required) {
@@ -199,28 +196,30 @@ pub fn render_status(status: &StatusResponse) -> String {
             profile.id, profile.id
         ));
     }
-    match status.reconcile_state.as_str() {
-        "waiting" => rendered.push_str(&format!(
+    match status.reconcile.state.as_str() {
+        constants::reconcile_state::WAITING => rendered.push_str(&format!(
             "\nScan: {} (vapor reconcile scans anyway)",
-            status.reconcile_detail
+            status.reconcile.detail
         )),
-        "running" => rendered.push_str(&format!("\nScan: {}", status.reconcile_detail)),
+        constants::reconcile_state::RUNNING => {
+            rendered.push_str(&format!("\nScan: {}", status.reconcile.detail))
+        }
         _ => {}
     }
     for profile in &status.profiles {
         rendered.push_str(&format!(
             "\nProfile {}: {} ({}, {}) queue {} failed {}{}",
             profile.id,
-            profile.run_state,
+            profile.run.state,
             profile.provider,
             profile.sync_mode,
-            profile.queue_depth,
-            profile.failed_intents,
-            profile
-                .suspended_reason
-                .as_ref()
-                .map(|reason| format!(" — SUSPENDED: {reason}"))
-                .unwrap_or_default(),
+            profile.queued,
+            profile.failed,
+            if profile.suspended {
+                format!(" — suspended: {}", profile.run.reason)
+            } else {
+                String::new()
+            },
         ));
     }
     rendered
@@ -228,41 +227,41 @@ pub fn render_status(status: &StatusResponse) -> String {
 
 /// Render a [`DiagnosticsResponse`] as human-readable lines.
 pub fn render_diagnostics(diagnostics: &DiagnosticsResponse) -> String {
-    if diagnostics.intents.is_empty() {
-        return format!(
-            "No pending or in-flight intents. Dropped ingest events: {}",
-            diagnostics.dropped_incoming_events
-        );
+    let counters = format!(
+        "dropped watcher events: {}; suppressed echoes: {}",
+        diagnostics.dropped_events, diagnostics.suppressed_echoes
+    );
+    if diagnostics.items.is_empty() {
+        return format!("Nothing queued or in flight. {counters}");
     }
     let mut rendered = format!(
-        "{} intent(s){}; dropped ingest events: {}",
-        diagnostics.intents.len(),
+        "{} item(s){}; {counters}",
+        diagnostics.items.len(),
         if diagnostics.truncated {
             " (truncated)"
         } else {
             ""
         },
-        diagnostics.dropped_incoming_events
     );
-    for intent in &diagnostics.intents {
+    for item in &diagnostics.items {
         rendered.push_str(&format!(
             "\n#{} [{}] {} {} — stage {} ({} ms), attempts {}{}{}",
-            intent.intent_id,
-            intent.profile_id,
-            intent.action,
-            intent.path,
-            intent.stage,
-            intent.elapsed_in_stage_ms,
-            intent.attempt_count,
-            if intent.blocker_reason.is_empty() {
+            item.id,
+            item.profile_id,
+            item.action,
+            item.path,
+            item.stage,
+            item.elapsed_ms,
+            item.attempts,
+            if item.reason.is_empty() {
                 String::new()
             } else {
-                format!(" — {}", intent.blocker_reason)
+                format!(" — {}", item.reason)
             },
-            if intent.last_error.is_empty() {
+            if item.error.is_empty() {
                 String::new()
             } else {
-                format!(" — last error: {}", intent.last_error)
+                format!(" — last error: {}", item.error)
             },
         ));
     }
@@ -346,6 +345,7 @@ fn log_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vapor_ipc::{MirrorCounts, ReconcileStatus, StateReason};
 
     #[test]
     fn daemon_not_running_classification_picks_up_not_found_io_errors() {
@@ -394,52 +394,74 @@ mod tests {
     #[test]
     fn render_status_includes_every_stable_field() {
         let status = StatusResponse {
-            schema_version: 2,
-            run_state: "running".to_string(),
-            throttle_state: "idle-drain".to_string(),
-            provider: "Filesystem (stub)".to_string(),
-            throttle_reason: "idle, plugged in, and cool".to_string(),
-            daemon_id: "vapord/0.2.0-alpha.3".to_string(),
-            queue_depth: 3,
-            failed_intents: 1,
-            conflicts: 2,
-            mirror_reverts: 1,
-            mirror_deletes: 1,
-            decisions_pending: 1,
-            conflicts_unresolved: 1,
-            reconcile_state: "waiting".to_string(),
-            reconcile_detail: "waiting for an idle moment: user activity is active".to_string(),
+            schema_version: 4,
+            daemon: "vapord/0.2.0-alpha.3".to_string(),
+            provider: "filesystem".to_string(),
+            run: StateReason {
+                state: "error".to_string(),
+                reason: "Vapor needs to sign in to gdrive again".to_string(),
+            },
+            throttle: StateReason {
+                state: "idle".to_string(),
+                reason: "idle, plugged in, and cool".to_string(),
+            },
+            reconcile: ReconcileStatus {
+                state: "waiting".to_string(),
+                detail: "waiting for an idle moment: user activity is active".to_string(),
+            },
+            queued: 3,
+            failed: 1,
+            decisions: 2,
+            mirror: MirrorCounts {
+                reverts: 1,
+                deletes: 1,
+            },
             profiles: vec![
                 vapor_ipc::ProfileStatus {
                     id: "mirror".to_string(),
                     provider: "filesystem".to_string(),
                     sync_mode: "pull-only".to_string(),
-                    run_state: "running".to_string(),
-                    queue_depth: 3,
-                    failed_intents: 1,
+                    run: StateReason {
+                        state: "running".to_string(),
+                        reason: String::new(),
+                    },
+                    queued: 3,
+                    failed: 1,
                     ..vapor_ipc::ProfileStatus::default()
                 },
                 vapor_ipc::ProfileStatus {
                     id: "work".to_string(),
                     provider: "gdrive".to_string(),
                     sync_mode: "two-way".to_string(),
-                    run_state: "error".to_string(),
+                    run: StateReason {
+                        state: "error".to_string(),
+                        reason: "Vapor needs to sign in to gdrive again".to_string(),
+                    },
                     sign_in_required: true,
+                    ..vapor_ipc::ProfileStatus::default()
+                },
+                vapor_ipc::ProfileStatus {
+                    id: "typo".to_string(),
+                    provider: "gdrvie".to_string(),
+                    run: StateReason {
+                        state: "error".to_string(),
+                        reason: "unknown provider gdrvie".to_string(),
+                    },
+                    suspended: true,
                     ..vapor_ipc::ProfileStatus::default()
                 },
             ],
             ..StatusResponse::default()
         };
         let rendered = render_status(&status);
-        assert!(rendered.contains("Run state: running"));
-        assert!(rendered.contains("Throttle: idle-drain"));
-        assert!(rendered.contains("Provider: Filesystem (stub)"));
+        assert!(rendered.contains("Run state: error (Vapor needs to sign in to gdrive again)"));
+        assert!(rendered.contains("Throttle: idle (idle, plugged in, and cool)"));
+        assert!(rendered.contains("Provider: filesystem"));
         assert!(rendered.contains("Daemon: vapord/0.2.0-alpha.3"));
-        assert!(rendered.contains("IPC schema: 2"));
-        assert!(rendered.contains("Queue: 3 pending, 1 failed"));
+        assert!(rendered.contains("IPC schema: 4"));
+        assert!(rendered.contains("Queue: 3 queued, 1 failed"));
         assert!(rendered.contains("Strict mirror: 1 reverts, 1 deletes"));
-        assert!(rendered.contains("Decisions waiting for you: 1 (vapor decisions list)"));
-        assert!(rendered.contains("Conflicts waiting for you: 1 (vapor conflicts list)"));
+        assert!(rendered.contains("Decisions waiting for you: 2 (vapor decisions list)"));
         assert!(rendered.contains(
             "Scan: waiting for an idle moment: user activity is active (vapor reconcile scans anyway)"
         ));
@@ -448,31 +470,33 @@ mod tests {
             "Sign-in required: profile work is on hold (vapor auth login --profile work)"
         ));
         assert!(!rendered.contains("profile mirror is on hold"));
+        assert!(rendered.contains("suspended: unknown provider gdrvie"));
     }
 
     #[test]
-    fn render_diagnostics_explains_why_intents_are_stuck() {
+    fn render_diagnostics_explains_why_work_is_stuck() {
         let diagnostics = DiagnosticsResponse {
-            schema_version: 2,
-            intents: vec![vapor_ipc::IntentDiagnostic {
-                intent_id: 42,
+            schema_version: 4,
+            items: vec![vapor_ipc::WorkItem {
+                id: 42,
                 profile_id: "default".to_string(),
                 path: "/watch/big.bin".to_string(),
                 action: "upload".to_string(),
                 stage: "retrying".to_string(),
-                elapsed_in_stage_ms: 12_000,
-                attempt_count: 3,
-                last_error: "transient provider failure: timeout".to_string(),
-                blocker_reason: "retry backoff active".to_string(),
+                elapsed_ms: 12_000,
+                attempts: 3,
+                error: "transient provider failure: timeout".to_string(),
+                reason: "retry backoff active".to_string(),
             }],
             truncated: false,
-            dropped_incoming_events: 2,
+            dropped_events: 2,
+            suppressed_echoes: 5,
         };
         let rendered = render_diagnostics(&diagnostics);
         assert!(rendered.contains("#42 [default] upload /watch/big.bin"));
         assert!(rendered.contains("stage retrying"));
         assert!(rendered.contains("retry backoff active"));
-        assert!(rendered.contains("dropped ingest events: 2"));
+        assert!(rendered.contains("dropped watcher events: 2; suppressed echoes: 5"));
     }
 
     #[test]
@@ -511,37 +535,87 @@ mod tests {
     #[test]
     fn status_json_shape_is_stable() {
         let status = StatusResponse {
-            schema_version: 3,
-            run_state: "running".to_string(),
-            throttle_state: "idle-drain".to_string(),
+            schema_version: 4,
+            daemon: "vapord/0.0.0-test".to_string(),
             provider: "filesystem".to_string(),
-            throttle_reason: "idle, plugged in, and cool".to_string(),
-            daemon_id: "vapord/0.0.0-test".to_string(),
+            run: StateReason {
+                state: "running".to_string(),
+                reason: "watching ~/Vapor".to_string(),
+            },
+            throttle: StateReason {
+                state: "idle".to_string(),
+                reason: "idle, plugged in, and cool".to_string(),
+            },
+            reconcile: ReconcileStatus {
+                state: "idle".to_string(),
+                detail: String::new(),
+            },
+            resources: Some(vapor_ipc::ResourcesStatus {
+                cpu: vapor_ipc::Ceiling {
+                    limit_percent: 15,
+                    used_percent: 2,
+                },
+                memory: vapor_ipc::Ceiling {
+                    limit_percent: 10,
+                    used_percent: 1,
+                },
+                bandwidth: vapor_ipc::BandwidthCeiling {
+                    limit_percent: 25,
+                    used_kbps: 0,
+                },
+                idle_boost: StateReason {
+                    state: "off".to_string(),
+                    reason: "user idle for 12s of the required 300s".to_string(),
+                },
+            }),
             ..StatusResponse::default()
         };
         let rendered = serde_json::to_string_pretty(&status).expect("serialize");
         assert_eq!(
             rendered,
             r#"{
-  "schemaVersion": 3,
-  "runState": "running",
-  "throttleState": "idle-drain",
+  "schemaVersion": 4,
+  "daemon": "vapord/0.0.0-test",
   "provider": "filesystem",
-  "throttleReason": "idle, plugged in, and cool",
-  "daemonId": "vapord/0.0.0-test",
-  "queueDepth": 0,
-  "failedIntents": 0,
-  "loopPreventionSuppressions": 0,
-  "conflicts": 0,
-  "mirrorReverts": 0,
-  "mirrorDeletes": 0,
-  "profiles": [],
-  "resourceBudget": null,
-  "configRestartRequired": null,
-  "decisionsPending": 0,
-  "conflictsUnresolved": 0,
-  "reconcileState": "",
-  "reconcileDetail": ""
+  "run": {
+    "state": "running",
+    "reason": "watching ~/Vapor"
+  },
+  "throttle": {
+    "state": "idle",
+    "reason": "idle, plugged in, and cool"
+  },
+  "reconcile": {
+    "state": "idle",
+    "detail": ""
+  },
+  "queued": 0,
+  "failed": 0,
+  "decisions": 0,
+  "mirror": {
+    "reverts": 0,
+    "deletes": 0
+  },
+  "restartRequired": null,
+  "resources": {
+    "cpu": {
+      "limitPercent": 15,
+      "usedPercent": 2
+    },
+    "memory": {
+      "limitPercent": 10,
+      "usedPercent": 1
+    },
+    "bandwidth": {
+      "limitPercent": 25,
+      "usedKbps": 0
+    },
+    "idleBoost": {
+      "state": "off",
+      "reason": "user idle for 12s of the required 300s"
+    }
+  },
+  "profiles": []
 }"#
         );
     }
@@ -550,9 +624,13 @@ mod tests {
     fn profile_status_json_shape_is_stable() {
         let profile = vapor_ipc::ProfileStatus {
             id: "work".to_string(),
+            name: "Work".to_string(),
             provider: "gdrive".to_string(),
             sync_mode: "two-way".to_string(),
-            run_state: "error".to_string(),
+            run: StateReason {
+                state: "error".to_string(),
+                reason: "Vapor needs to sign in to gdrive again".to_string(),
+            },
             sign_in_required: true,
             ..vapor_ipc::ProfileStatus::default()
         };
@@ -560,22 +638,69 @@ mod tests {
             serde_json::to_string_pretty(&profile).expect("serialize"),
             r#"{
   "id": "work",
-  "name": "",
+  "name": "Work",
   "provider": "gdrive",
   "syncMode": "two-way",
-  "runState": "error",
-  "reason": "",
-  "queueDepth": 0,
-  "failedIntents": 0,
-  "conflicts": 0,
-  "mirrorReverts": 0,
-  "mirrorDeletes": 0,
-  "suspendedReason": null,
-  "decisionsPending": 0,
-  "conflictsUnresolved": 0,
-  "reconcileState": "",
-  "reconcileDetail": "",
+  "run": {
+    "state": "error",
+    "reason": "Vapor needs to sign in to gdrive again"
+  },
+  "reconcile": {
+    "state": "",
+    "detail": ""
+  },
+  "queued": 0,
+  "failed": 0,
+  "decisions": 0,
+  "mirror": {
+    "reverts": 0,
+    "deletes": 0
+  },
+  "suspended": false,
   "signInRequired": true
+}"#
+        );
+    }
+
+    #[test]
+    fn diagnostics_json_shape_is_stable() {
+        let diagnostics = DiagnosticsResponse {
+            schema_version: 4,
+            items: vec![vapor_ipc::WorkItem {
+                id: 42,
+                profile_id: "default".to_string(),
+                path: "/watch/big.bin".to_string(),
+                action: "upload".to_string(),
+                stage: "waiting-to-upload".to_string(),
+                elapsed_ms: 1_200,
+                attempts: 0,
+                error: String::new(),
+                reason: "upload concurrency 2/2 in use".to_string(),
+            }],
+            truncated: false,
+            dropped_events: 0,
+            suppressed_echoes: 3,
+        };
+        assert_eq!(
+            serde_json::to_string_pretty(&diagnostics).expect("serialize"),
+            r#"{
+  "schemaVersion": 4,
+  "items": [
+    {
+      "id": 42,
+      "profileId": "default",
+      "path": "/watch/big.bin",
+      "action": "upload",
+      "stage": "waiting-to-upload",
+      "elapsedMs": 1200,
+      "attempts": 0,
+      "error": "",
+      "reason": "upload concurrency 2/2 in use"
+    }
+  ],
+  "truncated": false,
+  "droppedEvents": 0,
+  "suppressedEchoes": 3
 }"#
         );
     }
@@ -583,14 +708,14 @@ mod tests {
     #[test]
     fn ack_json_shape_is_stable() {
         let ack = vapor_ipc::AckResponse {
-            schema_version: 3,
+            schema_version: 4,
             accepted: true,
             note: "reconcile requested".to_string(),
         };
         assert_eq!(
             serde_json::to_string_pretty(&ack).expect("serialize"),
             r#"{
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "accepted": true,
   "note": "reconcile requested"
 }"#
@@ -600,11 +725,11 @@ mod tests {
     #[test]
     fn timeline_json_shape_is_stable() {
         let timeline = TimelineResponse {
-            schema_version: 3,
+            schema_version: 4,
             entries: vec![vapor_ipc::TimelineEntry {
                 timestamp_ms: 1_700_000_000_000,
                 kind: "throttle".to_string(),
-                message: "entered idle-drain".to_string(),
+                message: "idle: idle, plugged in, and cool".to_string(),
                 profile_id: "default".to_string(),
             }],
         };
@@ -612,12 +737,12 @@ mod tests {
         assert_eq!(
             rendered,
             r#"{
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "entries": [
     {
       "timestampMs": 1700000000000,
       "kind": "throttle",
-      "message": "entered idle-drain",
+      "message": "idle: idle, plugged in, and cool",
       "profileId": "default"
     }
   ]

@@ -463,7 +463,7 @@ impl DaemonApp {
 
     fn effective_throttle_caps(&self, now: SystemTime) -> ThrottleCaps {
         let mut caps = self.base_throttle_caps();
-        let is_idle_drain = self.snapshot.throttle_state == vapor_shared::ThrottleState::IdleDrain;
+        let is_idle = self.snapshot.throttle_state == vapor_shared::ThrottleState::Idle;
         if let Some(ceiling) = self.resource_cpu_ceiling_percent {
             let scale = f64::from(ceiling)
                 / f64::from(vapor_shared::constants::resource_limits::DEFAULT_CPU_PERCENT);
@@ -475,16 +475,12 @@ impl DaemonApp {
                 }
                 let scaled = (((cap as f64) * scale).round() as usize).max(1);
                 // Ceilings only ever *lower* what the throttle ladder
-                // allows — except under IdleDrain, where idle boost is
-                // defined. Outside IdleDrain a raised base budget must not
+                // allows — except under Idle, where idle boost is
+                // defined. Outside Idle a raised base budget must not
                 // lift the Light/Throttled tiers above their compiled
                 // values (that would defeat the throttle ladder in exactly
                 // the states where it matters most).
-                if is_idle_drain {
-                    scaled
-                } else {
-                    scaled.min(cap)
-                }
+                if is_idle { scaled } else { scaled.min(cap) }
             };
             caps.planner_workers = scale_cap(caps.planner_workers);
             caps.hash_workers = scale_cap(caps.hash_workers);
@@ -558,7 +554,7 @@ mod tests {
     #[test]
     fn explicit_transfer_ceiling_caps_every_throttle_tier() {
         let mut app = DaemonApp::default();
-        // IdleDrain default inputs: the core-derived tier applies.
+        // Idle default inputs: the core-derived tier applies.
         app.apply_throttle_inputs(ThrottleInputs::default());
         let unlimited = app.workgate_snapshot().caps;
         assert!(unlimited.upload_concurrency >= 4);
@@ -736,7 +732,7 @@ mod tests {
         // Idle boost publishes a 50% ceiling (scale 50/15 ≈ 3.3). Without
         // ordering the slowdown after scaling, upload_concurrency 1 would
         // be multiplied back up during the rate-limit window.
-        app.set_throttle_state(vapor_shared::ThrottleState::IdleDrain, "idle");
+        app.set_throttle_state(vapor_shared::ThrottleState::Idle, "idle");
         app.apply_resource_cpu_ceiling(50, now);
         let path = PathBuf::from("/tmp/vapor-root/f.txt");
         state_db
@@ -766,7 +762,7 @@ mod tests {
         app.set_throttle_state(vapor_shared::ThrottleState::Throttled, "user active");
         let base = app.throttle_caps();
         // A large ceiling (scale 100/15 ≈ 6.7) must not lift the Throttled
-        // tier: ceilings only relax under IdleDrain.
+        // tier: ceilings only relax under Idle.
         app.apply_resource_cpu_ceiling(100, now);
         let scaled = app.throttle_caps();
         assert!(scaled.planner_workers <= base.planner_workers);
@@ -834,7 +830,7 @@ mod tests {
                 .is_none()
         );
 
-        app.set_throttle_state(ThrottleState::IdleDrain, "idle drain");
+        app.set_throttle_state(ThrottleState::Idle, "idle drain");
         assert_eq!(
             app.release_ready_deferred_reconciles(&mut maps, &mut scheduler, timestamp(32)),
             1
@@ -859,7 +855,7 @@ mod tests {
         let mut scheduler = KeyedSupersedingScheduler::default();
         let mut app = DaemonApp::default();
 
-        app.set_throttle_state(ThrottleState::IdleDrain, "idle drain");
+        app.set_throttle_state(ThrottleState::Idle, "idle drain");
         app.release_ready_deferred_reconciles(&mut maps, &mut scheduler, timestamp(32));
         app.try_start_reconcile(&mut scheduler, timestamp(32))
             .expect("start reconcile");

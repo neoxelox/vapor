@@ -36,14 +36,14 @@ public enum VaporConstants {
     /// daemon picks between the two by provider, which is why the app
     /// never writes a cloud root it did not read.
     public static let filesystemCloudRoot = "~/cloud/Vapor"
-    public static let postIgnoreRules = ""
-    public static let languageCode = VaporConstants.Localization.defaultLanguageCode
+    public static let postIgnoreRules: [String] = []
+    public static let language = VaporConstants.Localization.defaultLanguageCode
     public static let timelineLimit = 1000
     /// Mirrors `constants.rs::provider::DEFAULT` / `sync_mode::DEFAULT`.
     public static let provider = "filesystem"
     public static let syncMode = "two-way"
 
-    public static let preIgnoreRuleLines: [String] = [
+    public static let preIgnoreRules: [String] = [
       // OS junk
       ".DS_Store",
       "Thumbs.db",
@@ -137,7 +137,6 @@ public enum VaporConstants {
       ".terraform/",
     ]
 
-    public static let preIgnoreRules = preIgnoreRuleLines.joined(separator: "\n")
   }
 
   public enum Localization {
@@ -204,7 +203,7 @@ public enum VaporConstants {
     public static let cloudRoot = "cloudRoot"
     public static let preIgnoreRules = "preIgnoreRules"
     public static let postIgnoreRules = "postIgnoreRules"
-    public static let languageCode = "languageCode"
+    public static let language = "language"
     public static let timelineLimit = "timelineLimit"
     public static let provider = "provider"
     public static let syncMode = "syncMode"
@@ -228,7 +227,7 @@ public enum VaporConstants {
   }
 
   public enum ThrottleState {
-    public static let idleDrain = "idle-drain"
+    public static let idle = "idle"
     public static let light = "light"
     public static let throttled = "throttled"
     public static let suspended = "suspended"

@@ -131,8 +131,8 @@ Things the product does on purpose that a scenario must account for:
   waits, and expect a delete burst to join a `mass-delete` hold over
   a few ticks rather than at once.
 - A decision (`vapor decisions list --json`) holds only its scope and
-  never pauses the daemon: assert `runState` stays `running` and
-  `decisionsPending` counts it; answer with `vapor decisions resolve`.
+  never pauses the daemon: assert `run.state` stays `running` and
+  `decisions` counts it; answer with `vapor decisions resolve`.
   While a sync root is missing or replaced the profile holds instead
   (`Error`, with a `root-missing` or `root-replaced` decision), and the
   daemon starts in `Error` when a local root is missing: use

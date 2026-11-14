@@ -19,10 +19,7 @@ impl Default for EventPathFilterOptions {
         Self {
             use_gitignore: true,
             use_vaporignore: true,
-            pre_user_rules: constants::filtering::DEFAULT_PRE_IGNORE_RULES
-                .iter()
-                .map(|rule| (*rule).to_string())
-                .collect(),
+            pre_user_rules: vapor_shared::config::default_pre_ignore_rules(),
             post_user_rules: Vec::new(),
         }
     }
@@ -41,10 +38,11 @@ impl EventPathFilterOptions {
     }
 }
 
-fn parse_rule_lines(raw: &str) -> Vec<String> {
-    raw.lines()
-        .map(|line| line.trim())
-        .filter(|line| !line.is_empty())
+fn parse_rule_lines(rules: &[String]) -> Vec<String> {
+    rules
+        .iter()
+        .map(|rule| rule.trim())
+        .filter(|rule| !rule.is_empty())
         .map(ToOwned::to_owned)
         .collect()
 }
@@ -870,8 +868,8 @@ mod tests {
         let config = vapor_shared::config::VaporConfig {
             use_gitignore: false,
             use_vaporignore: true,
-            pre_ignore_rules: "tmp/\n*.cache\n\n".to_string(),
-            post_ignore_rules: "keep-out/".to_string(),
+            pre_ignore_rules: vec!["tmp/".into(), " *.cache".into(), String::new()],
+            post_ignore_rules: vec!["keep-out/".into()],
             ..vapor_shared::config::VaporConfig::default()
         };
 

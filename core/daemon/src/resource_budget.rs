@@ -6,15 +6,15 @@
 //! 1. MIN-lowering across the global `resourceLimits` and every enabled
 //!    profile's override; any enabled profile with `idleBoost.enabled =
 //!    false` disables boost daemon-wide.
-//! 2. Idle-boost engages only in `IdleDrain`, after `minIdleSeconds` of
+//! 2. Idle-boost engages only in `Idle`, after `minIdleSeconds` of
 //!    user idleness, with non-Vapor CPU at or below the headroom gate.
 //!    Ceilings ramp linearly toward `boost*Percent` over
 //!    `rampUpSeconds`; a gating break ramps back down over
 //!    `rampDownSeconds`.
 //! 3. Deterministic transition rules (§Ceiling transitions): a throttle
-//!    exit from `IdleDrain` snaps the cap to
+//!    exit from `Idle` snaps the cap to
 //!    `min(current, resourceLimits.*)` in the same tick — no down-ramp;
-//!    a return to `IdleDrain` never auto-resumes, the gates re-evaluate
+//!    a return to `Idle` never auto-resumes, the gates re-evaluate
 //!    from scratch.
 //!
 //! Ceilings are hard caps: they only ever *lower* what the throttle
@@ -347,9 +347,9 @@ impl ResourceBudget {
                 }
             }
             BoostState::RampingUp { started } => {
-                if throttle_state != ThrottleState::IdleDrain {
+                if throttle_state != ThrottleState::Idle {
                     // §Ceiling transitions rule 1: snap, no down-ramp.
-                    self.snap_to_base("throttle left idle-drain; snapped to base ceilings");
+                    self.snap_to_base("throttle left idle; snapped to base ceilings");
                 } else if !gates_pass {
                     self.state = BoostState::RampingDown {
                         started: now_inst,
@@ -370,8 +370,8 @@ impl ResourceBudget {
                 }
             }
             BoostState::Active => {
-                if throttle_state != ThrottleState::IdleDrain {
-                    self.snap_to_base("throttle left idle-drain; snapped to base ceilings");
+                if throttle_state != ThrottleState::Idle {
+                    self.snap_to_base("throttle left idle; snapped to base ceilings");
                 } else if !gates_pass {
                     self.state = BoostState::RampingDown {
                         started: now_inst,
@@ -381,8 +381,8 @@ impl ResourceBudget {
                 }
             }
             BoostState::RampingDown { started, from_cpu } => {
-                if throttle_state != ThrottleState::IdleDrain {
-                    self.snap_to_base("throttle left idle-drain; snapped to base ceilings");
+                if throttle_state != ThrottleState::Idle {
+                    self.snap_to_base("throttle left idle; snapped to base ceilings");
                 } else if gates_pass {
                     // Headroom recovered mid-descent (e.g. a 1s background
                     // CPU blip). Re-checking the gate here — instead of
@@ -462,7 +462,7 @@ impl ResourceBudget {
         idle_for: Duration,
     ) -> bool {
         self.config.boost_enabled
-            && throttle_state == ThrottleState::IdleDrain
+            && throttle_state == ThrottleState::Idle
             && idle_for >= self.config.min_idle
             && non_vapor_cpu(inputs) <= self.config.headroom_cpu_percent
     }
@@ -475,9 +475,9 @@ impl ResourceBudget {
     ) -> String {
         if !self.config.boost_enabled {
             "idle boost disabled by configuration".to_string()
-        } else if throttle_state != ThrottleState::IdleDrain {
+        } else if throttle_state != ThrottleState::Idle {
             format!(
-                "throttle state is {}; boost requires idle-drain",
+                "throttle state is {}; boost requires idle",
                 throttle_state.wire_name()
             )
         } else if idle_for < self.config.min_idle {
@@ -707,7 +707,7 @@ mod tests {
 
         // Not idle long enough: stays at base.
         let ceilings = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             Duration::from_secs(10),
             t0,
@@ -717,10 +717,10 @@ mod tests {
         assert!(ceilings.reason.contains("idle for 10s"));
 
         // All gates pass: ramp starts and progresses linearly.
-        let ceilings = budget.tick(ThrottleState::IdleDrain, &idle_inputs(), long_idle(), t0);
+        let ceilings = budget.tick(ThrottleState::Idle, &idle_inputs(), long_idle(), t0);
         assert_eq!(ceilings.boost_state, "ramping-up");
         let mid = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             long_idle(),
             t0 + Duration::from_secs(15),
@@ -731,7 +731,7 @@ mod tests {
             mid.cpu_percent
         );
         let full = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             long_idle(),
             t0 + Duration::from_secs(31),
@@ -745,9 +745,9 @@ mod tests {
         // §Ceiling transitions rule 1.
         let mut budget = ResourceBudget::new(config_with(true));
         let t0 = Instant::now();
-        budget.tick(ThrottleState::IdleDrain, &idle_inputs(), long_idle(), t0);
+        budget.tick(ThrottleState::Idle, &idle_inputs(), long_idle(), t0);
         let boosted = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             long_idle(),
             t0 + Duration::from_secs(31),
@@ -763,18 +763,18 @@ mod tests {
         assert_eq!(snapped.boost_state, "off");
         assert_eq!(
             snapped.cpu_percent, 15,
-            "post-IdleDrain states never run against boosted caps"
+            "post-Idle states never run against boosted caps"
         );
     }
 
     #[test]
-    fn return_to_idle_drain_does_not_auto_resume() {
+    fn return_to_idle_does_not_auto_resume() {
         // §Ceiling transitions rule 2: gates re-evaluate from scratch.
         let mut budget = ResourceBudget::new(config_with(true));
         let t0 = Instant::now();
-        budget.tick(ThrottleState::IdleDrain, &idle_inputs(), long_idle(), t0);
+        budget.tick(ThrottleState::Idle, &idle_inputs(), long_idle(), t0);
         budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             long_idle(),
             t0 + Duration::from_secs(31),
@@ -786,9 +786,9 @@ mod tests {
             t0 + Duration::from_secs(32),
         );
 
-        // Back to IdleDrain but the user is no longer idle: no resume.
+        // Back to Idle but the user is no longer idle: no resume.
         let ceilings = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             Duration::from_secs(5),
             t0 + Duration::from_secs(33),
@@ -798,7 +798,7 @@ mod tests {
 
         // Idle again: a FRESH ramp starts from base.
         let ceilings = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             long_idle(),
             t0 + Duration::from_secs(34),
@@ -812,26 +812,26 @@ mod tests {
         // §Ceiling transitions rule 3.
         let mut budget = ResourceBudget::new(config_with(true));
         let t0 = Instant::now();
-        budget.tick(ThrottleState::IdleDrain, &idle_inputs(), long_idle(), t0);
+        budget.tick(ThrottleState::Idle, &idle_inputs(), long_idle(), t0);
         budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             long_idle(),
             t0 + Duration::from_secs(31),
         );
 
         // User HID input breaks the idle gate while throttle stays
-        // IdleDrain: linear ramp-down, not a snap.
+        // Idle: linear ramp-down, not a snap.
         let down_start = t0 + Duration::from_secs(32);
         let first = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             Duration::from_secs(0),
             down_start,
         );
         assert_eq!(first.boost_state, "ramping-down");
         let mid = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             Duration::from_secs(1),
             down_start + Duration::from_secs(5),
@@ -842,7 +842,7 @@ mod tests {
             mid.cpu_percent
         );
         let done = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             Duration::from_secs(2),
             down_start + Duration::from_secs(11),
@@ -858,9 +858,9 @@ mod tests {
         // the budget resumes climbing from its current level.
         let mut budget = ResourceBudget::new(config_with(true));
         let t0 = Instant::now();
-        budget.tick(ThrottleState::IdleDrain, &idle_inputs(), long_idle(), t0);
+        budget.tick(ThrottleState::Idle, &idle_inputs(), long_idle(), t0);
         budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             long_idle(),
             t0 + Duration::from_secs(31),
@@ -871,7 +871,7 @@ mod tests {
         assert_eq!(
             budget
                 .tick(
-                    ThrottleState::IdleDrain,
+                    ThrottleState::Idle,
                     &idle_inputs(),
                     Duration::from_secs(0),
                     down_start,
@@ -880,7 +880,7 @@ mod tests {
             "ramping-down"
         );
         let mid = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             Duration::from_secs(0),
             down_start + Duration::from_secs(4),
@@ -890,7 +890,7 @@ mod tests {
         // Headroom recovers (idle again): resume ramping up, holding the
         // current level this tick rather than continuing to descend.
         let recovered = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             long_idle(),
             down_start + Duration::from_secs(5),
@@ -904,7 +904,7 @@ mod tests {
         );
         // The next tick climbs back toward boost, not down to base.
         let climbing = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             long_idle(),
             down_start + Duration::from_secs(6),
@@ -925,7 +925,7 @@ mod tests {
             vapor_cpu_load_percent: 2,
             ..ThrottleInputs::default()
         };
-        let ceilings = budget.tick(ThrottleState::IdleDrain, &busy, long_idle(), Instant::now());
+        let ceilings = budget.tick(ThrottleState::Idle, &busy, long_idle(), Instant::now());
         assert_eq!(ceilings.boost_state, "off");
         assert!(ceilings.reason.contains("headroom"));
     }
@@ -934,7 +934,7 @@ mod tests {
     fn disabled_boost_never_engages() {
         let mut budget = ResourceBudget::new(config_with(false));
         let ceilings = budget.tick(
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             &idle_inputs(),
             long_idle(),
             Instant::now(),

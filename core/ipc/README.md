@@ -34,9 +34,10 @@ Tasks: `docs/tasks/core.md` Phase C5.
 
 ## Status
 
-Every method the surfaces use is implemented end to end: `status`,
-`pause`, `resume`, `flush_now`, `reconcile`, `timeline`, `diagnostics`,
-`set_auto_launch`, and `update_excludes`. The Windows named-pipe
+Every method is implemented end to end: `status`, `pause`, `resume`,
+`reconcile`, `timeline`, and `diagnostics`. Settings are not an IPC
+method: `vapor config set` and the app write `vapor.json`, and the
+daemon reloads it. The Windows named-pipe
 transport is the one open item (Wave 12 in `docs/tasks/README.md`).
 
 ## Daemon-side wiring

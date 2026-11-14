@@ -463,13 +463,13 @@ fn mass_delete_guard(ctx: &mut Ctx) -> Result<(), Failure> {
         || {
             cli.json(&["decisions", "show", &id.to_string(), "--json"])
                 .ok()
-                .and_then(|decision| decision["heldIntents"].as_u64())
+                .and_then(|decision| decision["held"].as_u64())
                 == Some(12)
         },
     )?;
     let decision = cli.json(&["decisions", "show", &id.to_string(), "--json"])?;
     ensure!(
-        decision["heldIntents"].as_u64() == Some(12),
+        decision["held"].as_u64() == Some(12),
         "the whole burst must be held before any of it lands: {decision}"
     );
     ensure!(
@@ -480,14 +480,14 @@ fn mass_delete_guard(ctx: &mut Ctx) -> Result<(), Failure> {
         .status()
         .ok_or_else(|| Failure::new("status did not answer"))?;
     ensure!(
-        status.run_state == "running",
-        "a held batch must not pause the daemon (run_state {})",
-        status.run_state
+        status.run.state == "running",
+        "a held batch must not pause the daemon (run state {})",
+        status.run.state
     );
     ensure!(
-        status.decisions_pending == 1,
+        status.decisions == 1,
         "status must count the open decision, got {}",
-        status.decisions_pending
+        status.decisions
     );
     ensure!(
         victims_in(&home.cloud) == 20,
@@ -520,10 +520,7 @@ fn mass_delete_guard(ctx: &mut Ctx) -> Result<(), Failure> {
     let status = cli
         .status()
         .ok_or_else(|| Failure::new("status did not answer"))?;
-    ensure!(
-        status.decisions_pending == 0,
-        "status still counts a decision"
-    );
+    ensure!(status.decisions == 0, "status still counts a decision");
     ctx.allow_warning("Mass-deletion guard tripped");
     Ok(())
 }

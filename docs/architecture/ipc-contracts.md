@@ -26,8 +26,8 @@ macOS-only connotation.
 
 Every request and response payload carries an explicit `schemaVersion: u32`
 field at the top level. Keys are camelCase and every value that names a
-state or a choice is kebab-case (`runState: "running"`,
-`throttleState: "idle-drain"`), the same shape `vapor … --json` prints;
+state or a choice is kebab-case (`run: {state: "running"}`,
+`throttle: {state: "idle"}`), the same shape `vapor … --json` prints;
 the values come from the vocabulary modules in
 `core/shared/src/constants.rs`. The concrete version handshake and skew tolerance
 rules below are pre-GA; backward-compat guarantees tighten at GA.
@@ -75,10 +75,10 @@ Source of truth: `core/shared/src/constants.rs::ipc`
   `vapor auth login <provider_name> --profile <id>`
   (`operations/provider-auth-operations.md` §Failure behavior). A
   daemon that predates it sends nothing, which reads as `false`.
-- **v3** (current; min supported v3) — the naming pass, a breaking
+- **v3** — the naming pass, a breaking
   change. Every key became camelCase (`schemaVersion`, `runState`,
   `queueDepth`, `profileId`) and every state value kebab-case
-  (`running`, `idle-drain`, diagnostics stages such as
+  (`running`, `idle`, diagnostics stages such as
   `waiting-to-upload`, actions such as `cloud-delete`); `ProfileStatus`
   `display_name` became `name` and `provider_name` became `provider`,
   on `StatusResponse` too. `FlushNow` and `SyncNow` are gone: `Reconcile`
@@ -88,6 +88,26 @@ Source of truth: `core/shared/src/constants.rs::ipc`
   out it names is `vapor auth login --profile <id>`, since the profile
   decides the provider. A v2 peer would read v3 frames as defaults, so
   the floor moved to 3 and the handshake refuses it.
+- **v4** (current; min supported v4) — the status regrouped into one
+  word per key. `run`, `throttle`, and `idleBoost` are `{state,
+  reason}` objects and `reconcile` is `{state, detail}`; `queueDepth`,
+  `failedIntents`, and `decisionsPending` became `queued`, `failed`, and
+  `decisions` (conflicts now count as decisions, so `conflictsUnresolved`
+  and the cumulative `conflicts` counter are gone); the mirror counters
+  sit in `mirror {reverts, deletes}`; `resourceBudget` became `resources`
+  with `cpu` / `memory` `{limitPercent, usedPercent}` and `bandwidth`
+  `{limitPercent, usedKbps}`; `configRestartRequired` became
+  `restartRequired` and `daemonId` became `daemon`. The daemon-wide
+  `run.reason` is the daemon's own pick (a suspension first, otherwise the
+  first profile in that state that gives one), so apps no longer compute
+  it. A profile row's `suspendedReason` folded into `run.reason` plus
+  `suspended: true`. `loopPreventionSuppressions` moved to diagnostics as
+  `suppressedEchoes`, whose rows lost the word intent: `items` of `{id,
+  profileId, path, action, stage, elapsedMs, attempts, error, reason}`
+  plus `droppedEvents`. The throttle state `idle-drain` is `idle`. The
+  `SetAutoLaunch` and `UpdateExcludes` methods are gone: nothing called
+  them, and `vapor.json` has one set of writers (`vapor config set`, the
+  app, `vapor service`), which the daemon reloads.
 
 ### Handshake
 
@@ -164,13 +184,52 @@ Concretely:
 
 ### Status
 
-- Running state, throttle state, throttle reason, queue depth (total +
-  per-profile), last sync markers, effective resource ceilings
-  (cpu/memory/bandwidth), current utilization, idle-boost state and reason,
-  open decisions (total + per-profile). Each profile's `reason` is its
-  run-state reason (what is watched, what blocks sync, which decision is
-  waited on); the throttle reason is a separate field and never
+The daemon as a whole, then one row per profile (`StatusResponse` and
+`ProfileStatus` in `core/ipc/src/protocol.rs`):
+
+```json
+{
+  "schemaVersion": 4,
+  "daemon": "vapord/0.2.0-alpha.3",
+  "provider": "gdrive",
+  "run": { "state": "running", "reason": "watching ~/Vapor" },
+  "throttle": { "state": "idle", "reason": "idle, plugged in, and cool" },
+  "reconcile": { "state": "idle", "detail": "" },
+  "queued": 0,
+  "failed": 0,
+  "decisions": 1,
+  "mirror": { "reverts": 0, "deletes": 0 },
+  "restartRequired": null,
+  "resources": {
+    "cpu": { "limitPercent": 15, "usedPercent": 2 },
+    "memory": { "limitPercent": 10, "usedPercent": 1 },
+    "bandwidth": { "limitPercent": 25, "usedKbps": 0 },
+    "idleBoost": { "state": "off", "reason": "user idle for 12s of the required 300s" }
+  },
+  "profiles": [
+    {
+      "id": "default", "name": "default", "provider": "gdrive", "syncMode": "two-way",
+      "run": { "state": "running", "reason": "watching ~/Vapor" },
+      "reconcile": { "state": "idle", "detail": "" },
+      "queued": 0, "failed": 0, "decisions": 1,
+      "mirror": { "reverts": 0, "deletes": 0 },
+      "suspended": false, "signInRequired": false
+    }
+  ]
+}
+```
+
+- The daemon-wide `run.state` is the most severe profile's; `run.reason`
+  is the daemon's pick (a suspended profile names itself first,
+  otherwise the first profile in that state that gives a reason). A
+  profile's `run.reason` says what is watched, what blocks sync, or which
+  decision it waits on; the throttle reason is separate and never
   overwrites it.
+- `decisions` counts open decisions, conflicts included
+  (`conflict-resolution.md`).
+- `suspended: true` means the profile was stopped by its configuration
+  or by repeated failures (`run.reason` says which); `signInRequired`
+  means the provider refused its sign-in.
 
 ### Provider / auth
 
@@ -187,14 +246,15 @@ Concretely:
 - `Pause` / `Resume`, `Reconcile` (the user's on-demand scan), excludes
   update, auto-launch toggle, config reload trigger.
 
-### Diagnostics (per-intent)
+### Diagnostics (per item of work)
 
-- For each pending durable intent the daemon exposes `intentId`,
-  `profileId`, `path`, `action`, `stage`, `elapsedInStageMs`,
-  `attemptCount`, `lastError`, and a human-readable `blockerReason`
-  (for example "hash workers 2/2 and read tokens 1/1 in use", "retry
-  backoff active (attempt 3)", "waiting for decision #4"). This is the
-  data source for the "why is this stuck" surface.
+- For each queued or in-flight item the daemon exposes `id`,
+  `profileId`, `path`, `action`, `stage`, `elapsedMs` (time in the
+  stage), `attempts`, `error` (the last one), and a human-readable
+  `reason` it is not moving (for example "hash workers 2/2 and read
+  tokens 1/1 in use", "retry backoff active (attempt 3)", "waiting for
+  decision #4"). This is the data source for the "why is this stuck"
+  surface.
 - `action` says what the item does (`constants::intent::ACTION_*`):
   - `upload` / `download` — content moving to or from the cloud.
   - `rename` — a local rename carried to the cloud.
@@ -217,8 +277,10 @@ Concretely:
   - `uploading` — being uploaded.
   - `waiting-to-download` — a cloud change waiting for a download permit.
   - `downloading` — being downloaded.
-- Diagnostics also expose the `BoundedFsEventRecorder` drop count as
-  `droppedIncomingEvents`, so users can detect prolonged callback-vs-
+- Diagnostics also expose `suppressedEchoes` (the daemon's own writes
+  seen again and skipped, loop prevention at work) and the
+  `BoundedFsEventRecorder` drop count as `droppedEvents`, so users can
+  detect prolonged callback-vs-
   runtime backpressure (a non-zero value means raw fs-watch callbacks pushed
   faster than the runtime drained, and some events were dropped at the
   queue boundary rather than allowed to grow the queue without bound).

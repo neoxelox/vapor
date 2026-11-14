@@ -36,9 +36,10 @@ pub mod transport;
 pub use client::{Client, ClientError};
 pub use framing::{FrameError, read_frame, write_frame};
 pub use protocol::{
-    AckResponse, DiagnosticsResponse, ErrorBody, Hello, HelloAck, IncompatibleVersion,
-    IntentDiagnostic, Method, ProfileStatus, Request, ResourceBudgetStatus, Response, ResponseBody,
-    StatusResponse, TimelineEntry, TimelineResponse, daemon_supported_versions,
+    AckResponse, BandwidthCeiling, Ceiling, DiagnosticsResponse, ErrorBody, Hello, HelloAck,
+    IncompatibleVersion, Method, MirrorCounts, ProfileStatus, ReconcileStatus, Request,
+    ResourcesStatus, Response, ResponseBody, StateReason, StatusResponse, TimelineEntry,
+    TimelineResponse, WorkItem, daemon_supported_versions,
 };
 pub use server::{ServeError, Service, serve_connection};
 pub use transport::{ListenerHandle, TransportError};

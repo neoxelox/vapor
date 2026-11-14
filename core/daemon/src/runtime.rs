@@ -435,6 +435,11 @@ pub struct DaemonRuntime {
     /// the profile runtime attaches one; the bare fixtures unlink.
     trash: Option<crate::trash::LocalTrash>,
     last_trash_purge_inst: Option<Instant>,
+    last_conflict_sync_inst: Option<Instant>,
+    /// Bumped whenever this runtime opens or closes a decision, so the
+    /// status publisher knows the open count moved without querying it
+    /// on every idle tick.
+    decision_changes: u64,
     /// Flush boost deadline (monotonic). While set and in the
     /// future, deferred reconciles release immediately regardless of
     /// the idle gate.
@@ -624,6 +629,7 @@ impl DaemonRuntime {
         self.check_roots_if_due(now)?;
         self.apply_resolved_decisions(now)?;
         self.withdraw_holds_left_empty(now)?;
+        self.sync_conflict_decisions(now)?;
 
         let (stabilized_events, suppressed_local_echoes, stabilize_mirror_reverts) =
             self.stabilize_events(now);
@@ -932,6 +938,117 @@ impl DaemonRuntime {
     /// processes; this sweep handles a lease lost *within* a live run.
     /// Drops managed-trash entries past their retention, at startup and
     /// then on a slow cadence. A directory scan of the trash, cheap at
+    /// Keeps one `conflict` decision per conflict copy the sync index
+    /// knows: a new copy gets its question, and a question whose copy
+    /// is gone (resolved in the Finder, on another device, or through
+    /// `vapor decisions resolve`) closes. Runs on its own cadence.
+    fn sync_conflict_decisions(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
+        let now_inst = self.clock.now();
+        let interval = Duration::from_secs(constants::conflict::DECISION_SYNC_SECONDS);
+        let due = self
+            .last_conflict_sync_inst
+            .map(|last| now_inst.saturating_duration_since(last) >= interval)
+            .unwrap_or(true);
+        if !due {
+            return Ok(());
+        }
+        self.last_conflict_sync_inst = Some(now_inst);
+
+        let originals: std::collections::BTreeSet<PathBuf> = self
+            .state_db
+            .conflict_copy_paths()?
+            .iter()
+            .filter(|copy| copy.is_file())
+            .filter_map(|copy| crate::conflict::original_path(copy))
+            .collect();
+        let trash_enabled = self
+            .trash
+            .as_ref()
+            .is_none_or(|trash| trash.settings().enabled);
+        let mut asked = std::collections::BTreeSet::new();
+        for decision in self.state_db.decisions(false)? {
+            if decision.kind != constants::decision::KIND_CONFLICT {
+                continue;
+            }
+            let conflict = decision
+                .path
+                .as_deref()
+                .and_then(crate::conflict::Conflict::find);
+            let Some(conflict) = conflict else {
+                self.withdraw_decision(decision.id, now)?;
+                logging::info(
+                    "Closed a conflict question: no copy is left",
+                    &[("decision_id", decision.id.to_string())],
+                );
+                continue;
+            };
+            let fresh = crate::conflict::question(&conflict, &self.device_id, trash_enabled);
+            if fresh.options != decision.options
+                || fresh.question != decision.question
+                || fresh.evidence != decision.evidence
+            {
+                self.state_db.update_open_decision(
+                    decision.id,
+                    &fresh.question,
+                    &fresh.options,
+                    &fresh.evidence,
+                )?;
+            }
+            asked.insert(conflict.original);
+        }
+        // An answer still being applied keeps its versions for a moment;
+        // asking again would duplicate the question.
+        for decision in self.state_db.resolved_unapplied_decisions()? {
+            if decision.kind == constants::decision::KIND_CONFLICT
+                && let Some(original) = decision.path
+            {
+                asked.insert(original);
+            }
+        }
+
+        let mut opened = Vec::new();
+        for original in originals.difference(&asked) {
+            // A keep-both moves this device's edit aside before the
+            // cloud's version lands under the name; ask once both are
+            // there. A copy made by answering a file/folder clash with
+            // `keep-both` is that answer, not a question.
+            let landing =
+                !original.exists() && !self.state_db.queued_kinds_at(original)?.is_empty();
+            let kept_both = self.state_db.decision_answered(
+                crate::type_mismatch::DECISION_KIND,
+                original,
+                crate::type_mismatch::OPTION_KEEP_BOTH,
+            )?;
+            if landing || kept_both {
+                continue;
+            }
+            let Some(conflict) = crate::conflict::Conflict::find(original) else {
+                continue;
+            };
+            let asking = crate::conflict::question(&conflict, &self.device_id, trash_enabled);
+            opened.push(self.state_db.create_decision(
+                constants::decision::KIND_CONFLICT,
+                crate::state_db::DecisionScope::Path,
+                Some(original),
+                &asking.question,
+                &asking.options,
+                &asking.evidence,
+                now,
+            )?);
+        }
+        if !opened.is_empty() {
+            logging::info(
+                "Asked which version of a conflicted file stays",
+                &[
+                    ("profile_id", self.profile_id.clone()),
+                    ("questions", opened.len().to_string()),
+                ],
+            );
+            self.announce_decisions(&opened, now);
+        }
+        Ok(())
+    }
+
     /// the cadence and only while the daemon is otherwise ticking.
     fn purge_trash_if_due(&mut self, now: SystemTime) {
         let Some(trash) = &self.trash else {
@@ -1350,6 +1467,8 @@ impl DaemonRuntime {
             mass_delete_settings: crate::safeguards::MassDeleteGuardSettings::default(),
             trash: None,
             last_trash_purge_inst: None,
+            last_conflict_sync_inst: None,
+            decision_changes: 0,
             flush_boost_until_inst: None,
         };
         if let Some(found) = local_replacement {
@@ -1443,7 +1562,7 @@ impl DaemonRuntime {
 
     /// Latest effective ceilings + utilization for the IPC surface
     ///. `None` until the first 1s sample.
-    pub fn resource_budget_status(&self) -> Option<vapor_ipc::ResourceBudgetStatus> {
+    pub fn resources_status(&self) -> Option<vapor_ipc::ResourcesStatus> {
         let ceilings = self.latest_ceilings.as_ref()?;
         let inputs = self.last_sampled_inputs.as_ref();
         let bandwidth_rate_kbps = self
@@ -1453,17 +1572,25 @@ impl DaemonRuntime {
             .rate()
             .map(|bytes_per_sec| bytes_per_sec * 8 / 1_000)
             .unwrap_or(0);
-        Some(vapor_ipc::ResourceBudgetStatus {
-            effective_cpu_percent: ceilings.cpu_percent,
-            effective_memory_percent: ceilings.memory_percent,
-            effective_bandwidth_percent: ceilings.bandwidth_percent,
-            cpu_utilization_percent: inputs.map(|i| i.vapor_cpu_load_percent).unwrap_or(0),
-            memory_utilization_percent: inputs
-                .and_then(|i| memory_share_percent(i.vapor_memory_bytes, i.device_memory_bytes))
-                .unwrap_or(0),
-            bandwidth_utilization_kbps: bandwidth_rate_kbps,
-            idle_boost_state: ceilings.boost_state.to_string(),
-            idle_boost_reason: ceilings.reason.clone(),
+        Some(vapor_ipc::ResourcesStatus {
+            cpu: vapor_ipc::Ceiling {
+                limit_percent: ceilings.cpu_percent,
+                used_percent: inputs.map(|i| i.vapor_cpu_load_percent).unwrap_or(0),
+            },
+            memory: vapor_ipc::Ceiling {
+                limit_percent: ceilings.memory_percent,
+                used_percent: inputs
+                    .and_then(|i| memory_share_percent(i.vapor_memory_bytes, i.device_memory_bytes))
+                    .unwrap_or(0),
+            },
+            bandwidth: vapor_ipc::BandwidthCeiling {
+                limit_percent: ceilings.bandwidth_percent,
+                used_kbps: bandwidth_rate_kbps,
+            },
+            idle_boost: vapor_ipc::StateReason {
+                state: ceilings.boost_state.to_string(),
+                reason: ceilings.reason.clone(),
+            },
         })
     }
 
@@ -1483,12 +1610,12 @@ impl DaemonRuntime {
     /// Per-intent "why stuck" rows: active executor stages plus
     /// the oldest queued/retrying durable rows, each with a
     /// human-readable blocker.
-    pub fn intent_diagnostics(
+    pub fn work_items(
         &self,
         profile_id: &str,
         limit: usize,
         now: SystemTime,
-    ) -> Vec<vapor_ipc::IntentDiagnostic> {
+    ) -> Vec<vapor_ipc::WorkItem> {
         let mut rows = Vec::new();
         let mut active_ids = std::collections::BTreeSet::new();
         let workgate = self.app.workgate_snapshot();
@@ -1516,16 +1643,16 @@ impl DaemonRuntime {
                 ),
                 _ => String::new(),
             };
-            rows.push(vapor_ipc::IntentDiagnostic {
-                intent_id,
+            rows.push(vapor_ipc::WorkItem {
+                id: intent_id,
                 profile_id: profile_id.to_string(),
                 path: path.to_string_lossy().into_owned(),
                 action: kind.wire_action().to_string(),
                 stage: stage.wire_name().to_string(),
-                elapsed_in_stage_ms: elapsed_ms,
-                attempt_count,
-                last_error,
-                blocker_reason,
+                elapsed_ms,
+                attempts: attempt_count,
+                error: last_error,
+                reason: blocker_reason,
             });
             if rows.len() >= limit {
                 return rows;
@@ -1579,16 +1706,16 @@ impl DaemonRuntime {
                 .duration_since(intent.enqueued_at)
                 .map(|duration| duration.as_millis() as u64)
                 .unwrap_or(0);
-            rows.push(vapor_ipc::IntentDiagnostic {
-                intent_id: intent.id,
+            rows.push(vapor_ipc::WorkItem {
+                id: intent.id,
                 profile_id: profile_id.to_string(),
                 path: intent.path.to_string_lossy().into_owned(),
                 action: intent.kind.wire_action().to_string(),
                 stage: stage.to_string(),
-                elapsed_in_stage_ms,
-                attempt_count: intent.attempt_count,
-                last_error: intent.last_error.unwrap_or_default(),
-                blocker_reason,
+                elapsed_ms: elapsed_in_stage_ms,
+                attempts: intent.attempt_count,
+                error: intent.last_error.unwrap_or_default(),
+                reason: blocker_reason,
             });
         }
         rows
@@ -1640,9 +1767,9 @@ impl DaemonRuntime {
         }
         if report.failed_intents > 0 {
             timeline.push(
-                constants::timeline::KIND_INTENT_FAILED,
+                constants::timeline::KIND_FAILURE,
                 profile_id,
-                format!("{} intent(s) failed terminally", report.failed_intents),
+                format!("{} change(s) failed for good", report.failed_intents),
                 now,
             );
         }
@@ -2206,7 +2333,7 @@ impl DaemonRuntime {
     ) -> Result<(), DaemonRuntimeError> {
         for decision in self.state_db.decisions(false)? {
             if decision.kind == kind && decision.evidence["side"] == side.label() {
-                self.state_db.withdraw_decision(decision.id, now)?;
+                self.withdraw_decision(decision.id, now)?;
                 if let Some(timeline) = &self.timeline {
                     timeline.push(
                         constants::timeline::KIND_DECISION,
@@ -2237,7 +2364,7 @@ impl DaemonRuntime {
             && let Ok(Some(decision)) = self.state_db.decision(decision_id)
             && decision.is_open()
         {
-            if let Err(error) = self.state_db.withdraw_decision(decision_id, now) {
+            if let Err(error) = self.withdraw_decision(decision_id, now) {
                 logging::warning(
                     "Could not withdraw the root-replaced decision",
                     &[("error", error.to_string())],
@@ -2603,7 +2730,7 @@ impl DaemonRuntime {
 
         // Flush boost: while boosted, deferred reconciles
         // release immediately, bypassing both their not-before times
-        // and the IdleDrain gate. Execution still answers to the
+        // and the Idle gate. Execution still answers to the
         // throttle ladder — this only moves work from "deferred" to
         // "queued".
         if self.flush_boost_active() {
@@ -2859,7 +2986,23 @@ impl DaemonRuntime {
 
     /// Pushes a timeline event for every decision the executor opened
     /// this tick, so surfaces learn about the question right away.
+    /// How many times this runtime opened or closed a decision; the
+    /// status publisher compares it between ticks.
+    pub fn decision_changes(&self) -> u64 {
+        self.decision_changes
+    }
+
+    fn withdraw_decision(
+        &mut self,
+        id: i64,
+        now: SystemTime,
+    ) -> Result<(), crate::state_db::StateDbError> {
+        self.decision_changes += 1;
+        self.state_db.withdraw_decision(id, now)
+    }
+
     fn announce_decisions(&mut self, ids: &[i64], now: SystemTime) {
+        self.decision_changes += ids.len() as u64;
         for id in ids {
             let Ok(Some(decision)) = self.state_db.decision(*id) else {
                 continue;
@@ -2940,7 +3083,7 @@ impl DaemonRuntime {
             if still_there {
                 continue;
             }
-            self.state_db.withdraw_decision(decision.id, now)?;
+            self.withdraw_decision(decision.id, now)?;
             if let Some(timeline) = &self.timeline {
                 timeline.push(
                     constants::timeline::KIND_DECISION,
@@ -2966,7 +3109,7 @@ impl DaemonRuntime {
             {
                 continue;
             }
-            self.state_db.withdraw_decision(decision.id, now)?;
+            self.withdraw_decision(decision.id, now)?;
             self.mass_change_guard.reset();
             logging::info(
                 "Withdrew the mass-delete decision: the other side already applied every held deletion",
@@ -3056,6 +3199,44 @@ impl DaemonRuntime {
                 }
                 (crate::unsyncable::DECISION_KIND, crate::unsyncable::OPTION_SKIP) => {
                     "skipped: the file stays on this device only".to_string()
+                }
+                (constants::decision::KIND_CONFLICT, choice) => {
+                    // `vapor decisions resolve` applies a conflict answer
+                    // itself; this arm finishes one it recorded but could
+                    // not apply.
+                    let found = decision
+                        .path
+                        .as_deref()
+                        .and_then(crate::conflict::Conflict::find);
+                    match found {
+                        None => "no copy was left to resolve".to_string(),
+                        Some(conflict) => {
+                            let trash = self.trash.as_ref();
+                            let kept = crate::conflict::keep(&conflict, choice, |path| {
+                                discard_conflict_version(trash, path, now)
+                            });
+                            match kept {
+                                Ok(()) => {
+                                    format!("kept {choice}; the other versions are in the trash")
+                                }
+                                Err(crate::conflict::KeepError::NotAVersion(_)) => {
+                                    // The chosen version went away; the
+                                    // versions left get a fresh question.
+                                    format!("{choice} was gone; Vapor asks again about the rest")
+                                }
+                                Err(crate::conflict::KeepError::Io(message)) => {
+                                    logging::warning(
+                                        "Could not apply the conflict answer; will retry",
+                                        &[
+                                            ("decision_id", decision.id.to_string()),
+                                            ("error", message),
+                                        ],
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                 }
                 (kind, choice) => {
                     // A kind this runtime does not know how to apply is
@@ -3582,7 +3763,7 @@ impl DaemonRuntime {
         // Bound the chunk by a wall-clock slice so a slow provider's
         // enumerate cannot hold the tick thread for the whole directory
         // budget; the high directory budget lets a fast provider converge
-        // a large tree quickly under IdleDrain.
+        // a large tree quickly under Idle.
         let clock = self.clock.clone();
         let deadline =
             clock.now() + Duration::from_millis(constants::engine::RECONCILE_SLICE_MILLIS);
@@ -3596,7 +3777,7 @@ impl DaemonRuntime {
             &self.provider_call_mode,
             self.sync_scope.sync_mode,
             &mut self.state_db,
-            constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN,
+            constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE,
             now,
             &should_continue,
         )
@@ -3662,6 +3843,21 @@ impl DaemonRuntime {
 /// permit / slot is available. Coarser than the tick interval so blocked
 /// intents don't churn a lease+requeue write pair on every tick.
 /// Timeline text for a remote name that would alias a local file.
+/// Sends a version of a conflicted file the user did not keep to the
+/// trash. A runtime without one (a test harness) removes it.
+fn discard_conflict_version(
+    trash: Option<&crate::trash::LocalTrash>,
+    path: &Path,
+    now: SystemTime,
+) -> std::io::Result<()> {
+    match trash {
+        Some(trash) => trash
+            .discard(path, constants::trash::REASON_CONFLICT, now)
+            .map(|_| ()),
+        None => std::fs::remove_file(path),
+    }
+}
+
 fn name_collision_message(wanted: &Path, existing: &Path) -> String {
     format!(
         "{} exists in the cloud but this filesystem cannot hold it next to {}; \
@@ -4033,7 +4229,7 @@ mod tests {
             vapor_shared::paths::canonicalize(&watch_root).expect("canonical watch root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
-        let planner_cap = crate::throttle::idle_drain_concurrency();
+        let planner_cap = crate::throttle::idle_concurrency();
         for index in 0..planner_cap + 2 {
             state_db
                 .enqueue_intent(
@@ -4185,7 +4381,7 @@ mod tests {
         // Advance past the throttle dwell window for `Throttled`
         // (MIN_DWELL_THROTTLED_SECONDS = 5 s) before the second
         // evaluation so the controller is allowed to transition back to
-        // IdleDrain.
+        // Idle.
         clock.advance(Duration::from_secs(6));
         let started = runtime
             .tick_with_inputs(timestamp_ms(32_000), ThrottleInputs::default())
@@ -5467,6 +5663,119 @@ mod tests {
         assert!(fixture.runtime.conflict_count() >= 1);
     }
 
+    fn conflict_questions(fixture: &BidirectionalFixture) -> Vec<crate::state_db::DecisionRecord> {
+        fixture
+            .runtime
+            .state_db()
+            .decisions(false)
+            .expect("decisions")
+            .into_iter()
+            .filter(|decision| decision.kind == constants::decision::KIND_CONFLICT)
+            .collect()
+    }
+
+    /// `report.md` and one copy of it, indexed the way a synced copy is.
+    fn seed_conflict(fixture: &mut BidirectionalFixture) -> (PathBuf, PathBuf) {
+        let original = fixture.watch_root.join("report.md");
+        let copy = fixture
+            .watch_root
+            .join("report~conflict-other-mac-1750000000123.md");
+        std::fs::write(&original, b"the cloud's version").expect("seed original");
+        std::fs::write(&copy, b"the other mac's version").expect("seed copy");
+        fixture
+            .runtime
+            .state_db
+            .set_sync_index(
+                &copy,
+                "hash",
+                23,
+                None,
+                None,
+                "op",
+                timestamp_ms(fixture.now_ms),
+            )
+            .expect("index the copy");
+        (original, copy)
+    }
+
+    #[test]
+    fn a_conflicted_file_is_one_decision_until_no_copy_is_left() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+        let (original, copy) = seed_conflict(&mut fixture);
+
+        fixture.tick(6_000);
+        let asked = conflict_questions(&fixture);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(asked[0].path.as_deref(), Some(original.as_path()));
+        let keys = |decision: &crate::state_db::DecisionRecord| {
+            decision
+                .options
+                .iter()
+                .map(|option| option.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            keys(&asked[0]),
+            vec!["report.md", "report~conflict-other-mac-1750000000123.md"]
+        );
+
+        // A third device's edit lands as a second copy: the same
+        // question now offers three versions.
+        let third = fixture
+            .watch_root
+            .join("report~conflict-third-mac-1750000000456.md");
+        std::fs::write(&third, b"the third mac's version").expect("seed copy");
+        fixture.tick(6_000);
+        let grown = conflict_questions(&fixture);
+        assert_eq!(grown.len(), 1, "one question per file: {grown:?}");
+        assert_eq!(grown[0].id, asked[0].id, "the id the user saw stays valid");
+        assert_eq!(keys(&grown[0]).len(), 3);
+        assert!(
+            grown[0].question.contains("all 3 versions"),
+            "{}",
+            grown[0].question
+        );
+
+        // Resolved by hand (the Finder, another device): the question
+        // closes on its own.
+        std::fs::remove_file(&copy).expect("resolve by hand");
+        std::fs::remove_file(&third).expect("resolve by hand");
+        fixture.tick(6_000);
+        assert!(conflict_questions(&fixture).is_empty());
+    }
+
+    #[test]
+    fn a_conflict_answer_recorded_but_not_applied_is_applied_by_the_daemon() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+        let (original, copy) = seed_conflict(&mut fixture);
+        fixture.tick(6_000);
+        let id = conflict_questions(&fixture)[0].id;
+        let choice = copy.file_name().unwrap().to_str().unwrap().to_string();
+
+        fixture
+            .runtime
+            .state_db
+            .resolve_decision(id, &choice, timestamp_ms(fixture.now_ms))
+            .expect("answer");
+        fixture.tick(6_000);
+
+        assert_eq!(
+            std::fs::read(&original).expect("kept version"),
+            b"the other mac's version"
+        );
+        assert!(!copy.exists());
+        let record = fixture
+            .runtime
+            .state_db()
+            .decision(id)
+            .expect("read")
+            .expect("decision");
+        assert!(record.applied_at.is_some());
+        assert!(conflict_questions(&fixture).is_empty());
+    }
+
     #[test]
     fn delete_modify_race_resolves_for_the_modification() {
         // A remote deletion racing a local modification loses —
@@ -5672,7 +5981,7 @@ mod tests {
     #[test]
     fn burst_of_real_uploads_drains_without_admission_serialization() {
         // Guard-rail: a burst of provider-backed uploads must
-        // drain with parallel admission (planner cap 4 in IdleDrain),
+        // drain with parallel admission (planner cap 4 in Idle),
         // not one-intent-per-tick serialization. 40 files with 4-wide
         // stages should finish comfortably under 60 ticks; a regression
         // to serialized admission would need 120+.
@@ -5779,7 +6088,7 @@ mod tests {
 
     #[test]
     fn idle_boost_scales_workgate_caps_and_snaps_back_on_throttle_exit() {
-        // The AlwaysIdle notifier + IdleDrain inputs engage
+        // The AlwaysIdle notifier + Idle inputs engage
         // boost; after the ramp the workgate caps exceed their base, and
         // a throttle exit snaps them back in the same sample.
         let mut fixture = BidirectionalFixture::new();
@@ -5791,19 +6100,19 @@ mod tests {
         }
         let boosted = fixture.runtime.app().workgate_snapshot();
         assert!(
-            boosted.caps.planner_workers > crate::throttle::idle_drain_concurrency(),
+            boosted.caps.planner_workers > crate::throttle::idle_concurrency(),
             "boost must raise caps above the base ({} <= {})",
             boosted.caps.planner_workers,
-            crate::throttle::idle_drain_concurrency()
+            crate::throttle::idle_concurrency()
         );
         let status = fixture
             .runtime
-            .resource_budget_status()
+            .resources_status()
             .expect("published after first sample");
-        assert_eq!(status.idle_boost_state, "active");
-        assert!(status.effective_cpu_percent > 15);
+        assert_eq!(status.idle_boost.state, "active");
+        assert!(status.cpu.limit_percent > 15);
 
-        // Heavy foreign load drives the throttle out of IdleDrain: caps
+        // Heavy foreign load drives the throttle out of Idle: caps
         // snap to (at most) their throttled base values immediately.
         let busy = ThrottleInputs {
             system_cpu_load_percent: 70,
@@ -5817,15 +6126,12 @@ mod tests {
             .expect("tick");
         let snapped = fixture.runtime.app().workgate_snapshot();
         assert!(
-            snapped.caps.planner_workers <= crate::throttle::idle_drain_concurrency(),
-            "post-IdleDrain states never run against boosted caps"
+            snapped.caps.planner_workers <= crate::throttle::idle_concurrency(),
+            "post-Idle states never run against boosted caps"
         );
-        let status = fixture
-            .runtime
-            .resource_budget_status()
-            .expect("still published");
-        assert_eq!(status.idle_boost_state, "off");
-        assert_eq!(status.effective_cpu_percent, 15);
+        let status = fixture.runtime.resources_status().expect("still published");
+        assert_eq!(status.idle_boost.state, "off");
+        assert_eq!(status.cpu.limit_percent, 15);
     }
 
     #[test]
@@ -6323,13 +6629,8 @@ mod tests {
             b"inside the cloud folder"
         );
         assert!(fixture.cloud_root.join("notes/inner.txt").is_file());
-        assert!(
-            runtime
-                .state_db()
-                .decisions(false)
-                .expect("open")
-                .is_empty()
-        );
+        let open = runtime.state_db().decisions(false).expect("open");
+        assert!(open.is_empty(), "{open:?}");
     }
 
     #[cfg(unix)]
@@ -6721,10 +7022,10 @@ mod tests {
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let subtree_root = watch_root.join("project");
         // Enough matched directories on BOTH sides that one walk chunk
-        // (RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN) cannot finish the
+        // (RECONCILE_DIRS_PER_SLICE_IDLE) cannot finish the
         // comparison: a finished walk completes instead of pausing, so
         // observing pause cycles requires a genuinely in-progress walk.
-        for index in 0..(constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN * 2) {
+        for index in 0..(constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE * 2) {
             std::fs::create_dir_all(subtree_root.join(format!("dir-{index}")))
                 .expect("create local walk fodder");
             std::fs::create_dir_all(cloud_root.join(format!("project/dir-{index}")))
@@ -6810,7 +7111,7 @@ mod tests {
         // its ThrottleInputs from the injected `MetricsSampler` and feed
         // them through to the throttle controller / workgate. We inject a
         // sampler that reports user-active + warm thermal state; the
-        // resulting throttle decision must downshift away from `IdleDrain`.
+        // resulting throttle decision must downshift away from `Idle`.
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
@@ -6845,10 +7146,10 @@ mod tests {
     }
 
     #[test]
-    fn tick_with_default_static_sampler_picks_idle_drain() {
+    fn tick_with_default_static_sampler_picks_idle() {
         // Sanity check: with no overrides, the default static sampler
         // mirrors `ThrottleInputs::default()` so the engine starts in
-        // IdleDrain — the existing behavior the clock plumbing must preserve.
+        // Idle — the existing behavior the clock plumbing must preserve.
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
@@ -6867,7 +7168,7 @@ mod tests {
             .app()
             .throttle_decision()
             .expect("throttle decision recorded after first tick");
-        assert_eq!(decision.state, vapor_shared::ThrottleState::IdleDrain);
+        assert_eq!(decision.state, vapor_shared::ThrottleState::Idle);
     }
 
     fn timestamp_ms(milliseconds: u64) -> SystemTime {
@@ -7189,7 +7490,7 @@ mod tests {
         let diagnostics =
             fixture
                 .runtime
-                .intent_diagnostics("default", 10, timestamp_ms(fixture.now_ms + 20));
+                .work_items("default", 10, timestamp_ms(fixture.now_ms + 20));
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].path, file.display().to_string());
         assert_eq!(diagnostics[0].action, "upload");
@@ -8053,7 +8354,7 @@ mod tests {
         fixture.tick(6_000);
         assert_eq!(
             fixture.runtime.app.snapshot().throttle_state,
-            vapor_shared::ThrottleState::IdleDrain,
+            vapor_shared::ThrottleState::Idle,
             "quiet defaults sample as idle"
         );
 

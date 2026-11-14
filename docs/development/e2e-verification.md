@@ -235,7 +235,7 @@ The harness sets `VAPOR_THROTTLE_INPUTS=static` for every daemon it
 starts, scripted or manual, so the throttle sits on neutral inputs
 instead of tracking your keyboard: with host inputs a daemon on a
 machine someone is typing on stays `Throttled`, and reconcile only
-runs in `IdleDrain`. To watch the real throttle react, start a daemon
+runs in `Idle`. To watch the real throttle react, start a daemon
 with that variable unset.
 
 Never run manual experiments against `~/.vapor` or with `VAPOR_DIR`
@@ -286,7 +286,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S01 | config set/get round-trips through `vapor.json`; structured keys are stored as JSON |
 | S02 | daemon reaches Running, creates the missing local sync root, binds the IPC socket |
 | S03 | local writes become durable intents and drain; the cloud root matches byte for byte |
-| S04 | pause flips runState over IPC, resume restores it, the paused backlog drains |
+| S04 | pause flips the run state over IPC, resume restores it, the paused backlog drains |
 | S05 | a second daemon on the same `VAPOR_DIR` exits non-zero saying one is already running |
 | S06 | `vapor doctor` reports no failures inside the sandbox, in text and `--json` |
 | S07 | clean SIGTERM shutdown, restart on the same state DB, post-restart writes converge |
@@ -297,7 +297,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S12 | pull-only materializes cloud content locally and removes a local-only file without uploading |
 | S13 | diagnostics answers over IPC; `vapor report` exports config, logs, live captures, manifest |
 | S14 | ignored names never sync in either direction and never manufacture a conflict copy |
-| S15 | conflicts list finds a keep-both copy; resolve promotes it; the resolution syncs; the list drains |
+| S15 | three versions of one file are one `conflict` decision naming each device; keeping the third device's version applies at once and trashes the others; the resolution syncs; the question closes |
 | S16 | a plain local rm removes the cloud copy |
 | S17 | a FIFO in the watched root never becomes a remote object and never wedges the queue |
 | S18 | a downstream reader that closes the pipe early does not make the CLI panic |

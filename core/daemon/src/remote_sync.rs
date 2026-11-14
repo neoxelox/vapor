@@ -130,8 +130,8 @@ impl RemotePoller {
     /// state forbids polling entirely.
     fn cadence_for(state: ThrottleState) -> Option<Duration> {
         match state {
-            ThrottleState::IdleDrain => Some(Duration::from_secs(
-                constants::engine::REMOTE_POLL_IDLE_DRAIN_SECONDS,
+            ThrottleState::Idle => Some(Duration::from_secs(
+                constants::engine::REMOTE_POLL_IDLE_SECONDS,
             )),
             ThrottleState::Light => Some(Duration::from_secs(
                 constants::engine::REMOTE_POLL_LIGHT_SECONDS,

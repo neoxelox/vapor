@@ -106,7 +106,7 @@ impl Cli {
     }
 
     pub fn run_state(&self) -> Option<String> {
-        self.status().map(|status| status.run_state)
+        self.status().map(|status| status.run.state)
     }
 
     pub fn run_state_is(&self, expected: &str) -> bool {

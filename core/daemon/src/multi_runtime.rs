@@ -153,7 +153,7 @@ pub struct MultiProfileRuntime {
 
 /// The cheap observable state of one profile: enough to detect that a
 /// published status snapshot went stale without re-running its SQL.
-type SlotStateFingerprint = (RunState, ThrottleState, bool, String);
+type SlotStateFingerprint = (RunState, ThrottleState, bool, String, u64);
 
 fn slot_state_fingerprint(slot: &ProfileSlot) -> SlotStateFingerprint {
     let app_snapshot = slot.runtime.app().snapshot();
@@ -162,6 +162,7 @@ fn slot_state_fingerprint(slot: &ProfileSlot) -> SlotStateFingerprint {
         app_snapshot.throttle_state,
         slot.failed.is_some(),
         app_snapshot.reason.clone(),
+        slot.runtime.decision_changes(),
     )
 }
 
@@ -874,6 +875,7 @@ impl MultiProfileRuntime {
         let Some(worst) = worst else {
             return DaemonStatusSnapshot {
                 run_state: RunState::Error.wire_name().to_string(),
+                run_reason: "no enabled profiles".to_string(),
                 throttle_state: ThrottleState::Suspended,
                 provider: "none".to_string(),
                 throttle_reason: "no enabled profiles".to_string(),
@@ -882,17 +884,17 @@ impl MultiProfileRuntime {
         };
 
         let mut snapshot = DaemonStatusSnapshot::from_app(worst.runtime.app());
-        snapshot.config_restart_required = (!self.restart_required.is_empty()).then(|| {
+        snapshot.restart_required = (!self.restart_required.is_empty()).then(|| {
             format!(
                 "{} changed; restart the daemon to apply (vapor service restart)",
                 self.restart_required.join(", ")
             )
         });
         snapshot.run_state = slot_effective_run_state(worst).wire_name().to_string();
-        snapshot.resource_budget = self
+        snapshot.resources = self
             .slots
             .iter()
-            .find_map(|slot| slot.runtime.resource_budget_status());
+            .find_map(|slot| slot.runtime.resources_status());
         if self.slots.len() > 1 {
             let live = self.slots.iter().filter(|s| s.failed.is_none()).count();
             snapshot.throttle_reason = format!(
@@ -906,68 +908,80 @@ impl MultiProfileRuntime {
         let per_profile_cap = (DIAGNOSTICS_ROW_CAP / self.slots.len().max(1)).max(10);
         let mut daemon_reconcile = crate::runtime::ReconcileStatus::Idle;
         for slot in &self.slots {
-            let queue_depth = slot.runtime.state_db().queue_depth().unwrap_or(0) as u64;
-            let failed_intents = slot.runtime.state_db().failed_depth().unwrap_or(0) as u64;
-            let decisions_pending =
-                slot.runtime.state_db().open_decision_count().unwrap_or(0) as u64;
-            let conflicts_unresolved = slot
-                .runtime
-                .state_db()
-                .unresolved_conflict_copy_count()
-                .unwrap_or(0) as u64;
-            let (mirror_reverts, mirror_deletes) = slot.runtime.mirror_counters();
-            let conflicts = slot.runtime.conflict_count();
+            let queued = slot.runtime.state_db().queue_depth().unwrap_or(0) as u64;
+            let failed = slot.runtime.state_db().failed_depth().unwrap_or(0) as u64;
+            let decisions = slot.runtime.state_db().open_decision_count().unwrap_or(0) as u64;
+            let (reverts, deletes) = slot.runtime.mirror_counters();
             let reconcile = slot.runtime.reconcile_status();
-            let app_snapshot = slot.runtime.app().snapshot();
+            let reason = match &slot.failed {
+                Some(suspension) => suspension.clone(),
+                None => slot.runtime.app().snapshot().reason.clone(),
+            };
             snapshot.profiles.push(vapor_ipc::ProfileStatus {
                 id: slot.profile.id.clone(),
                 name: slot.profile.name.clone(),
                 provider: slot.profile.provider_kind.clone(),
                 sync_mode: slot.profile.scope.sync_mode.as_config_value().to_string(),
-                run_state: slot_effective_run_state(slot).wire_name().to_string(),
-                reason: app_snapshot.reason.clone(),
-                queue_depth,
-                failed_intents,
-                conflicts,
-                mirror_reverts,
-                mirror_deletes,
-                suspended_reason: slot.failed.clone(),
-                decisions_pending,
-                conflicts_unresolved,
-                reconcile_state: reconcile.label().to_string(),
-                reconcile_detail: reconcile.detail(),
+                run: vapor_ipc::StateReason {
+                    state: slot_effective_run_state(slot).wire_name().to_string(),
+                    reason,
+                },
+                reconcile: vapor_ipc::ReconcileStatus {
+                    state: reconcile.label().to_string(),
+                    detail: reconcile.detail(),
+                },
+                queued,
+                failed,
+                decisions,
+                mirror: vapor_ipc::MirrorCounts { reverts, deletes },
+                suspended: slot.failed.is_some(),
                 sign_in_required: slot.runtime.sign_in_required(),
             });
             daemon_reconcile = daemon_reconcile.more_active(reconcile);
-            snapshot.queue_depth += queue_depth;
-            snapshot.failed_intents += failed_intents;
-            snapshot.decisions_pending += decisions_pending;
-            snapshot.conflicts_unresolved += conflicts_unresolved;
-            snapshot.conflicts += conflicts;
-            snapshot.mirror_reverts += mirror_reverts;
-            snapshot.mirror_deletes += mirror_deletes;
-            snapshot.loop_prevention_suppressions += slot.runtime.loop_suppression_count();
-            snapshot.dropped_incoming_events += slot.runtime.dropped_incoming_event_count();
+            snapshot.queued += queued;
+            snapshot.failed += failed;
+            snapshot.decisions += decisions;
+            snapshot.mirror.reverts += reverts;
+            snapshot.mirror.deletes += deletes;
+            snapshot.suppressed_echoes += slot.runtime.loop_suppression_count();
+            snapshot.dropped_events += slot.runtime.dropped_incoming_event_count();
 
-            if snapshot.intent_diagnostics.len() < DIAGNOSTICS_ROW_CAP {
-                let remaining = DIAGNOSTICS_ROW_CAP - snapshot.intent_diagnostics.len();
-                let rows = slot.runtime.intent_diagnostics(
-                    &slot.profile.id,
-                    per_profile_cap.min(remaining),
-                    now,
-                );
-                if rows.len() == per_profile_cap.min(remaining) && queue_depth > rows.len() as u64 {
+            if snapshot.work_items.len() < DIAGNOSTICS_ROW_CAP {
+                let remaining = DIAGNOSTICS_ROW_CAP - snapshot.work_items.len();
+                let rows =
+                    slot.runtime
+                        .work_items(&slot.profile.id, per_profile_cap.min(remaining), now);
+                if rows.len() == per_profile_cap.min(remaining) && queued > rows.len() as u64 {
                     snapshot.diagnostics_truncated = true;
                 }
-                snapshot.intent_diagnostics.extend(rows);
+                snapshot.work_items.extend(rows);
             } else {
                 snapshot.diagnostics_truncated = true;
             }
         }
-        snapshot.reconcile_state = daemon_reconcile.label().to_string();
-        snapshot.reconcile_detail = daemon_reconcile.detail();
+        snapshot.reconcile = vapor_ipc::ReconcileStatus {
+            state: daemon_reconcile.label().to_string(),
+            detail: daemon_reconcile.detail(),
+        };
+        snapshot.run_reason = daemon_run_reason(&snapshot.profiles, &snapshot.run_state)
+            .unwrap_or(snapshot.run_reason);
         snapshot
     }
+}
+
+/// The reason that explains the daemon-wide run state: a suspended
+/// profile names itself first, otherwise the first profile in the
+/// daemon-wide state that gives a reason.
+fn daemon_run_reason(profiles: &[vapor_ipc::ProfileStatus], state: &str) -> Option<String> {
+    profiles
+        .iter()
+        .find(|profile| profile.suspended && !profile.run.reason.is_empty())
+        .or_else(|| {
+            profiles
+                .iter()
+                .find(|profile| profile.run.state == state && !profile.run.reason.is_empty())
+        })
+        .map(|profile| profile.run.reason.clone())
 }
 
 fn slot_effective_run_state(slot: &ProfileSlot) -> RunState {
@@ -2241,11 +2255,11 @@ mod tests {
         let status = multi.aggregate_status(clock.now_system());
         assert!(
             status
-                .config_restart_required
+                .restart_required
                 .as_deref()
                 .is_some_and(|notice| notice.contains("provider") && notice.contains("restart")),
             "{:?}",
-            status.config_restart_required
+            status.restart_required
         );
         // The queued upload either finished or is still queued; a reload
         // never fails or drops it.
@@ -2308,12 +2322,16 @@ mod tests {
             .iter()
             .find(|profile| profile.id == "only")
             .expect("profile row");
+        assert!(only.suspended);
         assert!(
-            only.suspended_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("gdrvie")),
+            only.run.reason.contains("gdrvie"),
             "reason must name the bad provider: {:?}",
-            only.suspended_reason
+            only.run.reason
+        );
+        assert!(
+            snapshot.run_reason.contains("gdrvie"),
+            "the daemon-wide reason names the suspension: {:?}",
+            snapshot.run_reason
         );
     }
 

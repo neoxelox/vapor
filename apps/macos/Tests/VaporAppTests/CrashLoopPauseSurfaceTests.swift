@@ -94,8 +94,8 @@ private final class StubServiceController: LaunchAgentControlling {
 
   func daemonStatus() throws -> DaemonStatusSnapshot {
     DaemonStatusSnapshot(
-      runState: "running", throttleState: "idle-drain", throttleReason: "",
-      provider: "filesystem", queueDepth: 0, failedIntents: 0)
+      runState: "running", throttleState: "idle", throttleReason: "",
+      provider: "filesystem", queued: 0, failed: 0)
   }
   func reconcile() throws {}
 

@@ -81,7 +81,7 @@ impl Home {
             .env(constants::env::VAPOR_LOG_LEVEL, "debug")
             // Pin the throttle to neutral inputs: on a developer machine
             // the host sampler would hold the daemon at Throttled while
-            // the developer types, and reconcile only runs in IdleDrain.
+            // the developer types, and reconcile only runs in Idle.
             .env(
                 constants::env::VAPOR_THROTTLE_INPUTS,
                 constants::engine::THROTTLE_INPUTS_STATIC,

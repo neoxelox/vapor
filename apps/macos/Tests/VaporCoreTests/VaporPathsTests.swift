@@ -27,21 +27,19 @@ func resolvesVaporDirectoryToCurrentDirectoryForDevEnvironment() {
 }
 
 @Test
-func honorsCIOnlyWhenTruthyAndLetsVaporEnvWin() {
+func onlyVaporEnvDevPicksTheRepoLocalDirectory() {
   let devDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
     .appendingPathComponent(".vapor", isDirectory: true)
   let homeDir = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent(".vapor", isDirectory: true)
 
-  // A falsey CI must not redirect to the dev directory.
   #expect(
-    VaporPaths.resolveVaporDirectoryURL(environment: ["CI": "false"]).path == homeDir.path)
-  // A truthy CI does.
-  #expect(VaporPaths.resolveVaporDirectoryURL(environment: ["CI": "true"]).path == devDir.path)
-  // Explicit VAPOR_ENV=prod wins over CI.
+    VaporPaths.resolveVaporDirectoryURL(environment: ["VAPOR_ENV": "dev"]).path == devDir.path)
+  // A CI runner gets no special treatment: only VAPOR_ENV or VAPOR_DIR
+  // move the directory.
+  #expect(VaporPaths.resolveVaporDirectoryURL(environment: ["CI": "true"]).path == homeDir.path)
   #expect(
-    VaporPaths.resolveVaporDirectoryURL(environment: ["CI": "true", "VAPOR_ENV": "prod"]).path
-      == homeDir.path)
+    VaporPaths.resolveVaporDirectoryURL(environment: ["VAPOR_ENV": "prod"]).path == homeDir.path)
 }
 
 @Test

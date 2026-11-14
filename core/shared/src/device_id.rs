@@ -41,6 +41,18 @@ pub fn derive_device_id() -> String {
     }
 }
 
+/// The device id `vapor.json` holds, without deriving one: `None`
+/// until the daemon's first run has written it.
+pub fn persisted(config_path: &Path) -> Option<String> {
+    read_config_object(config_path)
+        .ok()?
+        .get(constants::config::KEY_DEVICE_ID)?
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
 /// Resolves the persisted device id, deriving and persisting one at
 /// first run. An existing non-empty value always wins (never silently
 /// regenerated). The write preserves every other key in `vapor.json`.

@@ -676,11 +676,13 @@ Design: `docs/architecture/conflict-resolution.md`.
 - [x] C8-69 Conflict-copy name parser
       (`conflict::parse_conflict_copy_name`, strict inverse of the
       generator, rejects marker-lookalike user files) + `CONFLICT_MARKER`.
-- [x] C8-70 `vapor conflicts list [--json]` + `vapor conflicts resolve
-      <copy> --choose <original|copy>` (cli.md L3-8): files-as-registry
-      scan pruned by the ignore rules, locked JSON contract for app
-      surfaces, resolution via plain file operations that sync like user
-      edits and work with the daemon stopped. E2E S15.
+- [x] C8-70 Conflict listing and resolution (cli.md L3-8): each
+      conflicted file is one `conflict` decision listing every version
+      (the file plus one copy per device that lost the race), opened,
+      rewritten, and closed by the daemon as copies come and go, and
+      answered through `vapor decisions resolve --choose <file>` with
+      plain file operations that sync like user edits, send the versions
+      not kept to the trash, and work with the daemon stopped. E2E S15.
 - [x] C8-72 Hash-verified divergence for uploads onto untagged remotes:
       an op-id mismatch alone no longer means conflict — the planner
       compares the remote content hash against the sync index first, so
@@ -909,7 +911,7 @@ runtime changed shape):
       match the index.
 - [x] RV-7 A fully misconfigured daemon stays up and serves status.
 - [x] RV-8 Live `vapor.json` reload for the safe key subset;
-      `config_restart_required` in status; `vapor config set` hints.
+      `restartRequired` in status; `vapor config set` hints.
 - [x] RV-9 JSON-typed structured config keys; partial per-profile
       overrides with per-field merge; `config get` renders defaults.
 - [x] RV-10 `Provider::rename` removed from the contract until move
@@ -1014,7 +1016,7 @@ it is answered. Whole-profile stops are limited to the conditions in
 Landed:
 
 - [x] SF-1 Decisions: durable `pending_decisions`, the `held` queue
-      state, `vapor decisions list|show|resolve`, `decisionsPending`
+      state, `vapor decisions list|show|resolve`, `decisions`
       in status, `Held` rows in diagnostics, timeline entries, and the
       applier loop in the runtime. The mass-delete guard is the first
       kind: both directions, the whole burst judged before its first

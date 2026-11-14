@@ -58,7 +58,6 @@ fn help_names_every_command() {
         "status",
         "config",
         "service",
-        "conflicts",
         "decisions",
         "trash",
         "doctor",
@@ -190,23 +189,15 @@ fn doctor_json_is_a_check_list_with_a_worst_status() {
 }
 
 #[test]
-fn conflicts_refuse_to_touch_a_file_that_is_not_a_conflict_copy() {
+fn resolving_a_decision_that_does_not_exist_fails_on_stderr() {
     let home = TempDir::new().expect("home");
-    let plain = home.path().join("notes.txt");
-    std::fs::write(&plain, b"not a copy").expect("seed");
     let output = vapor(
         home.path(),
-        &[
-            "conflicts",
-            "resolve",
-            plain.to_str().expect("utf-8"),
-            "--choose",
-            "original",
-        ],
+        &["decisions", "resolve", "99", "--choose", "report.md"],
     );
     assert_eq!(output.status.code(), Some(1));
-    assert!(plain.is_file(), "the file must be left alone");
-    assert!(stderr(&output).contains("conflict"), "{}", stderr(&output));
+    assert!(stdout(&output).is_empty());
+    assert!(stderr(&output).contains("99"), "{}", stderr(&output));
 }
 
 #[cfg(unix)]

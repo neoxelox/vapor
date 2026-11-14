@@ -321,7 +321,7 @@ pub enum IntentSource {
 
 /// Rank for `ReconcileSubtree` control intents: first. Leasing one is
 /// cheap (it only hands the walk to the reconcile controller, which
-/// itself defers until IdleDrain) and the startup reconstruction
+/// itself defers until Idle) and the startup reconstruction
 /// barrier depends on the whole-scope reconcile leasing ahead of any
 /// recovered file intents.
 pub const RECONCILE_INTENT_PRIORITY_RANK: u8 = 0;

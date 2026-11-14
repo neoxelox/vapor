@@ -23,7 +23,7 @@ func loadCreatesDefaultConfigurationAndRuntimeDirectories() throws {
   #expect(configuration.cloudRoot == nil, "the provider's default is the daemon's call")
   #expect(configuration.preIgnoreRules == VaporConfiguration.defaultPreIgnoreRules)
   #expect(configuration.postIgnoreRules == VaporConfiguration.defaultPostIgnoreRules)
-  #expect(configuration.languageCode == VaporConfiguration.defaultLanguageCode)
+  #expect(configuration.language == VaporConfiguration.defaultLanguage)
   #expect(configuration.timelineLimit == 1000)
   #expect(
     fileManager.fileExists(atPath: VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL).path)
@@ -53,9 +53,9 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
     useVaporignore: false,
     localRoot: "~/Desktop/Vapor",
     cloudRoot: "/RemoteVapor",
-    preIgnoreRules: "",
-    postIgnoreRules: "*.bak",
-    languageCode: "en",
+    preIgnoreRules: [],
+    postIgnoreRules: ["*.bak"],
+    language: "en",
     timelineLimit: 1500
   )
 
@@ -68,8 +68,8 @@ func savePersistsConfigurationInResolvedRuntimeDirectory() throws {
   #expect(loaded.localRoot == "~/Desktop/Vapor")
   #expect(loaded.cloudRoot == "/RemoteVapor")
   #expect(loaded.preIgnoreRules.isEmpty)
-  #expect(loaded.postIgnoreRules == "*.bak")
-  #expect(loaded.languageCode == "en")
+  #expect(loaded.postIgnoreRules == ["*.bak"])
+  #expect(loaded.language == "en")
   #expect(loaded.timelineLimit == 1500)
 
   try fileManager.removeItem(at: rootURL)
@@ -96,7 +96,7 @@ func loadDefaultsMissingKeysWithoutDroppingOtherSavedValues() throws {
     withJSONObject: [
       "useGitignore": false,
       "localRoot": "~/Projects/Vapor",
-      "postIgnoreRules": "*.bak",
+      "postIgnoreRules": ["*.bak"],
       "timelineLimit": 42,
     ],
     options: [.sortedKeys]
@@ -108,8 +108,8 @@ func loadDefaultsMissingKeysWithoutDroppingOtherSavedValues() throws {
   #expect(configuration.autoLaunch == true)
   #expect(configuration.useGitignore == false)
   #expect(configuration.localRoot == "~/Projects/Vapor")
-  #expect(configuration.postIgnoreRules == "*.bak")
-  #expect(configuration.languageCode == "en")
+  #expect(configuration.postIgnoreRules == ["*.bak"])
+  #expect(configuration.language == "en")
   #expect(configuration.timelineLimit == 42)
 
   try fileManager.removeItem(at: rootURL)
@@ -142,6 +142,69 @@ func loadResultPreservesMalformedConfigurationFileAndReportsIssue() throws {
 }
 
 @Test
+func oneInvalidValueFallsBackAloneAndASaveKeepsTheRest() throws {
+  let fileManager = FileManager.default
+  let rootURL = fileManager.temporaryDirectory
+    .appendingPathComponent("vapor-config-tests")
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+  defer { try? fileManager.removeItem(at: rootURL) }
+  let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL)
+  // Ignore rules in the older one-string shape, next to keys the app
+  // does not model.
+  let written = """
+    {
+      "localRoot": "~/Work",
+      "preIgnoreRules": "node_modules/\\nbuild/",
+      "provider": "gdrive",
+      "deviceId": "mac-studio"
+    }
+    """
+  try written.data(using: .utf8)!.write(to: configurationURL)
+  let store = VaporConfigurationStore(
+    fileManager: fileManager,
+    environment: ["VAPOR_DIR": rootURL.path]
+  )
+
+  let result = store.loadResult()
+  #expect(result.configuration.localRoot == "~/Work")
+  #expect(result.configuration.preIgnoreRules == VaporConfiguration.defaultPreIgnoreRules)
+  #expect(result.issue?.reason.contains("preIgnoreRules") == true)
+
+  var configuration = result.configuration
+  configuration.useGitignore = false
+  try store.save(configuration)
+  let saved = store.loadResult()
+  #expect(saved.issue == nil)
+  #expect(saved.configuration.localRoot == "~/Work")
+  #expect(saved.configuration.deviceId == "mac-studio")
+  #expect(
+    saved.configuration.additionalKeys[VaporConstants.ConfigKeys.provider] == .string("gdrive"))
+}
+
+@Test
+func aSaveNeverOverwritesAFileThatDoesNotParse() throws {
+  let fileManager = FileManager.default
+  let rootURL = fileManager.temporaryDirectory
+    .appendingPathComponent("vapor-config-tests")
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
+  defer { try? fileManager.removeItem(at: rootURL) }
+  let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL)
+  let broken = "{ \"provider\": \"gdrive\",".data(using: .utf8)!
+  try broken.write(to: configurationURL)
+  let store = VaporConfigurationStore(
+    fileManager: fileManager,
+    environment: ["VAPOR_DIR": rootURL.path]
+  )
+
+  #expect(throws: VaporConfigurationStoreError.self) {
+    try store.save(VaporConfiguration())
+  }
+  #expect((try Data(contentsOf: configurationURL)) == broken)
+}
+
+@Test
 func loadSaveRoundTripPreservesRuntimeOwnedKeysAndDeviceId() throws {
   let fileManager = FileManager.default
   let rootURL = fileManager.temporaryDirectory
@@ -154,7 +217,7 @@ func loadSaveRoundTripPreservesRuntimeOwnedKeysAndDeviceId() throws {
   // not model first-class must survive an app-side save untouched.
   let daemonWritten = """
     {
-      "languageCode": "en",
+      "language": "en",
       "deviceId": "mac-studio-01",
       "provider": "gdrive",
       "syncMode": "pull-only",

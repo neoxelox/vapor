@@ -11,7 +11,7 @@ pub mod runtime_paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThrottleState {
-    IdleDrain,
+    Idle,
     Light,
     Throttled,
     Suspended,
@@ -30,7 +30,7 @@ impl ThrottleState {
     pub fn wire_name(self) -> &'static str {
         use constants::throttle_state as names;
         match self {
-            Self::IdleDrain => names::IDLE_DRAIN,
+            Self::Idle => names::IDLE,
             Self::Light => names::LIGHT,
             Self::Throttled => names::THROTTLED,
             Self::Suspended => names::SUSPENDED,

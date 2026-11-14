@@ -3,18 +3,23 @@
 //!
 //! A decision lives in the profile's durable state DB, so this command
 //! reads and answers it with or without a running daemon; the daemon
-//! applies the answer on its next tick (or at its next start). App
-//! surfaces drive this command with `--json`, the same shim pattern as
-//! `vapor conflicts`. Design: `docs/architecture/data-flow.md`
-//! §Decisions.
+//! applies the answer on its next tick (or at its next start). A
+//! `conflict` is the exception: its answer is applied here, at once.
+//! App surfaces drive this command with `--json`. Design:
+//! `docs/architecture/data-flow.md` §Decisions and
+//! `docs/architecture/conflict-resolution.md`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use serde::Serialize;
+use vapor_daemon::conflict::{self, Conflict};
 use vapor_daemon::profiles::resolve_profiles;
 use vapor_daemon::state_db::{DecisionRecord, DurableStateDb};
+use vapor_daemon::trash::{LocalTrash, TrashSettings};
 use vapor_shared::config::VaporConfig;
+use vapor_shared::constants;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,7 +43,7 @@ pub struct DecisionJson {
     pub resolved_at_ms: Option<u64>,
     pub choice: Option<String>,
     pub applied_at_ms: Option<u64>,
-    pub held_intents: usize,
+    pub held: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,7 +82,7 @@ fn to_json(profile_id: &str, record: DecisionRecord) -> DecisionJson {
         resolved_at_ms: record.resolved_at.map(millis),
         choice: record.choice,
         applied_at_ms: record.applied_at.map(millis),
-        held_intents: record.held_intents,
+        held: record.held_intents,
     }
 }
 
@@ -106,6 +111,7 @@ pub fn list_decisions(config: &VaporConfig, include_closed: bool) -> DecisionLis
                 Ok(records) => decisions.extend(
                     records
                         .into_iter()
+                        .filter(|record| !is_settled_conflict(record))
                         .map(|record| to_json(&profile.id, record)),
                 ),
                 Err(_) => skipped_profiles.push(profile.id.clone()),
@@ -117,6 +123,15 @@ pub fn list_decisions(config: &VaporConfig, include_closed: bool) -> DecisionLis
         decisions,
         skipped_profiles,
     }
+}
+
+/// An open conflict question with no copy left (resolved in the Finder
+/// while the daemon was stopped). The daemon closes it on its next
+/// pass; until then a listing does not show it.
+fn is_settled_conflict(record: &DecisionRecord) -> bool {
+    record.kind == constants::decision::KIND_CONFLICT
+        && record.is_open()
+        && record.path.as_deref().and_then(Conflict::find).is_none()
 }
 
 /// One decision by id; `profile` disambiguates when several profiles
@@ -136,7 +151,9 @@ pub fn show_decision(
 }
 
 /// Records the answer. The daemon applies it on its next tick; with the
-/// daemon stopped, at its next start.
+/// daemon stopped, at its next start. A `conflict` answer is plain file
+/// operations, so it is applied here and now: the daemon syncs the
+/// result like any edit, and it works with the daemon stopped.
 pub fn resolve_decision(
     config: &VaporConfig,
     id: i64,
@@ -145,10 +162,90 @@ pub fn resolve_decision(
 ) -> Result<DecisionJson, String> {
     let profile_id = pick_profile(config, id, profile)?;
     let mut db = open_profile_db(&profile_id)?;
+    let now = SystemTime::now();
+    let current = db
+        .decision(id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("no decision {id} in profile {profile_id}"))?;
+    if current.kind == constants::decision::KIND_CONFLICT && current.is_open() {
+        resolve_conflict(config, &profile_id, &mut db, &current, choice, now)?;
+        let record = db
+            .decision(id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("decision {id} vanished"))?;
+        return Ok(to_json(&profile_id, record));
+    }
     let record = db
-        .resolve_decision(id, choice, SystemTime::now())
+        .resolve_decision(id, choice, now)
         .map_err(|error| error.to_string())?;
     Ok(to_json(&profile_id, record))
+}
+
+/// Keeps the chosen version of a conflicted file and sends the others
+/// to the profile's trash. Refuses when the versions on disk are no
+/// longer the ones the question lists, so an answer is never applied to
+/// a version the user did not see.
+fn resolve_conflict(
+    config: &VaporConfig,
+    profile_id: &str,
+    db: &mut DurableStateDb,
+    current: &DecisionRecord,
+    choice: &str,
+    now: SystemTime,
+) -> Result<(), String> {
+    let id = current.id;
+    let original = current.path.clone().unwrap_or_default();
+    let Some(found) = Conflict::find(&original) else {
+        db.withdraw_decision(id, now)
+            .map_err(|error| error.to_string())?;
+        return Err(format!(
+            "no conflict copy of {} is left, so there is nothing to decide; the question is closed",
+            original.display()
+        ));
+    };
+    let settings = TrashSettings::resolve(config);
+    let config_path = vapor_shared::runtime_paths::vapor_directory()
+        .join(constants::runtime::CONFIGURATION_FILE_NAME);
+    let device_id = vapor_shared::device_id::persisted(&config_path).unwrap_or_default();
+    let fresh = conflict::question(&found, &device_id, settings.enabled);
+    let listed = |options: &[vapor_daemon::state_db::DecisionOption]| {
+        options
+            .iter()
+            .map(|option| option.key.clone())
+            .collect::<Vec<_>>()
+    };
+    if listed(&fresh.options) != listed(&current.options) {
+        db.update_open_decision(id, &fresh.question, &fresh.options, &fresh.evidence)
+            .map_err(|error| error.to_string())?;
+        return Err(format!(
+            "the versions of {} changed since the question was asked; see them with \
+             `vapor decisions show {id}` and answer again",
+            original.display()
+        ));
+    }
+    db.resolve_decision(id, choice, now)
+        .map_err(|error| error.to_string())?;
+    let sync_root = resolve_profiles(config)
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .and_then(|profile| profile.scope.local_root);
+    let trash = LocalTrash::new(
+        profile_id,
+        vapor_shared::runtime_paths::profile_trash_directory(profile_id),
+        settings,
+        Arc::new(vapor_platform::NativeTrashBin::for_current_host()),
+    )
+    .with_sync_root(sync_root);
+    conflict::keep(&found, choice, |path| {
+        trash
+            .discard(path, constants::trash::REASON_CONFLICT, now)
+            .map(|_| ())
+    })
+    .map_err(|error| {
+        format!("{error}; the answer is recorded, and the daemon tries again on its next tick")
+    })?;
+    db.mark_decision_applied(id, now)
+        .map_err(|error| error.to_string())
 }
 
 fn pick_profile(config: &VaporConfig, id: i64, profile: Option<&str>) -> Result<String, String> {
@@ -197,16 +294,16 @@ pub fn render_list(report: &DecisionListReport) -> String {
             decision.profile_id,
             decision.kind,
             state,
-            if decision.held_intents > 0 {
-                format!(", {} held", decision.held_intents)
+            if decision.held > 0 {
+                format!(", {} held", decision.held)
             } else {
                 String::new()
             },
             decision.question
         ));
         if decision.choice.is_none() {
-            for option in &decision.options {
-                lines.push(format!("    --choose {:<14} {}", option.key, option.label));
+            for option in option_lines(&decision.options) {
+                lines.push(format!("    {option}"));
             }
         }
     }
@@ -214,6 +311,20 @@ pub fn render_list(report: &DecisionListReport) -> String {
         lines.push(format!("(profile {profile}: state database unreadable)"));
     }
     lines.join("\n")
+}
+
+/// `--choose <key>  <label>`, keys padded to the longest so the labels
+/// line up (a conflict's keys are file names).
+fn option_lines(options: &[DecisionOptionJson]) -> Vec<String> {
+    let width = options
+        .iter()
+        .map(|option| option.key.len())
+        .max()
+        .unwrap_or(0);
+    options
+        .iter()
+        .map(|option| format!("--choose {:<width$}  {}", option.key, option.label))
+        .collect()
 }
 
 pub fn render_show(decision: &DecisionJson) -> String {
@@ -229,8 +340,8 @@ pub fn render_show(decision: &DecisionJson) -> String {
     }
     lines.push(format!("Question: {}", decision.question));
     lines.push("Options:".to_string());
-    for option in &decision.options {
-        lines.push(format!("  --choose {:<14} {}", option.key, option.label));
+    for option in option_lines(&decision.options) {
+        lines.push(format!("  {option}"));
     }
     match (&decision.choice, decision.applied_at_ms) {
         (None, _) => lines.push("Status: open".to_string()),
@@ -239,8 +350,11 @@ pub fn render_show(decision: &DecisionJson) -> String {
         )),
         (Some(choice), Some(_)) => lines.push(format!("Status: applied {choice}")),
     }
-    if decision.held_intents > 0 {
-        lines.push(format!("Held intents: {}", decision.held_intents));
+    if decision.held > 0 {
+        lines.push(format!(
+            "Changes held until it is answered: {}",
+            decision.held
+        ));
     }
     if !decision.evidence.is_null() {
         lines.push("Evidence:".to_string());
@@ -277,7 +391,7 @@ mod tests {
                 resolved_at_ms: None,
                 choice: None,
                 applied_at_ms: None,
-                held_intents: 240,
+                held: 240,
             }],
             skipped_profiles: vec![],
         };
@@ -306,7 +420,7 @@ mod tests {
       "resolvedAtMs": null,
       "choice": null,
       "appliedAtMs": null,
-      "heldIntents": 240
+      "held": 240
     }
   ],
   "skippedProfiles": []
@@ -332,7 +446,7 @@ mod tests {
             resolved_at_ms: None,
             choice: None,
             applied_at_ms: None,
-            held_intents: 0,
+            held: 0,
         };
         let open = render_list(&DecisionListReport {
             decisions: vec![DecisionJson { ..decision }],
@@ -352,7 +466,7 @@ mod tests {
             evidence: serde_json::Value::Null,
             created_at_ms: 1,
             applied_at_ms: None,
-            held_intents: 0,
+            held: 0,
         };
         let answered = render_list(&DecisionListReport {
             decisions: vec![decision],

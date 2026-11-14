@@ -28,7 +28,7 @@ transport choice.
   `runtime_paths::ipc_socket_location` — deterministic per `vapor_dir`,
   collision-free across `vapor_dir`s, stable across separately built
   binaries (FNV-1a, not `DefaultHasher`). The daemon logs the
-  relocation at INFO and `vapor doctor` reports it (`ipc_socket_path`
+  relocation at INFO and `vapor doctor` reports it (`ipc-socket`
   probe); the relocated parent directory is created `0o700` and a
   symlinked parent is refused before `bind()`.
 - On install/update the daemon must remove any stale socket file at startup

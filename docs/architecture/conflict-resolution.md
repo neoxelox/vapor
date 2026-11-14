@@ -5,91 +5,122 @@ every surface. The *creation* mechanics (suffix template, determinism,
 tombstone interaction) live in `data-flow.md §Conflict handling`; this
 document owns everything that happens after a conflict copy exists.
 
-## Design position: the files are the registry
+## Who keeps the name
 
-A keep-both conflict produces one artifact: a sibling file named
-`{stem}~conflict-{device_id}-{timestamp_ms}[-{seq}]{ext}`. That file **is**
-the durable conflict record. There is deliberately no separate conflict
-table, quarantine folder, or database:
+The cloud settles it. When a file is edited in more than one place
+before the edits sync, the first edit to reach the cloud stays under the
+file's name. Each device whose edit lost the race finds the cloud
+changed under it, moves its own edit to a copy named after itself, and
+takes the cloud's version under the name. Three devices editing
+`report.md` at once leave `report.md` and two copies:
 
-- **It cannot be capped or lost.** The in-memory activity timeline is a
+```
+report.md                                  the edit that reached the cloud first
+report~conflict-macbook-air-1731500000000.md   macbook-air's edit
+report~conflict-mac-studio-1731500004000.md    mac-studio's edit
+```
+
+The copies sync like any file, so every device ends up with the same
+three files under the same names. Which version holds the name does not
+depend on the device you look from.
+
+## Design position: the files are the record, the decision is the question
+
+A copy is named `{stem}~conflict-{deviceId}-{timestamp_ms}[-{seq}]{ext}`,
+and the files themselves are the durable conflict record:
+
+- **They cannot be capped or lost.** The in-memory activity timeline is a
   bounded notification stream (default 1000 events, non-persistent across
-  restarts) — fine for "something happened", unusable as a ledger. Files
+  restarts), fine for "something happened" and unusable as a ledger. Files
   survive restarts, reinstalls, and even removing Vapor entirely.
-- **It syncs.** Conflict copies replicate like any other file, so every
-  replica (and the cloud web UI) can see and resolve them — including
-  copies that originated on *another* device.
-- **It self-resolves truthfully.** Deleting the copy — through Vapor
-  tooling, Finder, or a shell on any machine — is exactly what marks the
-  conflict resolved. A registry would have to chase that state; the
-  filesystem simply is it.
+- **They sync.** Every replica (and the cloud web UI) can see and resolve
+  a conflict, including one that started on *another* device.
+- **They resolve truthfully.** Removing the copies, through Vapor, the
+  Finder, or a shell on any machine, is exactly what ends the conflict.
 - **The name is machine-parseable.** `vapor_daemon::conflict::
   parse_conflict_copy_name` is the strict inverse of the generator: it
-  recovers the original name, origin device, divergence timestamp, and
-  collision sequence, and rejects user files that merely contain the
+  recovers the original name, the device, the divergence timestamp, and
+  the collision sequence, and rejects user files that merely contain the
   marker text (the timestamp segment must be a 12+ digit epoch-ms value).
 
-Trade-off, stated honestly: listing conflicts costs a directory walk of
-each profile's local root (pruned by the ignore rules, so `node_modules/`
--class subtrees are never entered — an ignored name can never host a
-conflict copy because ignored names never sync). The walk is user-initiated
-and read-only. If profiling ever shows it hurting on pathological trees, a
-derived cache can be added behind the same CLI contract without changing
-any surface.
+What the user answers is a decision, the same kind of question as a held
+mass delete or a missing root (`data-flow.md` §Decisions), so every
+surface lists and answers one thing: `vapor decisions`. A `conflict`
+decision covers one file and every version of it: the file under the
+name and all its copies. It opens while a copy exists and closes when
+none is left, whoever removed them.
 
 ## The three stages
 
 ### 1. Notify
 
 - The daemon pushes a `conflict` event onto the activity timeline in the
-  tick that created a copy, and `vapor status` carries a cumulative
-  conflict counter (IPC schema v2).
-- `vapor status` also carries `conflictsUnresolved` (total and per
-  profile): the paths in the sync index whose name parses as a conflict
-  copy, plus the copies still queued for their first upload, so the
-  count covers a copy from the tick that created it until the user's
-  resolution has synced. Two partial indexes over the marker keep the
-  query a read of the matching rows, never a scan of the index or the
-  queue, which is what lets every status publish afford it. It is the
-  cheap signal; the files on disk stay the ledger.
-- App surfaces treat the count and the timeline event as the *trigger*
-  (the macOS menu bar mark turns the brand colour while the count is
-  non-zero, and the menu names the number) and the CLI listing below as
-  the *content*. The timeline's cap is irrelevant here: a missed
-  notification costs nothing, because listing never depends on it.
+  tick that created a copy.
+- Every few seconds (`constants::conflict::DECISION_SYNC_SECONDS`) the
+  daemon matches the open `conflict` decisions to the files on disk. A
+  file with copies gets a decision, announced on the timeline like every
+  decision. When a version arrives or goes (a third device's copy lands,
+  one copy is deleted by hand), the decision is rewritten in place and
+  keeps its id. When no copy is left, it is withdrawn. Finding the
+  candidates is a read of the sync index (two partial indexes over the
+  marker cover the indexed and the still-queued copies); each conflicted
+  file then costs one listing of its folder.
+- Two cases wait: a copy whose original is still landing (the cloud's
+  version is being downloaded under the name) is asked about once it
+  lands, and a copy made by answering a file/folder clash with
+  `keep-both` is that answer, not a question.
+- `vapor status` counts open decisions (`decisions`, total and per
+  profile), conflicts included. App surfaces treat the count and the
+  timeline event as the *trigger* (the macOS menu bar mark turns the
+  brand colour while the count is non-zero) and the decision list as the
+  *content*.
 
 ### 2. List
 
-`vapor conflicts list [--json]` scans every enabled profile's local root
-and reports, per conflict: profile, the original's path (`originalPath`),
-the copy's path (`copyPath`), origin device, divergence time, both sizes,
-and whether the original still exists. It reads config directly, so it works with the daemon stopped, and
-it reports unreadable roots (`skippedRoots`) and unreadable
-subdirectories encountered mid-walk (`skippedDirectories`) explicitly
-rather than returning a silently incomplete empty list.
+`vapor decisions list [--json]` lists every open decision of every
+enabled profile. A conflict reads `kind: "conflict"`, `scope: "path"`,
+`path` (the file's own path), a `question`, one option per version, and
+`evidence.versions`:
 
-The `--json` shape is a locked contract (shape test in
-`core/cli/src/commands/conflicts.rs`); app surfaces consume it instead of
-reimplementing the scan — the same shim pattern the macOS app already uses
-for lifecycle (`vapor service … --json`).
+| Field | Meaning |
+|---|---|
+| `file` | the version's file name; also its option key |
+| `device` | the `deviceId` whose edit a copy holds; `null` for the file under the name |
+| `sizeBytes` | its size |
+| `modifiedAtMs` | its modification time |
+
+Option labels say whose edit each version is: "Keep the version already
+under the name", "Keep this device's edit", "Keep the edit made on
+mac-studio". The list reads the profile state databases directly, so it
+works with the daemon stopped; a conflict with no copy left is left out
+until the daemon withdraws it. The `--json` shape is locked in
+`core/cli/src/commands/decisions.rs`.
 
 ### 3. Resolve
 
-`vapor conflicts resolve <copy-path> --choose <original|copy>`. The
-original is the file at the path both sides edited; it holds the version
-that reached the cloud first. The copy is the other version.
+`vapor decisions resolve <id> --choose <file name>` keeps that version
+under the file's name and moves every other version to the trash
+(reason `conflict`, restorable with `vapor trash restore`). When a copy
+is kept, it is renamed onto the name after the version there went to the
+trash.
 
-- `--choose original` keeps the original and deletes the copy.
-- `--choose copy` moves the copy over the original (atomic on Unix;
-  remove-then-rename on Windows, where the at-risk window only ever holds
-  the version being discarded).
+Unlike other decisions, a conflict answer is applied by the command
+itself (`vapor_daemon::conflict::keep`): it is plain local file
+operations, so it works with the daemon stopped, and a running daemon
+syncs the result like any user edit, removing the discarded copies from
+the cloud and from the other devices. The answer is refused when the
+versions on disk are no longer the ones the question lists; the
+question is rewritten and the user looks again. The decision is
+recorded as answered and applied in the same step; the daemon finishes
+one it finds answered but not applied. Every file an answer touches
+comes from `Conflict::find`: the file under the name and the
+machine-named copies of it, never anything else. Manual resolution (the
+Finder, `rm`, the cloud web UI) remains fully supported and equivalent:
+the question closes on its own.
 
-Both are plain local file operations. A running daemon syncs them like any
-user edit — no IPC, no special pipeline — and a stopped daemon converges
-them on next start. The command refuses any path whose name does not parse
-as a machine-generated conflict copy, so it can never be talked into
-deleting an arbitrary file. Manual resolution (Finder, `rm`, the cloud web
-UI) remains fully supported and equivalent.
+When the file under the name was deleted and copies remain, the
+question asks which copy takes the name; with a single copy left it
+offers just that one.
 
 One-way caveat: conflicts are only *created* in `two-way` mode, but copies
 can arrive in a one-way scope via sync. In `pull-only`, resolve on the
@@ -98,34 +129,34 @@ locally.
 
 Name-clash copies: a copy that stands in for a cloud name this
 filesystem folds onto another local name (`data-flow.md` §Directory and
-symlink semantics, name collisions) is aliased to its own cloud
-object. `--choose original` drops that cloud object through the normal
-delete path; `--choose copy` is refused with the reason, since renaming
-the copy over the kept name would only swap which cloud object is
+symlink semantics, name collisions) is aliased to its own cloud object,
+not an edit of the local file. Its question offers only the local file
+that holds the folded name; keeping it moves the copies to the trash,
+which drops their cloud objects through the normal delete path. Moving
+a copy onto the kept name would only swap which cloud object is
 stranded.
-
-Not every question is a conflict. Where an irreversible action rests
-on ambiguous evidence (a deletion burst, a missing or replaced sync
-root, a name that is a file on one side and a folder on the other),
-the daemon opens a decision instead: `vapor decisions list|show|resolve`
-(`data-flow.md` §Decisions). The two systems share the keep-both
-posture and the CLI-first shape; they differ in that a conflict copy is
-a file on disk and a decision is a row in the state DB.
 
 ## Per-surface responsibilities
 
 | Surface | Notify | List | Resolve |
 |---|---|---|---|
-| `vapor` CLI (shipped) | `vapor timeline` / `vapor status` counter | `vapor conflicts list [--json]` | `vapor conflicts resolve` |
-| macOS app | the menu bar mark in the brand colour and a count in the menu while `conflictsUnresolved` is non-zero (shipped); native notification on `conflict` timeline events (planned, `docs/tasks/macos.md`) | conflicts pane driving `vapor conflicts list --json` (planned) | per-row keep-original / keep-copy actions driving `vapor conflicts resolve --json` (planned) |
+| `vapor` CLI (shipped) | `vapor timeline` / the `decisions` count in `vapor status` | `vapor decisions list [--json]` | `vapor decisions resolve <id> --choose <file>` |
+| macOS app | the menu bar mark in the brand colour and a count in the menu while `decisions` is non-zero (shipped); a native notification on `conflict` and `decision` timeline events (planned, `docs/tasks/macos.md`) | a decisions pane driving `vapor decisions list --json` (planned) | one "Keep" button per version driving `vapor decisions resolve --json` (planned) |
 | Windows / Linux apps (future waves) | same model over the same CLI | same | same |
 
-App shells never reimplement scan or resolution logic — the CLI is the
-single engine (`AGENTS.md §2`: no business logic in UI code).
+App shells never reimplement matching or resolution logic; the CLI and
+the daemon are the single engine (`AGENTS.md §2`: no business logic in UI
+code).
 
 ## Testing
 
-- Name parsing: round-trip + rejection tests in `core/daemon/src/conflict.rs`.
-- Scan/resolve behavior + locked `--json` shape: `core/cli/src/commands/conflicts.rs`.
-- End to end: Tier E2E S15 (list finds the S11 conflict, resolve promotes
-  the copy, the resolution syncs, list drains to empty).
+- Name parsing, grouping, the question, and resolution:
+  `core/daemon/src/conflict.rs`.
+- One decision per file that grows with a third version and closes when
+  no copy is left, and an answer the daemon finishes: the runtime tests
+  `a_conflicted_file_is_one_decision_until_no_copy_is_left` and
+  `a_conflict_answer_recorded_but_not_applied_is_applied_by_the_daemon`.
+- End to end: Tier E2E S15 `conflict-decisions` (three versions of one
+  file are one decision naming each device, keeping the third device's
+  version applies at once, the others land in the trash, the result
+  syncs, and the question closes).

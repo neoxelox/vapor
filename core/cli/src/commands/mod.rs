@@ -7,7 +7,6 @@
 
 pub mod auth;
 pub mod config;
-pub mod conflicts;
 pub mod daemon_binary;
 pub mod decisions;
 pub mod doctor;
@@ -20,7 +19,6 @@ pub mod version;
 
 pub use auth::{AuthError, AuthStatusEntry, AuthStatusReport};
 pub use config::{ConfigCommand, ConfigError};
-pub use conflicts::{ConflictListReport, ConflictRecord, KeepSide, ResolutionReport};
 pub use decisions::{DecisionJson, DecisionListReport};
 pub use doctor::{DoctorCheck, DoctorCheckStatus, DoctorReport};
 pub use ipc::IpcCliError;

@@ -373,10 +373,7 @@ fn local_root_replaced(ctx: &mut Ctx) -> Result<(), Failure> {
     let status = cli
         .status()
         .ok_or_else(|| Failure::new("status did not answer"))?;
-    ensure!(
-        status.decisions_pending == 1,
-        "status must count the open decision"
-    );
+    ensure!(status.decisions == 1, "status must count the open decision");
     // Nothing moves while the question is open.
     std::thread::sleep(Duration::from_secs(5));
     ensure!(
@@ -434,7 +431,7 @@ fn local_root_missing_at_start(ctx: &mut Ctx) -> Result<(), Failure> {
     let reason = status
         .profiles
         .first()
-        .map(|profile| profile.suspended_reason.clone().unwrap_or_default())
+        .map(|profile| profile.run.reason.clone())
         .unwrap_or_default();
     ensure!(
         reason.contains("is missing"),

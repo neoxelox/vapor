@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use vapor_ipc::{
-    Client, ClientError, ResponseBody, Service, StatusResponse,
+    Client, ClientError, ResponseBody, Service, StateReason, StatusResponse,
     framing::write_frame,
     protocol::{Hello, IncompatibleVersion, Request, Response, daemon_supported_versions},
     serve_connection,
@@ -35,11 +35,16 @@ impl Service for StaticService {
 fn fixture_status() -> StatusResponse {
     StatusResponse {
         schema_version: daemon_supported_versions().0,
-        run_state: "running".to_string(),
-        throttle_state: "idle-drain".to_string(),
+        daemon: "vapord/test".to_string(),
         provider: "Filesystem (stub)".to_string(),
-        throttle_reason: "idle, plugged in, and cool".to_string(),
-        daemon_id: "vapord/test".to_string(),
+        run: StateReason {
+            state: "running".to_string(),
+            reason: String::new(),
+        },
+        throttle: StateReason {
+            state: "idle".to_string(),
+            reason: "idle, plugged in, and cool".to_string(),
+        },
         ..StatusResponse::default()
     }
 }
@@ -119,7 +124,7 @@ fn handshake_n_n_succeeds_and_status_round_trips() {
 
     let mut client = Client::connect(&handle.socket_path, "vapor-cli/test").expect("connect");
     let status = client.status().expect("status");
-    assert_eq!(status.run_state, "running");
+    assert_eq!(status.run.state, "running");
 
     handle.shutdown();
 }

@@ -39,9 +39,13 @@ pub struct VaporConfig {
     /// remote provider and the filesystem provider need different
     /// defaults; [`Self::effective_cloud_root`] resolves it.
     pub cloud_root: Option<String>,
-    pub pre_ignore_rules: String,
-    pub post_ignore_rules: String,
-    pub language_code: String,
+    /// Ignore rules in `.gitignore` syntax, one rule per entry, applied
+    /// before the ignore files found under the root.
+    pub pre_ignore_rules: Vec<String>,
+    /// Ignore rules applied after the ignore files; a `!rule` here wins
+    /// over everything.
+    pub post_ignore_rules: Vec<String>,
+    pub language: String,
     pub timeline_limit: i64,
     /// Provider selection: `filesystem` (default pre-GA) or
     /// `gdrive`. When `filesystem` is selected,
@@ -342,8 +346,8 @@ impl Default for VaporConfig {
             local_root: constants::filtering::DEFAULT_LOCAL_ROOT.to_string(),
             cloud_root: None,
             pre_ignore_rules: default_pre_ignore_rules(),
-            post_ignore_rules: String::new(),
-            language_code: constants::config::DEFAULT_LANGUAGE_CODE.to_string(),
+            post_ignore_rules: Vec::new(),
+            language: constants::config::DEFAULT_LANGUAGE.to_string(),
             timeline_limit: constants::config::DEFAULT_TIMELINE_LIMIT,
             provider: constants::provider::DEFAULT.to_string(),
             sync_mode: constants::sync_mode::DEFAULT.to_string(),
@@ -356,10 +360,11 @@ impl Default for VaporConfig {
     }
 }
 
-/// The default pre-ignore rules as a newline-joined string, matching the
-/// shape the config file and the Swift store use.
-pub fn default_pre_ignore_rules() -> String {
-    constants::filtering::DEFAULT_PRE_IGNORE_RULES.join("\n")
+pub fn default_pre_ignore_rules() -> Vec<String> {
+    constants::filtering::DEFAULT_PRE_IGNORE_RULES
+        .iter()
+        .map(|rule| (*rule).to_string())
+        .collect()
 }
 
 /// Result of a configuration load. `load_issue` is `Some` when the file
@@ -483,12 +488,7 @@ fn config_from_object(map: &serde_json::Map<String, serde_json::Value>) -> Vapor
             defaults.post_ignore_rules,
             &mut issues,
         ),
-        language_code: field(
-            map,
-            keys::KEY_LANGUAGE_CODE,
-            defaults.language_code,
-            &mut issues,
-        ),
+        language: field(map, keys::KEY_LANGUAGE, defaults.language, &mut issues),
         timeline_limit: field(
             map,
             keys::KEY_TIMELINE_LIMIT,
@@ -669,22 +669,42 @@ mod tests {
     }
 
     #[test]
-    fn default_pre_ignore_rules_join_the_constants_list() {
+    fn default_pre_ignore_rules_leave_repositories_and_dotenv_files_in_sync() {
         let rules = default_pre_ignore_rules();
-        assert!(rules.contains("node_modules/"));
-        assert!(rules.contains("target/"));
-        assert!(rules.contains("__pycache__/"));
+        let has = |rule: &str| rules.iter().any(|candidate| candidate == rule);
+        assert!(has("node_modules/"));
+        assert!(has("target/"));
+        assert!(has("__pycache__/"));
         assert!(
-            !rules.contains(".git/"),
+            !rules.iter().any(|rule| rule.contains(".git/")),
             "repositories sync whole by default (owner decision)"
         );
         assert!(
-            !rules.contains(".env"),
+            !rules.iter().any(|rule| rule.contains(".env")),
             "dotenv files sync by default (owner decision)"
         );
-        assert_eq!(
-            rules.lines().count(),
-            constants::filtering::DEFAULT_PRE_IGNORE_RULES.len()
+    }
+
+    #[test]
+    fn ignore_rules_are_a_list_and_a_string_is_refused() {
+        let temp = TempDir::new().expect("temp dir");
+        let path = temp.path().join("vapor.json");
+        std::fs::write(
+            &path,
+            r#"{ "preIgnoreRules": ["tmp/", "*.log"], "postIgnoreRules": "build/" }"#,
+        )
+        .expect("write config");
+
+        let result = load_from(&path);
+        assert_eq!(result.config.pre_ignore_rules, vec!["tmp/", "*.log"]);
+        assert!(result.config.post_ignore_rules.is_empty());
+        assert!(
+            result
+                .load_issue
+                .as_deref()
+                .is_some_and(|issue| issue.contains("postIgnoreRules")),
+            "{:?}",
+            result.load_issue
         );
     }
 }

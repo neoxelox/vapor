@@ -8,7 +8,7 @@
 //! applies them within one poll interval of the file changing. Roots,
 //! provider, sync direction and the profile set reshape the pipeline;
 //! a change to one of those is reported in status as
-//! `config_restart_required` until the daemon restarts.
+//! `restartRequired` until the daemon restarts.
 //!
 //! The poll is one `stat` per second. A file that fails to load is
 //! reported once and left alone: the daemon keeps the configuration it
@@ -38,7 +38,7 @@ impl ConfigChange {
 }
 
 /// Compares two configurations key by key. Keys that neither the
-/// daemon nor its budget read (`languageCode`, `autoLaunch`) are not
+/// daemon nor its budget read (`language`, `autoLaunch`) are not
 /// reported: nothing in the daemon changes when they do.
 pub fn diff(applied: &VaporConfig, fresh: &VaporConfig) -> ConfigChange {
     use constants::config as keys;
@@ -161,9 +161,9 @@ mod tests {
         let applied = VaporConfig::default();
         let mut fresh = applied.clone();
         fresh.resource_limits.cpu_percent = 5;
-        fresh.pre_ignore_rules = "build/".to_string();
+        fresh.pre_ignore_rules = vec!["build/".to_string()];
         fresh.provider = "gdrive".to_string();
-        fresh.language_code = "es".to_string();
+        fresh.language = "es".to_string();
         fresh.trash.retention_days = 14;
         let change = diff(&applied, &fresh);
         assert_eq!(
@@ -187,7 +187,7 @@ mod tests {
             let restart = constants::config::RESTART_REQUIRED_KEYS.contains(key);
             let app_only = matches!(
                 *key,
-                constants::config::KEY_AUTO_LAUNCH | constants::config::KEY_LANGUAGE_CODE
+                constants::config::KEY_AUTO_LAUNCH | constants::config::KEY_LANGUAGE
             );
             assert!(
                 usize::from(live) + usize::from(restart) + usize::from(app_only) == 1,

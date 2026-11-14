@@ -59,7 +59,7 @@ final class AppShellViewModel: ObservableObject {
     self.configurationStore = configurationStore
     self.localizationStore = localizationStore
     self.configuration = resolvedConfiguration
-    self.localization = localizationStore.resolve(languageCode: resolvedConfiguration.languageCode)
+    self.localization = localizationStore.resolve(languageCode: resolvedConfiguration.language)
 
     // Startup reads must stay in-process (config file only). The
     // lifecycle-backed values (`autoLaunchEnabled`, `crashLoopPaused`)
@@ -75,9 +75,9 @@ final class AppShellViewModel: ObservableObject {
       forKind: self.configuration.providerKind)
     state.useGitignore = self.configuration.useGitignore
     state.useVaporignore = self.configuration.useVaporignore
-    state.preIgnoreRules = self.configuration.preIgnoreRules
-    state.postIgnoreRules = self.configuration.postIgnoreRules
-    state.languageCode = self.configuration.languageCode
+    state.preIgnoreRules = VaporConfiguration.editorText(for: self.configuration.preIgnoreRules)
+    state.postIgnoreRules = VaporConfiguration.editorText(for: self.configuration.postIgnoreRules)
+    state.language = self.configuration.language
     state.effectiveLanguageCode = localization.effectiveLanguageCode
     state.vaporDirectoryPath = self.configurationStore.resolveVaporDirectoryURL().path
     state.configurationIssuePath = resolvedConfigurationLoadIssue?.configPath
@@ -103,7 +103,7 @@ final class AppShellViewModel: ObservableObject {
         "auto_launch_enabled": String(state.autoLaunchEnabled),
         "use_gitignore": String(state.useGitignore),
         "use_vaporignore": String(state.useVaporignore),
-        "language_code": state.languageCode,
+        "language": state.language,
         "effective_language": state.effectiveLanguageCode,
         "version": VaporBuildInfo.version,
         "bundle_build": VaporBuildInfo.buildVersion,
@@ -126,10 +126,9 @@ final class AppShellViewModel: ObservableObject {
   }
 
   var hasPendingIgnoreRuleChanges: Bool {
-    Self.normalizeRuleEditorText(state.preIgnoreRules)
-      != Self.normalizeRuleEditorText(configuration.preIgnoreRules)
-      || Self.normalizeRuleEditorText(state.postIgnoreRules)
-        != Self.normalizeRuleEditorText(configuration.postIgnoreRules)
+    VaporConfiguration.rules(fromEditorText: state.preIgnoreRules) != configuration.preIgnoreRules
+      || VaporConfiguration.rules(fromEditorText: state.postIgnoreRules)
+        != configuration.postIgnoreRules
   }
 
   func localized(_ key: String) -> String {
@@ -224,14 +223,13 @@ final class AppShellViewModel: ObservableObject {
         self.state.syncDetail = AppShellState.syncDetail(for: self.state.syncState, status: status)
         self.state.scanIsWaiting = status?.scanIsWaiting ?? false
         self.state.scanIsRunning = status?.scanIsRunning ?? false
-        self.state.configRestartRequired = status?.configRestartRequired
-        // Both counts are durable facts about the profile state, so a
+        self.state.restartRequired = status?.restartRequired
+        // The count is a durable fact about the profile state, so a
         // tick without a status answer (daemon stopped or restarting)
-        // keeps the last known values instead of pretending nothing is
+        // keeps the last known value instead of pretending nothing is
         // waiting.
         if let status {
-          self.state.decisionsPending = status.decisionsPending
-          self.state.conflictsUnresolved = status.conflictsUnresolved
+          self.state.decisions = status.decisions
           self.state.signInRequired = status.signInRequired
         }
         if let status, !status.provider.isEmpty {
@@ -475,7 +473,7 @@ final class AppShellViewModel: ObservableObject {
             )
             return
           }
-          self.state.configRestartRequired = nil
+          self.state.restartRequired = nil
           logger.info("Daemon restart completed", metadata: ["result": String(describing: result)])
         }
       } catch {
@@ -596,22 +594,20 @@ final class AppShellViewModel: ObservableObject {
   }
 
   func saveIgnoreRuleSettings() {
-    let normalizedPreIgnoreRules = Self.normalizeRuleEditorText(state.preIgnoreRules)
-    let normalizedPostIgnoreRules = Self.normalizeRuleEditorText(state.postIgnoreRules)
+    let preIgnoreRules = VaporConfiguration.rules(fromEditorText: state.preIgnoreRules)
+    let postIgnoreRules = VaporConfiguration.rules(fromEditorText: state.postIgnoreRules)
+    state.preIgnoreRules = VaporConfiguration.editorText(for: preIgnoreRules)
+    state.postIgnoreRules = VaporConfiguration.editorText(for: postIgnoreRules)
 
     guard
-      normalizedPreIgnoreRules != Self.normalizeRuleEditorText(configuration.preIgnoreRules)
-        || normalizedPostIgnoreRules != Self.normalizeRuleEditorText(configuration.postIgnoreRules)
+      preIgnoreRules != configuration.preIgnoreRules
+        || postIgnoreRules != configuration.postIgnoreRules
     else {
-      state.preIgnoreRules = normalizedPreIgnoreRules
-      state.postIgnoreRules = normalizedPostIgnoreRules
       return
     }
 
-    configuration.preIgnoreRules = normalizedPreIgnoreRules
-    configuration.postIgnoreRules = normalizedPostIgnoreRules
-    state.preIgnoreRules = normalizedPreIgnoreRules
-    state.postIgnoreRules = normalizedPostIgnoreRules
+    configuration.preIgnoreRules = preIgnoreRules
+    configuration.postIgnoreRules = postIgnoreRules
 
     do {
       try configurationStore.save(configuration)
@@ -620,8 +616,8 @@ final class AppShellViewModel: ObservableObject {
       logger.info(
         "Updated user ignore rules",
         metadata: [
-          "pre_rule_count": String(Self.countConfiguredRules(in: normalizedPreIgnoreRules)),
-          "post_rule_count": String(Self.countConfiguredRules(in: normalizedPostIgnoreRules)),
+          "pre_rule_count": String(preIgnoreRules.count),
+          "post_rule_count": String(postIgnoreRules.count),
           "note": "persisted to vapor.json; the daemon reads it on next start",
         ]
       )
@@ -634,14 +630,14 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
-  func setLanguageCode(_ languageCode: String) {
-    let sanitizedLanguageCode = Self.normalizedLanguageCode(languageCode)
+  func setLanguage(_ language: String) {
+    let sanitizedLanguage = Self.normalizedLanguage(language)
 
-    guard configuration.languageCode != sanitizedLanguageCode else {
+    guard configuration.language != sanitizedLanguage else {
       return
     }
 
-    configuration.languageCode = sanitizedLanguageCode
+    configuration.language = sanitizedLanguage
     refreshLocalization()
 
     do {
@@ -650,7 +646,7 @@ final class AppShellViewModel: ObservableObject {
       logger.info(
         "Updated language setting",
         metadata: [
-          "language_code": configuration.languageCode,
+          "language": configuration.language,
           "effective_language": state.effectiveLanguageCode,
         ]
       )
@@ -676,8 +672,8 @@ final class AppShellViewModel: ObservableObject {
   }
 
   private func refreshLocalization() {
-    localization = localizationStore.resolve(languageCode: configuration.languageCode)
-    state.languageCode = configuration.languageCode
+    localization = localizationStore.resolve(languageCode: configuration.language)
+    state.language = configuration.language
     state.effectiveLanguageCode = localization.effectiveLanguageCode
   }
 
@@ -701,23 +697,9 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
-  private static func normalizeRuleEditorText(_ rules: String) -> String {
-    rules
-      .replacingOccurrences(of: "\r\n", with: "\n")
-      .replacingOccurrences(of: "\r", with: "\n")
-  }
-
-  private static func normalizedLanguageCode(_ languageCode: String) -> String {
-    let normalized = languageCode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    return normalized.isEmpty ? VaporConfiguration.defaultLanguageCode : normalized
-  }
-
-  private static func countConfiguredRules(in rules: String) -> Int {
-    normalizeRuleEditorText(rules)
-      .split(whereSeparator: \.isNewline)
-      .map { $0.trimmingCharacters(in: .whitespaces) }
-      .filter { !$0.isEmpty }
-      .count
+  private static func normalizedLanguage(_ language: String) -> String {
+    let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized.isEmpty ? VaporConfiguration.defaultLanguage : normalized
   }
 
   /// Builds the production lifecycle manager: a thin facade over the

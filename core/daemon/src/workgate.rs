@@ -396,9 +396,9 @@ mod tests {
     use crate::throttle::ThrottleController;
 
     #[test]
-    fn idle_drain_allows_planner_and_uploads_up_to_cap() {
-        let mut gate = idle_drain_gate();
-        let tier = crate::throttle::idle_drain_concurrency();
+    fn idle_allows_planner_and_uploads_up_to_cap() {
+        let mut gate = idle_gate();
+        let tier = crate::throttle::idle_concurrency();
 
         let planner_permits: Vec<WorkPermit> = (0..tier)
             .map(|_| {
@@ -441,9 +441,9 @@ mod tests {
 
     #[test]
     fn hash_work_is_limited_by_hash_workers_and_read_tokens() {
-        let mut gate = idle_drain_gate();
-        let read_tokens = crate::throttle::idle_drain_read_tokens();
-        let hash_workers = crate::throttle::idle_drain_concurrency();
+        let mut gate = idle_gate();
+        let read_tokens = crate::throttle::idle_read_tokens();
+        let hash_workers = crate::throttle::idle_concurrency();
         assert!(
             read_tokens < hash_workers,
             "the read-token pool must be the binding constraint here"
@@ -473,8 +473,8 @@ mod tests {
 
     #[test]
     fn reconcile_consumes_planner_capacity_and_read_tokens() {
-        let mut gate = idle_drain_gate();
-        let read_tokens = crate::throttle::idle_drain_read_tokens();
+        let mut gate = idle_gate();
+        let read_tokens = crate::throttle::idle_read_tokens();
 
         let reconcile = gate
             .try_acquire(WorkClass::Reconcile)
@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn downshifting_caps_keeps_running_work_but_blocks_new_acquires() {
         let controller = ThrottleController::default();
-        let mut gate = idle_drain_gate();
+        let mut gate = idle_gate();
         let first = gate
             .try_acquire(WorkClass::Upload)
             .expect("first upload permit");
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn invalid_or_duplicate_release_is_rejected() {
-        let mut gate = idle_drain_gate();
+        let mut gate = idle_gate();
         let permit = gate
             .try_acquire(WorkClass::Planner)
             .expect("planner permit");
@@ -596,11 +596,11 @@ mod tests {
         }));
     }
 
-    fn idle_drain_gate() -> ThrottleWorkgate {
+    fn idle_gate() -> ThrottleWorkgate {
         let controller = ThrottleController::default();
         ThrottleWorkgate::new(
-            ThrottleState::IdleDrain,
-            controller.caps_for(ThrottleState::IdleDrain),
+            ThrottleState::Idle,
+            controller.caps_for(ThrottleState::Idle),
         )
     }
 
@@ -638,7 +638,7 @@ mod tests {
         // allocator one shy of u64::MAX, then walk it past the boundary
         // while holding a permit at id 0 to force the wrap-around branch
         // to skip a colliding slot.
-        let mut gate = idle_drain_gate();
+        let mut gate = idle_gate();
 
         // Drive the allocator near saturation.
         gate.set_next_permit_id_for_testing(u64::MAX);
@@ -682,7 +682,7 @@ mod tests {
         // release (returns `false` for an id that is not currently active
         // or has the wrong class). We release each permit before acquiring
         // the next so we don't bump into the upload-concurrency cap.
-        let mut gate = idle_drain_gate();
+        let mut gate = idle_gate();
         gate.set_next_permit_id_for_testing(u64::MAX - 2);
 
         let mut observed_ids = Vec::new();

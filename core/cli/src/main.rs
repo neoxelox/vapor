@@ -15,9 +15,8 @@ use vapor_cli::commands::service as service_cmd;
 use vapor_cli::{RunOptions, ServiceCommand};
 use vapor_cli::{
     commands::{
-        auth as auth_cmd, config as config_cmd, conflicts as conflicts_cmd,
-        decisions as decisions_cmd, doctor as doctor_cmd, ipc as ipc_cmd, run as run_cmd,
-        trash as trash_cmd,
+        auth as auth_cmd, config as config_cmd, decisions as decisions_cmd, doctor as doctor_cmd,
+        ipc as ipc_cmd, run as run_cmd, trash as trash_cmd,
     },
     resolve_configuration_path,
 };
@@ -62,14 +61,9 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// List and resolve conflicts: files edited on both sides, kept as
-    /// two versions.
-    Conflicts {
-        #[command(subcommand)]
-        action: ConflictsAction,
-    },
-    /// List and answer the questions Vapor asks before an irreversible
-    /// action. Works with or without a running daemon.
+    /// List and answer the questions Vapor asks: conflicts (a file
+    /// changed in more than one place) and irreversible actions it will
+    /// not take on its own. Works with or without a running daemon.
     Decisions {
         #[command(subcommand)]
         action: DecisionsAction,
@@ -149,30 +143,6 @@ enum Command {
 }
 
 #[derive(Subcommand, Debug)]
-enum ConflictsAction {
-    /// List the conflicts in every profile. Works with or without a
-    /// running daemon.
-    List {
-        /// Print JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Keep one version of a conflict. The other is deleted and the
-    /// change syncs like any edit.
-    Resolve {
-        /// The conflict copy (the `…~conflict-…` file `list` prints).
-        path: std::path::PathBuf,
-        /// `original` keeps the file at the original name and deletes
-        /// the copy; `copy` moves the copy over the original.
-        #[arg(long, value_name = "original|copy")]
-        choose: String,
-        /// Print JSON.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
 enum DecisionsAction {
     /// List the open decisions of every profile.
     List {
@@ -194,11 +164,12 @@ enum DecisionsAction {
         #[arg(long)]
         json: bool,
     },
-    /// Answer a decision. The daemon applies it on its next tick, or at
-    /// its next start.
+    /// Answer a decision. A conflict is resolved at once; anything else
+    /// is applied by the daemon on its next tick, or at its next start.
     Resolve {
         id: i64,
-        /// One of the decision's option keys (`show` lists them).
+        /// One of the decision's option keys (`show` lists them). For a
+        /// conflict, the file name of the version to keep.
         #[arg(long, value_name = "OPTION")]
         choose: String,
         /// The profile the id belongs to; needed only when several
@@ -446,7 +417,6 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
         Command::Logs { tail } => dispatch_logs(tail),
         Command::Auth { action } => dispatch_auth(action),
         Command::Report { output, json } => dispatch_report(output, json),
-        Command::Conflicts { action } => dispatch_conflicts(action),
         Command::Decisions { action } => dispatch_decisions(action),
         Command::Trash { action } => dispatch_trash(action),
     }
@@ -495,6 +465,8 @@ fn dispatch_decisions(action: DecisionsAction) -> Result<ExitCode, String> {
                     "{}",
                     serde_json::to_string_pretty(&decision).map_err(|e| e.to_string())?
                 );
+            } else if decision.applied_at_ms.is_some() {
+                println!("Applied {choose} for decision #{id}.");
             } else {
                 println!(
                     "Recorded {choose} for decision #{id}; the daemon applies it on its next tick (or at its next start)."
@@ -544,40 +516,6 @@ fn dispatch_trash(action: TrashAction) -> Result<ExitCode, String> {
                 );
             } else {
                 println!("Removed {} item(s) from the trash.", report.removed);
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-    }
-}
-
-fn dispatch_conflicts(action: ConflictsAction) -> Result<ExitCode, String> {
-    match action {
-        ConflictsAction::List { json } => {
-            let loaded = vapor_shared::config::load_from(&resolve_configuration_path());
-            if let Some(issue) = loaded.load_issue {
-                eprintln!("vapor: warning: {issue}");
-            }
-            let report = conflicts_cmd::list_conflicts(&loaded.config);
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
-                );
-            } else {
-                println!("{}", conflicts_cmd::render_list(&report));
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        ConflictsAction::Resolve { path, choose, json } => {
-            let keep = conflicts_cmd::KeepSide::parse(&choose)?;
-            let report = conflicts_cmd::resolve_conflict(&path, keep)?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
-                );
-            } else {
-                println!("{}", conflicts_cmd::render_resolution(&report));
             }
             Ok(ExitCode::SUCCESS)
         }

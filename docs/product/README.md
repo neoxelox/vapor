@@ -24,6 +24,9 @@ status.
   additional adapters), product goals, runtime invariants (throttle
   states, user resource ceilings, idle boost, graceful shutdown,
   crash-loop pause), pre-GA compatibility policy.
+- `configuration.md` — every `vapor.json` key in detail: when a change
+  applies, the edge cases and floors, and how profiles merge. The root
+  `README.md` keeps the one-table summary.
 
 ## Related references
 

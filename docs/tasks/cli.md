@@ -141,13 +141,12 @@ Depends on: `docs/tasks/core.md` C5 (IPC channel).
 - [x] L3-7 Consistent behavior when no daemon is running: every IPC-backed
       command exits non-zero within 1s with `vapor: daemon not running —
       try \`vapor service start\``, never hangs.
-- [x] L3-8 `vapor conflicts list [--json]` + `vapor conflicts resolve
-      <copy> --choose <original|copy>` — keep-both conflict surfacing
-      (core.md C8-70). Filesystem scan of profile local roots (the copy
-      files are the durable registry), locked `--json` contract consumed
-      by app surfaces, resolution via plain file operations; both work
-      with the daemon stopped. Design:
-      `docs/architecture/conflict-resolution.md`.
+- [x] L3-8 Keep-both conflict surfacing (core.md C8-70). Shipped as
+      `vapor conflicts`; a conflicted file is now one `conflict`
+      decision listing every version, listed with `vapor decisions list`
+      and answered with `vapor decisions resolve <id> --choose <file>`,
+      which keeps that version, trashes the others, and works with the
+      daemon stopped. Design: `docs/architecture/conflict-resolution.md`.
 
 ## Phase L4 - Auth flows
 

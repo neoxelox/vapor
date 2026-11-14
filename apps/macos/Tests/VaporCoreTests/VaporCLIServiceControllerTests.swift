@@ -220,23 +220,19 @@ func daemonStatusDecodesTheCountsTheAppRenders() throws {
   let runner = ScriptedCLIRunner(
     standardOutput: """
       {
-        "schemaVersion": 2,
-        "runState": "running",
-        "throttleState": "idle-drain",
+        "schemaVersion": 4,
+        "daemon": "vapord/0.0.0-test",
         "provider": "filesystem",
-        "throttleReason": "idle, plugged in, and cool",
-        "daemonId": "vapord/0.0.0-test",
-        "queueDepth": 3,
-        "failedIntents": 1,
-        "loopPreventionSuppressions": 0,
-        "conflicts": 4,
-        "mirrorReverts": 0,
-        "mirrorDeletes": 0,
-        "profiles": [],
-        "resourceBudget": null,
-        "configRestartRequired": "syncMode changed; restart the daemon to apply (vapor service restart)",
-        "decisionsPending": 2,
-        "conflictsUnresolved": 1
+        "run": {"state": "running", "reason": "watching ~/Vapor"},
+        "throttle": {"state": "idle", "reason": "idle, plugged in, and cool"},
+        "reconcile": {"state": "idle", "detail": ""},
+        "queued": 3,
+        "failed": 1,
+        "decisions": 2,
+        "mirror": {"reverts": 0, "deletes": 0},
+        "restartRequired": "syncMode changed; restart the daemon to apply (vapor service restart)",
+        "resources": null,
+        "profiles": []
       }
       """)
   let controller = VaporCLIServiceController(runner: runner)
@@ -245,68 +241,28 @@ func daemonStatusDecodesTheCountsTheAppRenders() throws {
 
   #expect(runner.invocations == [["status", "--json"]])
   #expect(snapshot.runState == "running")
-  #expect(snapshot.queueDepth == 3)
-  #expect(snapshot.failedIntents == 1)
-  #expect(snapshot.configRestartRequired?.hasPrefix("syncMode changed") == true)
-  #expect(snapshot.decisionsPending == 2)
-  #expect(snapshot.conflictsUnresolved == 1)
-  #expect(snapshot.runStateReason == nil)
+  #expect(snapshot.runReason == "watching ~/Vapor")
+  #expect(snapshot.throttleState == "idle")
+  #expect(snapshot.throttleReason == "idle, plugged in, and cool")
+  #expect(snapshot.queued == 3)
+  #expect(snapshot.failed == 1)
+  #expect(snapshot.restartRequired?.hasPrefix("syncMode changed") == true)
+  #expect(snapshot.decisions == 2)
 }
 
 @Test
-func daemonStatusTreatsMissingCountsAsZeroForOlderDaemons() throws {
+func daemonStatusTreatsMissingCountsAsZero() throws {
   let runner = ScriptedCLIRunner(
     standardOutput: """
-      {"runState":"running","throttleState":"light","throttleReason":"","provider":"filesystem","queueDepth":0,"failedIntents":0}
+      {"provider":"filesystem","run":{"state":"running"},"throttle":{"state":"light"}}
       """)
   let controller = VaporCLIServiceController(runner: runner)
 
   let snapshot = try controller.daemonStatus()
 
-  #expect(snapshot.decisionsPending == 0)
-  #expect(snapshot.conflictsUnresolved == 0)
-}
-
-@Test
-func daemonStatusLiftsTheWorstProfilesReasonIntoTheSnapshot() throws {
-  let runner = ScriptedCLIRunner(
-    standardOutput: """
-      {
-        "runState": "error",
-        "throttleState": "light",
-        "throttleReason": "idle, plugged in, and cool",
-        "provider": "filesystem",
-        "queueDepth": 0,
-        "failedIntents": 0,
-        "profiles": [
-          {"id": "docs", "runState": "running", "reason": "watching ~/Docs"},
-          {"id": "default", "runState": "error", "reason": "cloud root /Vapor is unavailable; sync work is blocked until it can be ensured"}
-        ]
-      }
-      """)
-  let controller = VaporCLIServiceController(runner: runner)
-
-  let snapshot = try controller.daemonStatus()
-
-  #expect(snapshot.runState == "error")
-  #expect(snapshot.runStateReason?.hasPrefix("cloud root /Vapor is unavailable") == true)
-
-  runner.standardOutput = """
-    {
-      "runState": "running",
-      "throttleState": "light",
-      "throttleReason": "",
-      "provider": "filesystem",
-      "queueDepth": 0,
-      "failedIntents": 0,
-      "profiles": [
-        {"id": "default", "runState": "running", "reason": "held: root missing", "suspendedReason": "sync root is missing; waiting for decision #3"}
-      ]
-    }
-    """
-  #expect(
-    try controller.daemonStatus().runStateReason == "sync root is missing; waiting for decision #3",
-    "a suspension names itself before any run-state reason")
+  #expect(snapshot.decisions == 0)
+  #expect(snapshot.queued == 0)
+  #expect(snapshot.runReason == nil)
 }
 
 @Test
@@ -325,14 +281,12 @@ func daemonStatusDecodesTheScanStateAndReconcileDrivesTheCLI() throws {
   let runner = ScriptedCLIRunner(
     standardOutput: """
       {
-        "runState": "running",
-        "throttleState": "throttled",
-        "throttleReason": "user activity is active",
         "provider": "filesystem",
-        "queueDepth": 1,
-        "failedIntents": 0,
-        "reconcileState": "waiting",
-        "reconcileDetail": "waiting for an idle moment: user activity is active"
+        "run": {"state": "running"},
+        "throttle": {"state": "throttled", "reason": "user activity is active"},
+        "queued": 1,
+        "failed": 0,
+        "reconcile": {"state": "waiting", "detail": "waiting for an idle moment: user activity is active"}
       }
       """)
   let controller = VaporCLIServiceController(runner: runner)
@@ -342,11 +296,11 @@ func daemonStatusDecodesTheScanStateAndReconcileDrivesTheCLI() throws {
   #expect(!snapshot.scanIsRunning)
   #expect(snapshot.reconcileDetail == "waiting for an idle moment: user activity is active")
 
-  runner.standardOutput = #"{"schemaVersion":2,"accepted":true,"note":"sync requested"}"#
+  runner.standardOutput = #"{"schemaVersion":4,"accepted":true,"note":"reconcile requested"}"#
   try controller.reconcile()
   #expect(runner.invocations.last == ["reconcile", "--json"])
 
-  runner.standardOutput = #"{"schemaVersion":2,"accepted":false,"note":"unsupported"}"#
+  runner.standardOutput = #"{"schemaVersion":4,"accepted":false,"note":"unsupported"}"#
   #expect(throws: (any Error).self) {
     try controller.reconcile()
   }
@@ -357,15 +311,14 @@ func daemonStatusListsTheProfilesWaitingOnASignIn() throws {
   let runner = ScriptedCLIRunner(
     standardOutput: """
       {
-        "runState": "error",
-        "throttleState": "light",
-        "throttleReason": "",
         "provider": "gdrive",
-        "queueDepth": 2,
-        "failedIntents": 0,
+        "run": {"state": "error", "reason": "Vapor needs to sign in to gdrive again"},
+        "throttle": {"state": "light"},
+        "queued": 2,
+        "failed": 0,
         "profiles": [
-          {"id": "docs", "provider": "filesystem", "runState": "running"},
-          {"id": "default", "provider": "gdrive", "runState": "error", "signInRequired": true}
+          {"id": "docs", "provider": "filesystem", "run": {"state": "running"}},
+          {"id": "default", "provider": "gdrive", "run": {"state": "error"}, "signInRequired": true}
         ]
       }
       """)

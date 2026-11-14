@@ -225,19 +225,19 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
     let arguments = ["status", "--json"]
     let data = try runExpectingSuccess(arguments: arguments)
     let response: DaemonStatusResponse = try decode(data: data, arguments: arguments)
+    let runReason = response.run.reason ?? ""
     return DaemonStatusSnapshot(
-      runState: response.runState,
-      throttleState: response.throttleState,
-      throttleReason: response.throttleReason,
+      runState: response.run.state,
+      throttleState: response.throttle.state,
+      throttleReason: response.throttle.reason ?? "",
       provider: response.provider,
-      queueDepth: response.queueDepth,
-      failedIntents: response.failedIntents,
-      configRestartRequired: response.configRestartRequired,
-      decisionsPending: response.decisionsPending ?? 0,
-      conflictsUnresolved: response.conflictsUnresolved ?? 0,
-      runStateReason: response.runStateReason,
-      reconcileState: response.reconcileState ?? "",
-      reconcileDetail: response.reconcileDetail ?? "",
+      queued: response.queued ?? 0,
+      failed: response.failed ?? 0,
+      restartRequired: response.restartRequired,
+      decisions: response.decisions ?? 0,
+      runReason: runReason.isEmpty ? nil : runReason,
+      reconcileState: response.reconcile?.state ?? "",
+      reconcileDetail: response.reconcile?.detail ?? "",
       signInRequired: response.signInRequired
     )
   }
@@ -314,27 +314,31 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
   /// Mirrors `core/ipc/src/protocol.rs::StatusResponse` (the fields the
   /// app renders; unknown fields are ignored).
   private struct DaemonStatusResponse: Decodable {
-    let runState: String
-    let throttleState: String
-    let throttleReason: String
-    let provider: String
-    let queueDepth: UInt64
-    let failedIntents: UInt64
-    let configRestartRequired: String?
-    let decisionsPending: UInt64?
-    let conflictsUnresolved: UInt64?
-    let reconcileState: String?
-    let reconcileDetail: String?
-    let profiles: [ProfileResponse]?
+    struct StateReason: Decodable {
+      let state: String
+      let reason: String?
+    }
+
+    struct Reconcile: Decodable {
+      let state: String?
+      let detail: String?
+    }
 
     struct ProfileResponse: Decodable {
       let id: String?
       let provider: String?
-      let runState: String?
-      let reason: String?
-      let suspendedReason: String?
       let signInRequired: Bool?
     }
+
+    let run: StateReason
+    let throttle: StateReason
+    let provider: String
+    let queued: UInt64?
+    let failed: UInt64?
+    let decisions: UInt64?
+    let restartRequired: String?
+    let reconcile: Reconcile?
+    let profiles: [ProfileResponse]?
 
     /// The profiles whose provider refused the sign-in.
     var signInRequired: [SignInRequest] {
@@ -346,20 +350,6 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
         }
         return SignInRequest(providerKind: provider, profileId: id)
       }
-    }
-
-    /// The daemon-wide run state is the worst profile's; its reason is
-    /// the one to show. A suspension names itself first; otherwise the
-    /// first profile in the same state that gives a reason.
-    var runStateReason: String? {
-      let profiles = self.profiles ?? []
-      if let suspended = profiles.compactMap(\.suspendedReason).first(where: { !$0.isEmpty }) {
-        return suspended
-      }
-      return
-        profiles
-        .first { $0.runState == runState && !($0.reason ?? "").isEmpty }?
-        .reason
     }
   }
 

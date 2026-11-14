@@ -182,7 +182,7 @@ Full policy in `docs/operations/macos/distribution-trust-chain.md`.
   `apps/macos/Sources/VaporCore/Resources/locales/*.json` before
   Swift build/test/package via `scripts/swift/resources.sh` (or the
   cross-stack orchestrator `scripts/resources.sh`).
-- `languageCode` (persisted in `vapor.json`) defaults to `en` with English
+- `language` (persisted in `vapor.json`) defaults to `en` with English
   fallback when the requested catalog is unavailable.
 - Missing translation keys in non-English catalogs fall back deterministically
   to English.

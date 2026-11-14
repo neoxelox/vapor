@@ -146,7 +146,7 @@ Properties still to add:
 
 - **Throttle monotonicity** — monotonic input pressure produces
   monotonic state transitions; the controller never moves from
-  `Throttled` to `IdleDrain` while CPU pressure rises.
+  `Throttled` to `Idle` while CPU pressure rises.
 - **Conflict suffix determinism** — identical `(path, device_id,
   timestamp_ms)` inputs produce an identical conflict suffix across
   runs.

@@ -108,7 +108,7 @@ A daemon that re-creates the parked root is a finding.
 `VAPOR_THROTTLE_INPUTS=file:<sandbox>/throttle-inputs.json`. The daemon
 re-reads that document on every sample (a `ThrottleInputs` object under
 `inputs`, plus `idle_seconds`), so the driver walks it through
-`IdleDrain`, `Light`, `Throttled`, and `Suspended` while the workload
+`Idle`, `Light`, `Throttled`, and `Suspended` while the workload
 runs. A missing or half-written document samples as the neutral
 defaults, so the daemon never wedges on the driver. `vapor doctor`
 names the source.

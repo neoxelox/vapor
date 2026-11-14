@@ -34,8 +34,8 @@ func ignoreRuleDraftsStartFromConfigurationAndTrackPendingChanges() throws {
     environment: ["VAPOR_DIR": rootURL.path]
   )
   let configuration = VaporConfiguration(
-    preIgnoreRules: "node_modules/\n",
-    postIgnoreRules: "!node_modules/keep.txt\n"
+    preIgnoreRules: ["node_modules/"],
+    postIgnoreRules: ["!node_modules/keep.txt"]
   )
 
   let viewModel = AppShellViewModel(
@@ -44,8 +44,8 @@ func ignoreRuleDraftsStartFromConfigurationAndTrackPendingChanges() throws {
     configuration: configuration
   )
 
-  #expect(viewModel.state.preIgnoreRules == "node_modules/\n")
-  #expect(viewModel.state.postIgnoreRules == "!node_modules/keep.txt\n")
+  #expect(viewModel.state.preIgnoreRules == "node_modules/")
+  #expect(viewModel.state.postIgnoreRules == "!node_modules/keep.txt")
   #expect(!viewModel.hasPendingIgnoreRuleChanges)
 
   viewModel.updatePreIgnoreRulesDraft("tmp/\n")
@@ -65,7 +65,7 @@ func startupPreservesUserSelectedLanguageCodeEvenWhenCatalogFallsBackToEnglish()
     fileManager: fileManager,
     environment: ["VAPOR_DIR": rootURL.path]
   )
-  let configuration = VaporConfiguration(languageCode: "zz-unavailable-locale")
+  let configuration = VaporConfiguration(language: "zz-unavailable-locale")
   try configurationStore.save(configuration)
 
   let viewModel = AppShellViewModel(
@@ -74,11 +74,11 @@ func startupPreservesUserSelectedLanguageCodeEvenWhenCatalogFallsBackToEnglish()
     configuration: configuration
   )
 
-  #expect(viewModel.state.languageCode == "zz-unavailable-locale")
+  #expect(viewModel.state.language == "zz-unavailable-locale")
   #expect(viewModel.state.effectiveLanguageCode == "en")
 
   let persisted = configurationStore.load()
-  #expect(persisted.languageCode == "zz-unavailable-locale")
+  #expect(persisted.language == "zz-unavailable-locale")
 }
 
 @MainActor
@@ -93,8 +93,8 @@ func saveIgnoreRuleSettingsPersistsConfigurationAndRefreshesLifecycleFactory() t
     environment: ["VAPOR_DIR": rootURL.path]
   )
   let configuration = VaporConfiguration(
-    preIgnoreRules: "node_modules/\n",
-    postIgnoreRules: ""
+    preIgnoreRules: ["node_modules/"],
+    postIgnoreRules: []
   )
 
   var refreshedConfigurations: [VaporConfiguration] = []
@@ -114,14 +114,14 @@ func saveIgnoreRuleSettingsPersistsConfigurationAndRefreshesLifecycleFactory() t
   viewModel.saveIgnoreRuleSettings()
 
   let persisted = configurationStore.load()
-  #expect(persisted.preIgnoreRules == "tmp/\n!.keep\n")
-  #expect(persisted.postIgnoreRules == "build/\n")
-  #expect(viewModel.state.preIgnoreRules == "tmp/\n!.keep\n")
-  #expect(viewModel.state.postIgnoreRules == "build/\n")
+  #expect(persisted.preIgnoreRules == ["tmp/", "!.keep"])
+  #expect(persisted.postIgnoreRules == ["build/"])
+  #expect(viewModel.state.preIgnoreRules == "tmp/\n!.keep")
+  #expect(viewModel.state.postIgnoreRules == "build/")
   #expect(!viewModel.hasPendingIgnoreRuleChanges)
   #expect(refreshedConfigurations.count == 1)
-  #expect(refreshedConfigurations[0].preIgnoreRules == "tmp/\n!.keep\n")
-  #expect(refreshedConfigurations[0].postIgnoreRules == "build/\n")
+  #expect(refreshedConfigurations[0].preIgnoreRules == ["tmp/", "!.keep"])
+  #expect(refreshedConfigurations[0].postIgnoreRules == ["build/"])
 }
 
 @MainActor

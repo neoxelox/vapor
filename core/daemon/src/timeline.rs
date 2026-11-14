@@ -19,9 +19,7 @@ pub struct TimelineEventRecord {
     /// gaps after the first entry.
     pub sequence: u64,
     pub timestamp: SystemTime,
-    /// Stable machine-readable kind (`run_state`, `throttle`,
-    /// `conflict`, `intent_failed`, `mirror`, `reconcile`, `feed`,
-    /// `profile`).
+    /// Stable machine-readable kind, one of `constants::timeline::KIND_*`.
     pub kind: String,
     pub profile_id: String,
     pub message: String,
@@ -137,7 +135,7 @@ mod tests {
     fn entries_are_ordered_and_sequenced() {
         let buffer = TimelineBuffer::new(10);
         buffer.push("run-state", "default", "running", ts(1));
-        buffer.push("throttle", "default", "idle-drain", ts(2));
+        buffer.push("throttle", "default", "idle", ts(2));
 
         let entries = buffer.snapshot(None);
         assert_eq!(entries.len(), 2);

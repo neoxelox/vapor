@@ -24,7 +24,7 @@
 ## Runtime model
 
 - Auto-launch at login is ON by default.
-- Throttle states govern all heavy work: `IdleDrain`, `Light`, `Throttled`, `Suspended`.
+- Throttle states govern all heavy work: `Idle`, `Light`, `Throttled`, `Suspended`.
 - User resource ceilings (`resourceLimits.cpuPercent`, `memoryPercent`, `bandwidthPercent`) and `idleBoost` (default-on dynamic headroom) layer over the throttle controller without ever relaxing it.
 - Eventual consistency is guaranteed by durable intent persistence and retry logic.
 - Bidirectional safety includes self-write loop prevention (`self_write_cache` plus op-id tags) and deterministic conflict handling.

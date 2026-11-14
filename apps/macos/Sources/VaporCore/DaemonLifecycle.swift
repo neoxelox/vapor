@@ -65,20 +65,18 @@ public struct DaemonStatusSnapshot: Equatable, Sendable {
   public var throttleState: String
   public var throttleReason: String
   public var provider: String
-  public var queueDepth: UInt64
-  public var failedIntents: UInt64
+  public var queued: UInt64
+  public var failed: UInt64
   /// Set when a restart-required key of `vapor.json` changed under the
   /// running daemon; the daemon phrases the notice.
-  public var configRestartRequired: String?
-  /// Questions the daemon parked for the user (`vapor decisions list`).
-  public var decisionsPending: UInt64
-  /// Keep-both conflict copies the user has not resolved
-  /// (`vapor conflicts list`).
-  public var conflictsUnresolved: UInt64
-  /// Why the daemon is in its run state, when a profile says: a sync
-  /// root it cannot ensure, a decision it waits on, a suspension.
-  /// `nil` while every profile is simply running.
-  public var runStateReason: String?
+  public var restartRequired: String?
+  /// Questions the daemon is waiting on the user for, conflicts
+  /// included (`vapor decisions list`).
+  public var decisions: UInt64
+  /// Why the daemon is in its run state, as the daemon phrases it: a
+  /// sync root it cannot ensure, a decision it waits on, a suspension.
+  /// `nil` when it gives none.
+  public var runReason: String?
   /// What the whole-scope scan is doing: `waiting` (queued, held by
   /// the throttle), `running`, or nothing (`idle` or empty).
   public var reconcileState: String
@@ -92,12 +90,11 @@ public struct DaemonStatusSnapshot: Equatable, Sendable {
     throttleState: String,
     throttleReason: String,
     provider: String,
-    queueDepth: UInt64,
-    failedIntents: UInt64,
-    configRestartRequired: String? = nil,
-    decisionsPending: UInt64 = 0,
-    conflictsUnresolved: UInt64 = 0,
-    runStateReason: String? = nil,
+    queued: UInt64,
+    failed: UInt64,
+    restartRequired: String? = nil,
+    decisions: UInt64 = 0,
+    runReason: String? = nil,
     reconcileState: String = "",
     reconcileDetail: String = "",
     signInRequired: [SignInRequest] = []
@@ -106,12 +103,11 @@ public struct DaemonStatusSnapshot: Equatable, Sendable {
     self.throttleState = throttleState
     self.throttleReason = throttleReason
     self.provider = provider
-    self.queueDepth = queueDepth
-    self.failedIntents = failedIntents
-    self.configRestartRequired = configRestartRequired
-    self.decisionsPending = decisionsPending
-    self.conflictsUnresolved = conflictsUnresolved
-    self.runStateReason = runStateReason
+    self.queued = queued
+    self.failed = failed
+    self.restartRequired = restartRequired
+    self.decisions = decisions
+    self.runReason = runReason
     self.reconcileState = reconcileState
     self.reconcileDetail = reconcileDetail
     self.signInRequired = signInRequired
