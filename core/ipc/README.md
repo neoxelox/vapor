@@ -4,7 +4,7 @@ IPC channel between Vapor surfaces (`vapor` CLI, macOS app, future
 Windows / Linux apps) and the daemon (`vapord`).
 
 Authoritative reference: `docs/architecture/ipc-contracts.md`.
-Tasks: `docs/tasks/core.md` Phase C5.
+Tasks: `docs/tasks/core.md`.
 
 ## Wire format
 
@@ -23,7 +23,7 @@ Tasks: `docs/tasks/core.md` Phase C5.
   `Response`, `ResponseBody`, `ErrorBody`, `StatusResponse`, `Method`).
 - `framing` — length-prefixed frame codec.
 - `transport` — per-OS transport: Unix domain socket on Unix; the
-  Windows named pipe is a stub until Wave 12.
+  Windows named pipe is a stub.
 - `server` — `Service` trait + `serve_connection` that drives one
   client session through the handshake-then-RPC loop.
 - `client` — high-level `Client::connect` / `client.status()` API.
@@ -38,7 +38,7 @@ Every method is implemented end to end: `status`, `pause`, `resume`,
 `reconcile`, `timeline`, and `diagnostics`. Settings are not an IPC
 method: `vapor config set` and the app write `vapor.json`, and the
 daemon reloads it. The Windows named-pipe
-transport is the one open item (Wave 12 in `docs/tasks/README.md`).
+transport is the one open item (`docs/tasks/README.md`).
 
 ## Daemon-side wiring
 

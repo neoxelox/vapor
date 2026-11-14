@@ -8,7 +8,7 @@ and the `DaemonLifecycleManager` that ties them together over a
 [`vapor_platform::ServiceInstaller`](../platform/src/service/mod.rs).
 
 Authoritative reference: `docs/plans/core.md §2.3`.
-Tasks: `docs/tasks/core.md` Phase C4.
+Tasks: `docs/tasks/core.md`.
 
 ## What lives here
 

@@ -200,7 +200,9 @@ one it gates.
 ## End-to-end flow
 
 1. Prepare release changes
-   - Commit all non-release changes on `main`.
+   - Start from a clean `main` that is up to date with `origin/main`.
+     Every non-release change is already there, merged through its
+     pull request.
    - Set the target version with `./scripts/version.sh`:
      - Show current version: `./scripts/version.sh current`
      - Set an exact stable version: `./scripts/version.sh set 0.2.0`
@@ -223,7 +225,10 @@ one it gates.
      missing leg fails the gate. The harness builds its binaries
      without a client, so the leg's daemon takes it from the
      environment at run time.
-   - Commit any non-`CHANGELOG.md` fixes produced by validation.
+   - If the gate finds a bug, stop the release. Fix it in a pull
+     request, merge it, update `main`, and run the gate again. No fix
+     is committed on `main` directly: the release push carries the
+     release-prep commit and its tag, nothing else.
    - Confirm only `CHANGELOG.md` remains dirty before release preparation.
    - Optionally run local package rehearsal: `./scripts/build.sh package`.
 
@@ -331,6 +336,7 @@ are in, since a prerelease signs when the material is present.
 - [ ] Changelog entry exists for target version.
 - [ ] Worktree is clean except for `CHANGELOG.md` before running `./scripts/version.sh`.
 - [ ] `./scripts/release.sh` passed (`format`, `lint`, `test`, e2e for every provider).
+- [ ] No fix was committed on `main` for this release; every gate fix went through a pull request.
 - [ ] `./scripts/version.sh ...` created commit `release: v$(cat VERSION)` and tag `v$(cat VERSION)`.
 - [ ] Release push command used: `git push origin "$(git branch --show-current)" --follow-tags`.
 - [ ] Release gates passed (`lint`, `test`, `perf`, `soak` reusable workflows / local script equivalents).

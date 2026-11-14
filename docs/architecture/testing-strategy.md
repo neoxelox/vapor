@@ -178,7 +178,7 @@ and that dropping the watcher disconnects the channel. The fake sees
 no OS events, so the harness mirrors each action through a clone of
 the watcher's channel; the native watcher gets nothing mirrored and
 the OS is the source. The remaining traits are open work
-(`docs/tasks/core.md` CT-5).
+(`docs/tasks/core.md`).
 
 Trait-specific invariants:
 
@@ -239,7 +239,7 @@ same breath as a logic fix.
 
 Every `vapor … --json` command has an explicit shape test that asserts
 the serialized output field by field (`insta` snapshots are an open task,
-`docs/tasks/core.md` CT-4). Wire-format drift fails the PR; an
+see `docs/tasks/core.md`). Wire-format drift fails the PR; an
 intentional change updates the test in the same change set.
 
 Commands to snapshot:
@@ -295,7 +295,7 @@ Via `cargo-fuzz`. Target the parsers and format handlers that accept
 external input:
 
 - Ignore-rule parser (`path_filter.rs`).
-- IPC frame parser (once wave 6 lands).
+- IPC frame parser (`core/ipc/src/framing.rs`).
 - JSON config loader (`VaporConfiguration` decoding — Swift side — and
   the Rust-side equivalent when lifecycle moves over).
 - Path normalization (`fs_events.rs`).

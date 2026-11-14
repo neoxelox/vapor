@@ -5,8 +5,8 @@ native implementations. This document is what a contributor adding a new
 platform reads to understand exactly what they must implement.
 
 Governing plan: `docs/plans/core.md`
-Tasks: `docs/tasks/core.md` Phase C3 (traits + macOS impls), Phase C6
-(Windows impls), Phase C7 (Linux impls).
+Tasks: `docs/tasks/core.md` (the traits, and the macOS, Windows, and
+Linux implementations).
 
 Status: every trait below ships with a Rust trait definition, an
 in-memory fake usable on every OS, and native macOS and Linux
@@ -187,7 +187,7 @@ Metadata tagging + case-sensitivity discovery.
 Loop-prevention and conflict-path derivation consult this trait so
 comparisons respect local filesystem semantics.
 
-Tag API (Wave 8): `read_tag` / `write_tag` / `remove_tag` carry the
+Tag API: `read_tag` / `write_tag` / `remove_tag` carry the
 engine's op-id (`sh.arn.vapor.op-id`) on files. The Unix native impl
 uses the `xattr` crate; `supports_xattr()` reports whether the store is
 real, and `OpIdTagStore` in `core/providers` layers the atomic

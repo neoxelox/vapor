@@ -2,8 +2,9 @@
 
 The contract surface is defined in `docs/architecture/ipc-contracts.md`
 (transport-agnostic). This document covers the Windows-specific
-transport choice. The native implementation lands with Wave 12
-(`docs/tasks/core.md` C6 named-pipe work); until then
+transport choice. The native implementation is open work (the
+named-pipe transport, listed with the Windows work in
+`docs/tasks/README.md`); until then
 `vapor_ipc::transport::bind_listener` returns
 `TransportError::Unsupported` on Windows.
 
@@ -43,7 +44,7 @@ Linux) so cross-platform clients reuse one codec.
 
 ## Shutdown
 
-When the daemon receives a service-stop request (Wave 12 wires
+When the daemon receives a service-stop request (planned: wiring
 `SetConsoleCtrlHandler` + `SERVICE_STOP` + `WM_ENDSESSION` through
 `core/platform::ProcessSupervisor`), it:
 
@@ -56,10 +57,11 @@ When the daemon receives a service-stop request (Wave 12 wires
 ## Testing
 
 - The `windows-latest` job already runs the Rust test suite on every
-  pull request; the UDS-bound skew-matrix tests are `cfg(unix)`. Wave 12
-  runs them against the named-pipe transport. The skew matrix,
+  pull request; the UDS-bound skew-matrix tests are `cfg(unix)`.
+  Running them against the named-pipe transport is part of that open
+  work. The skew matrix,
   payload-bounds rejection, and field-omission tolerance are
   transport-agnostic.
-- Until that wave lands, the in-process IPC unit tests in
+- Until that work lands, the in-process IPC unit tests in
   `core/ipc/src/{framing,protocol,server}.rs` continue to give
   cross-OS coverage.

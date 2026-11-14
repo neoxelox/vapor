@@ -117,16 +117,18 @@ EOF
 
 The repository allows squash merges only; merge commits and rebase
 merges are off. A pull request lands on `main` as one commit. GitHub
-takes its subject from the pull request title, or from the commit when
-the pull request has only one, which is why both follow the
-Conventional Commit form (`AGENTS.md` §10). This is a repository
-setting, not part of the ruleset.
+fills the merge box with the pull request title and its number as the
+subject, and with the branch's commit messages as the body; the merger
+can edit both. That is why the title follows the Conventional Commit
+form (`AGENTS.md` §10). These are repository settings, not part of the
+ruleset.
 
-Inspect it, and set it again on a fresh repository:
+Inspect them, and set them again on a fresh repository:
 
 ```bash
-gh api repos/neoxelox/vapor --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge}'
-gh api -X PATCH repos/neoxelox/vapor -F allow_squash_merge=true -F allow_merge_commit=false -F allow_rebase_merge=false
+gh api repos/neoxelox/vapor --jq '{allow_squash_merge, allow_merge_commit, allow_rebase_merge, squash_merge_commit_title, squash_merge_commit_message}'
+gh api -X PATCH repos/neoxelox/vapor -F allow_squash_merge=true -F allow_merge_commit=false -F allow_rebase_merge=false \
+  -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=COMMIT_MESSAGES
 ```
 
 ## Workflow to script mapping

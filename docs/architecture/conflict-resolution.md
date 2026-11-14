@@ -156,7 +156,7 @@ stranded.
 |---|---|---|---|
 | `vapor` CLI (shipped) | `vapor timeline` / the `decisions` count in `vapor status` | `vapor decisions list [--json]` | `vapor decisions resolve <id> --choose <file>` |
 | macOS app | the menu bar mark in the brand colour and a count in the menu while `decisions` is non-zero (shipped); a native notification on `conflict` and `decision` timeline events (planned, `docs/tasks/macos.md`) | a decisions pane driving `vapor decisions list --json` (planned) | one "Keep" button per version driving `vapor decisions resolve --json` (planned) |
-| Windows / Linux apps (future waves) | same model over the same CLI | same | same |
+| Windows / Linux apps (future) | same model over the same CLI | same | same |
 
 App shells never reimplement matching or resolution logic; the CLI and
 the daemon are the single engine (`AGENTS.md §2`: no business logic in UI

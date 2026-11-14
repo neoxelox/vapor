@@ -38,10 +38,10 @@ Source of truth: `core/shared/src/constants.rs::ipc`
 (`SCHEMA_VERSION_CURRENT`, `SCHEMA_VERSION_MIN_SUPPORTED`) and the payload types in
 `core/ipc/src/protocol.rs`.
 
-- **v1** — Wave 7 baseline: `Hello`/`HelloAck`, `Status`, `Pause`,
+- **v1** (the baseline): `Hello`/`HelloAck`, `Status`, `Pause`,
   `Resume`, `FlushNow`, `Reconcile`, `Timeline`, `Logs` seam.
-- **v2** — Wave 8 finalisation, all additive
-  (every new field is serde-defaulted so a v1 peer's frames still parse):
+- **v2** (additive over v1; every new field is serde-defaulted so a
+  v1 peer's frames still parse):
   `StatusResponse` gains sync-scope/provider/sync-mode fields, per-profile
   summaries (`ProfileStatus`), effective resource ceilings + idle-boost
   state (`ResourceBudgetStatus`), and cumulative conflict/mirror counters;

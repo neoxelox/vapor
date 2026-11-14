@@ -78,7 +78,8 @@ across platforms, start with `platform-abstractions.md`.
   (`Window` scene, menubar, Dock, `SMAppService`), and the macOS IPC
   transport (Unix domain socket, optional NSXPC wrapping).
 - `windows/` — Windows-specific architecture (transport choice
-  documented now; native trait impls land with the optional Wave 12).
+  documented now; the native trait implementations are optional work,
+  see `docs/tasks/README.md`).
 - `linux/` — Linux-specific architecture (transport choice; the
   native trait impls are in, the app and release lane are still to
   come).

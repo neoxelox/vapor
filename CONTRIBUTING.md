@@ -123,7 +123,8 @@ test's only failure mode is "I typo'd a default value", skip it.
   both, always.
 - Comments referencing task ids, wave numbers, or `docs/tasks/*`
   (`AGENTS.md` §8.9). Stable docs are fine to reference; the work
-  schedule is not.
+  schedule is not. Docs prose may point at a task file for open work,
+  with no id and no wave number.
 - Hardcoded config keys, env var names, or defaults instead of the
   constants modules (`AGENTS.md` §8.6).
 
@@ -136,9 +137,9 @@ squash and lands on `main` as one commit: give the title the same form
 as the commit subject, label the PR with its type, and split a mixed
 change into separate PRs when practical.
 
-The repository is public. Keep personal information, local paths such
-as `/Users/...`, and real logs or reports out of commits, branch
-names, and PR text (`AGENTS.md` §6.1).
+The repository is public. Keep personal information, paths copied from
+your machine, and real logs or reports out of commits, branch names,
+and PR text (`AGENTS.md` §6.1).
 
 **Before committing anything non-trivial**, add release-note lines to
 the `Unreleased` section of [`CHANGELOG.md`](CHANGELOG.md).

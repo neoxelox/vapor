@@ -7,7 +7,7 @@ instead of reaching for OS APIs directly.
 
 Authoritative reference: `docs/architecture/platform-abstractions.md`.
 Governing plan: `docs/plans/core.md` §3.
-Tasks: `docs/tasks/core.md` Phase C3.
+Tasks: `docs/tasks/core.md`.
 
 ## Module layout
 
@@ -31,9 +31,10 @@ Tasks: `docs/tasks/core.md` Phase C3.
 Each module exports the trait, an `InMemory*` test fake that compiles on
 every OS, and a `Native*` per-OS implementation selected at compile time
 via `#[cfg(target_os = "...")]`. The macOS implementations are the ones
-the runtime ships with; Linux and Windows native impls are stubs
-(`Unsupported` errors or neutral defaults) until Waves 12 and 13 in
-`docs/tasks/README.md` land.
+the runtime ships with. Linux has native implementations and no app or
+release lane yet. The Windows ones are stubs (`Unsupported` errors or
+neutral defaults); that work is optional and listed in
+`docs/tasks/README.md`.
 
 ## Why this crate exists
 
