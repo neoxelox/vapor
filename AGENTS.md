@@ -14,10 +14,16 @@ Reading order for a new session:
 2. `docs/product/status-and-goals.md`, then `docs/architecture/README.md`
    and `docs/architecture/data-flow.md` for how the runtime works.
 3. `docs/tasks/README.md` for what is next; the surface task file
-   (`docs/tasks/{core,macos,cli}.md`) for the item you are touching.
-4. The skill for the job (§13). `vapor-validate` before every commit;
-   `unslop` for every sentence you write.
+   (`docs/tasks/{core,macos,cli}.md`) for the item you are touching;
+   `docs/specs/` for the decisions behind the part you are changing.
+4. The skill for the job (§13). `vapor-design` before building a
+   feature; `vapor-validate` before every commit; `unslop` for every
+   sentence you write.
 5. `docs/development/runbook.md` for the scripts and the local loop.
+
+Reports and replies to the project owner use Simplified Technical
+English (§8.11). What an agent does without asking, and what waits for
+the owner: §10.1.
 
 ## 1) Product intent and non-negotiables
 
@@ -40,6 +46,26 @@ Reading order for a new session:
 - Vapor is pre-GA and under heavy active development with no users yet.
 - Backward compatibility is not guaranteed for local config/state/schema formats, app/daemon internal contracts, or developer-facing interfaces.
 - Prefer clear, simple implementations over temporary legacy/migration shims unless the project owner explicitly requests compatibility preservation. Document a breaking change in `CHANGELOG.md` in the same change set.
+
+## 1.2) Features and decisions
+
+- A feature, a change to sync semantics, a redesign, or any change with
+  more than one reasonable answer is designed with the project owner
+  before it is built: facts first, then rounds of numbered questions
+  with a recommendation each, until the owner agrees. Procedure: the
+  `vapor-design` skill.
+- Every answer is recorded as a numbered decision (D1, D2, ...) in the
+  feature's spec, `docs/specs/YYYY-MM-DD-<slug>.md`. The spec outlives
+  the build: it is how a later session learns why Vapor works this way.
+- Recorded decisions hold until the owner changes them. A change that
+  would contradict one goes back to the owner as a question. When the
+  owner changes it, the spec gets a new decision that replaces the old
+  one; the old one is marked, never rewritten.
+- A fix with one obvious answer needs no spec. A runtime failure goes
+  through `vapor-debug`, which ends in a fix plan the owner approves.
+- An owner ruling written into this file or a skill carries who made it
+  and when, as "(owner, 2026-11-14)", so a later session can tell a
+  ruling from an agent's inference.
 
 ## 2) System boundaries
 
@@ -150,6 +176,30 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 - Telemetry is local-only unless explicitly designed otherwise.
 - Any permissioned feature must degrade safely when denied.
 
+## 6.1) Public repository
+
+The repository is public on GitHub. Everything committed or pushed is
+public and stays public: files, history, commit messages, branch names,
+PR descriptions and comments.
+
+- Never commit personal information: private email addresses, phone
+  numbers, home addresses, account or resource IDs, tokens, secrets,
+  environment variable values, local paths such as `/Users/...`, the
+  contents of private conversations or private repositories, and
+  details of the owner's accounts, plans, or billing. What the
+  repository already publishes (the maintainer's name and GitHub
+  handle, the `arn.sh` domain, project names) is fine.
+- Raw output from any account (GitHub settings, Google Cloud, Apple
+  Developer) and real logs, reports, or state from a `~/.vapor` go to
+  `.context/` (gitignored), never into the tree. Record a setting by
+  what it does, and a failure by a redacted excerpt.
+- Test fixtures use values that are obviously fake (`ya29.test`), never
+  a realistic credential or a real file name from someone's sync root.
+- Before every commit and push, read the diff, the message, and the
+  branch name for the above. If something private is already pushed,
+  tell the owner at once; rewrite history only with the owner's
+  approval.
+
 ## 7) Distribution and trust chain
 
 Each platform owns its own trust chain. Cross-platform principles live here;
@@ -259,6 +309,16 @@ environment because the CLI has no secrets or trust chain of its own.
 
 ## 8) Engineering standards
 
+- Every change
+  - Make the smallest complete change. No speculative abstraction, no
+    placeholder, no dead code, no unrelated cleanup. An abstraction
+    needs a second use today or a boundary to enforce.
+  - Never hide an error, weaken a type, loosen an assertion, or add a
+    suppression to make a check pass.
+  - Precedent is not a defence. Existing code that breaks an invariant
+    in §3 to §6 does not license more of it: fix it when the fix is
+    small and in the area being changed, otherwise report it and add a
+    task under `docs/tasks/`.
 - Swift (macOS app only)
   - Prefer structured concurrency and explicit actor boundaries.
   - Keep UI/state surfaces deterministic and reason-first.
@@ -392,6 +452,9 @@ how to read a red run: the `vapor-validate` skill.
   never seen the task lists. The same applies to strings that surface to
   users or logs (e.g. `unimplemented!()` messages), and to prose in
   architecture, operations, development, and CI docs.
+- The same holds for spec decision numbers (`D7`) and pointers to
+  `docs/specs/*`. A spec is a dated record of why; the comment and the
+  system doc must make sense to a reader who has never seen it.
 - Referencing stable documentation (`docs/architecture/*`, `docs/plans/*`,
   `AGENTS.md` sections) is fine; those documents describe the system, not
   the work schedule.
@@ -438,7 +501,44 @@ every agent. Layout and the add-a-skill checklist: `.agents/README.md`.
   resolves to a `SKILL.md`, the front matter parses, and the skill shows
   up in the agent's skill list and can be invoked.
 - Writing rules for every document, comment, and message: the `unslop`
-  skill. It always applies.
+  skill. It always applies. Which style goes with which reader: §8.11.
+- `.context/` is scratch space for agents: notes, raw command output,
+  PR bodies, handoffs between sessions. It is gitignored and never
+  shipped.
+
+## 8.11) Writing styles
+
+Two styles, chosen by the reader (owner, 2026-11-14). The `unslop`
+pattern list applies to both: no em dashes, no AI vocabulary, no
+puffery, no chatbot phrases.
+
+**Simplified Technical English** for text the owner or an agent reads
+to act on: reports and replies to the owner, design rounds, specs, PR
+descriptions, and review findings. A misread costs work, so clarity
+beats voice. Rules, adapted from ASD-STE100:
+
+- One idea per sentence. An instruction has 20 words or fewer; a
+  description has 25 words or fewer.
+- Active voice. Simple present, simple past, or simple future tense.
+- One word for one thing: the same term every time, and one meaning
+  for each word.
+- Common words. A single verb over a phrasal verb ("remove", not "take
+  out").
+- Keep the articles ("the", "a"). No telegraph style.
+- Steps go in a numbered list, one action per step.
+- A paragraph has one topic and six sentences or fewer.
+- State evidence, uncertainty, and blockers directly: what was checked,
+  what was not checked, and what stops the work.
+
+Where these rules and `unslop` disagree (sentence length, rhythm),
+these rules win.
+
+**Unslop with voice** for prose a user reads: the root `README.md`.
+Follow all of `unslop`, including its advice on rhythm and opinion.
+
+Commit messages, code comments, `CHANGELOG.md`, the documents under
+`docs/`, this file, and the skills follow `unslop` and stay short and
+plain. Per-document rules: the `vapor-docs` skill.
 
 ## 9) Required test matrix
 
@@ -633,18 +733,39 @@ work once, end to end. Procedure: the `vapor-e2e` skill and
 
 ## 10) Pull requests, commits, and documentation
 
-- Commit shape, message convention, labels, the no-push rule, and the
-  PR description template: the `vapor-commit` skill.
+- Commit shape, message convention, and labels: the `vapor-commit`
+  skill.
+- The pull request from branch to merge-ready (squash, rebase on
+  `main`, push, description template, CI watch, adversarial review,
+  report): the `vapor-pr` skill.
 - Documentation duties for every change (CHANGELOG line, root README
   Features and Configuration, the owning `docs/` file, group READMEs,
-  plans and tasks, this file when a rule changes): the `vapor-docs`
-  skill.
+  plans, tasks, and specs, this file when a rule changes): the
+  `vapor-docs` skill.
 
-The invariants behind both:
+The invariants behind them:
 
 - Do not push commits to GitHub unless the project owner explicitly asks.
-  An explicit release request counts as asking for the one push the
-  release flow requires; it does not authorize any other push.
+  A request to open a PR covers the pushes of that PR's branch (the
+  first push, the fix commits, a rebase onto a moved `main`) and
+  nothing else. An explicit release request counts as asking for the
+  one push the release flow requires; it does not authorize any other
+  push.
+- Never commit, rebase, or push on `main` outside the release flow. A
+  branch that was rewritten on purpose is pushed with
+  `--force-with-lease`, never `--force`.
+- A branch is one commit when its PR opens. The owner merges, as a
+  squash, the only method the repository allows, so the PR title is
+  the commit on `main` and the line in the release notes. Agents never
+  merge.
+- Every PR gets one adversarial review by the agent's own subagents
+  (owner, 2026-11-14). It starts the moment the PR opens and runs
+  while CI runs, so it adds no time to the wait. One pass; the agent
+  verifies the fixes itself.
+- No external AI reviewer runs on this repository, and none is to be
+  added (owner, 2026-11-14). Such a reviewer sees the diff without the
+  task or the decisions. If one comments on a PR anyway, it gets no
+  answer and no fix. Human comments get an answer.
 - Non-trivial feature/logic changes update the required documentation
   in the same change set, and add a `CHANGELOG.md` `Unreleased` line
   before the commit.
@@ -664,6 +785,26 @@ The invariants behind both:
   its alignment with Apple design conventions; Windows follows Fluent /
   WinUI, Linux follows GNOME HIG or KDE HIG per the chosen toolkit.
 - If docs are intentionally not updated, the PR description says why.
+- A change that builds a spec sets the spec's status in the same change
+  set.
+
+## 10.1) Standing permissions
+
+Collected from the rules in this file, so an agent neither stops to ask
+for what is already granted nor acts on what is not.
+
+- Without asking: run the wrapper scripts the validation ladder calls
+  for (§8.4) and the e2e manual sandbox; read repository and PR state
+  with `git` and read-only `gh` calls; write scratch files under
+  `.context/` and the repo-local `.vapor/`; and, on a PR the owner
+  asked for, push fixes to its branch and run the adversarial review.
+- Only when the owner asks for that specific action: push a branch,
+  open a PR, cut or rehearse a release, run e2e against Google Drive,
+  change repository settings, release environments, or the action
+  allowlist.
+- Never: merge a PR, push to `main` outside the release flow, launch a
+  packaged app, run `./scripts/e2e.sh --full` on a contributor machine,
+  touch `~/.vapor`, or use the network in a test.
 
 ## 11) Definition of done
 
@@ -714,12 +855,14 @@ carries its own trigger conditions in its description.
 | Skill | Invoke when |
 |---|---|
 | `unslop` | Writing anything a human reads: docs, comments, commit messages, replies. Always. |
+| `vapor-design` | The owner asks for a feature, a change to sync semantics, or any change with more than one reasonable answer; before building one; when a change would contradict a recorded decision. |
 | `vapor-validate` | Before committing a change under `core/*`, `apps/*`, or `scripts/*`; when a script run is red. |
 | `vapor-e2e` | A change alters daemon- or CLI-observable behaviour and Tier 1 is green; to watch a feature in the real product. |
 | `vapor-soak` | Proving the product is safe for real data: hours of seeded churn with faults and a no-loss oracle, watched on a loop and triaged at the first violation. |
-| `vapor-debug` | The daemon crashed, will not start, sync is stuck, or a status looks wrong. |
+| `vapor-debug` | The daemon crashed, will not start, sync is stuck, or a status looks wrong; a bug or a failing test has no obvious cause. |
 | `vapor-config` | Adding or changing a `vapor.json` key, `VAPOR_*` variable, default, path name, or launch label. |
 | `vapor-provider` | Touching `core/providers` or adding a provider kind. |
 | `vapor-docs` | Any non-trivial change; any file added, removed, or renamed under `docs/`. |
-| `vapor-commit` | Creating commits or a pull request. |
+| `vapor-commit` | Creating commits. |
+| `vapor-pr` | Opening, updating, or rebasing a pull request; watching its CI and conflicts; the adversarial review; answering a review comment; judging merge readiness. |
 | `vapor-release` | The owner asks to cut or rehearse a release, or `release.yml` changes. |

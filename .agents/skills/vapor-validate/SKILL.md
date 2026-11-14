@@ -96,7 +96,17 @@ nothing.
   `vapor-debug` skill on the preserved directory. `FIXED?` means a
   known-gap marker is stale: remove it in the same change.
 
-## Report
+## Evidence and report
 
-Quote the last line of each script you ran. If a step was skipped, say
-which and why. A red step is never summarised as "mostly green".
+- A command passed only when you ran it and saw the result. Quote the
+  last line of each script you ran.
+- If a step was skipped, say which and why. A red step is never
+  summarised as "mostly green".
+- Report each failure and whether the change caused it. A failure that
+  is older than the change is still reported.
+- Never change a test, loosen an assertion, raise a budget, or add an
+  `#[allow]` to make an incorrect implementation pass.
+- On CI, an infrastructure failure with no code signal (runner lost,
+  network error, a timeout before the job started) is rerun once. A
+  second failure is real. Never call a failure flaky without reading
+  its log.

@@ -43,6 +43,8 @@ to use them.
   `docs/plans/README.md`.
 - **Tasks** — per-surface task lists and the cross-surface roadmap:
   `docs/tasks/README.md`.
+- **Specs**: one dated file per designed feature, with its numbered
+  decisions and the reasons behind them: `docs/specs/README.md`.
 
 ## Quick intent mapping
 
@@ -55,5 +57,6 @@ to use them.
 - "Where are the performance SLOs?" → `docs/performance/README.md`
 - "Should I write this test?" → `docs/architecture/testing-strategy.md` + `AGENTS.md §9`
 - "What is the plan for surface X?" → `docs/plans/README.md`
+- "Why does this feature work this way?" → `docs/specs/README.md`
 
 The contributor operating rules live at the root: `AGENTS.md`.

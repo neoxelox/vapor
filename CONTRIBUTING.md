@@ -130,9 +130,15 @@ test's only failure mode is "I typo'd a default value", skip it.
 ## Commits and pull requests
 
 Use Conventional Commit subjects, `<type>: <why-focused summary>`, with
-one dominant type per commit: `feat`, `fix`, `perf`, `refactor`, `docs`,
-`test`, `ci`, `build`, `chore`, `release`. Split mixed changes so
-release-note grouping stays accurate, and label the PR to match.
+one dominant type: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`,
+`ci`, `build`, `chore`, `release`. A pull request is merged as a
+squash, so its title is the commit on `main` and its line in the
+release notes: give the title the same form, label the PR with its
+type, and split a mixed change into separate PRs when practical.
+
+The repository is public. Keep personal information, local paths such
+as `/Users/...`, and real logs or reports out of commits, branch
+names, and PR text (`AGENTS.md` §6.1).
 
 **Before committing anything non-trivial**, add release-note lines to
 the `Unreleased` section of [`CHANGELOG.md`](CHANGELOG.md).
@@ -160,9 +166,14 @@ Your PR description should answer:
 4. What tests were added or updated?
 5. What docs and contracts were updated?
 
-Plus scope and non-goals, risk and rollback, and any
+Plus how you verified it (each script you ran and its result), the
+judgement calls a reviewer could question, risk and rollback, and any
 migration/compatibility implications. If you intentionally skipped docs,
 say why.
+
+No AI review bot runs on this repository. The maintainer reviews and
+merges, and AI contributors review their own PRs as `AGENTS.md` §10
+describes.
 
 ## Reporting bugs
 
