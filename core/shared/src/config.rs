@@ -368,14 +368,29 @@ pub fn default_pre_ignore_rules() -> Vec<String> {
 }
 
 /// Result of a configuration load. `load_issue` is `Some` when the file
-/// existed but could not be read or parsed; the returned configuration is
-/// then the compiled defaults and the caller should surface the issue
-/// (the daemon logs it; the app shows a banner) without touching the
-/// on-disk file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// could not be read or parsed, or when some of its keys are invalid or
+/// unknown; the caller surfaces it (the daemon logs it; the app shows a
+/// banner) without touching the on-disk file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VaporConfigLoadResult {
     pub config: VaporConfig,
     pub load_issue: Option<String>,
+    /// Top-level keys whose value had the wrong shape; `config` holds
+    /// their defaults.
+    pub invalid_keys: Vec<&'static str>,
+    /// The file exists but is not a readable JSON object, so `config` is
+    /// the compiled defaults through and through.
+    pub unreadable: bool,
+}
+
+impl VaporConfigLoadResult {
+    fn unreadable(issue: String) -> Self {
+        Self {
+            load_issue: Some(issue),
+            unreadable: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// Loads `vapor.json` from the current `vapor_dir`.
@@ -385,68 +400,156 @@ pub fn load_default() -> VaporConfigLoadResult {
     load_from(&path)
 }
 
-/// Loads a configuration file from an explicit path. Missing file →
-/// defaults with no issue. Unreadable or unparsable file → defaults with
-/// a `load_issue` describing why.
+/// Loads a configuration file from an explicit path. A missing or empty
+/// file is the defaults with no issue; an unreadable or unparsable one is
+/// the defaults with a `load_issue` saying why.
 pub fn load_from(path: &Path) -> VaporConfigLoadResult {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return VaporConfigLoadResult {
-                config: VaporConfig::default(),
-                load_issue: None,
-            };
+            return VaporConfigLoadResult::default();
         }
         Err(error) => {
-            return VaporConfigLoadResult {
-                config: VaporConfig::default(),
-                load_issue: Some(format!("failed to read {}: {error}", path.display())),
-            };
+            return VaporConfigLoadResult::unreadable(format!(
+                "failed to read {}: {error}",
+                path.display()
+            ));
         }
     };
 
     if contents.trim().is_empty() {
-        return VaporConfigLoadResult {
-            config: VaporConfig::default(),
-            load_issue: None,
-        };
+        return VaporConfigLoadResult::default();
     }
 
     match serde_json::from_str::<serde_json::Value>(&contents) {
         Ok(serde_json::Value::Object(map)) => config_from_object(&map),
         // Valid JSON but not an object: the file shape is wrong.
-        Ok(_) => VaporConfigLoadResult {
-            config: VaporConfig::default(),
-            load_issue: Some(format!("{} is not a JSON object", path.display())),
-        },
-        Err(error) => VaporConfigLoadResult {
-            config: VaporConfig::default(),
-            load_issue: Some(format!("failed to parse {}: {error}", path.display())),
-        },
+        Ok(_) => {
+            VaporConfigLoadResult::unreadable(format!("{} is not a JSON object", path.display()))
+        }
+        Err(error) => VaporConfigLoadResult::unreadable(format!(
+            "failed to parse {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+/// The fields of a group value that `vapor.json` does not define, as
+/// dotted paths (`idleBoost.boostCpuPercent`,
+/// `profiles[0].localSyncDirectory`). Serde ignores unknown fields, so
+/// without this a renamed or misspelled field would silently fall back
+/// to its default.
+pub fn unknown_nested_keys(key: &str, value: &serde_json::Value) -> Vec<String> {
+    use constants::config as keys;
+    fn unknown_in(prefix: &str, value: &serde_json::Value, known: &[&str], out: &mut Vec<String>) {
+        if let Some(object) = value.as_object() {
+            for field in object.keys() {
+                if !known.contains(&field.as_str()) {
+                    out.push(format!("{prefix}.{field}"));
+                }
+            }
+        }
+    }
+    let mut unknown = Vec::new();
+    match key {
+        keys::KEY_RESOURCE_LIMITS => unknown_in(
+            key,
+            value,
+            constants::resource_limits::ALL_KEYS,
+            &mut unknown,
+        ),
+        keys::KEY_IDLE_BOOST => {
+            unknown_in(key, value, constants::idle_boost::ALL_KEYS, &mut unknown)
+        }
+        keys::KEY_TRASH => unknown_in(key, value, constants::trash::ALL_KEYS, &mut unknown),
+        keys::KEY_SAFEGUARDS => {
+            unknown_in(key, value, constants::safeguards::ALL_KEYS, &mut unknown);
+            if let Some(mass_delete) = value.get(constants::safeguards::KEY_MASS_DELETE) {
+                unknown_in(
+                    &format!("{key}.{}", constants::safeguards::KEY_MASS_DELETE),
+                    mass_delete,
+                    constants::safeguards::MASS_DELETE_KEYS,
+                    &mut unknown,
+                );
+            }
+        }
+        keys::KEY_PROFILES => {
+            for (index, profile) in value.as_array().into_iter().flatten().enumerate() {
+                let prefix = format!("{key}[{index}]");
+                unknown_in(&prefix, profile, constants::profile::ALL_KEYS, &mut unknown);
+                for (group, known) in [
+                    (
+                        constants::profile::KEY_RESOURCE_LIMITS,
+                        constants::resource_limits::ALL_KEYS,
+                    ),
+                    (
+                        constants::profile::KEY_IDLE_BOOST,
+                        constants::idle_boost::ALL_KEYS,
+                    ),
+                ] {
+                    if let Some(nested) = profile.get(group) {
+                        unknown_in(&format!("{prefix}.{group}"), nested, known, &mut unknown);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    unknown
+}
+
+impl VaporConfig {
+    /// Takes the value of one top-level `key` from `other`. The live
+    /// reload uses it to keep the applied value of a key whose new value
+    /// is invalid, rather than dropping that key to its default.
+    pub fn take_key_from(&mut self, other: &VaporConfig, key: &str) {
+        use constants::config as keys;
+        match key {
+            keys::KEY_AUTO_LAUNCH => self.auto_launch = other.auto_launch,
+            keys::KEY_USE_GITIGNORE => self.use_gitignore = other.use_gitignore,
+            keys::KEY_USE_VAPORIGNORE => self.use_vaporignore = other.use_vaporignore,
+            keys::KEY_LOCAL_ROOT => self.local_root = other.local_root.clone(),
+            keys::KEY_CLOUD_ROOT => self.cloud_root = other.cloud_root.clone(),
+            keys::KEY_PRE_IGNORE_RULES => self.pre_ignore_rules = other.pre_ignore_rules.clone(),
+            keys::KEY_POST_IGNORE_RULES => self.post_ignore_rules = other.post_ignore_rules.clone(),
+            keys::KEY_LANGUAGE => self.language = other.language.clone(),
+            keys::KEY_TIMELINE_LIMIT => self.timeline_limit = other.timeline_limit,
+            keys::KEY_PROVIDER => self.provider = other.provider.clone(),
+            keys::KEY_SYNC_MODE => self.sync_mode = other.sync_mode.clone(),
+            keys::KEY_PROFILES => self.profiles = other.profiles.clone(),
+            keys::KEY_RESOURCE_LIMITS => self.resource_limits = other.resource_limits.clone(),
+            keys::KEY_IDLE_BOOST => self.idle_boost = other.idle_boost.clone(),
+            keys::KEY_SAFEGUARDS => self.safeguards = other.safeguards.clone(),
+            keys::KEY_TRASH => self.trash = other.trash.clone(),
+            _ => {}
+        }
     }
 }
 
 /// Per-field-tolerant decode. Each known field is decoded independently:
 /// one malformed value (a type mismatch, an out-of-range number) reverts
 /// only that field to its default and is noted in `load_issue`, instead
-/// of discarding the user's entire configuration. Unknown top-level keys
-/// (typos like `profles`) are surfaced the same way rather than silently
-/// dropped. Absent fields fill in defaults (partial files stay valid).
+/// of discarding the user's entire configuration. Unknown keys, top-level
+/// or inside a group, are surfaced the same way rather than silently
+/// dropped. Absent or `null` fields fill in defaults (partial files stay
+/// valid).
 fn config_from_object(map: &serde_json::Map<String, serde_json::Value>) -> VaporConfigLoadResult {
     use constants::config as keys;
 
     fn field<T: serde::de::DeserializeOwned>(
         map: &serde_json::Map<String, serde_json::Value>,
-        key: &str,
+        key: &'static str,
         default: T,
         issues: &mut Vec<String>,
+        invalid: &mut Vec<&'static str>,
     ) -> T {
         match map.get(key) {
-            None => default,
+            None | Some(serde_json::Value::Null) => default,
             Some(value) => match serde_json::from_value::<T>(value.clone()) {
                 Ok(parsed) => parsed,
                 Err(error) => {
                     issues.push(format!("ignoring invalid `{key}`: {error}"));
+                    invalid.push(key);
                     default
                 }
             },
@@ -455,69 +558,66 @@ fn config_from_object(map: &serde_json::Map<String, serde_json::Value>) -> Vapor
 
     let defaults = VaporConfig::default();
     let mut issues: Vec<String> = Vec::new();
+    let mut invalid: Vec<&'static str> = Vec::new();
+    let (i, v) = (&mut issues, &mut invalid);
     let config = VaporConfig {
-        auto_launch: field(
-            map,
-            keys::KEY_AUTO_LAUNCH,
-            defaults.auto_launch,
-            &mut issues,
-        ),
-        use_gitignore: field(
-            map,
-            keys::KEY_USE_GITIGNORE,
-            defaults.use_gitignore,
-            &mut issues,
-        ),
+        auto_launch: field(map, keys::KEY_AUTO_LAUNCH, defaults.auto_launch, i, v),
+        use_gitignore: field(map, keys::KEY_USE_GITIGNORE, defaults.use_gitignore, i, v),
         use_vaporignore: field(
             map,
             keys::KEY_USE_VAPORIGNORE,
             defaults.use_vaporignore,
-            &mut issues,
+            i,
+            v,
         ),
-        local_root: field(map, keys::KEY_LOCAL_ROOT, defaults.local_root, &mut issues),
-        cloud_root: field(map, keys::KEY_CLOUD_ROOT, defaults.cloud_root, &mut issues),
+        local_root: field(map, keys::KEY_LOCAL_ROOT, defaults.local_root, i, v),
+        cloud_root: field(map, keys::KEY_CLOUD_ROOT, defaults.cloud_root, i, v),
         pre_ignore_rules: field(
             map,
             keys::KEY_PRE_IGNORE_RULES,
             defaults.pre_ignore_rules,
-            &mut issues,
+            i,
+            v,
         ),
         post_ignore_rules: field(
             map,
             keys::KEY_POST_IGNORE_RULES,
             defaults.post_ignore_rules,
-            &mut issues,
+            i,
+            v,
         ),
-        language: field(map, keys::KEY_LANGUAGE, defaults.language, &mut issues),
-        timeline_limit: field(
-            map,
-            keys::KEY_TIMELINE_LIMIT,
-            defaults.timeline_limit,
-            &mut issues,
-        ),
-        provider: field(map, keys::KEY_PROVIDER, defaults.provider, &mut issues),
-        sync_mode: field(map, keys::KEY_SYNC_MODE, defaults.sync_mode, &mut issues),
-        profiles: field(map, keys::KEY_PROFILES, defaults.profiles, &mut issues),
+        language: field(map, keys::KEY_LANGUAGE, defaults.language, i, v),
+        timeline_limit: field(map, keys::KEY_TIMELINE_LIMIT, defaults.timeline_limit, i, v),
+        provider: field(map, keys::KEY_PROVIDER, defaults.provider, i, v),
+        sync_mode: field(map, keys::KEY_SYNC_MODE, defaults.sync_mode, i, v),
+        profiles: field(map, keys::KEY_PROFILES, defaults.profiles, i, v),
         resource_limits: field(
             map,
             keys::KEY_RESOURCE_LIMITS,
             defaults.resource_limits,
-            &mut issues,
+            i,
+            v,
         ),
-        idle_boost: field(map, keys::KEY_IDLE_BOOST, defaults.idle_boost, &mut issues),
-        safeguards: field(map, keys::KEY_SAFEGUARDS, defaults.safeguards, &mut issues),
-        trash: field(map, keys::KEY_TRASH, defaults.trash, &mut issues),
+        idle_boost: field(map, keys::KEY_IDLE_BOOST, defaults.idle_boost, i, v),
+        safeguards: field(map, keys::KEY_SAFEGUARDS, defaults.safeguards, i, v),
+        trash: field(map, keys::KEY_TRASH, defaults.trash, i, v),
     };
 
-    for key in map.keys() {
+    for (key, value) in map {
         if !keys::ALL_KEYS.contains(&key.as_str()) {
             issues.push(format!("unrecognized config key `{key}`"));
+            continue;
+        }
+        for nested in unknown_nested_keys(key, value) {
+            issues.push(format!("unrecognized config key `{nested}`"));
         }
     }
 
     VaporConfigLoadResult {
         config,
         load_issue: (!issues.is_empty()).then(|| issues.join("; ")),
+        invalid_keys: invalid,
+        unreadable: false,
     }
 }
 
@@ -686,6 +786,33 @@ mod tests {
     }
 
     #[test]
+    fn null_is_absent_and_unknown_group_fields_are_reported() {
+        let temp = TempDir::new().expect("temp dir");
+        let path = temp.path().join("vapor.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "preIgnoreRules": null,
+                "idleBoost": { "boostCpuPercent": 15, "cpuPercent": 40 },
+                "profiles": [{ "id": "work", "localSyncDirectory": "~/Work" }]
+            }"#,
+        )
+        .expect("write config");
+
+        let result = load_from(&path);
+        assert_eq!(result.config.pre_ignore_rules, default_pre_ignore_rules());
+        assert_eq!(result.config.idle_boost.cpu_percent, 40);
+        assert!(result.invalid_keys.is_empty());
+        assert!(!result.unreadable);
+        let issue = result.load_issue.expect("the unknown fields are reported");
+        assert!(issue.contains("`idleBoost.boostCpuPercent`"), "{issue}");
+        assert!(
+            issue.contains("`profiles[0].localSyncDirectory`"),
+            "{issue}"
+        );
+    }
+
+    #[test]
     fn ignore_rules_are_a_list_and_a_string_is_refused() {
         let temp = TempDir::new().expect("temp dir");
         let path = temp.path().join("vapor.json");
@@ -698,6 +825,10 @@ mod tests {
         let result = load_from(&path);
         assert_eq!(result.config.pre_ignore_rules, vec!["tmp/", "*.log"]);
         assert!(result.config.post_ignore_rules.is_empty());
+        assert_eq!(
+            result.invalid_keys,
+            vec![constants::config::KEY_POST_IGNORE_RULES]
+        );
         assert!(
             result
                 .load_issue

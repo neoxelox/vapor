@@ -17,18 +17,31 @@ value.
 
 `vapor config set <key> <value>` changes one key and leaves the rest of
 the file as it is. A boolean takes `true` or `false`, a number takes a
-number, a choice is checked against its values, and a group or a list
-takes JSON:
+number, a choice is checked against its values, and a list takes JSON.
+One field of a group takes a dotted key and keeps the group's other
+fields; `null` removes the field so it takes its default again. A whole
+group given as JSON replaces the group, so fields it leaves out take
+their defaults. `vapor config get` reads dotted keys too.
 
 ```sh
 vapor config set syncMode pull-only
-vapor config set resourceLimits '{"cpuPercent": 10}'
+vapor config set resourceLimits.cpuPercent 10
+vapor config set safeguards.massDelete.threshold 500
+vapor config set resourceLimits.concurrentTransfers null
 vapor config set postIgnoreRules '["build/", "*.log"]'
 ```
 
-A value the daemon cannot read reverts that one key to its default and
-is reported (in the daemon log and as a banner in the app); the rest of
-the file still applies. An unknown key is reported the same way.
+`vapor config set` refuses an unknown key, an unknown field inside a
+group, and a value of the wrong type. A file edited by hand can still
+hold one: at start, an invalid value takes its key's default; while the
+daemon runs, an invalid new value keeps the value already applied and
+the valid keys around it still apply. Both cases, and unknown keys, are
+reported in the daemon log; the app's Settings banner names an invalid
+value in a key it shows. `null` counts as unset everywhere.
+
+The app and every command write the file under one lock
+(`vapor.json.lock`), and each writes only the keys it changes, so a
+setting changed in one place survives a save in another.
 
 ## When a change applies
 
@@ -38,8 +51,8 @@ the file still applies. An unknown key is reported the same way.
   and `trash` groups.
 - **On the next start**: `localRoot`, `cloudRoot`, `provider`,
   `syncMode`, `profiles`, and `deviceId` reshape the pipeline. `vapor
-  status` reports `restartRequired` until the daemon restarts, and
-  `vapor service restart` applies them.
+  status` reports `restartRequired`, naming them, until the daemon
+  restarts, and `vapor service restart` applies them.
 - **Elsewhere**: `autoLaunch` is acted on by `vapor service install`
   and `uninstall` (which also set it) and by the app at startup through
   `vapor service bootstrap`. `language` is read by the app only.

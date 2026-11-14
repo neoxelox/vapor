@@ -1403,17 +1403,17 @@ pub enum DecisionScope {
 impl DecisionScope {
     pub fn label(self) -> &'static str {
         match self {
-            DecisionScope::Path => "path",
-            DecisionScope::Batch => "batch",
-            DecisionScope::Profile => "profile",
+            DecisionScope::Path => constants::decision::SCOPE_PATH,
+            DecisionScope::Batch => constants::decision::SCOPE_BATCH,
+            DecisionScope::Profile => constants::decision::SCOPE_PROFILE,
         }
     }
 
     fn parse(text: &str) -> Result<Self, StateDbError> {
         match text {
-            "path" => Ok(Self::Path),
-            "batch" => Ok(Self::Batch),
-            "profile" => Ok(Self::Profile),
+            constants::decision::SCOPE_PATH => Ok(Self::Path),
+            constants::decision::SCOPE_BATCH => Ok(Self::Batch),
+            constants::decision::SCOPE_PROFILE => Ok(Self::Profile),
             other => Err(StateDbError::InvalidStateValue(format!(
                 "decision scope {other:?}"
             ))),
@@ -1655,12 +1655,31 @@ impl DurableStateDb {
                     .join(", ")
             )));
         }
-        self.connection.execute(
-            "UPDATE pending_decisions SET resolved_at_ms = ?, choice = ? WHERE id = ?",
+        // Conditional on the question still being open, so two answers
+        // racing (two CLIs, or the CLI and a withdrawal) cannot both win.
+        let claimed = self.connection.execute(
+            "UPDATE pending_decisions SET resolved_at_ms = ?, choice = ?
+             WHERE id = ? AND resolved_at_ms IS NULL",
             params![system_time_to_millis(now)?, choice, id],
         )?;
+        if claimed == 0 {
+            return Err(StateDbError::InvalidStateValue(format!(
+                "decision {id} was answered or closed meanwhile"
+            )));
+        }
         self.decision(id)?
             .ok_or_else(|| StateDbError::InvalidStateValue(format!("decision {id} vanished")))
+    }
+
+    /// Puts an answered but unapplied decision back to open, so it can
+    /// be asked again (an answer whose application failed half way).
+    pub fn reopen_decision(&mut self, id: i64) -> Result<(), StateDbError> {
+        self.connection.execute(
+            "UPDATE pending_decisions SET resolved_at_ms = NULL, choice = NULL
+             WHERE id = ? AND applied_at_ms IS NULL",
+            params![id],
+        )?;
+        Ok(())
     }
 
     /// Whether a decision of `kind` for `path` was applied after `since`:

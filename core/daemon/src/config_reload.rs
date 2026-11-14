@@ -10,9 +10,12 @@
 //! a change to one of those is reported in status as
 //! `restartRequired` until the daemon restarts.
 //!
-//! The poll is one `stat` per second. A file that fails to load is
-//! reported once and left alone: the daemon keeps the configuration it
-//! last applied rather than dropping to defaults because of a typo.
+//! The poll is one `stat` per second. A file that does not parse is
+//! reported and left alone: the daemon keeps the configuration it last
+//! applied rather than dropping to defaults because of a typo. A file
+//! that parses with some bad keys still applies its valid keys; a key
+//! whose new value is invalid keeps its applied value, and an unknown
+//! key is reported and ignored.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -94,6 +97,9 @@ pub fn diff(applied: &VaporConfig, fresh: &VaporConfig) -> ConfigChange {
 pub struct ConfigReloader {
     path: PathBuf,
     applied: VaporConfig,
+    /// The `deviceId` the daemon started with; it names conflict copies
+    /// and op-ids, so a new one waits for a restart.
+    started_device_id: Option<String>,
     last_seen: Option<(SystemTime, u64)>,
     last_poll: Option<Instant>,
     poll_interval: Duration,
@@ -104,6 +110,7 @@ impl ConfigReloader {
         Self {
             path: path.to_path_buf(),
             last_seen: file_stamp(path),
+            started_device_id: vapor_shared::device_id::persisted(path),
             applied,
             last_poll: None,
             poll_interval: Duration::from_millis(constants::engine::CONFIG_RELOAD_POLL_MILLIS),
@@ -115,8 +122,8 @@ impl ConfigReloader {
     }
 
     /// Returns the change and the freshly loaded configuration when the
-    /// file changed since the last poll and loads cleanly. Rate-limited
-    /// to one `stat` per poll interval.
+    /// file changed since the last poll and parses. Rate-limited to one
+    /// `stat` per poll interval.
     pub fn poll(&mut self, now: Instant) -> Option<(ConfigChange, VaporConfig)> {
         if self
             .last_poll
@@ -131,19 +138,38 @@ impl ConfigReloader {
         }
         self.last_seen = stamp;
         let loaded = load_from(&self.path);
-        if let Some(issue) = loaded.load_issue {
+        if loaded.unreadable {
             logging::warning(
-                "Configuration file changed but does not load; keeping the applied configuration",
-                &[("path", self.path.display().to_string()), ("issue", issue)],
+                "Configuration file changed but does not parse; keeping the applied configuration",
+                &[
+                    ("path", self.path.display().to_string()),
+                    ("issue", loaded.load_issue.unwrap_or_default()),
+                ],
             );
             return None;
         }
-        let change = diff(&self.applied, &loaded.config);
+        if let Some(issue) = &loaded.load_issue {
+            logging::warning(
+                "Configuration file has keys Vapor cannot use; applying the rest and keeping the applied value of each invalid key",
+                &[
+                    ("path", self.path.display().to_string()),
+                    ("issue", issue.clone()),
+                ],
+            );
+        }
+        let mut fresh = loaded.config;
+        for key in &loaded.invalid_keys {
+            fresh.take_key_from(&self.applied, key);
+        }
+        let mut change = diff(&self.applied, &fresh);
+        if vapor_shared::device_id::persisted(&self.path) != self.started_device_id {
+            change.restart.push(constants::config::KEY_DEVICE_ID);
+        }
         if change.is_empty() {
             return None;
         }
-        self.applied = loaded.config.clone();
-        Some((change, loaded.config))
+        self.applied = fresh.clone();
+        Some((change, fresh))
     }
 }
 
@@ -239,6 +265,48 @@ mod tests {
         write_at(&path, "{ not json", epoch + Duration::from_secs(30));
         assert!(reloader.poll(start + Duration::from_secs(8)).is_none());
         assert_eq!(reloader.applied().timeline_limit, 43);
+    }
+
+    #[test]
+    fn a_bad_key_never_blocks_the_valid_ones() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let path = temp.path().join("vapor.json");
+        let epoch = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        write_at(&path, "{\"postIgnoreRules\": [\"private/\"]}\n", epoch);
+        let applied = load_from(&path).config;
+        let mut reloader = ConfigReloader::new(&path, applied);
+        let start = Instant::now();
+
+        // A leftover old key, a rule list in the old string shape, and
+        // one good change: the good change applies, and the rules keep
+        // their applied value instead of dropping to the default.
+        write_at(
+            &path,
+            "{\"languageCode\": \"en\", \"postIgnoreRules\": \"private/\", \"timelineLimit\": 42}\n",
+            epoch + Duration::from_secs(10),
+        );
+        let (change, fresh) = reloader.poll(start).expect("the valid key applies");
+        assert_eq!(change.live, vec![constants::config::KEY_TIMELINE_LIMIT]);
+        assert_eq!(fresh.timeline_limit, 42);
+        assert_eq!(fresh.post_ignore_rules, vec!["private/"]);
+    }
+
+    #[test]
+    fn a_new_device_id_waits_for_a_restart() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let path = temp.path().join("vapor.json");
+        let epoch = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        write_at(&path, "{\"deviceId\": \"mac-studio\"}\n", epoch);
+        let mut reloader = ConfigReloader::new(&path, VaporConfig::default());
+
+        write_at(
+            &path,
+            "{\"deviceId\": \"studio-2\"}\n",
+            epoch + Duration::from_secs(10),
+        );
+        let (change, _) = reloader.poll(Instant::now()).expect("a change");
+        assert_eq!(change.restart, vec![constants::config::KEY_DEVICE_ID]);
+        assert!(change.live.is_empty());
     }
 
     fn write_at(path: &Path, contents: &str, modified_at: std::time::SystemTime) {

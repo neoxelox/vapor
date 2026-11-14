@@ -255,7 +255,18 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
 
   public func reconcile() throws {
     let arguments = ["reconcile", "--json"]
-    let data = try runExpectingSuccess(arguments: arguments)
+    // A refusal exits non-zero with the daemon's note on stdout; read it
+    // so the error says why instead of quoting an exit code.
+    let result = try runner.run(arguments: arguments)
+    let data = Data(result.standardOutput.utf8)
+    guard result.exitCode == 0 || (try? JSONDecoder().decode(AckResponse.self, from: data)) != nil
+    else {
+      throw VaporCLIServiceError.commandFailed(
+        arguments: arguments,
+        exitCode: result.exitCode,
+        standardError: result.standardError
+      )
+    }
     let response: AckResponse = try decode(data: data, arguments: arguments)
     guard response.accepted else {
       throw VaporCLIServiceError.malformedResponse(

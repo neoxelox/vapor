@@ -162,14 +162,25 @@ pub struct Conflict {
 impl Conflict {
     /// The conflict over `original`, or `None` while no copy of it
     /// exists. A folder is never in conflict: a copy next to one is the
-    /// `keep-both` answer to a file/folder clash, not a question.
-    pub fn find(original: &Path) -> Option<Self> {
+    /// `keep-both` answer to a file/folder clash, not a question. A
+    /// folder that cannot be listed (an unplugged drive, a permission
+    /// error) is an error, never "no copy left".
+    pub fn find(original: &Path) -> io::Result<Option<Self>> {
         if original.is_dir() {
-            return None;
+            return Ok(None);
         }
-        let wanted = original.file_name()?.to_str()?;
-        let mut copies: Vec<(u64, u64, PathBuf)> = fs::read_dir(original.parent()?)
-            .ok()?
+        let (Some(parent), Some(wanted)) = (
+            original.parent(),
+            original.file_name().and_then(|name| name.to_str()),
+        ) else {
+            return Ok(None);
+        };
+        let entries = match fs::read_dir(parent) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut copies: Vec<(u64, u64, PathBuf)> = entries
             .flatten()
             .filter_map(|entry| {
                 let name = entry.file_name();
@@ -180,7 +191,7 @@ impl Conflict {
             })
             .collect();
         if copies.is_empty() {
-            return None;
+            return Ok(None);
         }
         copies.sort();
         let clash = crate::name_collision::colliding_local_path(original);
@@ -192,11 +203,11 @@ impl Conflict {
             .into_iter()
             .chain(copies.into_iter().map(|(_, _, path)| path))
             .collect();
-        Some(Self {
+        Ok(Some(Self {
             original: original.to_path_buf(),
             clash,
             versions,
-        })
+        }))
     }
 
     /// The versions the user may keep.
@@ -243,6 +254,11 @@ impl std::fmt::Display for KeepError {
 /// touched comes from [`Conflict::find`], the file under the name and
 /// the machine-named copies of it, so an answer can never reach any
 /// other file. The daemon syncs the result like any user edit.
+///
+/// The order keeps every failure recoverable: the file under the name
+/// goes to the trash, the kept copy moves onto the name with a rename
+/// that never replaces anything (a file that appears there meanwhile
+/// stays, and the answer stops), and only then do the other copies go.
 pub fn keep(
     conflict: &Conflict,
     choice: &str,
@@ -264,27 +280,37 @@ pub fn keep(
                     .join(", ")
             ))
         })?;
-    for version in conflict.versions.iter().filter(|version| *version != kept) {
-        match discard(version) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(KeepError::Io(format!(
-                    "cannot move {} to the trash: {error}",
-                    version.display()
-                )));
-            }
-        }
-    }
     let destination = conflict.destination();
+    let mut discard_one = |version: &Path| match discard(version) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(KeepError::Io(format!(
+            "cannot move {} to the trash: {error}",
+            version.display()
+        ))),
+    };
     if kept != destination {
-        fs::rename(kept, destination).map_err(|error| {
+        if conflict
+            .versions
+            .iter()
+            .any(|version| version == destination)
+        {
+            discard_one(destination)?;
+        }
+        vapor_platform::fs_ops::atomic_noclobber_rename(kept, destination).map_err(|error| {
             KeepError::Io(format!(
                 "cannot move {} to {}: {error}",
                 kept.display(),
                 destination.display()
             ))
         })?;
+    }
+    for version in conflict
+        .versions
+        .iter()
+        .filter(|version| *version != kept && *version != destination)
+    {
+        discard_one(version)?;
     }
     Ok(())
 }
@@ -419,21 +445,32 @@ mod tests {
             &[THEIRS, MINE, "notes~conflict-x-1750000000999.md"],
         );
 
-        let conflict = Conflict::find(&original).expect("a conflict");
+        let conflict = Conflict::find(&original)
+            .expect("listable")
+            .expect("a conflict");
         assert_eq!(names(&conflict.versions), vec!["report.md", MINE, THEIRS]);
         assert_eq!(conflict.keepable().len(), 3);
-        assert!(Conflict::find(&original.with_file_name("plain.md")).is_none());
+        assert!(
+            Conflict::find(&original.with_file_name("plain.md"))
+                .expect("listable")
+                .is_none()
+        );
 
         fs::remove_file(original.with_file_name(MINE)).expect("resolve by hand");
         fs::remove_file(original.with_file_name(THEIRS)).expect("resolve by hand");
-        assert!(Conflict::find(&original).is_none(), "no copy, no conflict");
+        assert!(
+            Conflict::find(&original).expect("listable").is_none(),
+            "no copy, no conflict"
+        );
     }
 
     #[test]
     fn the_question_offers_every_version_and_says_whose_edit_each_holds() {
         let temp = TempDir::new().expect("temp");
         let original = seed(temp.path(), &[MINE, THEIRS]);
-        let conflict = Conflict::find(&original).expect("a conflict");
+        let conflict = Conflict::find(&original)
+            .expect("listable")
+            .expect("a conflict");
 
         let asked = question(&conflict, "this-mac", true);
         assert!(
@@ -470,12 +507,14 @@ mod tests {
         let temp = TempDir::new().expect("temp");
         let original = seed(temp.path(), &[MINE, THEIRS]);
         let bin = temp.path().join("bin");
-        let conflict = Conflict::find(&original).expect("a conflict");
+        let conflict = Conflict::find(&original)
+            .expect("listable")
+            .expect("a conflict");
 
         keep(&conflict, THEIRS, trash_into(&bin)).expect("keep");
 
         assert_eq!(fs::read(&original).expect("read"), THEIRS.as_bytes());
-        assert!(Conflict::find(&original).is_none());
+        assert!(Conflict::find(&original).expect("listable").is_none());
         let mut trashed: Vec<_> = fs::read_dir(&bin)
             .expect("bin")
             .flatten()
@@ -490,7 +529,9 @@ mod tests {
         let temp = TempDir::new().expect("temp");
         let original = seed(temp.path(), &[MINE, THEIRS]);
         let bin = temp.path().join("bin");
-        let conflict = Conflict::find(&original).expect("a conflict");
+        let conflict = Conflict::find(&original)
+            .expect("listable")
+            .expect("a conflict");
 
         keep(&conflict, "report.md", trash_into(&bin)).expect("keep");
 
@@ -504,7 +545,9 @@ mod tests {
         let original = seed(temp.path(), &[MINE]);
         let bystander = original.with_file_name("precious.md");
         fs::write(&bystander, b"do not touch").expect("seed");
-        let conflict = Conflict::find(&original).expect("a conflict");
+        let conflict = Conflict::find(&original)
+            .expect("listable")
+            .expect("a conflict");
 
         let refused = keep(&conflict, "precious.md", |_| panic!("nothing is discarded"));
         assert!(
@@ -520,7 +563,9 @@ mod tests {
         let temp = TempDir::new().expect("temp");
         let original = seed(temp.path(), &[THEIRS]);
         fs::remove_file(&original).expect("delete the original");
-        let conflict = Conflict::find(&original).expect("a conflict");
+        let conflict = Conflict::find(&original)
+            .expect("listable")
+            .expect("a conflict");
 
         let asked = question(&conflict, "this-mac", true);
         assert!(asked.question.contains("is gone"), "{}", asked.question);
@@ -535,7 +580,74 @@ mod tests {
         let folder = temp.path().join("report.md");
         fs::create_dir_all(&folder).expect("folder");
         fs::write(temp.path().join(MINE), b"file").expect("copy");
-        assert!(Conflict::find(&folder).is_none());
+        assert!(Conflict::find(&folder).expect("listable").is_none());
+    }
+
+    #[test]
+    fn a_file_that_appears_under_the_name_mid_answer_is_never_replaced() {
+        let temp = TempDir::new().expect("temp");
+        let original = seed(temp.path(), &[THEIRS]);
+        fs::remove_file(&original).expect("the name is free when asked");
+        let conflict = Conflict::find(&original)
+            .expect("listable")
+            .expect("a conflict");
+        fs::write(&original, b"a download that just landed").expect("lands");
+
+        let refused = keep(&conflict, THEIRS, |_| panic!("nothing is discarded"));
+        assert!(matches!(refused, Err(KeepError::Io(_))), "{refused:?}");
+        assert_eq!(
+            fs::read(&original).expect("read"),
+            b"a download that just landed"
+        );
+        assert!(original.with_file_name(THEIRS).exists());
+    }
+
+    #[test]
+    fn a_name_clash_offers_only_the_local_file_and_drops_the_stand_ins() {
+        let temp = TempDir::new().expect("temp");
+        fs::write(temp.path().join("readme.md"), b"local readme").expect("seed");
+        if !temp.path().join("README.MD").exists() {
+            return; // a case-sensitive volume has no clash to make
+        }
+        let stand_in = temp.path().join("Readme~conflict-dev-1750000000123.md");
+        fs::write(&stand_in, b"the cloud's other Readme").expect("seed");
+        let bin = temp.path().join("bin");
+
+        let conflict = Conflict::find(&temp.path().join("Readme.md"))
+            .expect("listable")
+            .expect("a clash");
+        let asked = question(&conflict, "dev", true);
+        let keys: Vec<_> = asked.options.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(keys, vec!["readme.md"]);
+        assert!(
+            asked.question.contains("Keep only readme.md"),
+            "{}",
+            asked.question
+        );
+
+        keep(&conflict, "readme.md", trash_into(&bin)).expect("keep");
+        assert_eq!(
+            fs::read(temp.path().join("readme.md")).expect("read"),
+            b"local readme"
+        );
+        assert!(!stand_in.exists());
+        assert!(bin.join(stand_in.file_name().expect("name")).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_folder_is_an_error_not_an_empty_conflict() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().expect("temp");
+        let original = seed(temp.path(), &[MINE]);
+        let folder = original.parent().expect("parent").to_path_buf();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o000)).expect("lock");
+        let listable = fs::read_dir(&folder).is_ok(); // true for root
+        let found = Conflict::find(&original);
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o755)).expect("unlock");
+        if !listable {
+            assert!(found.is_err(), "{found:?}");
+        }
     }
 
     fn never_exists(_: &Path) -> bool {

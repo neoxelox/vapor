@@ -153,17 +153,28 @@ pub struct MultiProfileRuntime {
 
 /// The cheap observable state of one profile: enough to detect that a
 /// published status snapshot went stale without re-running its SQL.
-type SlotStateFingerprint = (RunState, ThrottleState, bool, String, u64);
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SlotStateFingerprint {
+    run_state: RunState,
+    throttle_state: ThrottleState,
+    suspended: bool,
+    reason: String,
+    decision_changes: u64,
+    sign_in_required: bool,
+    reconcile: crate::runtime::ReconcileStatus,
+}
 
 fn slot_state_fingerprint(slot: &ProfileSlot) -> SlotStateFingerprint {
     let app_snapshot = slot.runtime.app().snapshot();
-    (
-        slot_effective_run_state(slot),
-        app_snapshot.throttle_state,
-        slot.failed.is_some(),
-        app_snapshot.reason.clone(),
-        slot.runtime.decision_changes(),
-    )
+    SlotStateFingerprint {
+        run_state: slot_effective_run_state(slot),
+        throttle_state: app_snapshot.throttle_state,
+        suspended: slot.failed.is_some(),
+        reason: app_snapshot.reason.clone(),
+        decision_changes: slot.runtime.decision_changes(),
+        sign_in_required: slot.runtime.sign_in_required(),
+        reconcile: slot.runtime.reconcile_status(),
+    }
 }
 
 impl MultiProfileRuntime {
@@ -884,6 +895,15 @@ impl MultiProfileRuntime {
         };
 
         let mut snapshot = DaemonStatusSnapshot::from_app(worst.runtime.app());
+        // A suspended or parked profile runs on an inert stand-in that
+        // never ticks: name its configured provider, and take the
+        // throttle from a profile that is actually running.
+        snapshot.provider = worst.profile.provider_kind.clone();
+        if let Some(live) = self.slots.iter().find(|slot| slot.failed.is_none()) {
+            let live_snapshot = DaemonStatusSnapshot::from_app(live.runtime.app());
+            snapshot.throttle_state = live_snapshot.throttle_state;
+            snapshot.throttle_reason = live_snapshot.throttle_reason;
+        }
         snapshot.restart_required = (!self.restart_required.is_empty()).then(|| {
             format!(
                 "{} changed; restart the daemon to apply (vapor service restart)",

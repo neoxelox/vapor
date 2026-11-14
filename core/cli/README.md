@@ -9,7 +9,7 @@ Tasks: `docs/tasks/cli.md`.
 
 ## Commands
 
-`status`, `pause`, `resume`, `reconcile`, `conflicts list|resolve`,
+`status`, `pause`, `resume`, `reconcile`,
 `decisions list|show|resolve`, `trash list|restore|empty`, `config get|set`,
 `auth login|logout|status`, `service bootstrap|install|uninstall|start|stop|restart|status|check|acknowledge`,
 `timeline`, `diagnostics`, `logs`, `doctor`, `report`, `run`, `version`.

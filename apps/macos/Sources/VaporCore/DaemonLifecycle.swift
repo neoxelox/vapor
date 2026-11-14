@@ -47,8 +47,7 @@ public struct ServiceStatusSnapshot: Equatable, Sendable {
 }
 
 /// A profile whose provider refused the sign-in: sync waits until the
-/// user signs in again (`vapor auth login <providerKind> --profile
-/// <profileId>`).
+/// user signs in again (`vapor auth login --profile <profileId>`).
 public struct SignInRequest: Equatable, Hashable, Codable, Sendable {
   public var providerKind: String
   public var profileId: String

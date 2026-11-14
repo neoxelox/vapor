@@ -163,7 +163,7 @@ fn daemon_startup(ctx: &mut Ctx) -> Result<(), Failure> {
         .status()
         .ok_or_else(|| Failure::new("status --json did not answer"))?;
     ensure!(
-        status.provider.to_lowercase().contains("filesystem"),
+        status.provider == vapor_shared::constants::provider::FILESYSTEM,
         "provider should name the filesystem provider, got {:?}",
         status.provider
     );

@@ -75,6 +75,10 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   /// costs the rest of the configuration. Not written back.
   public var invalidKeys: [String] = []
 
+  /// Every key the app models and may write. `deviceId` is the daemon's.
+  public static let modelledKeys: Set<String> = Set(
+    CodingKeys.allCases.map(\.stringValue).filter { $0 != VaporConstants.ConfigKeys.deviceId })
+
   /// The configured provider kind. The app does not model `provider`
   /// as a first-class field (it lives in `additionalKeys` so app-side
   /// saves preserve it verbatim); this read-only view feeds the UI.
@@ -252,7 +256,7 @@ public final class VaporConfigurationStore {
     self.environment = environment
     self.logger = logger
 
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
   }
 
   public func load() -> VaporConfiguration {
@@ -272,6 +276,10 @@ public final class VaporConfigurationStore {
 
     do {
       let data = try Data(contentsOf: configurationURL)
+      // An empty file is the defaults, as the daemon and the CLI read it.
+      if Self.isBlank(data) {
+        return VaporConfigurationLoadResult(configuration: VaporConfiguration(), issue: nil)
+      }
       let configuration = try decoder.decode(VaporConfiguration.self, from: data)
       guard configuration.invalidKeys.isEmpty else {
         let keys = configuration.invalidKeys.map { "`\($0)`" }.joined(separator: ", ")
@@ -350,48 +358,80 @@ public final class VaporConfigurationStore {
     }
   }
 
-  public func save(_ configuration: VaporConfiguration) throws {
+  /// Writes `keys` from `configuration` onto `vapor.json` as it is now,
+  /// under the lock every writer of the file takes. Every other key
+  /// keeps the value on disk: settings changed with `vapor config set`
+  /// or `vapor service` since the app read the file, keys the app does
+  /// not model, and values it could not read. The daemon owns
+  /// `deviceId`, so it is never written here. A file that does not parse
+  /// is the user's to fix and is never overwritten.
+  public func save(_ configuration: VaporConfiguration, keys: Set<String>) throws {
     let vaporDirectoryURL = resolveVaporDirectoryURL()
-
     try VaporPaths.prepareRuntimeDirectories(
       vaporDirectoryURL: vaporDirectoryURL,
       fileManager: fileManager
     )
-
     let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: vaporDirectoryURL)
-
-    // Merge onto a FRESH read of the on-disk file rather than writing the
-    // caller's (possibly stale) snapshot. The app loads its configuration
-    // once at launch, so a naive write would clobber daemon/CLI-owned keys
-    // that changed since: `deviceId` (persisted by the daemon) and every
-    // key the app does not model — `provider`, `syncMode`, `profiles`,
-    // `resourceLimits`, `idleBoost` (carried in `additionalKeys`).
-    var merged = configuration
-    if fileManager.fileExists(atPath: configurationURL.path) {
-      // A file that does not parse at all is the user's to fix: writing
-      // over it would replace every key the app does not model.
-      guard let onDisk = decodeOnDisk(at: configurationURL) else {
-        throw VaporConfigurationStoreError.unreadableFile(configurationURL.path)
+    try withConfigurationLock(configurationURL) {
+      var document = try readDocument(at: configurationURL)
+      let encoded = try decoder.decode(
+        [String: JSONValue].self, from: try encoder.encode(configuration))
+      for key in keys where key != VaporConstants.ConfigKeys.deviceId {
+        document[key] = encoded[key]
       }
-      merged.additionalKeys = onDisk.additionalKeys
-      if let diskDeviceId = onDisk.deviceId {
-        merged.deviceId = diskDeviceId
-      }
+      var data = try encoder.encode(document)
+      data.append(contentsOf: Array("\n".utf8))
+      try data.write(to: configurationURL, options: .atomic)
+      try VaporPaths.ensurePrivateFile(at: configurationURL, fileManager: fileManager)
     }
-
-    let data = try encoder.encode(merged)
-    try data.write(to: configurationURL, options: .atomic)
-    try VaporPaths.ensurePrivateFile(at: configurationURL, fileManager: fileManager)
-
     logger.info(
       "Persisted vapor configuration",
-      metadata: ["config_path": configurationURL.path]
+      metadata: [
+        "config_path": configurationURL.path,
+        "keys": keys.sorted().joined(separator: ","),
+      ]
     )
   }
 
-  /// Best-effort decode of the current on-disk configuration (nil on
-  /// missing/unreadable/corrupt file), used to preserve daemon-owned keys
-  /// across an app-side save.
+  /// The file as a JSON object: empty when it is missing or blank.
+  private func readDocument(at configurationURL: URL) throws -> [String: JSONValue] {
+    guard fileManager.fileExists(atPath: configurationURL.path) else {
+      return [:]
+    }
+    let data = try Data(contentsOf: configurationURL)
+    if Self.isBlank(data) {
+      return [:]
+    }
+    guard let document = try? decoder.decode([String: JSONValue].self, from: data) else {
+      throw VaporConfigurationStoreError.unreadableFile(configurationURL.path)
+    }
+    return document
+  }
+
+  /// Runs `body` holding the advisory lock on `vapor.json.lock`, the
+  /// same lock the CLI, the daemon, and `vapor service` take (`flock`).
+  private func withConfigurationLock(_ configurationURL: URL, _ body: () throws -> Void) throws {
+    let lockPath = configurationURL.path + ".lock"
+    let descriptor = open(lockPath, O_CREAT | O_WRONLY, 0o600)
+    guard descriptor >= 0 else {
+      throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    defer { close(descriptor) }
+    guard flock(descriptor, LOCK_EX) == 0 else {
+      throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    defer { flock(descriptor, LOCK_UN) }
+    try body()
+  }
+
+  private static func isBlank(_ data: Data) -> Bool {
+    String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+      .isEmpty
+  }
+
+  /// Best-effort decode of the current on-disk configuration (nil on a
+  /// missing, unreadable, or corrupt file), used to adopt the file a
+  /// concurrently starting daemon wrote first.
   private func decodeOnDisk(at configurationURL: URL) -> VaporConfiguration? {
     guard let data = try? Data(contentsOf: configurationURL) else {
       return nil

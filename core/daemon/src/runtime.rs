@@ -493,8 +493,7 @@ impl DaemonRuntime {
     }
 
     /// Fully-parameterized start used by the daemon bootstrap: explicit
-    /// filter options (resolved from `vapor.json` + environment) instead
-    /// of environment-only defaults.
+    /// filter options resolved from `vapor.json`.
     pub fn start_configured(
         sync_scope: SyncScope,
         filter_options: EventPathFilterOptions,
@@ -933,15 +932,12 @@ impl DaemonRuntime {
         }
     }
 
-    /// Periodic in-run recovery of leases that exceeded the lease
-    /// timeout (an orphaned execution). Startup recovery handles dead
-    /// processes; this sweep handles a lease lost *within* a live run.
-    /// Drops managed-trash entries past their retention, at startup and
-    /// then on a slow cadence. A directory scan of the trash, cheap at
-    /// Keeps one `conflict` decision per conflict copy the sync index
-    /// knows: a new copy gets its question, and a question whose copy
-    /// is gone (resolved in the Finder, on another device, or through
-    /// `vapor decisions resolve`) closes. Runs on its own cadence.
+    /// Keeps one `conflict` decision per conflicted file, listing every
+    /// version: a file with copies gets its question, a question whose
+    /// versions changed is rewritten in place, and a question with no
+    /// copy left (resolved in the Finder, on another device, or through
+    /// `vapor decisions resolve`) closes. Runs on its own cadence, and
+    /// not while the throttle is `Suspended`.
     fn sync_conflict_decisions(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
         let now_inst = self.clock.now();
         let interval = Duration::from_secs(constants::conflict::DECISION_SYNC_SECONDS);
@@ -949,7 +945,7 @@ impl DaemonRuntime {
             .last_conflict_sync_inst
             .map(|last| now_inst.saturating_duration_since(last) >= interval)
             .unwrap_or(true);
-        if !due {
+        if !due || self.app.snapshot().throttle_state == vapor_shared::ThrottleState::Suspended {
             return Ok(());
         }
         self.last_conflict_sync_inst = Some(now_inst);
@@ -970,10 +966,25 @@ impl DaemonRuntime {
             if decision.kind != constants::decision::KIND_CONFLICT {
                 continue;
             }
-            let conflict = decision
-                .path
-                .as_deref()
-                .and_then(crate::conflict::Conflict::find);
+            let Some(original) = decision.path.clone() else {
+                continue;
+            };
+            let conflict = match crate::conflict::Conflict::find(&original) {
+                Ok(found) => found,
+                Err(error) => {
+                    // Cannot look (an unplugged drive): the question
+                    // stands until the folder can be read again.
+                    logging::debug(
+                        "Cannot list a conflicted file's folder; leaving its question as it is",
+                        &[
+                            ("decision_id", decision.id.to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    asked.insert(original);
+                    continue;
+                }
+            };
             let Some(conflict) = conflict else {
                 self.withdraw_decision(decision.id, now)?;
                 logging::info(
@@ -996,7 +1007,7 @@ impl DaemonRuntime {
             }
             asked.insert(conflict.original);
         }
-        // An answer still being applied keeps its versions for a moment;
+        // An answer the CLI is applying keeps its versions for a moment;
         // asking again would duplicate the question.
         for decision in self.state_db.resolved_unapplied_decisions()? {
             if decision.kind == constants::decision::KIND_CONFLICT
@@ -1010,19 +1021,21 @@ impl DaemonRuntime {
         for original in originals.difference(&asked) {
             // A keep-both moves this device's edit aside before the
             // cloud's version lands under the name; ask once both are
-            // there. A copy made by answering a file/folder clash with
-            // `keep-both` is that answer, not a question.
-            let landing =
-                !original.exists() && !self.state_db.queued_kinds_at(original)?.is_empty();
-            let kept_both = self.state_db.decision_answered(
-                crate::type_mismatch::DECISION_KIND,
-                original,
-                crate::type_mismatch::OPTION_KEEP_BOTH,
-            )?;
-            if landing || kept_both {
-                continue;
+            // there. While the name is still empty, a copy made by
+            // answering a file/folder clash with `keep-both` is that
+            // answer (the folder is on its way), not a question.
+            if !original.exists() {
+                let landing = !self.state_db.queued_kinds_at(original)?.is_empty();
+                let kept_both = self.state_db.decision_answered(
+                    crate::type_mismatch::DECISION_KIND,
+                    original,
+                    crate::type_mismatch::OPTION_KEEP_BOTH,
+                )?;
+                if landing || kept_both {
+                    continue;
+                }
             }
-            let Some(conflict) = crate::conflict::Conflict::find(original) else {
+            let Ok(Some(conflict)) = crate::conflict::Conflict::find(original) else {
                 continue;
             };
             let asking = crate::conflict::question(&conflict, &self.device_id, trash_enabled);
@@ -1049,6 +1062,8 @@ impl DaemonRuntime {
         Ok(())
     }
 
+    /// Drops managed-trash entries past their retention, at startup and
+    /// then on a slow cadence. A directory scan of the trash, cheap at
     /// the cadence and only while the daemon is otherwise ticking.
     fn purge_trash_if_due(&mut self, now: SystemTime) {
         let Some(trash) = &self.trash else {
@@ -1076,6 +1091,9 @@ impl DaemonRuntime {
         }
     }
 
+    /// Periodic in-run recovery of leases that exceeded the lease
+    /// timeout (an orphaned execution). Startup recovery handles dead
+    /// processes; this sweep handles a lease lost *within* a live run.
     fn sweep_stale_leases_if_due(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
         let now_inst = self.clock.now();
         let due = self
@@ -3200,43 +3218,26 @@ impl DaemonRuntime {
                 (crate::unsyncable::DECISION_KIND, crate::unsyncable::OPTION_SKIP) => {
                     "skipped: the file stays on this device only".to_string()
                 }
-                (constants::decision::KIND_CONFLICT, choice) => {
+                (constants::decision::KIND_CONFLICT, _) => {
                     // `vapor decisions resolve` applies a conflict answer
-                    // itself; this arm finishes one it recorded but could
-                    // not apply.
-                    let found = decision
-                        .path
-                        .as_deref()
-                        .and_then(crate::conflict::Conflict::find);
-                    match found {
-                        None => "no copy was left to resolve".to_string(),
-                        Some(conflict) => {
-                            let trash = self.trash.as_ref();
-                            let kept = crate::conflict::keep(&conflict, choice, |path| {
-                                discard_conflict_version(trash, path, now)
-                            });
-                            match kept {
-                                Ok(()) => {
-                                    format!("kept {choice}; the other versions are in the trash")
-                                }
-                                Err(crate::conflict::KeepError::NotAVersion(_)) => {
-                                    // The chosen version went away; the
-                                    // versions left get a fresh question.
-                                    format!("{choice} was gone; Vapor asks again about the rest")
-                                }
-                                Err(crate::conflict::KeepError::Io(message)) => {
-                                    logging::warning(
-                                        "Could not apply the conflict answer; will retry",
-                                        &[
-                                            ("decision_id", decision.id.to_string()),
-                                            ("error", message),
-                                        ],
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
+                    // itself and records it applied; the daemon never
+                    // moves conflict files. One still unapplied past the
+                    // grace period belongs to a command that died: ask
+                    // again, about the versions there are now.
+                    let grace = Duration::from_secs(constants::conflict::ANSWER_GRACE_SECONDS);
+                    let stale = decision
+                        .resolved_at
+                        .and_then(|at| now.duration_since(at).ok())
+                        .is_some_and(|age| age >= grace);
+                    if stale {
+                        self.state_db.reopen_decision(decision.id)?;
+                        self.decision_changes += 1;
+                        logging::info(
+                            "Reopened a conflict question whose answer was never applied",
+                            &[("decision_id", decision.id.to_string())],
+                        );
                     }
+                    continue;
                 }
                 (kind, choice) => {
                     // A kind this runtime does not know how to apply is
@@ -3839,25 +3840,7 @@ impl DaemonRuntime {
     }
 }
 
-/// Requeue delay applied when a leased intent cannot start because no
-/// permit / slot is available. Coarser than the tick interval so blocked
-/// intents don't churn a lease+requeue write pair on every tick.
 /// Timeline text for a remote name that would alias a local file.
-/// Sends a version of a conflicted file the user did not keep to the
-/// trash. A runtime without one (a test harness) removes it.
-fn discard_conflict_version(
-    trash: Option<&crate::trash::LocalTrash>,
-    path: &Path,
-    now: SystemTime,
-) -> std::io::Result<()> {
-    match trash {
-        Some(trash) => trash
-            .discard(path, constants::trash::REASON_CONFLICT, now)
-            .map(|_| ()),
-        None => std::fs::remove_file(path),
-    }
-}
-
 fn name_collision_message(wanted: &Path, existing: &Path) -> String {
     format!(
         "{} exists in the cloud but this filesystem cannot hold it next to {}; \
@@ -3867,6 +3850,9 @@ fn name_collision_message(wanted: &Path, existing: &Path) -> String {
     )
 }
 
+/// Requeue delay applied when a leased intent cannot start because no
+/// permit / slot is available. Coarser than the tick interval so blocked
+/// intents don't churn a lease+requeue write pair on every tick.
 fn blocked_intent_requeue_delay() -> Duration {
     Duration::from_millis(constants::engine::BLOCKED_INTENT_REQUEUE_DELAY_MILLIS)
 }
@@ -5746,7 +5732,7 @@ mod tests {
     }
 
     #[test]
-    fn a_conflict_answer_recorded_but_not_applied_is_applied_by_the_daemon() {
+    fn a_conflict_answer_never_applied_is_asked_again_and_the_files_stay() {
         let mut fixture = BidirectionalFixture::new();
         fixture.tick(6_000); // baseline
         let (original, copy) = seed_conflict(&mut fixture);
@@ -5754,26 +5740,48 @@ mod tests {
         let id = conflict_questions(&fixture)[0].id;
         let choice = copy.file_name().unwrap().to_str().unwrap().to_string();
 
+        // A command that recorded the answer and died before applying it.
         fixture
             .runtime
             .state_db
             .resolve_decision(id, &choice, timestamp_ms(fixture.now_ms))
             .expect("answer");
         fixture.tick(6_000);
-
-        assert_eq!(
-            std::fs::read(&original).expect("kept version"),
-            b"the other mac's version"
-        );
-        assert!(!copy.exists());
-        let record = fixture
+        let pending = fixture
             .runtime
             .state_db()
             .decision(id)
             .expect("read")
             .expect("decision");
-        assert!(record.applied_at.is_some());
-        assert!(conflict_questions(&fixture).is_empty());
+        assert!(
+            pending.resolved_at.is_some(),
+            "left alone inside the grace period"
+        );
+        assert!(
+            original.exists() && copy.exists(),
+            "the daemon never moves conflict files"
+        );
+
+        fixture.tick(constants::conflict::ANSWER_GRACE_SECONDS * 1_000);
+        fixture.tick(6_000);
+        let reopened = fixture
+            .runtime
+            .state_db()
+            .decision(id)
+            .expect("read")
+            .expect("decision");
+        assert!(reopened.is_open(), "asked again: {reopened:?}");
+        assert!(reopened.choice.is_none());
+        assert_eq!(
+            std::fs::read(&original).expect("untouched"),
+            b"the cloud's version"
+        );
+        assert!(copy.exists());
+        assert_eq!(
+            conflict_questions(&fixture).len(),
+            1,
+            "one question, not two"
+        );
     }
 
     #[test]

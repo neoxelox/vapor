@@ -23,6 +23,7 @@
   "config_issue_using_defaults": "Vapor is using in-memory defaults until you fix or replace that file.",
   "runtime_directory_format": "Runtime directory: %@",
   "status_line_format": "%@ · %@",
+  "sync_detail_failed_format": "%@ changes failed. Run vapor diagnostics to see why.",
   "diagnostics_current_status": "Current Status",
   "diagnostics_lifecycle": "Lifecycle",
   "diagnostics_auto_launch_enabled": "Auto-launch is enabled",

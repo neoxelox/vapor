@@ -118,7 +118,7 @@ In flight and coming next:
 
 ## Configuration
 
-Settings live in `vapor.json` inside the runtime directory (`~/.vapor/vapor.json` by default). Change any of them with `vapor config set <key> <value>` or by editing the file; the app's Settings covers start at login, the ignore rules, and the language. A group or a list takes JSON: `vapor config set postIgnoreRules '["build/", "*.log"]'`. No environment variable overrides a setting.
+Settings live in `vapor.json` inside the runtime directory (`~/.vapor/vapor.json` by default). Change any of them with `vapor config set <key> <value>` or by editing the file; the app's Settings covers start at login, the ignore rules, and the language. A dotted key changes one field of a group (`vapor config set resourceLimits.cpuPercent 10`), and a list takes JSON (`vapor config set postIgnoreRules '["build/", "*.log"]'`). No environment variable overrides a setting.
 
 The Applies column says when a change takes effect: **live** within a few seconds while the daemon runs; **restart** when the daemon restarts (`vapor service restart`; `vapor status` says one is pending); **app** when the Mac app reads it (`autoLaunch` is also acted on by `vapor service`). Edge cases, floors, and how profiles merge: `docs/product/configuration.md`.
 

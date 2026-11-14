@@ -186,8 +186,14 @@ public struct AppShellState: Equatable, Codable, Sendable {
     guard let status else {
       return nil
     }
-    if syncState == .error || syncState == .paused, let reason = status.runReason {
-      return reason
+    if syncState == .error || syncState == .paused {
+      // The daemon's reason explains its own run state. An Error the app
+      // derived from failed changes comes with the reason of a healthy
+      // run ("watching ~/Vapor"), which would only mislead.
+      let explains =
+        status.runState == VaporConstants.RunState.error
+        || status.runState == VaporConstants.RunState.paused
+      return explains ? status.runReason : nil
     }
     if (status.scanIsWaiting || status.scanIsRunning) && !status.reconcileDetail.isEmpty {
       return status.reconcileDetail

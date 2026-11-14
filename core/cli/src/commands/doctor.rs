@@ -29,12 +29,27 @@ use vapor_shared::constants;
 
 use super::daemon_binary;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DoctorCheckStatus {
     Ok,
     Warning,
     Failure,
+}
+
+impl DoctorCheckStatus {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Ok => constants::doctor::STATUS_OK,
+            Self::Warning => constants::doctor::STATUS_WARNING,
+            Self::Failure => constants::doctor::STATUS_FAILURE,
+        }
+    }
+}
+
+impl Serialize for DoctorCheckStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.wire_name())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

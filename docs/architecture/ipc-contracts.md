@@ -35,7 +35,7 @@ rules below are pre-GA; backward-compat guarantees tighten at GA.
 ### Schema history
 
 Source of truth: `core/shared/src/constants.rs::ipc`
-(`SCHEMA_VERSION_CURRENT`, `SCHEMA_VERSION_MIN`) and the payload types in
+(`SCHEMA_VERSION_CURRENT`, `SCHEMA_VERSION_MIN_SUPPORTED`) and the payload types in
 `core/ipc/src/protocol.rs`.
 
 - **v1** — Wave 7 baseline: `Hello`/`HelloAck`, `Status`, `Pause`,
@@ -227,9 +227,13 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
   overwrites it.
 - `decisions` counts open decisions, conflicts included
   (`conflict-resolution.md`).
-- `suspended: true` means the profile was stopped by its configuration
-  or by repeated failures (`run.reason` says which); `signInRequired`
-  means the provider refused its sign-in.
+- `suspended: true` means the profile is not syncing: it was stopped by
+  its configuration or by repeated failures, or its local root is
+  missing and Vapor waits for it (`run.reason` says which).
+  `signInRequired` means the provider refused its sign-in.
+- The daemon-wide `provider` is the configured provider of the profile
+  whose state is reported, and `throttle` comes from a profile that is
+  running, never from a suspended one's stand-in.
 
 ### Provider / auth
 
@@ -243,8 +247,9 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
 
 ### Controls
 
-- `Pause` / `Resume`, `Reconcile` (the user's on-demand scan), excludes
-  update, auto-launch toggle, config reload trigger.
+- `Pause` / `Resume`, `Reconcile` (the user's on-demand scan). Settings
+  are not an IPC control: `vapor config set`, the app, and `vapor
+  service` write `vapor.json`, and the daemon reloads it.
 
 ### Diagnostics (per item of work)
 

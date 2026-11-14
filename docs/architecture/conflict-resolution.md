@@ -61,14 +61,17 @@ none is left, whoever removed them.
   file with copies gets a decision, announced on the timeline like every
   decision. When a version arrives or goes (a third device's copy lands,
   one copy is deleted by hand), the decision is rewritten in place and
-  keeps its id. When no copy is left, it is withdrawn. Finding the
-  candidates is a read of the sync index (two partial indexes over the
-  marker cover the indexed and the still-queued copies); each conflicted
-  file then costs one listing of its folder.
-- Two cases wait: a copy whose original is still landing (the cloud's
-  version is being downloaded under the name) is asked about once it
-  lands, and a copy made by answering a file/folder clash with
-  `keep-both` is that answer, not a question.
+  keeps its id. When no copy is left, it is withdrawn. A folder that
+  cannot be listed (an unplugged drive) leaves its questions as they
+  are. Finding the candidates is a read of the sync index (two partial
+  indexes over the marker cover the indexed and the still-queued
+  copies); each conflicted file then costs one listing of its folder.
+  The pass does not run while the throttle is `Suspended`.
+- Two cases wait while the name is still empty: a copy whose original
+  is still landing (the cloud's version is being downloaded under the
+  name) is asked about once it lands, and a copy made by answering a
+  file/folder clash with `keep-both` is that answer (the folder is on
+  its way), not a question.
 - `vapor status` counts open decisions (`decisions`, total and per
   profile), conflicts included. App surfaces treat the count and the
   timeline event as the *trigger* (the macOS menu bar mark turns the
@@ -100,23 +103,34 @@ until the daemon withdraws it. The `--json` shape is locked in
 
 `vapor decisions resolve <id> --choose <file name>` keeps that version
 under the file's name and moves every other version to the trash
-(reason `conflict`, restorable with `vapor trash restore`). When a copy
-is kept, it is renamed onto the name after the version there went to the
-trash.
+(reason `conflict`, restorable with `vapor trash restore`).
 
-Unlike other decisions, a conflict answer is applied by the command
-itself (`vapor_daemon::conflict::keep`): it is plain local file
-operations, so it works with the daemon stopped, and a running daemon
-syncs the result like any user edit, removing the discarded copies from
-the cloud and from the other devices. The answer is refused when the
-versions on disk are no longer the ones the question lists; the
-question is rewritten and the user looks again. The decision is
-recorded as answered and applied in the same step; the daemon finishes
-one it finds answered but not applied. Every file an answer touches
-comes from `Conflict::find`: the file under the name and the
-machine-named copies of it, never anything else. Manual resolution (the
-Finder, `rm`, the cloud web UI) remains fully supported and equivalent:
-the question closes on its own.
+A conflict answer is applied by the command itself
+(`vapor_daemon::conflict::keep`), never by the daemon: it is plain local
+file operations, so it works with the daemon stopped, and a running
+daemon syncs the result like any user edit, removing the discarded
+copies from the cloud and from the other devices. The command:
+
+1. lists the versions again and refuses when they are no longer the
+   ones the question lists, sizes and modification times included; the
+   question is rewritten and the user looks again;
+2. claims the answer, which only succeeds while the question is still
+   open, so two answers cannot both apply;
+3. moves the file under the name to the trash, moves the kept copy onto
+   the name with a rename that never replaces anything (a file that
+   lands there meanwhile stays, and the answer stops), and only then
+   moves the other copies to the trash;
+4. records the answer as applied. When a step fails, nothing is lost
+   (every removed version is in the trash) and the question opens again
+   with the versions there are then.
+
+An answer still recorded but not applied a minute later
+(`constants::conflict::ANSWER_GRACE_SECONDS`) belongs to a command that
+died; the daemon opens the question again rather than touching the
+files. Every file an answer touches comes from `Conflict::find`: the
+file under the name and the machine-named copies of it, never anything
+else. Manual resolution (the Finder, `rm`, the cloud web UI) remains
+fully supported and equivalent: the question closes on its own.
 
 When the file under the name was deleted and copies remain, the
 question asks which copy takes the name; with a single copy left it
@@ -153,9 +167,13 @@ code).
 - Name parsing, grouping, the question, and resolution:
   `core/daemon/src/conflict.rs`.
 - One decision per file that grows with a third version and closes when
-  no copy is left, and an answer the daemon finishes: the runtime tests
+  no copy is left, and an answer never applied that is asked again
+  without the daemon touching a file: the runtime tests
   `a_conflicted_file_is_one_decision_until_no_copy_is_left` and
-  `a_conflict_answer_recorded_but_not_applied_is_applied_by_the_daemon`.
+  `a_conflict_answer_never_applied_is_asked_again_and_the_files_stay`.
+- The command's side (refusing changed versions, losing a race to
+  another answer, reopening after a failure part way):
+  `core/cli/src/commands/decisions.rs` `conflict_answers` tests.
 - End to end: Tier E2E S15 `conflict-decisions` (three versions of one
   file are one decision naming each device, keeping the third device's
   version applies at once, the others land in the trash, the result

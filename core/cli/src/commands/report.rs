@@ -324,9 +324,9 @@ mod tests {
             artifacts: vec!["manifest.json".to_string()],
             daemon_reachable: false,
         };
-        let value = serde_json::to_value(&report).expect("serializes");
-        assert!(value.get("path").is_some());
-        assert!(value.get("daemonReachable").is_some());
-        assert!(value.get("artifacts").is_some());
+        assert_eq!(
+            serde_json::to_string(&report).expect("serializes"),
+            r#"{"path":"/tmp/vapor-report-1","artifacts":["manifest.json"],"daemonReachable":false}"#
+        );
     }
 }

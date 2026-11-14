@@ -131,7 +131,10 @@ pub fn list_decisions(config: &VaporConfig, include_closed: bool) -> DecisionLis
 fn is_settled_conflict(record: &DecisionRecord) -> bool {
     record.kind == constants::decision::KIND_CONFLICT
         && record.is_open()
-        && record.path.as_deref().and_then(Conflict::find).is_none()
+        && match record.path.as_deref() {
+            Some(path) => matches!(Conflict::find(path), Ok(None)),
+            None => true,
+        }
 }
 
 /// One decision by id; `profile` disambiguates when several profiles
@@ -181,10 +184,8 @@ pub fn resolve_decision(
     Ok(to_json(&profile_id, record))
 }
 
-/// Keeps the chosen version of a conflicted file and sends the others
-/// to the profile's trash. Refuses when the versions on disk are no
-/// longer the ones the question lists, so an answer is never applied to
-/// a version the user did not see.
+/// Applies a conflict answer with the profile's trash and this device's
+/// id. The daemon never applies one, so nothing races it.
 fn resolve_conflict(
     config: &VaporConfig,
     profile_id: &str,
@@ -193,9 +194,46 @@ fn resolve_conflict(
     choice: &str,
     now: SystemTime,
 ) -> Result<(), String> {
+    let config_path = vapor_shared::runtime_paths::vapor_directory()
+        .join(constants::runtime::CONFIGURATION_FILE_NAME);
+    let device_id = vapor_shared::device_id::persisted(&config_path).unwrap_or_default();
+    let sync_root = resolve_profiles(config)
+        .into_iter()
+        .find(|profile| profile.id == profile_id)
+        .and_then(|profile| profile.scope.local_root);
+    let trash = LocalTrash::new(
+        profile_id,
+        vapor_shared::runtime_paths::profile_trash_directory(profile_id),
+        TrashSettings::resolve(config),
+        Arc::new(vapor_platform::NativeTrashBin::for_current_host()),
+    )
+    .with_sync_root(sync_root);
+    answer_conflict(db, current, choice, &device_id, &trash, now)
+}
+
+/// Keeps the chosen version of a conflicted file and sends the others
+/// to `trash`. Refuses when the versions on disk are no longer the ones
+/// the question lists, sizes and times included, so an answer never
+/// reaches a version the user did not see. The answer is claimed only
+/// while the question is still open; when applying it fails part way,
+/// the question opens again with the versions there are then.
+pub(crate) fn answer_conflict(
+    db: &mut DurableStateDb,
+    current: &DecisionRecord,
+    choice: &str,
+    device_id: &str,
+    trash: &LocalTrash,
+    now: SystemTime,
+) -> Result<(), String> {
     let id = current.id;
     let original = current.path.clone().unwrap_or_default();
-    let Some(found) = Conflict::find(&original) else {
+    let found = Conflict::find(&original).map_err(|error| {
+        format!(
+            "cannot list the folder of {}: {error}; the question stays open",
+            original.display()
+        )
+    })?;
+    let Some(found) = found else {
         db.withdraw_decision(id, now)
             .map_err(|error| error.to_string())?;
         return Err(format!(
@@ -203,18 +241,15 @@ fn resolve_conflict(
             original.display()
         ));
     };
-    let settings = TrashSettings::resolve(config);
-    let config_path = vapor_shared::runtime_paths::vapor_directory()
-        .join(constants::runtime::CONFIGURATION_FILE_NAME);
-    let device_id = vapor_shared::device_id::persisted(&config_path).unwrap_or_default();
-    let fresh = conflict::question(&found, &device_id, settings.enabled);
-    let listed = |options: &[vapor_daemon::state_db::DecisionOption]| {
+    let enabled = trash.settings().enabled;
+    let fresh = conflict::question(&found, device_id, enabled);
+    let keys = |options: &[vapor_daemon::state_db::DecisionOption]| {
         options
             .iter()
             .map(|option| option.key.clone())
             .collect::<Vec<_>>()
     };
-    if listed(&fresh.options) != listed(&current.options) {
+    if keys(&fresh.options) != keys(&current.options) || fresh.evidence != current.evidence {
         db.update_open_decision(id, &fresh.question, &fresh.options, &fresh.evidence)
             .map_err(|error| error.to_string())?;
         return Err(format!(
@@ -225,25 +260,22 @@ fn resolve_conflict(
     }
     db.resolve_decision(id, choice, now)
         .map_err(|error| error.to_string())?;
-    let sync_root = resolve_profiles(config)
-        .into_iter()
-        .find(|profile| profile.id == profile_id)
-        .and_then(|profile| profile.scope.local_root);
-    let trash = LocalTrash::new(
-        profile_id,
-        vapor_shared::runtime_paths::profile_trash_directory(profile_id),
-        settings,
-        Arc::new(vapor_platform::NativeTrashBin::for_current_host()),
-    )
-    .with_sync_root(sync_root);
-    conflict::keep(&found, choice, |path| {
+    let kept = conflict::keep(&found, choice, |path| {
         trash
             .discard(path, constants::trash::REASON_CONFLICT, now)
             .map(|_| ())
-    })
-    .map_err(|error| {
-        format!("{error}; the answer is recorded, and the daemon tries again on its next tick")
-    })?;
+    });
+    if let Err(error) = kept {
+        db.reopen_decision(id).map_err(|error| error.to_string())?;
+        if let Ok(Some(now_found)) = Conflict::find(&original) {
+            let asked = conflict::question(&now_found, device_id, enabled);
+            db.update_open_decision(id, &asked.question, &asked.options, &asked.evidence)
+                .map_err(|error| error.to_string())?;
+        }
+        return Err(format!(
+            "{error}; the question is open again with the versions there are now"
+        ));
+    }
     db.mark_decision_applied(id, now)
         .map_err(|error| error.to_string())
 }
@@ -371,6 +403,171 @@ pub fn render_show(decision: &DecisionJson) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod conflict_answers {
+        use super::*;
+        use std::fs;
+        use vapor_daemon::state_db::DecisionScope;
+
+        const THEIRS: &str = "report~conflict-other-mac-1750000000123.md";
+
+        struct Setup {
+            _temp: tempfile::TempDir,
+            db: DurableStateDb,
+            trash: LocalTrash,
+            original: PathBuf,
+            id: i64,
+        }
+
+        /// `report.md`, one copy, and the open question about them, as
+        /// the daemon would have asked it.
+        fn setup() -> Setup {
+            let temp = tempfile::TempDir::new().expect("temp");
+            let root = temp.path().join("Vapor");
+            fs::create_dir_all(&root).expect("root");
+            let original = root.join("report.md");
+            fs::write(&original, b"the cloud's version").expect("seed");
+            fs::write(root.join(THEIRS), b"the other mac's version").expect("seed");
+            let mut db = DurableStateDb::open(temp.path().join("vapor.sqlite")).expect("db");
+            let trash = LocalTrash::new(
+                "default",
+                temp.path().join("trash"),
+                TrashSettings::default(),
+                Arc::new(vapor_platform::InMemoryTrashBin::unsupported()),
+            );
+            let found = Conflict::find(&original)
+                .expect("listable")
+                .expect("a conflict");
+            let asked = conflict::question(&found, "this-mac", true);
+            let id = db
+                .create_decision(
+                    constants::decision::KIND_CONFLICT,
+                    DecisionScope::Path,
+                    Some(&original),
+                    &asked.question,
+                    &asked.options,
+                    &asked.evidence,
+                    SystemTime::now(),
+                )
+                .expect("ask");
+            Setup {
+                _temp: temp,
+                db,
+                trash,
+                original,
+                id,
+            }
+        }
+
+        fn record(setup: &Setup) -> DecisionRecord {
+            setup
+                .db
+                .decision(setup.id)
+                .expect("read")
+                .expect("decision")
+        }
+
+        fn answer(setup: &mut Setup, choice: &str) -> Result<(), String> {
+            let current = record(setup);
+            answer_conflict(
+                &mut setup.db,
+                &current,
+                choice,
+                "this-mac",
+                &setup.trash,
+                SystemTime::now(),
+            )
+        }
+
+        #[test]
+        fn an_answer_keeps_the_version_and_trashes_the_rest() {
+            let mut setup = setup();
+            answer(&mut setup, THEIRS).expect("applied");
+            assert_eq!(
+                fs::read(&setup.original).expect("read"),
+                b"the other mac's version"
+            );
+            assert!(!setup.original.with_file_name(THEIRS).exists());
+            let trashed = setup.trash.list();
+            assert_eq!(trashed.len(), 1);
+            assert_eq!(trashed[0].reason, constants::trash::REASON_CONFLICT);
+            let done = record(&setup);
+            assert_eq!(done.choice.as_deref(), Some(THEIRS));
+            assert!(done.applied_at.is_some());
+        }
+
+        #[test]
+        fn a_version_that_changed_since_the_question_is_never_answered_blind() {
+            let mut setup = setup();
+            fs::write(&setup.original, b"a newer download, longer than before").expect("changes");
+            let error = answer(&mut setup, THEIRS).expect_err("refused");
+            assert!(error.contains("changed since"), "{error}");
+            assert!(record(&setup).is_open());
+            assert!(setup.original.with_file_name(THEIRS).exists());
+            // The question now shows what is there, so the next answer
+            // goes through.
+            answer(&mut setup, "report.md").expect("applied");
+        }
+
+        #[test]
+        fn a_question_with_no_copy_left_closes() {
+            let mut setup = setup();
+            fs::remove_file(setup.original.with_file_name(THEIRS)).expect("by hand");
+            let error = answer(&mut setup, "report.md").expect_err("nothing to decide");
+            assert!(error.contains("nothing to decide"), "{error}");
+            assert_eq!(record(&setup).choice.as_deref(), Some("withdrawn"));
+        }
+
+        #[test]
+        fn a_question_answered_meanwhile_is_not_answered_twice() {
+            let mut setup = setup();
+            let stale = record(&setup);
+            setup
+                .db
+                .resolve_decision(setup.id, THEIRS, SystemTime::now())
+                .expect("another answer won");
+            let error = answer_conflict(
+                &mut setup.db,
+                &stale,
+                "report.md",
+                "this-mac",
+                &setup.trash,
+                SystemTime::now(),
+            )
+            .expect_err("lost the claim");
+            assert!(
+                error.contains("already resolved") || error.contains("meanwhile"),
+                "{error}"
+            );
+            assert!(setup.original.exists() && setup.original.with_file_name(THEIRS).exists());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_failure_part_way_opens_the_question_again() {
+            use std::os::unix::fs::PermissionsExt;
+            let mut setup = setup();
+            // A trash that cannot take the file under the name.
+            let trash_root = setup.trash.root().to_path_buf();
+            fs::create_dir_all(&trash_root).expect("trash root");
+            fs::set_permissions(&trash_root, fs::Permissions::from_mode(0o500)).expect("lock");
+            let writable = fs::File::create(trash_root.join("probe")).is_ok(); // root
+            let result = answer(&mut setup, THEIRS);
+            fs::set_permissions(&trash_root, fs::Permissions::from_mode(0o700)).expect("unlock");
+            if writable {
+                return;
+            }
+            let error = result.expect_err("cannot trash");
+            assert!(error.contains("open again"), "{error}");
+            let reopened = record(&setup);
+            assert!(reopened.is_open() && reopened.choice.is_none());
+            assert_eq!(
+                fs::read(&setup.original).expect("untouched"),
+                b"the cloud's version"
+            );
+            assert!(setup.original.with_file_name(THEIRS).exists());
+        }
+    }
 
     #[test]
     fn json_shape_is_locked() {

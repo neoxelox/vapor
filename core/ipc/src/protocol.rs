@@ -21,14 +21,20 @@ pub fn daemon_supported_versions() -> (u32, u32) {
 
 /// First message every client sends. The server matches the version
 /// against its own support window and responds with [`HelloAck`].
+///
+/// The handshake is what lets two builds find out they cannot talk, so
+/// its frames also accept the snake_case keys schema 3 and earlier
+/// sent: an older peer gets `IncompatibleVersion`, not a parse error.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Hello {
+    #[serde(alias = "schema_version")]
     pub schema_version: u32,
+    #[serde(alias = "supported_min_version")]
     pub supported_min_version: u32,
     /// Free-form identifier — e.g. `"vapor-cli/0.2.0-alpha.3"`. Not
     /// part of the contract; logged on the server side for diagnostics.
-    #[serde(default)]
+    #[serde(default, alias = "client_id")]
     pub client_id: String,
 }
 
@@ -36,9 +42,11 @@ pub struct Hello {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HelloAck {
+    #[serde(alias = "schema_version")]
     pub schema_version: u32,
+    #[serde(alias = "supported_min_version")]
     pub supported_min_version: u32,
-    #[serde(default)]
+    #[serde(default, alias = "server_id")]
     pub server_id: String,
 }
 
@@ -48,8 +56,11 @@ pub struct HelloAck {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IncompatibleVersion {
+    #[serde(alias = "peer_version")]
     pub peer_version: u32,
+    #[serde(alias = "required_min")]
     pub required_min: u32,
+    #[serde(alias = "local_version")]
     pub local_version: u32,
 }
 

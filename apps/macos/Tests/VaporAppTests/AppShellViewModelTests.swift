@@ -66,7 +66,7 @@ func startupPreservesUserSelectedLanguageCodeEvenWhenCatalogFallsBackToEnglish()
     environment: ["VAPOR_DIR": rootURL.path]
   )
   let configuration = VaporConfiguration(language: "zz-unavailable-locale")
-  try configurationStore.save(configuration)
+  try configurationStore.save(configuration, keys: VaporConfiguration.modelledKeys)
 
   let viewModel = AppShellViewModel(
     daemonLifecycleManager: .placeholder(),

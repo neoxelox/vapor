@@ -125,13 +125,14 @@ func needsUserActionFollowsEveryStateOnlyTheUserCanClear() {
 @Test
 func syncDetailPrefersTheReasonTheUserCanActOn() {
   func status(
+    run: String = "running",
     throttle: String = "user activity is active",
     runReason: String? = nil,
     scan: String = "",
     scanDetail: String = ""
   ) -> DaemonStatusSnapshot {
     DaemonStatusSnapshot(
-      runState: "running", throttleState: "throttled", throttleReason: throttle,
+      runState: run, throttleState: "throttled", throttleReason: throttle,
       provider: "filesystem", queued: 1, failed: 0,
       runReason: runReason, reconcileState: scan, reconcileDetail: scanDetail)
   }
@@ -156,9 +157,13 @@ func syncDetailPrefersTheReasonTheUserCanActOn() {
     AppShellState.syncDetail(
       for: .error,
       status: status(
-        runReason: "cloud root /Vapor is unavailable", scan: "waiting",
+        run: "error", runReason: "cloud root /Vapor is unavailable", scan: "waiting",
         scanDetail: "waiting")
     ) == "cloud root /Vapor is unavailable")
+  // An Error the app derived from failed changes never borrows the
+  // reason of a healthy run.
+  #expect(
+    AppShellState.syncDetail(for: .error, status: status(runReason: "watching ~/Vapor")) == nil)
   // An empty throttle reason is no detail at all.
   #expect(AppShellState.syncDetail(for: .idle, status: status(throttle: "")) == nil)
 }

@@ -297,6 +297,20 @@ pub mod profile {
     pub const KEY_CLOUD_ROOT: &str = "cloudRoot";
     pub const KEY_SYNC_MODE: &str = "syncMode";
     pub const KEY_ENABLED: &str = "enabled";
+    /// Partial overrides of the top-level groups of the same name.
+    pub const KEY_RESOURCE_LIMITS: &str = super::config::KEY_RESOURCE_LIMITS;
+    pub const KEY_IDLE_BOOST: &str = super::config::KEY_IDLE_BOOST;
+    pub const ALL_KEYS: &[&str] = &[
+        KEY_ID,
+        KEY_NAME,
+        KEY_PROVIDER,
+        KEY_LOCAL_ROOT,
+        KEY_CLOUD_ROOT,
+        KEY_SYNC_MODE,
+        KEY_ENABLED,
+        KEY_RESOURCE_LIMITS,
+        KEY_IDLE_BOOST,
+    ];
     /// The implicit profile id used when no `profiles` array is
     /// configured (single-scope setups; the pre-profile behavior).
     pub const DEFAULT_PROFILE_ID: &str = "default";
@@ -316,6 +330,12 @@ pub mod resource_limits {
     /// the throttle ladder derives the ceiling from the machine's core
     /// count. Clamped into `1..=16`.
     pub const KEY_CONCURRENT_TRANSFERS: &str = "concurrentTransfers";
+    pub const ALL_KEYS: &[&str] = &[
+        KEY_CPU_PERCENT,
+        KEY_MEMORY_PERCENT,
+        KEY_BANDWIDTH_PERCENT,
+        KEY_CONCURRENT_TRANSFERS,
+    ];
     pub const DEFAULT_CPU_PERCENT: u8 = 15;
     pub const DEFAULT_MEMORY_PERCENT: u8 = 10;
     pub const DEFAULT_BANDWIDTH_PERCENT: u8 = 25;
@@ -338,6 +358,16 @@ pub mod idle_boost {
     pub const KEY_HEADROOM_CPU_PERCENT: &str = "headroomCpuPercent";
     pub const KEY_RAMP_UP_SECONDS: &str = "rampUpSeconds";
     pub const KEY_RAMP_DOWN_SECONDS: &str = "rampDownSeconds";
+    pub const ALL_KEYS: &[&str] = &[
+        KEY_ENABLED,
+        KEY_MIN_IDLE_SECONDS,
+        KEY_CPU_PERCENT,
+        KEY_MEMORY_PERCENT,
+        KEY_BANDWIDTH_PERCENT,
+        KEY_HEADROOM_CPU_PERCENT,
+        KEY_RAMP_UP_SECONDS,
+        KEY_RAMP_DOWN_SECONDS,
+    ];
     pub const DEFAULT_ENABLED: bool = true;
     pub const DEFAULT_MIN_IDLE_SECONDS: u64 = 300;
     pub const DEFAULT_CPU_PERCENT: u8 = 50;
@@ -356,6 +386,7 @@ pub mod safeguards {
     /// Keys of the `safeguards` config group. Each safeguard is its own
     /// object inside the group.
     pub const KEY_MASS_DELETE: &str = "massDelete";
+    pub const ALL_KEYS: &[&str] = &[KEY_MASS_DELETE];
 
     /// Keys of `safeguards.massDelete`. The guard holds a burst of
     /// deletes (in either direction) behind a decision when the burst
@@ -372,6 +403,12 @@ pub mod safeguards {
     /// window is held for a decision even when the threshold is not
     /// reached, so a small tree is protected too.
     pub const KEY_RATIO_PERCENT: &str = "ratioPercent";
+    pub const MASS_DELETE_KEYS: &[&str] = &[
+        KEY_ENABLED,
+        KEY_THRESHOLD,
+        KEY_WINDOW_SECONDS,
+        KEY_RATIO_PERCENT,
+    ];
     pub const DEFAULT_MASS_DELETE_ENABLED: bool = true;
     pub const DEFAULT_MASS_DELETE_THRESHOLD: usize = 1_000;
     pub const DEFAULT_MASS_DELETE_WINDOW_SECONDS: u64 = 60;
@@ -397,6 +434,7 @@ pub mod trash {
     /// Try the user's own trash (the Finder's Trash on macOS) first and
     /// fall back to the managed trash when that fails.
     pub const KEY_USE_SYSTEM: &str = "useSystem";
+    pub const ALL_KEYS: &[&str] = &[KEY_ENABLED, KEY_RETENTION_DAYS, KEY_USE_SYSTEM];
     pub const DEFAULT_ENABLED: bool = true;
     pub const DEFAULT_RETENTION_DAYS: u32 = 7;
     pub const DEFAULT_USE_SYSTEM: bool = false;
@@ -544,6 +582,11 @@ pub mod conflict {
     /// whose versions changed gets the question rewritten, and one with
     /// no copy left has its question closed.
     pub const DECISION_SYNC_SECONDS: u64 = 5;
+    /// `vapor decisions resolve` applies a conflict answer itself, in
+    /// milliseconds; one still answered but unapplied after this long
+    /// belongs to a command that died, and the daemon opens the
+    /// question again rather than touching the files.
+    pub const ANSWER_GRACE_SECONDS: u64 = 60;
 }
 
 /// Kinds of the entries in the activity timeline (`vapor timeline`).

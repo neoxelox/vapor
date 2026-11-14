@@ -304,6 +304,16 @@ func daemonStatusDecodesTheScanStateAndReconcileDrivesTheCLI() throws {
   #expect(throws: (any Error).self) {
     try controller.reconcile()
   }
+
+  // A refusal exits non-zero; the daemon's note still reaches the error.
+  runner.exitCode = 1
+  runner.standardOutput = #"{"schemaVersion":4,"accepted":false,"note":"profile is paused"}"#
+  do {
+    try controller.reconcile()
+    Issue.record("a refusal must throw")
+  } catch {
+    #expect(String(describing: error).contains("profile is paused"))
+  }
 }
 
 @Test

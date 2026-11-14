@@ -134,7 +134,7 @@ impl AutoLaunchSettingStore for JsonFileAutoLaunchSettingStore {
 
     fn write(&self, value: bool) -> Result<(), JsonFileError> {
         // Every `vapor.json` writer (this store, `vapor config`, the daemon's
-        // IPC config path) shares one advisory file-lock so the read → mutate
+        // device-id write, the Mac app) shares one advisory file-lock so the read → mutate
         // one key → rewrite cycle is atomic across processes; otherwise the
         // last rename re-emits its stale snapshot of every other top-level key
         // and silently reverts a concurrent writer's change.

@@ -182,6 +182,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn restore_and_empty_json_shapes_are_locked() {
+        let restored = RestoreReport {
+            profile_id: "default".into(),
+            id: "1700000000000-0001".into(),
+            restored_to: PathBuf::from("/r/notes.txt"),
+        };
+        assert_eq!(
+            serde_json::to_string(&restored).expect("serialize"),
+            r#"{"profileId":"default","id":"1700000000000-0001","restoredTo":"/r/notes.txt"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EmptyReport { removed: 3 }).expect("serialize"),
+            r#"{"removed":3}"#
+        );
+    }
+
+    #[test]
     fn json_shape_is_locked() {
         let report = TrashListReport {
             entries: vec![TrashEntryJson {

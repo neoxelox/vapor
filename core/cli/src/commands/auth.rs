@@ -147,7 +147,7 @@ pub fn logout_from(store: &dyn SecretStore, profile_id: &str) -> Result<bool, Au
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthStatusEntry {
-    pub profile: String,
+    pub profile_id: String,
     pub provider: String,
     /// One of `constants::auth::STATE_*`.
     pub state: &'static str,
@@ -180,7 +180,7 @@ pub fn status_from(
                 constants::auth::STATE_SIGNED_OUT
             };
             AuthStatusEntry {
-                profile: profile.id,
+                profile_id: profile.id,
                 provider: profile.provider_kind,
                 state,
             }
@@ -193,7 +193,7 @@ pub fn render_status(report: &AuthStatusReport) -> String {
     report
         .profiles
         .iter()
-        .map(|entry| format!("{} ({}): {}", entry.profile, entry.provider, entry.state))
+        .map(|entry| format!("{} ({}): {}", entry.profile_id, entry.provider, entry.state))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -447,6 +447,21 @@ mod tests {
     }
 
     #[test]
+    fn status_json_shape_is_locked() {
+        let report = AuthStatusReport {
+            profiles: vec![AuthStatusEntry {
+                profile_id: "work".into(),
+                provider: "gdrive".into(),
+                state: constants::auth::STATE_SIGNED_IN,
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&report).expect("serialize"),
+            r#"{"profiles":[{"profileId":"work","provider":"gdrive","state":"signed-in"}]}"#
+        );
+    }
+
+    #[test]
     fn login_uses_the_profile_provider_and_status_reports_it() {
         let store = InMemorySecretStore::new();
         let config = config_with(&[("work", "gdrive"), ("local", "filesystem")]);
@@ -457,7 +472,13 @@ mod tests {
         let states: Vec<_> = report
             .profiles
             .iter()
-            .map(|entry| (entry.profile.as_str(), entry.provider.as_str(), entry.state))
+            .map(|entry| {
+                (
+                    entry.profile_id.as_str(),
+                    entry.provider.as_str(),
+                    entry.state,
+                )
+            })
             .collect();
         assert_eq!(
             states,
@@ -492,7 +513,7 @@ mod tests {
             .profiles
             .iter()
             .filter(|entry| entry.state == constants::auth::STATE_SIGNED_IN)
-            .map(|entry| entry.profile.as_str())
+            .map(|entry| entry.profile_id.as_str())
             .collect();
         assert_eq!(signed_in, vec!["home"]);
     }

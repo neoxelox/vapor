@@ -214,6 +214,35 @@ fn handshake_skew_of_two_is_rejected_with_incompatible_version() {
 }
 
 #[test]
+fn an_older_build_s_snake_case_hello_is_refused_by_version_not_by_parse() {
+    // Schema 2 and 3 sent snake_case handshake keys; the refusal must
+    // still name the version so either side can say what to upgrade.
+    let service = Arc::new(StaticService {
+        status: Mutex::new(fixture_status()),
+    });
+    let handle = spawn_server(service);
+    thread::sleep(Duration::from_millis(20));
+
+    let mut stream = UnixStream::connect(&handle.socket_path).expect("connect");
+    let frame = br#"{"kind":"Hello","payload":{"schema_version":2,"supported_min_version":2,"client_id":"vapor-cli/0.2.0-alpha.3"}}"#;
+    write_frame(&mut stream, frame).expect("write");
+
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).expect("error length");
+    let mut payload = vec![0u8; u32::from_le_bytes(len_buf) as usize];
+    stream.read_exact(&mut payload).expect("error payload");
+    let response: Response = serde_json::from_slice(&payload).expect("error");
+    let body = format!("{response:?}");
+    assert!(
+        body.contains("IncompatibleVersion") && body.contains("peer_version: 2"),
+        "expected IncompatibleVersion for schema 2, got {body}"
+    );
+
+    drop(stream);
+    handle.shutdown();
+}
+
+#[test]
 fn payload_bounds_oversized_first_frame_drops_connection_cleanly() {
     // Spin up the server, then write an oversized length prefix
     // *without* the data. The server's framing layer must reject

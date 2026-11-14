@@ -221,6 +221,11 @@ final class AppShellViewModel: ObservableObject {
           self.state.syncState = SyncSurfaceState.from(health: outcome, status: status)
         }
         self.state.syncDetail = AppShellState.syncDetail(for: self.state.syncState, status: status)
+        if self.state.syncDetail == nil, self.state.syncState == .error, let status,
+          status.failed > 0
+        {
+          self.state.syncDetail = self.localized("sync_detail_failed_format", String(status.failed))
+        }
         self.state.scanIsWaiting = status?.scanIsWaiting ?? false
         self.state.scanIsRunning = status?.scanIsRunning ?? false
         self.state.restartRequired = status?.restartRequired
@@ -538,7 +543,7 @@ final class AppShellViewModel: ObservableObject {
     state.useGitignore = enabled
 
     do {
-      try configurationStore.save(configuration)
+      try configurationStore.save(configuration, keys: [VaporConstants.ConfigKeys.useGitignore])
       refreshDaemonLifecycleManagerForCurrentConfiguration()
       clearConfigurationIssueIfResolved()
       logger.info(
@@ -566,7 +571,7 @@ final class AppShellViewModel: ObservableObject {
     state.useVaporignore = enabled
 
     do {
-      try configurationStore.save(configuration)
+      try configurationStore.save(configuration, keys: [VaporConstants.ConfigKeys.useVaporignore])
       refreshDaemonLifecycleManagerForCurrentConfiguration()
       clearConfigurationIssueIfResolved()
       logger.info(
@@ -610,7 +615,9 @@ final class AppShellViewModel: ObservableObject {
     configuration.postIgnoreRules = postIgnoreRules
 
     do {
-      try configurationStore.save(configuration)
+      try configurationStore.save(
+        configuration,
+        keys: [VaporConstants.ConfigKeys.preIgnoreRules, VaporConstants.ConfigKeys.postIgnoreRules])
       refreshDaemonLifecycleManagerForCurrentConfiguration()
       clearConfigurationIssueIfResolved()
       logger.info(
@@ -641,7 +648,7 @@ final class AppShellViewModel: ObservableObject {
     refreshLocalization()
 
     do {
-      try configurationStore.save(configuration)
+      try configurationStore.save(configuration, keys: [VaporConstants.ConfigKeys.language])
       clearConfigurationIssueIfResolved()
       logger.info(
         "Updated language setting",
@@ -685,14 +692,17 @@ final class AppShellViewModel: ObservableObject {
     refreshLifecycleCoordinator()
   }
 
+  /// After a save, the banner reflects the file as it is now: a value the
+  /// save did not touch can still be invalid.
   private func clearConfigurationIssueIfResolved() {
     guard state.configurationIssuePath != nil || state.configurationIssueReason != nil else {
       return
     }
 
-    state.configurationIssuePath = nil
-    state.configurationIssueReason = nil
-    if state.syncState == .error {
+    let issue = configurationStore.loadResult().issue
+    state.configurationIssuePath = issue?.configPath
+    state.configurationIssueReason = issue?.reason
+    if issue == nil && state.syncState == .error {
       state.syncState = .idle
     }
   }
