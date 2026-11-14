@@ -295,7 +295,7 @@ Via `cargo-fuzz`. Target the parsers and format handlers that accept
 external input:
 
 - Ignore-rule parser (`path_filter.rs`).
-- IPC frame parser (once wave 6 lands).
+- IPC frame parser (`core/ipc/src/framing.rs`).
 - JSON config loader (`VaporConfiguration` decoding — Swift side — and
   the Rust-side equivalent when lifecycle moves over).
 - Path normalization (`fs_events.rs`).

@@ -184,11 +184,13 @@ PR descriptions and comments.
 
 - Never commit personal information: private email addresses, phone
   numbers, home addresses, account or resource IDs, tokens, secrets,
-  environment variable values, local paths such as `/Users/...`, the
+  environment variable values, paths copied from a real machine, the
   contents of private conversations or private repositories, and
   details of the owner's accounts, plans, or billing. What the
   repository already publishes (the maintainer's name and GitHub
-  handle, the `arn.sh` domain, project names) is fine.
+  handle, the `arn.sh` domain, project names) is fine. So is an
+  invented example path in a fixture or a document, with a common
+  first name in it (owner, 2026-11-14).
 - Raw output from any account (GitHub settings, Google Cloud, Apple
   Developer) and real logs, reports, or state from a `~/.vapor` go to
   `.context/` (gitignored), never into the tree. Record a setting by
@@ -451,8 +453,10 @@ how to read a red run: the `vapor-validate` skill.
   numbers, and no pointers to `docs/tasks/*`. Task tracking lives in
   `docs/tasks/`; a code comment must stand on its own for a reader who has
   never seen the task lists. The same applies to strings that surface to
-  users or logs (e.g. `unimplemented!()` messages), and to prose in
-  architecture, operations, development, and CI docs.
+  users or logs (e.g. `unimplemented!()` messages).
+- Prose in architecture, operations, development, and CI docs carries
+  no task id and no wave or phase number either. It may point at a
+  task file (`docs/tasks/core.md`) for open work (owner, 2026-11-14).
 - The same holds for spec decision numbers (`D7`): none in code
   comments, in strings, or in system docs. A code comment does not
   point at `docs/specs/*` either; a system doc may link the spec that

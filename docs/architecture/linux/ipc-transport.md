@@ -52,5 +52,5 @@ When the daemon receives a stop request (`SIGTERM` from
 - The `core/ipc/tests/skew_matrix.rs` integration tests run unchanged
   on Linux because the UDS path is shared with macOS, and the
   `ubuntu-latest` job already runs the whole Rust test suite on every
-  pull request. Wave 13 adds the `vapor service` round-trip against a
-  packaged daemon binary.
+  pull request. The `vapor service` round-trip against a packaged
+  daemon binary is open work (`docs/tasks/README.md`).

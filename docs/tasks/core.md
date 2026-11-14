@@ -1087,17 +1087,20 @@ Still open, in order:
 Found by the adversarial review of the change that added the design and
 pull-request skills. Each one is older than that change.
 
-- [ ] PF-1 Test fixtures under `core/` and `apps/macos` use paths with a
-      local account name under `/Users/` and `/home/`. `AGENTS.md` §6.1
-      keeps such paths out of the tree: replace them with a neutral
-      name.
+- [x] PF-1 Test fixtures under `core/` and `apps/macos` use invented
+      paths with a first name under `/Users/` and `/home/`. Decided
+      (owner, 2026-11-14): they stay. `AGENTS.md` §6.1 now allows an
+      invented example path and bars only a path copied from a real
+      machine.
 - [ ] PF-2 The release runbook (`docs/operations/release-process.md`,
       "End-to-end flow", steps 1 and 2) commits non-release changes and
       validation fixes straight on `main`. They then reach GitHub with
       no pull request, no required checks, and no review, which
       `AGENTS.md` §10 asks of every change. Decide whether those steps
       move to a pull request before the release starts.
-- [ ] PF-3 `AGENTS.md` §8.9 keeps pointers to `docs/tasks/*` and wave
-      numbers out of architecture, operations, development, and CI
-      prose. The `vapor-docs` skill says such pointers are fine, and
-      several of those documents carry them. Pick one rule and sweep.
+- [x] PF-3 `AGENTS.md` §8.9 and the `vapor-docs` skill disagreed on
+      pointers to `docs/tasks/*` in architecture, operations,
+      development, and CI prose. Decided (owner, 2026-11-14): that
+      prose may point at a task file for open work, with no task id
+      and no wave number. §8.9 says so, and the wave numbers are gone
+      from those documents.

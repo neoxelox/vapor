@@ -7,9 +7,10 @@ choices and lifecycle decisions are recorded.
 
 The native Windows surfaces (`apps/windows`, the
 `core/platform/*::windows` impls, the named-pipe transport) are part
-of the optional Wave 12 work and are not committed deliverables. Until
-that wave lands, this directory is documentation-only — the runtime
-trait stubs return `Unsupported` on Windows.
+of optional work (`docs/tasks/README.md`) and are not committed
+deliverables. Until that work lands, this directory is
+documentation-only: the runtime trait stubs return `Unsupported` on
+Windows.
 
 ## How to use this group
 

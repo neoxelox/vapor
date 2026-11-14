@@ -68,5 +68,5 @@ new surface:
    surface, and one-way sync modes.
 7. Google Drive provider, durability and upgrade hardening, live
    configuration reload.
-8. Windows and Linux app surfaces (optional; `docs/tasks/README.md`
-   Waves 12 to 14).
+8. Windows and Linux app surfaces (optional; see
+   `docs/tasks/README.md`).
