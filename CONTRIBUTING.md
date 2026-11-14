@@ -132,9 +132,9 @@ test's only failure mode is "I typo'd a default value", skip it.
 Use Conventional Commit subjects, `<type>: <why-focused summary>`, with
 one dominant type: `feat`, `fix`, `perf`, `refactor`, `docs`, `test`,
 `ci`, `build`, `chore`, `release`. A pull request is merged as a
-squash, so its title is the commit on `main` and its line in the
-release notes: give the title the same form, label the PR with its
-type, and split a mixed change into separate PRs when practical.
+squash and lands on `main` as one commit: give the title the same form
+as the commit subject, label the PR with its type, and split a mixed
+change into separate PRs when practical.
 
 The repository is public. Keep personal information, local paths such
 as `/Users/...`, and real logs or reports out of commits, branch

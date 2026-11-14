@@ -21,13 +21,20 @@ on main", "is it ready"), after confirming the earlier ones still hold.
 - Never commit, rebase, or push on `main`. Never `git switch main`:
   another worktree has it checked out. Use `git fetch origin main` and
   compare against `origin/main`.
-- Force only with `--force-with-lease`, only on this branch, only after
-  a deliberate rewrite (the squash, a rebase).
+- Force only with the full command
+  `git push --force-with-lease --force-if-includes origin HEAD`, only
+  on this branch, only after a deliberate rewrite (the squash, a
+  rebase). Never a bare `git push --force-with-lease`: the upstream of
+  a fresh branch can be `main`.
+- When a push is rejected, fetch the branch and read what is there.
+  The owner may have pushed. Integrate it; never overwrite it.
 - Never merge. The owner merges, and the repository allows squash
   merges only.
-- Never change a test, loosen an assertion, or add a suppression to
-  make a check pass. A command passed only when you ran it and saw the
-  result.
+- Never weaken a test, loosen an assertion, or add a suppression to
+  make an incorrect implementation pass. A command passed only when
+  you ran it and saw the result.
+- Shell variables do not survive between tool calls. Run each command
+  block below as one call.
 - The stash is shared across worktrees. Set work aside with a WIP
   commit. Scratch files (the PR body, the briefs) go under `.context/`.
 
@@ -36,26 +43,36 @@ on main", "is it ready"), after confirming the earlier ones still hold.
 ```sh
 git fetch origin main
 git status --porcelain --untracked-files=all
-BASE=$(git merge-base origin/main HEAD); git log --oneline "$BASE"..HEAD
+git log --oneline "$(git merge-base origin/main HEAD)"..HEAD
 ```
 
 - On `main` or detached, run `git switch -c <slug>` first. Otherwise
   keep the branch; a Conductor workspace names its own. The name is
   public (`AGENTS.md` §6.1).
 - Every path in the status list is committed or deliberately left out
-  (`vapor-commit`).
+  (`vapor-commit`). Only untracked files may be left out. A tracked
+  change that does not belong to this PR goes to another branch as its
+  own commit before the rebase; it never rides along.
 - Before the PR exists, the branch is one commit:
-  `git reset --soft "$BASE" && git commit`. Write the message for the
-  whole change. Its subject is the PR title and the commit on `main`.
+  `git reset --soft "$(git merge-base origin/main HEAD)" && git commit`.
+  Write the message for the whole change. Its subject is the PR title
+  and the commit on `main`.
 - Once the PR exists, do not squash. Fixes are ordinary commits.
 
 ## 2. Study what landed on main, then rebase
 
 ```sh
-git log --oneline --no-merges "$BASE"..origin/main
-comm -12 <(git diff --name-only "$BASE" origin/main | sort) \
+git fetch origin main
+MAIN=$(git rev-parse origin/main); BASE=$(git merge-base "$MAIN" HEAD)
+echo "main is $MAIN"
+git log --oneline --no-merges "$BASE".."$MAIN"
+comm -12 <(git diff --name-only "$BASE" "$MAIN" | sort) \
          <(git diff --name-only "$BASE" HEAD | sort)
 ```
+
+Note the SHA that the block prints. Another worktree's fetch can move
+`origin/main` at any time, so the study and the rebase both use that
+SHA.
 
 - Read every subject. Read the diff of each commit that touches the
   branch's crate, app, script, workflow, contract, or schema, and
@@ -67,7 +84,7 @@ comm -12 <(git diff --name-only "$BASE" origin/main | sort) \
 - If main already fixed the bug or removed the code, stop and report.
 
 ```sh
-git rebase origin/main
+git rebase <the main SHA from the block above>
 ```
 
 No conflict is not proof of safety: check each overlap against the
@@ -85,15 +102,18 @@ the branch.
 
 ## 3. Validate, push, open
 
-1. Run the `vapor-validate` ladder on the rebased tree. Fold fixes
-   into the single commit with `git commit --amend --no-edit`.
+1. Run the `vapor-validate` ladder on the rebased tree. Stage each fix
+   by name and fold it into the single commit with
+   `git commit --amend --no-edit`. Before the push,
+   `git status --porcelain` shows no tracked change.
 2. Confirm the `vapor-docs` duties. Read the diff, the message, and
    the branch name for personal information (`AGENTS.md` §6.1).
 3. Push, then open the PR ready for review, labelled with its dominant
    commit type:
 
 ```sh
-git push -u origin HEAD    # --force-with-lease after a rewrite of a pushed branch
+git push -u origin HEAD                                        # first push
+git push --force-with-lease --force-if-includes origin HEAD    # after a rewrite of a pushed branch
 gh pr create --base main --title "<commit subject>" --label <type> \
   --body-file .context/pr-body.md
 ```
@@ -128,16 +148,21 @@ Start the adversarial review (step 5) in the background the moment the
 PR exists. Watch CI and the base while the reviewers work. The review
 must not add time to the CI wait (owner, 2026-11-14).
 
+The reviewers read this worktree. Leave it alone until they return: no
+rebase, no fix, no format. Note what CI and the base check show, and
+act in step 6.
+
 ```sh
 PR=$(gh pr view --json number -q .number)
-gh pr checks "$PR" --watch --fail-fast    # in the background, or poll
+gh pr checks "$PR" --watch    # in the background, or poll
 gh pr view "$PR" --json mergeable
 git fetch origin main && git merge-base --is-ancestor origin/main HEAD; echo "up to date: $?"
 ```
 
 **CI.** Nine checks must pass: `lint`, `test`, and `build`, each on
 macOS, Ubuntu, and Windows. Right after a push the list can be empty
-or partial; that is not green. On a failure, read the log first
+or partial; that is not green. On a failure, read the log first. It
+is readable when the run has finished, and so is the rerun
 (`gh run view <run-id> --log-failed | tail -200`):
 
 - A code failure: reproduce it locally with the same script and fix
@@ -150,8 +175,8 @@ or partial; that is not green. On a failure, read the log first
   (`AGENTS.md` §9.6).
 
 **Conflicts and base.** `mergeable: CONFLICTING`, or `up to date: 1`,
-means `main` moved. Repeat step 2 and push with `--force-with-lease`:
-the ruleset wants what lands to be what CI tested.
+means `main` moved. Repeat step 2 and force-push with the command in
+step 3: the ruleset wants what lands to be what CI tested.
 `mergeStateStatus: BLOCKED` is normal, at the end too. The ruleset
 asks for an approval a solo maintainer cannot give, and the owner
 merges through the admin bypass (`docs/ci/required-checks.md`).
@@ -166,7 +191,7 @@ gets one. Launch them in one message so they run at the same time.
 
 **Brief.** Each reviewer gets:
 
-- its files, or `git diff origin/main...HEAD -- <paths>`;
+- its files, or `git diff origin/main...<head SHA> -- <paths>`;
 - the intent: what the PR is for, the spec decisions it builds, and
   the behaviour that must hold;
 - the risks of its area from the table, plus any the change raises;

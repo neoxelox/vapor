@@ -1082,3 +1082,22 @@ Still open, in order:
       (`vapor-e2e`, `vapor-soak`, `vapor-debug`, `vapor-provider`), and
       every decision kind has a scenario.
 
+## Process review follow-ups (2026-11-14)
+
+Found by the adversarial review of the change that added the design and
+pull-request skills. Each one is older than that change.
+
+- [ ] PF-1 Test fixtures under `core/` and `apps/macos` use paths with a
+      local account name under `/Users/` and `/home/`. `AGENTS.md` §6.1
+      keeps such paths out of the tree: replace them with a neutral
+      name.
+- [ ] PF-2 The release runbook (`docs/operations/release-process.md`,
+      "End-to-end flow", steps 1 and 2) commits non-release changes and
+      validation fixes straight on `main`. They then reach GitHub with
+      no pull request, no required checks, and no review, which
+      `AGENTS.md` §10 asks of every change. Decide whether those steps
+      move to a pull request before the release starts.
+- [ ] PF-3 `AGENTS.md` §8.9 keeps pointers to `docs/tasks/*` and wave
+      numbers out of architecture, operations, development, and CI
+      prose. The `vapor-docs` skill says such pointers are fine, and
+      several of those documents carry them. Pick one rule and sweep.

@@ -8,14 +8,18 @@ license: GPL-3.0-only
 
 - One commit per cohesive change while you work: small and easy to
   revert. The branch is squashed to one commit when its PR opens
-  (`vapor-pr`), and the owner merges every PR as a squash, so the PR
-  title is what lands on `main`.
-- A PR carries one dominant type. Split a mixed change into separate
-  PRs when practical, so the release notes group it correctly.
+  (`vapor-pr`), and the owner merges every PR as a squash, so that
+  commit's subject, which is also the PR title, is what lands on
+  `main`.
+- A PR carries one dominant type: its label, and the type of its
+  commit on `main`. Split a mixed change into separate PRs when
+  practical.
 - Subject: `<type>: <why-focused summary>` in the imperative, under 72
   characters. Body: what was wrong, what changed, what a user sees.
-- Types, labels, and release categories (`.github/release.yml` reads the
-  label of the PR):
+- Types, labels, and the categories `.github/release.yml` gives them in
+  GitHub's generated notes. The published release notes are the
+  `CHANGELOG.md` section (`vapor-release`), so the `Unreleased` line is
+  the text a user reads:
 
 | Type | Label | Category |
 |---|---|---|
@@ -47,7 +51,7 @@ license: GPL-3.0-only
 
 ## Never
 
-- Never commit on `main`.
+- Never commit on `main` outside the release flow (`vapor-release`).
 - Never push unless the project owner asks. A request to open a PR
   covers that PR's branch (`vapor-pr`). A release request authorises
   exactly one push (`vapor-release`). Nothing else is covered.

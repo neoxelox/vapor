@@ -1,6 +1,6 @@
 ---
 name: vapor-debug
-description: Diagnoses Vapor app and vapord daemon failures by correlating live CLI diagnostics, daemon logs, macOS crash reports, and the durable state DB against the source, states the root cause, then proposes a fix plan and waits for approval before changing code. Use when the daemon crashed, will not start, or keeps restarting; when sync is stuck or not converging; when `vapor status` or `vapor doctor` reports an unexpected state, reason, or throttle; when a `./scripts/e2e.sh` run left a failed sandbox to investigate; when a bug, a regression, or a failing test has no obvious cause; or when daemon log output needs a systematic review. macOS only.
+description: Diagnoses Vapor app and vapord daemon failures by correlating live CLI diagnostics, daemon logs, macOS crash reports, and the durable state DB against the source, states the root cause, then proposes a fix plan and waits for approval before changing code. Use when the daemon crashed, will not start, or keeps restarting; when sync is stuck or not converging; when `vapor status` or `vapor doctor` reports an unexpected state, reason, or throttle; when a `./scripts/e2e.sh` run left a failed sandbox to investigate; when a bug, a regression, or a failing test has no obvious cause; or when daemon log output needs a systematic review. The crash-report and launchd steps are macOS only.
 license: GPL-3.0-only
 ---
 
@@ -138,9 +138,15 @@ one, or a new one written per the `vapor-e2e` skill.
 
 ## 7. Wait for confirmation
 
-After the report, stop and wait for the owner to approve the fix plan,
-ask questions, request changes, or add context that changes the
-diagnosis. Do not write code until the owner confirms.
+When the owner asked for a diagnosis, stop after the report. Wait for
+the owner to approve the fix plan, ask questions, request changes, or
+add context that changes the diagnosis. Do not write code until the
+owner confirms.
+
+When the failure belongs to work the owner already asked for (a red
+check or a review finding on a PR, a failing test in the change being
+built), that request covers the fix. State the cause as in step 5, fix
+it, and put the cause in the report.
 
 ## Never
 

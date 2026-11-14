@@ -254,6 +254,7 @@ file.
 - Performance SLOs and benchmark harness: `docs/performance/README.md`
 - Per-surface implementation plans (core, macos, cli): `docs/plans/README.md`
 - Per-surface task lists and the cross-surface roadmap ("what should be done next"): `docs/tasks/README.md`
+- Feature specs, with the numbered decisions behind each feature: `docs/specs/README.md`
 - Contributor operating rules: `AGENTS.md`
 
 ## Contribute

@@ -14,8 +14,8 @@ learns why Vapor works the way it does.
   the question format, the spec template, and the rules for recording
   a decision.
 - **Looking for how the system works now?** Go to
-  `docs/architecture/README.md`. A spec is a dated record and is not
-  kept current after its feature ships.
+  `docs/architecture/README.md`. A spec records decisions and their
+  reasons. It is not rewritten to follow the code.
 
 ## How specs relate to the other groups
 
@@ -32,15 +32,18 @@ learns why Vapor works the way it does.
 - Name: `YYYY-MM-DD-<slug>.md`, dated the day the design starts, with a
   short kebab-case slug.
 - Status line: `designing`, `agreed`, or `implemented YYYY-MM-DD`. The
-  change that builds the feature sets it.
+  design sets `agreed` when the owner says to start, and the change
+  that builds the feature sets `implemented`.
 - Decisions are never rewritten. A later decision replaces an earlier
-  one by number ("D9 replaces D4"), and the earlier one is marked.
+  one by number ("D9 replaces D4"), and the earlier one is marked. A
+  change to a shipped feature is a new round in the same spec.
 - Specs are public, like the rest of the repository
   (`AGENTS.md` §6.1).
 
 ## Documents
 
-None yet. Each spec gets a row here in the change that adds it:
+None yet. Each spec gets a row here in the change that adds it. The
+status lives in the spec file only.
 
-| Spec | Status | What it decides |
-|---|---|---|
+| Spec | What it decides |
+|---|---|

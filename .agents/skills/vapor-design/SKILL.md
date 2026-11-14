@@ -73,13 +73,15 @@ and a scan uses CPU and disk.]
 **Q2.** Is the window one per day, or one per weekday? [One per day.
 Nobody asked for a weekday grid yet.]
 
-**Q3.** Does `vapor reconcile` run inside the window? [Yes. It is the
-user's own request, the same exception the throttle states make.]
+**Q3.** Does the daemon apply a new window live, or after a restart?
+[Live. A setting that needs a restart gets set once and forgotten.]
 ```
 
-The owner answers "ok" to take every recommendation, or corrects
-single lines ("Q2: one per weekday"). A question the owner skips stays
-open; it is not accepted.
+The owner answers "ok" to take every recommendation, and can correct
+single lines with it ("ok, Q2: one per weekday"). Without an "ok", only
+the questions the owner answered are decided. The others stay open and
+go into the next round; an open question is never recorded as a
+decision.
 
 - What the user gets and what must never happen come before
   mechanisms. Settle the behaviour, the failure cases, and the device
@@ -161,7 +163,8 @@ Questions still unanswered, numbered.
 
 ## 4. Build
 
-Start only when the owner says to. Build what the decisions say. If
+Start only when the owner says to, and set the status to `agreed`
+then. Build what the decisions say. If
 the code cannot honour a decision, take it back to the owner as a
 question; do not work around it. When the build raises a new choice,
 ask it as a short round and record the answer like any other.
@@ -173,8 +176,9 @@ When the feature is done:
 - bring the system docs in step (`vapor-docs`). The spec records why;
   `docs/architecture/` describes what the system does now, and must
   stand on its own;
-- keep decision numbers out of code comments and system docs
-  (`AGENTS.md` §8.9). The PR description is where they are cited.
+- keep decision numbers out of code comments and system docs, and
+  spec pointers out of code comments (`AGENTS.md` §8.9). The PR
+  description is where decisions are cited.
 
 The spec stays in `docs/specs/` as the record.
 
@@ -182,3 +186,10 @@ The spec stays in `docs/specs/` as the record.
 
 Read the specs that cover it. A change that contradicts a recorded
 decision is a design question for the owner, not an edit.
+
+When the owner changes a decision of a shipped feature, add a new
+round to the same spec. The new decisions take the next numbers, the
+replaced ones get their mark, and the status goes back to `agreed`
+until the change is built. When a new feature's spec replaces a
+decision of another spec, name both ("D3 replaces D4 of
+`<other spec>`"), and mark the old decision with the new file name.

@@ -311,8 +311,9 @@ environment because the CLI has no secrets or trust chain of its own.
 
 - Every change
   - Make the smallest complete change. No speculative abstraction, no
-    placeholder, no dead code, no unrelated cleanup. An abstraction
-    needs a second use today or a boundary to enforce.
+    dead code, no unrelated cleanup, and no placeholder other than the
+    platform stubs that §9.7 allows. An abstraction needs a second use
+    today or a boundary to enforce.
   - Never hide an error, weaken a type, loosen an assertion, or add a
     suppression to make a check pass.
   - Precedent is not a defence. Existing code that breaks an invariant
@@ -452,9 +453,11 @@ how to read a red run: the `vapor-validate` skill.
   never seen the task lists. The same applies to strings that surface to
   users or logs (e.g. `unimplemented!()` messages), and to prose in
   architecture, operations, development, and CI docs.
-- The same holds for spec decision numbers (`D7`) and pointers to
-  `docs/specs/*`. A spec is a dated record of why; the comment and the
-  system doc must make sense to a reader who has never seen it.
+- The same holds for spec decision numbers (`D7`): none in code
+  comments, in strings, or in system docs. A code comment does not
+  point at `docs/specs/*` either; a system doc may link the spec that
+  records why. Both must make sense to a reader who has never seen the
+  spec.
 - Referencing stable documentation (`docs/architecture/*`, `docs/plans/*`,
   `AGENTS.md` sections) is fine; those documents describe the system, not
   the work schedule.
@@ -535,6 +538,7 @@ these rules win.
 
 **Unslop with voice** for prose a user reads: the root `README.md`.
 Follow all of `unslop`, including its advice on rhythm and opinion.
+The one emoji per Features bullet that §10 asks for stays.
 
 Commit messages, code comments, `CHANGELOG.md`, the documents under
 `docs/`, this file, and the skills follow `unslop` and stay short and
@@ -754,10 +758,10 @@ The invariants behind them:
 - Never commit, rebase, or push on `main` outside the release flow. A
   branch that was rewritten on purpose is pushed with
   `--force-with-lease`, never `--force`.
-- A branch is one commit when its PR opens. The owner merges, as a
-  squash, the only method the repository allows, so the PR title is
-  the commit on `main` and the line in the release notes. Agents never
-  merge.
+- A branch is one commit when its PR opens, and the PR title is that
+  commit's subject. The owner merges, as a squash, the only method the
+  repository allows, so that subject is the commit on `main`. Agents
+  never merge.
 - Every PR gets one adversarial review by the agent's own subagents
   (owner, 2026-11-14). It starts the moment the PR opens and runs
   while CI runs, so it adds no time to the wait. One pass; the agent
@@ -796,15 +800,19 @@ for what is already granted nor acts on what is not.
 - Without asking: run the wrapper scripts the validation ladder calls
   for (§8.4) and the e2e manual sandbox; read repository and PR state
   with `git` and read-only `gh` calls; write scratch files under
-  `.context/` and the repo-local `.vapor/`; and, on a PR the owner
-  asked for, push fixes to its branch and run the adversarial review.
+  `.context/` and the repo-local `.vapor/`; read `~/.vapor` to
+  diagnose a failure the owner reported (`vapor-debug`); and, on a PR
+  the owner asked for, push to its branch (the fix commits, a rebase
+  onto a moved `main`), answer human comments, and run the adversarial
+  review.
 - Only when the owner asks for that specific action: push a branch,
   open a PR, cut or rehearse a release, run e2e against Google Drive,
   change repository settings, release environments, or the action
   allowlist.
 - Never: merge a PR, push to `main` outside the release flow, launch a
   packaged app, run `./scripts/e2e.sh --full` on a contributor machine,
-  touch `~/.vapor`, or use the network in a test.
+  write to `~/.vapor` or run a test or a reproduction against it, or
+  use the network in a test.
 
 ## 11) Definition of done
 
