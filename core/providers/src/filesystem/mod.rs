@@ -11,7 +11,7 @@
 //! Safety properties:
 //! - **Atomic writes**: uploads land in a hidden temp file in the target
 //!   directory and are committed after the payload and the op-id tag are
-//!   complete — renamed into place for the overwrite modes, or
+//!   complete: renamed into place for the overwrite modes, or
 //!   hard-linked (atomic no-clobber) for an `Absent` guard so a
 //!   concurrent writer cannot be silently overwritten. A `HashEquals`
 //!   guard re-checks the target's `(size, mtime)` just before the commit
@@ -118,7 +118,7 @@ pub fn has_internal_segment(remote: &RemotePath) -> bool {
 
 /// Best-effort reap of an orphaned staging temp file. A `TEMP_FILE_PREFIX`
 /// file older than the stale-age threshold is crash residue (an
-/// interrupted upload/download stage) — hidden from sync but never
+/// interrupted upload/download stage): hidden from sync but never
 /// otherwise removed, so it would accumulate across unclean shutdowns.
 /// A young temp file (an in-flight, possibly throttle-paused transfer) is
 /// left alone. Errors are ignored: this is cleanup, never load-bearing.
@@ -150,6 +150,10 @@ pub struct FilesystemProvider {
     root: Mutex<Option<PathBuf>>,
     feed: feed::ChangesFeed,
     feed_mode: FeedMode,
+    /// Entries of the cloud folder whose name cannot be a sync path and
+    /// that this provider has said so about, so each is reported one
+    /// time and not at every listing.
+    reported_names: Mutex<std::collections::BTreeSet<PathBuf>>,
 }
 
 impl FilesystemProvider {
@@ -167,6 +171,7 @@ impl FilesystemProvider {
             root: Mutex::new(None),
             feed: feed::ChangesFeed::new(),
             feed_mode: FeedMode::Native,
+            reported_names: Mutex::new(std::collections::BTreeSet::new()),
         }
     }
 
@@ -240,6 +245,9 @@ impl FilesystemProvider {
         remote: &RemotePath,
         resolved: &Path,
     ) -> Result<Option<RemoteEntry>, ProviderError> {
+        if stored_under_another_spelling(resolved).is_some() {
+            return Ok(None);
+        }
         let metadata = match fs::symlink_metadata(resolved) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -276,6 +284,30 @@ impl FilesystemProvider {
             content_hash: None,
             op_id,
         }))
+    }
+
+    /// Gives each folder on the way to `directory` the spelling the
+    /// path asks for. On a volume that folds names, a folder renamed
+    /// in spelling only resolves to the old folder, so a move into
+    /// `Photos/` would land in `photos/` and the rename of the folder
+    /// would never reach the cloud.
+    fn respell_folders(&self, directory: &Path) -> io::Result<()> {
+        let root = self
+            .canonical_root()
+            .map_err(|error| io::Error::other(error.message))?;
+        let Ok(below_root) = directory.strip_prefix(&root) else {
+            return Ok(());
+        };
+        let mut folder = root;
+        for name in below_root.components() {
+            folder.push(name);
+            if let Some(stored) = stored_under_another_spelling(&folder)
+                && stored.parent() == folder.parent()
+            {
+                fs::rename(&stored, &folder)?;
+            }
+        }
+        Ok(())
     }
 
     fn ensure_feed_started(&self) -> Result<(), ProviderError> {
@@ -357,12 +389,17 @@ impl Provider for FilesystemProvider {
     ) -> Result<(), ProviderError> {
         let resolved_from = self.resolve_in_scope(from)?;
         let resolved_to = self.resolve_in_scope(to)?;
-        if !resolved_from.exists() {
+        if !resolved_from.exists() || stored_under_another_spelling(&resolved_from).is_some() {
             return Err(ProviderError::not_found(format!(
                 "move source {from} does not exist"
             )));
         }
-        if fs::symlink_metadata(&resolved_to).is_ok() {
+        // On a volume that folds names, a destination that is another
+        // spelling of the source's own name resolves to the source:
+        // that is the rename asked for, not an occupied name.
+        let respelling_the_source = stored_under_another_spelling(&resolved_to)
+            .is_some_and(|stored| stored == resolved_from);
+        if fs::symlink_metadata(&resolved_to).is_ok() && !respelling_the_source {
             return Err(ProviderError::precondition_failed(format!(
                 "move destination {to} already exists"
             )));
@@ -371,6 +408,11 @@ impl Provider for FilesystemProvider {
             fs::create_dir_all(parent).map_err(|error| {
                 ProviderError::transient(format!(
                     "cannot create the destination directory for {to}: {error}"
+                ))
+            })?;
+            self.respell_folders(parent).map_err(|error| {
+                ProviderError::transient(format!(
+                    "cannot rename the destination directory for {to}: {error}"
                 ))
             })?;
         }
@@ -461,10 +503,17 @@ impl Provider for FilesystemProvider {
                 // Unrepresentable in the UTF-8 RemotePath: log so a file
                 // that never syncs is diagnosable rather than silently
                 // absent (macOS enforces UTF-8 names, so this is rare).
-                crate::logging::warning(
-                    "Skipping non-UTF-8 remote file name during enumeration (cannot be synced)",
-                    &[("path", dir_entry.path().to_string_lossy().into_owned())],
-                );
+                let first_report = self
+                    .reported_names
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(dir_entry.path());
+                if first_report {
+                    crate::logging::warning(
+                        "A file in the cloud folder has a name that is not valid UTF-8; it cannot be synced. Rename it",
+                        &[("path", dir_entry.path().to_string_lossy().into_owned())],
+                    );
+                }
                 continue;
             };
             if is_internal_file_name(name) {
@@ -492,6 +541,11 @@ impl Provider for FilesystemProvider {
 
     fn content_hash(&self, path: &RemotePath) -> Result<String, ProviderError> {
         let resolved = self.resolve_in_scope(path)?;
+        if stored_under_another_spelling(&resolved).is_some() {
+            return Err(ProviderError::not_found(format!(
+                "remote file {path} does not exist"
+            )));
+        }
         hash_hex_of_file(&resolved).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 ProviderError::not_found(format!("remote file {path} does not exist"))
@@ -506,6 +560,15 @@ impl Provider for FilesystemProvider {
         request: UploadRequest,
     ) -> Result<Box<dyn TransferSession>, ProviderError> {
         let target = self.resolve_in_scope(&request.remote_path)?;
+        if stored_under_another_spelling(&target).is_some() {
+            // The folder holds this name under another spelling, and
+            // writing here would replace that object. Its own deletion
+            // or move frees the name; until then the upload waits.
+            return Err(ProviderError::transient(format!(
+                "the cloud folder holds {} under another spelling; waiting for that name to go",
+                request.remote_path
+            )));
+        }
         let source = fs::File::open(&request.local_source).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 ProviderError::not_found(format!(
@@ -583,6 +646,7 @@ impl Provider for FilesystemProvider {
             }
         };
 
+        let source_len = source.metadata().map(|metadata| metadata.len()).ok();
         Ok(Box::new(FilesystemUploadSession {
             source,
             temp: Some(temp),
@@ -597,6 +661,7 @@ impl Provider for FilesystemProvider {
             tags: self.tags.clone(),
             hasher: Sha256::new(),
             bytes_total: 0,
+            source_len,
             finished: false,
         }))
     }
@@ -606,6 +671,12 @@ impl Provider for FilesystemProvider {
         request: DownloadRequest,
     ) -> Result<Box<dyn TransferSession>, ProviderError> {
         let resolved = self.resolve_in_scope(&request.remote_path)?;
+        if stored_under_another_spelling(&resolved).is_some() {
+            return Err(ProviderError::not_found(format!(
+                "remote file {} does not exist",
+                request.remote_path
+            )));
+        }
         let source = fs::File::open(&resolved).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 ProviderError::not_found(format!(
@@ -634,6 +705,7 @@ impl Provider for FilesystemProvider {
             ))
         })?;
 
+        let source_len = source.metadata().map(|metadata| metadata.len()).ok();
         Ok(Box::new(FilesystemDownloadSession {
             source,
             destination: Some(destination),
@@ -641,12 +713,20 @@ impl Provider for FilesystemProvider {
             remote_path: request.remote_path,
             hasher: Sha256::new(),
             bytes_total: 0,
+            source_len,
             finished: false,
         }))
     }
 
     fn delete(&self, path: &RemotePath, _op_id: &str) -> Result<(), ProviderError> {
         let resolved = self.resolve_in_scope(path)?;
+        if stored_under_another_spelling(&resolved).is_some() {
+            // Another spelling of the name is another object; removing
+            // through this one would delete it.
+            return Err(ProviderError::not_found(format!(
+                "remote file {path} was already gone"
+            )));
+        }
         match fs::remove_file(&resolved) {
             Ok(()) => {
                 let _ = self.tags.remove(&resolved);
@@ -693,6 +773,18 @@ impl Provider for FilesystemProvider {
 /// Removes Vapor's internal files (staging temps, op-id side-files)
 /// directly inside `directory` and nothing else. Used before deleting
 /// a directory the engine believes is empty.
+/// The stored path when the cloud folder holds the entry `resolved`
+/// names under another spelling. A cloud keeps `Report.txt` and
+/// `report.txt` apart, and the engine relies on that: a folder on a
+/// volume that folds names must not answer for a spelling it does not
+/// store.
+fn stored_under_another_spelling(resolved: &Path) -> Option<PathBuf> {
+    match vapor_shared::paths::stored_spelling(resolved) {
+        vapor_shared::paths::StoredSpelling::Other(stored) => Some(stored),
+        _ => None,
+    }
+}
+
 fn reap_internal_files(directory: &Path) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;
@@ -799,7 +891,7 @@ fn copy_permissions_from_handle(source: &fs::File, staged: &Path) {
 fn copy_permissions_from_handle(_source: &fs::File, _staged: &Path) {}
 
 /// A scope-resolution failure has two very different causes: a genuinely
-/// out-of-scope path (permanent — never retry) and the cloud sync root
+/// out-of-scope path (permanent, never retry) and the cloud sync root
 /// itself having vanished under a running daemon (deleted, unmounted).
 /// In the latter case the deepest-existing ancestor of *every* legal
 /// path resolves through the root's parent, so the escape check fires
@@ -896,18 +988,30 @@ struct FilesystemUploadSession {
     tags: OpIdTagStore,
     hasher: Sha256,
     bytes_total: u64,
+    /// The source's size when the upload began.
+    source_len: Option<u64>,
     finished: bool,
+}
+
+/// A failed write of an upload's temp file. A volume with no room left
+/// is the cloud being full: the upload waits for space, it does not
+/// burn its retries.
+fn upload_write_error(remote_path: &RemotePath, action: &str, error: &io::Error) -> ProviderError {
+    if error.kind() == io::ErrorKind::StorageFull {
+        return ProviderError::storage_full(format!(
+            "the cloud folder's volume is full ({remote_path}); free space, then uploads resume"
+        ));
+    }
+    ProviderError::transient(format!(
+        "cannot {action} temp file for {remote_path}: {error}"
+    ))
 }
 
 impl FilesystemUploadSession {
     fn finalize(&mut self) -> Result<TransferOutcome, ProviderError> {
         let temp = self.temp.take().expect("finalize called with live temp");
-        temp.sync_all().map_err(|error| {
-            ProviderError::transient(format!(
-                "cannot sync temp file for {}: {error}",
-                self.remote_path
-            ))
-        })?;
+        temp.sync_all()
+            .map_err(|error| upload_write_error(&self.remote_path, "sync", &error))?;
         drop(temp);
 
         // Tag the temp file first so the rename lands a fully-tagged
@@ -980,7 +1084,7 @@ impl FilesystemUploadSession {
     /// overwrite modes (`None`/`HashEquals`) rename unconditionally.
     /// The no-clobber commit must be a rename, never a hard-link +
     /// unlink pair: FSEvents tracks file events by node, and a link-
-    /// created target stays bound to the deleted temp name — every
+    /// created target stays bound to the deleted temp name: every
     /// later external edit or deletion of the uploaded file would then
     /// be invisible to the changes feed (observed live as a cloud-side
     /// `rm` that never propagated).
@@ -1058,6 +1162,15 @@ fn current_size_mtime(path: &Path) -> Option<(u64, SystemTime)> {
 }
 
 impl TransferSession for FilesystemUploadSession {
+    fn remaining_bytes(&self) -> Option<u64> {
+        // The check of the old remote copy reads a file of another size.
+        if matches!(self.phase, UploadPhase::VerifyingHash { .. }) {
+            return None;
+        }
+        self.source_len
+            .map(|len| len.saturating_sub(self.bytes_total).max(1))
+    }
+
     fn step(&mut self, max_bytes: u64) -> Result<TransferStep, ProviderError> {
         debug_assert!(!self.finished, "step called after completion");
 
@@ -1091,12 +1204,8 @@ impl TransferSession for FilesystemUploadSession {
                 return Ok(TransferStep::Completed(outcome));
             }
             let temp = self.temp.as_mut().expect("temp lives until finalize");
-            temp.write_all(&buffer[..read]).map_err(|error| {
-                ProviderError::transient(format!(
-                    "cannot write temp file for {}: {error}",
-                    self.remote_path
-                ))
-            })?;
+            temp.write_all(&buffer[..read])
+                .map_err(|error| upload_write_error(&self.remote_path, "write", &error))?;
             self.hasher.update(&buffer[..read]);
             self.bytes_total += read as u64;
             transferred += read as u64;
@@ -1132,10 +1241,17 @@ struct FilesystemDownloadSession {
     remote_path: RemotePath,
     hasher: Sha256,
     bytes_total: u64,
+    /// The remote file's size when the download began.
+    source_len: Option<u64>,
     finished: bool,
 }
 
 impl TransferSession for FilesystemDownloadSession {
+    fn remaining_bytes(&self) -> Option<u64> {
+        self.source_len
+            .map(|len| len.saturating_sub(self.bytes_total).max(1))
+    }
+
     fn step(&mut self, max_bytes: u64) -> Result<TransferStep, ProviderError> {
         debug_assert!(!self.finished, "step called after completion");
         let mut remaining = max_bytes;
@@ -1853,6 +1969,87 @@ mod tests {
             FilesystemProvider::with_manual_feed(&cloud, caps).expect("manual provider");
         assert_eq!(provider.name(), "filesystem");
         assert!(provider.capabilities().supports_remote_changes_feed);
+    }
+
+    #[test]
+    fn another_spelling_of_a_name_is_another_object() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let provider = provider_at(dir.path());
+        let root = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        fs::write(root.join("Report.txt"), b"payload").expect("seed");
+        if fs::symlink_metadata(root.join("report.txt")).is_err() {
+            // This volume keeps the two spellings apart by itself.
+            return;
+        }
+        let other = RemotePath::new("report.txt").expect("path");
+
+        assert_eq!(provider.stat(&other).expect("stat"), None);
+        assert_eq!(
+            provider.content_hash(&other).expect_err("hash").kind,
+            vapor_shared::ProviderErrorKind::NotFound
+        );
+        assert_eq!(
+            provider.delete(&other, "op").expect_err("delete").kind,
+            vapor_shared::ProviderErrorKind::NotFound
+        );
+        assert!(root.join("Report.txt").exists(), "the stored object stays");
+        let download = provider.begin_download(DownloadRequest {
+            remote_path: other.clone(),
+            destination: dir.path().join("out"),
+        });
+        assert_eq!(
+            download.err().expect("download").kind,
+            vapor_shared::ProviderErrorKind::NotFound
+        );
+    }
+
+    #[test]
+    fn a_move_can_change_only_the_spelling_of_a_file_or_of_its_folder() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let provider = provider_at(dir.path());
+        let root = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        fs::create_dir(root.join("photos")).expect("dir");
+        fs::write(root.join("photos/report.txt"), b"payload").expect("seed");
+        let names = |directory: &Path| -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(directory)
+                .expect("list")
+                .map(|entry| {
+                    entry
+                        .expect("entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            names.sort();
+            names
+        };
+
+        provider
+            .move_object(
+                &RemotePath::new("photos/report.txt").expect("path"),
+                &RemotePath::new("photos/Report.txt").expect("path"),
+                "op-1",
+            )
+            .expect("a change of spelling is a move");
+        assert_eq!(names(&root.join("photos")), vec!["Report.txt"]);
+
+        provider
+            .move_object(
+                &RemotePath::new("photos/Report.txt").expect("path"),
+                &RemotePath::new("Photos/Report.txt").expect("path"),
+                "op-2",
+            )
+            .expect("a move into the folder's new spelling");
+        if fs::symlink_metadata(root.join("PHOTOS")).is_ok() {
+            // A volume that folds names holds one folder; it took the
+            // new spelling.
+            assert_eq!(names(&root), vec!["Photos"]);
+        }
+        assert_eq!(
+            fs::read(root.join("Photos/Report.txt")).expect("moved"),
+            b"payload"
+        );
     }
 
     #[test]

@@ -17,6 +17,12 @@
 //! - `throttle_inputs` reports where the daemon's throttle signals come
 //!   from on this host.
 //! - `host_launch_agent_plist` (macOS) is present at the documented path.
+//! - `profiles` says when no sync profile exists yet and which command
+//!   sets one up, or what in `vapor.json` stops one from running.
+//! - `profile:<id>`, one for each profile: its local root can be listed
+//!   and written, its cloud root can be listed (filesystem provider),
+//!   and it is signed in (a provider with an account). A refused macOS
+//!   privacy permission is named with where to allow it.
 //!
 //! The report renders as text rows or, with `--json`, as
 //! `{"checks": [...], "worstStatus": "..."}`.
@@ -117,6 +123,13 @@ pub fn run() -> DoctorReport {
         check_gdrive_oauth_client(vapor_providers::gdrive::oauth::client_credentials()),
         check_throttle_inputs(std::env::var(constants::env::VAPOR_THROTTLE_INPUTS).ok()),
     ];
+    let config = vapor_shared::config::load_default();
+    checks.extend(check_profiles(
+        &config,
+        vapor_platform::open_store(vapor_platform::SecretAccess::Interactive)
+            .ok()
+            .as_deref(),
+    ));
     if cfg!(target_os = "macos") {
         checks.push(check_macos_launch_agent_plist());
     }
@@ -133,7 +146,7 @@ fn check_vapor_directory(path: &Path) -> DoctorCheck {
             name,
             status: DoctorCheckStatus::Warning,
             detail: format!(
-                "{} does not exist yet — `vapor run` will create it on first start",
+                "{} does not exist yet: `vapor run` will create it on first start",
                 path.display()
             ),
         };
@@ -189,11 +202,9 @@ fn private_mode_violation(_path: &Path) -> Option<String> {
     None
 }
 
-/// Surfaces the socket relocation so it is never a silent surprise: a
-/// deep `vapor_dir` used to cost the daemon its IPC endpoint with only
-/// a log WARNING while `vapor status` claimed the daemon was not
-/// running. Warning (not Failure) — the relocation is functional, but
-/// the user should know their socket is not at the canonical path.
+/// Surfaces the socket relocation so it is never a silent surprise.
+/// Warning, not Failure: the relocation works, but the user should
+/// know that the socket is not at the canonical path.
 fn check_ipc_socket_path(location: &vapor_shared::runtime_paths::IpcSocketLocation) -> DoctorCheck {
     let name = constants::doctor::CHECK_IPC_SOCKET.to_string();
     if location.path.as_os_str().len() > constants::ipc::MAX_SOCKET_PATH_BYTES {
@@ -249,10 +260,140 @@ fn check_daemon_binary(found: Option<daemon_binary::DaemonBinary>) -> DoctorChec
 
 /// Whether `vapor auth login` tokens outlive the process on this OS.
 /// Constructing the store touches nothing, so this never prompts.
+/// The profile set, then one row for each profile that can run.
+fn check_profiles(
+    load: &vapor_shared::config::VaporConfigLoadResult,
+    secrets: Option<&dyn vapor_platform::SecretStore>,
+) -> Vec<DoctorCheck> {
+    let set = vapor_daemon::profiles::resolve_profile_set(load);
+    let mut checks = Vec::new();
+    if set.is_unconfigured() {
+        checks.push(DoctorCheck {
+            name: constants::doctor::CHECK_PROFILES.to_string(),
+            status: DoctorCheckStatus::Warning,
+            detail: "no sync profile yet; set one up with `vapor profiles add`".to_string(),
+        });
+        return checks;
+    }
+    if !set.problems.is_empty() {
+        checks.push(DoctorCheck {
+            name: constants::doctor::CHECK_PROFILES.to_string(),
+            status: DoctorCheckStatus::Failure,
+            detail: set.problems.join("; "),
+        });
+    }
+    for profile in set.profiles.iter().filter(|profile| profile.enabled) {
+        checks.push(check_profile(profile, secrets));
+    }
+    checks
+}
+
+fn check_profile(
+    profile: &vapor_daemon::profiles::ResolvedProfile,
+    secrets: Option<&dyn vapor_platform::SecretStore>,
+) -> DoctorCheck {
+    let name = format!("{}{}", constants::doctor::CHECK_PROFILE_PREFIX, profile.id);
+    let failure = |detail: String| DoctorCheck {
+        name: name.clone(),
+        status: DoctorCheckStatus::Failure,
+        detail,
+    };
+    if let Some(reason) = &profile.invalid {
+        return failure(format!("cannot run as configured: {reason}"));
+    }
+    let Some(local_root) = profile.scope.local_root.as_deref() else {
+        return failure("the local root does not resolve to a folder".to_string());
+    };
+    let mut notes = Vec::new();
+    if local_root.is_dir() {
+        if let Err(problem) = folder_can_be_listed(local_root) {
+            return failure(format!("local root {}: {problem}", local_root.display()));
+        }
+        if let Err(problem) = folder_can_be_written(local_root) {
+            return failure(format!("local root {}: {problem}", local_root.display()));
+        }
+        notes.push(format!(
+            "local root {} reads and writes",
+            local_root.display()
+        ));
+    } else {
+        notes.push(format!(
+            "local root {} is not there (created at the first start; a root that synced before is waited for)",
+            local_root.display()
+        ));
+    }
+    if profile.provider_kind.trim() == constants::provider::FILESYSTEM {
+        let cloud_root = Path::new(profile.scope.cloud_root.as_str());
+        if cloud_root.is_dir() {
+            if let Err(problem) = folder_can_be_listed(cloud_root) {
+                return failure(format!("cloud root {}: {problem}", cloud_root.display()));
+            }
+            notes.push(format!("cloud root {} reads", cloud_root.display()));
+        } else {
+            notes.push(format!(
+                "cloud root {} is not there yet",
+                cloud_root.display()
+            ));
+        }
+    } else if constants::provider::SIGN_IN_REQUIRED.contains(&profile.provider_kind.as_str()) {
+        // Names only: a check must not read a secret, which could
+        // open a keychain dialog.
+        let token_name =
+            vapor_daemon::profiles::secret_key(&profile.id, &profile.provider_kind, "token");
+        let signed_in = secrets
+            .is_some_and(|store| store.list().is_ok_and(|names| names.contains(&token_name)));
+        if !signed_in {
+            return DoctorCheck {
+                name,
+                status: DoctorCheckStatus::Warning,
+                detail: format!(
+                    "not signed in to {}; run `vapor auth login --profile {}`",
+                    profile.provider_kind, profile.id
+                ),
+            };
+        }
+        notes.push(format!("signed in to {}", profile.provider_kind));
+    }
+    DoctorCheck {
+        name,
+        status: DoctorCheckStatus::Ok,
+        detail: notes.join("; "),
+    }
+}
+
+/// A permission error with what to do about it on macOS, where a
+/// background process needs the user's consent for some folders.
+fn describe_access_error(error: &std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        format!("permission denied; {}", constants::FOLDER_ACCESS_HINT)
+    } else {
+        error.to_string()
+    }
+}
+
+fn folder_can_be_listed(folder: &Path) -> Result<(), String> {
+    fs::read_dir(folder)
+        .map(|_| ())
+        .map_err(|error| format!("cannot be listed: {}", describe_access_error(&error)))
+}
+
+/// Creates and removes one file under Vapor's own temp prefix, which
+/// the watcher and the walk ignore.
+fn folder_can_be_written(folder: &Path) -> Result<(), String> {
+    let probe = folder.join(format!(
+        "{}doctor-{}",
+        constants::provider::TEMP_FILE_PREFIX,
+        std::process::id()
+    ));
+    let written = fs::write(&probe, b"")
+        .map_err(|error| format!("cannot be written: {}", describe_access_error(&error)));
+    let _ = fs::remove_file(&probe);
+    written
+}
+
 fn check_secret_store() -> DoctorCheck {
-    use vapor_platform::SecretStore;
     let name = constants::doctor::CHECK_SECRET_STORE.to_string();
-    match vapor_platform::NativeSecretStore::for_current_user() {
+    match vapor_platform::open_store(vapor_platform::SecretAccess::Interactive) {
         Ok(store) if store.is_persistent() => DoctorCheck {
             name,
             status: DoctorCheckStatus::Ok,
@@ -447,6 +588,90 @@ fn is_writable(path: &Path) -> bool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn load(contents: serde_json::Value) -> (TempDir, vapor_shared::config::VaporConfigLoadResult) {
+        let temp = TempDir::new().expect("temp");
+        let path = temp.path().join("vapor.json");
+        fs::write(&path, contents.to_string()).expect("seed config");
+        let load = vapor_shared::config::load_from(&path);
+        (temp, load)
+    }
+
+    #[test]
+    fn an_install_with_no_profile_is_told_which_command_sets_one_up() {
+        let (_temp, load) = load(serde_json::json!({}));
+        let checks = check_profiles(&load, None);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "profiles");
+        assert_eq!(checks[0].status, DoctorCheckStatus::Warning);
+        assert!(checks[0].detail.contains("vapor profiles add"));
+    }
+
+    #[test]
+    fn each_profile_gets_a_check_of_its_roots_and_its_sign_in() {
+        let temp = TempDir::new().expect("temp");
+        let local = temp.path().join("local");
+        let cloud = temp.path().join("cloud");
+        fs::create_dir_all(&local).expect("local");
+        fs::create_dir_all(&cloud).expect("cloud");
+        let (_config, load) = load(serde_json::json!({
+            "profiles": [
+                { "id": "files", "localRoot": local, "cloudRoot": cloud },
+                { "id": "drive", "provider": "gdrive", "localRoot": temp.path().join("d"),
+                  "cloudRoot": "/Vapor" },
+                { "id": "typo", "localRoot": local, "cloudRoot": cloud, "syncMode": "mirror" },
+            ]
+        }));
+        let store = vapor_platform::InMemorySecretStore::new();
+        let checks = check_profiles(&load, Some(&store));
+        let by_name = |name: &str| {
+            checks
+                .iter()
+                .find(|check| check.name == name)
+                .unwrap_or_else(|| panic!("{name} in {checks:?}"))
+        };
+        let files = by_name("profile:files");
+        assert_eq!(files.status, DoctorCheckStatus::Ok, "{}", files.detail);
+        assert!(files.detail.contains("reads and writes"));
+        assert!(
+            fs::read_dir(&local).expect("list").next().is_none(),
+            "the write probe leaves nothing behind"
+        );
+        let drive = by_name("profile:drive");
+        assert_eq!(drive.status, DoctorCheckStatus::Warning);
+        assert!(drive.detail.contains("vapor auth login --profile drive"));
+        let typo = by_name("profile:typo");
+        assert_eq!(typo.status, DoctorCheckStatus::Failure);
+        assert!(typo.detail.contains("\"mirror\""), "{}", typo.detail);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_cannot_be_read_names_where_to_allow_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().expect("temp");
+        let local = temp.path().join("local");
+        let cloud = temp.path().join("cloud");
+        fs::create_dir_all(&local).expect("local");
+        fs::create_dir_all(&cloud).expect("cloud");
+        let (_config, load) = load(serde_json::json!({ "localRoot": local, "cloudRoot": cloud }));
+        fs::set_permissions(&local, fs::Permissions::from_mode(0o000)).expect("lock");
+        let readable_anyway = fs::read_dir(&local).is_ok();
+        let checks = check_profiles(&load, None);
+        fs::set_permissions(&local, fs::Permissions::from_mode(0o755)).expect("unlock");
+        if readable_anyway {
+            return;
+        }
+        let check = &checks[0];
+        assert_eq!(check.name, "profile:default");
+        assert_eq!(check.status, DoctorCheckStatus::Failure);
+        assert!(
+            check.detail.contains("permission denied")
+                && check.detail.contains("Privacy & Security"),
+            "{}",
+            check.detail
+        );
+    }
 
     #[test]
     fn vapor_dir_check_warns_when_missing() {

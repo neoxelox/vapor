@@ -12,13 +12,13 @@
 //!   resolves or creates the configured folder chain; failures surface
 //!   as actionable errors and the engine blocks sync until it works.
 //! - **Uploads**: multipart for small payloads, resumable
-//!   chunked sessions for large ones, chunk size auto-tuned across
+//!   chunked sessions for large ones, chunk size tuned across
 //!   sessions, rate-limit aware classification throughout.
 //! - **Changes**: `changes.list` with a persisted page token;
 //!   a 410 maps to `ChangesPoll::CursorExpired`, which the engine
 //!   answers with a whole-scope reconcile + re-baseline.
 //! - **Deletes** move files to the Drive trash (recoverable) rather
-//!   than purging — consistent with Vapor's data-preservation posture.
+//!   than purging: consistent with Vapor's data-preservation posture.
 //!
 //! Op-ids ride in `appProperties.vaporOpId`; content hashes use Drive's
 //! metadata `md5Checksum` (the engine's hash stage follows
@@ -107,6 +107,8 @@ struct TokenManager {
     /// still holds it, a call fails without another token request; a
     /// new sign-in stores a different one and the next call uses it.
     rejected_refresh_token: Mutex<Option<String>>,
+    /// Held for the length of a token refresh, so only one runs.
+    refreshing: Mutex<()>,
 }
 
 impl TokenManager {
@@ -129,12 +131,22 @@ impl TokenManager {
         let raw = self
             .secrets
             .get(&self.config.token_secret_name())
-            .map_err(|_| {
-                ProviderError::authentication(format!(
-                    "no Google Drive credentials for profile '{}'; {}",
+            .map_err(|error| match error {
+                vapor_platform::SecretStoreError::NotFound(_) => {
+                    ProviderError::authentication(format!(
+                        "no Google Drive credentials for profile '{}'; {}",
+                        self.config.profile_id,
+                        self.sign_in_hint()
+                    ))
+                }
+                // The store holds something and did not give it: the
+                // keychain would have asked, or it failed. A new
+                // sign-in writes an item this build can read.
+                refused => ProviderError::authentication(format!(
+                    "the Google Drive credentials for profile '{}' could not be read ({refused}); {}",
                     self.config.profile_id,
                     self.sign_in_hint()
-                ))
+                )),
             })?;
         let tokens: StoredTokens = serde_json::from_str(&raw).map_err(|_| {
             ProviderError::authentication(format!(
@@ -170,6 +182,17 @@ impl TokenManager {
         let tokens = self.load()?;
         let now_ms = Self::now_ms();
         if tokens.expires_at_ms > now_ms + TOKEN_REFRESH_MARGIN_MS {
+            return Ok(tokens.access_token);
+        }
+        // One refresh at a time. Several workers find the token near its
+        // end at the same moment; the first one asks, and the others
+        // take what it stored.
+        let _refreshing = self
+            .refreshing
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tokens = self.load()?;
+        if tokens.expires_at_ms > Self::now_ms() + TOKEN_REFRESH_MARGIN_MS {
             return Ok(tokens.access_token);
         }
         self.force_refresh(&tokens)
@@ -306,6 +329,18 @@ const FILE_FIELDS: &str =
 // Provider
 // ---------------------------------------------------------------------
 
+/// How many files of one name in one folder a lookup reads. The lowest
+/// id among them is the file the name stands for.
+const DUPLICATE_NAME_PAGE: usize = 100;
+
+/// How long a folder id that a request confirmed stands without another
+/// request. A path lookup would otherwise confirm every folder above it
+/// again: a stat five folders deep cost six requests, and an upload
+/// into that folder about fifteen. The changes feed drops a folder from
+/// the cache as soon as it reports the folder changed, so the window
+/// only covers a change the feed has not delivered yet.
+const FOLDER_ID_TRUST: Duration = Duration::from_secs(60);
+
 pub struct GoogleDriveProvider {
     tokens: Arc<TokenManager>,
     /// Resolved id of the configured cloud root folder.
@@ -319,6 +354,14 @@ pub struct GoogleDriveProvider {
     out_of_scope: Mutex<BTreeMap<String, SystemTime>>,
     /// Learned resumable chunk size, shared across sessions.
     chunk_hint: Arc<Mutex<u64>>,
+    /// Ids of files this provider leaves in the cloud and has said so
+    /// about: one that shares its name with another file in the same
+    /// folder and lost the choice, and one whose name cannot be a sync
+    /// path. Each is reported one time.
+    reported_duplicates: Mutex<std::collections::BTreeSet<String>>,
+    /// When each cached folder path was last confirmed by a request
+    /// ([`FOLDER_ID_TRUST`]).
+    folder_confirmed_at: Mutex<BTreeMap<String, std::time::Instant>>,
 }
 
 impl GoogleDriveProvider {
@@ -334,10 +377,13 @@ impl GoogleDriveProvider {
                 transport,
                 cached: Mutex::new(None),
                 rejected_refresh_token: Mutex::new(None),
+                refreshing: Mutex::new(()),
             }),
             root_id: Mutex::new(None),
             id_by_path: Mutex::new(BTreeMap::new()),
             path_by_id: Mutex::new(BTreeMap::new()),
+            reported_duplicates: Mutex::new(std::collections::BTreeSet::new()),
+            folder_confirmed_at: Mutex::new(BTreeMap::new()),
             out_of_scope: Mutex::new(BTreeMap::new()),
             chunk_hint: Arc::new(Mutex::new(CHUNK_START)),
         }
@@ -354,8 +400,11 @@ impl GoogleDriveProvider {
                 vapor_shared::constants::env::VAPOR_GDRIVE_CLIENT_ID
             ))
         })?;
-        let secrets = vapor_platform::NativeSecretStore::for_current_user()
-            .map(|store| Arc::new(store) as Arc<dyn SecretStore>)
+        // The provider runs inside the daemon: a read of the tokens that
+        // would open a keychain dialog fails instead, and the profile
+        // holds for a sign-in.
+        let secrets = vapor_platform::open_store(vapor_platform::SecretAccess::Background)
+            .map(Arc::<dyn SecretStore>::from)
             .map_err(|error| {
                 ProviderError::authentication(format!("secret store unavailable: {error}"))
             })?;
@@ -435,6 +484,48 @@ impl GoogleDriveProvider {
             .insert(id.to_string(), path.to_string());
     }
 
+    /// Records where a file the changes feed reported lives. Drive lets
+    /// two files in one folder have one name. A path is bound to the
+    /// file with the lower id (the rule `find_child` applies), so a
+    /// change of the other file must not rebind it: the path would name
+    /// different files at different times.
+    fn cache_changed_file(&self, path: &str, id: &str) {
+        let bound_to_another_file = self
+            .id_by_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(path)
+            .is_some_and(|bound| bound.as_str() < id);
+        if bound_to_another_file {
+            self.path_by_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(id.to_string(), path.to_string());
+            return;
+        }
+        self.cache_mapping(path, id);
+    }
+
+    /// Says one time that a file shares its name with another one in
+    /// the same folder and is left in the cloud.
+    fn report_duplicate(&self, path: &str, kept: &GdFile, left: &GdFile) {
+        let first_report = self
+            .reported_duplicates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(left.id.clone());
+        if first_report {
+            logging::warning(
+                "Two files in the cloud folder share one name; Vapor syncs one and leaves the other in the cloud. Rename one of them in Google Drive",
+                &[
+                    ("path", path.to_string()),
+                    ("synced_file_id", kept.id.clone()),
+                    ("left_file_id", left.id.clone()),
+                ],
+            );
+        }
+    }
+
     fn evict_path(&self, path: &str) {
         let id = self
             .id_by_path
@@ -447,6 +538,58 @@ impl GoogleDriveProvider {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&id);
         }
+        // A folder that changed takes the trust of everything under it
+        // with it: those paths hang off the old place.
+        let below = format!("{path}/");
+        self.folder_confirmed_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|folder, _| folder != path && !folder.starts_with(&below));
+    }
+
+    /// Notes that a request just confirmed `path` as a folder with the
+    /// id the cache holds for it.
+    fn trust_folder(&self, path: &str) {
+        self.folder_confirmed_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(path.to_string(), std::time::Instant::now());
+    }
+
+    /// The cached id of the folder at `path`, when a request confirmed
+    /// it within [`FOLDER_ID_TRUST`].
+    fn trusted_folder_id(&self, path: &str) -> Option<String> {
+        let confirmed_at = self
+            .folder_confirmed_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(path)
+            .copied()?;
+        if confirmed_at.elapsed() > FOLDER_ID_TRUST {
+            return None;
+        }
+        self.id_by_path
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(path)
+            .cloned()
+    }
+
+    /// The id of the folder at `path`: the trusted one, or the one a
+    /// lookup finds, which is then trusted. `None` when there is no
+    /// folder there.
+    fn resolve_folder_id(&self, path: &RemotePath) -> Result<Option<String>, ProviderError> {
+        if let Some(id) = self.trusted_folder_id(path.as_str()) {
+            return Ok(Some(id));
+        }
+        match self.resolve(path)? {
+            Some(file) if file.mime_type == FOLDER_MIME => {
+                self.cache_mapping(path.as_str(), &file.id);
+                self.trust_folder(path.as_str());
+                Ok(Some(file.id))
+            }
+            _ => Ok(None),
+        }
     }
 
     fn find_child(&self, parent_id: &str, name: &str) -> Result<Option<GdFile>, ProviderError> {
@@ -456,15 +599,17 @@ impl GoogleDriveProvider {
             escape_query(name)
         );
         let url = format!(
-            "{API_BASE}/files?q={}&fields=files({FILE_FIELDS})&pageSize=2",
+            "{API_BASE}/files?q={}&fields=files({FILE_FIELDS})&pageSize={DUPLICATE_NAME_PAGE}",
             oauth::url_encode(&query)
         );
         let list: GdFileList = self.api_json("GET", url, None)?;
         // Drive allows multiple children with the same name in one folder.
         // Pick the smallest id deterministically so the binding cannot flip
-        // across calls/restarts — an unstable binding manufactures endless
+        // across calls/restarts: an unstable binding manufactures endless
         // keep-both conflicts (two-way) and a never-converging mirror
-        // (push-only).
+        // (push-only). The page is large enough to hold every file of
+        // that name: with a page of two, a third file made the choice
+        // depend on the order Drive answered in.
         Ok(list
             .files
             .into_iter()
@@ -487,8 +632,8 @@ impl GoogleDriveProvider {
             return Ok(false);
         }
         let expected_parent = match path.parent() {
-            Some(parent) if !parent.is_root() => match self.resolve(&parent)? {
-                Some(parent_file) => parent_file.id,
+            Some(parent) if !parent.is_root() => match self.resolve_folder_id(&parent)? {
+                Some(parent_id) => parent_id,
                 None => return Ok(false),
             },
             _ => root_id.to_string(),
@@ -563,6 +708,10 @@ impl GoogleDriveProvider {
         if parent.is_root() {
             return Ok(root_id);
         }
+        // The common case: another upload into this folder a moment ago.
+        if let Some(id) = self.trusted_folder_id(parent.as_str()) {
+            return Ok(id);
+        }
         let mut parent_id = root_id;
         let mut walked = String::new();
         for segment in parent.as_str().split('/') {
@@ -570,11 +719,16 @@ impl GoogleDriveProvider {
                 walked.push('/');
             }
             walked.push_str(segment);
+            if let Some(id) = self.trusted_folder_id(&walked) {
+                parent_id = id;
+                continue;
+            }
             parent_id = match self.find_child(&parent_id, segment)? {
                 Some(existing) => existing.id,
                 None => self.create_folder(&parent_id, segment)?,
             };
             self.cache_mapping(&walked, &parent_id);
+            self.trust_folder(&walked);
         }
         Ok(parent_id)
     }
@@ -628,7 +782,7 @@ impl GoogleDriveProvider {
         if self.is_known_out_of_scope(&file.id) {
             return None;
         }
-        // Any previously-cached path for this id is the OLD path — it must
+        // Any previously-cached path for this id is the OLD path: it must
         // NOT be trusted as the current one: a remote rename/move keeps the
         // id but changes the name/parent. Recompute the fresh path from the
         // change's own name + parents; the parent short-circuit against
@@ -696,7 +850,7 @@ impl GoogleDriveProvider {
         if let Some(old) = &old_path {
             self.evict_path(old);
         }
-        self.cache_mapping(&new_path, &file.id);
+        self.cache_changed_file(&new_path, &file.id);
         // It resolved in-scope, so drop any stale out-of-scope verdict
         // (the file may have just been moved into the sync root).
         self.out_of_scope
@@ -851,7 +1005,9 @@ impl Provider for GoogleDriveProvider {
                 "remote directory {directory} does not exist"
             )));
         };
-        let mut entries = Vec::new();
+        // One entry for each name: the file with the lowest id, which is
+        // the one every lookup of that path finds.
+        let mut by_name: BTreeMap<String, (RemotePath, GdFile)> = BTreeMap::new();
         let mut page_token: Option<String> = None;
         loop {
             let query = format!(
@@ -873,23 +1029,48 @@ impl Provider for GoogleDriveProvider {
                 let Ok(child) = directory.join(&file.name) else {
                     // A Drive name may contain `/`, which the sync path
                     // model cannot represent; say so, or the file would
-                    // simply never sync with no trace of why.
-                    logging::warning(
-                        "Skipping a Drive entry whose name cannot be a sync path",
-                        &[
-                            ("directory", directory.as_str().to_string()),
-                            ("name", file.name.clone()),
-                        ],
-                    );
+                    // simply never sync with no trace of why. One time
+                    // for each file: a listing runs at every scan.
+                    let first_report = self
+                        .reported_duplicates
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(file.id.clone());
+                    if first_report {
+                        logging::warning(
+                            "A file in Google Drive has a name that cannot be a sync path; it stays in the cloud. Rename it in Google Drive",
+                            &[
+                                ("directory", directory.as_str().to_string()),
+                                ("name", file.name.clone()),
+                            ],
+                        );
+                    }
                     continue;
                 };
-                entries.push(self.entry_from_file(&child, &file));
+                match by_name.remove(&file.name) {
+                    None => {
+                        by_name.insert(file.name.clone(), (child, file));
+                    }
+                    Some((path, other)) => {
+                        let (kept, left) = if other.id <= file.id {
+                            (other, file)
+                        } else {
+                            (file, other)
+                        };
+                        self.report_duplicate(path.as_str(), &kept, &left);
+                        by_name.insert(kept.name.clone(), (path, kept));
+                    }
+                }
             }
             match list.next_page_token {
                 Some(token) => page_token = Some(token),
                 None => break,
             }
         }
+        let mut entries: Vec<RemoteEntry> = by_name
+            .values()
+            .map(|(path, file)| self.entry_from_file(path, file))
+            .collect();
         entries.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(entries)
     }
@@ -979,6 +1160,8 @@ impl Provider for GoogleDriveProvider {
             sent_bytes: 0,
             chunk_hint: self.chunk_hint.clone(),
             precondition: request.precondition.clone(),
+            hasher: Md5::new(),
+            hashed_bytes: 0,
         }))
     }
 
@@ -1007,6 +1190,7 @@ impl Provider for GoogleDriveProvider {
         })?;
         Ok(Box::new(GdriveDownloadSession {
             provider: self.handle(),
+            expected_md5: file.md5_checksum.clone().filter(|md5| !md5.is_empty()),
             file_id: file.id,
             remote_modified_at: file.modified_time.as_deref().and_then(parse_rfc3339_millis),
             destination: Some(destination),
@@ -1106,6 +1290,21 @@ impl Provider for GoogleDriveProvider {
                 continue;
             }
             let Some(file) = &change.file else { continue };
+            if file.mime_type == FOLDER_MIME {
+                // A folder was renamed, moved, or trashed. No change is
+                // reported for a folder itself, but whatever the cache
+                // holds for it, and for everything under it, names the
+                // old place.
+                let cached_path = self
+                    .path_by_id
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&file.id)
+                    .cloned();
+                if let Some(cached_path) = cached_path {
+                    self.evict_path(&cached_path);
+                }
+            }
             if file.mime_type == FOLDER_MIME || is_google_native_non_folder(&file.mime_type) {
                 continue;
             }
@@ -1115,8 +1314,8 @@ impl Provider for GoogleDriveProvider {
             };
             // A rename/move surfaces as Removed(old) + CreatedOrModified(new)
             // so the local side deletes the old path and downloads the new
-            // one (previously the change was reported at the stale cached
-            // path and never converged).
+            // one. Reported at the cached path alone, the change would
+            // never converge.
             if let Some(old_path) = resolved.old_path
                 && let Ok(old_remote) = RemotePath::new(old_path)
             {
@@ -1150,7 +1349,7 @@ impl Provider for GoogleDriveProvider {
 
         // Drive must return a cursor to advance on: `nextPageToken` for more
         // pages, else `newStartPageToken` for the next baseline. A parsable
-        // response missing both is not progress — reusing the old cursor
+        // response missing both is not progress: reusing the old cursor
         // would durably re-poll the identical page forever. Surface it as
         // transient so the poll retries instead of wedging.
         let Some(next_cursor) = list.next_page_token.or(list.new_start_page_token) else {
@@ -1198,6 +1397,9 @@ fn execute_authed_with(
     body: Vec<u8>,
 ) -> Result<HttpResponse, ProviderError> {
     let mut attempt = 0;
+    // Shared with the one retry after a 401, never copied: a body is up
+    // to one upload chunk.
+    let body = Arc::new(body);
     loop {
         let token = tokens.access_token()?;
         let mut all_headers = headers.clone();
@@ -1245,9 +1447,17 @@ struct GdriveUploadSession {
     sent_bytes: u64,
     chunk_hint: Arc<Mutex<u64>>,
     /// The precondition, retained so it can be re-verified immediately
-    /// before the committing request — begin_upload's one-time check is a
+    /// before the committing request: begin_upload's one-time check is a
     /// check-then-act across the whole (possibly long) transfer.
     precondition: RemotePrecondition,
+    /// MD5 of the bytes of a resumable upload, taken as the chunks go
+    /// out. It is the content hash when Drive's final answer carries
+    /// none, so the sync index never records an empty one.
+    hasher: Md5,
+    /// How far into the file `hasher` has read. A chunk that Drive
+    /// acknowledged only in part is sent again from the acknowledged
+    /// offset, and those bytes must not be hashed twice.
+    hashed_bytes: u64,
 }
 
 impl GdriveUploadSession {
@@ -1302,7 +1512,7 @@ impl GdriveUploadSession {
         // A fixed boundary corrupts (or bounces with 400) any file whose
         // bytes contain the delimiter line. Generate a random per-request
         // boundary and, defensively, regenerate until it does not occur in
-        // the payload — so no file content can ever collide with it.
+        // the payload, so no file content can ever collide with it.
         let boundary = multipart_boundary_absent_in(&content);
         let mut body = Vec::new();
         body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
@@ -1312,6 +1522,10 @@ impl GdriveUploadSession {
         body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
         body.extend_from_slice(&content);
         body.extend_from_slice(format!("\r\n--{boundary}--").as_bytes());
+        // The body holds the bytes now; the file's own copy is not kept
+        // for the length of the request.
+        let content_md5 = md5_hex_of_bytes(&content);
+        drop(content);
 
         let (method, url): (&'static str, String) = match &self.file_id {
             Some(id) => (
@@ -1345,17 +1559,25 @@ impl GdriveUploadSession {
             remote_modified_at: file.modified_time.as_deref().and_then(parse_rfc3339_millis),
             content_hash: file
                 .md5_checksum
-                .unwrap_or_else(|| md5_hex_of_bytes(&content)),
+                .filter(|md5| !md5.is_empty())
+                .unwrap_or(content_md5),
         })
     }
 
     fn initiate_resumable(&mut self) -> Result<String, ProviderError> {
+        // `fields` on the request that opens the session decides what
+        // the final answer holds. Without it Drive returns its default
+        // set for the method, which has no checksum and no modified
+        // time.
         let (method, url): (&'static str, String) = match &self.file_id {
             Some(id) => (
                 "PATCH",
-                format!("{UPLOAD_BASE}/files/{id}?uploadType=resumable"),
+                format!("{UPLOAD_BASE}/files/{id}?uploadType=resumable&fields={FILE_FIELDS}"),
             ),
-            None => ("POST", format!("{UPLOAD_BASE}/files?uploadType=resumable")),
+            None => (
+                "POST",
+                format!("{UPLOAD_BASE}/files?uploadType=resumable&fields={FILE_FIELDS}"),
+            ),
         };
         let response = self.handle().execute_authed(
             method,
@@ -1407,6 +1629,19 @@ impl GdriveUploadSession {
 }
 
 impl TransferSession for GdriveUploadSession {
+    /// The resumable chunk size this provider tunes for itself: it
+    /// grows while chunks land and halves when one fails.
+    fn step_bytes(&self) -> u64 {
+        *self
+            .chunk_hint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn remaining_bytes(&self) -> Option<u64> {
+        Some(self.total_bytes.saturating_sub(self.sent_bytes).max(1))
+    }
+
     fn step(&mut self, max_bytes: u64) -> Result<TransferStep, ProviderError> {
         match &self.state {
             UploadState::Done => unreachable!("step called after completion"),
@@ -1431,11 +1666,18 @@ impl TransferSession for GdriveUploadSession {
                     .map_err(|error| {
                         ProviderError::transient(format!("cannot read upload chunk: {error}"))
                     })?;
+                // Each byte is hashed one time, in order.
+                let chunk_end = self.sent_bytes + chunk_len;
+                if chunk_end > self.hashed_bytes {
+                    let already_hashed = (self.hashed_bytes - self.sent_bytes) as usize;
+                    self.hasher.update(&chunk[already_hashed..]);
+                    self.hashed_bytes = chunk_end;
+                }
 
                 let range_end = self.sent_bytes + chunk_len - 1;
                 // The resumable update only materializes when the final chunk
-                // commits, so re-verify the precondition immediately before it
-                // — begin_upload's check could be arbitrarily stale by now.
+                // commits, so re-verify the precondition immediately before it:
+                // begin_upload's check could be arbitrarily stale by now.
                 if range_end + 1 == self.total_bytes {
                     self.reverify_precondition_before_commit()?;
                 }
@@ -1475,9 +1717,20 @@ impl TransferSession for GdriveUploadSession {
                         self.state = UploadState::Done;
                         let file: GdFile =
                             serde_json::from_slice(&response.body).unwrap_or_default();
+                        // Drive's checksum when the answer has one, else
+                        // the hash of the bytes this session sent.
+                        let content_hash = file
+                            .md5_checksum
+                            .filter(|checksum| !checksum.is_empty())
+                            .or_else(|| {
+                                (self.hashed_bytes == self.total_bytes).then(|| {
+                                    hex_encode(&std::mem::take(&mut self.hasher).finalize())
+                                })
+                            })
+                            .unwrap_or_default();
                         Ok(TransferStep::Completed(TransferOutcome {
                             bytes_total: self.total_bytes,
-                            content_hash: file.md5_checksum.unwrap_or_default(),
+                            content_hash,
                             remote_modified_at: file
                                 .modified_time
                                 .as_deref()
@@ -1514,6 +1767,11 @@ impl TransferSession for GdriveUploadSession {
 struct GdriveDownloadSession {
     provider: ProviderHandle,
     file_id: String,
+    /// Drive's checksum of the file when the download began. The
+    /// download reads the file in ranges, and nothing pins a range to a
+    /// revision: a file that is replaced while it comes down gives the
+    /// head of one version and the tail of another.
+    expected_md5: Option<String>,
     remote_modified_at: Option<SystemTime>,
     destination: Option<std::fs::File>,
     destination_path: std::path::PathBuf,
@@ -1524,6 +1782,10 @@ struct GdriveDownloadSession {
 }
 
 impl TransferSession for GdriveDownloadSession {
+    fn remaining_bytes(&self) -> Option<u64> {
+        Some(self.total_bytes.saturating_sub(self.received_bytes).max(1))
+    }
+
     fn step(&mut self, max_bytes: u64) -> Result<TransferStep, ProviderError> {
         debug_assert!(!self.finished, "step called after completion");
         if self.received_bytes >= self.total_bytes {
@@ -1563,7 +1825,7 @@ impl TransferSession for GdriveDownloadSession {
         self.received_bytes += response.body.len() as u64;
         // A 200 means the server ignored the Range and returned the full
         // body. Verify it actually delivered the whole file before
-        // finishing — otherwise a truncated/transcoded body (or the
+        // finishing, otherwise a truncated/transcoded body (or the
         // transport's size cap) would complete as a self-consistent but
         // corrupt local file.
         if response.status == 200 {
@@ -1599,11 +1861,23 @@ impl GdriveDownloadSession {
                 ProviderError::transient(format!("cannot sync downloaded payload: {error}"))
             })?;
         }
-        self.finished = true;
         let digest = std::mem::replace(&mut self.hasher, Md5::new()).finalize();
+        let content_hash = hex_encode(&digest);
+        if let Some(expected) = &self.expected_md5
+            && *expected != content_hash
+        {
+            // What came down is not the file Drive described: it changed
+            // while it was read. The payload goes, and the retry reads
+            // the file as it is then.
+            self.abort();
+            return Err(ProviderError::transient(
+                "the file changed in Google Drive while it was downloaded; it is read again",
+            ));
+        }
+        self.finished = true;
         Ok(TransferStep::Completed(TransferOutcome {
             bytes_total: self.received_bytes,
-            content_hash: hex_encode(&digest),
+            content_hash,
             remote_modified_at: self.remote_modified_at,
         }))
     }
@@ -1644,7 +1918,7 @@ fn classify_api_failure(response: &HttpResponse) -> ProviderError {
         403 => match extract_403_reason(&body_text).as_deref() {
             // Rate/quota limits are transient: back off, do not drop the
             // intent. `dailyLimitExceeded` and `storageQuotaExceeded` (note
-            // the capital Q) were previously misclassified as permanent.
+            // the capital Q) belong here too.
             Some(
                 "rateLimitExceeded"
                 | "userRateLimitExceeded"
@@ -1652,8 +1926,8 @@ fn classify_api_failure(response: &HttpResponse) -> ProviderError {
                 | "dailyLimitExceeded"
                 | "quotaExceeded",
             ) => ProviderError::rate_limited(retry_after, "Drive rate/quota limit exceeded"),
-            Some("storageQuotaExceeded") => ProviderError::permanent(
-                "Google Drive storage is full; free space or upgrade the account, then sync resumes",
+            Some("storageQuotaExceeded") => ProviderError::storage_full(
+                "Google Drive storage is full; free space or upgrade the account, then uploads resume",
             ),
             // Fall back to substring sniffing for bodies that don't parse
             // to a structured reason.
@@ -1746,7 +2020,7 @@ pub fn md5_hex_of_bytes(bytes: &[u8]) -> String {
     hex_encode(&Md5::digest(bytes))
 }
 
-/// Minimal RFC 3339 UTC parser (`YYYY-MM-DDTHH:MM:SS(.mmm)Z`) — Drive
+/// Minimal RFC 3339 UTC parser (`YYYY-MM-DDTHH:MM:SS(.mmm)Z`): Drive
 /// always emits this shape; anything else reads as `None`.
 fn parse_rfc3339_millis(raw: &str) -> Option<SystemTime> {
     let bytes = raw.as_bytes();

@@ -3,7 +3,7 @@ name = "vapor-soak"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+publish.workspace = true
 
 # Development tool, never shipped: hours of randomized file churn on both
 # sides of a real daemon, a model of what must survive, fault injection,

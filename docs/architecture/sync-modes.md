@@ -18,7 +18,7 @@ are in `docs/plans/core.md §2.5`.
 | `pull-only` | cloud → local    | **cloud**       | a read-only replica of cloud  | read-only local copies / mirrors of a cloud folder |
 | `push-only` | local → cloud    | **local**       | a read-only backup of local   | one-way backup of a local folder to the cloud |
 
-- `two-way` is the default and the historical behavior. Both sides are
+- `two-way` is the default. Both sides are
   equal peers; divergence is resolved by the *keep-both* conflict policy
   (`data-flow.md §Conflict handling`).
 - `pull-only` and `push-only` are **one-way** modes. The mode names describe
@@ -29,7 +29,7 @@ are in `docs/plans/core.md §2.5`.
 
 One-way modes are **strict mirror**: the subordinate (non-authoritative)
 side is driven to *exactly* match the authoritative source. This is a
-deliberate product choice — a "read-only backup/copy" that silently
+deliberate product choice: a "read-only backup/copy" that silently
 accumulates drift is not a faithful mirror. It is also a deliberate,
 opt-in departure from Vapor's default data-preservation posture, so it
 carries the safety requirements in §Safety.
@@ -68,16 +68,17 @@ no conflict copy. This does **not** change the default: `two-way` remains
 the default mode and *keep-both* remains its policy, exactly as
 `AGENTS.md §4` requires. One-way strict mirror is a per-profile opt-in.
 
-### Interaction with loop prevention and tombstones
+### Interaction with loop prevention and deletions
 
 - **`self_write_cache`** is orthogonal and still active in every mode. It
   suppresses the daemon from reacting to changes it just wrote itself
   (`data-flow.md §Loop prevention`). One-way gating decides *whether* a
   direction produces work at all; the self-write cache decides whether a
   given observed change is an echo of Vapor's own write.
-- **Tombstones / deletion replay** stay durable in every mode. Strict
-  mirror *uses* deletion propagation as a first-class outcome (that is the
-  point), so the durable tombstone machinery is exercised, not bypassed.
+- **Deletions** rest on the sync index in every mode. Strict mirror
+  *uses* deletion propagation as a first-class outcome (that is the
+  point): what the source no longer has is removed from the other side,
+  and the index row of the path is the evidence that it was synced.
 
 ## Where it lives in the pipeline
 
@@ -98,7 +99,7 @@ profile's resolved settings. The engine consults it at these points (see
 
 Because the gate is a property of the scope/profile and not a special code
 path per operation, deletion, rename, and edit all flow through the same
-mode check — there is no operation that can bypass it.
+mode check: there is no operation that can bypass it.
 
 ## Profiles integration
 
@@ -108,12 +109,12 @@ mode check — there is no operation that can bypass it.
 - The top-level `syncMode` in `vapor.json` is the **default** for any profile
   that does not set its own.
 - Each profile may override `syncMode` with any of the three values. There is
-  no lowering/merging — the profile's value wins outright for that profile.
+  no lowering/merging: the profile's value wins outright for that profile.
 - Different profiles on the same device may run **different** modes
   concurrently. This is what makes the headline use case work: keep several
   independent **`pull-only`** profiles, each mirroring the same cloud folder
   into a different local directory (or different clouds), to maintain several
-  read-only backups/copies — while an unrelated profile stays `two-way`.
+  read-only backups/copies, while an unrelated profile stays `two-way`.
 - Per-profile isolation follows the existing multi-profile rules
   (`data-flow.md §Multi-profile watch coordination`): one watcher per
   canonical local root, per-profile queues, shared workgate/throttle. A
@@ -128,23 +129,34 @@ modes deliberately trade it for a faithful mirror: strict mirror can
 **overwrite and delete user data** on the subordinate side (`pull-only`
 reverts local edits and removes local-only files; `push-only` does the
 symmetric thing to the cloud), permanently, to match the source. That is the
-whole point of the feature, so the protection is *informed opt-in*. The
-one net under it is the local trash (`data-flow.md` §Remote to local):
-what `pull-only` removes on this device is kept there for
-`trash.retentionDays`; what `push-only` removes in the cloud depends on
-the provider (Google Drive trashes, the filesystem provider does not).
-Overwrites have no undo on either side:
+whole point of the feature, so the protection is *informed opt-in*.
+What can be undone, stated once for every document that needs it: the
+local trash (`data-flow.md` §Remote to local) keeps what a mirror
+removes on this device for `trash.retentionDays`. An overwrite, on
+either side, has no undo. A removal in the cloud has no undo on a
+provider without a trash (Google Drive trashes; the filesystem provider
+does not). The rules:
 
 - **Opt-in, per profile.** A profile is `two-way` unless the user explicitly
   sets `syncMode` to `pull-only` or `push-only`. The mode is never inferred,
   and the default never deletes/overwrites to converge.
-- **Up-front overwrite warning.** Before a one-way mode is enabled, the macOS
-  app and the CLI must state, in plain language, that the subordinate side
-  will be made to exactly match the source — divergent local (or cloud) edits
-  are overwritten and local (or cloud)-only content is removed, permanently.
-  The CLI enum-validates the value; the macOS app's warning ships with its
-  settings surface (`docs/tasks/macos.md`). The warning is the safeguard;
-  there is no recoverable copy.
+- **The warning is a decision the daemon holds the profile for.** A
+  one-way profile does not sync until its warning is acknowledged. The
+  daemon opens a `one-way-mode` decision (profile scope, option
+  `enable`) that states, in plain language, that the subordinate side
+  will be made to exactly match the source: divergent edits there are
+  overwritten and content that exists only there is removed. The
+  acknowledgement is recorded in the profile's state DB
+  (`one_way.acknowledged`) for that profile, that mode, and that pair of
+  roots; a change of any of the three asks again. `vapor decisions`
+  and the app show the same question, so a hand-edited `vapor.json`
+  cannot enable a mirror silently. `vapor profiles add --mode`
+  shows the warning on a terminal and records a yes; with `--json` it
+  asks nothing and leaves the question to the daemon.
+- **An unknown value stops the profile.** A `syncMode` the build does
+  not know suspends that profile with the value in its reason. It never
+  falls back to `two-way`, which would upload from a folder the user
+  meant to keep read-only.
 - **Observability.** Diagnostics/IPC expose each profile's `syncMode` and a
   count of mirror-driven reverts/deletes so the behavior is never silent.
 
@@ -157,28 +169,16 @@ Overwrites have no undo on either side:
   `VaporConstants` per `AGENTS.md §8.6`.
 - **CLI.** `vapor config get|set syncMode <value>` validates against the enum
   and rejects unknown values with an actionable error (like the existing
-  boolean/int typed keys). Per-profile editing arrives with the profiles CLI
-  surface.
+  boolean/int typed keys). `vapor profiles add --mode <value>` sets it
+  for a new profile.
 - **Docs.** Documented in root `README.md` **Configuration**, this file, and
   `data-flow.md`.
-
-## Build order
-
-The modes were built in a deliberate order, which is also the order in
-which they are easiest to reason about:
-
-1. **`pull-only` first**: exercises the remote-to-local download/apply
-   pipeline in isolation, with no upload risk. The cleanest way to
-   confirm Vapor downloads and mirrors cloud content correctly.
-2. **`two-way` second**: binds `syncMode = two-way` to the bidirectional
-   keep-both pipeline and asserts the one-way gates are inert.
-3. **`push-only` third**: local-to-cloud strict mirror (remote overwrite
-   plus remote-only deletion).
 
 ## Testing
 
 Covered by the daemon's integration tests and the e2e harness (S12 runs a
-pull-only daemon end to end):
+pull-only daemon end to end; S62 holds a one-way profile until its
+warning is answered):
 
 - `pull-only`: a local edit is reverted to the cloud canonical; a local-only
   file is removed; a cloud deletion removes the local copy; no upload ever

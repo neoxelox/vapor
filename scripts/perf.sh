@@ -8,28 +8,17 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-export VAPOR_DIR="${VAPOR_DIR:-$ROOT_DIR/.vapor}"
 export VAPOR_ENV="${VAPOR_ENV:-dev}"
-mkdir -p "$VAPOR_DIR/logs" "$VAPOR_DIR/state"
 
-BUDGET_DOC="$ROOT_DIR/docs/performance/acceptance-budgets-and-benchmark-harness.md"
 DURATION="${VAPOR_PERF_SOAK_DURATION:-12m}"
 SEED="${VAPOR_PERF_SOAK_SEED:-11}"
-
-for marker in SLO-1 SLO-2 SLO-3 SLO-4 SLO-5; do
-  if ! grep -Fq "$marker" "$BUDGET_DOC"; then
-    echo "[perf] missing required budget marker: $marker"
-    echo "[perf] update $BUDGET_DOC before running the performance gate"
-    exit 1
-  fi
-done
 
 echo "[perf] soak cell: two-way, mixed load, crash faults, release profile, $DURATION, seed $SEED"
 report="$ROOT_DIR/.vapor/e2e/soak-last-report.json"
 # A stale report from an earlier run must never stand in for this one.
 rm -f "$report"
-# The wrapper unsets VAPOR_DIR for the driver: the daemon under test
-# lives in its own sandbox. A host that cannot run the cell (the
+# The daemon under test lives in the driver's own sandbox, so this
+# script sets no runtime directory. A host that cannot run the cell (the
 # driver's exit 3, turned into a clean exit by the wrapper) leaves no
 # report behind; the gate then reports the skip and exits clean, so a
 # platform whose daemon has not shipped yet does not block a release.

@@ -83,6 +83,32 @@ fn wait_for(
     );
 }
 
+/// Returns when the watcher has delivered an event. A native backend
+/// arms on its own thread and does not say when it is live, so the
+/// proof is an event that follows a probe file. Each attempt writes a
+/// new probe.
+fn wait_until_armed(
+    harness: &ContractHarness<'_>,
+    receiver: &Receiver<WatchEvent>,
+    mirror: &Sender<WatchEvent>,
+    root: &Path,
+) {
+    let until = Instant::now() + harness.delivery;
+    for attempt in 0.. {
+        let probe = root.join(format!("arming-{attempt}.probe"));
+        std::fs::write(&probe, b"probe").expect("probe");
+        (harness.reflect)(mirror, &probe, Action::Create);
+        if receiver.recv_timeout(Duration::from_millis(100)).is_ok() {
+            return;
+        }
+        assert!(
+            Instant::now() < until,
+            "the watcher delivered no event within {:?} of its start",
+            harness.delivery
+        );
+    }
+}
+
 pub fn run(harness: ContractHarness<'_>) {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let root = vapor_shared::paths::canonicalize(temp.path()).expect("canonical root");
@@ -94,8 +120,7 @@ pub fn run(harness: ContractHarness<'_>) {
         root.as_path(),
         "the watch root reads back canonical"
     );
-    // A backend needs a moment to arm before the first action.
-    std::thread::sleep(harness.delivery.min(Duration::from_millis(500)));
+    wait_until_armed(&harness, &receiver, &mirror, &root);
 
     let file = root.join("contract.txt");
     let started = SystemTime::now();

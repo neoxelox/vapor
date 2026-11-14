@@ -33,6 +33,7 @@ the owner: §10.1.
 - Primary priority is user device impact, not strict real-time sync.
 - Vapor sync scope is a user-selected local directory replicated bidirectionally with a user-selected cloud directory.
 - Vapor is not a full-device backup product and must never broaden scope beyond configured sync roots.
+- A profile exists only when the user set its two roots. With no usable configuration (no `vapor.json`, a file that does not parse, no valid profile) the daemon stays up, syncs nothing, and creates no folder (owner, 2026-11-14).
 - On a profile's first contact with its sync roots, Vapor creates the local root on-device, ensures the cloud root exists provider-side, and adopts both (`docs/architecture/data-flow.md` §Root identity). After that a missing root is waited for and never re-created on Vapor's own, and a root that is present without the adopted identity is put to the user as a decision; neither is ever mirrored as deletions.
 - Core guarantees:
   - Never lose intent state.
@@ -132,11 +133,13 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 
 - The fs-watch callback (FSEvents on macOS, ReadDirectoryChangesW on Windows, inotify on Linux) may only normalize/filter/record event metadata.
 - No DB/hash/network work in callback.
-- No provider I/O on the tick thread: transfers, probes, deletes, the changes poll, reconcile directory listings, and the cloud-root retry all run on worker threads and are harvested by a later tick.
+- No provider I/O and no file hashing on the tick thread: transfers, probes, deletes, hashes, the changes poll, reconcile directory listings, and the cloud-root checks all run on worker threads and are harvested by a later tick.
 - All expensive work must be throttle-state gated.
 - Throttle states: `Idle`, `Light`, `Throttled`, `Suspended`.
+- A throttle state makes sync slower. Only `Suspended` stops it, and a condition that can last never gives `Suspended`: a device on battery, a user at the device, and Low Power Mode slow sync down and never stop it. Critical thermal pressure is what suspends (owner, 2026-11-14).
 - Under `Suspended`, uploads/hashing stop; only lightweight intent coalescing continues.
-- Reconcile scans are deferred and interruptible; run only when policy permits. The user's own request (`vapor reconcile`, the app's Sync now) is the one exception: it admits the next whole-scope scan under any state but `Suspended`, still within that state's caps and still interruptible, and it is spent when one scan completes.
+- Reconcile scans are interruptible and start in every state but `Suspended`, at the caps of that state. A whole-scope scan runs at start, once each 24 hours, and on the user's request (`vapor reconcile`, the app's Sync now).
+- The resource ceilings are measured limits. The daemon reads its own CPU and memory and measures what the link carries; it never assumes a number, and more capacity means a higher rate (owner, 2026-11-14).
 - Throttle inputs come from the host on macOS (CPU, power source, thermal state, Low Power Mode, memory, keyboard presence). Test harnesses pin neutral inputs with `VAPOR_THROTTLE_INPUTS=static`; never make that the production default.
 
 ## 4) Bidirectional sync safety requirements
@@ -144,7 +147,8 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 - Implement loop prevention (`self_write_cache`, operation IDs, TTL discipline).
 - Handle local/remote races deterministically.
 - Default conflict policy: keep both (never silent overwrite).
-- Maintain tombstones and deletion semantics with durable replay. A deletion made while no daemon was watching propagates when the surviving copy is exactly what the sync index last saw; when the evidence is ambiguous (a changed survivor, an unreadable mtime, an unknown provenance), keeping data wins over honouring a deletion.
+- A deletion propagates on the evidence of the sync index only: the index has a row for the path, and the surviving copy is exactly what that row last saw. With no row, or a changed survivor, keeping data wins over honouring a deletion, and Vapor never deletes a cloud object that it did not compare. A modification time never decides that a deletion wins (owner, 2026-11-14).
+- On a volume that folds case, a change in only the spelling of a name is a rename, carried to the other side as a move. When both sides changed the spelling, the cloud's spelling stays (owner, 2026-11-14).
 - A file Vapor removes on this device goes to the trash (`core/daemon/src/trash.rs`, the `TrashBin` platform trait), never straight to an unlink, unless the user turned the trash off.
 - Remote poll/apply pipeline must obey throttle and retry constraints.
 - Equality checks in the reconcile walk are the rsync quick check on both sides (size plus the local mtime and the remote mtime the sync index recorded), never a whole-tree hash; a pair the index has no row for is verified once, not assumed converged; the upload planner hashes and converges identical content silently, and a change on one side only while the other side still equals the last synced hash is a transfer in that direction, never a conflict copy.
@@ -155,8 +159,11 @@ Do not move heavy compute into an app process or the fs-watch callback path.
   exception: they are **strict mirror** (the non-authoritative side is driven
   to exactly match the declared source of truth, permanently overwriting
   divergent edits and removing extra content). They must never be enabled
-  silently or inferred, and must surface an up-front data-loss warning before
-  activation. The local trash keeps what a mirror removes on this device
+  silently or inferred. The daemon holds a one-way profile until its
+  data-loss warning is acknowledged for that profile, that mode, and that
+  pair of roots; the warning is a decision, so every surface shows the same
+  question and a hand-edited file cannot enable a mirror (owner,
+  2026-11-14). The local trash keeps what a mirror removes on this device
   for the retention window; overwrites and cloud-side removals on a
   provider without a trash have no undo, so the warning is the safeguard.
   Full design: `docs/architecture/sync-modes.md`.
@@ -164,14 +171,16 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 ## 5) Data durability and migrations
 
 - Queue/state storage must provide at-least-once intent semantics.
-- Schema versions are explicit and migration-tested.
-- Forward migration and rollback behavior must be defined before schema changes ship.
-- Corruption recovery path must be documented and observable.
+- Schema versions are explicit.
+- Before GA the state database has no migrations. A database of another schema version, or a damaged one, is set aside next to itself, and a whole-scope reconcile rebuilds the index; with no index row nothing is deleted on either side (owner, 2026-11-14).
+- Migrations start at GA. From then on forward migration and rollback behavior are defined and tested before a schema change ships.
+- Corruption recovery path must be documented and observable (`docs/architecture/state-schema-migrations.md`).
 - Pre-GA exception: contributors may make intentional breaking changes to config/state formats without migration when the change is documented and validated in the same change set.
 
 ## 6) Security and privacy
 
 - Secrets/tokens only via `core/platform/secrets::SecretStore`: the login keychain on macOS (one generic-password item per secret under the `sh.arn.vapor` service, with an access list covering `vapor` and `vapord`), Credential Manager on Windows, Secret Service on desktop Linux, the external command named by `VAPOR_SECRETS_COMMAND` on headless Linux, never a plaintext file. Tests use the in-memory fake; the fake and the native store run the same contract test.
+- A runtime directory other than the default one has its own scope in the store, so a dev checkout or a test sandbox never reads or removes the secrets of the real install. The daemon reads secrets without a prompt and holds for a sign-in when it cannot. A token never goes on a command line.
 - Logs must redact secrets, tokens, auth headers, and sensitive identifiers.
 - Telemetry is local-only unless explicitly designed otherwise.
 - Any permissioned feature must degrade safely when denied.
@@ -269,6 +278,8 @@ Full policy: `docs/operations/macos/distribution-trust-chain.md`.
 
 - Distribution model must include: code signing, hardened runtime,
   notarization, entitlement review.
+- The Mac app is built for Apple silicon. There is no Intel Mac build
+  (owner, 2026-11-14).
 - `Vapor.app` is the single distributable package and must contain the
   three executables:
   - `Contents/MacOS/Vapor`
@@ -291,15 +302,13 @@ Full policy: `docs/operations/macos/distribution-trust-chain.md`.
 
 ### 7.3) Windows distribution (future)
 
-Lands with `apps/windows`. Expected controls: EV code-signing certificate
-(Azure Key Vault or USB HSM), WiX or MSIX packaging, `signtool`. Isolated
-`release-windows` GitHub Environment.
+Lands with `apps/windows`, under the isolated `release-windows` GitHub
+Environment. Expected controls: `docs/plans/core.md` §6.
 
 ### 7.4) Linux distribution (future)
 
-Lands with `apps/linux`. Expected controls: GPG-signed AppImage first;
-`.deb`/`.rpm` as demand surfaces; Flathub/Snap later. Isolated
-`release-linux` GitHub Environment.
+Lands with `apps/linux`, under the isolated `release-linux` GitHub
+Environment. Expected controls: `docs/plans/core.md` §6.
 
 ### 7.5) CLI (`vapor`) distribution
 
@@ -379,24 +388,19 @@ environment because the CLI has no secrets or trust chain of its own.
 
 ## 8.3) Known-good local baseline (reference)
 
-Current verified contributor baseline (Mar 2026):
-
-- macOS `26.3` (Tahoe)
-- `rustc 1.93.1 (01f6ddf75 2026-02-11)`
-- `cargo 1.93.1 (083ac5135 2025-12-15)`
-- `swift-driver 1.127.15`
-- `Apple Swift 6.2.4 (swiftlang-6.2.4.1.4 clang-1700.6.4.2)`
-- target `arm64-apple-macosx26.0`
-
-This section is informational and should be updated when contributor baseline shifts materially.
-It does not override the "latest stable" policy above.
+The verified contributor baseline is in
+`docs/development/toolchain-baseline.md`. It is informational, it is
+updated when the baseline shifts materially, and it does not override
+the "latest stable" policy above.
 
 ## 8.4) Script-first validation
 
 Contributors run the repository wrapper scripts under `scripts/`, never
 raw tool commands, in the order `format`, `lint`, `test`, then `e2e` for
 runtime-affecting changes. The wrappers set the project environment
-(`VAPOR_DIR`, `VAPOR_ENV`, log routing). Which tier a change needs and
+(`VAPOR_DIR`, `VAPOR_ENV`, log routing). `lint` includes the dependency
+check (`cargo deny`), which needs that tool installed and a network
+connection. Which tier a change needs and
 how to read a red run: the `vapor-validate` skill.
 
 ## 8.5) Runtime data directory policy
@@ -566,8 +570,9 @@ the procedure is the `vapor-validate` skill.
   failing test must catch a real bug.
 - **Fast.** `./scripts/test.sh` (Tier 1) must finish in under 2 minutes
   on a contemporary dev machine and under 5 minutes on CI, where
-  `VAPOR_TEST_MAX_SECONDS` enforces it. If a change pushes the suite
-  past the budget, split slow tests out to Tier 2.
+  `VAPOR_TEST_MAX_SECONDS` enforces it. The script builds first and
+  times the run only. If a change pushes the suite past the budget,
+  split slow tests out to Tier 2.
 - **Deterministic.** No `thread::sleep` for timing-dependent
   assertions; use test-injectable clocks. No retry decorators.
 - **Independent.** Tests run in any order and in parallel. Each
@@ -600,8 +605,8 @@ of the following:
   cover the rest until their properties land (`docs/tasks/core.md`).
 - **Platform-trait contract tests.** Each trait's test body runs against
   the in-memory fake and the native impl on the shipping OS (the secret
-  store does this today; extending it to every trait is
-  `docs/tasks/core.md` CT-5). Catches fake-vs-native drift.
+  store and the fs watcher do this today; the other traits are open
+  work in `docs/tasks/core.md`). Catches fake-vs-native drift.
 - **Bidirectional race tests**: simultaneous local/remote edits,
   rename+modify, delete/restore, loop-prevention verification.
 - **Crash / restart / recovery tests**: pre/post-restart durable
@@ -611,7 +616,8 @@ of the following:
   made the callback 100× slower" checks. Distinct from the SLO perf
   suite (Tier 2).
 - **`--json` shape locks** for every `vapor … --json` command: explicit
-  assertion tests today; `insta` snapshots are open work (CT-4).
+  assertion tests today; `insta` snapshots are open work
+  (`docs/tasks/core.md`).
 
 ### 9.3) What must NOT be tested
 
@@ -647,8 +653,8 @@ If a test's failure mode is "I typo'd a default value", skip it.
 
 ### 9.5) Test tiers
 
-- **Tier 1**: `./scripts/test.sh` via `lint.yml` / `test.yml` /
-  `workflow_call`. Runs on every PR; required check on `main`
+- **Tier 1**: `./scripts/test.sh` via `test.yml` (and `workflow_call`
+  in a release). Runs on every PR; required check on `main`
   (`docs/ci/required-checks.md`). Budget: under 5 minutes per OS on CI.
 - **Tier 2**: `scripts/perf.sh` via `perf.yml`, a release gate and on
   demand.
@@ -716,7 +722,9 @@ work once, end to end. Procedure: the `vapor-e2e` skill and
 - Sandbox discipline is absolute: everything runs under the repo-local
   `.vapor/e2e/` directory (removed by `./scripts/clean.sh`). Tier E2E
   must never touch `~/.vapor`, install host services (LaunchAgents,
-  login items), launch packaged apps, or use the network.
+  login items), launch packaged apps, or use the network. The harness
+  points `HOME` at the sandbox for every process it starts, so a
+  default path cannot reach the real home.
 - Required after Tier 1 passes for: features or fixes in `core/*` that
   change daemon/CLI-observable behavior, startup/shutdown/IPC/schema
   changes, and build changes to the shipping binaries. Not required
@@ -766,8 +774,9 @@ The invariants behind them:
   The release flow puts one commit there, the release-prep commit,
   with its tag. A fix that the release gate finds goes through a pull
   request like any other change (owner, 2026-11-14). A branch that was
-  rewritten on purpose is pushed with `--force-with-lease`, never
-  `--force`.
+  rewritten on purpose is pushed with `--force-with-lease
+  --force-if-includes`, never a bare `--force` (the exact command is in
+  the `vapor-pr` skill).
 - A branch is one commit when its PR opens, and the PR title is that
   commit's subject. The owner merges, as a squash, the only method the
   repository allows, so that subject is the commit on `main`. Agents
@@ -781,8 +790,10 @@ The invariants behind them:
   task or the decisions. If one comments on a PR anyway, it gets no
   answer and no fix. Human comments get an answer.
 - Non-trivial feature/logic changes update the required documentation
-  in the same change set, and add a `CHANGELOG.md` `Unreleased` line
-  before the commit.
+  in the same change set, and add to `CHANGELOG.md` `Unreleased` before
+  the commit: one line for each pull request, in words a user can
+  notice (owner, 2026-11-14). The release body is that section, and
+  GitHub refuses a long one.
 - Root `README.md` is product-facing and concise; detailed content
   belongs under `docs/`. Its **Features** section stays complete and
   honest (`Available now` vs `In flight and coming next`), one emoji
@@ -854,15 +865,13 @@ Maintain runbooks under `docs/operations/` for:
 - daemon crash loops
 - auth/token refresh failures
 - provider rate-limit storms
-- schema migration failures
+- a state database that was set aside (another schema version, damage)
 - reconcile backlog non-convergence
 
 Each runbook must include detection, mitigation, user-visible state, and recovery verification.
 
-Current status: only the release incident playbook exists
-(`docs/operations/release-incident-playbook.md`). The five runbooks
-above are open work, tracked in `docs/tasks/core.md` R-1; when one lands,
-remove it from that tracking entry.
+The runbooks that do not exist yet are open work in
+`docs/tasks/core.md`.
 
 ## 13) Skills index
 

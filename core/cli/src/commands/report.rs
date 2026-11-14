@@ -1,16 +1,19 @@
 //! `vapor report`: a support report to share when asking for help.
 //!
 //! Collects everything a maintainer needs to triage a report into one
-//! shareable directory: the runtime config, the daemon logs, and — when
-//! the daemon is reachable — live status / per-intent diagnostics / the
+//! shareable directory: the runtime config, the daemon logs, and, when
+//! the daemon is reachable: live status / per-intent diagnostics / the
 //! activity timeline, plus a manifest describing what was (and was not)
 //! captured.
 //!
 //! Privacy posture: the config carries no secrets (tokens live only in
 //! the platform secret store, §6) and the daemon logs are written
-//! through the redacting logger. The report therefore contains no
-//! credentials by construction; the manifest states this so users know
-//! what they are sharing.
+//! through the redacting logger, so the report holds no credential. It
+//! does hold the user's folder paths and file names: in `vapor.json`,
+//! in every log line, and in the live state. A report attached to a
+//! public issue is public, so those names are replaced by stable codes
+//! unless the user asks to keep them (`redact.rs`). The command says
+//! which of the two it wrote, on the terminal and in the manifest.
 
 use std::fs;
 use std::io;
@@ -39,7 +42,31 @@ pub struct SupportReport {
     /// Report-relative paths of everything captured.
     pub artifacts: Vec<String>,
     pub daemon_reachable: bool,
+    /// Whether file and folder names were replaced by codes.
+    pub paths_redacted: bool,
 }
+
+/// What the report does with file and folder names.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Paths {
+    /// Replace them by stable codes. The default.
+    Redact,
+    /// Keep them as they are.
+    Keep,
+}
+
+/// How many reports stay in the default reports directory. Each one
+/// can hold every log file; the oldest go when a new one is written.
+pub const REPORTS_KEPT: usize = 5;
+
+const REDACTED_NOTE: &str = "no credentials: tokens live in the platform secret store, and the \
+     logs are written through the redacting logger. File and folder names are replaced by \
+     stable codes (p-xxxxxxxx). A name inside an error message that the operating system or \
+     the provider wrote can remain: read the report before you share it";
+const KEPT_NOTE: &str = "no credentials: tokens live in the platform secret store, and the logs \
+     are written through the redacting logger. This report was written with the paths kept: \
+     it holds the sync folders' paths and the name of every file that synced. Do not attach \
+     it to a public issue";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,33 +80,57 @@ struct ReportManifest<'a> {
     /// Per-endpoint live-capture failures (empty when all succeeded or the
     /// daemon was fully unreachable).
     capture_errors: &'a [String],
+    /// Whether file and folder names were replaced by codes.
+    paths_redacted: bool,
     /// Human-facing note on what the report can and cannot contain.
     redaction: &'a str,
 }
 
 /// Writes the report under `output_root/vapor-report-{timestamp}/`.
 ///
-/// Pure filesystem work over an explicit `vapor_dir` — no IPC, no
-/// network — so tests drive it hermetically; `main.rs` supplies the
+/// Pure filesystem work over an explicit `vapor_dir`, no IPC, no
+/// network, so tests drive it hermetically; `main.rs` supplies the
 /// live captures.
 pub fn write_support_report(
     vapor_dir: &Path,
     output_root: &Path,
     live: Option<LiveCaptures>,
     timestamp_ms: u64,
+    paths: Paths,
 ) -> io::Result<SupportReport> {
     let path = create_unique_report_dir(output_root, timestamp_ms)?;
     let mut artifacts = Vec::new();
 
+    let config_name = vapor_shared::constants::runtime::CONFIGURATION_FILE_NAME;
+    let config_path = vapor_dir.join(config_name);
+    let redactor = (paths == Paths::Redact).then(|| {
+        super::redact::Redactor::new(
+            &vapor_shared::config::load_from(&config_path).config,
+            vapor_shared::runtime_paths::home_directory().as_deref(),
+            vapor_shared::device_id::persisted(&config_path).as_deref(),
+        )
+    });
+    // A JSON document goes through the redactor as a document, so a
+    // path field is redacted whole. One that does not parse is treated
+    // as lines of text.
+    let redact_json = |contents: String| match (
+        &redactor,
+        serde_json::from_str::<serde_json::Value>(&contents),
+    ) {
+        (None, _) => contents,
+        (Some(redactor), Ok(mut document)) => {
+            redactor.json(&mut document);
+            serde_json::to_string_pretty(&document).unwrap_or_default() + "\n"
+        }
+        (Some(redactor), Err(_)) => redact_lines(redactor, &contents),
+    };
+
     // Runtime config (no secrets by design; tokens live in the secret
     // store).
-    let config_path = vapor_dir.join(vapor_shared::constants::runtime::CONFIGURATION_FILE_NAME);
     if config_path.is_file() {
-        fs::copy(
-            &config_path,
-            path.join(vapor_shared::constants::runtime::CONFIGURATION_FILE_NAME),
-        )?;
-        artifacts.push(vapor_shared::constants::runtime::CONFIGURATION_FILE_NAME.to_string());
+        let contents = fs::read_to_string(&config_path)?;
+        fs::write(path.join(config_name), redact_json(contents))?;
+        artifacts.push(config_name.to_string());
     }
 
     // Daemon/CLI logs (written through the redacting logger).
@@ -94,7 +145,17 @@ pub fn write_support_report(
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let name = entry.file_name();
-            fs::copy(entry.path(), report_logs.join(&name))?;
+            match &redactor {
+                Some(redactor) => {
+                    // Lossy on purpose: a log holds the bytes of file
+                    // names, and a name need not be UTF-8.
+                    let contents = String::from_utf8_lossy(&fs::read(entry.path())?).into_owned();
+                    fs::write(report_logs.join(&name), redact_lines(redactor, &contents))?;
+                }
+                None => {
+                    fs::copy(entry.path(), report_logs.join(&name))?;
+                }
+            }
             artifacts.push(format!(
                 "{}/{}",
                 vapor_shared::constants::runtime::LOGS_DIRECTORY_NAME,
@@ -104,7 +165,7 @@ pub fn write_support_report(
     }
 
     // Live daemon captures, each independent. "Reachable" is decided by
-    // the status call alone — a later endpoint failing must not erase the
+    // the status call alone: a later endpoint failing must not erase the
     // captures that did land or misreport the daemon as unreachable.
     let capture_errors = live
         .as_ref()
@@ -114,12 +175,12 @@ pub fn write_support_report(
     if let Some(live) = live {
         daemon_reachable = live.status_json.is_some();
         for (name, contents) in [
-            ("status.json", &live.status_json),
-            ("diagnostics.json", &live.diagnostics_json),
-            ("timeline.json", &live.timeline_json),
+            ("status.json", live.status_json),
+            ("diagnostics.json", live.diagnostics_json),
+            ("timeline.json", live.timeline_json),
         ] {
             if let Some(contents) = contents {
-                fs::write(path.join(name), contents)?;
+                fs::write(path.join(name), redact_json(contents))?;
                 artifacts.push(name.to_string());
             }
         }
@@ -128,6 +189,7 @@ pub fn write_support_report(
     // The manifest lists itself, so its artifact array matches both the
     // report and the actual report contents.
     artifacts.push("manifest.json".to_string());
+    let paths_redacted = redactor.is_some();
     let manifest = ReportManifest {
         created_at_ms: timestamp_ms,
         vapor_version: vapor_daemon::build_info::VERSION,
@@ -136,9 +198,12 @@ pub fn write_support_report(
         daemon_reachable,
         artifacts: &artifacts,
         capture_errors: &capture_errors,
-        redaction: "config carries no credentials (tokens live in the platform secret \
-                    store) and logs are written through the redacting logger; review \
-                    file paths in logs/diagnostics before sharing if they are sensitive",
+        paths_redacted,
+        redaction: if paths_redacted {
+            REDACTED_NOTE
+        } else {
+            KEPT_NOTE
+        },
     };
     let manifest_json = serde_json::to_string_pretty(&manifest)
         .map_err(|error| io::Error::other(format!("cannot serialize manifest: {error}")))?;
@@ -148,7 +213,51 @@ pub fn write_support_report(
         path,
         artifacts,
         daemon_reachable,
+        paths_redacted,
     })
+}
+
+fn redact_lines(redactor: &super::redact::Redactor, contents: &str) -> String {
+    let mut out = String::with_capacity(contents.len());
+    for line in contents.split_inclusive('\n') {
+        let (text, newline) = match line.strip_suffix('\n') {
+            Some(text) => (text, "\n"),
+            None => (line, ""),
+        };
+        out.push_str(&redactor.log_line(text));
+        out.push_str(newline);
+    }
+    out
+}
+
+/// Removes the oldest reports under `reports_root` so that at most
+/// [`REPORTS_KEPT`] stay. Only directories this command names
+/// (`vapor-report-*`) count. Returns how many went.
+pub fn prune_old_reports(reports_root: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(reports_root) else {
+        return 0;
+    };
+    let mut reports: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("vapor-report-")
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        })
+        .filter_map(|entry| {
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect();
+    reports.sort();
+    let surplus = reports.len().saturating_sub(REPORTS_KEPT);
+    reports
+        .into_iter()
+        .take(surplus)
+        .filter(|(_, report)| fs::remove_dir_all(report).is_ok())
+        .count()
 }
 
 /// Creates a fresh report directory, disambiguating a name collision
@@ -192,6 +301,13 @@ pub fn render_report(report: &SupportReport) -> String {
     for artifact in &report.artifacts {
         out.push_str(&format!("  + {artifact}\n"));
     }
+    out.push_str(if report.paths_redacted {
+        "File and folder names are replaced by codes. A name inside an error message can \
+         remain: read the report before you share it.\n"
+    } else {
+        "This report holds your folder paths and the name of every file that synced. Do not \
+         attach it to a public issue.\n"
+    });
     out
 }
 
@@ -213,8 +329,9 @@ mod tests {
         let output = TempDir::new().expect("output dir");
         seed_vapor_dir(vapor_dir.path());
 
-        let report = write_support_report(vapor_dir.path(), output.path(), None, 1_234)
-            .expect("report collects");
+        let report =
+            write_support_report(vapor_dir.path(), output.path(), None, 1_234, Paths::Keep)
+                .expect("report collects");
 
         assert!(!report.daemon_reachable);
         assert!(report.path.ends_with("vapor-report-1234"));
@@ -244,8 +361,9 @@ mod tests {
             timeline_json: Some("{\"entries\":[]}".to_string()),
             capture_errors: Vec::new(),
         };
-        let report = write_support_report(vapor_dir.path(), output.path(), Some(live), 99)
-            .expect("report collects");
+        let report =
+            write_support_report(vapor_dir.path(), output.path(), Some(live), 99, Paths::Keep)
+                .expect("report collects");
 
         assert!(report.daemon_reachable);
         for name in ["status.json", "diagnostics.json", "timeline.json"] {
@@ -267,8 +385,9 @@ mod tests {
             timeline_json: None,
             capture_errors: vec!["timeline: daemon not responding".to_string()],
         };
-        let report = write_support_report(vapor_dir.path(), output.path(), Some(live), 42)
-            .expect("report collects");
+        let report =
+            write_support_report(vapor_dir.path(), output.path(), Some(live), 42, Paths::Keep)
+                .expect("report collects");
 
         // Reachability is decided by status, not by the failed endpoint.
         assert!(report.daemon_reachable);
@@ -291,10 +410,11 @@ mod tests {
         let output = TempDir::new().expect("output dir");
         seed_vapor_dir(vapor_dir.path());
 
-        let first = write_support_report(vapor_dir.path(), output.path(), None, 1_000)
+        let first = write_support_report(vapor_dir.path(), output.path(), None, 1_000, Paths::Keep)
             .expect("first report");
-        let second = write_support_report(vapor_dir.path(), output.path(), None, 1_000)
-            .expect("second report");
+        let second =
+            write_support_report(vapor_dir.path(), output.path(), None, 1_000, Paths::Keep)
+                .expect("second report");
 
         assert_ne!(
             first.path, second.path,
@@ -309,7 +429,7 @@ mod tests {
         let vapor_dir = TempDir::new().expect("vapor dir");
         let output = TempDir::new().expect("output dir");
 
-        let report = write_support_report(vapor_dir.path(), output.path(), None, 7)
+        let report = write_support_report(vapor_dir.path(), output.path(), None, 7, Paths::Keep)
             .expect("report collects from an empty runtime dir");
 
         // Only the manifest is guaranteed.
@@ -323,10 +443,128 @@ mod tests {
             path: PathBuf::from("/tmp/vapor-report-1"),
             artifacts: vec!["manifest.json".to_string()],
             daemon_reachable: false,
+            paths_redacted: true,
         };
         assert_eq!(
             serde_json::to_string(&report).expect("serializes"),
-            r#"{"path":"/tmp/vapor-report-1","artifacts":["manifest.json"],"daemonReachable":false}"#
+            r#"{"path":"/tmp/vapor-report-1","artifacts":["manifest.json"],"daemonReachable":false,"pathsRedacted":true}"#
         );
+    }
+
+    #[test]
+    fn a_report_holds_no_folder_or_file_name_unless_the_user_keeps_them() {
+        let vapor_dir = TempDir::new().expect("vapor dir");
+        let output = TempDir::new().expect("output dir");
+        fs::create_dir_all(vapor_dir.path().join("logs")).expect("logs dir");
+        fs::write(
+            vapor_dir.path().join("vapor.json"),
+            r#"{ "deviceId": "sams-mac-k3x9",
+                 "localRoot": "/Users/sam/Family Photos",
+                 "cloudRoot": "/Users/sam/cloud/Photos" }"#,
+        )
+        .expect("config");
+        fs::write(
+            vapor_dir.path().join("logs/vapord.log"),
+            "1 [INFO] (vapord): Removed from the cloud. \
+             path=/Users/sam/Family Photos/summer 2025/beach day.jpg remote_path=summer 2025/beach day.jpg\n",
+        )
+        .expect("log");
+        let live = || LiveCaptures {
+            status_json: Some(
+                r#"{"run":{"state":"running","reason":"watching /Users/sam/Family Photos"}}"#
+                    .to_string(),
+            ),
+            diagnostics_json: Some(
+                r#"{"items":[{"path":"/Users/sam/Family Photos/summer 2025/beach day.jpg"}]}"#
+                    .to_string(),
+            ),
+            timeline_json: None,
+            capture_errors: Vec::new(),
+        };
+        let everything = |report: &SupportReport| {
+            [
+                "vapor.json",
+                "logs/vapord.log",
+                "status.json",
+                "diagnostics.json",
+            ]
+            .iter()
+            .map(|name| fs::read_to_string(report.path.join(name)).expect(name))
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+
+        let redacted = write_support_report(
+            vapor_dir.path(),
+            output.path(),
+            Some(live()),
+            1,
+            Paths::Redact,
+        )
+        .expect("report");
+        assert!(redacted.paths_redacted);
+        let text = everything(&redacted);
+        for name in ["sam", "Family", "Photos", "summer", "beach", "2025"] {
+            assert!(
+                !text.contains(name),
+                "{name} is still in the report:\n{text}"
+            );
+        }
+        assert!(
+            text.contains("Removed from the cloud."),
+            "the messages stay"
+        );
+        assert!(
+            text.contains("<local-root:default>") && text.contains(".jpg"),
+            "{text}"
+        );
+        let manifest = fs::read_to_string(redacted.path.join("manifest.json")).expect("manifest");
+        assert!(manifest.contains("\"pathsRedacted\": true"), "{manifest}");
+        assert!(render_report(&redacted).contains("read the report before you share it"));
+
+        let kept = write_support_report(
+            vapor_dir.path(),
+            output.path(),
+            Some(live()),
+            2,
+            Paths::Keep,
+        )
+        .expect("report");
+        assert!(!kept.paths_redacted);
+        assert!(everything(&kept).contains("/Users/sam/Family Photos/summer 2025/beach day.jpg"));
+        assert!(render_report(&kept).contains("Do not"));
+    }
+
+    #[test]
+    fn the_oldest_reports_go_when_more_than_the_kept_number_are_there() {
+        let reports = TempDir::new().expect("reports");
+        let vapor_dir = TempDir::new().expect("vapor dir");
+        seed_vapor_dir(vapor_dir.path());
+        let mut written = Vec::new();
+        for index in 0..(REPORTS_KEPT as u64 + 2) {
+            let report =
+                write_support_report(vapor_dir.path(), reports.path(), None, index, Paths::Redact)
+                    .expect("report");
+            // Distinct modification times, oldest first.
+            let stamp = std::time::SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(1_700_000_000 + index);
+            fs::File::open(&report.path)
+                .and_then(|directory| directory.set_modified(stamp))
+                .expect("set the report's time");
+            written.push(report.path);
+        }
+        fs::create_dir_all(reports.path().join("my-notes")).expect("another folder");
+
+        assert_eq!(prune_old_reports(reports.path()), 2);
+        assert!(
+            !written[0].exists() && !written[1].exists(),
+            "the two oldest went"
+        );
+        assert!(written[2..].iter().all(|report| report.exists()));
+        assert!(
+            reports.path().join("my-notes").exists(),
+            "only reports are counted"
+        );
+        assert_eq!(prune_old_reports(reports.path()), 0);
     }
 }

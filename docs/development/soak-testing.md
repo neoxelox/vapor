@@ -26,7 +26,7 @@ the planned duration elapses:
 | Phase | What happens |
 |---|---|
 | `seed` | the local side creates a tree of files |
-| `local-churn` | the local side creates, overwrites, edits in place, appends, renames, moves, deletes, removes subtrees, makes directories, flips modes |
+| `local-churn` | the local side creates, overwrites, edits in place, appends, renames, renames so that only the case of a name changes, moves, deletes, removes a file and puts it back with the same bytes and time after 0.5 to 4 seconds, removes subtrees, makes directories, flips modes |
 | `cloud-churn` | the same, on the cloud root (another device, the web UI) |
 | `both-churn` | both sides at once, on disjoint halves of the files, interleaved |
 | `conflicts` | the same paths edited on both sides at once (two-way only) |
@@ -209,10 +209,3 @@ image for the disk-full fault) and exits with code 3 naming each
 unmet one; `./scripts/soak.sh` reports the skip and exits clean, the
 way the e2e harness skips a scenario by name. Exit 1 is a run that
 found something, exit 2 a bad invocation or a provisioning failure.
-
-The first week of runs found five product bugs and one harness bug,
-all fixed: push-only could not remove a cloud-only folder, pull-only
-queued a download for a folder, a full cloud disk left an upload
-untagged, an in-place cloud edit passed as Vapor's own echo, and a
-conflict copy's upload was taken for a rename of the cloud canonical.
-Each fix carries a Tier 1 test named after the finding.

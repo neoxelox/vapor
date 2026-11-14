@@ -1,8 +1,8 @@
 //! Off-thread execution of blocking provider I/O.
 //!
-//! Every provider call the staged executor makes — remote stats and
+//! Every provider call the staged executor makes: remote stats and
 //! content hashes during planning, `begin_upload`/`begin_download`,
-//! transfer-session steps, and remote deletes — is a blocking network
+//! transfer-session steps, and remote deletes: is a blocking network
 //! round trip on a real cloud provider. Running those inline on the
 //! runtime tick thread would time-slice "concurrent" transfers on one
 //! thread and stall fs-event draining, debounce, and IPC status behind
@@ -17,7 +17,7 @@
 //! between steps. When a gate closes (throttle Suspended) or the
 //! shaper runs dry, the session is handed back to the executor at its
 //! checkpoint ([`ProviderJobOutcome::TransferHeld`]) and re-dispatched
-//! once the gate reopens — the same hold-at-checkpoint discipline the
+//! once the gate reopens: the same hold-at-checkpoint discipline the
 //! tick-inline executor enforced, minus the tick-thread stalls.
 //!
 //! The pool has two modes:
@@ -31,10 +31,11 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use vapor_providers::{
-    BandwidthShaper, DownloadRequest, Provider, ProviderError, RemoteEntry, RemotePath,
-    TransferOutcome, TransferSession, TransferStep, UploadRequest,
+    DownloadRequest, Provider, ProviderError, RemoteEntry, RemotePath, TransferOutcome,
+    TransferSession, TransferStep, UploadRequest,
 };
 
 use crate::clock::Clock;
@@ -47,6 +48,7 @@ use crate::runtime::TickWaker;
 pub(crate) struct TransferGates {
     allow_uploads: AtomicBool,
     allow_downloads: AtomicBool,
+    allow_hashing: AtomicBool,
     /// Bumped on abort/shutdown; jobs dispatched under an older
     /// generation abort their session and report `Cancelled`.
     generation: AtomicU64,
@@ -57,6 +59,7 @@ impl TransferGates {
         Self {
             allow_uploads: AtomicBool::new(true),
             allow_downloads: AtomicBool::new(true),
+            allow_hashing: AtomicBool::new(true),
             generation: AtomicU64::new(0),
         }
     }
@@ -64,21 +67,16 @@ impl TransferGates {
 
 /// Everything a job needs from the dispatching tick, captured by value
 /// so the worker never touches tick-thread state. The provider is the
-/// app's `Arc` (swappable in tests); shaper and step knob are the
-/// daemon-wide shared instances, so auto-tune and rate changes reach
-/// in-flight transfers on their next step.
+/// app's `Arc` (swappable in tests); the bandwidth state is the
+/// daemon-wide shared instance, so a rate change reaches an in-flight
+/// transfer on its next step and every step feeds one estimate.
 pub(crate) struct JobContext {
     pub provider: Arc<dyn Provider>,
-    pub bandwidth: Arc<Mutex<BandwidthShaper>>,
-    pub transfer_step_bytes: Arc<AtomicU64>,
+    pub bandwidth: Arc<crate::bandwidth::TransferBandwidth>,
     pub clock: Arc<dyn Clock>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TransferDirection {
-    Upload,
-    Download,
-}
+pub(crate) use crate::bandwidth::TransferDirection;
 
 /// Which phase of a transfer job an error came from. The executor's
 /// failure handling differs: a failed `begin_download` on an absent
@@ -91,14 +89,14 @@ pub(crate) enum TransferPhase {
 }
 
 /// When a probe should also fetch the remote content hash (a full
-/// remote read on filesystem-backed providers — only fetched when the
+/// remote read on filesystem-backed providers, only fetched when the
 /// planner's decision actually needs it).
 pub(crate) enum ProbeHash {
     Never,
     /// Unconditional hash fetch (upload-gate verification).
     Always,
     /// Fetch only when the stat found an entry whose op-id differs from
-    /// the sync index's and which carries no hash of its own — the
+    /// the sync index's and which carries no hash of its own: the
     /// divergence check would otherwise have nothing to compare.
     IfDivergedFrom {
         index_op_id: String,
@@ -133,7 +131,7 @@ pub(crate) struct ProbeResult {
 pub(crate) const SUBTREE_LISTING_CAP: usize = 10_000;
 
 impl ProbeResult {
-    /// The fetched hash, folded to `None` on fetch failure — matching
+    /// The fetched hash, folded to `None` on fetch failure: matching
     /// the planner's best-effort `.ok()` semantics.
     pub fn content_hash_ok(&self) -> Option<String> {
         self.content_hash
@@ -163,6 +161,9 @@ pub(crate) enum ProviderJobKind {
         session: Box<dyn TransferSession>,
         direction: TransferDirection,
     },
+    /// The content hash of a local file before its upload: disk reads
+    /// and digest work that must not run on the tick thread.
+    Hash(crate::executor::StreamingFileHash),
 }
 
 pub(crate) enum ProviderJobOutcome {
@@ -171,11 +172,19 @@ pub(crate) enum ProviderJobOutcome {
     Move(Result<(), ProviderError>),
     /// Session held at its checkpoint: a gate closed or the bandwidth
     /// bucket ran dry. The executor re-dispatches on a later tick (its
-    /// stage already knows the direction).
+    /// stage already knows the direction). A dry bucket says how long
+    /// until a grant is worth a step, and the executor waits that long;
+    /// dispatching sooner would spin the tick on a few bytes a pass.
     TransferHeld {
         session: Box<dyn TransferSession>,
+        resume_after: Option<Duration>,
     },
     TransferCompleted(TransferOutcome),
+    /// The local file is hashed (or could not be read).
+    Hashed(std::io::Result<String>),
+    /// Hashing stopped at a step boundary because the throttle no
+    /// longer allows it; the executor dispatches it again when it does.
+    HashHeld(crate::executor::StreamingFileHash),
     /// The session (or its begin call) failed; any session was already
     /// aborted worker-side.
     TransferFailed {
@@ -188,7 +197,7 @@ pub(crate) enum ProviderJobOutcome {
     /// The provider call panicked on the worker. The worker survives and
     /// the executor fails the intent with the panic message; without
     /// this the permit and the in-flight slot would leak for the rest of
-    /// the process. (Release builds abort on panic and never see it.)
+    /// the process.
     Panicked(String),
 }
 
@@ -346,14 +355,18 @@ impl ProviderJobPool {
     }
 
     /// Pushes the current workgate caps to the shared gates so in-flight
-    /// transfer loops observe throttle transitions between steps.
-    pub fn update_gates(&self, allow_uploads: bool, allow_downloads: bool) {
+    /// transfer and hash loops observe throttle transitions between
+    /// steps.
+    pub fn update_gates(&self, allow_uploads: bool, allow_downloads: bool, allow_hashing: bool) {
         self.gates
             .allow_uploads
             .store(allow_uploads, Ordering::Relaxed);
         self.gates
             .allow_downloads
             .store(allow_downloads, Ordering::Relaxed);
+        self.gates
+            .allow_hashing
+            .store(allow_hashing, Ordering::Relaxed);
     }
 
     /// Invalidates every dispatched-but-unharvested job: their sessions
@@ -535,6 +548,19 @@ fn run_job(job: QueuedJob, gates: &TransferGates) -> CompletedJob {
         ProviderJobKind::Move { from, to, op_id } => {
             ProviderJobOutcome::Move(context.provider.move_object(&from, &to, &op_id))
         }
+        ProviderJobKind::Hash(mut hasher) => loop {
+            if gates.generation.load(Ordering::SeqCst) != generation {
+                break ProviderJobOutcome::Cancelled;
+            }
+            if !gates.allow_hashing.load(Ordering::Relaxed) {
+                break ProviderJobOutcome::HashHeld(hasher);
+            }
+            match hasher.step(vapor_shared::constants::engine::HASH_STAGE_STEP_BYTES) {
+                Ok(Some(content_hash)) => break ProviderJobOutcome::Hashed(Ok(content_hash)),
+                Ok(None) => {}
+                Err(error) => break ProviderJobOutcome::Hashed(Err(error)),
+            }
+        },
         ProviderJobKind::Upload(request) => match context.provider.begin_upload(request) {
             Ok(session) => run_transfer(
                 &context,
@@ -627,9 +653,13 @@ fn list_subtree(
     Ok(collected)
 }
 
+/// A transfer that waits for bandwidth resumes when the bucket holds
+/// this share of one second of rate: four resumes a second at most.
+const USEFUL_GRANTS_PER_SECOND: u64 = 4;
+
 /// Steps a transfer session until it completes, fails, is cancelled, or
-/// must hold (gate closed / bandwidth dry). Byte budgets per step come
-/// from the shared auto-tuned knob capped by the shared shaper, so one
+/// must hold (gate closed / bandwidth dry). The byte budget of a step
+/// is the session's own chunk size capped by the shared shaper, so one
 /// step is always bounded and interruptible.
 fn run_transfer(
     context: &JobContext,
@@ -649,24 +679,61 @@ fn run_transfer(
             TransferDirection::Download => gates.allow_downloads.load(Ordering::Relaxed),
         };
         if !allowed {
-            return ProviderJobOutcome::TransferHeld { session };
+            return ProviderJobOutcome::TransferHeld {
+                session,
+                resume_after: None,
+            };
         }
-        let step_bytes = context.transfer_step_bytes.load(Ordering::Relaxed);
-        let grant = context
-            .bandwidth
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .budget(step_bytes, context.clock.now());
-        if grant == 0 {
-            // Bucket dry: hold at the checkpoint until tokens refill.
-            return ProviderJobOutcome::TransferHeld { session };
-        }
+        // No more than the session can still move: a small file must
+        // not empty the bucket for the others.
+        let step_bytes = session.step_bytes();
+        let step_bytes = session
+            .remaining_bytes()
+            .map_or(step_bytes, |left| left.min(step_bytes));
+        let now = context.clock.now();
+        // An old estimate of the link gets one step without the
+        // limiter: a short probe, so the ceiling follows the link.
+        let probing = context.bandwidth.take_probe(direction, now);
+        let grant = if probing {
+            Ok(step_bytes.min(vapor_shared::constants::engine::LINK_CAPACITY_PROBE_BYTES))
+        } else {
+            let mut shaper = context.bandwidth.shaper(direction);
+            let useful = shaper
+                .rate()
+                .map(|rate| rate / USEFUL_GRANTS_PER_SECOND)
+                .unwrap_or(step_bytes);
+            shaper.grant_or_wait(step_bytes, useful, now)
+        };
+        let grant = match grant {
+            Ok(grant) => grant,
+            // Bucket dry: hold at the checkpoint until a useful grant
+            // has refilled.
+            Err(wait) => {
+                return ProviderJobOutcome::TransferHeld {
+                    session,
+                    resume_after: Some(wait),
+                };
+            }
+        };
+        // What a step that ends the transfer moved: the session knows
+        // only before the step.
+        let left_before = session.remaining_bytes();
         match session.step(grant) {
             Ok(TransferStep::Progressed { bytes_transferred }) => {
+                let done = context.clock.now();
+                context.bandwidth.record_step(
+                    direction,
+                    bytes_transferred,
+                    done.saturating_duration_since(now),
+                    done,
+                );
                 // Return the slack: a step routinely spends less than its
                 // grant (chunk alignment / short final chunk), and keeping
-                // it would undershoot the configured rate.
-                refund(context, grant.saturating_sub(bytes_transferred));
+                // it would undershoot the configured rate. A probe took
+                // nothing from the bucket.
+                if !probing {
+                    refund(context, direction, grant.saturating_sub(bytes_transferred));
+                }
                 if bytes_transferred == 0 {
                     zero_progress_steps += 1;
                     if zero_progress_steps
@@ -685,12 +752,21 @@ fn run_transfer(
                 }
             }
             Ok(TransferStep::Completed(outcome)) => {
+                let done = context.clock.now();
+                context.bandwidth.record_step(
+                    direction,
+                    left_before.unwrap_or(0).min(grant),
+                    done.saturating_duration_since(now),
+                    done,
+                );
                 return ProviderJobOutcome::TransferCompleted(outcome);
             }
             Err(error) => {
                 // A failed step moved zero bytes: refund the whole grant
                 // so a retry storm cannot burn the shared bucket.
-                refund(context, grant);
+                if !probing {
+                    refund(context, direction, grant);
+                }
                 session.abort();
                 return ProviderJobOutcome::TransferFailed {
                     error,
@@ -701,15 +777,11 @@ fn run_transfer(
     }
 }
 
-fn refund(context: &JobContext, unused: u64) {
+fn refund(context: &JobContext, direction: TransferDirection, unused: u64) {
     if unused == 0 {
         return;
     }
-    context
-        .bandwidth
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .refund(unused);
+    context.bandwidth.shaper(direction).refund(unused);
 }
 
 #[cfg(test)]
@@ -717,7 +789,6 @@ mod tests {
     use super::*;
     use crate::clock::SystemClock;
     use std::sync::atomic::AtomicUsize;
-    use std::time::Duration;
 
     struct StubProvider {
         delete_calls: AtomicUsize,
@@ -793,8 +864,7 @@ mod tests {
     fn context(provider: Arc<dyn Provider>) -> JobContext {
         JobContext {
             provider,
-            bandwidth: Arc::new(Mutex::new(BandwidthShaper::unlimited())),
-            transfer_step_bytes: Arc::new(AtomicU64::new(1024)),
+            bandwidth: Arc::default(),
             clock: Arc::new(SystemClock),
         }
     }

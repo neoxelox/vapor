@@ -19,18 +19,18 @@ status.
 
 ## Documents
 
-- `status-and-goals.md` — current shipping stage (pre-GA), active work
+- `status-and-goals.md`: current shipping stage (pre-GA), active work
   phase, provider roadmap (filesystem reference → Google Drive →
   additional adapters), product goals, runtime invariants (throttle
   states, user resource ceilings, idle boost, graceful shutdown,
   crash-loop pause), pre-GA compatibility policy.
-- `configuration.md` — every `vapor.json` key in detail: when a change
+- `configuration.md`: every `vapor.json` key in detail: when a change
   applies, the edge cases and floors, and how profiles merge. The root
   `README.md` keeps the one-table summary.
 
 ## Related references
 
-- `docs/plans/README.md` — how product direction turns into per-surface
+- `docs/plans/README.md`: how product direction turns into per-surface
   plans (`core`, `macos`, `cli`, …).
-- `docs/tasks/README.md` — what is actively being executed next and
+- `docs/tasks/README.md`: what is actively being executed next and
   across which surfaces.

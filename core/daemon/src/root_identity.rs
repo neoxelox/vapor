@@ -90,10 +90,9 @@ pub fn check_local_root(
     now: SystemTime,
 ) -> Result<RootStatus, StateDbError> {
     let recorded = recorded_identity(state_db, RootSide::Local)?;
-    let present = match std::fs::symlink_metadata(root) {
-        Ok(metadata) => metadata.is_dir(),
-        Err(_) => false,
-    };
+    // Through a symbolic link: a root that is a link to a folder is
+    // that folder.
+    let present = std::fs::metadata(root).is_ok_and(|metadata| metadata.is_dir());
     match (recorded, present) {
         (None, false) => {
             if let Err(error) = std::fs::create_dir_all(root) {
@@ -115,16 +114,42 @@ pub fn check_local_root(
         (None, true) => adopt_local(state_db, root, device_id, now),
         (Some(_), false) => Ok(RootStatus::Missing),
         (Some(expected), true) => {
-            let found = root_marker::read_marker(root)
-                .ok()
-                .flatten()
-                .map(|marker| marker.root_id);
+            // A marker that cannot be read (a privacy permission the
+            // user refused, an I/O error) says nothing about which
+            // folder this is. It is not a replacement.
+            let found = match root_marker::read_marker(root) {
+                Ok(marker) => marker.map(|marker| marker.root_id),
+                Err(error) => {
+                    return Ok(RootStatus::Unreachable(format!(
+                        "cannot read {}: {error}",
+                        root.display()
+                    )));
+                }
+            };
             if found.as_deref() == Some(expected.as_str()) {
                 Ok(RootStatus::Ready)
             } else {
                 Ok(RootStatus::Replaced { expected, found })
             }
         }
+    }
+}
+
+/// Whether the folder at `root` is the one this profile adopted, read
+/// now. The daemon asks right before it acts on what it found there. A
+/// file is "gone" from a root that was swapped (a volume unmounted, a
+/// folder put in its place), and the user deleted nothing: the
+/// periodic check has not seen the swap yet. A profile that has adopted
+/// no root has nothing to compare, and a marker that cannot be read
+/// vouches for nothing.
+pub fn local_root_is_adopted(state_db: &DurableStateDb, root: &Path) -> bool {
+    match recorded_identity(state_db, RootSide::Local) {
+        Ok(None) => true,
+        Ok(Some(expected)) => root_marker::read_marker(root)
+            .ok()
+            .flatten()
+            .is_some_and(|marker| marker.root_id == expected),
+        Err(_) => false,
     }
 }
 
@@ -307,6 +332,48 @@ mod tests {
             RootStatus::Missing
         );
         assert!(!root.exists(), "a once-adopted root is never re-created");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_that_is_a_link_to_a_folder_is_present_on_every_start() {
+        let temp = TempDir::new().expect("temp");
+        let mut state_db = db(&temp);
+        let folder = temp.path().join("on-another-volume");
+        std::fs::create_dir(&folder).expect("folder");
+        let root = temp.path().join("Vapor");
+        std::os::unix::fs::symlink(&folder, &root).expect("link");
+
+        for start in 1..=3 {
+            assert_eq!(
+                check_local_root(&mut state_db, &root, "dev", at(start)).expect("check"),
+                RootStatus::Ready,
+                "start {start}"
+            );
+        }
+        assert!(root_marker::read_marker(&folder).expect("marker").is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_whose_marker_cannot_be_read_is_not_a_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().expect("temp");
+        let mut state_db = db(&temp);
+        let root = temp.path().join("Vapor");
+        check_local_root(&mut state_db, &root, "dev", at(1)).expect("adopt");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).expect("lock");
+        let status = check_local_root(&mut state_db, &root, "dev", at(2)).expect("check");
+        let readable_anyway = std::fs::read_dir(&root).is_ok();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("unlock");
+        if readable_anyway {
+            // Running as a user that permissions do not stop.
+            return;
+        }
+        assert!(
+            matches!(status, RootStatus::Unreachable(ref reason) if reason.contains("cannot read")),
+            "{status:?}"
+        );
     }
 
     #[test]

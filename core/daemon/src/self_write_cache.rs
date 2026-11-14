@@ -3,7 +3,7 @@
 //! Bidirectional sync must not react to its own writes: an upload echoes
 //! back through the remote changes feed, and a downloaded file echoes
 //! back through the local fs watcher. The daemon keeps two instances of
-//! this cache — one keyed by remote path (suppressing feed echoes of
+//! this cache: one keyed by remote path (suppressing feed echoes of
 //! uploads / remote deletes) and one keyed by local path (suppressing
 //! watcher echoes of downloads / local applies).
 //!
@@ -13,7 +13,7 @@
 //! diverged). Eviction is LRU-on-insert; TTL expiry runs on the same 1s
 //! cadence as throttle sampling. Bounds come from
 //! `constants::self_write_cache` and may be tightened under memory
-//! pressure but never below the documented floors —
+//! pressure but never below the documented floors:
 //! loop-prevention is a safety guarantee, not an opportunistic feature.
 
 use std::collections::BTreeMap;
@@ -123,7 +123,7 @@ impl SelfWriteCache {
     /// Whether an observed write-shaped change at `key` is an echo of a
     /// write the daemon performed. Op-id equality is the primary
     /// correlator; content hash the fallback. A `None` observation on
-    /// both correlators never matches — suppression must be positive
+    /// both correlators never matches: suppression must be positive
     /// evidence, not absence of evidence.
     pub fn matches_write(
         &mut self,
@@ -180,6 +180,32 @@ impl SelfWriteCache {
         matched
     }
 
+    /// Whether the file at `key` is still what the daemon wrote there,
+    /// by the size and the modification time the write recorded: the
+    /// same evidence as the sync index's quick check, and no read of
+    /// the file. A record without a modification time never matches.
+    pub fn matches_write_state(
+        &mut self,
+        key: &str,
+        observed_size: u64,
+        observed_modified_at: Option<SystemTime>,
+        now: SystemTime,
+    ) -> bool {
+        let Some(record) = self.live_record(key, now) else {
+            return false;
+        };
+        let matched = record.kind == SelfWriteKind::Write
+            && record.size_bytes == Some(observed_size)
+            && matches!(
+                (record.modified_at, observed_modified_at),
+                (Some(recorded), Some(observed)) if same_millisecond(recorded, observed)
+            );
+        if matched {
+            self.suppressed_count += 1;
+        }
+        matched
+    }
+
     /// The expected size of the daemon's own write at `key`, when a
     /// live write record exists. Callers use it as the cheap pre-check
     /// before paying for a content hash in the fallback path.
@@ -214,6 +240,21 @@ impl SelfWriteCache {
         matched
     }
 
+    /// Drops the delete record of `key`, if it has one. The caller saw
+    /// the path present again: whoever made it is not the daemon's
+    /// delete, so a later removal of it is a real one. A delete record
+    /// that stayed would match that removal for the rest of its life.
+    pub fn forget_delete(&mut self, key: &str) {
+        if self
+            .entries
+            .get(key)
+            .is_some_and(|record| record.kind == SelfWriteKind::Delete)
+        {
+            self.entries.remove(key);
+            self.insertion_order.retain(|recorded| recorded != key);
+        }
+    }
+
     /// TTL sweep; runs on the 1s throttle-sampling cadence.
     pub fn purge_expired(&mut self, now: SystemTime) {
         let expired: Vec<String> = self
@@ -241,7 +282,7 @@ impl SelfWriteCache {
         self.recorded_count
     }
 
-    /// Total suppressions performed — surfaced in diagnostics so loop
+    /// Total suppressions performed: surfaced in diagnostics so loop
     /// prevention is observable (`data-flow.md §Loop prevention`).
     pub fn suppressed_count(&self) -> u64 {
         self.suppressed_count
@@ -382,6 +423,28 @@ mod tests {
         );
         assert!(!cache.matches_write("docs/a.txt", None, None, ts(100)));
         assert_eq!(cache.suppressed_count(), 0);
+    }
+
+    #[test]
+    fn a_delete_record_goes_when_the_path_is_seen_again_and_a_write_record_stays() {
+        let mut cache = SelfWriteCache::new();
+        cache.record_delete("gone.txt", ts(0));
+        assert!(cache.matches_delete("gone.txt", ts(1_000)));
+        // Seen again: the next removal at this path is not the daemon's.
+        cache.forget_delete("gone.txt");
+        assert!(!cache.matches_delete("gone.txt", ts(2_000)));
+        assert!(cache.is_empty());
+
+        cache.record_write(
+            "kept.txt",
+            Some("op-1".to_string()),
+            None,
+            Some(4),
+            None,
+            ts(0),
+        );
+        cache.forget_delete("kept.txt");
+        assert!(cache.has_write_record("kept.txt", ts(1_000)));
     }
 
     #[test]

@@ -7,7 +7,7 @@
     menubar state.
   - Auto-launch toggle and daemon control surface (delegates to
     `core/lifecycle` by invoking the bundled `vapor` CLI at
-    `Contents/Helpers/vapor` as a subprocess — `vapor service …
+    `Contents/Helpers/vapor` as a subprocess: `vapor service …
     --json`; Swift keeps no lifecycle policy).
 - Rust daemon `vapord` (`core/daemon`, registered as a per-user LaunchAgent)
   - Fs-watch ingestion, debounce/coalescing, scheduler, throttle controller.
@@ -17,7 +17,7 @@
     `ServiceInstaller` (launchd + SMAppService), `SecretStore` (Keychain),
     `PlatformMetricsSampler` (IOKit / NSProcessInfo), `IdleNotifier`
     (CGEventSource), `FilesystemCapabilities` (xattr), `ProcessSupervisor`
-    (SIGTERM/SIGINT).
+    (SIGTERM/SIGINT), `TrashBin` (`~/.Trash`).
 - Provider modules (`core/providers`)
   - The filesystem provider (a local directory playing the cloud side)
     is the default and the reference implementation every
@@ -25,8 +25,9 @@
   - The Google Drive provider is selected by `provider = "gdrive"` and
     keeps its tokens in the login keychain through the platform
     `SecretStore`.
-  - An inert stub provider exists for tests and for a profile the daemon
-    has suspended; it is not selectable from configuration.
+  - A profile the daemon has suspended gets a provider that refuses
+    every call. A stub provider exists for tests. Neither is selectable
+    from configuration.
   - Additional adapters (for example iCloud, S3, R2, Proton Drive) come
     through extensibility hardening and are not part of the first release.
 - IPC boundary
@@ -63,8 +64,7 @@
   via `core/platform/process::macos` so `launchctl kill TERM` (or Ctrl-C
   in dev) exits its tick loop cleanly at the next tick boundary.
 - Crash-loop protection is owned by `core/lifecycle::CrashLoopGuard`
-  (not `launchd`, and not Swift — the former Swift guard was deleted;
-  the app only relays outcomes). Crash counters, backoff, and pause
+  (not `launchd`, and not Swift: the app only relays outcomes). Crash counters, backoff, and pause
   persist in `<vapor_dir>/state/lifecycle.json`, so they survive
   process restarts and are shared across surfaces. The app's
   `DaemonHealthMonitor` runs `vapor service check` every 30 seconds

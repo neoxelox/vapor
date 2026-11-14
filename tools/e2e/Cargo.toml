@@ -3,7 +3,7 @@ name = "vapor-e2e"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+publish.workspace = true
 
 # Development tool, never shipped: drives the real `vapor` + `vapord`
 # binaries black-box inside a disposable sandbox. Lives in the workspace

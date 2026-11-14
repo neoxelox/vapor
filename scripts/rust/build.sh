@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MODE="${1:-build}"
 
+if [[ "$MODE" != "build" && "$MODE" != "package" ]]; then
+  echo "Usage: scripts/rust/build.sh [build|package]"
+  exit 1
+fi
+
 export VAPOR_DIR="${VAPOR_DIR:-$ROOT_DIR/.vapor}"
 if [[ "$MODE" == "package" ]]; then
   export VAPOR_ENV="${VAPOR_ENV:-prod}"
@@ -13,11 +18,6 @@ fi
 mkdir -p "$VAPOR_DIR/logs" "$VAPOR_DIR/state"
 
 "$ROOT_DIR/scripts/version.sh" check-sync >/dev/null
-
-if [[ "$MODE" != "build" && "$MODE" != "package" ]]; then
-  echo "Usage: scripts/rust/build.sh [build|package]"
-  exit 1
-fi
 
 if [[ -f "$ROOT_DIR/Cargo.toml" ]]; then
   # shellcheck source=scripts/dotenv.sh

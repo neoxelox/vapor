@@ -18,10 +18,14 @@ Commands:
   check-sync                 Fail if Cargo.toml does not match VERSION
   sync                       Sync Cargo.toml from VERSION
   set <version>              Prepare a release commit/tag for X.Y.Z or X.Y.Z-(alpha|beta|rc).N
-  bump <major|minor|patch>   Prepare a stable release commit/tag after bumping the base version
+  bump <major|minor|patch>   Prepare a stable release commit/tag after bumping a stable version
   prerelease <alpha|beta|rc> [number]
                              Prepare a prerelease commit/tag by setting or incrementing that track
+                             of the current prerelease
   release                    Prepare a stable release commit/tag by stripping the prerelease suffix
+
+Every command that prepares a release refuses a version that does not
+sort above the current one.
 EOF
 }
 
@@ -41,7 +45,10 @@ CURRENT_BRANCH=""
 parse_version() {
   local version="$1"
 
-  if [[ ! "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-((alpha|beta|rc)\.([0-9]+)))?$ ]]; then
+  # Semver numbers carry no leading zero, which also keeps them out of
+  # bash's octal arithmetic.
+  local number='(0|[1-9][0-9]*)'
+  if [[ ! "$version" =~ ^${number}\.${number}\.${number}(-((alpha|beta|rc)\.([1-9][0-9]*)))?$ ]]; then
     return 1
   fi
 
@@ -51,7 +58,7 @@ parse_version() {
   VERSION_PRERELEASE_LABEL="${BASH_REMATCH[6]:-}"
   VERSION_PRERELEASE_NUMBER="${BASH_REMATCH[7]:-}"
 
-  if [[ -n "$VERSION_PRERELEASE_NUMBER" ]] && (( VERSION_PRERELEASE_NUMBER < 1 || VERSION_PRERELEASE_NUMBER > 255 )); then
+  if [[ -n "$VERSION_PRERELEASE_NUMBER" ]] && (( VERSION_PRERELEASE_NUMBER > 255 )); then
     return 1
   fi
 
@@ -60,6 +67,39 @@ parse_version() {
 
 base_version() {
   printf '%s.%s.%s\n' "$VERSION_MAJOR" "$VERSION_MINOR" "$VERSION_PATCH"
+}
+
+# The parsed version as numbers that compare in semver order: the three
+# base numbers, then the track (a stable version sorts above each of its
+# prereleases), then the prerelease number.
+version_sort_key() {
+  local track
+  case "$VERSION_PRERELEASE_LABEL" in
+    alpha) track=1 ;;
+    beta) track=2 ;;
+    rc) track=3 ;;
+    *) track=4 ;;
+  esac
+  printf '%s %s %s %s %s\n' "$VERSION_MAJOR" "$VERSION_MINOR" "$VERSION_PATCH" "$track" "${VERSION_PRERELEASE_NUMBER:-0}"
+}
+
+# True when version $1 sorts above version $2. Leaves $2 parsed.
+version_is_greater() {
+  local candidate current index
+  parse_version "$1" || return 1
+  read -r -a candidate <<< "$(version_sort_key)"
+  parse_version "$2" || return 1
+  read -r -a current <<< "$(version_sort_key)"
+
+  for index in 0 1 2 3 4; do
+    if (( candidate[index] > current[index] )); then
+      return 0
+    fi
+    if (( candidate[index] < current[index] )); then
+      return 1
+    fi
+  done
+  return 1
 }
 
 load_current_version() {
@@ -160,17 +200,12 @@ check_cargo_lock_sync() {
 
 sync_cargo_lock() {
   [[ -f "$CARGO_LOCK" ]] || return 0
-  # `cargo update --workspace` refreshes only the workspace members'
-  # lockfile entries. (`cargo generate-lockfile` would re-resolve every
-  # third-party dependency to its newest compatible version, silently
-  # bundling a dependency bump into the release-prep commit.)
-  #
-  # Keep stderr: swallowing it (with `2>&1 >/dev/null`) hid the failure
-  # when cargo was missing/broken, so `set -euo pipefail` aborted mid-way
-  # through set_version_and_sync — leaving VERSION/Cargo.toml bumped but
-  # Cargo.lock stale, with no diagnostic.
+  # `cargo update --workspace` refreshes the workspace members' lockfile
+  # entries only. `cargo generate-lockfile` would move every third-party
+  # dependency to its newest compatible version inside the release
+  # commit. stderr stays visible, so a missing or broken cargo is named.
   cargo update --workspace --manifest-path "$CARGO_TOML" >/dev/null \
-    || die "cargo update --workspace failed; VERSION/Cargo.toml were already updated — inspect the worktree"
+    || die "cargo update --workspace failed after VERSION and Cargo.toml were updated; inspect the worktree"
 }
 
 sync_cargo_from_version() {
@@ -311,6 +346,10 @@ prepare_release_version() {
     die "VERSION is already '$version'"
   fi
 
+  if ! version_is_greater "$version" "$CURRENT_VERSION"; then
+    die "version '$version' sorts below the current '$CURRENT_VERSION'; a release never goes back"
+  fi
+
   ensure_release_branch
   ensure_clean_worktree_except_changelog
   ensure_changelog_entry_exists "$version"
@@ -379,6 +418,10 @@ bump_version() {
   local segment="$1" next_major next_minor next_patch
   load_current_version
 
+  if [[ -n "$VERSION_PRERELEASE_LABEL" ]]; then
+    die "VERSION '$CURRENT_VERSION' is a prerelease, and a bump would skip $(base_version); use 'release' for $(base_version), or 'set <version>' for another one"
+  fi
+
   next_major="$VERSION_MAJOR"
   next_minor="$VERSION_MINOR"
   next_patch="$VERSION_PATCH"
@@ -416,8 +459,12 @@ set_prerelease_version() {
     *) die "unsupported prerelease label '$label'; expected alpha, beta, or rc" ;;
   esac
 
+  if [[ -z "$VERSION_PRERELEASE_LABEL" ]]; then
+    die "VERSION '$CURRENT_VERSION' is stable, and '$base-$label.N' sorts below it; name the next version with 'set <version>-$label.1'"
+  fi
+
   if [[ -n "$number" ]]; then
-    [[ "$number" =~ ^[0-9]+$ ]] || die "prerelease number must be numeric"
+    [[ "$number" =~ ^[1-9][0-9]*$ ]] || die "prerelease number must be a number from 1, with no leading zero"
     next_number="$number"
   elif [[ "$VERSION_PRERELEASE_LABEL" == "$label" && -n "$VERSION_PRERELEASE_NUMBER" ]]; then
     next_number=$((VERSION_PRERELEASE_NUMBER + 1))
@@ -434,6 +481,9 @@ release_version() {
 }
 
 COMMAND="${1:-current}"
+# Assigned on its own line, so a refusal inside the computation ends the
+# script with that one message.
+TARGET_VERSION=""
 
 case "$COMMAND" in
   current)
@@ -458,15 +508,18 @@ case "$COMMAND" in
     ;;
   bump)
     [[ $# -eq 2 ]] || die "usage: ./scripts/version.sh bump <major|minor|patch>"
-    prepare_release_version "$(bump_version "$2")"
+    TARGET_VERSION="$(bump_version "$2")"
+    prepare_release_version "$TARGET_VERSION"
     ;;
   prerelease)
     [[ $# -ge 2 && $# -le 3 ]] || die "usage: ./scripts/version.sh prerelease <alpha|beta|rc> [number]"
-    prepare_release_version "$(set_prerelease_version "$2" "${3:-}")"
+    TARGET_VERSION="$(set_prerelease_version "$2" "${3:-}")"
+    prepare_release_version "$TARGET_VERSION"
     ;;
   release)
     [[ $# -eq 1 ]] || die "usage: ./scripts/version.sh release"
-    prepare_release_version "$(release_version)"
+    TARGET_VERSION="$(release_version)"
+    prepare_release_version "$TARGET_VERSION"
     ;;
   help|-h|--help)
     usage

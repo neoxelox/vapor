@@ -37,6 +37,40 @@ pub fn scenarios() -> Vec<Scenario> {
             run: cloud_rename_is_a_move,
         },
         Scenario {
+            id: "S56",
+            name: "local-case-rename",
+            proves: "renaming a synced file on this device so that only the case of its name changes moves the cloud object to the new spelling (same inode), with no conflict copy, no deletion, and nothing in the trash",
+            needs: &[
+                Need::NativeWatcher,
+                Need::Filesystem,
+                Need::Unix,
+                Need::CaseInsensitiveFs,
+            ],
+            expect: Expect::Pass,
+            run: local_case_rename,
+        },
+        Scenario {
+            id: "S57",
+            name: "cloud-case-rename",
+            proves: "renaming a synced file in the cloud so that only the case of its name changes renames the local file to the new spelling (same inode), with no conflict copy, no deletion, and nothing in the trash",
+            needs: &[
+                Need::NativeWatcher,
+                Need::Filesystem,
+                Need::Unix,
+                Need::CaseInsensitiveFs,
+            ],
+            expect: Expect::Pass,
+            run: cloud_case_rename,
+        },
+        Scenario {
+            id: "S58",
+            name: "remove-and-put-back",
+            proves: "a synced file moved out of the folder and moved back a few seconds later stays in the cloud",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: remove_and_put_back,
+        },
+        Scenario {
             id: "S26",
             name: "tree-removal-and-type-flip",
             proves: "rm -rf of a tree removes it from the cloud; recreating the name as a file converges to a file on both sides",
@@ -169,6 +203,155 @@ pub(crate) fn inode_of(path: &std::path::Path) -> Result<u64, Failure> {
 #[cfg(not(unix))]
 pub(crate) fn inode_of(_path: &std::path::Path) -> Result<u64, Failure> {
     Ok(0)
+}
+
+/// The names in `directory` as the filesystem stores them, without
+/// Vapor's own files.
+pub(crate) fn stored_names(directory: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| !name.starts_with(".vapor"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// What a change in the spelling of a name must never leave behind.
+fn ensure_nothing_but_a_rename(ctx: &Ctx) -> Result<(), Failure> {
+    let trash = ctx.cli().json(&["trash", "list", "--json"])?;
+    ensure!(
+        trash["entries"].as_array().is_some_and(Vec::is_empty),
+        "a rename must not put anything in the trash: {trash}"
+    );
+    let decisions = ctx.cli().json(&["decisions", "list", "--json"])?;
+    ensure!(
+        decisions["decisions"].as_array().is_some_and(Vec::is_empty),
+        "a rename must not ask a question: {decisions}"
+    );
+    Ok(())
+}
+
+fn local_case_rename(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("report.txt"), "quarterly numbers\n")?;
+    write_file(&home.local.join("other.txt"), "untouched\n")?;
+    ctx.converge_from(&mark, 2, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("report.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    let cloud_inode = inode_of(&home.cloud.join("report.txt"))?;
+
+    fs::rename(home.local.join("report.txt"), home.local.join("Report.txt"))?;
+    let cloud = home.cloud.clone();
+    ctx.wait_until(
+        Duration::from_secs(60),
+        "the cloud folder spells the name Report.txt",
+        || stored_names(&cloud) == ["Report.txt", "other.txt"],
+    )?;
+    ctx.settle(Duration::from_secs(60))?;
+
+    ensure!(
+        stored_names(&home.local) == ["Report.txt", "other.txt"],
+        "the local folder must hold exactly the renamed file: {:?}",
+        stored_names(&home.local)
+    );
+    ensure!(
+        stored_names(&home.cloud) == ["Report.txt", "other.txt"],
+        "the cloud folder must hold exactly the renamed file: {:?}",
+        stored_names(&home.cloud)
+    );
+    ensure!(
+        inode_of(&home.cloud.join("Report.txt"))? == cloud_inode,
+        "the cloud object must be the same one moved, not a re-upload"
+    );
+    ensure!(
+        read_string(&home.cloud.join("Report.txt"))? == "quarterly numbers\n",
+        "payload intact"
+    );
+    ensure_nothing_but_a_rename(ctx)
+}
+
+fn cloud_case_rename(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("notes.txt"), "meeting minutes\n")?;
+    write_file(&home.local.join("other.txt"), "untouched\n")?;
+    ctx.converge_from(&mark, 2, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("notes.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    let local_inode = inode_of(&home.local.join("notes.txt"))?;
+
+    fs::rename(home.cloud.join("notes.txt"), home.cloud.join("Notes.txt"))?;
+    let local = home.local.clone();
+    ctx.wait_until(
+        Duration::from_secs(90),
+        "the local folder spells the name Notes.txt",
+        || stored_names(&local) == ["Notes.txt", "other.txt"],
+    )?;
+    ctx.settle(Duration::from_secs(60))?;
+
+    ensure!(
+        stored_names(&home.cloud) == ["Notes.txt", "other.txt"],
+        "the cloud folder must hold exactly the renamed file: {:?}",
+        stored_names(&home.cloud)
+    );
+    ensure!(
+        stored_names(&home.local) == ["Notes.txt", "other.txt"],
+        "the local folder must hold exactly the renamed file: {:?}",
+        stored_names(&home.local)
+    );
+    ensure!(
+        inode_of(&home.local.join("Notes.txt"))? == local_inode,
+        "the local file must be the same one renamed, not a download"
+    );
+    ensure!(
+        read_string(&home.local.join("Notes.txt"))? == "meeting minutes\n",
+        "payload intact"
+    );
+    ensure_nothing_but_a_rename(ctx)
+}
+
+fn remove_and_put_back(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("keep.txt"), "do not lose me\n")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("keep.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    // Out for longer than the debounce window, back before the delete
+    // has settled: an undo in the Finder a few seconds after a delete.
+    let elsewhere = home.dir.join("keep.txt.elsewhere");
+    let db = ctx.db();
+    let enqueued_before = db.enqueue_high_water().unwrap_or(0);
+    fs::rename(home.local.join("keep.txt"), &elsewhere)?;
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "the removal became a queued deletion",
+        || db.enqueue_high_water().unwrap_or(0) > enqueued_before,
+    )?;
+    fs::rename(&elsewhere, home.local.join("keep.txt"))?;
+    // Long enough for the delete's settle window and its probe.
+    std::thread::sleep(Duration::from_secs(12));
+    ctx.settle(Duration::from_secs(60))?;
+
+    ensure!(
+        read_string(&home.cloud.join("keep.txt"))? == "do not lose me\n",
+        "the cloud copy must survive a removal that was undone"
+    );
+    ensure!(
+        read_string(&home.local.join("keep.txt"))? == "do not lose me\n",
+        "the local copy is back"
+    );
+    Ok(())
 }
 
 fn large_payload() -> Vec<u8> {

@@ -83,6 +83,90 @@ pub trait SecretStore: Send + Sync {
     }
 }
 
+/// How a process may reach the secret store.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SecretAccess {
+    /// A person is at the process (`vapor auth login`): the store may
+    /// ask them.
+    Interactive,
+    /// A background process (the daemon): a read that would open a
+    /// dialog fails instead. The caller holds for a sign-in; a dialog
+    /// nobody sees would block the read until someone answers it.
+    Background,
+}
+
+/// The secret store of this runtime directory: the native store of the
+/// OS, with the directory's scope on every name when the directory is
+/// not the default one ([`vapor_shared::runtime_paths::secrets_scope`]).
+pub fn open_store(access: SecretAccess) -> Result<Box<dyn SecretStore>, SecretStoreError> {
+    let native = NativeSecretStore::for_current_user()?;
+    let native = match access {
+        SecretAccess::Interactive => native,
+        SecretAccess::Background => native.without_prompts(),
+    };
+    Ok(match vapor_shared::runtime_paths::secrets_scope() {
+        Some(scope) => Box::new(ScopedSecretStore::new(native, &scope)),
+        None => Box::new(native),
+    })
+}
+
+/// A store that keeps its secrets under a prefix of a shared store, and
+/// sees no other.
+#[derive(Debug)]
+pub struct ScopedSecretStore<S> {
+    inner: S,
+    prefix: String,
+}
+
+impl<S: SecretStore> ScopedSecretStore<S> {
+    pub fn new(inner: S, scope: &str) -> Self {
+        Self {
+            inner,
+            prefix: format!("{scope}."),
+        }
+    }
+
+    fn scoped(&self, name: &str) -> String {
+        format!("{}{name}", self.prefix)
+    }
+}
+
+impl<S: SecretStore> SecretStore for ScopedSecretStore<S> {
+    fn get(&self, name: &str) -> Result<String, SecretStoreError> {
+        self.inner
+            .get(&self.scoped(name))
+            .map_err(|error| match error {
+                SecretStoreError::NotFound(_) => SecretStoreError::NotFound(name.to_string()),
+                other => other,
+            })
+    }
+
+    fn set(&self, name: &str, value: &str) -> Result<(), SecretStoreError> {
+        self.inner.set(&self.scoped(name), value)
+    }
+
+    fn delete(&self, name: &str) -> Result<(), SecretStoreError> {
+        self.inner.delete(&self.scoped(name))
+    }
+
+    fn list(&self) -> Result<Vec<String>, SecretStoreError> {
+        Ok(self
+            .inner
+            .list()?
+            .into_iter()
+            .filter_map(|name| name.strip_prefix(&self.prefix).map(str::to_string))
+            .collect())
+    }
+
+    fn is_persistent(&self) -> bool {
+        self.inner.is_persistent()
+    }
+
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+}
+
 /// Process-local in-memory secret store. Default for tests and the
 /// fallback on OSes without a native store.
 #[derive(Debug, Default)]
@@ -201,6 +285,52 @@ mod tests {
         assert_eq!(store.get("k").expect("get"), "tökén ✓ {\"json\":true}");
     }
 
+    #[test]
+    fn a_scoped_store_keeps_the_contract_and_sees_only_its_own_secrets() {
+        let shared = std::sync::Arc::new(InMemorySecretStore::new());
+        shared
+            .set("auth.default.gdrive.token", "the real install's")
+            .expect("seed");
+        let sandbox = ScopedSecretStore::new(SharedStore(shared.clone()), "dir-0123456789abcdef");
+        exercise_contract(&sandbox, "contract");
+
+        // The same name in the sandbox is another secret.
+        assert!(matches!(
+            sandbox.get("auth.default.gdrive.token"),
+            Err(SecretStoreError::NotFound(name)) if name == "auth.default.gdrive.token"
+        ));
+        sandbox
+            .set("auth.default.gdrive.token", "the sandbox's")
+            .expect("set");
+        assert_eq!(
+            sandbox.list().expect("list"),
+            vec!["auth.default.gdrive.token"]
+        );
+        sandbox.delete("auth.default.gdrive.token").expect("delete");
+        assert_eq!(
+            shared.get("auth.default.gdrive.token").expect("untouched"),
+            "the real install's"
+        );
+    }
+
+    /// A handle on a store that several scopes share.
+    struct SharedStore(std::sync::Arc<InMemorySecretStore>);
+
+    impl SecretStore for SharedStore {
+        fn get(&self, name: &str) -> Result<String, SecretStoreError> {
+            self.0.get(name)
+        }
+        fn set(&self, name: &str, value: &str) -> Result<(), SecretStoreError> {
+            self.0.set(name, value)
+        }
+        fn delete(&self, name: &str) -> Result<(), SecretStoreError> {
+            self.0.delete(name)
+        }
+        fn list(&self) -> Result<Vec<String>, SecretStoreError> {
+            self.0.list()
+        }
+    }
+
     /// The native store runs the same contract against the real login
     /// keychain under a throwaway service name, so Vapor's own entries
     /// are never touched and the test leaves nothing behind.
@@ -215,6 +345,10 @@ mod tests {
         let store = NativeSecretStore::with_namespace(&service);
         assert!(store.is_persistent());
         exercise_contract(&store, "contract");
+        // The daemon's reads never open a dialog. An item this binary
+        // made needs none, so the contract holds the same way.
+        let background = NativeSecretStore::with_namespace(&service).without_prompts();
+        exercise_contract(&background, "background");
         // Entries are scoped by service: a sibling namespace sees nothing.
         let other = NativeSecretStore::with_namespace(&format!("{service}.other"));
         store.set("scoped", "v").expect("set");

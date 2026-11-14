@@ -41,7 +41,7 @@ outside the constants modules is a bug.
    env vars, and the architecture or operations doc that owns the
    behaviour.
 8. **Tests and e2e.** Unit tests for the parser and the consumer; extend
-   e2e S1 (config round trip) or S22 (live reload) when the key is
+   e2e S01 (config round trip) or S22 (live reload) when the key is
    observable through the CLI.
 9. **CHANGELOG.** One line under `Unreleased`.
 

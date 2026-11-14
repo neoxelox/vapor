@@ -229,6 +229,57 @@ impl Ctx {
         Ok(index)
     }
 
+    /// Starts the primary daemon for a profile in a one-way mode and
+    /// answers the confirmation the daemon asks for. A one-way profile
+    /// holds, and syncs nothing, until the user says yes.
+    pub fn start_daemon_confirming_one_way(&mut self) -> Result<usize, Failure> {
+        let home = self.primary.clone();
+        let index = self.start_daemon_in(&home, self.paths.daemon_kind, false)?;
+        self.confirm_one_way(&home)?;
+        self.cli_for(&home)
+            .wait_run_state("running", STARTUP_TIMEOUT)?;
+        Ok(index)
+    }
+
+    /// Answers `enable` to the one-way confirmation of `home`'s profile.
+    pub fn confirm_one_way(&mut self, home: &Home) -> Result<(), Failure> {
+        let cli = self.cli_for(home);
+        let mut decision_id = None;
+        wait::wait_until(
+            STARTUP_TIMEOUT,
+            "the daemon to ask for the one-way confirmation",
+            || {
+                decision_id = cli
+                    .json(&["decisions", "list", "--json"])
+                    .ok()
+                    .and_then(|report| {
+                        report["decisions"].as_array().and_then(|decisions| {
+                            decisions
+                                .iter()
+                                .find(|decision| {
+                                    decision["kind"]
+                                        == vapor_shared::constants::decision::KIND_ONE_WAY_MODE
+                                        && decision["choice"].is_null()
+                                })
+                                .and_then(|decision| decision["id"].as_i64())
+                        })
+                    });
+                decision_id.is_some()
+            },
+        )?;
+        let id = decision_id.unwrap_or_default().to_string();
+        cli.ok(&[
+            "decisions",
+            "resolve",
+            &id,
+            "--choose",
+            vapor_shared::constants::decision::OPTION_ENABLE,
+        ])?;
+        // The daemon says once that the profile waits for the answer.
+        self.allow_warning("A one-way mode needs the user's confirmation");
+        Ok(())
+    }
+
     pub fn daemon(&mut self, index: usize) -> &mut Daemon {
         &mut self.daemons[index]
     }

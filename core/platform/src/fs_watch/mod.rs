@@ -35,7 +35,7 @@ pub use windows::NativeFsWatcher;
 /// a stable cross-platform set.
 ///
 /// Rename semantics: directional rename halves are mapped to the
-/// actionable kind directly — a rename-away is `Removed` at the old
+/// actionable kind directly: a rename-away is `Removed` at the old
 /// path, a rename-in is `Created` at the new path, and a paired rename
 /// event is split into that Removed/Created pair. `Renamed` survives
 /// only for ambiguous OS reports where the source/destination side is
@@ -51,7 +51,7 @@ pub enum WatchEventKind {
 
 /// Callback for watcher backend errors. Runs on the OS watcher's
 /// callback thread, so it must stay cheap (log/record only). Without
-/// one, backend errors are silently dropped — acceptable only for
+/// one, backend errors are silently dropped: acceptable only for
 /// consumers that re-derive state by stat (the filesystem provider's
 /// changes feed); the daemon's local watch records every error.
 pub type WatchErrorHandler = Arc<dyn Fn(&str) + Send + Sync>;

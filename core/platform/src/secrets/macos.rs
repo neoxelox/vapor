@@ -48,6 +48,8 @@ use super::{SecretStore, SecretStoreError};
 #[link(name = "Security", kind = "framework")]
 unsafe extern "C" {
     static kSecAttrAccess: CFStringRef;
+    static kSecUseAuthenticationUI: CFStringRef;
+    static kSecUseAuthenticationUIFail: CFStringRef;
     fn SecAccessCreate(
         descriptor: CFStringRef,
         trusted_list: CFArrayRef,
@@ -61,6 +63,8 @@ unsafe extern "C" {
 #[derive(Debug)]
 pub struct NativeSecretStore {
     namespace: String,
+    /// Whether a read may open a keychain dialog.
+    prompts: bool,
 }
 
 impl NativeSecretStore {
@@ -73,7 +77,20 @@ impl NativeSecretStore {
     pub fn with_namespace(namespace: &str) -> Self {
         Self {
             namespace: namespace.to_string(),
+            prompts: true,
         }
+    }
+
+    /// For a background process: a read that the keychain would answer
+    /// with a dialog ("vapord wants to use your confidential
+    /// information") fails instead. The access list names a binary by
+    /// its code identity, and an ad-hoc signed build has a new one after
+    /// every update, so the daemon of an updated prerelease is not on
+    /// the list of the item its predecessor read. Nobody sees a dialog
+    /// that a daemon opens, and the read would wait on it.
+    pub fn without_prompts(mut self) -> Self {
+        self.prompts = false;
+        self
     }
 
     fn base_query(&self, name: &str) -> Vec<(CFString, CFType)> {
@@ -135,6 +152,12 @@ impl SecretStore for NativeSecretStore {
             key(unsafe_key(&raw const kSecReturnData)),
             CFBoolean::true_value().as_CFType(),
         ));
+        if !self.prompts {
+            pairs.push((
+                key(unsafe_key(&raw const kSecUseAuthenticationUI)),
+                key(unsafe_key(&raw const kSecUseAuthenticationUIFail)).as_CFType(),
+            ));
+        }
         let query = CFDictionary::from_CFType_pairs(&pairs);
         let mut result: CFTypeRef = ptr::null();
         // SAFETY: `query` outlives the call and `result` is a valid

@@ -64,10 +64,12 @@ where
 
 /// Writes a whole `vapor.json` document atomically with private
 /// permissions: 0700 parent, pretty JSON plus a trailing newline staged
-/// in a per-writer temp file created 0600, then renamed into place. Every
-/// writer (CLI, daemon, lifecycle store, device-id persistence) goes
-/// through here so the file mode and the staging discipline cannot
-/// drift. Callers hold [`with_config_lock`] around their read-modify-write.
+/// in a per-writer temp file created 0600, synced to disk, then renamed
+/// into place. Without the sync a power loss after the rename can leave
+/// an empty file under the real name. Every writer (CLI, daemon,
+/// lifecycle store, device-id persistence) goes through here so the
+/// file mode and the staging discipline cannot drift. Callers hold
+/// [`with_config_lock`] around their read-modify-write.
 pub fn write_config_document(
     path: &std::path::Path,
     document: &serde_json::Value,
@@ -80,31 +82,37 @@ pub fn write_config_document(
     serialized.push('\n');
     let temp = unique_temp_path(path);
     write_private_file(&temp, serialized.as_bytes())?;
-    fs::rename(&temp, path)
+    fs::rename(&temp, path)?;
+    // The rename is durable once the directory is; a directory cannot
+    // be opened for a sync on every OS, so this part is best effort.
+    if let Some(parent) = path.parent()
+        && let Ok(directory) = fs::File::open(parent)
+    {
+        let _ = directory.sync_all();
+    }
+    Ok(())
 }
 
-#[cfg(unix)]
 fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(constants::runtime::PRIVATE_FILE_MODE)
-        .open(path)?;
-    file.write_all(contents)
-}
-
-#[cfg(not(unix))]
-fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
-    fs::write(path, contents)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(constants::runtime::PRIVATE_FILE_MODE);
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()
 }
 
 /// A unique temp path next to `target` for an atomic write, so concurrent
 /// writers never collide on one shared staging filename.
 pub fn unique_temp_path(target: &std::path::Path) -> PathBuf {
     let mut name = target.as_os_str().to_owned();
-    name.push(format!(".vapor-tmp-{}", std::process::id()));
+    name.push(format!(
+        "{}{}",
+        constants::provider::TEMP_FILE_PREFIX,
+        std::process::id()
+    ));
     PathBuf::from(name)
 }
 
@@ -128,8 +136,8 @@ pub struct IpcSocketLocation {
 /// Unix sockets carry a hard address-length cap (`sun_path`: 104 bytes
 /// on macOS/BSD, 108 on Linux). The canonical location is
 /// `<vapor_dir>/vapord.sock`, but with a deep `vapor_dir` binding it
-/// fails outright — pre-fix the daemon degraded to running without its
-/// IPC endpoint while `vapor status` reported it as not running. When
+/// fails outright, which would leave a running daemon with no IPC
+/// endpoint and a `vapor status` that reports it as not running. When
 /// the canonical path exceeds [`constants::ipc::MAX_SOCKET_PATH_BYTES`],
 /// both sides deterministically relocate to
 /// `<os-temp>/vapor-<fnv1a64(vapor_dir)>/vapord.sock`: same `vapor_dir`
@@ -160,6 +168,33 @@ fn resolve_ipc_socket_location(
     }
 }
 
+/// The scope of this runtime directory's secrets, or `None` for the
+/// default runtime directory.
+///
+/// The OS secret store is one per user. A second runtime directory (a
+/// development daemon on `./.vapor`, a test sandbox) is a second install
+/// with the same profile ids, so its secret names carry this scope: it
+/// never reads, replaces, or deletes the sign-in of the first. The
+/// default directory keeps plain names.
+pub fn secrets_scope() -> Option<String> {
+    let directory = vapor_directory();
+    let directory = std::path::absolute(&directory).unwrap_or(directory);
+    let default_directory =
+        home_directory().map(|home| home.join(constants::runtime::VAPOR_DIRECTORY_NAME));
+    secrets_scope_for(&directory, default_directory.as_deref())
+}
+
+fn secrets_scope_for(
+    directory: &std::path::Path,
+    default_directory: Option<&std::path::Path>,
+) -> Option<String> {
+    if default_directory == Some(directory) {
+        return None;
+    }
+    let hash = fnv1a64(directory.as_os_str().as_encoded_bytes());
+    Some(format!("dir-{hash:016x}"))
+}
+
 /// FNV-1a 64-bit. Implemented here (six lines) instead of relying on
 /// `DefaultHasher` because the CLI and daemon are separate binaries that
 /// may be built by different compiler versions during upgrade skew, and
@@ -182,18 +217,23 @@ pub fn sqlite_database_path() -> PathBuf {
     state_directory().join(constants::runtime::SQLITE_DATABASE_FILE_NAME)
 }
 
-/// Durable state DB for a named profile. The implicit
-/// `default` profile keeps the legacy single-scope path so existing
-/// state carries forward without migration; every other profile gets an
-/// isolated database under `state/profiles/<id>/`.
+/// Durable state DB for a profile. The `default` profile's database
+/// sits in `state/` itself; every other profile gets an isolated
+/// database under `state/profiles/<id>/`.
 pub fn profile_database_path(profile_id: &str) -> PathBuf {
-    if profile_id == crate::constants::profile::DEFAULT_PROFILE_ID {
-        return sqlite_database_path();
-    }
-    state_directory()
-        .join("profiles")
-        .join(profile_id)
-        .join(crate::constants::runtime::SQLITE_DATABASE_FILE_NAME)
+    profile_database_path_in(&state_directory(), profile_id)
+}
+
+/// [`profile_database_path`] under a given state directory.
+pub fn profile_database_path_in(state_directory: &std::path::Path, profile_id: &str) -> PathBuf {
+    let directory = if profile_id == crate::constants::profile::DEFAULT_PROFILE_ID {
+        state_directory.to_path_buf()
+    } else {
+        state_directory
+            .join(constants::runtime::PROFILES_DIRECTORY_NAME)
+            .join(profile_id)
+    };
+    directory.join(crate::constants::runtime::SQLITE_DATABASE_FILE_NAME)
 }
 
 /// The managed trash root, `vapor_dir/trash`.
@@ -333,14 +373,14 @@ fn normalize_override_path(path: PathBuf) -> Option<PathBuf> {
     // then canonicalize the deepest existing ancestor so the directory,
     // once created, still lands under the canonical spelling. A `..`
     // crossing a symlinked component inside the not-yet-existing tail
-    // resolves lexically here — the one case where a consistent
+    // resolves lexically here: the one case where a consistent
     // VAPOR_DIR spelling across surfaces still matters.
     let lexical = normalize_absolute_path(candidate)?;
     Some(canonicalize_deepest_existing_ancestor(lexical))
 }
 
 /// Canonicalizes the deepest existing ancestor of `path` (which must
-/// already be lexically normalized — no `.` / `..` components) and
+/// already be lexically normalized, no `.` / `..` components) and
 /// re-appends the missing tail. Falls back to the input when nothing
 /// on the path can be canonicalized.
 fn canonicalize_deepest_existing_ancestor(path: PathBuf) -> PathBuf {
@@ -429,6 +469,33 @@ fn normalize_absolute_path(path: PathBuf) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_runtime_directory_has_no_secret_scope_and_every_other_one_has_its_own() {
+        let home = std::path::Path::new("/home/sam");
+        let default = home.join(".vapor");
+        assert_eq!(secrets_scope_for(&default, Some(&default)), None);
+
+        let checkout = secrets_scope_for(
+            std::path::Path::new("/home/sam/code/vapor/.vapor"),
+            Some(&default),
+        )
+        .expect("a development directory is scoped");
+        let sandbox = secrets_scope_for(std::path::Path::new("/tmp/sandbox/home"), Some(&default))
+            .expect("a sandbox is scoped");
+        assert_ne!(checkout, sandbox);
+        assert!(
+            checkout.starts_with("dir-") && checkout.len() == "dir-".len() + 16,
+            "{checkout}"
+        );
+        // The same directory gives the same scope in every process.
+        assert_eq!(
+            secrets_scope_for(std::path::Path::new("/tmp/sandbox/home"), Some(&default)),
+            Some(sandbox)
+        );
+        // With no home directory to compare with, every directory is scoped.
+        assert!(secrets_scope_for(&default, None).is_some());
+    }
     use tempfile::TempDir;
 
     #[test]

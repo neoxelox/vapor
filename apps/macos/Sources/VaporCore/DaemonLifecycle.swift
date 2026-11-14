@@ -119,7 +119,7 @@ public struct DaemonStatusSnapshot: Equatable, Sendable {
 
 /// The app's seam onto daemon lifecycle operations. The
 /// default implementation is `VaporCLIServiceController`, which invokes
-/// the bundled `vapor` CLI as a subprocess — all lifecycle *policy*
+/// the bundled `vapor` CLI as a subprocess: all lifecycle *policy*
 /// (autolaunch persistence, crash-loop backoff and pause, supervision)
 /// lives in the Rust `core/lifecycle` crate behind that CLI. Swift only
 /// ever sees the outcomes.
@@ -178,7 +178,7 @@ public protocol LaunchAgentControlling {
 /// login violates the degrade-safely rule for permissioned features.
 public enum LoginItemRegistrationOutcome: Equatable, Sendable {
   case registered
-  /// macOS deferred or refused the registration — typically the user
+  /// macOS deferred or refused the registration: typically the user
   /// disabled the login item in System Settings, or device management
   /// policy blocks it. The user must approve it under System Settings
   /// › General › Login Items.
@@ -253,7 +253,7 @@ public struct NoopLaunchAgentController: LaunchAgentControlling {
 /// Thin coordinator over the `LaunchAgentControlling` seam. Owns
 /// serialization (one lifecycle operation at a time) and macOS login-item
 /// registration; every lifecycle decision is delegated to the Rust
-/// `core/lifecycle` layer through the controller — no runtime or
+/// `core/lifecycle` layer through the controller, no runtime or
 /// lifecycle policy lives in Swift.
 public final class DaemonLifecycleManager: @unchecked Sendable {
   private let launchAgentController: any LaunchAgentControlling
@@ -266,7 +266,7 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
   // when the app swaps in a fresh manager on a config save: the health
   // monitor keeps a reference to the original manager, so a per-instance
   // queue would let a periodic `vapor service check` run concurrently with
-  // a user-initiated install/uninstall/stop on a different queue — the
+  // a user-initiated install/uninstall/stop on a different queue: the
   // check could then observe the daemon vanishing mid-uninstall and
   // restart it (or register a spurious crash toward crash-loop pause).
   private var stateQueue: DispatchQueue { Self.sharedStateQueue }

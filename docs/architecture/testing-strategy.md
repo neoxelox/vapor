@@ -18,7 +18,7 @@ silently. So:
   code. A thousand trivial tests are worse than a hundred well-chosen
   ones.
 
-The bar is quality over quantity — but in this project quality also
+The bar is quality over quantity, but in this project quality also
 means breadth, because the engine has complex concurrent behavior
 that silently-wrong code can introduce.
 
@@ -33,51 +33,52 @@ never `thread::sleep` for timing.
 
 Target modules with heavy coverage expected in `core/daemon`:
 
-- `debounce.rs` — quiet-window behavior per extension class; coalescing
+- `debounce.rs`: quiet-window behavior per extension class; coalescing
   under burst; tick cadence.
-- `scheduler.rs` — superseding semantics; dirty-while-running;
+- `scheduler.rs`: superseding semantics; dirty-while-running;
   completion disposition.
-- `throttle.rs` — input-to-state mapping; per-state caps; hysteresis
+- `throttle.rs`: input-to-state mapping; per-state caps; hysteresis
   and min-dwell.
-- `workgate.rs` — permit issuance and release; permit-id allocation
+- `workgate.rs`: permit issuance and release; permit-id allocation
   (including wrap-around); reconfigure semantics.
-- `retry.rs` — backoff math; jitter bounds; rate-limit floor honoring.
-- `storm.rs` — threshold detection; defer window; compaction.
-- `state_db.rs` — schema versioning; lease recovery; retry-slowdown
+- `retry.rs`: backoff math; jitter bounds; rate-limit floor honoring.
+- `storm.rs`: threshold detection; defer window; compaction.
+- `state_db.rs`: schema versioning; lease recovery; retry-slowdown
   persistence; corruption guards; bounded durable fields.
-- `reconcile.rs` — idle-bias; slice yielding; boundary clearing.
-- `executor.rs` — stage transitions; permit handoff; admission capacity
-  math; provider-job dispatch/harvest (the pool runs inline —
-  synchronously at dispatch — in tests so ticks stay deterministic;
+- `reconcile.rs`: idle-bias; slice yielding; boundary clearing.
+- `executor.rs`: stage transitions; permit handoff; admission capacity
+  math; provider-job dispatch/harvest (the pool runs inline:
+  synchronously at dispatch, in tests so ticks stay deterministic;
   one dedicated test exercises the threaded production mode
   end-to-end).
-- `provider_jobs.rs` — pool modes (inline vs worker threads); probe
+- `provider_jobs.rs`: pool modes (inline vs worker threads); probe
   shapes; transfer hold/resume; generation-based cancellation.
-- `path_filter.rs` — gitignore/vaporignore precedence; nested discovery;
+- `path_filter.rs`: gitignore/vaporignore precedence; nested discovery;
   heavy-dir skip.
-- `event_intents.rs` — compaction; deferred markers; bounded caps.
-- `fs_events.rs` — bridge discipline (platform watch events →
+- `event_intents.rs`: compaction; deferred markers; bounded caps.
+- `fs_events.rs`: bridge discipline (platform watch events →
   normalize → filter → recorder); symlink-escape rejection; path
   normalization invariants; one real-watcher bridge round-trip.
 
 In `core/shared`:
 
-- `runtime_paths.rs` — `VAPOR_DIR` resolution order; permission
+- `runtime_paths.rs`: `VAPOR_DIR` resolution order; permission
   application on Unix; Windows fallback.
-- `paths.rs` — the shared `canonicalize` never returns a Windows verbatim
+- `paths.rs`: the shared `canonicalize` never returns a Windows verbatim
   (`\\?\`) path; verbatim disk / UNC prefix simplification. Windows leg
   only, since no other OS produces such paths.
-- `logging.rs` — log level parsing; sensitive-key redaction; inline-
+- `logging.rs`: log level parsing; sensitive-key redaction; inline-
   secret redaction; graceful fallback on log-file failure.
 
-Planned crates inherit the same expectation: `core/platform`,
-`core/lifecycle`, `core/cli` each ship tests with their logic.
+Every other crate carries the same expectation: `core/platform`,
+`core/lifecycle`, `core/ipc`, and `core/cli` each ship tests with their
+logic.
 
 ### Integration tests (Tier 1; every PR)
 
 Compose multiple modules and drive them through the tick-based test
 harness that already exists in `DaemonRuntime` (see `runtime.rs` test
-module — it is the template).
+module: it is the template).
 
 Priority scenarios:
 
@@ -92,7 +93,10 @@ Priority scenarios:
   duplication, no loss.
 - Throttle transitions during real work (`Suspended` halts new
   admission; running work completes cleanly or yields at the next
-  slice checkpoint; chunked transfers hold at their checkpoint).
+  slice checkpoint; chunked transfers hold at their checkpoint), and
+  sync that goes on in `Light` and `Throttled`: a scan starts, a
+  compacted folder is released, and the measured CPU ceiling takes
+  workers away and gives them back.
 - Storm-scale event bursts stay bounded; compaction triggers and the
   reconcile marker takes over.
 - Reconcile is interruptible at slice boundaries and on throttle
@@ -106,8 +110,15 @@ Priority scenarios:
   shared workgate caps, blast-radius containment on a panicking
   profile).
 - Safeguards: a deletion burst in either direction is held whole behind a `mass-delete` decision while other work continues; `apply` releases, `discard` restores;
-  code-churn heuristic flips throttle to user-active; flush boost
-  re-polls the remote feed.
+  the reconcile boost re-polls the remote feed.
+- The events of the daemon's own writes. The runtime fixture has a
+  stand-in watcher (`watching_the_local_tree()`) that reports what a
+  real watcher reports after a download, a rename, or a move to the
+  trash, so a test sees the echo and not only the user's event.
+- A root that was swapped: no intent is leased and no cloud deletion
+  is made while the local root is not the adopted one.
+- An install with no usable configuration syncs nothing and creates
+  no folder.
 - Config reload mid-work does not lose in-flight intents.
 
 Cloud-provider logic (Google Drive) is tested entirely offline through
@@ -130,31 +141,31 @@ budget.
 
 Properties that exist:
 
-- **Path normalization** — any generated event path (`../`, `./`,
+- **Path normalization**: any generated event path (`../`, `./`,
   doubled separators, an absolute path elsewhere) is either accepted
   and lies under the watch root once normalized, or rejected; a path
   rooted elsewhere is never accepted.
-- **Scheduler superseding** — any sequence of upserts collapses to one
+- **Scheduler superseding**: any sequence of upserts collapses to one
   pending intent per path, the intent's kind matches the latest
   upsert, and draining claims each path once.
-- **Retry backoff monotonicity** — the exponential base never shrinks
+- **Retry backoff monotonicity**: the exponential base never shrinks
   between attempts (allowing for the symmetric jitter band), the delay
   is never zero, and it never exceeds `RETRY_MAX_DELAY_MILLIS` plus
   its jitter.
 
 Properties still to add:
 
-- **Throttle monotonicity** — monotonic input pressure produces
+- **Throttle monotonicity**: monotonic input pressure produces
   monotonic state transitions; the controller never moves from
   `Throttled` to `Idle` while CPU pressure rises.
-- **Conflict suffix determinism** — identical `(path, device_id,
+- **Conflict suffix determinism**: identical `(path, device_id,
   timestamp_ms)` inputs produce an identical conflict suffix across
   runs.
-- **Durable queue FIFO** — enqueue-then-lease within the same priority
+- **Durable queue FIFO**: enqueue-then-lease within the same priority
   returns FIFO order.
-- **Ignore-rule precedence** — given overlapping rules, the decision
+- **Ignore-rule precedence**: given overlapping rules, the decision
   is deterministic per the documented precedence.
-- **IPC handshake** — any `(app_version, daemon_version)` pair in
+- **IPC handshake**: any `(app_version, daemon_version)` pair in
   `|N - M| <= 1` succeeds; `|N - M| >= 2` fails with
   `IncompatibleVersion`.
 
@@ -177,27 +188,28 @@ timed, that each action produces the kinds the engine accepts for it,
 and that dropping the watcher disconnects the channel. The fake sees
 no OS events, so the harness mirrors each action through a clone of
 the watcher's channel; the native watcher gets nothing mirrored and
-the OS is the source. The remaining traits are open work
-(`docs/tasks/core.md`).
+the OS is the source. Before its first action the body waits for an
+event about a probe file, which proves the backend is live; it does not
+sleep. The remaining traits are open work (`docs/tasks/core.md`).
 
 Trait-specific invariants:
 
-- `FsWatcher` — create → modify → rename → remove for a file, as the
+- `FsWatcher`: create → modify → rename → remove for a file, as the
   kinds the engine accepts for each; absolute paths under the root;
   the channel closes with the watcher.
-- `ServiceInstaller` — install → start → status=`Running` → stop →
+- `ServiceInstaller`: install → start → status=`Running` → stop →
   uninstall round-trip; status transitions are observable.
-- `SecretStore` — get-after-set returns the value; delete removes; list
+- `SecretStore`: get-after-set returns the value; delete removes; list
   returns the keys we wrote.
-- `PlatformMetricsSampler` — returned values are within their declared
+- `PlatformMetricsSampler`: returned values are within their declared
   bounds; monotonic inputs produce monotonic outputs where the trait
   documents that.
-- `IdleNotifier` — `user_active` flips correlates with synthetic
+- `IdleNotifier`: `user_active` flips correlates with synthetic
   activity.
-- `FilesystemCapabilities` — `supports_xattr` is consistent with the
+- `FilesystemCapabilities`: `supports_xattr` is consistent with the
   underlying FS; xattr round-trip works when claimed to be supported;
   side-file fallback fires when not.
-- `ProcessSupervisor` — shutdown handler fires on SIGTERM (or the
+- `ProcessSupervisor`: shutdown handler fires on SIGTERM (or the
   platform equivalent).
 
 ### Concurrency tests
@@ -207,15 +219,11 @@ abstraction (`DaemonRuntime::tick_with_inputs`) makes concurrency
 testable deterministically **without** `loom` for 90% of the interesting
 cases. Use it first.
 
-Reserve `loom`-backed tests for the remaining corners where atomics
-and memory ordering actually matter:
-
-- `ThrottleWorkgate` permit allocation under contention.
-- `BoundedFsEventRecorder` drop-count semantics under callback
-  backpressure.
-
-Loom tests are slow. Keep them small, keep them few, and run them in
-**Tier 2** (release gate), not on every PR.
+No `loom` test exists yet. The two corners where atomics and memory
+ordering matter are the candidates: `ThrottleWorkgate` permit
+allocation under contention, and the `BoundedFsEventRecorder` drop
+count under callback backpressure. They are open work
+(`docs/tasks/core.md`) and belong to Tier 2, not to a PR.
 
 ### Performance regression tests (Tier 2; release gate)
 
@@ -256,7 +264,7 @@ Commands to snapshot:
 
 `./scripts/e2e.sh` runs the real `vapor` + `vapord` binaries black-box
 through the CLI, one disposable sandbox per scenario under the
-repo-local `.vapor/e2e/` directory — real process boundaries, real
+repo-local `.vapor/e2e/` directory: real process boundaries, real
 FSEvents, real durable DB, real IPC socket, real signals. The harness
 is a Rust dev crate (`tools/e2e`, `vapor-e2e`) so the same scenarios
 run on every OS job once its native traits exist; scenarios declare
@@ -273,7 +281,7 @@ the same change set. Full process, scenario catalog, and extension
 discipline: `docs/development/e2e-verification.md`; policy summary:
 `AGENTS.md §9.8`.
 
-### Soak tests (Tier S; scheduled and on demand)
+### Soak tests (Tier S; release gate and on demand)
 
 `./scripts/soak.sh` runs the real binaries under hours of seeded file
 churn on both sides of the sync, with faults (crash, freeze, pause,
@@ -289,19 +297,13 @@ next to it. Full process:
 evidence for the cells it ran, and the model is never edited to make a
 run green.
 
-### Fuzz tests (Tier 2; release gate)
+### Fuzz tests (open work)
 
-Via `cargo-fuzz`. Target the parsers and format handlers that accept
-external input:
-
-- Ignore-rule parser (`path_filter.rs`).
-- IPC frame parser (`core/ipc/src/framing.rs`).
-- JSON config loader (`VaporConfiguration` decoding — Swift side — and
-  the Rust-side equivalent when lifecycle moves over).
-- Path normalization (`fs_events.rs`).
-
-Short corpora live in-tree. Long fuzz runs ride the Tier-2 release gate
-alongside the perf suite. Fuzzing is **not** a PR gate.
+No fuzz target exists yet. The parsers that take outside input are the
+candidates: the ignore-rule parser (`path_filter.rs`), the IPC frame
+parser (`core/ipc/src/framing.rs`), the configuration loader, and path
+normalization (`fs_events.rs`). When they land they run in the Tier 2
+release gate, never on a PR (`docs/tasks/core.md`).
 
 ## What we deliberately do NOT test
 
@@ -311,18 +313,18 @@ tests is worse than a hundred well-chosen ones.
 - **Trivial getters / setters** that return an inner field.
 - **`Default` impls** whose values are constants mirrored 1:1 from the
   struct definition. (The `Default` *behavior* may be worth testing if
-  it does something — e.g., throttle default state selection — but
+  it does something (e.g., throttle default state selection) but
   not the rote mapping.)
 - **`Debug` / `Display` impls** unless the output is a wire format
   (e.g., structured log lines qualify; ad-hoc `Debug` does not).
 - **`serde` derive round-trips** of trivial structs. The derive is
   correct by construction; testing it tests serde, not us.
 - **Generated code** from `build.rs`.
-- **UI rendering** on the macOS app — SwiftUI views, menubar layout,
+- **UI rendering** on the macOS app: SwiftUI views, menubar layout,
   Dock transitions, keyboard focus, animation timing. UI correctness
   is verified by the project owner manually. This applies to every
   future GUI surface (Windows, Linux).
-- **Interactive TTY behavior** on the CLI — cursor positioning, color
+- **Interactive TTY behavior** on the CLI: cursor positioning, color
   codes, terminal resize, ncurses interactions.
 - **Third-party crate internals** (e.g., do not test that `rusqlite`
   actually persists rows; test that *our* schema + query code does
@@ -377,19 +379,22 @@ value", the test is not worth writing.
 
 ## CI tier execution
 
-- **Tier 1** — `lint.yml`, `test.yml`, `workflow_call`. Runs unit +
-  integration + platform-trait contract + property + snapshot tests.
-  Runs on every PR. Required check on `main`. Target budget: under
-  **5 minutes** per OS in the matrix.
-- **Tier 2** — `perf.yml`. Runs one soak cell with the SLO checks
-  (`scripts/perf.sh`), and, as they land, long-running property cases
-  (higher case counts), fuzz corpora, and `loom`-backed tests. A
-  release gate (`release.yml` calls it) and on demand, never a PR
-  gate.
-- **Tier S** — `soak.yml`, a release gate (`release.yml` calls it)
+- **Tier 1**: `./scripts/test.sh` in `test.yml` (and through
+  `workflow_call` in a release). Runs unit + integration +
+  platform-trait contract + property + shape-lock tests and the script
+  tests under `scripts/tests/`. Runs on every PR. Required check on
+  `main`. Budget: under **5 minutes** per OS in the matrix for the run
+  itself. The script builds the tests first and times only the run, so
+  a cold cache cannot fail the budget and a warm one cannot hide a slow
+  test.
+- **Tier 2**: `perf.yml`. Runs one soak cell with the SLO checks
+  (`scripts/perf.sh`). Long property cases, fuzz targets, and `loom`
+  tests join it when they exist. A release gate (`release.yml` calls
+  it) and on demand, never a PR gate.
+- **Tier S**: `soak.yml`, a release gate (`release.yml` calls it)
   and on demand, never a PR gate. Long soak cells across modes, loads,
   faults, and throttle walks, on macOS and Linux runners.
-- **Tier E2E** — `scripts/e2e.sh`, at the end of every `test.yml`
+- **Tier E2E**: `scripts/e2e.sh`, at the end of every `test.yml`
   OS job (every PR; part of the required `test` check on `main`).
   Also part of the local contributor validation loop for
   runtime-affecting changes (`AGENTS.md §9.8`). Runs the shipped
@@ -419,7 +424,7 @@ add value. No UI, so nothing is excluded.
 
 **Logic tests only.** Configuration parsing and normalization,
 lifecycle coordinator state transitions, view-model state mapping,
-localization fallback, logger redaction — all tested. The existing
+localization fallback, logger redaction: all tested. The existing
 suite under `apps/macos/Tests/` is the template and the correct
 shape.
 
@@ -452,7 +457,7 @@ Same rule: logic yes, UI no. When those surfaces land, each gets a
 test section in its plan (`docs/plans/windows.md`,
 `docs/plans/linux.md`) and inherits the same carve-out.
 
-## Adding a test — checklist
+## Adding a test: checklist
 
 Before writing a test, ask:
 
@@ -462,7 +467,7 @@ Before writing a test, ask:
       `~/.vapor`.)
 - [ ] Does the name describe the behavior?
 - [ ] Does it run in under a second (Tier 1)?
-- [ ] Is it a UI rendering or TTY interaction test? If yes — stop;
+- [ ] Is it a UI rendering or TTY interaction test? If yes: stop;
       we do not test those.
 
 If you answered yes to the first five and no to the last, write the

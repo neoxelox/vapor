@@ -71,7 +71,10 @@ public enum SyncSurfaceState: String, CaseIterable, Codable, Sendable {
     switch status.runState {
     case VaporConstants.RunState.error:
       return .error
-    case VaporConstants.RunState.paused:
+    case VaporConstants.RunState.paused, VaporConstants.RunState.unconfigured:
+      // No sync profile yet: nothing runs and nothing is wrong. Until
+      // the first-run flow exists the surface shows it as paused, with
+      // the daemon's reason, which names how to set a profile up.
       return .paused
     default:
       break
@@ -193,6 +196,7 @@ public struct AppShellState: Equatable, Codable, Sendable {
       let explains =
         status.runState == VaporConstants.RunState.error
         || status.runState == VaporConstants.RunState.paused
+        || status.runState == VaporConstants.RunState.unconfigured
       return explains ? status.runReason : nil
     }
     if (status.scanIsWaiting || status.scanIsRunning) && !status.reconcileDetail.isEmpty {

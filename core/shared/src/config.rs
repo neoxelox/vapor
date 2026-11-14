@@ -2,18 +2,18 @@
 //! `<vapor_dir>/vapor.json`.
 //!
 //! Every surface shares this file: the macOS app's
-//! `VaporConfigurationStore` and the `vapor config` CLI command write it;
-//! the daemon reads it here at startup so persisted settings actually
-//! reach the runtime. Environment variables (`VAPOR_*`) remain a
-//! per-field override on top of the file — the resolution order is
-//! env var → `vapor.json` → compiled default — which keeps the
-//! LaunchAgent policy honest: the service definition only needs to carry
-//! `VAPOR_DIR` (and optionally `VAPOR_ENV`).
+//! `VaporConfigurationStore` and the `vapor` CLI write it; the daemon
+//! reads it here at startup and again when it changes. A setting comes
+//! from the file or from its compiled default. No environment variable
+//! overrides a key: the `VAPOR_*` variables choose where the runtime
+//! directory is and how a development run behaves, so the service
+//! definition only needs to carry `VAPOR_DIR` (and optionally
+//! `VAPOR_ENV`).
 //!
 //! Parsing is tolerant the same way the Swift store is: a missing file
 //! yields pure defaults, missing fields yield per-field defaults, and an
 //! unreadable/corrupt file yields defaults plus a `load_issue` the caller
-//! can surface — the file itself is never modified or overwritten by the
+//! can surface: the file itself is never modified or overwritten by the
 //! loader.
 
 use std::fs;
@@ -33,11 +33,11 @@ pub struct VaporConfig {
     pub auto_launch: bool,
     pub use_gitignore: bool,
     pub use_vaporignore: bool,
-    pub local_root: String,
-    /// The cloud root, or `None` for the provider's own default
-    /// (`constants::filtering::default_cloud_root`), since a
-    /// remote provider and the filesystem provider need different
-    /// defaults; [`Self::effective_cloud_root`] resolves it.
+    /// The local root, or `None` while the user has not set one. There
+    /// is no compiled default: Vapor syncs only folders the user chose,
+    /// so a configuration that names none composes no profile.
+    pub local_root: Option<String>,
+    /// The cloud root, or `None` while the user has not set one.
     pub cloud_root: Option<String>,
     /// Ignore rules in `.gitignore` syntax, one rule per entry, applied
     /// before the ignore files found under the root.
@@ -55,7 +55,7 @@ pub struct VaporConfig {
     /// Sync direction selector: `two-way` (default),
     /// `pull-only`, `push-only`. One-way values are strict mirrors and
     /// destructive to the subordinate side; they only activate through
-    /// an explicit, enum-validated set — see
+    /// an explicit, enum-validated set, see
     /// `docs/architecture/sync-modes.md`.
     pub sync_mode: String,
     /// Sync profiles. Empty means one implicit profile
@@ -66,7 +66,7 @@ pub struct VaporConfig {
     /// Hard user ceilings on daemon device impact. Out-of-range values
     /// are clamped into `1..=100` when the daemon resolves its effective
     /// budget (`resource_budget.rs`, with a logged warning), not at
-    /// config load — so a non-daemon consumer of `load_from` sees the raw
+    /// config load, so a non-daemon consumer of `load_from` sees the raw
     /// values.
     pub resource_limits: ResourceLimitsConfig,
     /// Idle-boost group. `*Percent` ceilings below their matching
@@ -125,7 +125,7 @@ pub struct ResourceLimitsConfig {
     #[serde(default = "default_bandwidth_percent")]
     pub bandwidth_percent: u8,
     /// Optional hard ceiling on concurrent uploads and on concurrent
-    /// downloads (each direction separately). `None` means automatic —
+    /// downloads (each direction separately). `None` means automatic:
     /// the throttle ladder derives its ceiling from the machine's core
     /// count. Clamped into `1..=16` at daemon budget-resolve time.
     #[serde(default)]
@@ -326,15 +326,19 @@ pub struct ProfileConfig {
 }
 
 impl VaporConfig {
-    /// The cloud root this configuration syncs with: the configured
-    /// value, or the default for its provider when the key is unset.
-    pub fn effective_cloud_root(&self) -> &str {
-        self.cloud_root
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| constants::filtering::default_cloud_root(&self.provider))
+    /// The local root the user set, trimmed; `None` when unset or blank.
+    pub fn configured_local_root(&self) -> Option<&str> {
+        non_blank(self.local_root.as_deref())
     }
+
+    /// The cloud root the user set, trimmed; `None` when unset or blank.
+    pub fn configured_cloud_root(&self) -> Option<&str> {
+        non_blank(self.cloud_root.as_deref())
+    }
+}
+
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 impl Default for VaporConfig {
@@ -343,7 +347,7 @@ impl Default for VaporConfig {
             auto_launch: constants::config::DEFAULT_AUTO_LAUNCH,
             use_gitignore: constants::config::DEFAULT_USE_GITIGNORE,
             use_vaporignore: constants::config::DEFAULT_USE_VAPORIGNORE,
-            local_root: constants::filtering::DEFAULT_LOCAL_ROOT.to_string(),
+            local_root: None,
             cloud_root: None,
             pre_ignore_rules: default_pre_ignore_rules(),
             post_ignore_rules: Vec::new(),
@@ -400,9 +404,12 @@ pub fn load_default() -> VaporConfigLoadResult {
     load_from(&path)
 }
 
-/// Loads a configuration file from an explicit path. A missing or empty
-/// file is the defaults with no issue; an unreadable or unparsable one is
-/// the defaults with a `load_issue` saying why.
+/// Loads a configuration file from an explicit path. A missing file is
+/// the defaults with no issue. A file that is there and empty is the
+/// defaults with a `load_issue`: nothing writes an empty `vapor.json`,
+/// so one that exists lost its contents (an interrupted write, a full
+/// disk). An unreadable or unparsable file is the defaults with a
+/// `load_issue` saying why, and `unreadable` set.
 pub fn load_from(path: &Path) -> VaporConfigLoadResult {
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -418,7 +425,13 @@ pub fn load_from(path: &Path) -> VaporConfigLoadResult {
     };
 
     if contents.trim().is_empty() {
-        return VaporConfigLoadResult::default();
+        return VaporConfigLoadResult {
+            load_issue: Some(format!(
+                "{} is empty: every setting and every profile it held is gone",
+                path.display()
+            )),
+            ..VaporConfigLoadResult::default()
+        };
     }
 
     match serde_json::from_str::<serde_json::Value>(&contents) {
@@ -676,30 +689,19 @@ mod tests {
 
         let result = load_from(&path);
         assert!(result.load_issue.is_none());
-        assert_eq!(result.config.local_root, "~/Projects");
+        assert_eq!(result.config.configured_local_root(), Some("~/Projects"));
         assert!(!result.config.use_gitignore);
         assert!(result.config.use_vaporignore);
+        // A root the user did not set has no default: nothing syncs
+        // into a folder nobody chose.
         assert_eq!(result.config.cloud_root, None);
-        // Unset means the provider's default; the filesystem provider
-        // gets a folder the daemon can create, a remote one the account
-        // root folder.
-        assert_eq!(
-            result.config.effective_cloud_root(),
-            constants::filtering::DEFAULT_FILESYSTEM_CLOUD_ROOT
-        );
-        let mut remote = result.config.clone();
-        remote.provider = constants::provider::GDRIVE.to_string();
-        assert_eq!(
-            remote.effective_cloud_root(),
-            constants::filtering::DEFAULT_CLOUD_ROOT
-        );
-        remote.cloud_root = Some("  ".to_string());
-        assert_eq!(
-            remote.effective_cloud_root(),
-            constants::filtering::DEFAULT_CLOUD_ROOT
-        );
-        remote.cloud_root = Some("/Work".to_string());
-        assert_eq!(remote.effective_cloud_root(), "/Work");
+        assert_eq!(result.config.configured_cloud_root(), None);
+        let mut blank = result.config.clone();
+        blank.cloud_root = Some("  ".to_string());
+        assert_eq!(blank.configured_cloud_root(), None);
+        blank.cloud_root = Some(" /Work ".to_string());
+        assert_eq!(blank.configured_cloud_root(), Some("/Work"));
+        assert_eq!(VaporConfig::default().configured_local_root(), None);
     }
 
     #[test]
@@ -731,7 +733,7 @@ mod tests {
 
         let result = load_from(&path);
         // The valid field is preserved (not discarded to defaults)...
-        assert_eq!(result.config.local_root, "~/Keep");
+        assert_eq!(result.config.configured_local_root(), Some("~/Keep"));
         // ...the bad field falls back to its default...
         assert_eq!(
             result.config.timeline_limit,
@@ -758,14 +760,23 @@ mod tests {
     }
 
     #[test]
-    fn empty_file_loads_defaults_without_issue() {
+    fn a_file_that_is_there_and_empty_loads_the_defaults_and_says_so() {
         let temp = TempDir::new().expect("temp dir");
         let path = temp.path().join("vapor.json");
         std::fs::write(&path, "  \n").expect("seed empty config");
 
         let result = load_from(&path);
         assert_eq!(result.config, VaporConfig::default());
-        assert!(result.load_issue.is_none());
+        assert!(
+            result
+                .load_issue
+                .as_deref()
+                .is_some_and(|issue| issue.contains("is empty")),
+            "an interrupted write must not pass as a fresh install: {:?}",
+            result.load_issue
+        );
+        // The next write repairs it, so it does not count as unreadable.
+        assert!(!result.unreadable);
     }
 
     #[test]

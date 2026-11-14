@@ -24,32 +24,32 @@ incident scenarios) live in per-platform subdirectories.
 
 ## Common documents
 
-- `distribution-trust-chain.md` — cross-platform index: signing,
+- `distribution-trust-chain.md`: cross-platform index: signing,
   packaging, and trust-chain principles shared across macOS / Windows /
   Linux / CLI, plus pointers into each platform's concrete policy.
-- `release-process.md` — the release runbook: versioning governance,
+- `release-process.md`: the release runbook: versioning governance,
   `VERSION` source-of-truth, tag discipline, script-first packaging,
   environment gating, publication flow.
-- `release-incident-playbook.md` — detection / mitigation / verification
+- `release-incident-playbook.md`: detection / mitigation / verification
   steps for common release-time failures (signing, notarization,
   publishing).
-- `provider-auth-operations.md` — OAuth (PKCE) flow, the built-in
+- `provider-auth-operations.md`: OAuth (PKCE) flow, the built-in
   OAuth client and where its values come from, consent-screen status
   and token lifetime, refresh policy, and the sign-in hold a refused
   sign-in puts a profile in. Transport-neutral; secret storage
   delegates to `core/platform::SecretStore`.
-- `runtime-logging-and-localization.md` — `VAPOR_DIR` runtime layout,
+- `runtime-logging-and-localization.md`: `VAPOR_DIR` runtime layout,
   log level override via `VAPOR_LOG_LEVEL`, structured log line format,
   redaction markers, locale catalog resolution (`assets/locales/*.json`),
   `language` with English fallback.
 
 ## Per-platform subdirectories
 
-- `macos/` — macOS LaunchAgent plist policy and crash-loop interaction,
+- `macos/`: macOS LaunchAgent plist policy and crash-loop interaction,
   macOS-specific distribution trust chain (Developer ID, hardened runtime,
   notarization, entitlement review).
 - (`windows/` and `linux/` subdirectories will be added when those app
-  surfaces start — signed installer policy, service install mechanics,
+  surfaces start: signed installer policy, service install mechanics,
   per-OS incident playbooks.)
 
 Runbooks expand here as implementation matures. Platform-specific

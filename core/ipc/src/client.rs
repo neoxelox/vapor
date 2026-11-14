@@ -339,12 +339,12 @@ mod tests {
         let socket_path = temp.path().join("vapord.sock");
         let listener = bind_listener(socket_path.clone()).expect("bind");
 
-        // Accept on a worker thread so the client's `connect` doesn't
-        // race the listener. The accepted stream is held but never
-        // written to, simulating a wedged daemon.
-        let _accept = std::thread::spawn(move || {
+        // A worker accepts the connection and holds the stream without
+        // a write, as a wedged daemon does, until the test lets go.
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let accept = std::thread::spawn(move || {
             let _stream = listener.listener().accept().ok();
-            std::thread::sleep(Duration::from_secs(2));
+            let _ = held.recv();
         });
 
         let started = Instant::now();
@@ -357,14 +357,16 @@ mod tests {
 
         assert!(
             result.is_err(),
-            "expected timeout error, got Ok(_) — client did not honor deadline"
+            "expected timeout error, got Ok(_): client did not honor deadline"
         );
-        // Generous bound — the deadline is 200 ms, but CI can be slow
+        // Generous bound: the deadline is 200 ms, but CI can be slow
         // and the OS scheduler adds noise. Anything well under the
         // 1 s budget is fine.
         assert!(
             elapsed < Duration::from_millis(900),
             "client took {elapsed:?} to give up against wedged peer; expected < 900 ms",
         );
+        drop(release);
+        accept.join().expect("accept thread");
     }
 }

@@ -1,11 +1,11 @@
 //! Daemon-side `vapor_ipc::Service` implementation.
 //!
-//! Adapts the runtime's published snapshots into the schema-v2 wire
-//! shapes: aggregate + per-profile status, per-intent
-//! "why stuck" diagnostics, the bounded activity timeline
-//!, and the control endpoints. The runtime publishes a
-//! fresh snapshot every tick; IPC handler threads never reach into the
-//! runtime itself.
+//! Adapts the runtime's published snapshots into the wire shapes of
+//! the current IPC schema: aggregate and per-profile status,
+//! per-intent "why stuck" diagnostics, the bounded activity timeline,
+//! and the control endpoints. The runtime publishes a fresh snapshot
+//! when something observable changed; IPC handler threads never reach
+//! into the runtime itself.
 
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -223,7 +223,7 @@ impl Service for DaemonIpcService {
 
     fn timeline(&self) -> TimelineResponse {
         let (current, _) = daemon_supported_versions();
-        let entries = self
+        let mut entries: Vec<TimelineEntry> = self
             .timeline
             .as_ref()
             .map(|timeline| {
@@ -243,11 +243,41 @@ impl Service for DaemonIpcService {
                     .collect()
             })
             .unwrap_or_default();
+        let truncated = keep_newest_that_fit(&mut entries, TIMELINE_RESPONSE_BUDGET_BYTES);
         TimelineResponse {
             schema_version: current,
             entries,
+            truncated,
         }
     }
+}
+
+/// The room a timeline response may take: half of one IPC frame, which
+/// leaves the rest for the envelope and for the escapes JSON adds.
+const TIMELINE_RESPONSE_BUDGET_BYTES: usize = vapor_shared::constants::ipc::MAX_PAYLOAD_BYTES / 2;
+
+/// Drops the oldest entries until the rest fit in `budget` bytes of
+/// JSON, by a generous estimate. A response larger than a frame cannot
+/// be written at all: the session would close and the client would see
+/// an end-of-file. Returns whether anything was dropped.
+fn keep_newest_that_fit(entries: &mut Vec<TimelineEntry>, budget: usize) -> bool {
+    // Field names, quotes, the timestamp, and separators.
+    const PER_ENTRY_OVERHEAD: usize = 96;
+    let mut used = 0usize;
+    let mut kept = 0usize;
+    for entry in entries.iter().rev() {
+        // An escape can double a character, so text counts twice.
+        let size = PER_ENTRY_OVERHEAD
+            + 2 * (entry.kind.len() + entry.message.len() + entry.profile_id.len());
+        if used + size > budget {
+            break;
+        }
+        used += size;
+        kept += 1;
+    }
+    let dropped = entries.len() - kept;
+    entries.drain(..dropped);
+    dropped > 0
 }
 
 #[cfg(test)]
@@ -309,6 +339,46 @@ mod tests {
         );
         let _ = service.reconcile();
         assert!(control.take_reconcile_request());
+    }
+
+    #[test]
+    fn a_timeline_that_would_not_fit_one_frame_keeps_its_newest_entries() {
+        let entry = |index: usize| TimelineEntry {
+            timestamp_ms: index as u64,
+            kind: "cloud-delete".to_string(),
+            message: format!("{index} {}", "x".repeat(400)),
+            profile_id: "default".to_string(),
+        };
+        let mut entries: Vec<TimelineEntry> = (0..20_000).map(entry).collect();
+        assert!(keep_newest_that_fit(
+            &mut entries,
+            TIMELINE_RESPONSE_BUDGET_BYTES
+        ));
+        assert!(
+            entries.len() < 20_000 && entries.len() > 1_000,
+            "{}",
+            entries.len()
+        );
+        assert_eq!(entries.last().expect("newest").timestamp_ms, 19_999);
+        let response = TimelineResponse {
+            schema_version: 4,
+            entries,
+            truncated: true,
+        };
+        let frame = serde_json::to_vec(&response).expect("serialize");
+        assert!(
+            frame.len() < vapor_shared::constants::ipc::MAX_PAYLOAD_BYTES,
+            "the response fits one frame: {} bytes",
+            frame.len()
+        );
+
+        // A timeline of the default size is never cut.
+        let mut small: Vec<TimelineEntry> = (0..1_000).map(entry).collect();
+        assert!(!keep_newest_that_fit(
+            &mut small,
+            TIMELINE_RESPONSE_BUDGET_BYTES
+        ));
+        assert_eq!(small.len(), 1_000);
     }
 
     #[test]

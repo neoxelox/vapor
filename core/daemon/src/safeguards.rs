@@ -1,28 +1,22 @@
 //! Optional advanced safeguards.
 //!
-//! Three small, self-contained protections the runtime consults on its
+//! Two small, self-contained protections the runtime consults on its
 //! normal tick cadence:
 //!
-//! - [`ActiveCodingHeuristic`] — treats the user as actively
-//!   working when code-class files churn rapidly, even on hosts where
-//!   no permissioned HID-idle signal is available. The permissioned
-//!   native signal stays the primary source (`MetricsSampler`
-//!   `user_active`); this heuristic can only *add* activity, never
-//!   clear it, so it strictly increases throttle caution.
-//! - [`MassChangeGuard`] — a burst of local deletions above
-//!   the configured rate looks like ransomware or an accidental
-//!   recursive delete. Propagating it would faithfully replicate the
-//!   damage to the cloud, so the guard pauses the daemon and raises a
-//!   timeline alert instead; `vapor resume` is the explicit
-//!   human-in-the-loop reset.
-//! - [`intent_priority_rank`] — folder/path priority classes
-//!   reuse the debounce classification so key config files and code
-//!   flush ahead of lockfile noise when a single tick drains a mixed
-//!   batch to the durable queue.
+//! - [`MassChangeGuard`]: a burst of deletions above the configured
+//!   rate looks like ransomware or an accidental recursive delete.
+//!   Propagating it would copy the damage to the other side, so the
+//!   guard holds the whole batch behind a `mass-delete` decision. The
+//!   rest of the profile keeps syncing, and the user's answer lets the
+//!   deletions through or puts the files back.
+//! - [`intent_priority_rank`]: folder/path priority classes reuse the
+//!   debounce classification so key config files and code flush ahead
+//!   of lockfile noise when a single tick drains a mixed batch to the
+//!   durable queue.
 //!
-//! The flush-boost half lives on `DaemonRuntime` (it touches
-//! deferred-reconcile release and remote-poll cadence); the window
-//! constant is shared from `constants::engine::RECONCILE_BOOST_SECONDS`.
+//! The reconcile boost lives on `DaemonRuntime` (it touches
+//! deferred-reconcile release and remote-poll cadence); its window is
+//! `constants::engine::RECONCILE_BOOST_SECONDS`.
 
 use std::collections::VecDeque;
 use std::time::{Duration, SystemTime};
@@ -31,8 +25,8 @@ use vapor_shared::constants;
 
 use crate::debounce::DebounceClass;
 
-/// Rolling-window event counter: the shared mechanics behind both the
-/// active-coding heuristic and the mass-delete guard.
+/// Rolling-window event counter: the mechanics of the mass-delete
+/// guard.
 #[derive(Debug)]
 struct RollingWindowCounter {
     window: Duration,
@@ -84,56 +78,11 @@ impl RollingWindowCounter {
     }
 }
 
-/// Heuristic active-coding detection.
-///
-/// Counts stabilized code/config-class events; at or above the
-/// threshold inside the window the user is presumed to be actively
-/// working, and the runtime ORs `user_active = true` into the throttle
-/// inputs. Purely additive: it never overrides a positive native
-/// activity signal with "idle".
-#[derive(Debug)]
-pub struct ActiveCodingHeuristic {
-    counter: RollingWindowCounter,
-    threshold: usize,
-}
-
-impl Default for ActiveCodingHeuristic {
-    fn default() -> Self {
-        Self::new(
-            Duration::from_secs(constants::engine::ACTIVE_CODING_WINDOW_SECONDS),
-            constants::engine::ACTIVE_CODING_EVENT_THRESHOLD,
-        )
-    }
-}
-
-impl ActiveCodingHeuristic {
-    pub fn new(window: Duration, threshold: usize) -> Self {
-        // Cap the buffer just above the threshold: once tripped, older
-        // history adds nothing, so memory stays O(threshold) no matter
-        // how large the storm is.
-        Self {
-            counter: RollingWindowCounter::new(window, threshold.max(1).saturating_add(1)),
-            threshold: threshold.max(1),
-        }
-    }
-
-    /// Feed one stabilized event; only code-ish classes count.
-    pub fn record_stabilized(&mut self, class: DebounceClass, now: SystemTime) {
-        if matches!(class, DebounceClass::CodeText | DebounceClass::KeyConfig) {
-            self.counter.record(now);
-        }
-    }
-
-    pub fn is_active(&mut self, now: SystemTime) -> bool {
-        self.counter.count(now) >= self.threshold
-    }
-}
-
 /// Resolved mass-delete guard tuning: the `safeguards` config group
 /// with floors applied. Configurable because a workflow that
 /// legitimately unlinks many files (`rm -rf` of large trees, build
-/// cleans) may need a higher threshold; the defaults stay conservative
-/// — this guard is the ransomware / bulk-mistake backstop.
+/// cleans) may need a higher threshold; the defaults stay conservative:
+/// this guard is the ransomware / bulk-mistake backstop.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MassDeleteGuardSettings {
     pub enabled: bool,
@@ -309,7 +258,7 @@ pub fn intent_priority_rank(class: DebounceClass) -> u8 {
 /// Where a durable queue intent came from, for lease-priority
 /// purposes. Reconcile-walk backlog ranks below every fresh intent so
 /// a whole-scope reconcile of a large tree can never starve a file the
-/// user just edited — background convergence yields to foreground
+/// user just edited: background convergence yields to foreground
 /// changes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IntentSource {
@@ -362,44 +311,6 @@ mod tests {
 
     fn at(seconds: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
-    }
-
-    #[test]
-    fn coding_heuristic_trips_at_threshold_inside_window() {
-        let mut heuristic = ActiveCodingHeuristic::new(Duration::from_secs(60), 3);
-        heuristic.record_stabilized(DebounceClass::CodeText, at(100));
-        heuristic.record_stabilized(DebounceClass::CodeText, at(110));
-        assert!(!heuristic.is_active(at(110)));
-        heuristic.record_stabilized(DebounceClass::KeyConfig, at(120));
-        assert!(heuristic.is_active(at(120)));
-    }
-
-    #[test]
-    fn coding_heuristic_ignores_non_code_classes() {
-        let mut heuristic = ActiveCodingHeuristic::new(Duration::from_secs(60), 1);
-        heuristic.record_stabilized(DebounceClass::Lockfile, at(100));
-        heuristic.record_stabilized(DebounceClass::Other, at(100));
-        assert!(!heuristic.is_active(at(100)));
-    }
-
-    #[test]
-    fn coding_heuristic_decays_once_events_age_out_of_the_window() {
-        let mut heuristic = ActiveCodingHeuristic::new(Duration::from_secs(60), 2);
-        heuristic.record_stabilized(DebounceClass::CodeText, at(100));
-        heuristic.record_stabilized(DebounceClass::CodeText, at(101));
-        assert!(heuristic.is_active(at(101)));
-        // 100/101 fall out of the 60s window by t=162.
-        assert!(!heuristic.is_active(at(162)));
-    }
-
-    #[test]
-    fn coding_heuristic_survives_wall_clock_rewind_without_tripping() {
-        let mut heuristic = ActiveCodingHeuristic::new(Duration::from_secs(60), 3);
-        heuristic.record_stabilized(DebounceClass::CodeText, at(100));
-        heuristic.record_stabilized(DebounceClass::CodeText, at(100));
-        // Clock rewinds before the window start: recorded events prune
-        // (they are "in the future"), which fails safe to inactive.
-        assert!(!heuristic.is_active(at(10)));
     }
 
     #[test]

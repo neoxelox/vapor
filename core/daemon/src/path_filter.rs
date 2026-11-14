@@ -56,7 +56,26 @@ enum RuleAction {
 #[derive(Debug)]
 struct CompiledRule {
     action: RuleAction,
-    globs: Vec<Glob>,
+    globs: Vec<RuleGlob>,
+    /// The rule as it was written (`build/`, `*.log`), for the list of
+    /// what the rules hide.
+    pattern: String,
+}
+
+/// One glob of a rule. A rule that ends in `/` names folders: its
+/// `folder_only` glob matches the folder itself and applies to a folder
+/// only, so `build/` does not hide a file named `build`. The glob for
+/// what lies under the folder (`build/**`) applies to every path.
+#[derive(Debug)]
+struct RuleGlob {
+    glob: Glob,
+    folder_only: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GlobOwner {
+    rule: usize,
+    folder_only: bool,
 }
 
 #[derive(Debug)]
@@ -64,28 +83,91 @@ pub struct EventPathFilter {
     watch_root: PathBuf,
     rules: Vec<CompiledRule>,
     /// All rule globs compiled into one automaton for O(1)-per-event
-    /// matching on the fs-watch callback thread; `glob_owner[i]` is the
-    /// index of the rule that contributed the i-th glob so last-match-wins
+    /// matching on the fs-watch callback thread; `glob_owner[i]` names
+    /// the rule that contributed the i-th glob so last-match-wins
     /// (highest matching rule index) still holds.
     glob_set: GlobSet,
-    glob_owner: Vec<usize>,
+    glob_owner: Vec<GlobOwner>,
 }
 
 /// Compiles every rule's globs into a single [`GlobSet`], recording which
 /// rule each glob belongs to.
-fn build_glob_set(rules: &[CompiledRule]) -> (GlobSet, Vec<usize>) {
+fn build_glob_set(rules: &[CompiledRule]) -> (GlobSet, Vec<GlobOwner>) {
     let mut builder = GlobSetBuilder::new();
     let mut glob_owner = Vec::new();
     for (rule_index, rule) in rules.iter().enumerate() {
-        for glob in &rule.globs {
-            builder.add(glob.clone());
-            glob_owner.push(rule_index);
+        for rule_glob in &rule.globs {
+            builder.add(rule_glob.glob.clone());
+            glob_owner.push(GlobOwner {
+                rule: rule_index,
+                folder_only: rule_glob.folder_only,
+            });
         }
     }
     // Every glob already compiled individually in compile_rule, so the set
     // build cannot fail; fall back to an empty set defensively.
     let glob_set = builder.build().unwrap_or_else(|_| GlobSet::empty());
     (glob_set, glob_owner)
+}
+
+/// The last rule that matches one path: read as a file, and read as a
+/// folder. `None` when no rule matches. The two differ only where a
+/// folder rule names the path itself.
+fn winning_rules(
+    glob_set: &GlobSet,
+    glob_owner: &[GlobOwner],
+    normalized: &str,
+) -> (Option<usize>, Option<usize>) {
+    let mut as_file: Option<usize> = None;
+    let mut as_folder: Option<usize> = None;
+    for glob_index in glob_set.matches(normalized) {
+        let owner = glob_owner[glob_index];
+        as_folder = as_folder.max(Some(owner.rule));
+        if !owner.folder_only {
+            as_file = as_file.max(Some(owner.rule));
+        }
+    }
+    (as_file, as_folder)
+}
+
+/// The rule that takes the path `normalized` (relative to the watch
+/// root) out of scope, or `None` when the path is in scope. `is_folder`
+/// is asked only when a folder rule names the path itself.
+///
+/// A negation follows git's rule: a path under an excluded folder
+/// cannot be included again. The watcher and the reconcile walk both
+/// decide here, so a file is in scope for both or for neither.
+fn ignoring_rule(
+    rules: &[CompiledRule],
+    glob_set: &GlobSet,
+    glob_owner: &[GlobOwner],
+    normalized: &str,
+    is_folder: &dyn Fn() -> bool,
+) -> Option<usize> {
+    let is_ignore =
+        |winner: Option<usize>| winner.filter(|index| rules[*index].action == RuleAction::Ignore);
+    let own = match winning_rules(glob_set, glob_owner, normalized) {
+        (as_file, as_folder) if as_file == as_folder => as_file,
+        (as_file, as_folder) => {
+            if is_folder() {
+                as_folder
+            } else {
+                as_file
+            }
+        }
+    };
+    // Every ignore rule also matches what lies under the path it names.
+    // A path that no rule matches is under no ignored folder.
+    let winner = own?;
+    if rules[winner].action == RuleAction::Ignore {
+        return Some(winner);
+    }
+    // A negation matched. It includes the path again unless a folder
+    // above it is excluded.
+    normalized.match_indices('/').find_map(|(end, _)| {
+        let (_, as_folder) = winning_rules(glob_set, glob_owner, &normalized[..end]);
+        is_ignore(as_folder)
+    })
 }
 
 impl EventPathFilter {
@@ -144,46 +226,90 @@ impl EventPathFilter {
         }
     }
 
+    /// Whether `path` is out of scope. For a path whose kind the caller
+    /// does not know: the filesystem is asked whether it is a folder,
+    /// and only when a folder rule (`build/`) names the path itself. A
+    /// path that is not there counts as a file.
     pub fn should_ignore(&self, path: &Path) -> bool {
-        // Engine-internal artifacts (atomic-write temp files, op-id
-        // side-files) are unconditionally invisible: loop prevention
-        // depends on them never becoming intents, so no user rule may
-        // re-include them.
+        self.ignores(path, &|| {
+            fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
+        })
+    }
+
+    /// [`Self::should_ignore`] for a path whose kind the caller knows:
+    /// a directory entry it just listed, a cloud entry.
+    pub fn should_ignore_kind(&self, path: &Path, is_folder: bool) -> bool {
+        self.ignores(path, &|| is_folder)
+    }
+
+    fn ignores(&self, path: &Path, is_folder: &dyn Fn() -> bool) -> bool {
+        self.is_internal(path) || self.deciding_rule(path, is_folder).is_some()
+    }
+
+    /// Engine-internal artifacts (atomic-write temp files, op-id
+    /// side-files) and Vapor's own directories with everything under
+    /// them. They are unconditionally invisible: loop prevention depends
+    /// on them never becoming intents, so no user rule may re-include
+    /// them.
+    fn is_internal(&self, path: &Path) -> bool {
         if is_internal_artifact(path) {
             return true;
         }
-
         let Ok(relative_path) = path.strip_prefix(&self.watch_root) else {
             return false;
         };
-        // Vapor's own directories are invisible with everything under
-        // them, so a runtime directory or a volume's trash inside the
-        // watch root never becomes intents.
-        if relative_path.components().any(|component| {
+        relative_path.components().any(|component| {
             component.as_os_str().to_str().is_some_and(|name| {
                 constants::filtering::INTERNAL_IGNORE_DIRECTORY_NAMES.contains(&name)
             })
-        }) {
-            return true;
-        }
+        })
+    }
 
+    fn deciding_rule(&self, path: &Path, is_folder: &dyn Fn() -> bool) -> Option<usize> {
+        let relative_path = path.strip_prefix(&self.watch_root).ok()?;
         let normalized_relative_path = normalize_relative_path(relative_path);
         if normalized_relative_path.is_empty() {
-            return false;
+            return None;
         }
+        ignoring_rule(
+            &self.rules,
+            &self.glob_set,
+            &self.glob_owner,
+            &normalized_relative_path,
+            is_folder,
+        )
+    }
 
-        // One automaton pass returns the matching glob indices; the
-        // highest-indexed rule among them wins (last-match-wins).
-        let winning_rule = self
-            .glob_set
-            .matches(&normalized_relative_path)
-            .into_iter()
-            .map(|glob_index| self.glob_owner[glob_index])
-            .max();
-        match winning_rule {
-            Some(rule_index) => matches!(self.rules[rule_index].action, RuleAction::Ignore),
-            None => false,
+    /// The rule, as it was written, that keeps `path` out of sync:
+    /// `build/`, `*.log`. `None` for a path that syncs, and for one of
+    /// Vapor's own files, which no rule decides and no user misses.
+    pub fn ignored_by_rule(&self, path: &Path, is_folder: bool) -> Option<&str> {
+        if self.is_internal(path) {
+            return None;
         }
+        self.deciding_rule(path, &|| is_folder)
+            .map(|index| self.rules[index].pattern.as_str())
+    }
+
+    /// The rules in the order they apply, as text. Two filters with the
+    /// same signature decide every path the same way.
+    pub fn signature(&self) -> Vec<String> {
+        self.rules
+            .iter()
+            .flat_map(|rule| {
+                rule.globs.iter().map(move |rule_glob| {
+                    format!(
+                        "{}{}{}",
+                        match rule.action {
+                            RuleAction::Ignore => '-',
+                            RuleAction::Allow => '+',
+                        },
+                        if rule_glob.folder_only { "d:" } else { ":" },
+                        rule_glob.glob.glob()
+                    )
+                })
+            })
+            .collect()
     }
 }
 
@@ -199,6 +325,7 @@ fn is_internal_artifact(path: &Path) -> bool {
         || constants::filtering::INTERNAL_IGNORE_FILE_SUFFIXES
             .iter()
             .any(|suffix| name.ends_with(suffix))
+        || constants::filtering::INTERNAL_IGNORE_FILE_NAMES.contains(&name)
         || constants::filtering::INTERNAL_IGNORE_DIRECTORY_NAMES.contains(&name)
 }
 
@@ -213,39 +340,20 @@ fn append_rules_from_file_tree(
     // inside a user-excluded `vendor/` could re-include content the user
     // opted out of, and the walk would descend huge excluded trees.
     let (glob_set, glob_owner) = build_glob_set(rules);
-    let is_ignored_dir =
-        |dir: &Path| evaluate_rules(rules, &glob_set, &glob_owner, watch_root, dir);
+    let is_ignored_dir = |dir: &Path| {
+        let Ok(relative_path) = dir.strip_prefix(watch_root) else {
+            return false;
+        };
+        let normalized = normalize_relative_path(relative_path);
+        !normalized.is_empty()
+            && ignoring_rule(rules, &glob_set, &glob_owner, &normalized, &|| true).is_some()
+    };
     let ignore_files = collect_ignore_files(watch_root, file_name, &is_ignored_dir);
     for ignore_file in &ignore_files {
         append_rules_from_file(rules, watch_root, ignore_file.as_path());
     }
 
     ignore_files.len()
-}
-
-/// Evaluates the compiled rules against `path` (last-match-wins), used to
-/// prune already-excluded directories during ignore-file discovery.
-fn evaluate_rules(
-    rules: &[CompiledRule],
-    glob_set: &GlobSet,
-    glob_owner: &[usize],
-    watch_root: &Path,
-    path: &Path,
-) -> bool {
-    let Ok(relative_path) = path.strip_prefix(watch_root) else {
-        return false;
-    };
-    let normalized = normalize_relative_path(relative_path);
-    if normalized.is_empty() {
-        return false;
-    }
-    glob_set
-        .matches(&normalized)
-        .into_iter()
-        .map(|glob_index| glob_owner[glob_index])
-        .max()
-        .map(|rule_index| matches!(rules[rule_index].action, RuleAction::Ignore))
-        .unwrap_or(false)
 }
 
 fn collect_ignore_files(
@@ -480,23 +588,33 @@ fn compile_rule(
     let patterns = expand_glob_patterns(raw_pattern, base_directory, emit_descendants)?;
     let mut globs = Vec::with_capacity(patterns.len());
 
-    for pattern in patterns {
+    for (pattern, folder_only) in patterns {
         let glob = GlobBuilder::new(&pattern)
             .literal_separator(true)
             .backslash_escape(true)
             .build()
             .map_err(|error| error.to_string())?;
-        globs.push(glob);
+        globs.push(RuleGlob { glob, folder_only });
     }
 
-    Ok(CompiledRule { action, globs })
+    Ok(CompiledRule {
+        action,
+        globs,
+        pattern: match action {
+            RuleAction::Ignore => raw_pattern.to_string(),
+            RuleAction::Allow => format!("!{raw_pattern}"),
+        },
+    })
 }
 
+/// The glob patterns of one rule, each with whether it applies to a
+/// folder only: the pattern for the path itself when the rule ends in
+/// `/`.
 fn expand_glob_patterns(
     raw_pattern: &str,
     base_directory: Option<&Path>,
     emit_descendants: bool,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<(String, bool)>, String> {
     let anchored = raw_pattern.starts_with('/');
     let directory_only = raw_pattern.ends_with('/');
 
@@ -532,9 +650,9 @@ fn expand_glob_patterns(
             }
         }
 
-        patterns.push(resolved.clone());
+        patterns.push((resolved.clone(), directory_only));
         if directory_only || emit_descendants {
-            patterns.push(format!("{resolved}/**"));
+            patterns.push((format!("{resolved}/**"), false));
         }
     }
 
@@ -658,7 +776,7 @@ mod tests {
         .expect("failed to write .gitignore");
         fs::write(
             watch_root.join(".vaporignore"),
-            "coverage/\n!coverage/from-vaporignore.txt\n",
+            "coverage/*\n!coverage/from-vaporignore.txt\n",
         )
         .expect("failed to write .vaporignore");
 
@@ -810,7 +928,7 @@ mod tests {
                 use_vaporignore: false,
                 pre_user_rules: vec![
                     "# comment".to_string(),
-                    "tmp/".to_string(),
+                    "tmp/*".to_string(),
                     "!tmp/keep.txt".to_string(),
                     "\\#literal-file".to_string(),
                 ],
@@ -821,6 +939,122 @@ mod tests {
         assert!(filter.should_ignore(&watch_root.join("tmp/a.txt")));
         assert!(!filter.should_ignore(&watch_root.join("tmp/keep.txt")));
         assert!(filter.should_ignore(&watch_root.join("#literal-file")));
+    }
+
+    fn filter_with_rules(watch_root: &Path, rules: &[&str]) -> EventPathFilter {
+        EventPathFilter::for_watch_root(
+            watch_root,
+            &EventPathFilterOptions {
+                use_gitignore: false,
+                use_vaporignore: false,
+                pre_user_rules: rules.iter().map(|rule| rule.to_string()).collect(),
+                post_user_rules: Vec::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_file_under_an_excluded_folder_cannot_be_included_again() {
+        let (_watch_root_guard, watch_root) = create_test_directory();
+        let filter = filter_with_rules(
+            &watch_root,
+            &[
+                "vendor/",
+                "!vendor/keep.txt",
+                "logs/*",
+                "!logs/keep.txt",
+                "cache/",
+                "!cache/",
+                "!cache/kept/note.txt",
+            ],
+        );
+        // Git's rule: the folder is excluded, so nothing under it comes
+        // back. The reconcile walk never enters the folder, and the
+        // watcher has to agree with it.
+        assert!(filter.should_ignore_kind(&watch_root.join("vendor"), true));
+        assert!(filter.should_ignore(&watch_root.join("vendor/keep.txt")));
+        assert!(filter.should_ignore(&watch_root.join("vendor/lib/deep/keep.txt")));
+        // The way to keep one file: exclude what is in the folder, not
+        // the folder.
+        assert!(!filter.should_ignore_kind(&watch_root.join("logs"), true));
+        assert!(filter.should_ignore(&watch_root.join("logs/today.log")));
+        assert!(!filter.should_ignore(&watch_root.join("logs/keep.txt")));
+        // A folder that a later rule includes again is not excluded.
+        assert!(!filter.should_ignore_kind(&watch_root.join("cache"), true));
+        assert!(!filter.should_ignore(&watch_root.join("cache/kept/note.txt")));
+    }
+
+    #[test]
+    fn a_folder_rule_hides_folders_and_not_a_file_of_that_name() {
+        let (_watch_root_guard, watch_root) = create_test_directory();
+        fs::create_dir_all(watch_root.join("build")).expect("folder");
+        fs::create_dir_all(watch_root.join("notes")).expect("folder");
+        fs::write(watch_root.join("notes/build"), b"a file named build").expect("file");
+        let filter = filter_with_rules(&watch_root, &["build/", "target"]);
+
+        // The caller that knows the kind says it.
+        assert!(filter.should_ignore_kind(&watch_root.join("src/build"), true));
+        assert!(!filter.should_ignore_kind(&watch_root.join("src/build"), false));
+        // The caller that does not know gets the answer from the disk,
+        // and a path that is not there counts as a file.
+        assert!(filter.should_ignore(&watch_root.join("build")));
+        assert!(!filter.should_ignore(&watch_root.join("notes/build")));
+        assert!(!filter.should_ignore(&watch_root.join("gone/build")));
+        // What lies under the folder is hidden whatever its kind.
+        assert!(filter.should_ignore(&watch_root.join("build/out/app.o")));
+        assert!(filter.should_ignore_kind(&watch_root.join("pkg/build/app.o"), false));
+        // A rule with no trailing slash names files and folders.
+        assert!(filter.should_ignore_kind(&watch_root.join("target"), false));
+        assert!(filter.should_ignore_kind(&watch_root.join("target"), true));
+    }
+
+    #[test]
+    fn the_root_marker_is_hidden_by_its_whole_name_only() {
+        let (_watch_root_guard, watch_root) = create_test_directory();
+        let filter = filter_with_rules(&watch_root, &[]);
+        assert!(filter.should_ignore(&watch_root.join(".vapor-root")));
+        assert!(filter.should_ignore(&watch_root.join("volume/.vapor-root")));
+        // A file of the user's whose name only starts like the marker.
+        assert!(!filter.should_ignore(&watch_root.join(".vapor-roots.txt")));
+        assert!(!filter.should_ignore(&watch_root.join("notes/.vapor-rootless")));
+    }
+
+    #[test]
+    fn the_rule_that_hides_a_path_is_named_as_it_was_written() {
+        let (_watch_root_guard, watch_root) = create_test_directory();
+        let filter =
+            filter_with_rules(&watch_root, &["build/", "*.log", "vendor/", "!vendor/keep"]);
+        let rule = |path: &str, is_folder: bool| {
+            filter
+                .ignored_by_rule(&watch_root.join(path), is_folder)
+                .map(str::to_string)
+        };
+        assert_eq!(rule("build", true).as_deref(), Some("build/"));
+        assert_eq!(rule("app/build/out.o", false).as_deref(), Some("build/"));
+        assert_eq!(rule("notes/today.log", false).as_deref(), Some("*.log"));
+        // Under an excluded folder, the folder's rule is the one.
+        assert_eq!(rule("vendor/keep", false).as_deref(), Some("vendor/"));
+        assert_eq!(rule("notes/today.txt", false), None, "in scope");
+        assert_eq!(rule("build", false), None, "a file named build syncs");
+        // Vapor's own files are hidden by no rule.
+        assert_eq!(rule(".vapor-tmp-upload", false), None);
+        assert!(filter.should_ignore(&watch_root.join(".vapor-tmp-upload")));
+    }
+
+    #[test]
+    fn two_filters_with_the_same_rules_have_the_same_signature() {
+        let (_watch_root_guard, watch_root) = create_test_directory();
+        let rules = ["build/", "!build/keep", "*.log"];
+        let first = filter_with_rules(&watch_root, &rules);
+        assert_eq!(
+            first.signature(),
+            filter_with_rules(&watch_root, &rules).signature()
+        );
+        assert_ne!(
+            first.signature(),
+            filter_with_rules(&watch_root, &["build", "!build/keep", "*.log"]).signature(),
+            "`build` and `build/` decide a file named build two ways"
+        );
     }
 
     #[test]

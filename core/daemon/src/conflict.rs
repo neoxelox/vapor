@@ -30,6 +30,54 @@ use crate::state_db::DecisionOption;
 /// The daemon recognizes copies by it through [`parse_conflict_copy_name`].
 pub const CONFLICT_MARKER: &str = constants::conflict::COPY_MARKER;
 
+/// Marks the temp name a local file gets while a download takes its
+/// place. The file's own name follows the separator when it fits, so
+/// a crash between the two renames leaves enough to give the bytes
+/// back under a conflict name.
+const ASIDE_MARKER: &str = "aside-";
+const ASIDE_NAME_SEPARATOR: char = '~';
+/// The longest file name the common filesystems store, in bytes.
+const MAX_FILE_NAME_BYTES: usize = 255;
+
+/// The temp path `original` is set aside under while the download with
+/// `op_id` is put in its place.
+pub fn aside_path(original: &Path, op_id: &str) -> PathBuf {
+    let op_id: String = op_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let short = format!(
+        "{}{ASIDE_MARKER}{op_id}",
+        constants::provider::TEMP_FILE_PREFIX
+    );
+    let name = match original.file_name().and_then(|name| name.to_str()) {
+        Some(name) if short.len() + 1 + name.len() <= MAX_FILE_NAME_BYTES => {
+            format!("{short}{ASIDE_NAME_SEPARATOR}{name}")
+        }
+        _ => short,
+    };
+    original.with_file_name(name)
+}
+
+/// For the name of a file that was set aside: the name the file had,
+/// when the temp name carries it. `None` for any other name.
+pub fn set_aside_original_name(name: &str) -> Option<Option<&str>> {
+    let rest = name
+        .strip_prefix(constants::provider::TEMP_FILE_PREFIX)?
+        .strip_prefix(ASIDE_MARKER)?;
+    Some(
+        rest.split_once(ASIDE_NAME_SEPARATOR)
+            .map(|(_, original)| original)
+            .filter(|original| !original.is_empty()),
+    )
+}
+
 /// Derives the keep-both conflict-copy path for `original`.
 /// `path_exists` abstracts the existence probe so derivation stays
 /// pure and testable.
@@ -65,7 +113,7 @@ pub fn conflict_copy_path(
     }
 }
 
-/// A conflict-copy file name decomposed back into its parts — the
+/// A conflict-copy file name decomposed back into its parts: the
 /// inverse of [`conflict_copy_path`] for names that machine derived.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConflictCopyName {
@@ -93,7 +141,9 @@ const TIMESTAMP_MIN_DIGITS: usize = 12;
 /// so user files that merely contain the marker text do not
 /// false-positive.
 pub fn parse_conflict_copy_name(file_name: &str) -> Option<ConflictCopyName> {
-    let marker_index = file_name.find(CONFLICT_MARKER)?;
+    // The last marker: a copy of a copy carries two, and the original
+    // of the second copy is the first copy, marker and all.
+    let marker_index = file_name.rfind(CONFLICT_MARKER)?;
     let stem = &file_name[..marker_index];
     if stem.is_empty() {
         return None;
@@ -438,6 +488,26 @@ mod tests {
     }
 
     #[test]
+    fn a_set_aside_name_gives_the_original_name_back() {
+        let original = Path::new("/sync/notes/Plan 2026.md");
+        let aside = aside_path(original, "mac-1750000000000-7");
+        let name = aside.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with(constants::provider::TEMP_FILE_PREFIX));
+        assert_eq!(aside.parent(), original.parent());
+        assert_eq!(set_aside_original_name(name), Some(Some("Plan 2026.md")));
+
+        // A name too long to carry keeps the short temp name.
+        let long = "x".repeat(250);
+        let aside = aside_path(&Path::new("/sync").join(&long), "mac-1750000000000-7");
+        let name = aside.file_name().unwrap().to_str().unwrap();
+        assert!(name.len() <= MAX_FILE_NAME_BYTES);
+        assert_eq!(set_aside_original_name(name), Some(None));
+
+        assert_eq!(set_aside_original_name(".vapor-tmp-mac-1"), None);
+        assert_eq!(set_aside_original_name("notes.md"), None);
+    }
+
+    #[test]
     fn every_copy_of_a_file_belongs_to_one_conflict() {
         let temp = TempDir::new().expect("temp");
         let original = seed(
@@ -722,12 +792,28 @@ mod tests {
                 .unwrap_or_else(|| panic!("generated name must parse: {name}"));
             // Multi-dot originals lose their inner stem dots to the
             // canonical reconstruction only when the generator split
-            // them — round-trip must restore the full original name.
+            // them: round-trip must restore the full original name.
             assert_eq!(parsed.canonical_file_name, original, "for {name}");
             assert_eq!(parsed.device_id, device_id, "for {name}");
             assert_eq!(parsed.timestamp_ms, timestamp_ms, "for {name}");
             assert_eq!(parsed.sequence, None, "for {name}");
         }
+    }
+
+    #[test]
+    fn a_copy_of_a_copy_names_the_first_copy_as_its_original() {
+        let first = conflict_copy_path(
+            Path::new("/sync/report.md"),
+            "sams-mac-k3x9",
+            1_700_000_000_000,
+            |_| false,
+        );
+        let second = conflict_copy_path(&first, "work-pc-7q2m", 1_700_000_000_500, |_| false);
+        let parsed = parse_conflict_copy_name(&file_name(&second)).expect("a conflict copy");
+        assert_eq!(parsed.canonical_file_name, file_name(&first));
+        assert_eq!(parsed.device_id, "work-pc-7q2m");
+        assert_eq!(parsed.timestamp_ms, 1_700_000_000_500);
+        assert_eq!(original_path(&second), Some(first));
     }
 
     #[test]

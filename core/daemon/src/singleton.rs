@@ -5,7 +5,7 @@
 //! socket (`bind_listener` removes a pre-existing socket file). The lock
 //! is an OS advisory file lock (`flock` on Unix, `LockFileEx` on
 //! Windows) on `<vapor_dir>/vapord.lock`, held for the lifetime of the
-//! returned guard — it releases automatically when the process exits,
+//! returned guard: it releases automatically when the process exits,
 //! including on crash, so there is no stale-lock recovery to get wrong.
 
 use std::error::Error;
@@ -18,7 +18,7 @@ use vapor_shared::{constants, runtime_paths};
 
 #[derive(Debug)]
 pub enum SingletonLockError {
-    /// Another live process holds the lock — a daemon is already
+    /// Another live process holds the lock: a daemon is already
     /// serving this `vapor_dir`.
     AlreadyRunning(PathBuf),
     Io(io::Error),

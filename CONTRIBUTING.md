@@ -3,8 +3,8 @@
 Thanks for looking at Vapor. This page is the practical on-ramp.
 
 **[`AGENTS.md`](AGENTS.md) is the authority.** It holds the full
-operating rules — safety invariants, performance constraints, test
-matrix, naming, release policy — and it binds human and AI contributors
+operating rules: safety invariants, performance constraints, test
+matrix, naming, release policy, and it binds human and AI contributors
 alike. This file summarises the parts you need on day one and points at
 the rest. Where the two disagree, `AGENTS.md` wins.
 
@@ -18,7 +18,7 @@ over a migration shim unless the maintainer asks otherwise.
 For anything beyond a small fix, **open an issue first**. A lot of the
 roadmap is already sequenced in
 [`docs/tasks/README.md`](docs/tasks/README.md), which is the
-"what should be done next" orchestrator across surfaces — check it
+"what should be done next" orchestrator across surfaces: check it
 before building something that is already planned or deliberately
 deferred.
 
@@ -27,19 +27,19 @@ By contributing you agree your work is licensed under
 
 ## Layout in one minute
 
-- `core/*` — the portable Rust runtime. **All business logic lives
+- `core/*`: the portable Rust runtime. **All business logic lives
   here.** `daemon`, `providers`, `ipc`, `shared`, `platform`,
   `lifecycle`, `cli`.
-- `apps/macos` — SwiftUI app. A UI and OS-integration shim over
+- `apps/macos`: SwiftUI app. A UI and OS-integration shim over
   `core/*`; no business logic, no lifecycle policy.
-- `core/platform` — traits plus per-OS native implementations. Engine
+- `core/platform`: traits plus per-OS native implementations. Engine
   code consumes traits, never OS APIs directly.
-- `scripts/` — the supported entrypoint for every workflow.
-- `docs/` — start at [`docs/README.md`](docs/README.md); every group has
+- `scripts/`: the supported entrypoint for every workflow.
+- `docs/`: start at [`docs/README.md`](docs/README.md); every group has
   its own `README.md` entrypoint.
 
 macOS is the only shipping surface today. Linux and Windows must keep
-**compiling** — a platform trait may be `unimplemented!()` there, but
+**compiling**: a platform trait may be `unimplemented!()` there, but
 `cargo build --workspace` has to succeed on every OS in CI.
 
 ## Setup
@@ -52,8 +52,9 @@ Current verified baseline:
 ```sh
 git clone https://github.com/neoxelox/vapor.git
 cd vapor
+cargo install cargo-deny --locked   # the dependency check that lint runs
 ./scripts/build.sh          # Rust workspace + Swift app
-./scripts/hooks.sh install  # optional: pre-commit runs lint -> test -> build
+./scripts/hooks.sh install  # optional: pre-commit runs lint -> test
 ```
 
 Repo scripts default `VAPOR_DIR` to `./.vapor` and `VAPOR_ENV` to `dev`,
@@ -63,7 +64,7 @@ removes it. See [`.env.example`](.env.example) for every supported
 
 ## Validating a change
 
-Run the wrapper scripts, not raw `cargo`/`swift` commands — they set
+Run the wrapper scripts, not raw `cargo`/`swift` commands: they set
 required project environment (`AGENTS.md` §8.4). In this order:
 
 ```sh
@@ -94,12 +95,12 @@ your change pushes it past that, move the slow test to Tier 2
 
 ## Tests
 
-Testing is not optional — Vapor is largely built autonomously, and the
+Testing is not optional: Vapor is largely built autonomously, and the
 test suite *is* the feedback loop. Full taxonomy:
 [`docs/architecture/testing-strategy.md`](docs/architecture/testing-strategy.md).
 
 Tests must be **deterministic** (no `thread::sleep` for timing
-assertions — use the injectable clock), **independent** (own
+assertions: use the injectable clock), **independent** (own
 `TempDir`, parallel-safe), and must never use the network or the user's
 runtime directory.
 
@@ -112,7 +113,7 @@ test's only failure mode is "I typo'd a default value", skip it.
 ## Things that will get a change sent back
 
 - Heavy work in the fs-watch callback. It may only normalize, filter,
-  and record event metadata — no DB, hash, or network work
+  and record event metadata, no DB, hash, or network work
   (`AGENTS.md` §3).
 - Business logic in `apps/*` instead of `core/*`.
 - `#[cfg(target_os)]` sprinkled through engine code instead of a
@@ -150,7 +151,7 @@ keys). If the match is real, do not bypass: rotate the credential first,
 then remove it from history before pushing again. If it is a test
 fixture, bypass with *used in tests* and keep the fixture obviously fake
 (`ya29.test`, not a realistic-looking token). Secrets belong in the
-platform `SecretStore`, never in the tree — see
+platform `SecretStore`, never in the tree, see
 [`SECURITY.md`](SECURITY.md).
 
 Update docs in the *same* change set: the relevant `docs/` group (plus
@@ -182,5 +183,5 @@ Open an issue with the version (`vapor --version`), platform, what you
 expected, what happened, and repro steps. `vapor doctor` output and a
 redacted `vapor report` help a lot.
 
-**For security problems, do not open an issue** — follow
+**For security problems, do not open an issue**: follow
 [`SECURITY.md`](SECURITY.md).

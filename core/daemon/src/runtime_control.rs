@@ -9,8 +9,8 @@
 //!
 //! The first batch of control requests:
 //!
-//! - `pause` / `resume` — flip the run-state.
-//! - `reconcile` — the user's on-demand sync: a whole-scope reconcile
+//! - `pause` / `resume`: flip the run-state.
+//! - `reconcile`: the user's on-demand sync: a whole-scope reconcile
 //!   admitted under any throttle state but `Suspended`, plus a short
 //!   boost that releases deferred work, so what the scan finds moves at
 //!   once.

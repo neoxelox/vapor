@@ -19,15 +19,15 @@ Tasks: `docs/tasks/core.md`.
 
 ## What lives here
 
-- `protocol` — wire-format types (`Hello`, `HelloAck`, `Request`,
+- `protocol`: wire-format types (`Hello`, `HelloAck`, `Request`,
   `Response`, `ResponseBody`, `ErrorBody`, `StatusResponse`, `Method`).
-- `framing` — length-prefixed frame codec.
-- `transport` — per-OS transport: Unix domain socket on Unix; the
+- `framing`: length-prefixed frame codec.
+- `transport`, per-OS transport: Unix domain socket on Unix; the
   Windows named pipe is a stub.
-- `server` — `Service` trait + `serve_connection` that drives one
+- `server`: `Service` trait + `serve_connection` that drives one
   client session through the handshake-then-RPC loop.
-- `client` — high-level `Client::connect` / `client.status()` API.
-- `tests/skew_matrix.rs` — end-to-end integration tests that spin up a
+- `client`: high-level `Client::connect` / `client.status()` API.
+- `tests/skew_matrix.rs`: end-to-end integration tests that spin up a
   real Unix-domain-socket server and exercise every supported version
   pair plus the documented negative cases (skew of 2 rejected, an
   oversized first frame answered with `PayloadTooLarge` and then EOF).

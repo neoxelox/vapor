@@ -1,4 +1,4 @@
-//! `vapor decisions list|show|resolve` — the questions the daemon
+//! `vapor decisions list|show|resolve`: the questions the daemon
 //! parked because an irreversible action rested on ambiguous evidence.
 //!
 //! A decision lives in the profile's durable state DB, so this command

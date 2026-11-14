@@ -11,9 +11,13 @@ describe the new behaviour. Do this before the commit, not after.
 
 ## Every non-trivial change
 
-1. `CHANGELOG.md` `Unreleased`: one entry that says what changed, why,
-   and what a user or contributor sees differently. Group under
-   `Added`, `Changed`, `Fixed`, `Docs`, or `Tooling / CI`.
+1. `CHANGELOG.md` `Unreleased`: one line for each pull request, under
+   `Added`, `Changed`, `Fixed`, `Docs`, or `Tooling / CI` (one group of
+   each in a section, no other group names). One or two sentences, 300
+   characters at most, in words a user can notice: what is different
+   for them, not how it was built. The section becomes the release
+   body, and GitHub refuses a body over 125 000 characters. The detail
+   belongs in the pull request and in the owning document.
 2. The owning document under `docs/` (architecture for design,
    operations for runbooks, development for workflow, ci for pipeline,
    performance for budgets, product for status). If none owns it, add a

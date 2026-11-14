@@ -30,8 +30,8 @@ Inside `VAPOR_DIR`:
 |----------|------|
 | Config | `vapor.json` (a running daemon applies the live keys within seconds; roots, provider, profiles and sync mode need a restart and show up in `vapor status` as `restartRequired`) |
 | Daemon log | `logs/vapord.log` (rotates at 8 MiB, three generations); `logs/vapord.stdout.log` / `.stderr.log` are the service manager's redirects; `logs/vapor-supervisor.log` is the headless supervisor's (`vapor service check --loop` under launchd, when installed with `--supervise`) |
-| Durable queue/state DB | `state/vapor.sqlite` for the implicit `default` profile; `state/profiles/<id>/vapor.sqlite` per configured profile (tables: `queue_intents`, `failed_intents`, `pending_decisions`, `name_aliases`, `state_entries`, `sync_index`, `tombstones`, `schema_meta`) |
-| Quarantined DB | `vapor.sqlite.corrupt-<ms>` next to the DB: the daemon moved a corrupt file aside and started fresh; a startup reconcile rebuilt the queue |
+| Durable queue/state DB | `state/vapor.sqlite` for the implicit `default` profile; `state/profiles/<id>/vapor.sqlite` per configured profile (tables: `queue_intents`, `failed_intents`, `pending_decisions`, `name_aliases`, `state_entries`, `sync_index`, `schema_meta`; schema 7) |
+| DB that was set aside | `vapor.sqlite.corrupt-<ms>` (a damaged file) or `vapor.sqlite.schema-v<n>-<ms>` (another schema version) next to the DB: the daemon moved it aside and started fresh; a startup reconcile rebuilt the index. Removed after 30 days |
 | Lifecycle state | `state/lifecycle.json` (crash-loop bookkeeping shared by the CLI and the app) |
 | Trash | `trash/<profile>/<entry>/` (what Vapor removed on this device: the payload under its original name plus `meta.json`; `vapor trash list` reads it) |
 | IPC socket (framed JSON over UDS; Vapor does not use XPC) | `vapord.sock`, relocated under the OS temp dir when the path exceeds ~104 bytes (`vapor doctor` reports where) |

@@ -1,6 +1,6 @@
 ---
 name: vapor-soak
-description: Runs and oversees Vapor's Tier S soak (the real `vapor` and `vapord` under hours of seeded file churn on both sides, fault injection, and a model-checked no-loss oracle) through `./scripts/soak.sh`, watching `soak-status.json` on a loop and triaging the first violation from `ops.jsonl`, the daemon log, and the preserved sandbox. Use when asked to prove the product is safe for real data, before a release, after a change to the executor, reconcile, deletion, or conflict paths, or to reproduce a bug that only shows up under sustained load. macOS only today.
+description: Runs and oversees Vapor's Tier S soak (the real `vapor` and `vapord` under hours of seeded file churn on both sides, fault injection, and a model-checked no-loss oracle) through `./scripts/soak.sh`, watching `soak-status.json` on a loop and triaging the first violation from `ops.jsonl`, the daemon log, and the preserved sandbox. Use when asked to prove the product is safe for real data, before a release, after a change to the executor, reconcile, deletion, or conflict paths, or to reproduce a bug that only shows up under sustained load. Runs on macOS and Linux; the disk-full cell needs macOS.
 license: GPL-3.0-only
 ---
 

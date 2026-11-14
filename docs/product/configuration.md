@@ -37,7 +37,10 @@ hold one: at start, an invalid value takes its key's default; while the
 daemon runs, an invalid new value keeps the value already applied and
 the valid keys around it still apply. Both cases, and unknown keys, are
 reported in the daemon log; the app's Settings banner names an invalid
-value in a key it shows. `null` counts as unset everywhere.
+value in a key it shows. `null` counts as unset everywhere. A file that
+does not parse, or that exists and is empty, is reported as a load
+issue and leaves the daemon with no profile: it stays up, syncs
+nothing, and `vapor status` says what to fix.
 
 The app and every command write the file under one lock
 (`vapor.json.lock`), and each writes only the keys it changes, so a
@@ -52,7 +55,10 @@ setting changed in one place survives a save in another.
 - **On the next start**: `localRoot`, `cloudRoot`, `provider`,
   `syncMode`, `profiles`, and `deviceId` reshape the pipeline. `vapor
   status` reports `restartRequired`, naming them, until the daemon
-  restarts, and `vapor service restart` applies them.
+  restarts, and `vapor service restart` applies them. The one
+  exception is the first profile: a daemon with no usable profile
+  (run state `unconfigured`) starts it as soon as its two roots are
+  set, with no restart.
 - **Elsewhere**: `autoLaunch` is acted on by `vapor service install`
   and `uninstall` (which also set it) and by the app at startup through
   `vapor service bootstrap`. `language` is read by the app only.
@@ -80,23 +86,32 @@ platform secret store, never in `vapor.json`.
 The sync direction: `two-way` (default), `pull-only` (cloud to local, a
 read-only local mirror), or `push-only` (local to cloud, a read-only
 cloud backup). The one-way modes overwrite and remove whatever the
-other side holds that the source does not; `docs/architecture/
-sync-modes.md` has the full contract.
+other side holds that the source does not, so a one-way profile syncs
+nothing until its warning is answered (`vapor decisions`, or the
+question `vapor profiles add` asks on a terminal). A value the build
+does not know stops the profile; it never falls back to `two-way`.
+`docs/architecture/sync-modes.md` has the full contract.
 
 ### `localRoot`
 
-The folder on this device that Vapor syncs. Default `~/Vapor`. Vapor
-creates it on first contact.
+The folder on this device that Vapor syncs. It has no default: a
+profile exists only when the user set its two roots, and until then
+Vapor syncs nothing and creates no folder. `vapor profiles add`
+suggests `~/Vapor`. Vapor creates the folder on first contact. The
+path is absolute or starts with `~`; a relative path is a profile
+problem, and `vapor profiles add` writes the full path for a relative
+one. `vapor config get localRoot` prints an empty line while it is
+unset.
 
 ### `cloudRoot`
 
-The folder on the provider side. Vapor creates it on first contact.
-Unset by default, which resolves by provider: `~/cloud/Vapor` with
-`filesystem`, `/Vapor` at the account root otherwise. With `filesystem`
-this is a local path (`~` and relative paths resolve like `localRoot`)
-and it must not overlap `localRoot`; overlapping roots refuse to sync.
-`vapor config get cloudRoot` prints the default for the selected
-provider.
+The folder on the provider side. It has no default either; the setup
+suggests `/Vapor` at the account root for a cloud provider and
+`~/cloud/Vapor` for `filesystem`. Vapor creates it on first contact.
+With `filesystem` this is a local path with the rules of `localRoot`,
+and it must not overlap `localRoot`: one inside the other, or the same
+folder under two spellings on a volume that folds case, refuses to
+sync.
 
 ### `useGitignore` and `useVaporignore`
 
@@ -114,10 +129,26 @@ tool caches, OS and editor junk); `postIgnoreRules` defaults to `[]`.
 The README's Ignore rules section describes what the defaults cover and
 what they deliberately leave in.
 
+The rules read as git reads them, on the watcher and on the reconcile
+walk alike:
+
+- A rule that ends in `/` matches folders only. `build/` hides a
+  folder named `build` and not a file of that name.
+- A file under an excluded folder cannot be included again: `logs/`
+  followed by `!logs/keep.txt` still hides `keep.txt`. Exclude the
+  contents instead: `logs/*` followed by `!logs/keep.txt`.
+- A change to a rule, in an ignore file or in `vapor.json`, applies
+  within seconds and is followed by a whole-scope reconcile, so a file
+  that a rule frees starts to sync and nothing waits for a restart.
+
+`vapor status` shows how many local paths the rules keep out of sync
+for each profile, and `vapor ignored` lists them with the rule that
+hides each one (a hidden folder is one line).
+
 ### `timelineLimit`
 
 How many entries the in-memory activity timeline (`vapor timeline`)
-keeps. Default `1000`. Must be a positive integer.
+keeps. Default `1000`. A positive integer, at most `10000`.
 
 ### `language`
 
@@ -127,16 +158,22 @@ back to English.
 ### `deviceId`
 
 This device's name in conflict-copy names
-(`report~conflict-mac-studio-….pdf`). Derived from the hostname on the
-daemon's first run (lowercase, `[a-z0-9-]`, at most 32 characters, a
-random id when nothing is left), written once, and never regenerated, so
-renaming the machine does not change it.
+(`report~conflict-mac-studio-k3x9-….pdf`). Made on the daemon's first
+run from the host name (the part before the first dot, lowercase,
+`[a-z0-9-]`) plus four random characters, so two devices with one host
+name still write different copies. Written once and never regenerated,
+so renaming the machine does not change it.
 
 ### `profiles`
 
 Named sync profiles. Absent means one implicit profile named `default`
-built from the top-level keys. Each entry runs as an isolated pipeline
-with its own state database, trash, and queue:
+built from the top-level keys, which exists once both roots are set.
+`vapor profiles list|add|remove` manages them: the first `add` is the
+setup of a fresh install and starts syncing with no restart; `remove`
+needs the daemon stopped, forgets the profile's sync state and
+sign-in, keeps its trash, and leaves the files on both sides. Each
+entry runs as an isolated pipeline with its own state database, trash,
+and queue:
 
 | Field | Required | Meaning |
 | --- | --- | --- |
@@ -155,12 +192,19 @@ daemon-wide, the three `*Percent` ceilings, `headroomCpuPercent`, and
 
 ### `resourceLimits`
 
-Hard ceilings on the daemon. Defaults `{ cpuPercent: 15, memoryPercent:
-10, bandwidthPercent: 25 }`.
+Ceilings on the daemon. Each one is a measured limit: the daemon
+reads what it uses each second and corrects, so a short excursion is
+possible and a lasting one is not. Defaults `{ cpuPercent: 15,
+memoryPercent: 10, bandwidthPercent: 25 }`.
 
-- `cpuPercent`: share of the whole device's CPU.
+- `cpuPercent`: share of the whole device's CPU. While the daemon is
+  above it, it takes one worker away at each sample, down to one.
 - `memoryPercent`: resident size as a share of physical memory.
-- `bandwidthPercent`: share of the measured bandwidth.
+- `bandwidthPercent`: share of what the link carries, for uploads and
+  for downloads separately. Vapor measures that capacity from its own
+  transfers (the first estimate is the speed of the network
+  interface), so a faster link gives a higher rate with no setting to
+  change.
 - `concurrentTransfers`: parallel uploads and, separately, parallel
   downloads, `1` to `16`. Absent means automatic: the idle width
   follows the core count (4 to 8 per direction) and always collapses
@@ -204,8 +248,9 @@ keep. Defaults `{ enabled: true, retentionDays: 7, useSystem: false }`.
 The managed trash lives under `<vapor_dir>/trash/<profile>/`, or
 `<volume root>/.vapor/trash/<profile>/` when the sync root is on another
 volume, so a discard there is a rename and never a copy. `vapor trash
-list` and `vapor trash restore <id>` read it; entries older than
-`retentionDays` are purged. `useSystem: true` tries the system trash
+list` and `vapor trash restore <id>` read it; `vapor trash empty` asks
+first, or takes `--yes`; entries older than `retentionDays` are purged,
+for every profile on disk. `useSystem: true` tries the system trash
 first (the Finder's Trash on macOS, the freedesktop trash on Linux) and
 keeps the managed trash as the fallback. `enabled: false` deletes for
 good.

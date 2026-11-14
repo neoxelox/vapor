@@ -11,22 +11,30 @@ pub use vapor_shared::constants::decision::{
     KIND_TYPE_MISMATCH as DECISION_KIND, OPTION_KEEP_BOTH, OPTION_PREFER_CLOUD, OPTION_PREFER_LOCAL,
 };
 
-pub fn question(path: &Path, local_is_dir: bool) -> String {
+/// The question. `trash_enabled` says where the local side goes when
+/// the cloud's wins: to the trash, or away for good when the user
+/// turned the trash off.
+pub fn question(path: &Path, local_is_dir: bool, trash_enabled: bool) -> String {
     let (here, there) = if local_is_dir {
         ("a folder", "a file")
     } else {
         ("a file", "a folder")
     };
+    let loser = if trash_enabled {
+        "the local one goes to the trash"
+    } else {
+        "the local one is deleted, because the trash is turned off"
+    };
     format!(
         "{} is {here} on this device and {there} in the cloud. Vapor is leaving both untouched. \
          Keep both (the local one moves to a conflict name and the cloud one comes down under \
          the original name), keep this device's (the cloud one is removed), or keep the cloud's \
-         (the local one goes to the trash)?",
+         ({loser})?",
         path.display()
     )
 }
 
-pub fn options(local_is_dir: bool) -> [DecisionOption; 3] {
+pub fn options(local_is_dir: bool, trash_enabled: bool) -> [DecisionOption; 3] {
     let local = if local_is_dir { "folder" } else { "file" };
     let cloud = if local_is_dir { "file" } else { "folder" };
     [
@@ -42,7 +50,32 @@ pub fn options(local_is_dir: bool) -> [DecisionOption; 3] {
         },
         DecisionOption {
             key: OPTION_PREFER_CLOUD.to_string(),
-            label: format!("Keep the cloud's {cloud}; move this device's {local} to the trash"),
+            label: if trash_enabled {
+                format!("Keep the cloud's {cloud}; move this device's {local} to the trash")
+            } else {
+                format!("Keep the cloud's {cloud}; delete this device's {local} (the trash is off)")
+            },
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_question_says_where_the_local_side_goes() {
+        let path = Path::new("/sync/notes");
+        let with_trash = question(path, false, true);
+        assert!(with_trash.contains("goes to the trash"), "{with_trash}");
+        let without = question(path, false, false);
+        assert!(without.contains("is deleted"), "{without}");
+        assert!(!without.contains("goes to the trash"), "{without}");
+        assert!(
+            options(false, false)[2]
+                .label
+                .contains("delete this device's file")
+        );
+        assert!(options(true, true)[2].label.contains("to the trash"));
+    }
 }

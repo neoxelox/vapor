@@ -1,9 +1,11 @@
 //! Durable profile model + override resolution.
 //!
 //! A profile is one sync pairing: a provider, a local root, a cloud
-//! root, and a sync mode. Without a `profiles` array the daemon runs
-//! one implicit profile (`default`) assembled from the top-level
-//! configuration — the pre-profile behavior, byte-for-byte.
+//! root, and a sync mode. A profile exists only when the user set its
+//! two roots: a configuration that names none composes no profile, the
+//! daemon syncs nothing and creates no folder, and status says so.
+//! Without a `profiles` array the two top-level roots, once both are
+//! set, give one implicit profile (`default`).
 //!
 //! Override semantics are **categorical** for the fields resolved here
 //! (provider, directories, syncMode): a profile's value replaces the
@@ -13,8 +15,8 @@
 
 use std::collections::BTreeSet;
 
-use vapor_shared::config::VaporConfig;
-use vapor_shared::{SyncMode, constants};
+use vapor_shared::config::{VaporConfig, VaporConfigLoadResult};
+use vapor_shared::constants;
 
 use crate::logging;
 use crate::sync_directories::{self, SyncScope};
@@ -30,40 +32,102 @@ pub struct ResolvedProfile {
     pub provider_kind: String,
     pub scope: SyncScope,
     pub enabled: bool,
+    /// Why this profile cannot run as it is written: a root that is
+    /// not set, a sync mode the daemon does not know. Such a profile is
+    /// listed in status as suspended with this reason, and nothing of
+    /// it syncs.
+    pub invalid: Option<String>,
 }
 
-/// Resolves the configured profile set. Invalid entries (missing or
-/// duplicate ids, malformed values) are skipped with a loud log rather
-/// than aborting the daemon — one broken profile must not take down the
-/// others (blast-radius discipline).
+/// The profiles a configuration gives, and what stops it from giving
+/// the ones it means to.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProfileSet {
+    pub profiles: Vec<ResolvedProfile>,
+    /// What to fix in `vapor.json`, in words for the user. Empty for a
+    /// healthy file, and for one that names no sync scope yet.
+    pub problems: Vec<String>,
+}
+
+impl ProfileSet {
+    /// Nothing is set up and nothing is wrong: a fresh install.
+    pub fn is_unconfigured(&self) -> bool {
+        self.profiles.is_empty() && self.problems.is_empty()
+    }
+}
+
+/// Resolves the profile set from a loaded `vapor.json`. A file that
+/// cannot be read, or whose `profiles` value has the wrong shape, gives
+/// no profile at all: running the profiles that happen to parse, or a
+/// default one in their place, would sync folders the user did not
+/// choose.
+pub fn resolve_profile_set(load: &VaporConfigLoadResult) -> ProfileSet {
+    use constants::config as keys;
+    if load.unreadable {
+        return ProfileSet {
+            profiles: Vec::new(),
+            problems: vec![format!(
+                "vapor.json cannot be read: {}",
+                load.load_issue.as_deref().unwrap_or("unknown error")
+            )],
+        };
+    }
+    let scope_keys = [
+        keys::KEY_PROFILES,
+        keys::KEY_LOCAL_ROOT,
+        keys::KEY_CLOUD_ROOT,
+        keys::KEY_PROVIDER,
+        keys::KEY_SYNC_MODE,
+    ];
+    let broken: Vec<&str> = scope_keys
+        .into_iter()
+        .filter(|key| load.invalid_keys.contains(key))
+        .collect();
+    if !broken.is_empty() {
+        return ProfileSet {
+            profiles: Vec::new(),
+            problems: broken
+                .into_iter()
+                .map(|key| format!("`{key}` in vapor.json has a value of the wrong shape"))
+                .collect(),
+        };
+    }
+    resolve_profile_set_from(&load.config)
+}
+
+/// The profiles of `config`, valid or not. For callers that hold a
+/// configuration and need the profiles it names (the CLI).
 pub fn resolve_profiles(config: &VaporConfig) -> Vec<ResolvedProfile> {
+    resolve_profile_set_from(config).profiles
+}
+
+/// The profile set of a configuration that parsed.
+pub fn resolve_profile_set_from(config: &VaporConfig) -> ProfileSet {
     if config.profiles.is_empty() {
-        return vec![implicit_default_profile(config)];
+        return ProfileSet {
+            profiles: implicit_default_profile(config).into_iter().collect(),
+            problems: Vec::new(),
+        };
     }
 
     let mut seen_ids: BTreeSet<String> = BTreeSet::new();
-    let mut resolved = Vec::new();
-    for profile in &config.profiles {
+    let mut set = ProfileSet::default();
+    for (position, profile) in config.profiles.iter().enumerate() {
         let id = profile.id.trim();
         if !is_valid_profile_id(id) {
-            logging::error(
-                "Skipping profile with missing or invalid id",
-                &[(
-                    "id",
-                    if id.is_empty() {
-                        "<empty>".to_string()
-                    } else {
-                        id.to_string()
-                    },
-                )],
+            let problem = format!(
+                "profile {} has no valid id (`{}`): lowercase letters, digits, `-` and `_`",
+                position + 1,
+                id
             );
+            logging::error("Skipping a profile", &[("problem", problem.clone())]);
+            set.problems.push(problem);
             continue;
         }
         if !seen_ids.insert(id.to_string()) {
-            logging::error(
-                "Skipping profile with duplicate id",
-                &[("id", id.to_string())],
-            );
+            let problem = format!("two profiles have the id `{id}`; the second one is skipped");
+            logging::error("Skipping a profile", &[("problem", problem.clone())]);
+            set.problems.push(problem);
             continue;
         }
 
@@ -75,7 +139,7 @@ pub fn resolve_profiles(config: &VaporConfig) -> Vec<ResolvedProfile> {
             effective.provider = provider.clone();
         }
         if let Some(local) = &profile.local_root {
-            effective.local_root = local.clone();
+            effective.local_root = Some(local.clone());
         }
         if let Some(cloud) = &profile.cloud_root {
             effective.cloud_root = Some(cloud.clone());
@@ -84,23 +148,7 @@ pub fn resolve_profiles(config: &VaporConfig) -> Vec<ResolvedProfile> {
             effective.sync_mode = sync_mode.clone();
         }
 
-        // One-way modes are explicit opt-in per profile: a
-        // malformed per-profile value falls back to the *top-level*
-        // resolution path inside resolve_with_config, which itself
-        // falls back to two-way with a warning.
-        if let Some(sync_mode) = &profile.sync_mode
-            && SyncMode::from_config_value(sync_mode).is_none()
-        {
-            logging::warning(
-                "Profile has an unknown syncMode; using the safe two-way default",
-                &[
-                    ("profile_id", id.to_string()),
-                    ("configured_sync_mode", sync_mode.clone()),
-                ],
-            );
-        }
-
-        resolved.push(ResolvedProfile {
+        set.profiles.push(ResolvedProfile {
             id: id.to_string(),
             name: profile
                 .name
@@ -108,29 +156,51 @@ pub fn resolve_profiles(config: &VaporConfig) -> Vec<ResolvedProfile> {
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or_else(|| id.to_string()),
             provider_kind: effective.provider.clone(),
+            invalid: scope_problem(&effective),
             scope: sync_directories::resolve_with_config(&effective),
             enabled: profile.enabled.unwrap_or(true),
         });
     }
-
-    if resolved.is_empty() {
-        logging::error(
-            "No valid profiles resolved from configuration; running the implicit default profile",
-            &[],
-        );
-        return vec![implicit_default_profile(config)];
-    }
-    resolved
+    set
 }
 
-fn implicit_default_profile(config: &VaporConfig) -> ResolvedProfile {
-    ResolvedProfile {
+/// What stops `config`'s scope from being a profile, if anything: a
+/// root that is not set, a root that is a relative path, or a sync mode
+/// that is not one.
+pub fn scope_problem(config: &VaporConfig) -> Option<String> {
+    use constants::config as keys;
+    let missing = match (
+        config.configured_local_root(),
+        config.configured_cloud_root(),
+    ) {
+        (Some(_), Some(_)) => None,
+        (None, Some(_)) => Some(format!("`{}` is not set", keys::KEY_LOCAL_ROOT)),
+        (Some(_), None) => Some(format!("`{}` is not set", keys::KEY_CLOUD_ROOT)),
+        (None, None) => Some(format!(
+            "`{}` and `{}` are not set",
+            keys::KEY_LOCAL_ROOT,
+            keys::KEY_CLOUD_ROOT
+        )),
+    };
+    missing
+        .or_else(|| sync_directories::unusable_root(config))
+        .or_else(|| sync_directories::parse_sync_mode(&config.sync_mode).err())
+}
+
+/// The profile the top-level keys give when there is no `profiles`
+/// array. `None` while neither root is set: nothing is configured.
+fn implicit_default_profile(config: &VaporConfig) -> Option<ResolvedProfile> {
+    if config.configured_local_root().is_none() && config.configured_cloud_root().is_none() {
+        return None;
+    }
+    Some(ResolvedProfile {
         id: constants::profile::DEFAULT_PROFILE_ID.to_string(),
         name: constants::profile::DEFAULT_PROFILE_ID.to_string(),
         provider_kind: config.provider.clone(),
+        invalid: scope_problem(config),
         scope: sync_directories::resolve_with_config(config),
         enabled: true,
-    }
+    })
 }
 
 /// Profile ids name state directories and secret entries: short,
@@ -143,52 +213,85 @@ pub fn is_valid_profile_id(id: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
-/// Safe profile disconnect/delete primitive: removes a
-/// profile's durable state directory and its namespaced secrets while
-/// leaving every other profile untouched. Callers (the profiles CLI /
-/// app surface) must stop the daemon first — this function is
-/// the storage-side primitive, not the orchestration.
+/// Deletes what Vapor keeps about a profile: its sync state and its
+/// credentials. The user's folders and the profile's trash are never
+/// touched. The daemon must not be running: it holds the state open.
 ///
-/// The implicit `default` profile is refused: its state lives on the
-/// legacy shared paths and removing it is a daemon-reset, not a
-/// profile delete.
-pub fn purge_profile_state(
+/// A named profile owns the directory `state/profiles/<id>/`. The
+/// `default` profile's database sits in `state/` itself, next to files
+/// that belong to no profile, so only the database and the files
+/// derived from its name go.
+pub fn forget_profile(
+    state_directory: &std::path::Path,
     profile_id: &str,
-    secret_store: &dyn vapor_platform::SecretStore,
+    secret_store: Option<&dyn vapor_platform::SecretStore>,
 ) -> std::io::Result<()> {
-    if profile_id == constants::profile::DEFAULT_PROFILE_ID || !is_valid_profile_id(profile_id) {
+    if !is_valid_profile_id(profile_id) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("profile '{profile_id}' cannot be purged"),
+            format!("'{profile_id}' is not a profile id"),
         ));
     }
 
-    let state_directory = vapor_shared::runtime_paths::state_directory()
-        .join("profiles")
-        .join(profile_id);
-    match std::fs::remove_dir_all(&state_directory) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    let database =
+        vapor_shared::runtime_paths::profile_database_path_in(state_directory, profile_id);
+    if profile_id == constants::profile::DEFAULT_PROFILE_ID {
+        remove_database_files(&database)?;
+    } else if let Some(profile_directory) = database.parent() {
+        match std::fs::remove_dir_all(profile_directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
     }
 
     let prefix = format!("auth.{profile_id}.");
-    if let Ok(names) = secret_store.list() {
+    if let Some(secret_store) = secret_store
+        && let Ok(names) = secret_store.list()
+    {
         for name in names {
             if name.starts_with(&prefix)
                 && let Err(error) = secret_store.delete(&name)
             {
                 logging::warning(
-                    "Could not delete profile secret during purge",
+                    "Could not delete a profile's secret",
                     &[("name", name.clone()), ("error", error.to_string())],
                 );
             }
         }
     }
     logging::info(
-        "Purged profile state",
+        "Deleted a profile's sync state and credentials",
         &[("profile_id", profile_id.to_string())],
     );
+    Ok(())
+}
+
+/// Removes a database and every file named after it: the write-ahead
+/// log, the shared-memory file, and the copies set aside after a
+/// corruption or a schema change.
+fn remove_database_files(database: &std::path::Path) -> std::io::Result<()> {
+    let (Some(directory), Some(name)) = (
+        database.parent(),
+        database.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return Ok(());
+    };
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let is_database_file = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|file| file.starts_with(name));
+        if is_database_file && entry.file_type()?.is_file() {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
     Ok(())
 }
 
@@ -201,11 +304,12 @@ pub fn secret_key(profile_id: &str, provider: &str, item: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vapor_shared::SyncMode;
     use vapor_shared::config::ProfileConfig;
 
     fn base_config() -> VaporConfig {
         VaporConfig {
-            local_root: "/tmp/vapor-top-local".to_string(),
+            local_root: Some("/tmp/vapor-top-local".to_string()),
             cloud_root: Some("/tmp/vapor-top-cloud".to_string()),
             sync_mode: "two-way".to_string(),
             ..VaporConfig::default()
@@ -270,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_and_duplicate_profile_ids_are_skipped() {
+    fn invalid_and_duplicate_profile_ids_are_skipped_and_named() {
         let mut config = base_config();
         config.profiles = vec![
             ProfileConfig {
@@ -291,62 +395,173 @@ mod tests {
             },
         ];
 
-        let profiles = resolve_profiles(&config);
-        assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].id, "good");
+        let set = resolve_profile_set_from(&config);
+        assert_eq!(set.profiles.len(), 1);
+        assert_eq!(set.profiles[0].id, "good");
+        assert_eq!(set.problems.len(), 3, "{:?}", set.problems);
+        assert!(set.problems[1].contains("Not A Slug!"));
+        assert!(set.problems[2].contains("`good`"));
     }
 
     #[test]
-    fn all_invalid_profiles_fall_back_to_the_implicit_default() {
+    fn a_configuration_with_no_valid_profile_gives_none_and_never_a_default() {
         let mut config = base_config();
         config.profiles = vec![ProfileConfig {
             id: "***".to_string(),
             ..ProfileConfig::default()
         }];
-        let profiles = resolve_profiles(&config);
-        assert_eq!(profiles.len(), 1);
-        assert_eq!(profiles[0].id, "default");
+        let set = resolve_profile_set_from(&config);
+        assert!(
+            set.profiles.is_empty(),
+            "the top-level roots must not run in place of the profiles the user wrote"
+        );
+        assert_eq!(set.problems.len(), 1);
+        assert!(!set.is_unconfigured());
     }
 
     #[test]
-    fn one_way_mode_on_a_profile_requires_the_exact_spelling() {
-        let mut config = base_config();
-        config.profiles = vec![ProfileConfig {
-            id: "sloppy".to_string(),
-            sync_mode: Some("Pull-Only".to_string()),
-            ..ProfileConfig::default()
-        }];
-        let profiles = resolve_profiles(&config);
+    fn nothing_set_is_unconfigured_and_one_root_set_names_the_other() {
+        let fresh = resolve_profile_set_from(&VaporConfig::default());
+        assert!(fresh.is_unconfigured(), "a fresh install has no profile");
+
+        let half = VaporConfig {
+            local_root: Some("/tmp/vapor-top-local".to_string()),
+            ..VaporConfig::default()
+        };
+        let set = resolve_profile_set_from(&half);
+        assert_eq!(set.profiles.len(), 1);
         assert_eq!(
-            profiles[0].scope.sync_mode,
-            SyncMode::TwoWay,
-            "a typo must never activate a destructive mode"
+            set.profiles[0].invalid.as_deref(),
+            Some("`cloudRoot` is not set")
+        );
+
+        // A profile entry needs both roots too, its own or the top level's.
+        let partial = VaporConfig {
+            profiles: vec![ProfileConfig {
+                id: "work".to_string(),
+                local_root: Some("/tmp/vapor-work".to_string()),
+                ..ProfileConfig::default()
+            }],
+            ..VaporConfig::default()
+        };
+        let set = resolve_profile_set_from(&partial);
+        assert_eq!(
+            set.profiles[0].invalid.as_deref(),
+            Some("`cloudRoot` is not set")
         );
     }
 
     #[test]
-    fn purge_refuses_the_default_profile_and_clears_namespaced_secrets() {
+    fn an_unknown_sync_mode_stops_the_profile_and_names_the_value() {
+        let mut config = base_config();
+        config.profiles = vec![
+            ProfileConfig {
+                id: "sloppy".to_string(),
+                sync_mode: Some("Pull-Only".to_string()),
+                ..ProfileConfig::default()
+            },
+            ProfileConfig {
+                id: "fine".to_string(),
+                sync_mode: Some("pull-only".to_string()),
+                ..ProfileConfig::default()
+            },
+        ];
+        let profiles = resolve_profiles(&config);
+        let reason = profiles[0].invalid.as_deref().expect("the typo is refused");
+        assert!(reason.contains("\"Pull-Only\""), "{reason}");
+        assert!(reason.contains("pull-only"), "{reason}");
+        assert_eq!(profiles[1].invalid, None);
+        assert_eq!(profiles[1].scope.sync_mode, SyncMode::PullOnly);
+
+        // The same for the top-level value of the implicit profile.
+        let top = VaporConfig {
+            sync_mode: "mirror".to_string(),
+            ..base_config()
+        };
+        assert!(resolve_profiles(&top)[0].invalid.is_some());
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_or_has_a_broken_scope_key_gives_no_profile() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let path = temp.path().join("vapor.json");
+
+        std::fs::write(&path, "{ not json").expect("seed");
+        let set = resolve_profile_set(&vapor_shared::config::load_from(&path));
+        assert!(set.profiles.is_empty());
+        assert!(set.problems[0].starts_with("vapor.json cannot be read"));
+
+        // One bad field makes the whole `profiles` value unreadable;
+        // the top-level roots must not run instead.
+        std::fs::write(
+            &path,
+            r#"{ "localRoot": "/tmp/a", "cloudRoot": "/tmp/b",
+                 "profiles": [{ "id": "work", "enabled": "yes" }] }"#,
+        )
+        .expect("seed");
+        let set = resolve_profile_set(&vapor_shared::config::load_from(&path));
+        assert!(set.profiles.is_empty(), "{set:?}");
+        assert_eq!(
+            set.problems,
+            vec!["`profiles` in vapor.json has a value of the wrong shape".to_string()]
+        );
+
+        std::fs::write(&path, r#"{ "localRoot": "/tmp/a", "cloudRoot": "/tmp/b" }"#).expect("seed");
+        let set = resolve_profile_set(&vapor_shared::config::load_from(&path));
+        assert_eq!(set.profiles.len(), 1);
+        assert_eq!(set.profiles[0].invalid, None);
+        assert!(set.problems.is_empty());
+    }
+
+    #[test]
+    fn forgetting_a_profile_takes_its_state_and_secrets_and_leaves_the_others() {
         use vapor_platform::SecretStore;
+        let temp = tempfile::TempDir::new().expect("temp");
+        let state = temp.path();
         let store = vapor_platform::InMemorySecretStore::new();
-        store
-            .set(&secret_key("work", "gdrive", "token"), "secret-a")
-            .expect("seed");
-        store
-            .set(&secret_key("home", "gdrive", "token"), "secret-b")
-            .expect("seed");
+        for profile in ["work", "home", "default"] {
+            store
+                .set(&secret_key(profile, "gdrive", "token"), "secret")
+                .expect("seed");
+            let database = vapor_shared::runtime_paths::profile_database_path_in(state, profile);
+            std::fs::create_dir_all(database.parent().expect("parent")).expect("dir");
+            for suffix in ["", "-wal", ".corrupt-1000"] {
+                let mut name = database.clone().into_os_string();
+                name.push(suffix);
+                std::fs::write(name, b"x").expect("seed");
+            }
+        }
+        std::fs::write(state.join("lifecycle.json"), b"{}").expect("seed");
+        let has_state = |profile: &str| {
+            vapor_shared::runtime_paths::profile_database_path_in(state, profile).exists()
+        };
+        let signed_in = |profile: &str| store.get(&secret_key(profile, "gdrive", "token")).is_ok();
 
-        purge_profile_state("work", &store).expect("purge");
-        assert!(
-            store.get(&secret_key("work", "gdrive", "token")).is_err(),
-            "purged profile secrets must be gone"
-        );
-        assert!(
-            store.get(&secret_key("home", "gdrive", "token")).is_ok(),
-            "other profiles' secrets must survive"
-        );
+        forget_profile(state, "work", Some(&store)).expect("forget");
+        assert!(!has_state("work") && !signed_in("work"));
+        assert!(!state.join("profiles").join("work").exists());
+        assert!(has_state("home") && signed_in("home"));
+        assert!(has_state("default") && signed_in("default"));
 
-        assert!(purge_profile_state("default", &store).is_err());
-        assert!(purge_profile_state("Not Valid!", &store).is_err());
+        // The default profile's database sits next to files that belong
+        // to no profile: only what is named after the database goes.
+        forget_profile(state, "default", Some(&store)).expect("forget");
+        assert!(!has_state("default") && !signed_in("default"));
+        let mut left: Vec<String> = std::fs::read_dir(state)
+            .expect("read")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        left.sort();
+        assert_eq!(left, vec!["lifecycle.json", "profiles"]);
+        assert!(has_state("home") && signed_in("home"));
+
+        assert!(forget_profile(state, "Not Valid!", Some(&store)).is_err());
     }
 
     #[test]

@@ -42,7 +42,7 @@ public final class AppLifecycleCoordinator {
   }
 
   /// Stops the daemon and then terminates the app. The stop runs on
-  /// `queue` — the caller's single lifecycle-operation queue — so it
+  /// `queue` (the caller's single lifecycle-operation queue) so it
   /// serializes behind any pending auto-launch toggle (a queued
   /// `installAndEnable` must not start the daemon *after* this stop) and
   /// never blocks the main actor; the whole path is bounded by the CLI's

@@ -88,6 +88,12 @@ pub enum Op {
     DeleteTree {
         dir: String,
     },
+    /// Remove a file and put it back after a pause, with the same bytes
+    /// and the same modification time: a removal the user undoes.
+    Restore {
+        path: String,
+        pause_ms: u64,
+    },
     Mkdir {
         dir: String,
     },
@@ -109,6 +115,7 @@ impl Op {
             Op::Move { .. } => "move",
             Op::Delete { .. } => "delete",
             Op::DeleteTree { .. } => "delete-tree",
+            Op::Restore { .. } => "restore",
             Op::Mkdir { .. } => "mkdir",
             Op::Chmod { .. } => "chmod",
         }
@@ -125,9 +132,12 @@ pub struct LoadShape {
     pub same_size_edit: u32,
     pub append: u32,
     pub rename: u32,
+    /// A rename that changes only the case of a file name.
+    pub case_rename: u32,
     pub mv: u32,
     pub delete: u32,
     pub delete_tree: u32,
+    pub restore: u32,
     pub mkdir: u32,
     pub chmod: u32,
     pub small: u32,
@@ -152,9 +162,11 @@ impl LoadShape {
             same_size_edit: 8,
             append: 8,
             rename: 8,
+            case_rename: 3,
             mv: 6,
             delete: 10,
             delete_tree: 2,
+            restore: 3,
             mkdir: 4,
             chmod: 4,
             small: 70,
@@ -178,9 +190,11 @@ impl LoadShape {
                 same_size_edit: 15,
                 append: 10,
                 rename: 5,
+                case_rename: 2,
                 mv: 2,
                 delete: 6,
                 delete_tree: 0,
+                restore: 2,
                 mkdir: 2,
                 chmod: 0,
                 small: 95,
@@ -196,9 +210,11 @@ impl LoadShape {
                 same_size_edit: 0,
                 append: 0,
                 rename: 3,
+                case_rename: 1,
                 mv: 2,
                 delete: 5,
                 delete_tree: 1,
+                restore: 1,
                 mkdir: 4,
                 chmod: 0,
                 small: 100,
@@ -215,9 +231,11 @@ impl LoadShape {
                 same_size_edit: 0,
                 append: 5,
                 rename: 5,
+                case_rename: 2,
                 mv: 0,
                 delete: 10,
                 delete_tree: 0,
+                restore: 5,
                 mkdir: 0,
                 chmod: 0,
                 small: 0,
@@ -246,9 +264,11 @@ impl LoadShape {
             same_size_edit: 0,
             append: 0,
             rename: 0,
+            case_rename: 0,
             mv: 0,
             delete: 0,
             delete_tree: 0,
+            restore: 0,
             mkdir: 10,
             chmod: 0,
             op_interval_ms: self.op_interval_ms.min(100),
@@ -364,6 +384,21 @@ pub fn apply(root: &Path, op: &Op, seed: u64, version: u64, size: u64) -> Result
             fs::remove_dir_all(&target)?;
             Ok(count)
         }
+        Op::Restore { path, pause_ms } => {
+            let target = full(path);
+            let bytes = fs::read(&target)?;
+            let modified = fs::metadata(&target)?.modified()?;
+            fs::remove_file(&target)?;
+            std::thread::sleep(std::time::Duration::from_millis(*pause_ms));
+            // What a restore from the trash leaves: the old bytes under
+            // the old name, with the old modification time.
+            write_atomically(&target, &bytes)?;
+            fs::File::options()
+                .write(true)
+                .open(&target)?
+                .set_modified(modified)?;
+            Ok(1)
+        }
         Op::Mkdir { dir } => {
             fs::create_dir_all(full(dir))?;
             Ok(0)
@@ -453,9 +488,11 @@ pub fn next_op(
         + shape.same_size_edit
         + shape.append
         + shape.rename
+        + shape.case_rename
         + shape.mv
         + shape.delete
         + shape.delete_tree
+        + shape.restore
         + shape.mkdir
         + shape.chmod;
     let mut roll = rng.below(u64::from(total.max(1))) as u32;
@@ -465,9 +502,11 @@ pub fn next_op(
         ("same-size-edit", shape.same_size_edit),
         ("append", shape.append),
         ("rename", shape.rename),
+        ("case-rename", shape.case_rename),
         ("move", shape.mv),
         ("delete", shape.delete),
         ("delete-tree", shape.delete_tree),
+        ("restore", shape.restore),
         ("mkdir", shape.mkdir),
         ("chmod", shape.chmod),
     ];
@@ -508,6 +547,16 @@ pub fn next_op(
             let to = with_extension_of(&join(&parent, &rng.name("renamed")), &from);
             Op::Rename { from, to }
         }
+        "case-rename" => {
+            let from = rng.pick(owned).clone();
+            let to = case_toggled(&from);
+            Op::Rename { from, to }
+        }
+        "restore" => Op::Restore {
+            path: rng.pick(owned).clone(),
+            // From inside the daemon's debounce window to well past it.
+            pause_ms: 500 + rng.below(3_500),
+        },
         "move" => {
             let from = rng.pick(owned).clone();
             let target_dir = if dirs.is_empty() || rng.chance(30) {
@@ -569,6 +618,29 @@ fn new_path(rng: &mut Rng, dirs: &[String], max_depth: usize) -> String {
     join(dir, &name)
 }
 
+/// The path with the case of the first letter of its file name
+/// swapped. On a volume that folds case the result names the same
+/// file, so a rename to it changes the spelling and nothing else.
+fn case_toggled(path: &str) -> String {
+    let name_start = path.rfind('/').map_or(0, |index| index + 1);
+    let mut toggled = String::with_capacity(path.len());
+    toggled.push_str(&path[..name_start]);
+    let mut swapped = false;
+    for character in path[name_start..].chars() {
+        if !swapped && character.is_ascii_alphabetic() {
+            swapped = true;
+            toggled.push(if character.is_ascii_lowercase() {
+                character.to_ascii_uppercase()
+            } else {
+                character.to_ascii_lowercase()
+            });
+        } else {
+            toggled.push(character);
+        }
+    }
+    toggled
+}
+
 fn parent_of(path: &str) -> String {
     match path.rfind('/') {
         Some(index) => path[..index].to_string(),
@@ -624,12 +696,71 @@ mod tests {
                 | Op::SameSizeEdit { path }
                 | Op::Append { path, .. }
                 | Op::Delete { path }
+                | Op::Restore { path, .. }
                 | Op::Chmod { path, .. } => assert!(owned.contains(path), "{op:?}"),
                 Op::Rename { from, .. } | Op::Move { from, .. } => assert!(owned.contains(from)),
                 Op::DeleteTree { dir } => assert_eq!(dir, "d"),
                 Op::Create { .. } | Op::Mkdir { .. } => {}
             }
         }
+    }
+
+    #[test]
+    fn a_case_rename_changes_the_spelling_of_the_file_name_only() {
+        assert_eq!(case_toggled("d/Sub/file-1a.txt"), "d/Sub/File-1a.txt");
+        assert_eq!(case_toggled("File-1a.txt"), "file-1a.txt");
+        assert_eq!(case_toggled("d/42-notes.md"), "d/42-Notes.md");
+        // Twice gives the first spelling back.
+        assert_eq!(case_toggled(&case_toggled("a/b.txt")), "a/b.txt");
+
+        let shape = LoadShape {
+            case_rename: 1_000_000,
+            ..LoadShape::named("mixed").expect("shape")
+        };
+        let mut rng = Rng::new(11);
+        let owned = vec!["d/file-1a.txt".to_string()];
+        let op = next_op(&mut rng, &shape, &owned, &["d".to_string()], 1);
+        assert_eq!(
+            op,
+            Op::Rename {
+                from: "d/file-1a.txt".to_string(),
+                to: "d/File-1a.txt".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_restore_puts_the_same_bytes_and_time_back() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let create = Op::Create {
+            path: "sub/one.txt".to_string(),
+            size: SizeClass::Small,
+        };
+        apply(dir.path(), &create, 7, 1, 300).expect("create");
+        let file = dir.path().join("sub/one.txt");
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .expect("open")
+            .set_modified(old)
+            .expect("set time");
+
+        let restore = Op::Restore {
+            path: "sub/one.txt".to_string(),
+            pause_ms: 0,
+        };
+        apply(dir.path(), &restore, 7, 2, 0).expect("restore");
+
+        assert_eq!(
+            fs::read(&file).expect("read"),
+            content_for(7, "sub/one.txt", 1, 300),
+            "the bytes of the version before the removal"
+        );
+        assert_eq!(
+            fs::metadata(&file).expect("stat").modified().expect("time"),
+            old
+        );
     }
 
     #[test]

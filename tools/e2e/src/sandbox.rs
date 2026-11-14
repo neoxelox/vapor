@@ -3,6 +3,14 @@
 //! `VAPOR_DIR` (config, logs, state, socket, lock), the local root it
 //! watches, and the cloud root the filesystem provider treats as the
 //! cloud side.
+//!
+//! `VAPOR_DIR` alone does not hold a child inside the sandbox: a path
+//! that starts with `~`, the system trash, the service directory, and
+//! the login keychain all hang off the user's home directory. So the
+//! sandbox also points `HOME` at a directory of its own. Whatever a
+//! binary under test does with `~`, an older binary with other defaults
+//! included, lands in the sandbox, and the user's keychain is out of
+//! reach.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -23,6 +31,9 @@ pub struct Home {
     pub local: PathBuf,
     /// The configured cloud sync root for the filesystem provider.
     pub cloud: PathBuf,
+    /// The home directory (`HOME`) of every process bound to this
+    /// home. `None` leaves the user's own in place.
+    pub user_home: Option<PathBuf>,
     /// Extra environment for every process bound to this home.
     pub extra_env: BTreeMap<String, String>,
     /// Environment variables removed for every process bound to this
@@ -68,12 +79,18 @@ impl Home {
             .join(constants::runtime::LIFECYCLE_STATE_FILE_NAME)
     }
 
-    /// Applies the sandbox environment to a command: `VAPOR_DIR`,
-    /// `VAPOR_ENV=dev`, debug logging, static throttle inputs, then this
-    /// home's own additions and removals.
+    /// Applies the sandbox environment to a command: the sandbox's own
+    /// home directory, `VAPOR_DIR`, `VAPOR_ENV=dev`, debug logging,
+    /// static throttle inputs, then this home's own additions and
+    /// removals.
     pub fn apply_env(&self, command: &mut Command) {
         for name in &self.removed_env {
             command.env_remove(name);
+        }
+        if let Some(user_home) = &self.user_home {
+            for name in USER_HOME_ENV {
+                command.env(name, user_home);
+            }
         }
         command
             .env(constants::env::VAPOR_DIR, &self.dir)
@@ -92,18 +109,36 @@ impl Home {
     }
 }
 
+/// The variables a process reads its home directory from: `HOME` on
+/// Unix, `USERPROFILE` on Windows.
+const USER_HOME_ENV: [&str; 2] = ["HOME", "USERPROFILE"];
+
 /// One scenario's sandbox: a directory holding one or more homes.
 #[derive(Clone, Debug)]
 pub struct Sandbox {
     pub root: PathBuf,
+    /// The home directory its child processes get; `None` when they
+    /// keep the user's.
+    user_home: Option<PathBuf>,
 }
 
 impl Sandbox {
     pub fn create(root: &Path) -> Result<Self, Failure> {
-        fs::create_dir_all(root)?;
+        let user_home = root.join("user");
+        fs::create_dir_all(&user_home)?;
         Ok(Self {
             root: root.to_path_buf(),
+            user_home: Some(user_home),
         })
+    }
+
+    /// Leaves the user's home directory in place for the child
+    /// processes. Two kinds of run need it: a Google Drive run reads its
+    /// tokens from the login keychain, and a launchd run installs a
+    /// LaunchAgent the way a real install does.
+    pub fn keeping_user_home(mut self) -> Self {
+        self.user_home = None;
+        self
     }
 
     /// Provisions a home under the sandbox. `label` becomes the
@@ -136,6 +171,7 @@ impl Sandbox {
             dir,
             local,
             cloud,
+            user_home: self.user_home.clone(),
             extra_env: BTreeMap::new(),
             removed_env: Vec::new(),
         })
@@ -154,6 +190,7 @@ impl Sandbox {
             dir,
             local: self.root.join("deep-local"),
             cloud,
+            user_home: self.user_home.clone(),
             extra_env: BTreeMap::new(),
             removed_env: Vec::new(),
         })

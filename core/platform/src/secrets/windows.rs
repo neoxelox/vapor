@@ -12,6 +12,11 @@ impl NativeSecretStore {
             "no native secret store on Windows yet",
         ))
     }
+
+    /// For a background process; nothing to turn off in the stub.
+    pub fn without_prompts(self) -> Self {
+        self
+    }
 }
 
 impl SecretStore for NativeSecretStore {

@@ -5,7 +5,7 @@ import Testing
 
 // The monitor owns only the timer; each tick delegates to the
 // Rust core via the manager. Tests drive `performHealthCheck()`
-// directly — no timing assertions, per the testing strategy.
+// directly, no timing assertions, per the testing strategy.
 
 @Test
 func healthCheckForwardsOutcomeToObserver() {

@@ -61,6 +61,12 @@ impl NativeSecretStore {
         ))
     }
 
+    /// For a background process. Neither backend opens a dialog from
+    /// this process, so there is nothing to turn off.
+    pub fn without_prompts(self) -> Self {
+        self
+    }
+
     /// The command shim, for tests and for a caller that has the
     /// program in hand.
     pub fn with_command(command: &str) -> Self {

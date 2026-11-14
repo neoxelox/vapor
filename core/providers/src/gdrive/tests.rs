@@ -268,6 +268,153 @@ fn resumable_upload_reverifies_hash_precondition_before_the_final_chunk() {
 }
 
 #[test]
+fn a_resumable_upload_whose_final_answer_has_no_checksum_reports_the_hash_of_its_bytes() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(200, r#"{"files":[]}"#); // resolve absent
+    transport.push_response_with_headers(
+        200,
+        "",
+        vec![(
+            "Location".to_string(),
+            "https://upload.example/session-2".to_string(),
+        )],
+    );
+    // Drive acknowledges only half of the first chunk, so the session
+    // sends the rest of it again: those bytes are hashed one time.
+    let half = SIMPLE_UPLOAD_MAX_BYTES / 2;
+    transport.push_response_with_headers(
+        308,
+        "",
+        vec![("Range".to_string(), format!("bytes=0-{}", half - 1))],
+    );
+    transport.push_response(308, ""); // the rest of the first chunk
+    // What Drive answers when the session was opened without `fields`:
+    // the default set, with no checksum and no modified time.
+    transport.push_response(
+        200,
+        r#"{"kind":"drive#file","id":"big","name":"big.bin","mimeType":"application/octet-stream"}"#,
+    );
+
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let source = scratch.path().join("big.bin");
+    let content: Vec<u8> = (0..(SIMPLE_UPLOAD_MAX_BYTES + CHUNK_GRANULARITY))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    std::fs::write(&source, &content).expect("seed");
+
+    let mut session = provider
+        .begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("big.bin").expect("path"),
+            op_id: "dev-op3".to_string(),
+            precondition: RemotePrecondition::None,
+        })
+        .expect("session");
+    let outcome = loop {
+        match session.step(SIMPLE_UPLOAD_MAX_BYTES).expect("step") {
+            TransferStep::Completed(outcome) => break outcome,
+            TransferStep::Progressed { .. } => {}
+        }
+    };
+    assert_eq!(
+        outcome.content_hash,
+        md5_hex_of_bytes(&content),
+        "an empty hash in the sync index makes the next edit of the file impossible to upload"
+    );
+}
+
+#[test]
+fn two_files_with_one_name_give_one_entry_and_the_choice_never_depends_on_the_order() {
+    let listing = |first: &str, second: &str, third: &str| {
+        format!(
+            r#"{{"files":[
+                {{"id":"{first}","name":"report.txt","mimeType":"text/plain","size":"1","md5Checksum":"m-{first}"}},
+                {{"id":"{second}","name":"report.txt","mimeType":"text/plain","size":"2","md5Checksum":"m-{second}"}},
+                {{"id":"{third}","name":"report.txt","mimeType":"text/plain","size":"3","md5Checksum":"m-{third}"}},
+                {{"id":"other","name":"notes.txt","mimeType":"text/plain","size":"4","md5Checksum":"m-other"}}
+            ]}}"#
+        )
+    };
+    for order in [["id-b", "id-c", "id-a"], ["id-c", "id-a", "id-b"]] {
+        let transport = Arc::new(ScriptedHttpTransport::new());
+        let provider = ensured_provider(transport.clone());
+        transport.push_response(200, listing(order[0], order[1], order[2]));
+        let entries = provider.enumerate(&RemotePath::root()).expect("enumerate");
+        let names: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["notes.txt", "report.txt"],
+            "one entry for each name"
+        );
+        let report = entries
+            .iter()
+            .find(|entry| entry.path.as_str() == "report.txt")
+            .expect("report");
+        assert_eq!(
+            report.content_hash.as_deref(),
+            Some("m-id-a"),
+            "the file with the lowest id, whatever order Drive answers in"
+        );
+
+        // A lookup of the path, on a provider that has listed nothing,
+        // finds the same file.
+        let transport = Arc::new(ScriptedHttpTransport::new());
+        let provider = ensured_provider(transport.clone());
+        transport.push_response(200, listing(order[0], order[1], order[2]));
+        let stat = provider
+            .stat(&RemotePath::new("report.txt").expect("path"))
+            .expect("stat")
+            .expect("present");
+        assert_eq!(stat.content_hash.as_deref(), Some("m-id-a"));
+        let lookup = transport.recorded_requests().pop().expect("the lookup");
+        assert!(
+            lookup.url.contains("pageSize=100"),
+            "the lookup reads every file of that name: {}",
+            lookup.url
+        );
+    }
+}
+
+#[test]
+fn a_folder_that_a_request_confirmed_is_not_looked_up_again_until_the_feed_reports_it() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let folder = |id: &str, name: &str| {
+        format!(
+            r#"{{"files":[{{"id":"{id}","name":"{name}","mimeType":"application/vnd.google-apps.folder"}}]}}"#
+        )
+    };
+    transport.push_response(200, folder("id-a", "a"));
+    transport.push_response(200, folder("id-b", "b"));
+    let target = RemotePath::new("a/b/one.txt").expect("path");
+    let before = transport.recorded_requests().len();
+    assert_eq!(provider.ensure_parent_id(&target).expect("first"), "id-b");
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        2,
+        "one lookup for each folder"
+    );
+
+    // The next upload into the same folder asks nothing: the scripted
+    // transport has no answer left, so any request would fail.
+    let sibling = RemotePath::new("a/b/two.txt").expect("path");
+    assert_eq!(provider.ensure_parent_id(&sibling).expect("second"), "id-b");
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        2,
+        "no request"
+    );
+
+    // The feed reports that folder `a` changed: it and everything under
+    // it are looked up again.
+    provider.evict_path("a");
+    transport.push_response(200, folder("id-a2", "a"));
+    transport.push_response(200, folder("id-b2", "b"));
+    assert_eq!(provider.ensure_parent_id(&sibling).expect("third"), "id-b2");
+}
+
+#[test]
 fn large_upload_is_resumable_with_content_range_chunks() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = ensured_provider(transport.clone());
@@ -321,6 +468,11 @@ fn large_upload_is_resumable_with_content_range_chunks() {
     let requests = transport.recorded_requests();
     let initiate = &requests[2];
     assert!(initiate.url.contains("uploadType=resumable"));
+    assert!(
+        initiate.url.contains("fields=") && initiate.url.contains("md5Checksum"),
+        "the request that opens the session asks for the checksum: {}",
+        initiate.url
+    );
     let chunk1 = &requests[3];
     assert_eq!(chunk1.url, "https://upload.example/session-1");
     let range = chunk1
@@ -409,6 +561,42 @@ fn download_streams_ranges_and_hashes_with_md5() {
         .map(|(_, value)| value.clone())
         .expect("range header");
     assert_eq!(first_range, "bytes=0-3");
+}
+
+#[test]
+fn a_download_that_does_not_match_drives_checksum_is_thrown_away_and_read_again() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    // Drive describes the file as it was when the download began.
+    let described = md5_hex_of_bytes(b"12345678");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"files":[{{"id":"dl","name":"data.bin","mimeType":"application/octet-stream","size":"8","md5Checksum":"{described}"}}]}}"#
+        ),
+    );
+    // The file is replaced between the two ranges: the head of one
+    // version and the tail of another.
+    transport.push_response(206, "1234");
+    transport.push_response(206, "WXYZ");
+
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let destination = scratch.path().join("data.bin");
+    let mut session = provider
+        .begin_download(DownloadRequest {
+            remote_path: RemotePath::new("data.bin").expect("path"),
+            destination: destination.clone(),
+        })
+        .expect("session");
+    session.step(4).expect("range 1");
+    let error = session
+        .step(4)
+        .expect_err("mixed content must not complete");
+    assert_eq!(error.kind, ProviderErrorKind::Transient);
+    assert!(
+        !destination.exists(),
+        "the mixed payload is not left where an apply would find it"
+    );
 }
 
 #[test]
@@ -777,11 +965,11 @@ fn classifies_daily_and_storage_quota_403s_distinctly() {
         headers: Vec::new(),
         body: br#"{"error":{"errors":[{"reason":"storageQuotaExceeded"}]}}"#.to_vec(),
     };
-    // Storage-full is surfaced (permanent), not misclassified as a rate
-    // limit that would retry forever.
+    // A full Drive is not a rate limit and not a fault of the file: the
+    // upload waits and is tried again when there is room.
     assert!(matches!(
         classify_api_failure(&storage).kind,
-        ProviderErrorKind::Permanent
+        ProviderErrorKind::StorageFull
     ));
 }
 

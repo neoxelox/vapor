@@ -27,7 +27,7 @@ final class AppShellViewModel: ObservableObject {
     let configuration = configurationLoadResult.configuration
     let localizationStore = VaporLocalizationStore()
     // Lifecycle policy lives in the Rust core behind the bundled
-    // `vapor` CLI; the manager is configuration-independent — the
+    // `vapor` CLI; the manager is configuration-independent: the
     // factory stays for tests and future launch-relevant settings.
     let lifecycleManagerFactory: (VaporConfiguration) -> DaemonLifecycleManager = { _ in
       AppShellViewModel.makeDefaultLifecycleManager()
@@ -716,7 +716,7 @@ final class AppShellViewModel: ObservableObject {
   /// bundled `vapor` CLI. The Rust `core/lifecycle` layer behind
   /// the CLI owns the LaunchAgent definition (per
   /// `docs/operations/macos/launchagent-policy.md`), autolaunch
-  /// persistence, and crash-loop policy — one implementation for every
+  /// persistence, and crash-loop policy: one implementation for every
   /// surface, so the CLI and the app can never clobber each other.
   private static func makeDefaultLifecycleManager() -> DaemonLifecycleManager {
     if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil {

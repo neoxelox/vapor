@@ -14,7 +14,10 @@ are provider-neutral unless a section says otherwise.
   default browser, receives the redirect, and exchanges the code. It
   waits up to five minutes for the consent. It runs the browser flow
   only from a terminal; `--browser` runs it without one (the app's
-  Sign In button), and without either it reads a token from stdin.
+  Sign In button). A token made elsewhere goes in on stdin (`<command
+  that prints the token> | vapor auth login --token -`); a token given
+  as an argument is refused and not stored, because an argument shows
+  in the process list and stays in the shell history.
 - No backend takes part. PKCE and the loopback redirect protect the
   code exchange, and the app talks to Google directly.
 - Requested scope is `https://www.googleapis.com/auth/drive` (full
@@ -73,6 +76,17 @@ Google's rules for the consent screen decide how long a sign-in lasts:
   homepage, a privacy policy, a demo video) and a yearly third-party
   security assessment before the client serves the public.
 
+## One scope for each runtime directory
+
+A secret belongs to the runtime directory that stored it. The default
+directory (`~/.vapor`) uses the plain name
+(`auth.default.gdrive.token`). Any other directory (`VAPOR_DIR`, a dev
+checkout's `./.vapor`, an e2e sandbox) puts `dir-<hash of the
+directory>.` before the name, and its commands list, read, and remove
+only names with that prefix. A sandbox therefore cannot use or remove
+the sign-in of the real install, and a sign-in made in one directory
+is not visible in another: sign in again there.
+
 ## Where tokens live on macOS
 
 - Each secret is one generic-password item in the user's login
@@ -85,13 +99,18 @@ Google's rules for the consent screen decide how long a sign-in lasts:
   a build directory or at `Contents/Helpers/vapor` and
   `Contents/MacOS/vapord` inside the bundle). The daemon therefore
   reads a token the CLI stored without a keychain prompt.
-- Development builds are unsigned, and macOS identifies an unsigned
-  binary by its content hash. Rebuilding `vapord` after a login makes
-  the next daemon read prompt once ("vapord wants to use your
-  confidential information"); choose Always Allow, or run `vapor auth
-  login` again so the item is recreated with the new hash. Signed
-  release builds are identified by their code requirement and do not
-  have this problem.
+- The daemon never opens a keychain dialog. It reads with the
+  interaction turned off, so a read that would need the user's consent
+  fails, and the profile holds for a sign-in (below). A dialog from a
+  background process would sit unseen and block the read.
+- Development builds and prerelease builds are not signed with a
+  Developer ID, and macOS identifies such a binary by its content
+  hash. A rebuilt `vapord`, or an updated prerelease app, is a new
+  identity that the item's access list does not name. The daemon's
+  read then fails, the profile asks for a sign-in, and `vapor auth
+  login` stores the item again for the new binaries. A release signed
+  with a Developer ID is identified by its code requirement and keeps
+  its access across updates.
 - Without a GUI session (SSH, CI) the keychain refuses any operation
   that would need a prompt with `errSecInteractionNotAllowed`; the
   error surfaces verbatim in `vapor auth` output and in the daemon's
@@ -124,11 +143,18 @@ Google's rules for the consent screen decide how long a sign-in lasts:
 - Google usually omits the refresh token in refresh responses; the
   previous refresh token is retained so the chain never breaks.
 - Failure classification (`ProviderErrorKind`):
-  - `invalid_grant` / `invalid_client` → `Authentication`
-    (user-action-required; the message names the exact command:
-    `vapor auth login`).
-  - Token-endpoint 5xx or transport failure → `Transient` (bounded
-    retries with backoff through the normal retry policy).
+  - `invalid_grant`, `invalid_client`, `unauthorized_client` →
+    `Authentication` (user-action-required; the message names the
+    exact command: `vapor auth login`).
+  - `temporarily_unavailable`, `server_error`, `slow_down`,
+    `rate_limit_exceeded`, any 5xx or 429, or a transport failure →
+    `Transient` (bounded retries with backoff through the normal retry
+    policy). A busy token endpoint is not a lost sign-in.
+  - Any other error code → `Authentication`.
+  - The daemon logs a rejected token request as a WARNING with the
+    code under `error_code`, never the body.
+- One refresh runs at a time for a profile: two calls that find the
+  token expired share one request.
 - A daemon with no OAuth client (none built in, none in the
   environment) cannot build the provider: the profile is suspended
   with the reason in `vapor status`, and the other profiles keep
@@ -190,7 +216,9 @@ file, so it holds the profile instead of failing work
 - Least-privilege scopes where the product model allows it (see the
   scope rationale above).
 - Tokens never enter `vapor.json`, the durable state DB, or support
-  bundles.
+  bundles. `vapor report` also replaces file and folder names with
+  stable codes unless `--keep-paths` is given.
+- A token never goes on a command line.
 
 ## Operational checklist (per deployment)
 

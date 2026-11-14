@@ -1,4 +1,4 @@
-//! Durable lifecycle state — crash-loop bookkeeping and supervision
+//! Durable lifecycle state: crash-loop bookkeeping and supervision
 //! expectations that must survive process restarts.
 //!
 //! Every `vapor service …` invocation (and, through it, the macOS app
@@ -30,12 +30,13 @@ use crate::auto_launch::JsonFileError;
 
 /// Bump on any incompatible shape change. Pre-GA, a file with a newer
 /// version than this build understands is a hard error rather than a
-/// silent reset — resetting could un-pause a crash-looping daemon.
+/// silent reset: resetting could un-pause a crash-looping daemon.
 pub const LIFECYCLE_STATE_SCHEMA_VERSION: u32 = 1;
 
-/// The durable lifecycle document. Field names are the wire format.
+/// The durable lifecycle document. The keys are camelCase, like every
+/// other JSON file and wire shape of Vapor.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct PersistedLifecycleState {
     pub schema_version: u32,
     /// True after any successful daemon start; false after an expected
@@ -280,7 +281,7 @@ mod tests {
         fs::write(
             &path,
             format!(
-                "{{ \"schema_version\": {} }}",
+                "{{ \"schemaVersion\": {} }}",
                 LIFECYCLE_STATE_SCHEMA_VERSION + 1
             ),
         )
@@ -298,7 +299,7 @@ mod tests {
         // default values for absent fields.
         let temp = TempDir::new().expect("temp");
         let path = temp.path().join("lifecycle.json");
-        fs::write(&path, "{ \"consecutive_crashes\": 2 }").expect("seed file");
+        fs::write(&path, "{ \"consecutiveCrashes\": 2 }").expect("seed file");
         let store = JsonFileLifecycleStateStore::new(path);
         let state = store.load().expect("load").expect("state");
         assert_eq!(state.consecutive_crashes, 2);

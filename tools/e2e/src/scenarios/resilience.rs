@@ -36,6 +36,22 @@ pub fn scenarios() -> Vec<Scenario> {
             run: sigkill_mid_download,
         },
         Scenario {
+            id: "S59",
+            name: "bandwidth-wait-is-quiet",
+            proves: "an upload that waits for bandwidth leaves the daemon near idle: well under half a core while the transfer is held",
+            needs: &[Need::NativeWatcher, Need::Filesystem, Need::Unix],
+            expect: Expect::Pass,
+            run: bandwidth_wait_is_quiet,
+        },
+        Scenario {
+            id: "S60",
+            name: "conflict-with-slow-download",
+            proves: "after a keep-both conflict whose download outlasts the debounce window, the version that won stays in the cloud and both versions end on both sides",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: conflict_with_slow_download,
+        },
+        Scenario {
             id: "S32",
             name: "state-db-lost",
             proves: "with the state DB deleted, a restart rebuilds the index from both trees without losing a file or inventing a conflict copy for identical content",
@@ -122,6 +138,147 @@ fn throttle_bandwidth(ctx: &Ctx) -> Result<(), Failure> {
     ctx.cli()
         .config_set("resourceLimits", r#"{"bandwidthPercent": 5}"#)
         .map(|_| ())
+}
+
+/// CPU time the process has used so far, in seconds (`ps -o cputime`,
+/// which prints `[[D-]HH:]MM:SS[.cc]`).
+fn cpu_seconds(pid: u32) -> Result<f64, Failure> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "cputime=", "-p", &pid.to_string()])
+        .output()?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let (days, clock) = match text.split_once('-') {
+        Some((days, clock)) => (days.parse::<f64>().unwrap_or(0.0), clock),
+        None => (0.0, text.as_str()),
+    };
+    let mut seconds = 0.0;
+    for part in clock.split(':') {
+        let value: f64 = part
+            .parse()
+            .map_err(|_| Failure::new(format!("cannot read the CPU time of {pid}: {text:?}")))?;
+        seconds = seconds * 60.0 + value;
+    }
+    Ok(days * 86_400.0 + seconds)
+}
+
+fn bandwidth_wait_is_quiet(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    ctx.configure_scope(&home)?;
+    // 2% of the capacity the sandbox pins: about 250 KB each second,
+    // so the 4 MiB upload below is held for most of its length.
+    ctx.cli()
+        .config_set("resourceLimits", r#"{"bandwidthPercent": 2}"#)?;
+    let daemon = ctx.start_daemon()?;
+    let pid = ctx.daemon(daemon).pid();
+    let payload: Vec<u8> = (0..4 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    let target = home.local.join("held.bin");
+    write_file(&target, &payload)?;
+    wait::wait_until(
+        Duration::from_secs(60),
+        "the upload staging temp to appear in the cloud root",
+        || temp_file_present(&home.cloud),
+    )?;
+
+    let used_before = cpu_seconds(pid)?;
+    let started = std::time::Instant::now();
+    std::thread::sleep(Duration::from_secs(6));
+    let used = cpu_seconds(pid)? - used_before;
+    let wall = started.elapsed().as_secs_f64();
+    ensure!(
+        !home.cloud.join("held.bin").exists(),
+        "the upload ended inside the measured window, so the window proves nothing"
+    );
+    ctx.note(format!(
+        "daemon CPU while the upload was held: {used:.2}s over {wall:.1}s"
+    ));
+    // Whole percent of one core, so the comparison is on integers.
+    let core_percent = (used / wall * 100.0).round() as u64;
+    ensure!(
+        core_percent < 40,
+        "the daemon used {core_percent}% of a core while a transfer waited for bandwidth"
+    );
+
+    // Full speed again so the upload ends quickly.
+    ctx.cli()
+        .config_set("resourceLimits", r#"{"bandwidthPercent": 80}"#)?;
+    let cloud_copy = home.cloud.join("held.bin");
+    wait::wait_until(Duration::from_secs(90), "the upload to complete", || {
+        sha256_of(&cloud_copy).ok() == sha256_of(&target).ok()
+    })?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    Ok(())
+}
+
+fn conflict_with_slow_download(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let body = |seed: u8| -> Vec<u8> {
+        (0..1_200_000u32)
+            .map(|i| (i as u8).wrapping_mul(17).wrapping_add(seed))
+            .collect()
+    };
+    let local = home.local.join("doc.bin");
+    let cloud = home.cloud.join("doc.bin");
+    let mark = ctx.mark();
+    write_file(&local, body(1))?;
+    ctx.converge_from(&mark, 1, Duration::from_secs(60))?;
+    ctx.wait_exists(&cloud, CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    // 1% of the pinned capacity: a 1.2 MB transfer takes about ten
+    // seconds. The local edit starts to upload; the cloud changes under
+    // it, so the upload loses the race and the daemon renames the local
+    // edit to a conflict copy and queues the download of the cloud's
+    // version. That download outlasts the debounce window in which the
+    // daemon's own rename is reported.
+    ctx.cli()
+        .config_set("resourceLimits", r#"{"bandwidthPercent": 1}"#)?;
+    std::thread::sleep(Duration::from_secs(3));
+    write_file(&local, body(3))?;
+    wait::wait_until(
+        Duration::from_secs(60),
+        "the upload of the local edit to be in flight",
+        || temp_file_present(&home.cloud),
+    )?;
+    write_file(&cloud, body(2))?;
+    std::thread::sleep(Duration::from_secs(30));
+    ctx.cli()
+        .config_set("resourceLimits", r#"{"bandwidthPercent": 80}"#)?;
+    ctx.wait_until(
+        Duration::from_secs(120),
+        "a keep-both copy of the local edit on both sides",
+        || {
+            crate::scenario::conflict_copy_exists(&home.local, "doc")
+                && crate::scenario::conflict_copy_exists(&home.cloud, "doc")
+        },
+    )?;
+    ctx.settle(Duration::from_secs(120))?;
+
+    ensure!(
+        cloud.exists(),
+        "the version that won the conflict is gone from the cloud"
+    );
+    ensure!(
+        fs::read(&cloud)? == body(2),
+        "the cloud keeps the cloud's version under the original name"
+    );
+    ensure!(
+        fs::read(&local)? == body(2),
+        "this device holds the cloud's version under the original name"
+    );
+    for root in [&home.local, &home.cloud] {
+        let copy = crate::scenario::conflict_copies(root, "doc")
+            .next()
+            .ok_or_else(|| Failure::new("no conflict copy"))?;
+        ensure!(
+            fs::read(&copy)? == body(3),
+            "the conflict copy under {} holds the local edit",
+            root.display()
+        );
+    }
+    ctx.allow_warning("Resolved concurrent divergence by keeping both versions");
+    ctx.allow_warning("Kept both versions on download-apply");
+    Ok(())
 }
 
 fn sigkill_mid_upload(ctx: &mut Ctx) -> Result<(), Failure> {

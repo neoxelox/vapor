@@ -1,4 +1,4 @@
-# core/cli — `vapor` CLI
+# core/cli: `vapor` CLI
 
 Headless-first control plane for the Vapor runtime. The same crate that
 ships the binary also exposes per-command logic so unit tests can drive
@@ -10,7 +10,8 @@ Tasks: `docs/tasks/cli.md`.
 ## Commands
 
 `status`, `pause`, `resume`, `reconcile`,
-`decisions list|show|resolve`, `trash list|restore|empty`, `config get|set`,
+`profiles list|add|remove`, `decisions list|show|resolve`, `ignored`,
+`trash list|restore|empty`, `config get|set`,
 `auth login|logout|status`, `service bootstrap|install|uninstall|start|stop|restart|status|check|acknowledge`,
 `timeline`, `diagnostics`, `logs`, `doctor`, `report`, `run`, `version`.
 Every command that reports state takes `--json`: keys are camelCase and
@@ -30,10 +31,10 @@ path.
 
 ## Layout
 
-- `src/lib.rs` — library entry point exposing per-command modules.
-- `src/main.rs` — `clap` wiring; converts subcommands into library
+- `src/lib.rs`: library entry point exposing per-command modules.
+- `src/main.rs`: `clap` wiring; converts subcommands into library
   calls and renders results.
-- `src/commands/<command>.rs` — one module per command. Each owns its
+- `src/commands/<command>.rs`: one module per command. Each owns its
   command-specific types, error enum, and unit tests.
 
 ## Scripts

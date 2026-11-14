@@ -9,11 +9,16 @@ use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
+/// Runs the binary with the throwaway directory as its runtime
+/// directory and as its home directory, so neither a `~` path nor the
+/// login keychain of whoever runs the tests is in reach.
 fn vapor(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_vapor"))
         .args(args)
         .env("VAPOR_DIR", home)
         .env("VAPOR_ENV", "dev")
+        .env("HOME", home)
+        .env("USERPROFILE", home)
         .output()
         .expect("vapor binary runs")
 }
@@ -56,6 +61,8 @@ fn help_names_every_command() {
     for command in [
         "run",
         "status",
+        "profiles",
+        "ignored",
         "config",
         "service",
         "decisions",
@@ -140,6 +147,75 @@ fn config_round_trips_and_types_its_keys() {
 }
 
 #[test]
+fn profiles_set_an_install_up_without_a_daemon_and_never_ask_without_a_terminal() {
+    let home = TempDir::new().expect("home");
+    let listed = vapor(home.path(), &["profiles", "list", "--json"]);
+    assert!(listed.status.success());
+    assert_eq!(json(&listed)["profiles"], serde_json::json!([]));
+
+    let local = home.path().join("local");
+    let cloud = home.path().join("cloud");
+    let added = vapor(
+        home.path(),
+        &[
+            "profiles",
+            "add",
+            "--local",
+            &local.to_string_lossy(),
+            "--cloud",
+            &cloud.to_string_lossy(),
+            "--mode",
+            "push-only",
+        ],
+    );
+    assert!(added.status.success(), "{}", stderr(&added));
+    let text = stdout(&added);
+    assert!(text.contains("Added profile default"), "{text}");
+    assert!(
+        text.contains("vapor decisions list"),
+        "with no terminal a one-way mode is left for the daemon to ask: {text}"
+    );
+    assert!(!local.exists(), "adding a profile creates no folder");
+
+    // No terminal and no --yes: remove does not guess a confirmation.
+    let unconfirmed = vapor(home.path(), &["profiles", "remove", "default"]);
+    assert_eq!(unconfirmed.status.code(), Some(1));
+    assert!(stderr(&unconfirmed).contains("--yes"));
+    let removed = vapor(home.path(), &["profiles", "remove", "default", "--yes"]);
+    assert!(removed.status.success(), "{}", stderr(&removed));
+    let listed = vapor(home.path(), &["profiles", "list"]);
+    assert!(stdout(&listed).contains("vapor profiles add"));
+}
+
+#[test]
+fn a_token_on_the_command_line_is_refused_and_never_stored() {
+    let home = TempDir::new().expect("home");
+    let added = vapor(
+        home.path(),
+        &[
+            "profiles",
+            "add",
+            "--provider",
+            "gdrive",
+            "--local",
+            &home.path().join("local").to_string_lossy(),
+        ],
+    );
+    assert!(added.status.success(), "{}", stderr(&added));
+
+    let login = vapor(home.path(), &["auth", "login", "--token", "ya29.test"]);
+    assert_eq!(login.status.code(), Some(1));
+    let reason = stderr(&login);
+    assert!(reason.contains("process list"), "{reason}");
+    assert!(reason.contains("--token -"), "{reason}");
+    assert!(
+        !reason.contains("ya29"),
+        "the refusal must not repeat the token: {reason}"
+    );
+    assert!(stdout(&login).is_empty());
+}
+
+#[test]
 fn decisions_and_trash_are_empty_and_well_formed_on_a_fresh_home() {
     let home = TempDir::new().expect("home");
     let decisions = vapor(home.path(), &["decisions", "list", "--json"]);
@@ -162,6 +238,19 @@ fn decisions_and_trash_are_empty_and_well_formed_on_a_fresh_home() {
     );
     assert_eq!(missing.status.code(), Some(1));
     assert!(stderr(&missing).contains("7"), "{}", stderr(&missing));
+    // Emptying the trash cannot be undone: with no terminal to ask on,
+    // it needs an explicit yes.
+    let unconfirmed = vapor(home.path(), &["trash", "empty"]);
+    assert_eq!(unconfirmed.status.code(), Some(1));
+    assert!(
+        stderr(&unconfirmed).contains("--yes"),
+        "{}",
+        stderr(&unconfirmed)
+    );
+    let confirmed = vapor(home.path(), &["trash", "empty", "--yes", "--json"]);
+    assert!(confirmed.status.success());
+    assert_eq!(json(&confirmed)["removed"], 0);
+
     let missing = vapor(home.path(), &["trash", "restore", "nope"]);
     assert_eq!(missing.status.code(), Some(1));
     assert!(stderr(&missing).contains("nope"), "{}", stderr(&missing));

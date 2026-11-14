@@ -27,7 +27,7 @@ nothing.
 
 | Change | Tiers |
 |---|---|
-| Docs only, `assets/locales` only | none required, but `lint` is cheap and catches broken locale JSON |
+| Docs only, `assets/locales` only | `lint`: it checks that the locale catalogs parse, and that no tracked file holds an em dash |
 | Tests only | `format`, `lint`, `test` |
 | Anything under `core/*` or `scripts/*` that a user could observe through the daemon or CLI, including startup, shutdown, IPC, schema, config and build changes to the shipping binaries | `format`, `lint`, `test`, `e2e` |
 | `apps/macos` logic | `format`, `lint`, `test`; UI rendering is never tested, hand the owner a manual checklist |
@@ -75,6 +75,13 @@ nothing.
 ## Reading a red run
 
 - `format.sh check` diff: run `./scripts/format.sh` and re-run lint.
+- `cargo deny` in lint: a missing tool is fixed with `cargo install
+  cargo-deny --locked`. An advisory is fixed with a dependency update;
+  an advisory that does not apply goes into `deny.toml` `ignore` with
+  the reason, never silently. The check reads the advisory database
+  from the network.
+- An em dash found by lint: rewrite the sentence with a comma, a
+  colon, or two sentences.
 - Clippy: fix the lint, do not `allow` it; `#[allow]` needs a comment
   stating why the lint is wrong here.
 - A failing test: read the assertion message and the test body before

@@ -302,7 +302,7 @@ pub fn run(options: &RunOptions) -> Result<RunReport, Failure> {
 
     let summary = &report.summary;
     println!(
-        "[e2e] {} — {} passed, {} failed, {} skipped, {} known gaps, {} unexpected passes ({:.1}s)",
+        "[e2e] {}: {} passed, {} failed, {} skipped, {} known gaps, {} unexpected passes ({:.1}s)",
         if report.is_green() { "OK" } else { "RED" },
         summary.passed,
         summary.failed,
@@ -421,6 +421,13 @@ fn run_one(
     let scenario_root = run_root.join(scenario.id);
     let outcome = (|| -> Result<Outcome, Failure> {
         let sandbox = Sandbox::create(&scenario_root)?;
+        let needs_user_home =
+            host.provider == Provider::Gdrive || scenario.needs.contains(&Need::Full);
+        let sandbox = if needs_user_home {
+            sandbox.keeping_user_home()
+        } else {
+            sandbox
+        };
         let mut ctx = Ctx::new(host.clone(), paths.clone(), sandbox)?;
         let body = (scenario.run)(&mut ctx);
         let mut failures = Vec::new();

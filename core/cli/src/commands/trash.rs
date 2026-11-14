@@ -2,10 +2,12 @@
 //! device and kept in the managed trash. Reads and moves files under
 //! `vapor_dir/trash/<profile>/`, so it works with or without a running
 //! daemon; a restored file lands in the sync root and syncs like any
-//! other write. Design: `docs/architecture/data-flow.md` §Remote to
-//! local.
+//! other write. Every trash on disk is in reach: the one of a profile
+//! that is disabled, and the one of a profile that left `vapor.json`,
+//! hold the user's files as much as the others. Design:
+//! `docs/architecture/data-flow.md` §Remote to local.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use vapor_daemon::profiles::resolve_profiles;
@@ -56,33 +58,44 @@ fn to_json(entry: TrashEntry) -> TrashEntryJson {
     }
 }
 
-fn enabled_profile_ids(config: &VaporConfig) -> Vec<String> {
-    resolve_profiles(config)
+/// Every profile that can hold a trash: the profiles of `vapor.json`,
+/// enabled or not, and every profile directory under `trash_root`,
+/// which is what a removed profile leaves.
+fn trash_profile_ids(config: &VaporConfig, trash_root: &Path) -> Vec<String> {
+    let mut ids: Vec<String> = resolve_profiles(config)
         .into_iter()
-        .filter(|profile| profile.enabled)
         .map(|profile| profile.id)
-        .collect()
+        .collect();
+    let on_disk = std::fs::read_dir(trash_root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .filter(|name| vapor_daemon::profiles::is_valid_profile_id(name));
+    for id in on_disk {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
 }
 
 /// The profile's trash, home location plus the sync root's volume
 /// when that is another volume.
-fn open(config: &VaporConfig, profile_id: &str) -> LocalTrash {
+fn open(config: &VaporConfig, trash_root: &Path, profile_id: &str) -> LocalTrash {
     let sync_root = resolve_profiles(config)
         .into_iter()
         .find(|profile| profile.id == profile_id)
         .and_then(|profile| profile.scope.local_root);
-    LocalTrash::open(
-        profile_id,
-        vapor_shared::runtime_paths::profile_trash_directory(profile_id),
-    )
-    .with_sync_root(sync_root)
+    LocalTrash::open(profile_id, trash_root.join(profile_id)).with_sync_root(sync_root)
 }
 
-/// Every entry of every enabled profile, newest first.
-pub fn list_trash(config: &VaporConfig) -> TrashListReport {
-    let mut entries: Vec<TrashEntryJson> = enabled_profile_ids(config)
+/// Every entry of every profile, newest first.
+pub fn list_trash(config: &VaporConfig, trash_root: &Path) -> TrashListReport {
+    let mut entries: Vec<TrashEntryJson> = trash_profile_ids(config, trash_root)
         .iter()
-        .flat_map(|profile_id| open(config, profile_id).list())
+        .flat_map(|profile_id| open(config, trash_root, profile_id).list())
         .map(to_json)
         .collect();
     entries.sort_by_key(|entry| std::cmp::Reverse(entry.discarded_at_ms));
@@ -93,11 +106,12 @@ pub fn list_trash(config: &VaporConfig) -> TrashListReport {
 /// hold the same id.
 pub fn restore(
     config: &VaporConfig,
+    trash_root: &Path,
     id: &str,
     profile: Option<&str>,
 ) -> Result<RestoreReport, String> {
-    let profile_id = pick_profile(config, id, profile)?;
-    let restored_to = open(config, &profile_id)
+    let profile_id = pick_profile(config, trash_root, id, profile)?;
+    let restored_to = open(config, trash_root, &profile_id)
         .restore(id)
         .map_err(|error| format!("cannot restore trash entry {id}: {error}"))?;
     Ok(RestoreReport {
@@ -107,27 +121,64 @@ pub fn restore(
     })
 }
 
-/// Removes every entry of every enabled profile (or of one).
-pub fn empty(config: &VaporConfig, profile: Option<&str>) -> EmptyReport {
-    let profiles = match profile {
+/// What `empty` would remove: how many entries, and their size.
+pub fn empty_preview(
+    config: &VaporConfig,
+    trash_root: &Path,
+    profile: Option<&str>,
+) -> (usize, u64) {
+    let entries: Vec<TrashEntry> = profiles_to_empty(config, trash_root, profile)
+        .iter()
+        .flat_map(|profile_id| open(config, trash_root, profile_id).list())
+        .collect();
+    (
+        entries.len(),
+        entries.iter().map(|entry| entry.size_bytes).sum(),
+    )
+}
+
+/// The question `empty` asks before it deletes for good.
+pub fn empty_question(count: usize, size_bytes: u64) -> String {
+    format!(
+        "Delete {count} item(s) ({}) from the trash for good? They cannot be restored after this.",
+        human_size(size_bytes)
+    )
+}
+
+fn profiles_to_empty(
+    config: &VaporConfig,
+    trash_root: &Path,
+    profile: Option<&str>,
+) -> Vec<String> {
+    match profile {
         Some(profile) => vec![profile.to_string()],
-        None => enabled_profile_ids(config),
-    };
+        None => trash_profile_ids(config, trash_root),
+    }
+}
+
+/// Removes every entry of every profile (or of one), for good. The
+/// caller has the user's confirmation.
+pub fn empty(config: &VaporConfig, trash_root: &Path, profile: Option<&str>) -> EmptyReport {
     EmptyReport {
-        removed: profiles
+        removed: profiles_to_empty(config, trash_root, profile)
             .iter()
-            .map(|profile_id| open(config, profile_id).empty())
+            .map(|profile_id| open(config, trash_root, profile_id).empty())
             .sum(),
     }
 }
 
-fn pick_profile(config: &VaporConfig, id: &str, profile: Option<&str>) -> Result<String, String> {
+fn pick_profile(
+    config: &VaporConfig,
+    trash_root: &Path,
+    id: &str,
+    profile: Option<&str>,
+) -> Result<String, String> {
     if let Some(profile) = profile {
         return Ok(profile.to_string());
     }
-    let holders: Vec<String> = enabled_profile_ids(config)
+    let holders: Vec<String> = trash_profile_ids(config, trash_root)
         .into_iter()
-        .filter(|profile_id| open(config, profile_id).entry(id).is_some())
+        .filter(|profile_id| open(config, trash_root, profile_id).entry(id).is_some())
         .collect();
     match holders.as_slice() {
         [one] => Ok(one.clone()),
@@ -180,6 +231,66 @@ pub fn render_list(report: &TrashListReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_trash_of_a_disabled_and_of_a_removed_profile_is_in_reach() {
+        use vapor_shared::config::ProfileConfig;
+        let temp = tempfile::TempDir::new().expect("temp");
+        let trash_root = temp.path().join("trash");
+        let root = temp.path().join("root");
+        std::fs::create_dir_all(&root).expect("root");
+        let profile = |id: &str, enabled: bool| ProfileConfig {
+            id: id.to_string(),
+            enabled: Some(enabled),
+            local_root: Some(root.join(id).display().to_string()),
+            cloud_root: Some(format!("/{id}")),
+            ..ProfileConfig::default()
+        };
+        let config = VaporConfig {
+            profiles: vec![profile("work", true), profile("paused", false)],
+            ..VaporConfig::default()
+        };
+        // One discarded file for a running profile, for a disabled one,
+        // and for one that is no longer in vapor.json.
+        let mut ids = Vec::new();
+        for (index, id) in ["work", "paused", "gone"].iter().enumerate() {
+            let file = root.join(format!("{id}.txt"));
+            std::fs::write(&file, b"discarded").expect("seed");
+            let trash = LocalTrash::open(id, trash_root.join(id));
+            let disposition = trash
+                .discard(
+                    &file,
+                    "cloud-delete",
+                    std::time::SystemTime::UNIX_EPOCH
+                        + std::time::Duration::from_secs(1_700_000_000 + index as u64),
+                )
+                .expect("discard");
+            let vapor_daemon::trash::Disposition::Managed(entry) = disposition else {
+                panic!("managed trash expected");
+            };
+            ids.push(entry);
+        }
+
+        let listed = list_trash(&config, &trash_root);
+        let mut profiles: Vec<&str> = listed
+            .entries
+            .iter()
+            .map(|entry| entry.profile_id.as_str())
+            .collect();
+        profiles.sort();
+        assert_eq!(profiles, vec!["gone", "paused", "work"]);
+
+        // Restore finds the entry of the removed profile with no flag.
+        let restored = restore(&config, &trash_root, &ids[2], None).expect("restore");
+        assert_eq!(restored.profile_id, "gone");
+        assert!(root.join("gone.txt").is_file());
+
+        let (count, size) = empty_preview(&config, &trash_root, None);
+        assert_eq!((count, size), (2, 18));
+        assert!(empty_question(count, size).contains("2 item(s)"));
+        assert_eq!(empty(&config, &trash_root, None).removed, 2);
+        assert!(list_trash(&config, &trash_root).entries.is_empty());
+    }
 
     #[test]
     fn restore_and_empty_json_shapes_are_locked() {

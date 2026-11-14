@@ -75,7 +75,7 @@ public struct ProcessVaporCLIRunner: VaporCLIRunning {
     // Drain both pipes concurrently, BEFORE waiting: a child that writes
     // more than the ~64KB pipe buffer (a Rust panic backtrace, verbose
     // stderr) would otherwise block in write() while we block in
-    // waitUntilExit() — a permanent deadlock that freezes every serialized
+    // waitUntilExit(): a permanent deadlock that freezes every serialized
     // lifecycle operation.
     let outputBox = DataBox()
     let errorBox = DataBox()

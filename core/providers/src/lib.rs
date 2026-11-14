@@ -69,6 +69,10 @@ impl ProviderError {
         Self::new(ProviderErrorKind::CloudRootUnavailable, message)
     }
 
+    pub fn storage_full(message: impl Into<String>) -> Self {
+        Self::new(ProviderErrorKind::StorageFull, message)
+    }
+
     pub fn permanent(message: impl Into<String>) -> Self {
         Self::new(ProviderErrorKind::Permanent, message)
     }
@@ -109,36 +113,21 @@ pub struct ProviderCapabilities {
     /// [`Provider::poll_changes`]. Without it the engine falls back to
     /// periodic reconcile enumeration.
     pub supports_remote_changes_feed: bool,
-    /// Provider honors [`RemotePrecondition`] guards on uploads.
-    pub supports_write_preconditions: bool,
-    /// Provider persists the engine's op-id tag on remote objects and
-    /// echoes it back through entries and changes (loop prevention's
-    /// primary correlator).
-    pub supports_op_id_tags: bool,
     /// Provider can move a remote object to another path without a
     /// re-upload ([`Provider::move_object`]); the engine turns a
     /// detected local rename into one call when this is set.
     pub supports_server_side_move: bool,
-    /// Provider reports content hashes in enumeration / changes
-    /// metadata without a separate expensive call.
-    pub supports_content_hashes_in_metadata: bool,
 }
 
 impl ProviderCapabilities {
     pub const FILESYSTEM: Self = Self {
         supports_remote_changes_feed: true,
-        supports_write_preconditions: true,
-        supports_op_id_tags: true,
         supports_server_side_move: true,
-        supports_content_hashes_in_metadata: false,
     };
 
     pub const GDRIVE_MVP: Self = Self {
         supports_remote_changes_feed: true,
-        supports_write_preconditions: true,
-        supports_op_id_tags: true,
         supports_server_side_move: true,
-        supports_content_hashes_in_metadata: true,
     };
 }
 
@@ -230,6 +219,26 @@ pub trait TransferSession: Send {
     /// (the engine's retry machinery re-plans from scratch).
     fn step(&mut self, max_bytes: u64) -> Result<TransferStep, ProviderError>;
 
+    /// The most bytes the session wants one step to move: the
+    /// provider's chunk size, which only the provider can choose well
+    /// (a resumable upload has its own granularity and its own view of
+    /// the link). The engine checks its gates and the bandwidth bucket
+    /// between steps, so this is also how soon a transfer can be held
+    /// or cancelled.
+    fn step_bytes(&self) -> u64 {
+        vapor_shared::constants::provider::TRANSFER_STEP_BYTES
+    }
+
+    /// The most bytes the next step can move, when the session knows:
+    /// what is left of a payload whose size is known, and never zero
+    /// (the step that finds the end still has to run). The engine asks
+    /// the bandwidth bucket for no more than this, so a small file does
+    /// not take the whole bucket from every other transfer for the
+    /// moment of its one step. `None` when the session cannot tell.
+    fn remaining_bytes(&self) -> Option<u64> {
+        None
+    }
+
     /// Abandons the transfer and removes partial artifacts. Idempotent.
     fn abort(&mut self);
 }
@@ -284,7 +293,7 @@ pub enum ChangesPoll {
 
 /// The provider trait every cloud backend implements.
 ///
-/// Path vocabulary: all remote paths are [`RemotePath`]s — relative to
+/// Path vocabulary: all remote paths are [`RemotePath`]s; relative to
 /// the configured cloud sync root, forward-slash separated, no
 /// traversal. Scope safety is the provider's responsibility: an
 /// implementation must refuse to touch anything outside its root.
@@ -403,18 +412,15 @@ pub use gdrive::GoogleDriveProvider;
 
 /// Resolves the configured `provider` value onto a provider instance
 ///. Unknown values are a configuration error the caller must
-/// surface — never a silent fallback, because a wrong provider guess
+/// surface, never a silent fallback, because a wrong provider guess
 /// could sync into the wrong place.
 pub fn select_provider(kind: &str) -> Result<Box<dyn Provider>, ProviderError> {
-    select_provider_for_profile(
-        kind,
-        vapor_shared::constants::provider::DEFAULT_PROFILE_FALLBACK,
-    )
+    select_provider_for_profile(kind, vapor_shared::constants::profile::DEFAULT_PROFILE_ID)
 }
 
 /// Profile-aware provider selection: `gdrive` is now
 /// selectable, constructed against the profile's namespaced
-/// credentials. Missing credentials do not fail selection — they
+/// credentials. Missing credentials do not fail selection: they
 /// surface as an actionable `Authentication` error when the engine
 /// ensures the cloud root, which blocks sync until
 /// `vapor auth login` runs.
@@ -436,11 +442,91 @@ pub fn select_provider_for_profile(
     }
 }
 
-/// Inert provider for engine composition tests and for a profile the
-/// daemon has suspended (it needs a provider value but must never sync).
-/// Every mutation completes as a successful no-op and every read reports
-/// nothing. Not selectable through the `provider` config key; the
-/// runtime picks the real provider with [`select_provider_for_profile`].
+/// The provider of a profile that does not run: one the daemon
+/// suspended, one whose configuration is not valid. The profile needs a
+/// provider value and must never sync, so every call is refused. A
+/// profile in this state does not tick; if a bug ever let it, a stand-in
+/// that answered "the cloud is empty" would read as a cloud where
+/// everything was deleted.
+#[derive(Debug, Default)]
+pub struct SuspendedProvider;
+
+pub fn suspended_provider() -> Box<dyn Provider> {
+    Box::new(SuspendedProvider)
+}
+
+impl SuspendedProvider {
+    fn refuse<T>() -> Result<T, ProviderError> {
+        Err(ProviderError::permanent(
+            "this profile does not run, so it has no provider to call",
+        ))
+    }
+}
+
+impl Provider for SuspendedProvider {
+    fn name(&self) -> &'static str {
+        "suspended"
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            supports_remote_changes_feed: false,
+            supports_server_side_move: false,
+        }
+    }
+
+    fn ensure_cloud_root(&self, _cloud_root: &str) -> Result<(), ProviderError> {
+        Self::refuse()
+    }
+
+    fn root_identity(&self, _cloud_root: &str) -> Result<Option<String>, ProviderError> {
+        Self::refuse()
+    }
+
+    fn enumerate(&self, _directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {
+        Self::refuse()
+    }
+
+    fn stat(&self, _path: &RemotePath) -> Result<Option<RemoteEntry>, ProviderError> {
+        Self::refuse()
+    }
+
+    fn content_hash(&self, _path: &RemotePath) -> Result<String, ProviderError> {
+        Self::refuse()
+    }
+
+    fn begin_upload(
+        &self,
+        _request: UploadRequest,
+    ) -> Result<Box<dyn TransferSession>, ProviderError> {
+        Self::refuse()
+    }
+
+    fn begin_download(
+        &self,
+        _request: DownloadRequest,
+    ) -> Result<Box<dyn TransferSession>, ProviderError> {
+        Self::refuse()
+    }
+
+    fn delete(&self, _path: &RemotePath, _op_id: &str) -> Result<(), ProviderError> {
+        Self::refuse()
+    }
+
+    fn poll_changes(
+        &self,
+        _cursor: Option<&str>,
+        _max_changes: usize,
+    ) -> Result<ChangesPoll, ProviderError> {
+        Self::refuse()
+    }
+}
+
+/// Inert provider for engine composition tests: every mutation
+/// completes as a successful no-op and every read reports nothing. Not
+/// selectable through the `provider` config key, and never the provider
+/// of a profile of the daemon; a profile that does not run gets
+/// [`SuspendedProvider`].
 #[derive(Debug, Default)]
 pub struct FilesystemStubProvider;
 
@@ -456,10 +542,7 @@ impl Provider for FilesystemStubProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             supports_remote_changes_feed: false,
-            supports_write_preconditions: false,
-            supports_op_id_tags: false,
             supports_server_side_move: false,
-            supports_content_hashes_in_metadata: false,
         }
     }
 
@@ -561,10 +644,27 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_stub_reports_no_capabilities() {
-        let capabilities = FilesystemStubProvider.capabilities();
-        assert!(!capabilities.supports_remote_changes_feed);
-        assert!(!capabilities.supports_op_id_tags);
+    fn the_provider_of_a_profile_that_does_not_run_refuses_every_call() {
+        let provider = SuspendedProvider;
+        let path = RemotePath::new("notes/a.txt").expect("path");
+        // A stand-in that answered would describe a cloud that is empty,
+        // which reads as "everything was deleted".
+        assert!(provider.ensure_cloud_root("/Vapor").is_err());
+        assert!(provider.enumerate(&RemotePath::root()).is_err());
+        assert!(provider.stat(&path).is_err());
+        assert!(provider.delete(&path, "op").is_err());
+        assert!(provider.poll_changes(None, 10).is_err());
+        assert!(
+            provider
+                .begin_upload(UploadRequest {
+                    local_source: std::path::PathBuf::from("/tmp/vapor-test-source"),
+                    remote_path: path.clone(),
+                    op_id: "op".to_string(),
+                    precondition: RemotePrecondition::None,
+                })
+                .is_err()
+        );
+        assert!(!provider.capabilities().supports_remote_changes_feed);
     }
 
     #[test]

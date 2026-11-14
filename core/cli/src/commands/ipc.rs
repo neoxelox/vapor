@@ -3,7 +3,7 @@
 //! `vapor status / pause / resume / reconcile / timeline`
 //! all share the same shape: connect to the daemon's UDS endpoint at
 //! `<vapor_dir>/vapord.sock` (relocated under the OS temp directory
-//! when that path would exceed the socket-address budget — the CLI and
+//! when that path would exceed the socket-address budget: the CLI and
 //! daemon share `runtime_paths::ipc_socket_location`, so both sides
 //! always rendezvous), perform the handshake, dispatch one method,
 //! render the result.
@@ -28,11 +28,11 @@ use vapor_shared::{constants, runtime_paths};
 #[derive(Debug)]
 pub enum IpcCliError {
     /// The socket file is missing / connection refused. Renders as
-    /// `vapor: daemon not running — try \`vapor service start\``.
+    /// `vapor: daemon not running; try \`vapor service start\``.
     DaemonNotRunning,
     /// The connection succeeded but the daemon never answered within
     /// the per-call deadline. Renders as
-    /// `vapor: daemon is not responding — check \`vapor logs\``.
+    /// `vapor: daemon is not responding; check \`vapor logs\``.
     /// The CLI must never hang; this is the variant that
     /// fires when a wedged but accepting daemon would otherwise stall
     /// us.
@@ -43,9 +43,9 @@ pub enum IpcCliError {
 impl Display for IpcCliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::DaemonNotRunning => write!(f, "daemon not running — try `vapor service start`"),
+            Self::DaemonNotRunning => write!(f, "daemon not running: try `vapor service start`"),
             Self::DaemonUnresponsive => {
-                write!(f, "daemon is not responding — check `vapor logs`")
+                write!(f, "daemon is not responding: check `vapor logs`")
             }
             Self::Client(error) => write!(f, "IPC client error: {error}"),
         }
@@ -104,7 +104,7 @@ fn is_timeout(kind: io::ErrorKind) -> bool {
     matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
 
-/// Resolve the daemon's UDS endpoint path — shared with the daemon's
+/// Resolve the daemon's UDS endpoint path: shared with the daemon's
 /// bind path so a budget-driven relocation lands both sides on the
 /// same socket.
 pub fn socket_path() -> PathBuf {
@@ -190,6 +190,16 @@ pub fn render_status(status: &StatusResponse) -> String {
             status.decisions
         ));
     }
+    let ignored: u64 = status
+        .profiles
+        .iter()
+        .filter_map(|profile| profile.ignored_paths)
+        .sum();
+    if ignored > 0 {
+        rendered.push_str(&format!(
+            "\nIgnored: {ignored} path(s) on this device are not synced (vapor ignored lists them)"
+        ));
+    }
     for profile in status.profiles.iter().filter(|p| p.sign_in_required) {
         rendered.push_str(&format!(
             "\nSign-in required: profile {} is on hold (vapor auth login --profile {})",
@@ -216,7 +226,7 @@ pub fn render_status(status: &StatusResponse) -> String {
             profile.queued,
             profile.failed,
             if profile.suspended {
-                format!(" — suspended: {}", profile.run.reason)
+                format!("; suspended: {}", profile.run.reason)
             } else {
                 String::new()
             },
@@ -245,7 +255,7 @@ pub fn render_diagnostics(diagnostics: &DiagnosticsResponse) -> String {
     );
     for item in &diagnostics.items {
         rendered.push_str(&format!(
-            "\n#{} [{}] {} {} — stage {} ({} ms), attempts {}{}{}",
+            "\n#{} [{}] {} {}: stage {} ({} ms), attempts {}{}{}",
             item.id,
             item.profile_id,
             item.action,
@@ -256,12 +266,12 @@ pub fn render_diagnostics(diagnostics: &DiagnosticsResponse) -> String {
             if item.reason.is_empty() {
                 String::new()
             } else {
-                format!(" — {}", item.reason)
+                format!("; {}", item.reason)
             },
             if item.error.is_empty() {
                 String::new()
             } else {
-                format!(" — last error: {}", item.error)
+                format!("; last error: {}", item.error)
             },
         ));
     }
@@ -504,7 +514,7 @@ mod tests {
         // The current process's `vapor_dir` may or may not have a log
         // file. We exercise the missing-file path by pointing
         // `VAPOR_DIR` at a fresh tempdir, but only when the test is
-        // run in isolation — we don't mutate process env in a parallel
+        // run in isolation: we don't mutate process env in a parallel
         // test. Skip when a log file already exists.
         let result = tail_logs(Some(10));
         assert!(result.is_ok());
@@ -562,6 +572,8 @@ mod tests {
                 bandwidth: vapor_ipc::BandwidthCeiling {
                     limit_percent: 25,
                     used_kbps: 0,
+                    upload_capacity_kbps: Some(40_000),
+                    download_capacity_kbps: None,
                 },
                 idle_boost: StateReason {
                     state: "off".to_string(),
@@ -608,7 +620,8 @@ mod tests {
     },
     "bandwidth": {
       "limitPercent": 25,
-      "usedKbps": 0
+      "usedKbps": 0,
+      "uploadCapacityKbps": 40000
     },
     "idleBoost": {
       "state": "off",
@@ -732,6 +745,7 @@ mod tests {
                 message: "idle: idle, plugged in, and cool".to_string(),
                 profile_id: "default".to_string(),
             }],
+            truncated: false,
         };
         let rendered = serde_json::to_string_pretty(&timeline).expect("serialize");
         assert_eq!(
@@ -745,7 +759,8 @@ mod tests {
       "message": "idle: idle, plugged in, and cool",
       "profileId": "default"
     }
-  ]
+  ],
+  "truncated": false
 }"#
         );
     }

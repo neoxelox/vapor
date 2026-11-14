@@ -62,9 +62,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ github.workflow }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ github.workflow }}-
+            ${{ runner.os }}-cargo-build-
 
       - name: Cache SwiftPM dependencies
         if: matrix.scope == 'full'

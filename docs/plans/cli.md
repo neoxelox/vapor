@@ -10,8 +10,8 @@ the daemon on every supported OS).
 
 Binary names are fixed:
 
-- **`vapor`** — the CLI.
-- **`vapord`** — the daemon.
+- **`vapor`**: the CLI.
+- **`vapord`**: the daemon.
 
 ## 1) Mission
 
@@ -25,16 +25,17 @@ recompile + CI job once those waves land, not a rewrite.
 ## 2) Non-negotiables
 
 1. **Headless-first.** No GUI dependencies; works over SSH, in Docker, and in
-   CI. No interactive-TTY requirements — every command has a deterministic
+   CI. No interactive-TTY requirements: every command has a deterministic
    non-interactive code path.
 2. **Parity by default.** Every runtime capability exposed in a GUI app must
    also be reachable from the CLI. If a feature is CLI-only, it must be
    because GUI ergonomics would hurt it, not because someone forgot to wire
    it.
-3. **Scriptable.** Every command supports `--json` output; exit codes are
-   stable and documented.
+3. **Scriptable.** Every command that reports state supports `--json`
+   output (`logs`, `config get|set`, `version`, and `run` print plain
+   text); exit codes are stable and documented.
 4. **Per-OS native when it matters.** The CLI inherits platform-native
-   implementations from `core/platform` — it uses FSEvents on macOS, inotify
+   implementations from `core/platform`: it uses FSEvents on macOS, inotify
    on Linux, ReadDirectoryChangesW on Windows. No "portable but slow" path.
 5. **Respects the same config surface as GUI apps.** Reads `VAPOR_DIR`,
    `VAPOR_ENV`, `vapor.json`. Writes and reads the same locale catalogs.
@@ -45,10 +46,12 @@ recompile + CI job once those waves land, not a rewrite.
 vapor status [--json]                   # what the daemon does and why
 vapor pause|resume [--json]
 vapor reconcile [--json]                # scan now: any throttle state but suspended, plus the boost
+vapor profiles list|add|remove          # the folders Vapor syncs; the first add is the setup
 vapor decisions list|show|resolve       # conflicts and parked questions (resolve --choose <option>)
-vapor trash list|restore|empty          # what Vapor removed from this device
+vapor ignored [--profile <id>] [--json] # what the ignore rules keep out of sync, with the rule
+vapor trash list|restore|empty          # what Vapor removed from this device (empty asks, or --yes)
 vapor config get|set <key> [value]      # edits vapor.json
-vapor auth login [--profile <id>]       # signs the profile in to its provider
+vapor auth login [--profile <id>]       # signs the profile in to its provider (--token - reads stdin)
 vapor auth logout [--profile <id>]
 vapor auth status [--profile <id>] [--json]  # signed-in / signed-out / not-needed, never the token
 vapor service bootstrap                 # install+start only when autolaunch is enabled
@@ -61,7 +64,7 @@ vapor timeline [--json]                 # recent daemon activity
 vapor diagnostics [--json]              # per-intent "why is this stuck"
 vapor logs [--tail N]
 vapor doctor [--json]                   # sanity checks, exit 1 on failure
-vapor report [--output DIR] [--json]    # redacted support report
+vapor report [--output DIR] [--keep-paths] [--json]  # support report; names replaced by codes
 vapor run                               # run the daemon in the foreground
 vapor version
 ```
@@ -74,39 +77,39 @@ profile without it.
 
 ### 3.1 Rules per command
 
-- `run` — runs the daemon in the current process (useful for Docker / WSL /
+- `run`: runs the daemon in the current process (useful for Docker / WSL /
   servers / devs). Exits non-zero if another daemon is already attached to
   this `VAPOR_DIR`.
-- `service install` — picks the right installer for the host OS
+- `service install`: picks the right installer for the host OS
   automatically; `--user` (default) vs `--system` switch. Configures the OS
   restart policy to match `core/lifecycle::CrashLoopGuard`.
-- `service status` — reports `running` / `stopped` / `not-installed` /
+- `service status`: reports `running` / `stopped` / `not-installed` /
   `crash-loop-paused` (the crash-loop pause is overlaid from durable
   lifecycle state) plus `label`, `autoLaunch`, and a `crashLoop`
   object with `--json`.
-- `service start` / `restart` — act on the registered service
+- `service start` / `restart`: act on the registered service
   definition only. With none registered (auto-launch off, or a host
   that never ran `service install`) both answer `not-installed` with
   exit 0 instead of asking the service manager to kick a job it does
   not have; the text form names the command that registers one.
-- `service bootstrap` / `check` / `acknowledge` — the surfaces' shared
+- `service bootstrap` / `check` / `acknowledge`: the surfaces' shared
   lifecycle entry points (app startup, the periodic supervision tick,
   and clearing a crash-loop pause). All crash-loop policy runs in
   `core/lifecycle` against `<vapor_dir>/state/lifecycle.json`, so
   backoff and pause survive restarts and are shared across surfaces;
   the macOS app shells out to these same subcommands.
-- `auth login` — the profile's provider decides what it does. Google
+- `auth login`: the profile's provider decides what it does. Google
   Drive runs PKCE in the user's browser with a localhost-loopback
   redirect (or reads a token on stdin when there is no terminal); the
   filesystem provider needs no sign-in and the command says so. Tokens
   go through `core/platform/secrets`.
-- `status`, `pause`, `resume`, `reconcile`, `timeline`, `diagnostics` —
+- `status`, `pause`, `resume`, `reconcile`, `timeline`, `diagnostics`:
   talk to a running daemon via the IPC channel
   (`docs/architecture/ipc-contracts.md`). Exit non-zero with a clear message
   if no daemon is running; never hang. `reconcile` is the on-demand path
   past the idle gate: the scan runs under any throttle state but
   `suspended`, and `--json` returns the daemon's ack for the app shim.
-- `doctor` — reports platform-specific sanity checks: inotify watch limits on
+- `doctor`: reports platform-specific sanity checks: inotify watch limits on
   Linux, Task Scheduler task presence on Windows, LaunchAgent plist presence
   on macOS, `VAPOR_DIR` permissions, daemon binary location + version.
 - `--user-activity=always|never|auto` (planned, not implemented) would
@@ -149,7 +152,7 @@ CLI distribution itself: Wave 14).
 
 ## 5) Developer ergonomics
 
-- Local run: `cargo run -p vapor -- <command>`.
+- Local run: `cargo run -p vapor-cli -- <command>`.
 - `vapor doctor` is the first command a contributor runs on a new host.
 - Install-from-source: `cargo install --path core/cli` (kept working for
   every supported host).
@@ -168,8 +171,8 @@ CLI distribution itself: Wave 14).
 
 ## 7) What the CLI deliberately does not do
 
-- It does not ship its own sync engine — it runs the same `core/daemon`.
-- It does not persist its own config — it reads/writes `vapor.json`.
+- It does not ship its own sync engine: it runs the same `core/daemon`.
+- It does not persist its own config: it reads/writes `vapor.json`.
 - It does not replace GUI diagnostics; it exposes the same information in
   text/JSON form.
 
@@ -179,7 +182,7 @@ Logic + snapshot + integration tests. The full policy lives in
 `AGENTS.md §9` and `docs/architecture/testing-strategy.md`; the CLI-
 specific scope is:
 
-- **Tested** — argument parsing (`clap`), exit code discipline,
+- **Tested**: argument parsing (`clap`), exit code discipline,
   `--json` output shape via explicit assertion tests (one per `--json`
   command; `insta` snapshots are an open task), IPC client correctness
   against a fake daemon,
@@ -189,7 +192,7 @@ specific scope is:
   `./scripts/e2e.sh` (and on each additional OS once its optional
   wave lands), "no daemon running" error paths (every IPC-backed
   command exits non-zero within 1 s; never hangs).
-- **Not tested** — color codes, cursor positioning, terminal resize
+- **Not tested**: color codes, cursor positioning, terminal resize
   handling, ncurses or TTY-capability interactions, progress-bar
   rendering timing.
 

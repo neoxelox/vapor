@@ -1,4 +1,3 @@
-use std::env;
 use std::path::{Path, PathBuf};
 
 use vapor_shared::{SyncMode, constants, runtime_paths};
@@ -11,81 +10,90 @@ pub struct SyncScope {
     pub cloud_root: String,
     /// Sync direction for this scope. Carried on the scope so
     /// every pipeline gate (ingest, remote apply, reconcile, executor)
-    /// consults the same value — no operation can bypass it.
+    /// consults the same value, no operation can bypass it.
     pub sync_mode: SyncMode,
 }
 
-/// Resolves the sync scope from `vapor.json`: the configured value, or
-/// the compiled default when the key is unset or blank.
+/// Resolves the sync scope from `vapor.json`. A root the user did not
+/// set stays unset: there is no compiled default, and the caller
+/// composes no profile for such a scope.
 pub fn resolve_with_config(config: &vapor_shared::config::VaporConfig) -> SyncScope {
-    let current_directory = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home_directory = home_directory();
-    resolve_scope(config, &current_directory, home_directory.as_deref())
+    resolve_scope(config, home_directory.as_deref())
 }
 
 fn resolve_scope(
     config: &vapor_shared::config::VaporConfig,
-    current_directory: &Path,
     home_directory: Option<&Path>,
 ) -> SyncScope {
-    let local_raw = first_non_empty(&[
-        Some(config.local_root.as_str()),
-        Some(constants::filtering::DEFAULT_LOCAL_ROOT),
-    ]);
-    let local_root =
-        local_raw.and_then(|raw| resolve_local_directory(raw, current_directory, home_directory));
-    let cloud_root = resolve_cloud_directory(
-        config.effective_cloud_root(),
-        &config.provider,
-        current_directory,
-        home_directory,
-    );
+    let local_root = config
+        .configured_local_root()
+        .and_then(|raw| resolve_local_directory(raw, home_directory));
+    let cloud_root = config
+        .configured_cloud_root()
+        .map(|raw| resolve_cloud_directory(raw, &config.provider, home_directory))
+        .unwrap_or_default();
 
     SyncScope {
         local_root,
         cloud_root,
-        sync_mode: resolve_sync_mode(&config.sync_mode),
+        // A value this function cannot read is the caller's to refuse
+        // (`parse_sync_mode`); two-way is the one mode that never
+        // deletes or overwrites to converge.
+        sync_mode: parse_sync_mode(&config.sync_mode).unwrap_or(SyncMode::TwoWay),
     }
 }
 
-/// Resolves the configured `syncMode` string. Unknown values fall back
-/// to the safe default (`two-way` never deletes or overwrites to
-/// converge) with a loud warning — a typo must not silently activate a
-/// destructive strict-mirror mode, and equally must not activate any
-/// mode the user did not spell exactly (one-way is explicit
-/// opt-in, never inferred).
-fn resolve_sync_mode(raw: &str) -> SyncMode {
-    match SyncMode::from_config_value(raw) {
-        Some(mode) => mode,
-        None => {
-            logging::warning(
-                "Unknown syncMode value; using the safe two-way default",
-                &[
-                    ("configured_sync_mode", raw.to_string()),
-                    ("accepted", constants::sync_mode::ALL.join(", ")),
-                ],
-            );
-            SyncMode::TwoWay
-        }
+/// Reads a `syncMode` value. An unknown value is an error that names
+/// it, never a fallback: a typo of `pull-only` that ran as two-way
+/// would send local edits and deletions to the cloud folder the user
+/// meant to protect.
+pub fn parse_sync_mode(raw: &str) -> Result<SyncMode, String> {
+    SyncMode::from_config_value(raw).ok_or_else(|| {
+        format!(
+            "unknown syncMode {raw:?}; use one of {}",
+            constants::sync_mode::ALL.join(", ")
+        )
+    })
+}
+
+/// Why a root that is set cannot be used as it is written, if it
+/// cannot. A relative path has no fixed meaning for a daemon: its
+/// working directory is `/` under launchd and the terminal's directory
+/// under `vapor run`, so the same `vapor.json` would sync two different
+/// folders.
+pub fn unusable_root(config: &vapor_shared::config::VaporConfig) -> Option<String> {
+    use constants::config as keys;
+    let problem = |key: &str, raw: &str| {
+        format!("`{key}` is a relative path ({raw}); write the full path, or start it with `~/`")
+    };
+    if let Some(local) = config.configured_local_root()
+        && is_relative(local)
+    {
+        return Some(problem(keys::KEY_LOCAL_ROOT, local));
     }
+    // Only the filesystem provider's cloud root is a path on this
+    // device; another provider's is a path inside the cloud.
+    if config.provider.trim() == constants::provider::FILESYSTEM
+        && let Some(cloud) = config.configured_cloud_root()
+        && is_relative(cloud)
+    {
+        return Some(problem(keys::KEY_CLOUD_ROOT, cloud));
+    }
+    None
 }
 
-/// First candidate that is non-empty after trimming.
-fn first_non_empty<'a>(candidates: &[Option<&'a str>]) -> Option<&'a str> {
-    candidates
-        .iter()
-        .flatten()
-        .map(|value| value.trim())
-        .find(|value| !value.is_empty())
+fn is_relative(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    !(trimmed == "~" || trimmed.starts_with("~/") || Path::new(trimmed).is_absolute())
 }
 
-fn resolve_local_directory(
-    raw: &str,
-    current_directory: &Path,
-    home_directory: Option<&Path>,
-) -> Option<PathBuf> {
-    let Some(path) = resolve_path(raw, current_directory, home_directory) else {
-        logging::warning("No local root configured; daemon will remain idle", &[]);
+fn resolve_local_directory(raw: &str, home_directory: Option<&Path>) -> Option<PathBuf> {
+    let Some(path) = resolve_path(raw, home_directory) else {
+        logging::warning(
+            "The local root cannot be resolved to a full path; the profile does not run",
+            &[("local_root", raw.to_string())],
+        );
         return None;
     };
 
@@ -106,27 +114,20 @@ fn resolve_local_directory(
 fn resolve_cloud_directory(
     raw: &str,
     provider_kind: &str,
-    current_directory: &Path,
     home_directory: Option<&Path>,
 ) -> String {
     let trimmed = raw.trim();
-    let trimmed = if trimmed.is_empty() {
-        constants::filtering::default_cloud_root(provider_kind)
-    } else {
-        trimmed
-    };
 
     // The filesystem provider's "cloud" root is a local directory:
-    // resolve it exactly like the local root (tilde expansion,
-    // cwd-anchored relative paths). Blindly prefixing `/` turned
-    // `~/x` into the unusable literal `/~/x`. Real cloud providers
-    // keep the root-relative remote-path semantics below.
+    // resolve it exactly like the local root (tilde expansion). A real
+    // cloud provider keeps the root-relative remote-path semantics
+    // below.
     if provider_kind.trim() == constants::provider::FILESYSTEM {
-        return match resolve_path(trimmed, current_directory, home_directory) {
+        return match resolve_path(trimmed, home_directory) {
             Some(path) => path.to_string_lossy().into_owned(),
-            // A `~` path with no home to expand against stays as
-            // written; the root check reports it instead of a
-            // manufactured path.
+            // A path that does not resolve (relative, or `~` with no
+            // home to expand against) stays as written; the profile
+            // check reports it instead of a manufactured path.
             None => trimmed.to_string(),
         };
     }
@@ -139,66 +140,104 @@ fn resolve_cloud_directory(
 }
 
 /// Overlap guard for filesystem-backed profiles. The provider's
-/// "cloud" root is a local directory; if it equals — or nests inside
-/// or around — the watched local root, the engine ingests its own
+/// "cloud" root is a local directory; if it equals, or nests inside
+/// or around: the watched local root, the engine ingests its own
 /// provider writes as fresh local changes (self-sustaining churn, and
 /// potentially destructive under a pull-only strict mirror). Returns
 /// the actionable refusal reason when the roots overlap.
 pub fn filesystem_roots_overlap(local_root: &Path, cloud_root: &str) -> Option<String> {
-    let local = canonicalize_for_overlap(local_root);
-    let cloud = canonicalize_for_overlap(Path::new(cloud_root));
-    if local == cloud {
+    roots_overlap(
+        local_root,
+        Path::new(cloud_root),
+        &crate::name_collision::folds_case_at,
+    )
+}
+
+/// `folds_case` says whether the volume of a folder that exists folds
+/// names; it is asked about the deepest ancestor that exists.
+fn roots_overlap(
+    local_root: &Path,
+    cloud_root: &Path,
+    folds_case: &dyn Fn(&Path) -> bool,
+) -> Option<String> {
+    let local = OverlapPath::of(local_root, folds_case);
+    let cloud = OverlapPath::of(cloud_root, folds_case);
+    if local.compared == cloud.compared {
         Some(format!(
             "localRoot and cloudRoot resolve to the same directory ({})",
-            local.display()
+            local.shown.display()
         ))
-    } else if cloud.starts_with(&local) {
+    } else if cloud.compared.starts_with(&local.compared) {
         Some(format!(
             "cloudRoot {} is inside localRoot {}",
-            cloud.display(),
-            local.display()
+            cloud.shown.display(),
+            local.shown.display()
         ))
-    } else if local.starts_with(&cloud) {
+    } else if local.compared.starts_with(&cloud.compared) {
         Some(format!(
             "localRoot {} is inside cloudRoot {}",
-            local.display(),
-            cloud.display()
+            local.shown.display(),
+            cloud.shown.display()
         ))
     } else {
         None
     }
 }
 
-/// Canonicalizes the deepest existing ancestor and re-appends the
-/// missing tail (the cloud root may not exist yet at composition
-/// time); falls back to the input when nothing canonicalizes. Keeps
-/// symlinked and real spellings from evading the overlap check.
-fn canonicalize_for_overlap(path: &Path) -> PathBuf {
-    let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
-    let mut ancestor = path;
-    loop {
-        if let Ok(canonical) = vapor_shared::paths::canonicalize(ancestor) {
-            let mut resolved = canonical;
-            for name in missing_tail.iter().rev() {
-                resolved.push(name);
+/// A root as the overlap check sees it: the deepest ancestor that
+/// exists, canonical (so a symbolic link and its target compare
+/// equal), with the names that do not exist yet appended.
+struct OverlapPath {
+    /// The path as messages show it.
+    shown: PathBuf,
+    /// The path as it is compared. A name that exists has its true
+    /// spelling from the filesystem. A name that does not exist yet has
+    /// none: on a volume that ignores case, `Sync` and `sync` will be
+    /// one folder, so those names are compared folded.
+    compared: PathBuf,
+}
+
+impl OverlapPath {
+    fn of(path: &Path, folds_case: &dyn Fn(&Path) -> bool) -> Self {
+        let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
+        let mut ancestor = path;
+        loop {
+            if let Ok(canonical) = vapor_shared::paths::canonicalize(ancestor) {
+                let fold_missing_names = !missing_tail.is_empty() && folds_case(&canonical);
+                let mut shown = canonical.clone();
+                let mut compared = canonical;
+                for name in missing_tail.iter().rev() {
+                    shown.push(name);
+                    match name.to_str() {
+                        Some(text) if fold_missing_names => {
+                            compared.push(vapor_shared::paths::fold_name(text));
+                        }
+                        _ => compared.push(name),
+                    }
+                }
+                return Self { shown, compared };
             }
-            return resolved;
-        }
-        match (ancestor.parent(), ancestor.file_name()) {
-            (Some(parent), Some(name)) => {
-                missing_tail.push(name.to_os_string());
-                ancestor = parent;
+            match (ancestor.parent(), ancestor.file_name()) {
+                (Some(parent), Some(name)) => {
+                    missing_tail.push(name.to_os_string());
+                    ancestor = parent;
+                }
+                _ => {
+                    return Self {
+                        shown: path.to_path_buf(),
+                        compared: path.to_path_buf(),
+                    };
+                }
             }
-            _ => return path.to_path_buf(),
         }
     }
 }
 
-fn resolve_path(
-    raw: &str,
-    current_directory: &Path,
-    home_directory: Option<&Path>,
-) -> Option<PathBuf> {
+/// The full path a root value names: `~` expands against the home
+/// directory, and an absolute path stays. `None` for a blank value, a
+/// `~` with no home directory, and a relative path, which is never
+/// resolved against the working directory (see [`unusable_root`]).
+fn resolve_path(raw: &str, home_directory: Option<&Path>) -> Option<PathBuf> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -213,11 +252,7 @@ fn resolve_path(
     }
 
     let path = PathBuf::from(trimmed);
-    if path.is_absolute() {
-        return Some(path);
-    }
-
-    Some(current_directory.join(path))
+    path.is_absolute().then_some(path)
 }
 
 fn home_directory() -> Option<PathBuf> {
@@ -235,30 +270,40 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_two_folders_under_home_for_the_filesystem_provider() {
+    fn roots_that_are_not_set_stay_unset() {
         let (_guard, home) = create_test_directory();
-
-        let scope = resolve_scope(&default_config(), Path::new("/tmp"), Some(home.as_path()));
-        assert_eq!(scope.local_root, Some(home.join("Vapor")));
-        assert_eq!(scope.cloud_root, home.join("cloud/Vapor").to_string_lossy());
+        for provider in [constants::provider::FILESYSTEM, constants::provider::GDRIVE] {
+            let mut config = default_config();
+            config.provider = provider.to_string();
+            let scope = resolve_scope(&config, Some(home.as_path()));
+            assert_eq!(scope.local_root, None, "{provider}");
+            assert_eq!(scope.cloud_root, "", "{provider}");
+        }
         assert!(
-            filesystem_roots_overlap(&home.join("Vapor"), &scope.cloud_root).is_none(),
-            "the two defaults must never nest"
-        );
-        assert!(
-            !home.join("Vapor").exists(),
-            "resolution names the root; the root identity check creates it"
+            !home.join("Vapor").exists() && !home.join("cloud").exists(),
+            "nothing is created for a root nobody chose"
         );
     }
 
     #[test]
-    fn defaults_to_the_account_root_folder_for_a_remote_provider() {
+    fn the_roots_that_setup_offers_never_nest() {
         let (_guard, home) = create_test_directory();
-        let mut config = default_config();
-        config.provider = constants::provider::GDRIVE.to_string();
-
-        let scope = resolve_scope(&config, Path::new("/tmp"), Some(home.as_path()));
-        assert_eq!(scope.cloud_root, "/Vapor");
+        let config = VaporConfig {
+            local_root: Some(constants::filtering::DEFAULT_LOCAL_ROOT.to_string()),
+            cloud_root: Some(
+                constants::filtering::default_cloud_root(constants::provider::FILESYSTEM)
+                    .to_string(),
+            ),
+            ..default_config()
+        };
+        let scope = resolve_scope(&config, Some(home.as_path()));
+        assert_eq!(scope.local_root, Some(home.join("Vapor")));
+        assert_eq!(scope.cloud_root, home.join("cloud/Vapor").to_string_lossy());
+        assert!(filesystem_roots_overlap(&home.join("Vapor"), &scope.cloud_root).is_none());
+        assert!(
+            !home.join("Vapor").exists(),
+            "resolution names the root; the root identity check creates it"
+        );
     }
 
     #[test]
@@ -269,7 +314,7 @@ mod tests {
             ..VaporConfig::default()
         };
 
-        let scope = resolve_scope(&config, Path::new("/tmp"), Some(home.as_path()));
+        let scope = resolve_scope(&config, Some(home.as_path()));
 
         assert_eq!(
             scope.cloud_root,
@@ -287,7 +332,7 @@ mod tests {
             ..VaporConfig::default()
         };
 
-        let scope = resolve_scope(&config, Path::new("/tmp"), Some(home.as_path()));
+        let scope = resolve_scope(&config, Some(home.as_path()));
 
         assert_eq!(scope.cloud_root, "/Backups/Vapor");
     }
@@ -343,34 +388,28 @@ mod tests {
         let (_guard, root) = create_test_directory();
         let configured = root.join("from-config");
         let config = VaporConfig {
-            local_root: configured.to_string_lossy().into_owned(),
+            local_root: Some(configured.to_string_lossy().into_owned()),
             cloud_root: Some("/FromConfig".to_string()),
             ..VaporConfig::default()
         };
 
-        let scope = resolve_scope(&config, Path::new("/tmp"), None);
+        let scope = resolve_scope(&config, None);
 
         assert_eq!(scope.local_root, Some(configured));
         assert_eq!(scope.cloud_root, "/FromConfig");
     }
 
     #[test]
-    fn blank_values_fall_back_to_the_defaults() {
+    fn blank_values_are_unset() {
         let config = VaporConfig {
-            local_root: "   ".to_string(),
+            local_root: Some("   ".to_string()),
             cloud_root: Some(String::new()),
             ..VaporConfig::default()
         };
 
-        let scope = resolve_scope(&config, Path::new("/tmp"), None);
-
-        // No home directory to expand `~` against, so both defaults stay
-        // as written rather than becoming a bogus path.
+        let scope = resolve_scope(&config, None);
         assert_eq!(scope.local_root, None);
-        assert_eq!(
-            scope.cloud_root,
-            constants::filtering::DEFAULT_FILESYSTEM_CLOUD_ROOT
-        );
+        assert_eq!(scope.cloud_root, "");
     }
 
     #[test]
@@ -379,12 +418,12 @@ mod tests {
         let missing = root.join("missing");
 
         let config = VaporConfig {
-            local_root: missing.to_string_lossy().into_owned(),
+            local_root: Some(missing.to_string_lossy().into_owned()),
             cloud_root: Some("/Cloud".to_string()),
             provider: constants::provider::GDRIVE.to_string(),
             ..VaporConfig::default()
         };
-        let scope = resolve_scope(&config, Path::new("/tmp"), None);
+        let scope = resolve_scope(&config, None);
         assert_eq!(scope.local_root, Some(missing.clone()));
         assert!(!missing.exists());
         assert_eq!(scope.cloud_root, "/Cloud");
@@ -397,85 +436,94 @@ mod tests {
         std::fs::write(&file_path, b"x").expect("failed to create file path");
 
         let config = VaporConfig {
-            local_root: file_path.to_string_lossy().into_owned(),
+            local_root: Some(file_path.to_string_lossy().into_owned()),
             cloud_root: Some("/Cloud".to_string()),
             provider: constants::provider::GDRIVE.to_string(),
             ..VaporConfig::default()
         };
-        let scope = resolve_scope(&config, Path::new("/tmp"), None);
+        let scope = resolve_scope(&config, None);
         assert!(scope.local_root.is_none());
         assert_eq!(scope.cloud_root, "/Cloud");
     }
 
     #[test]
-    fn invalid_local_sync_path_does_not_fall_back_to_current_or_home_directory() {
+    fn a_local_root_that_is_a_file_does_not_fall_back_to_the_home_directory() {
         let (_guard, root) = create_test_directory();
-        let current_directory = root.join("current-directory");
         let home_directory = root.join("home-directory");
         let file_path = root.join("not-a-directory");
-        std::fs::create_dir_all(&current_directory).expect("failed to create current directory");
         std::fs::create_dir_all(&home_directory).expect("failed to create home directory");
         std::fs::write(&file_path, b"x").expect("failed to create file path");
 
         let config = VaporConfig {
-            local_root: file_path.to_string_lossy().into_owned(),
+            local_root: Some(file_path.to_string_lossy().into_owned()),
             ..VaporConfig::default()
         };
-        let scope = resolve_scope(
-            &config,
-            current_directory.as_path(),
-            Some(home_directory.as_path()),
-        );
-
+        let scope = resolve_scope(&config, Some(home_directory.as_path()));
         assert!(scope.local_root.is_none());
-        assert_ne!(scope.local_root, Some(current_directory));
-        assert_ne!(scope.local_root, Some(home_directory));
     }
 
     #[test]
-    fn resolves_relative_local_path_against_current_directory() {
+    fn a_relative_root_is_refused_and_never_resolved_against_the_working_directory() {
         let (_guard, root) = create_test_directory();
-        let projects = root.join("projects");
-        std::fs::create_dir_all(&projects).expect("failed to create projects directory");
-
+        // The working directory of the test process holds no `projects`
+        // folder; a root resolved against it would name one there.
         let config = VaporConfig {
-            local_root: "projects".to_string(),
+            local_root: Some("projects".to_string()),
+            cloud_root: Some(root.join("cloud").to_string_lossy().into_owned()),
+            ..VaporConfig::default()
+        };
+        let problem = unusable_root(&config).expect("a relative local root is a problem");
+        assert!(
+            problem.contains("`localRoot` is a relative path (projects)"),
+            "{problem}"
+        );
+        assert_eq!(
+            resolve_scope(&config, Some(root.as_path())).local_root,
+            None
+        );
+
+        // The filesystem provider's cloud root is a path on this device.
+        let config = VaporConfig {
+            local_root: Some(root.join("local").to_string_lossy().into_owned()),
             cloud_root: Some("cloud-folder".to_string()),
             ..VaporConfig::default()
         };
-        let scope = resolve_scope(&config, &root, None);
-        assert_eq!(scope.local_root, Some(projects));
-        // The default provider is filesystem-backed: its cloud root is a
-        // local path and resolves against the current directory like the
-        // local root does.
-        assert_eq!(
-            scope.cloud_root,
-            root.join("cloud-folder").to_string_lossy()
+        let problem = unusable_root(&config).expect("a relative cloud root is a problem");
+        assert!(
+            problem.contains("`cloudRoot` is a relative path"),
+            "{problem}"
         );
+
+        // Another provider's cloud root is a path inside the cloud; the
+        // home directory and a full path are fine for the local root.
+        for (local, cloud, provider) in [
+            ("~/Photos", "Backups/Vapor", constants::provider::GDRIVE),
+            ("~", "~/cloud/Vapor", constants::provider::FILESYSTEM),
+        ] {
+            let config = VaporConfig {
+                provider: provider.to_string(),
+                local_root: Some(local.to_string()),
+                cloud_root: Some(cloud.to_string()),
+                ..VaporConfig::default()
+            };
+            assert_eq!(unusable_root(&config), None, "{local} / {cloud}");
+        }
     }
 
     #[test]
-    fn a_configured_local_root_resolves_to_itself_not_the_cwd_or_home() {
-        let (_guard, root) = create_test_directory();
-        let current_directory = root.join("current-directory");
-        let home_directory = root.join("home-directory");
-        let configured = root.join("nested").join("sync-root");
-        std::fs::create_dir_all(&current_directory).expect("failed to create current directory");
-        std::fs::create_dir_all(&home_directory).expect("failed to create home directory");
-
-        let config = VaporConfig {
-            local_root: configured.to_string_lossy().into_owned(),
-            ..VaporConfig::default()
-        };
-        let scope = resolve_scope(
-            &config,
-            current_directory.as_path(),
-            Some(home_directory.as_path()),
-        );
-
-        assert_eq!(scope.local_root, Some(configured.clone()));
-        assert_ne!(scope.local_root, Some(current_directory));
-        assert_ne!(scope.local_root, Some(home_directory));
+    fn roots_that_do_not_exist_yet_and_differ_only_by_case_overlap_where_case_is_ignored() {
+        let temp = TempDir::new().expect("temp dir");
+        let base = vapor_shared::paths::canonicalize(temp.path()).expect("canonical base");
+        let local = base.join("Sync");
+        let cloud = base.join("sync");
+        // On a volume that ignores case the two names will be one
+        // folder; on one that does not, they are two.
+        assert!(roots_overlap(&local, &cloud, &|_| true).is_some());
+        assert!(roots_overlap(&local, &cloud.join("cloud"), &|_| true).is_some());
+        assert!(roots_overlap(&local, &cloud, &|_| false).is_none());
+        // A name that exists keeps its true spelling: folding the names
+        // that are missing never joins two folders that both exist.
+        assert!(roots_overlap(&local, &base.join("Sync-cloud"), &|_| true).is_none());
     }
 
     #[test]
@@ -483,7 +531,7 @@ mod tests {
         // One-way modes are never inferred. Only the
         // exact configured value activates them; anything else lands on
         // the safe two-way default.
-        let scope = resolve_scope(&default_config(), Path::new("/tmp"), None);
+        let scope = resolve_scope(&default_config(), None);
         assert_eq!(scope.sync_mode, vapor_shared::SyncMode::TwoWay);
 
         let pull = VaporConfig {
@@ -491,7 +539,7 @@ mod tests {
             ..VaporConfig::default()
         };
         assert_eq!(
-            resolve_scope(&pull, Path::new("/tmp"), None).sync_mode,
+            resolve_scope(&pull, None).sync_mode,
             vapor_shared::SyncMode::PullOnly
         );
 
@@ -500,24 +548,33 @@ mod tests {
             ..VaporConfig::default()
         };
         assert_eq!(
-            resolve_scope(&push, Path::new("/tmp"), None).sync_mode,
+            resolve_scope(&push, None).sync_mode,
             vapor_shared::SyncMode::PushOnly
         );
     }
 
     #[test]
-    fn unknown_sync_mode_values_fall_back_to_the_safe_default() {
+    fn an_unknown_sync_mode_is_an_error_that_names_the_value() {
         for bogus in ["mirror", "Pull-Only", "pullonly", "one-way", ""] {
+            let error = parse_sync_mode(bogus).expect_err("unknown");
+            assert!(error.contains(&format!("{bogus:?}")), "{error}");
+            assert!(error.contains("pull-only"), "{error}");
+            // The scope itself never carries a destructive mode for a
+            // value nobody can read.
             let config = VaporConfig {
                 sync_mode: bogus.to_string(),
                 ..VaporConfig::default()
             };
             assert_eq!(
-                resolve_scope(&config, Path::new("/tmp"), None).sync_mode,
+                resolve_scope(&config, None).sync_mode,
                 vapor_shared::SyncMode::TwoWay,
                 "'{bogus}' must not activate any mode"
             );
         }
+        assert_eq!(
+            parse_sync_mode("push-only"),
+            Ok(vapor_shared::SyncMode::PushOnly)
+        );
     }
 
     fn create_test_directory() -> (TempDir, PathBuf) {

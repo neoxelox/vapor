@@ -63,9 +63,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ github.workflow }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ github.workflow }}-
+            ${{ runner.os }}-cargo-lint-
 
       - name: Cache SwiftPM dependencies
         if: matrix.scope == 'full'
@@ -75,6 +75,19 @@ jobs:
           key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
           restore-keys: |
             ${{ runner.os }}-spm-
+
+      # A cargo subcommand built from crates.io, not an action. The
+      # binary lands in ~/.cargo/bin, which the Rust cache above keeps.
+      - name: Install cargo-deny
+        shell: bash
+        env:
+          CARGO_DENY_VERSION: 0.20.2
+        run: |
+          set -euo pipefail
+
+          if ! cargo deny --version 2>/dev/null | grep -Fq "$CARGO_DENY_VERSION"; then
+            cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
+          fi
 
       - name: Run lint checks
         shell: bash

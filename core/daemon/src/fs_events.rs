@@ -136,21 +136,37 @@ impl From<FsWatcherError> for FsEventsWatcherError {
     }
 }
 
-/// Live, swappable path filter shared between the fs-watch callback and
+/// Live, swappable path filter shared between the fs-watch bridge and
 /// the runtime thread.
 ///
-/// The callback reads it (cheap `RwLock` read) and flags a reload when it
-/// observes a change to an ignore file; the runtime thread performs the
-/// expensive rebuild (a tree walk + glob compilation) between ticks via
-/// [`SharedEventPathFilter::rebuild_if_requested`], so ignore-rule edits
-/// take effect without a daemon restart and without heavy work in the
-/// callback path.
-#[derive(Debug)]
+/// The bridge reads it (cheap `RwLock` read) and flags a reload when it
+/// observes a change to an ignore file. The rebuild (a tree walk for
+/// ignore files, then glob compilation) is started by the runtime
+/// thread and runs on a worker ([`SharedEventPathFilter::drive_rebuild`]);
+/// the rules in force stay in force until the new ones are in. Ignore
+/// rule edits take effect without a daemon restart and without heavy
+/// work on the bridge or the tick thread.
 pub struct SharedEventPathFilter {
     watch_root: PathBuf,
     options: RwLock<EventPathFilterOptions>,
     filter: RwLock<EventPathFilter>,
     reload_requested: AtomicBool,
+    /// The rebuild in flight, if any.
+    rebuild: std::sync::Mutex<Option<crate::provider_jobs::ProviderCall<EventPathFilter>>>,
+    /// Counts the rebuilds that changed what the rules decide. A
+    /// runtime that sees a new value queues a whole-scope reconcile:
+    /// a file the old rules hid is in scope now, and nothing else
+    /// would notice it until it changes.
+    rules_generation: std::sync::atomic::AtomicU64,
+}
+
+impl std::fmt::Debug for SharedEventPathFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedEventPathFilter")
+            .field("watch_root", &self.watch_root)
+            .field("rules_generation", &self.rules_generation())
+            .finish_non_exhaustive()
+    }
 }
 
 impl SharedEventPathFilter {
@@ -161,23 +177,21 @@ impl SharedEventPathFilter {
             options: RwLock::new(options),
             filter: RwLock::new(filter),
             reload_requested: AtomicBool::new(false),
+            rebuild: std::sync::Mutex::new(None),
+            rules_generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    /// Swaps the toggles and user rules (a live `vapor.json` change) and
-    /// rebuilds the filter in place, so every holder of this shared
-    /// instance, watcher callback included, sees the new rules at once.
+    /// Takes the toggles and user rules of a live `vapor.json` change.
+    /// The filter is rebuilt by the next [`Self::drive_rebuild`], so
+    /// every holder of this shared instance, the watcher bridge
+    /// included, sees the new rules together.
     pub fn replace_options(&self, options: EventPathFilterOptions) {
-        let rebuilt = EventPathFilter::for_watch_root(&self.watch_root, &options);
         *self
             .options
             .write()
             .expect("SharedEventPathFilter options lock poisoned") = options;
-        *self
-            .filter
-            .write()
-            .expect("SharedEventPathFilter lock poisoned") = rebuilt;
-        self.reload_requested.store(false, Ordering::Release);
+        self.request_reload();
     }
 
     pub fn should_ignore(&self, path: &Path) -> bool {
@@ -185,6 +199,24 @@ impl SharedEventPathFilter {
             .read()
             .expect("SharedEventPathFilter lock poisoned")
             .should_ignore(path)
+    }
+
+    /// [`Self::should_ignore`] for a path whose kind the caller knows.
+    pub fn should_ignore_kind(&self, path: &Path, is_folder: bool) -> bool {
+        self.filter
+            .read()
+            .expect("SharedEventPathFilter lock poisoned")
+            .should_ignore_kind(path, is_folder)
+    }
+
+    /// Whether a rule keeps `path` out of sync
+    /// ([`EventPathFilter::ignored_by_rule`]).
+    pub fn is_ignored_by_rule(&self, path: &Path, is_folder: bool) -> bool {
+        self.filter
+            .read()
+            .expect("SharedEventPathFilter lock poisoned")
+            .ignored_by_rule(path, is_folder)
+            .is_some()
     }
 
     /// Canonical root the filter's relative-path matching is anchored
@@ -195,7 +227,7 @@ impl SharedEventPathFilter {
         &self.watch_root
     }
 
-    /// Called from the fs-watch callback when an ignore file changed.
+    /// Called from the fs-watch bridge when an ignore file changed.
     pub fn request_reload(&self) {
         self.reload_requested.store(true, Ordering::Release);
     }
@@ -219,37 +251,85 @@ impl SharedEventPathFilter {
         }
     }
 
-    /// Rebuilds the compiled filter when a reload was requested. Runs on
-    /// the runtime thread (never the callback); returns whether a rebuild
-    /// happened.
-    pub fn rebuild_if_requested(&self) -> bool {
-        if !self.reload_requested.swap(false, Ordering::AcqRel) {
-            return false;
-        }
+    /// How many rebuilds changed what the rules decide.
+    pub fn rules_generation(&self) -> u64 {
+        self.rules_generation.load(Ordering::Acquire)
+    }
 
-        let rebuilt = {
+    /// Moves a requested rebuild forward, from the runtime thread: puts
+    /// a finished one in force, and starts one when a reload was
+    /// requested and none runs. With a threaded `mode` the walk and the
+    /// compilation run on a worker and land on a later call; inline,
+    /// they finish in this call. Returns whether new rules went in
+    /// force.
+    pub(crate) fn drive_rebuild(&self, mode: &crate::provider_jobs::ProviderCallMode) -> bool {
+        let mut rebuild = self
+            .rebuild
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if rebuild.is_none() && self.reload_requested.swap(false, Ordering::AcqRel) {
+            let watch_root = self.watch_root.clone();
             let options = self
                 .options
                 .read()
-                .expect("SharedEventPathFilter options lock poisoned");
-            EventPathFilter::for_watch_root(&self.watch_root, &options)
+                .expect("SharedEventPathFilter options lock poisoned")
+                .clone();
+            *rebuild = Some(crate::provider_jobs::ProviderCall::start(
+                mode,
+                "ignore-rules",
+                move || EventPathFilter::for_watch_root(&watch_root, &options),
+            ));
+        }
+        let Some(outcome) = rebuild.as_mut().and_then(|call| call.take()) else {
+            return false;
         };
-        *self
-            .filter
-            .write()
-            .expect("SharedEventPathFilter lock poisoned") = rebuilt;
+        *rebuild = None;
+        let rebuilt = match outcome {
+            Ok(rebuilt) => rebuilt,
+            Err(panic) => {
+                logging::warning(
+                    "Could not rebuild the ignore rules; the rules in force stay",
+                    &[
+                        ("watch_root", self.watch_root.display().to_string()),
+                        ("error", panic),
+                    ],
+                );
+                return false;
+            }
+        };
+        let changed = {
+            let mut filter = self
+                .filter
+                .write()
+                .expect("SharedEventPathFilter lock poisoned");
+            let changed = filter.signature() != rebuilt.signature();
+            *filter = rebuilt;
+            changed
+        };
+        if changed {
+            self.rules_generation.fetch_add(1, Ordering::AcqRel);
+        }
         logging::info(
-            "Reloaded ignore-rule path filter after an ignore file changed",
-            &[("watch_root", self.watch_root.display().to_string())],
+            "Reloaded the ignore rules",
+            &[
+                ("watch_root", self.watch_root.display().to_string()),
+                ("rules_changed", changed.to_string()),
+            ],
         );
         true
+    }
+
+    /// Rebuilds the filter in this call when a reload was requested;
+    /// returns whether a rebuild happened.
+    pub fn rebuild_if_requested(&self) -> bool {
+        self.drive_rebuild(&crate::provider_jobs::ProviderCallMode::Inline)
     }
 }
 
 /// The daemon's local watch: the platform [`FsWatcher`] owns the OS
 /// notifier (one OS-event→kind mapping for every surface, contract-
 /// tested in `core/platform`), and a bridge thread drains its channel
-/// through the daemon-side discipline — path normalization, ignore
+/// through the daemon-side discipline: path normalization, ignore
 /// filtering, ignore-file reload notes, recorder push. The OS callback
 /// itself only normalizes the kind and sends; everything heavier runs
 /// on the bridge.
@@ -275,7 +355,7 @@ impl FsEventsWatcher {
 
     /// Starts the watcher around a caller-owned filter so the runtime's
     /// non-callback consumers (reconcile walk, remote-change mapping)
-    /// observe the exact same rules — including ignore-file reloads —
+    /// observe the exact same rules, including ignore-file reloads,
     /// as the callback path. The filter must be anchored to the same
     /// canonical root.
     pub fn start_with_shared_filter(

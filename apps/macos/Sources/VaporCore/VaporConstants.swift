@@ -224,6 +224,8 @@ public enum VaporConstants {
     public static let running = "running"
     public static let paused = "paused"
     public static let error = "error"
+    /// No sync profile exists yet: the daemon is up and syncs nothing.
+    public static let unconfigured = "unconfigured"
   }
 
   public enum ThrottleState {

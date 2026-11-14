@@ -49,11 +49,27 @@ and the repository enforces `sha_pinning_required`:
 - `actions/checkout` v7.0.1
 - `maxim-lobanov/setup-xcode` v1.7.0
 - `actions-rust-lang/setup-rust-toolchain` v1.17.0
-- `actions/cache` v5.1.0 for Rust (`cargo`) and SwiftPM caches
+- `actions/cache` v5.1.0 for Rust (`cargo`) and SwiftPM caches. Each
+  of `lint.yml`, `test.yml`, and `build.yml` has its own word in the
+  key (`cargo-lint-`, `cargo-test-`, `cargo-build-`), so the three do
+  not overwrite each other inside one release run. The `package` job
+  of `release.yml` has no build cache: a job that signs builds from a
+  clean tree.
 - `actions/upload-artifact` v4.6.2 for the Tier E2E report, the soak
   and perf reports, and the release packages
 - `actions/download-artifact` v8.0.1 for the release packages in the
   `publish` job
+
+## Tools installed with cargo
+
+`lint.yml` installs `cargo-deny` (pinned in the workflow) with `cargo
+install`, from crates.io, into `~/.cargo/bin`, which the Rust cache
+keeps. It is a cargo subcommand, not an action, so the allowlist below
+does not change. `./scripts/lint.sh` runs `cargo deny check` against
+`deny.toml`: RustSec advisories and yanked crates, licenses, and crate
+sources. A new advisory can turn lint red on a change that did not
+touch a dependency; the fix is a dependency update, or an entry in
+`deny.toml` `ignore` with the reason.
 
 ## Action allowlist
 
@@ -63,7 +79,7 @@ reusable workflows, and these explicit third-party patterns:
 
 - `maxim-lobanov/setup-xcode@*`
 - `actions-rust-lang/setup-rust-toolchain@*`
-- `Swatinem/rust-cache@*` — not referenced by any workflow directly;
+- `Swatinem/rust-cache@*`, not referenced by any workflow directly;
   `setup-rust-toolchain` is a composite action whose `action.yml` uses
   it, and the policy is evaluated for every nested reference at
   *Set up job*, even though our call sites pass `cache: false` and the

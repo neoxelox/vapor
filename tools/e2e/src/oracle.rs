@@ -267,6 +267,7 @@ pub fn is_internal_name(name: &str) -> bool {
         || constants::filtering::INTERNAL_IGNORE_FILE_SUFFIXES
             .iter()
             .any(|suffix| name.ends_with(suffix))
+        || constants::filtering::INTERNAL_IGNORE_FILE_NAMES.contains(&name)
         || constants::filtering::INTERNAL_IGNORE_DIRECTORY_NAMES.contains(&name)
 }
 

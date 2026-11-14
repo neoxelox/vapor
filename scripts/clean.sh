@@ -4,11 +4,26 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # A manual e2e sandbox leaves its daemon running on purpose; stop it
-# before its home disappears from under it.
+# before its home disappears from under it. The pid file can outlive
+# its daemon, and the OS can give the number to another process, so the
+# signal goes only to a process whose command is Vapor's.
+is_vapor_process() {
+  local command
+  command="$(ps -p "$1" -o comm= 2>/dev/null || true)"
+  case "${command##*/}" in
+    vapord|vapor) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 for pid_file in "$ROOT_DIR"/.vapor/e2e/*/daemon.pid; do
   [[ -f "$pid_file" ]] || continue
   pid="$(tr -d '[:space:]' < "$pid_file")"
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+  [[ "$pid" =~ ^[0-9]+$ ]] || continue
+  if ! is_vapor_process "$pid"; then
+    continue
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
     echo "[clean] stopping sandbox daemon pid $pid"
     kill -TERM "$pid" 2>/dev/null || true
     for _ in $(seq 1 40); do

@@ -50,6 +50,7 @@ pub trait Service: Send + Sync {
         TimelineResponse {
             schema_version: daemon_supported_versions().0,
             entries: Vec::new(),
+            truncated: false,
         }
     }
 }
@@ -114,7 +115,7 @@ impl From<FrameError> for ServeError {
 /// Drives a single client connection to completion. Returns
 /// `Ok(())` when the client cleanly disconnects (or sends EOF after a
 /// clean response). Returns an error when the framing or handshake
-/// layer fails — callers typically log the error and move on to the
+/// layer fails: callers typically log the error and move on to the
 /// next connection rather than tear the whole server down.
 pub fn serve_connection<R, W>(
     reader: &mut R,
@@ -127,7 +128,7 @@ where
 {
     // 1. Handshake.
     let Some(first_frame) = read_next_frame(reader, writer)? else {
-        // The client connected and left without speaking — clean close.
+        // The client connected and left without speaking: clean close.
         return Ok(());
     };
     let request: Request = match serde_json::from_slice(&first_frame) {
@@ -166,7 +167,7 @@ where
         schema_version: current,
         supported_min_version: min,
         // Product version (workspace version, synced from the root VERSION
-        // file), not the schema version — the dedicated schema_version
+        // file), not the schema version: the dedicated schema_version
         // field already carries that.
         server_id: format!("vapord/{}", env!("CARGO_PKG_VERSION")),
     };
@@ -175,23 +176,22 @@ where
     // 2. Per-method loop.
     loop {
         let Some(next) = read_next_frame(reader, writer)? else {
-            // Clean EOF — the client closed at a frame boundary.
+            // Clean EOF: the client closed at a frame boundary.
             return Ok(());
         };
         let request: Request = match serde_json::from_slice(&next) {
             Ok(value) => value,
             Err(error) => {
-                // An unknown Method variant from a newer (in-window) peer
-                // fails the whole-envelope parse. Answer the documented
-                // MethodNotFound (so the client can tell "daemon too old
-                // for this command" from a genuine fault), reserving
-                // Backend for genuinely malformed frames.
-                let response = if error.to_string().contains("unknown variant") {
-                    let name =
-                        unknown_method_name(&next).unwrap_or_else(|| "<unknown>".to_string());
-                    Response::Err(ErrorBody::MethodNotFound(name))
-                } else {
-                    Response::Err(ErrorBody::Backend(format!("invalid request: {error}")))
+                // A method this build does not know, from a newer peer
+                // inside the version window, fails the whole-envelope
+                // parse. The frame's own shape says whether that is the
+                // case: a `Call` that names a method gets the documented
+                // MethodNotFound, so the client can tell "daemon too old
+                // for this command" from a fault. Anything else (an
+                // unknown envelope kind, a malformed frame) is Backend.
+                let response = match unknown_method_name(&next) {
+                    Some(name) => Response::Err(ErrorBody::MethodNotFound(name)),
+                    None => Response::Err(ErrorBody::Backend(format!("invalid request: {error}"))),
                 };
                 send_response(writer, response)?;
                 continue;
@@ -256,13 +256,18 @@ fn unknown_method_name(frame: &[u8]) -> Option<String> {
     if value.get("kind")?.as_str()? != "Call" {
         return None;
     }
-    match value.get("payload")?.get("method")? {
+    let method = value.get("payload")?.get("method")?;
+    let name = match method {
         // Unit variants serialize as a bare string; struct variants as a
         // single-key object.
-        serde_json::Value::String(name) => Some(name.clone()),
-        serde_json::Value::Object(map) => map.keys().next().cloned(),
-        _ => None,
-    }
+        serde_json::Value::String(name) => name.clone(),
+        serde_json::Value::Object(map) => map.keys().next().cloned()?,
+        _ => return None,
+    };
+    // A method this build knows whose frame still failed to parse is a
+    // malformed request, not a missing method.
+    let known = serde_json::from_value::<Method>(serde_json::Value::String(name.clone())).is_ok();
+    (!known).then_some(name)
 }
 
 /// Returns `Some(violation)` if the peer's announced version is
@@ -455,6 +460,46 @@ mod tests {
         match read_response_frame(&mut response_reader) {
             Response::Err(ErrorBody::MethodNotFound(name)) => assert_eq!(name, "FutureMethod"),
             other => panic!("expected MethodNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_a_call_that_names_an_unknown_method_is_method_not_found() {
+        let service = StaticService {
+            status: fixture_status(),
+        };
+        let mut request_buf = Vec::new();
+        write_request_frame(
+            &mut request_buf,
+            &Request::Hello(Hello {
+                schema_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
+                supported_min_version: vapor_shared::constants::ipc::SCHEMA_VERSION_CURRENT,
+                client_id: "vapor-cli/test".to_string(),
+            }),
+        );
+        // An envelope kind this build does not know, and a known method
+        // in a frame that does not parse: neither is a missing method.
+        for raw in [
+            &br#"{"kind":"Subscribe","payload":{"topic":"status"}}"#[..],
+            &br#"{"kind":"Call","payload":{"method":"Status","extra":{"#[..],
+            &br#"{"kind":"Call","payload":{"method":42}}"#[..],
+        ] {
+            write_frame(&mut request_buf, raw).expect("write raw frame");
+        }
+
+        let mut reader = Cursor::new(request_buf);
+        let mut response_buf = Vec::new();
+        serve_connection(&mut reader, &mut response_buf, &service).expect("serve");
+
+        let mut response_reader = Cursor::new(response_buf);
+        let _ack = read_response_frame(&mut response_reader);
+        for _ in 0..3 {
+            match read_response_frame(&mut response_reader) {
+                Response::Err(ErrorBody::Backend(message)) => {
+                    assert!(message.contains("invalid request"), "{message}");
+                }
+                other => panic!("expected Backend, got {other:?}"),
+            }
         }
     }
 

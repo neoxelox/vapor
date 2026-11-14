@@ -16,3 +16,23 @@ else
 fi
 
 "$ROOT_DIR/scripts/rust/format.sh" check
+
+# The locale catalogs parse as JSON: a broken catalog fails here, not
+# at the first build of the app.
+for catalog in "$ROOT_DIR"/assets/locales/*.json; do
+  [[ -f "$catalog" ]] || continue
+  if ! python3 -m json.tool "$catalog" >/dev/null; then
+    echo "[lint] $catalog is not valid JSON"
+    exit 1
+  fi
+done
+
+# No tracked text file holds an em dash (AGENTS.md §8.11). The
+# character is written as bytes here so this file passes its own check.
+em_dash=$'\xe2\x80\x94'
+if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if git -C "$ROOT_DIR" grep -n -I "$em_dash" -- .; then
+    echo "[lint] The lines above hold an em dash. Use a comma, a colon, or two sentences."
+    exit 1
+  fi
+fi

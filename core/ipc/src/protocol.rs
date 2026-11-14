@@ -1,10 +1,13 @@
 //! Wire-format types for the Vapor IPC channel.
 //!
 //! All payloads are JSON with camelCase keys and kebab-case values, the
-//! same shape `vapor … --json` prints. Top-level types carry an explicit
-//! `schemaVersion` per `docs/architecture/ipc-contracts.md`. We use
+//! same shape `vapor … --json` prints. The envelope is the exception:
+//! its tags, the method names, and the error codes are the Rust variant
+//! names (`Hello`, `Call`, `Status`, `Ok`, `MethodNotFound`). Top-level
+//! types carry an explicit `schemaVersion` per
+//! `docs/architecture/ipc-contracts.md`. We use
 //! `serde(default)` on every optional field so peer N-1 can omit fields
-//! peer N introduced without forcing a hard parse error — the "field
+//! peer N introduced without forcing a hard parse error: the "field
 //! omission tolerance" rule from the contracts doc.
 
 use serde::{Deserialize, Serialize};
@@ -32,7 +35,7 @@ pub struct Hello {
     pub schema_version: u32,
     #[serde(alias = "supported_min_version")]
     pub supported_min_version: u32,
-    /// Free-form identifier — e.g. `"vapor-cli/0.2.0-alpha.3"`. Not
+    /// Free-form identifier, e.g. `"vapor-cli/0.2.0-alpha.3"`. Not
     /// part of the contract; logged on the server side for diagnostics.
     #[serde(default, alias = "client_id")]
     pub client_id: String,
@@ -71,9 +74,9 @@ pub struct IncompatibleVersion {
 pub enum Method {
     /// Read the current daemon snapshot.
     Status,
-    /// Flip `RunState` to `Paused` — idempotent.
+    /// Flip `RunState` to `Paused`: idempotent.
     Pause,
-    /// Flip `RunState` back to `Running` — idempotent.
+    /// Flip `RunState` back to `Running`: idempotent.
     Resume,
     /// The user's on-demand sync: a whole-scope reconcile admitted
     /// under any throttle state but `Suspended`, and deferred work
@@ -81,7 +84,7 @@ pub enum Method {
     Reconcile,
     /// Read the bounded daemon activity timeline.
     Timeline,
-    /// Per-intent "why stuck" diagnostics (schema v2).
+    /// Per-intent "why stuck" diagnostics.
     Diagnostics,
 }
 
@@ -103,7 +106,7 @@ pub enum ResponseBody {
     Status(StatusResponse),
     /// Generic acknowledgement for fire-and-forget control endpoints
     /// (Pause / Resume / Reconcile). The `accepted` flag
-    /// reflects whether the request actually changed any state — the
+    /// reflects whether the request actually changed any state: the
     /// daemon currently always returns `true` once the request reaches
     /// the runtime, but
     /// future versions may return `false` for no-op cases (e.g.
@@ -128,7 +131,7 @@ pub struct TimelineEntry {
     pub timestamp_ms: u64,
     pub kind: String,
     pub message: String,
-    /// Profile the event belongs to (schema v2; empty on v1 peers).
+    /// Profile the event belongs to.
     #[serde(default)]
     pub profile_id: String,
 }
@@ -184,6 +187,10 @@ pub struct TimelineResponse {
     pub schema_version: u32,
     #[serde(default)]
     pub entries: Vec<TimelineEntry>,
+    /// True when the daemon left the oldest entries out so that the
+    /// response fits one frame.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// Wrapper response sent over the wire. Distinguishes success
@@ -319,6 +326,12 @@ pub struct ProfileStatus {
     /// `vapor auth login --profile <id>`; queued work is kept.
     #[serde(default)]
     pub sign_in_required: bool,
+    /// How many entries on this device the ignore rules keep out of
+    /// sync, as the last whole-scope scan counted them: a file, or a
+    /// folder with everything under it, is one. Absent until a scan
+    /// has finished. `vapor ignored` lists them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ignored_paths: Option<u64>,
 }
 
 /// A resource ceiling and how much of it is in use.
@@ -331,7 +344,11 @@ pub struct Ceiling {
     pub used_percent: u8,
 }
 
-/// The bandwidth ceiling; use is measured in kbit/s.
+/// The bandwidth ceiling. `limitPercent` is a share of the link
+/// capacity, which the daemon measures for each direction; `usedKbps`
+/// is what it moved over the last seconds, both directions together.
+/// A capacity is absent while nothing is known about that direction,
+/// and then that direction has no limit.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BandwidthCeiling {
@@ -339,6 +356,10 @@ pub struct BandwidthCeiling {
     pub limit_percent: u8,
     #[serde(default)]
     pub used_kbps: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_capacity_kbps: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_capacity_kbps: Option<u64>,
 }
 
 /// The effective ceilings (raised by idle boost while it is active),

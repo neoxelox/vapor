@@ -177,7 +177,7 @@ fn rotate_sink(sink: &mut LogSink) {
 
 /// Truncates a service-manager stdout/stderr redirect file at daemon
 /// startup if it has grown past the size cap. These are held open by
-/// launchd/systemd, so — unlike the structured log — we truncate in
+/// launchd/systemd, so (unlike the structured log) we truncate in
 /// place: the service's fd stays valid and its `O_APPEND` writes resume
 /// from the new (zero) EOF, whereas renaming the inode would leave the
 /// service writing into the rotated-away file forever.
@@ -194,7 +194,7 @@ pub fn trim_redirect_log_if_oversized(path: &std::path::Path) {
     }
 }
 
-/// `<path>.<generation>` — the rotated-generation file name.
+/// `<path>.<generation>`: the rotated-generation file name.
 fn rotated_path(path: &std::path::Path, generation: u32) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(format!(".{generation}"));
@@ -358,6 +358,15 @@ const INLINE_SECRET_MARKERS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_code_is_logged_and_a_key_that_names_a_credential_is_not() {
+        // The OAuth error code (`invalid_grant`) is what a runbook looks
+        // for; its key must not look like a credential to the redactor.
+        assert!(!is_sensitive_key("error_code"));
+        assert!(is_sensitive_key("oauth_error"));
+        assert!(is_sensitive_key("refresh_token"));
+    }
 
     #[test]
     fn parses_expected_log_levels() {

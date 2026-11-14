@@ -26,10 +26,10 @@ adopt the same runtime without forking behavior.
    budgets, and ignore-rule semantics are delivered on every supported OS.
    Missing an implementation on one OS is an "implement the platform trait"
    task, never a "skip it on that OS" decision.
-4. **The macOS Swift app keeps working unchanged.** Nothing about it needs to
-   become cross-platform. Runtime logic that today sits in Swift (daemon
-   lifecycle, crash-loop guard, service install) moves down into Rust so every
-   future platform inherits it; the macOS app calls the Rust-backed layer.
+4. **The macOS Swift app stays a macOS app.** Nothing about it needs to
+   become cross-platform. Runtime logic (daemon lifecycle, crash-loop
+   guard, service install) lives in Rust so every platform inherits it;
+   the macOS app calls the Rust-backed layer.
 5. **Performance is a per-platform commitment.** Each OS gets the idiomatic,
    native implementation of its platform trait. We do not accept portable
    implementations that cost measurable CPU, latency, or battery compared to
@@ -37,37 +37,36 @@ adopt the same runtime without forking behavior.
 6. **Testing is the feedback loop.** Vapor is coded autonomously. The suite is
    what the agent trusts. Core runtime work ships with heavy, scoped testing;
    app surfaces ship with logic tests only (no UI rendering or TTY interaction
-   tests — those are verified manually). Discipline rules and the full
+   tests: those are verified manually). Discipline rules and the full
    taxonomy live in `docs/architecture/testing-strategy.md`; the policy
    contract lives in `AGENTS.md §9`. Tier 1 (`./scripts/test.sh`) must stay
    under 5 minutes per OS on CI.
 
-## 2) Product architecture (target state)
+## 2) Product architecture
 
 ```
 core/
   daemon/     Rust sync engine (portable; no OS-specific calls)
   providers/  cloud provider adapters (portable; network code)
-  shared/     contracts, constants, types used across the workspace
+  shared/     constants, configuration model, error taxonomy, runtime paths
+  ipc/        the wire between the daemon and every surface
   platform/   traits + per-OS native implementations
-  lifecycle/  daemon lifecycle + crash-loop guard (moved from Swift)
+  lifecycle/  daemon lifecycle + crash-loop guard
   cli/        the `vapor` CLI binary
 
 apps/
-  macos/      SwiftUI/AppKit shell (unchanged)
+  macos/      SwiftUI/AppKit shell
   windows/    native Windows shell (LATER)
   linux/      native Linux shell (LATER)
 ```
 
-### 2.1 Portable engine (already works)
+How the pieces work today is in `docs/architecture/system-overview.md`
+and `docs/architecture/data-flow.md`. This plan holds the intent.
 
-- `core/daemon/src/{debounce, scheduler, throttle, workgate, reconcile, retry,
-  event_intents, storm, executor, state_db, path_filter}.rs` — zero OS
-  dependencies. Keep the current shape.
-- `core/providers/src/lib.rs` — `trait Provider` + `ProviderCapabilities`. Keep
-  the current shape.
-- `core/shared/src/{constants, runtime_paths, logging}.rs` — small portability
-  fixes listed in §4 below; structure unchanged.
+### 2.1 Portable engine
+
+`core/daemon`, `core/providers`, and `core/shared` call no OS API. They
+stay that way.
 
 ### 2.2 Platform abstraction layer (`core/platform`)
 
@@ -77,19 +76,11 @@ Traits listed in §3.
 
 ### 2.3 Daemon lifecycle (`core/lifecycle`)
 
-Moves from `apps/macos/Sources/VaporCore/DaemonLifecycle.swift` into Rust:
-
-- `DaemonLifecycleManager` — orchestrates install/enable, start, stop.
-- `CrashLoopGuard` — pure-logic backoff policy (5 crashes in 10 minutes →
-  `CrashLoopPaused`). Direct Swift → Rust port.
-- `AutoLaunchSettingStore` — reads/writes `vapor.json`'s `autoLaunch` field.
-  Swift and Rust share the same file.
-
-The macOS Swift app is a thin consumer of the Rust-backed lifecycle
-manager (it shells out to the bundled `vapor` CLI — `vapor service …
---json`). Windows, Linux, and CLI surfaces consume the same layer
-directly. Crash-loop bookkeeping persists across invocations and
-surfaces in `<vapor_dir>/state/lifecycle.json`.
+`DaemonLifecycleManager`, `CrashLoopGuard`, and `AutoLaunchSettingStore`
+are Rust. Every surface consumes them: the macOS app through the
+bundled `vapor` CLI (`vapor service ... --json`), the CLI and future
+apps directly. Crash-loop bookkeeping persists in
+`<vapor_dir>/state/lifecycle.json`.
 
 ### 2.4 The `vapor` CLI (`core/cli`)
 
@@ -102,163 +93,56 @@ universal control plane other apps can shell out to. Command surface in §7.
 The engine supports three sync directions, selected by the `syncMode` setting
 and owned entirely by the core runtime (apps only display it):
 
-- `two-way` (default) — bidirectional local ⇄ cloud with the keep-both
-  conflict policy. Historical behavior.
-- `pull-only` — one-way cloud → local. Cloud is authoritative; local is a
+- `two-way` (default): bidirectional local ⇄ cloud with the keep-both
+  conflict policy.
+- `pull-only`: one-way cloud → local. Cloud is authoritative; local is a
   read-only replica (strict mirror). Great for keeping several read-only
   local copies/backups of a cloud folder.
-- `push-only` — one-way local → cloud. Local is authoritative; the cloud is a
+- `push-only`: one-way local → cloud. Local is authoritative; the cloud is a
   read-only backup (strict mirror).
 
 `syncMode` is a **per-profile, categorical** setting: the top-level value is
 the default and each profile may override it outright (not MIN-lowering), so
 one device can run several `pull-only` mirror profiles beside a `two-way`
-profile. One-way modes are **strict mirror** — the subordinate side is driven
-to exactly match the source, which can overwrite/delete user data — so they
-are opt-in per profile and carry an up-front data-loss warning. Vapor's
-never-lose-data guarantee is scoped to `two-way`; one-way modes deliberately
-trade it for a faithful mirror (no recoverable quarantine, no conflict copy —
-the declared source of truth wins). Keep-both stays the `two-way` default.
+profile. One-way modes are **strict mirror**: the subordinate side is driven
+to exactly match the source, which can overwrite/delete user data, so they
+are opt-in per profile, and the daemon holds a one-way profile until its
+data-loss warning is acknowledged. Vapor's never-lose-data guarantee is
+scoped to `two-way`; one-way modes deliberately trade it for a faithful
+mirror with no conflict copy: the declared source of truth wins. The local
+trash keeps what a mirror removes on this device; an overwrite, and a
+removal in a cloud without a trash, have no undo. Keep-both stays the
+`two-way` default.
 
-This is a **prioritized** capability: it must be delivered and proven in the
-core runtime (Wave 8) before any app surface exposes it (Wave 9). Full design:
-`docs/architecture/sync-modes.md`. Pipeline mechanics: `data-flow.md`.
-Execution: `docs/tasks/core.md` C8-59…C8-66, built in the order
-`pull-only` → `two-way` → `push-only`.
+Full design: `docs/architecture/sync-modes.md`. Pipeline mechanics:
+`data-flow.md`.
 
 ## 3) Platform traits
 
-All traits live under `core/platform/src/*`. Each has one native implementation
-per OS. Tests use an in-memory fake.
+All traits live under `core/platform/src/*`: `FsWatcher`,
+`ServiceInstaller`, `SecretStore`, `PlatformMetricsSampler`,
+`IdleNotifier`, `FilesystemCapabilities`, `ProcessSupervisor`, and
+`TrashBin`. Each has one native implementation per OS and an in-memory
+fake for tests.
 
-### 3.1 `FsWatcher`
+The contract of each trait, the native API behind it on each OS, and
+what is shipped, stubbed, or planned are in
+`docs/architecture/platform-abstractions.md`. The principles:
 
-Start/stop a recursive watch on a canonical root; deliver
-`Created`/`Modified`/`Removed`/`Renamed` events via a Send channel; preserve
-the lightweight-callback discipline (no DB/hash/network work in the OS
-callback, per `docs/architecture/data-flow.md`).
+- The engine consumes the trait and never the OS API.
+- Behind the trait, the best native API of the OS, not a
+  lowest-common-denominator wrapper.
+- The OS never restarts the daemon on its own: `core/lifecycle` owns
+  restart decisions, so the service definition says "no restart".
+- A secret is never in a plaintext file, on any OS.
+- A stub on an OS that ships no surface must compile.
 
-- macOS — FSEvents (via `notify` initially; direct `FSEventStreamCreate` if
-  benchmarks demand finer tuning of latency/coalescing or `since_when`
-  historical event delivery for delta reconcile).
-- Windows — `ReadDirectoryChangesW` with IOCP (via `notify` initially; direct
-  `windows` crate if buffer sizing or rename pairing needs tuning).
-- Linux — `inotify` for user-level trees; `fanotify` for system-wide/headless
-  scenarios with `CAP_SYS_ADMIN`. `vapor doctor` detects
-  `/proc/sys/fs/inotify/max_user_watches` exhaustion and prints a remediation
-  hint.
+## 4) Portability
 
-### 3.2 `ServiceInstaller`
-
-Install/uninstall/start/stop the daemon as a platform-native background
-service. This is how Vapor's "autolaunch at login" feature ports. Every OS has
-a first-class native mechanism:
-
-| OS | Mechanism |
-|---|---|
-| macOS (per-user) | `~/Library/LaunchAgents/sh.arn.vapor.daemon.plist` + `launchctl bootstrap/kickstart/bootout`; `SMAppService` login-item registration stays in the Swift app, layered on top of the same `vapor service` calls. |
-| Linux (per-user) | `~/.config/systemd/user/vapord.service` + `systemctl --user enable --now vapord`. Optional `loginctl enable-linger <user>` for sync while logged out. |
-| Linux (system-wide) | `/etc/systemd/system/vapord.service` + `systemctl enable --now vapord`. Opt-in via `vapor service install --system`. |
-| Windows (per-user) | Task Scheduler with an `AtLogOn` trigger and `RestartOnFailure` via `ITaskService`. No admin prompt needed, matching the macOS LaunchAgent UX. |
-| Windows (system-wide) | Windows Service via the `windows-service` crate + SCM (`CreateServiceW`). Opt-in via `vapor service install --system`. |
-
-Crash-loop protection stays in `core/lifecycle::CrashLoopGuard`; each platform
-installer configures the OS restart policy (`KeepAlive=false` on launchd,
-`Restart=on-failure` + `RestartSec` on systemd, `RestartOnFailure` on Task
-Scheduler) so the OS respects the backoff the guard computes.
-
-### 3.3 `SecretStore`
-
-Per-provider OAuth tokens and other credentials. No generic encrypted file by
-default — every desktop OS has a native store.
-
-| OS | Native API |
-|---|---|
-| macOS | Keychain Services (`security-framework`). |
-| Windows | Credential Manager (`windows` crate or `keyring`). |
-| Linux (desktop) | Secret Service / libsecret via D-Bus (`secret-service`). |
-| Linux (headless / server) | Two supported fallbacks: (a) age-encrypted file at `<vapor_dir>/secrets.age` keyed by a machine-bound passphrase or `systemd-creds`; (b) external command shim (HashiCorp Vault, pass, aws-vault). |
-
-The `keyring` crate unifies the first three with a single API and is the
-default; drop to direct APIs only when access-group semantics are required.
-
-### 3.4 `PlatformMetricsSampler`
-
-Populates `ThrottleInputs` every tick. The engine already defines the
-portable value shape in `core/daemon/src/throttle.rs`; this trait is the
-per-OS source. Prefer notification-based signals over polling where available.
-
-- macOS — `host_statistics64` + `task_info`; `IOPSCopyPowerSourcesInfo`;
-  `NSProcessInfo.isLowPowerModeEnabled`; `NSProcessInfo.thermalState`;
-  `nw_path_monitor` for expensive-link detection.
-- Windows — `GetSystemTimes` + `GetProcessTimes` or PDH; `GetSystemPowerStatus`;
-  `CallNtPowerInformation(SystemPowerInformation)`;
-  `NotifyNetworkConnectivityHintChange` for metered-connection awareness
-  (metered ⇒ auto-throttle bandwidth).
-- Linux — `/proc/stat`, `/proc/self/stat`; `/sys/class/power_supply/*`;
-  `/proc/pressure/{cpu,io,memory}` (PSI — the best pressure signal available);
-  `/proc/net/dev`; NetworkManager D-Bus `NM-metered` when present.
-
-### 3.5 `IdleNotifier`
-
-User-idle duration. Event-driven where possible, polled otherwise. Separate
-from `PlatformMetricsSampler` so headless hosts can trivially stub it to
-"always idle" (CLI/server scenario).
-
-- macOS — `CGEventSourceSecondsSinceLastEventType`.
-- Windows — `GetLastInputInfo` (polled on the 1s throttle cadence).
-- Linux — X11 `XScreenSaverQueryInfo`; Wayland `org.freedesktop.ScreenSaver` or
-  `ext-idle-notify-v1`; headless hosts ⇒ always-idle.
-
-CLI / server operators can force a specific mode via
-`--user-activity=always|never|auto`.
-
-### 3.6 `FilesystemCapabilities`
-
-Metadata tagging (op-id for self-write-cache) and case-sensitivity discovery:
-
-- macOS — native xattr (`getxattr`/`setxattr`).
-- Linux — native xattr on ext4/xfs/btrfs; side-file fallback on FS without
-  xattr support (FAT, some network mounts).
-- Windows — NTFS alternate data streams (ADS) via `CreateFileW` with
-  `filename:streamname`; side-file fallback on ReFS/FAT.
-- Case-sensitivity surfaced via `case_sensitive_by_default() -> bool` so loop
-  prevention and conflict-path derivation respect local semantics.
-
-### 3.7 `ProcessSupervisor`
-
-Graceful shutdown:
-
-- macOS/Linux — `SIGTERM` from launchd/systemd, `SIGINT` from terminal; install
-  via `signal-hook` into the existing `SHUTDOWN_REQUESTED` atomic in
-  `core/daemon/src/runtime.rs`.
-- Windows — `SetConsoleCtrlHandler` for interactive runs; `SERVICE_STOP` from
-  SCM for service runs (`windows-service` crate); `WM_ENDSESSION` for logout.
-
-## 4) Small engine fixes required for multi-OS build
-
-These are strictly inside existing files, not new abstraction surface, but
-they must land before `core/daemon` compiles on Windows or Linux.
-
-- **`core/shared/src/runtime_paths.rs`** — Unix-only `DirBuilderExt` /
-  `OpenOptionsExt` / `PermissionsExt` calls. Gate with `#[cfg(unix)]`; on
-  Windows translate to equivalent DACL or accept inherited permissions for
-  MVP. Replace `HOME`-only lookup with `directories`-style resolution
-  (`USERPROFILE` on Windows, `$XDG_*` on Linux when present).
-- **`core/daemon/src/sync_directories.rs`** — same `HOME` gap; same fix.
-- **`core/daemon/src/state_db.rs`** — Unix `OsStrExt`/`OsStringExt` for path ↔
-  bytes. Replace with UTF-8 storage (`Path::to_str()` + `PathBuf::from(&str)`)
-  or the `os_str_bytes` crate. Pre-GA schema bump is fine per `AGENTS.md §1.1`.
-- **`core/daemon/src/fs_events.rs`** — `normalize_absolute_path` rejects
-  `Component::Prefix`, which excludes every Windows drive-letter path. Extend
-  to preserve prefixes; optionally strip `\\?\` UNC via `dunce` for user-
-  facing paths.
-- **`core/daemon/Cargo.toml`** — move `libc` under
-  `[target.'cfg(unix)'.dependencies]` once §3.7 handles signals via a
-  portable crate.
-- **Defaults in `core/shared/src/constants.rs`** — keep `"~/Vapor"` and
-  `"/Vapor"`; verify tilde expansion honors `USERPROFILE` on Windows inside
-  `sync_directories.rs`.
+`core/*` builds and passes its tests on macOS, Linux, and Windows in
+CI. A change that adds a Unix-only assumption to engine code is a
+regression: paths go through `vapor_shared::paths`, home lookup through
+`runtime_paths`, and OS calls through `core/platform`.
 
 ## 5) IPC between apps and daemon
 
@@ -266,10 +150,11 @@ they must land before `core/daemon` compiles on Windows or Linux.
 holds the versioning, handshake, and skew-matrix discipline; the transport
 is swapped per OS:
 
-- macOS — Unix domain socket at `<vapor_dir>/vapord.sock` (default) with
+- macOS: Unix domain socket at `<vapor_dir>/vapord.sock` (default) with
   optional NSXPC wrapping if sandboxing capability delegation is ever needed.
-- Linux — Unix domain socket at `<vapor_dir>/vapord.sock`.
-- Windows — named pipe `\\.\pipe\vapord-<user-sid>`.
+- Linux: Unix domain socket at `<vapor_dir>/vapord.sock`.
+- Windows: a named pipe whose name carries the user and the runtime
+  directory (`docs/architecture/windows/ipc-transport.md`).
 
 Protocol: Vapor's own tagged JSON envelopes (`{kind, payload}` requests,
 `{outcome, value}` responses) in length-prefixed frames; not JSON-RPC.
@@ -282,14 +167,14 @@ multi-language clients become a requirement.
 Each platform owns its own trust chain. Every platform gets an isolated
 GitHub Environment holding its secrets.
 
-- macOS — Developer ID Application cert + `notarytool` keychain profile.
+- macOS: Developer ID Application cert + `notarytool` keychain profile.
   Environment: `release-macos`. Delegated spec in
   `docs/operations/macos/distribution-trust-chain.md`.
-- Windows — EV code-signing certificate (Azure Key Vault or USB HSM) + WiX or
+- Windows: EV code-signing certificate (Azure Key Vault or USB HSM) + WiX or
   MSIX packaging + `signtool`. Environment: `release-windows`.
-- Linux — GPG-signed AppImage first; `.deb`/`.rpm` as demand surfaces;
+- Linux: GPG-signed AppImage first; `.deb`/`.rpm` as demand surfaces;
   Flathub/Snap later. Environment: `release-linux`.
-- CLI — static-ish Rust binaries per target triple, zstd-compressed,
+- CLI: static-ish Rust binaries per target triple, zstd-compressed,
   checksummed, published to GitHub Releases alongside the platform installers.
 
 ## 7) The `vapor` CLI
@@ -304,7 +189,7 @@ The command list and its naming rules live in `docs/plans/cli.md` §3;
 
 Design rules:
 
-- Every command has a `--json` output for scripting.
+- Every command that reports state has a `--json` output for scripting.
 - No interactive-TTY requirements; runs in CI, Docker, SSH.
 - Respects the same `VAPOR_DIR`, `VAPOR_ENV`, `vapor.json` as every GUI app.
 - When no daemon is running, queries exit non-zero with a clear message; they
@@ -314,13 +199,13 @@ Design rules:
 
 You are free to pick per app, but these are the recommended defaults:
 
-- macOS — SwiftUI + AppKit + SMAppService. Already shipped. Keep.
-- Windows — **Tauri 2.0** for fastest parity (embeds Rust runtime directly,
+- macOS: SwiftUI + AppKit + SMAppService. Already shipped. Keep.
+- Windows: **Tauri 2.0** for fastest parity (embeds Rust runtime directly,
   MSI via WiX, single-file exe). WinUI 3 + WindowsAppSDK if you want the most
   native Fluent feel; WPF + .NET if the team has XAML muscle memory.
-- Linux — **Tauri 2.0** for parity; GTK4 + libadwaita via `gtk4-rs` for a
+- Linux: **Tauri 2.0** for parity; GTK4 + libadwaita via `gtk4-rs` for a
   pure-Rust GNOME-native feel; Qt 6 via `cxx-qt` for KDE-first polish.
-- CLI — pure Rust: `clap` for args, `indicatif` for progress, `crossterm` for
+- CLI: pure Rust: `clap` for args, `indicatif` for progress, `crossterm` for
   terminal UI, JSON mode for scripting.
 
 A reasonable default path is **Tauri 2.0 on Windows + Linux while macOS stays
@@ -328,113 +213,22 @@ SwiftUI**: one codebase for the non-mac surfaces, direct Rust runtime
 embedding (no IPC needed inside the UI process itself), revisit per-platform
 native if Tauri doesn't pull its weight.
 
-## 9) Feature parity matrix
+## 9) Feature parity
 
-This is the acceptance definition *if and when* Vapor ships on a given
-platform. Windows and Linux columns describe what the optional waves
-must deliver; until those waves land, the Windows/Linux cells stay as
-`unimplemented!()` stubs behind the shared trait layer and the engine
-continues to compile on those OSes.
+Nothing ships on an OS with a hole in an invariant: autolaunch,
+crash-loop protection, the durable queue, throttle discipline, secret
+storage, and resource budgets come through the matching `core/platform`
+trait. An OS that ships no surface may keep stubs. Where each trait
+stands on each OS: the parity matrix in
+`docs/architecture/platform-abstractions.md`.
 
-| Capability | macOS | Windows (optional) | Linux (optional) | CLI | Lives in |
-|---|---|---|---|---|---|
-| Invisible background daemon | ✅ | must if shipping | must if shipping | must on macOS; must on Win/Linux if shipping (`vapor run`) | `core/daemon` |
-| Autolaunch on login/boot | ✅ LaunchAgent | Task Scheduler / SCM | systemd --user / system | `vapor service install` | `core/platform/service` |
-| Crash-loop protection | ✅ Rust (`core/lifecycle`, durable state) | must if shipping | must if shipping | must | `core/lifecycle` |
-| Menubar/tray status | ✅ SwiftUI | tray (WinUI/Tauri/WPF) | tray (GTK/Qt/Tauri) | — | `apps/<os>` |
-| FS watch (native-optimal) | FSEvents | ReadDirectoryChangesW + IOCP | inotify / fanotify | via host impl | `core/platform/fs_watch` |
-| Durable queue/state | ✅ SQLite | same | same | same | `core/daemon/state_db` |
-| Throttle controller | ✅ | same | same | same | `core/daemon/throttle` |
-| Metrics sampler | needs impl | needs impl if shipping | needs impl if shipping | via host impl or static | `core/platform/metrics` |
-| User-idle detector | needs impl | needs impl if shipping | needs impl if shipping | headless ⇒ always-idle | `core/platform/idle` |
-| Secret store | Keychain | Credential Manager | Secret Service + file fallback | via host impl | `core/platform/secrets` |
-| xattr / metadata tags | xattr | NTFS ADS | xattr | via host impl | `core/platform/fs_caps` |
-| Signed + verified distribution | Developer ID + notary | EV cert + signtool | GPG AppImage | binary + checksum | `apps/<os>/scripts`, `core/cli/scripts` |
-| Diagnostics / logs / timeline | ✅ | must if shipping | must if shipping | must | `core/daemon` |
-
-"Must" is scoped to shipping surfaces: nothing is allowed to ship on a
-given OS with a hole, but a non-shipping OS can have stubbed platform
-impls. Promoting a non-shipping OS to a shipping OS requires its
-optional wave in `docs/tasks/README.md` to land first.
-
-## 10) Execution sequence
-
-### Priorities
+## 10) Priorities
 
 **Focus:** a very good, performant, polished core runtime, `vapor` CLI,
 and macOS app. Windows and Linux are kept *possible* via the platform
-trait layer but are not committed deliverables.
-
-### Primary path (macOS + CLI + core)
-
-1. **Docs and naming hygiene.** Rename "XPC contracts" →
-   "IPC contracts"; "FSEvents callback" → "fs-watch callback"; reframe
-   `AGENTS.md` product intent; split macOS-specific doc files into
-   `docs/{architecture,operations}/macos/*`. Zero code risk.
-2. **Engine portability fixes (§4).** Make `core/daemon` + `core/shared`
-   compile on macOS/Linux/Windows. Add Linux + Windows Rust jobs to the
-   CI matrix (lint + test; no perf yet). **Foundation** — kept in the
-   primary path even though macOS-only shipping would technically not
-   need it, because it removes Unix-only assumptions from the engine
-   and keeps the door open.
-3. **Create `core/platform` crate** with trait skeletons (§3) and
-   macOS-native implementations ported from existing Swift/docs.
-   Windows/Linux implementations stubbed to `unimplemented!()`. No new
-   app surfaces yet. **Foundation** — the trait layer is the single
-   place OS-specific behavior lives; if Windows/Linux native impls are
-   never written, the stubs stay. macOS daemon behavior stays
-   byte-for-byte identical before and after.
-4. **Move lifecycle into `core/lifecycle`** (§2.3). Swift app consumes
-   the Rust-backed lifecycle by shelling out to the bundled `vapor`
-   CLI (the FFI alternative was not needed). macOS behavior unchanged
-   end-to-end.
-5. **Ship the `vapor` CLI on macOS.** Validates that `core/platform` +
-   `core/lifecycle` work against real users by running the daemon with
-   full autolaunch semantics on macOS. The same crate also builds on
-   Linux + Windows thanks to step 2, but will not run there until the
-   deferred Wave 12/13 work lands.
-6. **Finish runtime capability completion** (the full C8 span in
-   `docs/tasks/core.md`): filesystem reference provider, bidirectional
-   runtime shell, `self_write_cache`, conflict policy, tombstones,
-   **sync modes / directionality (§2.5 — prioritized: land right after the
-   bidirectional runtime shell, before the app UX)**, multi-profile model,
-   IPC diagnostics surface, user resource budgets + idle boost, auto-tuning,
-   provider-system extensibility, Google Drive provider, optional
-   safeguards.
-7. **Polish the macOS app UX** against the completed runtime:
-   diagnostics panel, per-intent "why stuck" view, live timeline,
-   profiles UX, real IPC-backed controls.
-8. **Harden macOS distribution** (signing, notarization, upgrade
-   stability, rollback artifacts) and publish the macOS CLI binary
-   alongside the app bundle under the same GitHub Release tag.
-
-At the end of step 8, the primary deliverable is complete: core +
-`vapor` CLI + macOS app, polished and shipping.
-
-### Deferred / optional (Windows + Linux)
-
-Start condition: the project owner explicitly decides to ship a
-non-macOS surface. Nothing in the primary path is blocked by any of
-these.
-
-9. **Land Windows platform implementations** for every trait in
-   `core/platform`. The `windows-latest` job already runs the full
-   `core/*` test suite; add the named-pipe IPC transport and the service
-   round-trip.
-10. **Land Linux platform implementations** for every trait in
-    `core/platform`. Real Linux CI jobs run the full `core/*` test
-    suite.
-11. **Ship the `vapor` CLI on Windows and Linux.** Cross-OS binary
-    distribution (EV-cert signing on Windows, GPG signing on Linux),
-    headless / Docker / systemd / Task Scheduler recipes validated
-    end-to-end.
-12. **Decide app tech per OS** (see §8) if and only if a GUI is
-    actually desired. Create `docs/plans/windows.md` /
-    `docs/tasks/windows.md` (and the Linux equivalents) and start
-    `apps/windows` / `apps/linux`.
-
-Steps 9–12 are entirely optional. The primary deliverable stands on its
-own with none of them.
+trait layer but are not committed deliverables: they start when the
+project owner decides to ship a non-macOS surface. The order of the
+open work is in `docs/tasks/README.md`.
 
 ## 11) Definition of done (applies to every milestone)
 
@@ -442,7 +236,7 @@ own with none of them.
 (macOS is the primary shipping OS; Windows/Linux only count once their
 optional waves land).
 
-- Behavior validated on every shipping OS — happy path and failure path.
+- Behavior validated on every shipping OS: happy path and failure path.
 - Crash/restart recovery preserved on every shipping OS.
 - Throttle/backpressure invariants upheld on every shipping OS.
 - Autolaunch + lifecycle behavior verified on every shipping OS
@@ -458,17 +252,16 @@ optional waves land).
 
 ## 12) What must not change
 
-- The macOS Swift app. No cross-platform refactor of Swift code, ever. The
-  only effect of this plan on Swift is that some logic moves *out* of Swift
-  into Rust (crash-loop guard, lifecycle orchestration) so the other
-  platforms get it; the Swift app then calls the Rust-backed version.
-- The sync engine invariants in `AGENTS.md §1, §3, §4, §5` — throttle
+- The macOS Swift app. No cross-platform refactor of Swift code, ever.
+  Logic that other platforms need lives in Rust, and the Swift app
+  calls the Rust-backed version.
+- The sync engine invariants in `AGENTS.md §1, §3, §4, §5`: throttle
   discipline, durable queue, bidirectional safety, "never lose intent state",
   recover after crash. These are what Vapor *is*.
-- The provider trait boundary (`core/providers/src/lib.rs`) — already
+- The provider trait boundary (`core/providers/src/lib.rs`): already
   correctly generic.
 - `VAPOR_DIR`, `VAPOR_ENV`, `vapor.json` schema, and the locale catalogs.
   Every platform reads the same config surface.
-- Script-first validation discipline — contributors still run
+- Script-first validation discipline: contributors still run
   `./scripts/lint.sh`, `./scripts/test.sh`. The scripts learn per-OS routing
   internally; the entry points stay.

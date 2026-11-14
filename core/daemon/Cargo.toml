@@ -3,6 +3,7 @@ name = "vapor-daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 globset = "=0.4.18"

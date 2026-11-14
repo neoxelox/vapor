@@ -33,18 +33,18 @@ Length-prefixed frames, 32-bit little-endian length header followed by
 a UTF-8 JSON envelope (`{kind, payload}` requests, `{outcome, value}`
 responses; not JSON-RPC). Frame length bound by
 `vapor_shared::constants::ipc::MAX_PAYLOAD_BYTES` (default
-`4 * 1024 * 1024`). Identical to the macOS framing — the codec under
+`4 * 1024 * 1024`). Identical to the macOS framing: the codec under
 `core/ipc/src/framing.rs` is shared across every Unix transport.
 
 ## Shutdown
 
 When the daemon receives a stop request (`SIGTERM` from
-`systemctl --user stop vapord` or any `kill TERM`), it:
+`systemctl --user stop sh.arn.vapor.daemon.service` or any `kill TERM`), it:
 
 1. Closes the listening socket and lets the `Drop` on the listener
    handle clean up the socket file.
-2. Drains in-flight requests to a clean completion or returns a
-   `Shutting Down` error frame.
+2. Stops serving: a request in flight gets its answer, or its client
+   reads a closed connection. No frame announces the shutdown.
 3. Exits at the next tick boundary.
 
 ## Testing

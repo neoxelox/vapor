@@ -15,13 +15,19 @@ form; the runbook wins on any disagreement.
 
 1. On `main`, up to date with `origin/main`, and clean except
    `CHANGELOG.md` (`scripts/version.sh` refuses otherwise).
-2. `CHANGELOG.md` `Unreleased` holds every line for the release; the
-   script rolls them into the versioned section.
-3. `./scripts/release.sh` green on the commit being released:
-   format, lint, Tier 1, and the e2e suite once per provider. The
+2. `CHANGELOG.md` holds a `## [<version>] - YYYY-MM-DD` section with
+   the lines of the release. A person moves them there from
+   `Unreleased`; the script only checks that the section exists and
+   stops with "CHANGELOG.md missing section" when it does not.
+3. `./scripts/release.sh` green on the commit being released: the
+   format check, lint, Tier 1, and the e2e suite once per provider. The
    Google Drive leg runs only here, by hand, with the dedicated test
-   account signed in and `VAPOR_GDRIVE_CLIENT_ID` set (exported or in
-   `.env`); it never runs in CI and never against a personal account.
+   account and `VAPOR_GDRIVE_CLIENT_ID` set (exported or in `.env`); it
+   never runs in CI and never against a personal account.
+4. The target version sorts above the current one. `version.sh` refuses
+   anything else, `prerelease` on a stable version (use `set
+   <version>-rc.1`), and `bump` on a prerelease (use `release` or
+   `set`).
    A red gate stops the release: the fix goes through a pull request
    (`vapor-pr`), and the release starts again from the merged `main`.
 4. The release environment is protected before any secret is added:

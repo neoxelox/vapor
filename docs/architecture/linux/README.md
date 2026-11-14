@@ -22,6 +22,6 @@ still to come; until they land, Linux is not a shipping surface.
 
 ## Documents
 
-- `ipc-transport.md` — Linux-specific IPC transport: Unix domain
+- `ipc-transport.md`: Linux-specific IPC transport: Unix domain
   socket under `<vapor_dir>/vapord.sock`, owner-only permissions,
   framing, shutdown semantics, test harness.

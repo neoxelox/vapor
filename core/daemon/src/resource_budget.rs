@@ -13,7 +13,7 @@
 //!    `rampDownSeconds`.
 //! 3. Deterministic transition rules (§Ceiling transitions): a throttle
 //!    exit from `Idle` snaps the cap to
-//!    `min(current, resourceLimits.*)` in the same tick — no down-ramp;
+//!    `min(current, resourceLimits.*)` in the same tick, no down-ramp;
 //!    a return to `Idle` never auto-resumes, the gates re-evaluate
 //!    from scratch.
 //!
@@ -385,8 +385,8 @@ impl ResourceBudget {
                     self.snap_to_base("throttle left idle; snapped to base ceilings");
                 } else if gates_pass {
                     // Headroom recovered mid-descent (e.g. a 1s background
-                    // CPU blip). Re-checking the gate here — instead of
-                    // riding the full down-ramp and then a fresh up-ramp —
+                    // CPU blip). Re-checking the gate here, instead of
+                    // riding the full down-ramp and then a fresh up-ramp:
                     // avoids ~40s of reduced ceilings for a momentary blip.
                     // Resume climbing from the *current* level by
                     // back-dating the up-ramp start to the matching
@@ -516,7 +516,7 @@ impl ResourceBudget {
     }
 
     fn snap_to_base(&mut self, reason: &str) {
-        // §Ceiling transitions rule 1: min(current, base) — the ramped
+        // §Ceiling transitions rule 1: min(current, base); the ramped
         // value can only ever exceed the base, so this is the base.
         self.current_cpu = self.config.cpu_percent;
         self.current_memory = self.config.memory_percent;

@@ -113,8 +113,4 @@ impl StateDb {
     pub fn sync_index_count(&self) -> Option<i64> {
         self.scalar_i64("SELECT COUNT(*) FROM sync_index;")
     }
-
-    pub fn tombstone_count(&self) -> Option<i64> {
-        self.scalar_i64("SELECT COUNT(*) FROM tombstones;")
-    }
 }

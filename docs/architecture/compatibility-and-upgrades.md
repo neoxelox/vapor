@@ -8,7 +8,7 @@ Compatibility rules for app, daemon, shared contracts, and persisted schema acro
 
 - App version (`apps/macos`)
 - Daemon version (`core/daemon`)
-- Shared contract version (`core/shared`)
+- IPC schema version (`core/shared` constants, `core/ipc` types)
 - State schema version (durable DB)
 
 ## Baseline policy
@@ -19,23 +19,27 @@ Compatibility rules for app, daemon, shared contracts, and persisted schema acro
 
 ## Compatibility matrix (initial)
 
-| App | Daemon | Shared contracts | Schema |
+| App | Daemon | IPC schema | State schema |
 | --- | --- | --- | --- |
 | N | N | N | N |
-| N | N-1 | N-1 compatible | migrated or compatible |
-| N-1 | N | N-1 compatible | compatible |
+| N | N-1 | N-1 compatible | set aside and rebuilt when it differs |
+| N-1 | N | N-1 compatible | set aside and rebuilt when it differs |
 
-`N` denotes latest stable release line. The `|N - M| <= 1` rule for the app-vs-daemon skew is enforced at the IPC handshake layer; concrete handshake mechanics (fail-closed `IncompatibleVersion`, default-on-unknown-field, payload bounds) live in `docs/architecture/ipc-contracts.md`. The state schema versioning rules and the pre-GA "reject older schemas" stance live in `docs/architecture/state-schema-migrations.md`.
+`N` denotes latest stable release line. The `|N - M| <= 1` rule for the app-vs-daemon skew is enforced at the IPC handshake layer; concrete handshake mechanics (fail-closed `IncompatibleVersion`, default-on-unknown-field, payload bounds) live in `docs/architecture/ipc-contracts.md`. Before GA the state database has no migrations: a database of another schema version is set aside and a whole-scope reconcile rebuilds it (`docs/architecture/state-schema-migrations.md`).
 
 ## Upgrade flow expectations
 
 1. Install/update app and daemon artifacts.
 2. Validate launch configuration and compatibility handshake.
-3. Perform schema migration if required.
+3. Open the state database. Before GA, set a database of another
+   schema version aside and rebuild it with a whole-scope reconcile;
+   from GA on, migrate it.
 4. Resume queues with recovery checks.
 
 ## Rollback expectations
 
 - Keep rollback-safe artifacts for app and daemon.
-- Define whether schema rollback is supported per migration.
+- From GA on, define whether schema rollback is supported per migration.
+  Before GA a rollback sets the newer database aside like any other
+  version.
 - If rollback cannot be automatic, document operator mitigation.

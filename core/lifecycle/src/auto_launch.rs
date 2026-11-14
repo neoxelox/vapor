@@ -1,9 +1,8 @@
-//! `AutoLaunchSettingStore` — persist the user's autolaunch preference.
+//! `AutoLaunchSettingStore`: persist the user's autolaunch preference.
 //!
-//! The single owner of the `autoLaunch` key in `vapor.json` since the
-//! Swift `AutoLaunchSettingStore` family was retired: the
-//! macOS app reads and writes the preference through the `vapor
-//! service` CLI, which lands here.
+//! The single owner of the `autoLaunch` key in `vapor.json`: the macOS
+//! app reads and writes the preference through the `vapor service`
+//! CLI, which lands here.
 //!
 
 use std::error::Error;
@@ -47,8 +46,8 @@ impl From<io::Error> for JsonFileError {
 
 /// Persistent storage for the autolaunch preference.
 ///
-/// `read` returns `Ok(None)` when the value has never been persisted,
-/// matching Swift's `bool(forKey:) -> Bool?`. `write` is responsible
+/// `read` returns `Ok(None)` when the value has never been persisted.
+/// `write` is responsible
 /// for atomic-on-disk semantics so a crash mid-write cannot leave the
 /// file half-flushed.
 pub trait AutoLaunchSettingStore: Send + Sync {
@@ -98,7 +97,7 @@ impl AutoLaunchSettingStore for InMemoryAutoLaunchSettingStore {
 /// The file is parsed and re-emitted with `serde_json` (the same
 /// serializer the `vapor config` CLI command uses), so every other
 /// top-level key in the file is preserved verbatim on write. A file that
-/// exists but does not parse as a JSON object is a hard error on write —
+/// exists but does not parse as a JSON object is a hard error on write:
 /// silently rewriting a corrupt config would destroy whatever the user
 /// (or another surface) had there.
 #[derive(Debug, Clone)]
@@ -278,9 +277,9 @@ mod tests {
 
     #[test]
     fn auto_launch_key_inside_string_values_is_not_misread() {
-        // Regression for the pre-serde parser, which substring-matched
-        // `"autoLaunch"` anywhere in the file — including inside string
-        // values of unrelated keys.
+        // The key is read from the parsed document. A match on the text
+        // `"autoLaunch"` anywhere in the file would also hit the string
+        // value of an unrelated key.
         let temp = TempDir::new().expect("temp");
         let path = temp.path().join("vapor.json");
         fs::write(&path, r#"{ "note": "set \"autoLaunch\": true someday" }"#).expect("seed file");

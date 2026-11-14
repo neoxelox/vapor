@@ -48,10 +48,10 @@ paired rename events are split into that pair; `Renamed` survives only
 for ambiguous OS reports (consumers re-stat to disambiguate). Backend
 errors reach an optional error handler instead of being dropped.
 
-Both watch consumers go through this one trait — the daemon's local
+Both watch consumers go through this one trait: the daemon's local
 watch (`core/daemon::fs_events` bridges the event channel through path
 normalization, ignore filtering, and the recorder on a dedicated
-thread) and the filesystem provider's changes feed — so there is exactly
+thread) and the filesystem provider's changes feed, so there is exactly
 one OS-event→kind mapping to test and fix per OS.
 
 macOS and Linux share one `notify`-backed watcher
@@ -132,25 +132,41 @@ then falls back to the in-memory store and prints that reason on every
 `auth` command, as it does on Windows. `vapor doctor` names the backend
 in use.
 
+Every consumer opens the store through `open_store(SecretAccess)`:
+
+- `SecretAccess::Interactive` is for a process a person is at (`vapor
+  auth login`): the store may ask them. `SecretAccess::Background` is
+  the daemon's: a read that would open a dialog fails, and the profile
+  holds for a sign-in. A dialog nobody sees would block the read.
+- A runtime directory other than the default one gets its own scope
+  (`ScopedSecretStore`): every name carries the prefix
+  `dir-<hash of the directory>.`, and the store lists and removes only
+  names with that prefix. A dev checkout, an e2e sandbox, and the real
+  install on one device therefore never read or remove each other's
+  sign-in.
+
 ### `PlatformMetricsSampler`
 
 Returns a `ThrottleInputs` (`on_battery`, `low_power_mode`,
 `thermal_pressure`, `system_cpu_load_percent`, `vapor_cpu_load_percent`,
 `disk_pressure`, `network_error_rate_percent`, `network_throughput_kbps`,
-`user_active`, `vapor_memory_bytes`, `device_memory_bytes`). CPU
+`link_speed_kbps`, `user_active`, `vapor_memory_bytes`,
+`device_memory_bytes`). CPU
 percentages are shares of the whole device, so a single busy core on an
 eight-core machine reads as 13%.
 
 | OS | Status |
 |---|---|
-| macOS | Shipped. `host_statistics64` (system CPU), `getrusage` (daemon CPU), `IOPSGetTimeRemainingEstimate` (battery), `NSProcessInfo.thermalState` and `isLowPowerModeEnabled` through the Objective-C runtime, `proc_pidinfo` and `hw.memsize` (memory), and the HID idle clock for `user_active` (input within the last 30 s). One read per throttle interval; calls inside the interval return the cached reading. `disk_pressure` and the two network fields keep their defaults: macOS has no public disk-pressure signal and link capacity is not measured yet. |
+| macOS | Shipped. `host_statistics64` (system CPU), `getrusage` (daemon CPU), `IOPSGetTimeRemainingEstimate` (battery), `NSProcessInfo.thermalState` and `isLowPowerModeEnabled` through the Objective-C runtime, `proc_pidinfo` and `hw.memsize` (memory), and the HID idle clock for `user_active` (input within the last 30 s). One read per throttle interval; calls inside the interval return the cached reading. `link_speed_kbps` is the speed of the fastest active interface (`if_data.ifi_baudrate`; tunnels, bridges, and peer-to-peer interfaces are left out). It is an upper bound and only the first estimate of the link capacity: the daemon measures the capacity from its own transfers after that (`data-flow.md` §User resource budgets). `disk_pressure` keeps its default: macOS has no public disk-pressure signal. |
 | Windows | Planned. `GetSystemTimes` + `GetProcessTimes`; `GetSystemPowerStatus`; `CallNtPowerInformation`; `NotifyNetworkConnectivityHintChange` (metered means auto-throttle). Today the native sampler returns the static defaults and `has_native_sampling()` is `false`. |
-| Linux | Shipped. `/proc/stat` (system CPU), `/proc/self/stat` (daemon CPU), `/proc/self/statm` and `/proc/meminfo` (memory), `/sys/class/power_supply/*` (`on_battery` when no mains or USB supply is online and a battery is discharging), the hottest `/sys/class/thermal` zone against its trip points (`thermal_pressure`), and the idle notifier for `user_active`. Anything the host does not expose (a container, a VM without thermal zones) keeps the neutral default for that input. `low_power_mode`, `disk_pressure`, and the network fields keep their defaults; PSI under `/proc/pressure/` and NetworkManager's metered flag are open work. |
+| Linux | Shipped. `/proc/stat` (system CPU), `/proc/self/stat` (daemon CPU), `/proc/self/statm` and `/proc/meminfo` (memory), `/sys/class/power_supply/*` (`on_battery` when no mains or USB supply is online and a battery is discharging), the hottest `/sys/class/thermal` zone against its trip points (`thermal_pressure`), and the idle notifier for `user_active`. Anything the host does not expose (a container, a VM without thermal zones) keeps the neutral default for that input. `low_power_mode`, `disk_pressure`, `link_speed_kbps`, and the network fields keep their defaults; the interface speed, PSI under `/proc/pressure/`, and NetworkManager's metered flag are open work (`docs/tasks/core.md`). Without an interface speed a direction of the link has no bandwidth limit until its first measured transfer. |
 
 `StaticPlatformMetricsSampler` (config-driven) is the headless/CLI
 fallback and the test fake. `VAPOR_THROTTLE_INPUTS=static` makes the
-daemon use it (with zero idle time) on any host; `scripts/e2e.sh` sets
-it so a run is not shaped by whoever is typing on the machine.
+daemon use it (with zero idle time) on any host, and pins the link
+capacity at 100 Mbit/s so the bandwidth ceiling is the same on every
+run; `scripts/e2e.sh` sets it so a run is not shaped by whoever is
+typing on the machine.
 `VAPOR_THROTTLE_INPUTS=file:<path>` selects the daemon's
 `FileMetricsSampler` and `FileIdleNotifier`, which re-read a JSON
 document (`{"inputs": <ThrottleInputs>, "idle_seconds": N}`) on every
@@ -185,7 +201,11 @@ Metadata tagging + case-sensitivity discovery.
 | Windows | NTFS ADS (`CreateFileW` with `filename:streamname`); side-file on ReFS/FAT | case-insensitive by default (per-dir case-sensitivity possible on Win10+) |
 
 Loop-prevention and conflict-path derivation consult this trait so
-comparisons respect local filesystem semantics.
+comparisons respect local filesystem semantics. The table gives the
+default of each OS; the engine asks about the volume a root is on
+(`case_sensitivity_at(path)`, `pathconf(_PC_CASE_SENSITIVE)` on macOS),
+because a case-sensitive APFS volume and an exFAT drive on one Mac give
+two different answers.
 
 Tag API: `read_tag` / `write_tag` / `remove_tag` carry the
 engine's op-id (`sh.arn.vapor.op-id`) on files. The Unix native impl
@@ -219,7 +239,7 @@ unlink.
 
 | OS | Mechanism | Status |
 |---|---|---|
-| macOS | Rename into `~/.Trash`, Finder-style numbered duplicates | Shipped. Cross-volume moves are refused rather than copied. |
+| macOS | Rename into `~/.Trash`, Finder-style numbered duplicates | Shipped. Cross-volume moves are refused rather than copied, and Finder shows no Put Back for these files. The move through `NSFileManager`, which gives both, is open work (`docs/tasks/core.md`). |
 | Windows | `SHFileOperation` / `IFileOperation` with `FOF_ALLOWUNDO` (Recycle Bin) | Planned. Refuses with `Unsupported` today. |
 | Linux | freedesktop trash spec: `$XDG_DATA_HOME/Trash` (default `~/.local/share/Trash`) for files on the home volume, `<mount>/.Trash-<uid>` for other volumes; `info/<name>.trashinfo` written before the rename, numbered duplicates like a file manager | Shipped. A volume without a usable `.Trash-<uid>` is refused, and the managed trash takes over. |
 
@@ -228,8 +248,24 @@ can be told to refuse, which is how the fallback is tested.
 
 ## Parity matrix
 
-See `docs/plans/core.md §9` for the capability-vs-OS matrix. Every trait
-must deliver the same contract on every supported OS before that OS ships.
+Every trait must deliver the same contract on an OS before that OS
+ships a surface (`AGENTS.md` §1). Where each one stands:
+
+| Trait | macOS | Linux | Windows |
+|---|---|---|---|
+| `FsWatcher` | shipped (FSEvents) | shipped (inotify) | stub |
+| `ServiceInstaller` | shipped (LaunchAgent) | shipped (systemd user unit) | stub |
+| `SecretStore` | shipped (login keychain) | shipped (Secret Service, or the external command) | stub |
+| `PlatformMetricsSampler` | shipped | shipped, with no interface speed | static defaults |
+| `IdleNotifier` | shipped | session presence only | zero idle time |
+| `FilesystemCapabilities` | shipped (xattr) | shipped (xattr, side-file fallback) | stub |
+| `ProcessSupervisor` | shipped (signals) | shipped (signals) | stub |
+| `TrashBin` | shipped (`~/.Trash`) | shipped (freedesktop trash) | stub |
+
+macOS is the one shipping OS today. Linux has its native
+implementations and no app or release lane yet. The stubs compile, so
+the workspace builds on every OS in the CI matrix; the open work is in
+`docs/tasks/core.md`.
 
 ## Adding a new platform
 
@@ -241,5 +277,4 @@ must deliver the same contract on every supported OS before that OS ships.
 4. Add a platform doc subdirectory under `docs/architecture/<os>/`,
    `docs/operations/<os>/`, and the matching plan + tasks file
    (`docs/plans/<os>.md`, `docs/tasks/<os>.md`).
-5. Update this document's parity tables and the `docs/plans/core.md` §9
-   matrix.
+5. Update this document's per-trait tables and its parity matrix.

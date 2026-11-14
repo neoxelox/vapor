@@ -135,7 +135,7 @@ impl RunReport {
 /// One console line per scenario, stable enough to read in CI logs.
 pub fn console_line(result: &ScenarioResult) -> String {
     let head = format!(
-        "[e2e] {} {} — {}",
+        "[e2e] {} {}: {}",
         result.verdict.label(),
         result.id,
         match result.verdict {

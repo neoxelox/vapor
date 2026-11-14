@@ -2,7 +2,7 @@
 //!
 //! Binds the Unix-domain-socket listener at `<vapor_dir>/vapord.sock`
 //! (relocated under the OS temp directory when that path would exceed
-//! the socket-address budget — see `runtime_paths::ipc_socket_location`),
+//! the socket-address budget, see `runtime_paths::ipc_socket_location`),
 //! accepts connections in a background thread, and dispatches each
 //! session to `vapor_ipc::serve_connection`. The daemon's main thread
 //! keeps a [`IpcServerHandle`] so the listener (and its socket file)
@@ -149,28 +149,24 @@ pub fn spawn(service: Arc<dyn Service>) -> std::io::Result<IpcServerHandle> {
                 // the bounded connection slots.
                 let _ = stream.set_write_timeout(Some(idle_timeout));
                 let service = service.clone();
-                let connection_counter = active_connections.clone();
-                connection_counter.fetch_add(1, Ordering::AcqRel);
-                let spawned = thread::Builder::new()
+                // The slot is given back when the guard drops: at the
+                // end of the session, when the thread cannot start, and
+                // when a handler panics.
+                let slot = ConnectionSlot::take(&active_connections);
+                let _ = thread::Builder::new()
                     .name("vapor-ipc-conn".to_string())
-                    .spawn({
-                        let connection_counter = connection_counter.clone();
-                        move || {
-                            let mut reader = match stream.try_clone() {
-                                Ok(reader) => reader,
-                                Err(_) => {
-                                    connection_counter.fetch_sub(1, Ordering::AcqRel);
-                                    return;
-                                }
-                            };
-                            let mut writer = stream;
-                            let _ = serve_connection(&mut reader, &mut writer, service.as_ref());
-                            connection_counter.fetch_sub(1, Ordering::AcqRel);
-                        }
+                    .spawn(move || {
+                        let _slot = slot;
+                        let Ok(mut reader) = stream.try_clone() else {
+                            return;
+                        };
+                        let mut writer = stream;
+                        log_session_end(serve_connection(
+                            &mut reader,
+                            &mut writer,
+                            service.as_ref(),
+                        ));
                     });
-                if spawned.is_err() {
-                    connection_counter.fetch_sub(1, Ordering::AcqRel);
-                }
             }
         })?;
     Ok(IpcServerHandle {
@@ -178,6 +174,48 @@ pub fn spawn(service: Arc<dyn Service>) -> std::io::Result<IpcServerHandle> {
         _listener: listener,
         _join: Some(join),
     })
+}
+
+/// One of the bounded connection slots, given back on drop.
+#[cfg(unix)]
+struct ConnectionSlot(Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(unix)]
+impl ConnectionSlot {
+    fn take(active: &Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        active.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Self(active.clone())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Says why a session ended when the reason helps someone: a client
+/// whose schema version is outside the window is the one line that
+/// explains "the app cannot talk to the daemon" after an update of one
+/// of the two.
+#[cfg(unix)]
+fn log_session_end(result: Result<(), vapor_ipc::ServeError>) {
+    match result {
+        Ok(()) => {}
+        Err(vapor_ipc::ServeError::HandshakeIncompatible(violation)) => crate::logging::info(
+            "Refused an IPC client: its schema version is outside the window this daemon supports",
+            &[
+                ("client_version", violation.peer_version.to_string()),
+                ("daemon_version", violation.local_version.to_string()),
+                ("required_min", violation.required_min.to_string()),
+            ],
+        ),
+        Err(error) => crate::logging::debug(
+            "An IPC session ended with an error",
+            &[("error", error.to_string())],
+        ),
+    }
 }
 
 #[cfg(not(unix))]

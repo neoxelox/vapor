@@ -64,6 +64,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: symmetric_ignore,
         },
         Scenario {
+            id: "S64",
+            name: "ignore-rules-decide-one-way",
+            proves: "a folder rule hides a folder and not a file of that name; a negation under an excluded folder stays excluded for the watcher as it does for the walk; a file that a rule change frees syncs with no restart and no reconcile request",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: ignore_rules_decide_one_way,
+        },
+        Scenario {
             id: "S16",
             name: "local-delete-propagates",
             proves: "a plain local rm removes the cloud copy",
@@ -201,7 +209,7 @@ fn pull_only_folder_removed_here(ctx: &mut Ctx) -> Result<(), Failure> {
     )?;
     ctx.configure_scope(&home)?;
     ctx.cli().config_set("syncMode", "pull-only")?;
-    ctx.start_daemon()?;
+    ctx.start_daemon_confirming_one_way()?;
     ctx.wait_exists(&home.local.join("shared/inner/deep.txt"), CONVERGE_TIMEOUT)?;
     ctx.settle(CONVERGE_TIMEOUT)?;
 
@@ -266,7 +274,7 @@ fn pull_only_mirror(ctx: &mut Ctx) -> Result<(), Failure> {
     write_file(&home.cloud.join("doc.txt"), "cloud canonical\n")?;
     ctx.configure_scope(&home)?;
     ctx.cli().config_set("syncMode", "pull-only")?;
-    ctx.start_daemon()?;
+    ctx.start_daemon_confirming_one_way()?;
     ctx.wait_exists(&home.local.join("doc.txt"), CONVERGE_TIMEOUT)?;
     write_file(&home.local.join("extra.txt"), "local intruder\n")?;
     ctx.cli().reconcile()?;
@@ -311,6 +319,59 @@ fn symmetric_ignore(ctx: &mut Ctx) -> Result<(), Failure> {
             && !conflict_copy_exists(&home.cloud, ".DS_Store"),
         "ignored divergence manufactured a ~conflict copy"
     );
+    Ok(())
+}
+
+fn ignore_rules_decide_one_way(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    ctx.configure_scope(&home)?;
+    // Rules and files that are there before the daemon starts.
+    write_file(
+        &home.local.join(".vaporignore"),
+        "draft.txt\nkeepers/\n!keepers/keep.txt\n",
+    )?;
+    write_file(&home.local.join("draft.txt"), "not ready\n")?;
+    // `build/` is one of the default rules: it names folders.
+    write_file(&home.local.join("notes/build"), "a file named build\n")?;
+    ctx.start_daemon()?;
+    ctx.wait_same_content(
+        &home.local.join("notes/build"),
+        &home.cloud.join("notes/build"),
+        CONVERGE_TIMEOUT,
+    )?;
+
+    // A live write under the excluded folder: the watcher must decide
+    // it the way the walk does, so the negation does not bring it back.
+    let mark = ctx.mark();
+    write_file(
+        &home.local.join("keepers/keep.txt"),
+        "under an excluded folder\n",
+    )?;
+    write_file(&home.local.join("control.txt"), "control\n")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("control.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ensure!(
+        !home.cloud.join("keepers").exists(),
+        "a file under an excluded folder synced through its negation"
+    );
+    ensure!(
+        !home.cloud.join("draft.txt").exists(),
+        "an ignored file synced"
+    );
+
+    // The rules go. Nothing touches the files they hid.
+    write_file(&home.local.join(".vaporignore"), "")?;
+    ctx.wait_same_content(
+        &home.local.join("draft.txt"),
+        &home.cloud.join("draft.txt"),
+        CONVERGE_TIMEOUT,
+    )?;
+    ctx.wait_same_content(
+        &home.local.join("keepers/keep.txt"),
+        &home.cloud.join("keepers/keep.txt"),
+        CONVERGE_TIMEOUT,
+    )?;
     Ok(())
 }
 

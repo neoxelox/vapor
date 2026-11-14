@@ -28,7 +28,7 @@ surface produced by `core/platform/service::macos`.
   (reopen + deliberate restart) and (b) the Rust-backed crash-loop guard
   in `core/lifecycle`. This avoids collision between `launchd`'s default
   ~10s restart cadence and the guard's exponential backoff.
-- No `SuccessfulExit` conditional — `KeepAlive = false` is unconditional.
+- No `SuccessfulExit` conditional: `KeepAlive = false` is unconditional.
 
 ### I/O redirection and environment
 
@@ -41,22 +41,36 @@ surface produced by `core/platform/service::macos`.
   (the latter is how the e2e harness keeps a launchd-managed daemon on
   neutral throttle inputs; an ordinary install never carries it). All
   other runtime behavior is code-defined or read from `vapor.json`
-  (the daemon loads `vapor.json` at startup; `VAPOR_*` variables remain
-  per-field overrides).
+  (the daemon loads it at startup and reloads it live). No environment
+  variable overrides a `vapor.json` key.
 - The plist has a single writer: the Rust `NativeServiceInstaller` in
   `core/platform`, driven through `core/lifecycle` by `vapor service
-  install`. Every surface goes through it — the macOS app shells out
-  to the bundled `vapor` CLI instead of writing the plist itself — so
+  install`. Every surface goes through it: the macOS app shells out
+  to the bundled `vapor` CLI instead of writing the plist itself, so
   the definition cannot diverge between surfaces.
 - Uninstall semantics: removing the agent (`vapor service uninstall`,
   the app's autolaunch-off toggle) boots the job out of launchd, and
-  launchd terminates the running daemon as part of bootout. This is
-  long-standing macOS behavior (the retired Swift controller did the
-  same); `--keep-running` therefore only suppresses the *explicit*
-  stop signal and is meaningful on service managers that keep a
-  disabled unit running (e.g. systemd on Linux).
+  launchd terminates the running daemon as part of bootout. That is how
+  launchd works; `--keep-running` therefore only suppresses the
+  *explicit* stop signal and is meaningful on service managers that
+  keep a disabled unit running (e.g. systemd on Linux).
+- Install is idempotent: when the plist on disk is the one the
+  installer would write and the job is loaded, install changes
+  nothing, so a running daemon is not restarted by a second install.
+- Start never kills: `launchctl kickstart` runs without `-k`, so a
+  start request for a daemon that already runs leaves it running.
+- Stop waits: after the stop signal the installer waits up to 10
+  seconds for the daemon to exit, so its shutdown flush completes
+  before the caller goes on.
 - `ProcessType`: `Background` so the daemon participates in background
-  resource-management policy.
+  resource-management policy. This has a price that was measured on an
+  idle Apple silicon Mac with `taskpolicy -b`, which applies the same
+  policy: a SHA-256 over 768 MiB took 6.5 to 7.0 s against 2.4 to
+  2.5 s, about 2.7 times slower, and a file copy took 0.55 s against
+  0.30 s. The policy also keeps the daemon off the performance cores
+  and lowers its I/O priority, which is the point for a background
+  sync. Whether `Standard` serves users better is an open decision
+  (`docs/specs/2026-11-14-full-review.md`).
 
 ### Limits and scheduling
 
@@ -86,27 +100,32 @@ protection. `launchd` is intentionally passive (`KeepAlive = false`):
    `CrashLoopGuard` and applies exponential backoff before attempting
    restart. The canonical schedule (locked in by
    `core/lifecycle/tests/crash_loop_parity.rs` and mirrored by the Swift
-   tests) with the default policy — `delayStartsAfterFailures = 1`,
+   tests) with the default policy: `delayStartsAfterFailures = 1`,
    `baseDelay = 2s`, `maxDelay = 120s`,
-   `maxConsecutiveFailuresBeforePause = 5` — is:
+   `maxConsecutiveFailuresBeforePause = 5`: is:
    `crash 1 → restart immediately, crash 2 → 2s, crash 3 → 4s,
    crash 4 → 8s, paused on the 5th crash`. The longer theoretical
    sequence (`16s, 32s, …, 120s`) is only reachable if a deployment
    raises `maxConsecutiveFailuresBeforePause`; the default never reaches
    it. Crashes age out of the sliding `failureWindow = 600s`, so a run
-   that stays healthy for the window length resets the schedule.
+   that stays healthy for the window length resets the schedule. The
+   delays are shorter than the 30-second supervision tick, so what a
+   user sees is a restart on the next tick or the one after it; the
+   schedule decides which tick, not the second.
    Detection is app-side but policy-free: the macOS app runs a
    30-second timer (`DaemonHealthMonitor`,
    `VaporConstants.Daemon.healthTickIntervalSeconds`) whose every tick
-   invokes `vapor service check` — one supervision tick that detects an
+   invokes `vapor service check`: one supervision tick that detects an
    unexpected daemon exit, registers the crash, and restarts or defers
    per the schedule above. Expected stops are never counted, and the
    `awaiting_restart` marker prevents the same exit from being counted
-   twice. Crash-loop bookkeeping (`consecutive_crashes`,
-   `last_crash_at_ms`, pause, `awaiting_restart`) persists durably in
-   `<vapor_dir>/state/lifecycle.json` (owned by `core/lifecycle`), so
-   backoff and pause survive process restarts and are shared across
-   surfaces.
+   twice. Crash-loop bookkeeping (`consecutiveCrashes`,
+   `lastCrashAtMs`, `pausedIndefinitely`, `awaitingRestart`) persists
+   durably in `<vapor_dir>/state/lifecycle.json` (owned by
+   `core/lifecycle`), so backoff and pause survive process restarts and
+   are shared across surfaces. Each surface reads the file again before
+   it acts and writes its change before it starts the daemon, so the
+   app's tick and a `vapor service` command do not undo each other.
 3. After 5 consecutive crashes within the `failureWindow` (default 10
    minutes), the guard enters a durable `CrashLoopPaused` state, stops
    attempting auto-restart (`vapor service status` reports
@@ -149,10 +168,12 @@ candidate:
   `StandardOutPath`, `StandardErrorPath`, `EnvironmentVariables`,
   `ProcessType=Background`, and no other keys; the supervisor's plist
   is the same shape with `KeepAlive=true`.
-- **SIGKILL scenario**: start the daemon, `kill -9` its pid, wait `30s`,
+- **SIGKILL scenario**: with no app running and no supervisor
+  installed, start the daemon, `kill -9` its pid, wait `30s`, and
   assert no automatic restart has occurred (no new pid for `vapord`).
-  Touching the config or issuing a menubar action must then trigger a
-  restart through the app coordinator, not `launchd`.
+  With the app running, its health tick restarts the daemon within
+  one or two ticks; the restart comes from the coordinator, never from
+  `launchd`.
 - **Crash-loop pause scenario**: force 5 crashes within 10 minutes, assert
   the coordinator reaches `CrashLoopPaused` and stops restart attempts, and
   that the menubar surfaces the paused state with the documented reason.

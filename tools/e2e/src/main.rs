@@ -278,7 +278,7 @@ fn manual_sandbox(
     ctx.cli()
         .wait_run_state("running", vapor_e2e::scenario::STARTUP_TIMEOUT)?;
     println!(
-        "[e2e] sandbox ready — daemon running (pid {pid})
+        "[e2e] sandbox ready: daemon running (pid {pid})
 
   export VAPOR_DIR=\"{home_dir}\"
   vapor={cli}
@@ -338,6 +338,7 @@ fn sandbox_stop(repo_root: &Path, path: Option<PathBuf>) -> Result<(), vapor_e2e
         let pid_file = target.join("daemon.pid");
         if let Ok(text) = fs::read_to_string(&pid_file)
             && let Ok(pid) = text.trim().parse::<u32>()
+            && is_vapor_process(pid)
         {
             terminate_pid(pid);
             println!("[e2e] stopped daemon pid {pid} of {}", target.display());
@@ -348,13 +349,32 @@ fn sandbox_stop(repo_root: &Path, path: Option<PathBuf>) -> Result<(), vapor_e2e
     Ok(())
 }
 
+/// Whether `pid` is a running `vapor` or `vapord`. A pid file can
+/// outlive its daemon, and the OS can give the number to another
+/// process, so nothing is signalled on the number alone.
+fn is_vapor_process(pid: u32) -> bool {
+    #[cfg(unix)]
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output();
+    #[cfg(not(unix))]
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let command = text.trim().trim_start_matches('"');
+    let command = command.split('"').next().unwrap_or(command);
+    let name = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    matches!(name.trim_end_matches(".exe"), "vapor" | "vapord")
+}
+
 fn terminate_pid(pid: u32) {
     #[cfg(unix)]
     {
-        // SAFETY: pid came from a file this tool wrote; a stale pid at
-        // worst signals a process we do not own, which the kernel refuses
-        // for another user and which we accept as a best-effort cleanup
-        // for the same user.
+        // SAFETY: the caller checked that pid names a Vapor process.
         unsafe {
             libc::kill(pid as libc::pid_t, libc::SIGTERM);
         }

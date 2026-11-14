@@ -260,7 +260,7 @@ mod tests {
         let ceiling = Duration::from_millis(constants::engine::RETRY_AFTER_CEILING_MILLIS);
 
         // A bogus header (near u64::MAX seconds) must not overflow the time
-        // math or park the intent for years — it clamps to the ceiling.
+        // math or park the intent for years: it clamps to the ceiling.
         let decision = policy.decide(
             9,
             1,

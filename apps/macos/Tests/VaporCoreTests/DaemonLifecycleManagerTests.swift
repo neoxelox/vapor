@@ -44,7 +44,7 @@ func bootstrapNoopSkipsLoginItemWhenAutoLaunchDisabled() throws {
 @Test
 func bootstrapRegistersLoginItemEvenWhenStartIsDeferredByCrashLoopPolicy() throws {
   // A deferred start still means autolaunch is enabled and the service
-  // definition was installed — the login item must be registered.
+  // definition was installed: the login item must be registered.
   let controller = RecordingServiceController()
   controller.bootstrapResult = .relaunchDeferred(2)
   let loginItem = RecordingLoginItemController()
