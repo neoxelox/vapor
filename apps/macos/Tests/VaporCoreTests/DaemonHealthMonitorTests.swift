@@ -126,7 +126,7 @@ private struct FailingServiceController: LaunchAgentControlling {
   func restartDaemon() throws -> DaemonLifecycleActionResult { .unchanged }
 
   func daemonStatus() throws -> DaemonStatusSnapshot { throw CheckError() }
-  func syncNow() throws { throw CheckError() }
+  func reconcile() throws { throw CheckError() }
 
-  func signIn(provider _: String, profile _: String) throws {}
+  func signIn(profile _: String) throws {}
 }

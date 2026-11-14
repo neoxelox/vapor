@@ -312,7 +312,7 @@ pub trait Provider: Send + Sync {
     /// provider must state explicitly whether it can honor this
     /// safety-relevant operation. A failure blocks regular sync work
     /// with an actionable configuration error.
-    fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), ProviderError>;
+    fn ensure_cloud_root(&self, cloud_root: &str) -> Result<(), ProviderError>;
 
     /// A stable identity for the cloud root, so a folder that merely
     /// has the same path (a fresh mount, a re-created folder, an
@@ -322,8 +322,8 @@ pub trait Provider: Send + Sync {
     /// answer with the folder id. `Ok(None)` when the root exists but
     /// carries no identity (no marker yet, or a backend without one);
     /// `NotFound` when the root is missing. Never creates the root.
-    fn root_identity(&self, cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
-        let _ = cloud_sync_directory;
+    fn root_identity(&self, cloud_root: &str) -> Result<Option<String>, ProviderError> {
+        let _ = cloud_root;
         Ok(None)
     }
 
@@ -331,14 +331,14 @@ pub trait Provider: Send + Sync {
     /// marker where the backend needs one and returns the identity
     /// [`root_identity`](Self::root_identity) will report from then on
     /// (`None` for a backend without one). Called once, after
-    /// [`ensure_cloud_sync_directory`](Self::ensure_cloud_sync_directory).
+    /// [`ensure_cloud_root`](Self::ensure_cloud_root).
     fn adopt_root(
         &self,
-        cloud_sync_directory: &str,
+        cloud_root: &str,
         device_id: &str,
     ) -> Result<Option<String>, ProviderError> {
         let _ = device_id;
-        self.root_identity(cloud_sync_directory)
+        self.root_identity(cloud_root)
     }
 
     /// Lists the immediate children of `directory` (non-recursive, so
@@ -417,7 +417,7 @@ pub fn select_provider(kind: &str) -> Result<Box<dyn Provider>, ProviderError> {
 /// credentials. Missing credentials do not fail selection — they
 /// surface as an actionable `Authentication` error when the engine
 /// ensures the cloud root, which blocks sync until
-/// `vapor auth login gdrive` runs.
+/// `vapor auth login` runs.
 pub fn select_provider_for_profile(
     kind: &str,
     profile_id: &str,
@@ -463,17 +463,17 @@ impl Provider for FilesystemStubProvider {
         }
     }
 
-    fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), ProviderError> {
+    fn ensure_cloud_root(&self, cloud_root: &str) -> Result<(), ProviderError> {
         // Inert stub: it has no cloud side, so "ensuring" is a logged
         // no-op by design (not a silent trait default).
         logging::info(
-            "Filesystem stub provider treats the cloud sync directory as always present",
-            &[("cloud_sync_directory", cloud_sync_directory.to_string())],
+            "Filesystem stub provider treats the cloud root as always present",
+            &[("cloud_root", cloud_root.to_string())],
         );
         Ok(())
     }
 
-    fn root_identity(&self, _cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
+    fn root_identity(&self, _cloud_root: &str) -> Result<Option<String>, ProviderError> {
         // Always present, never identified: the stub has no cloud side
         // to tell apart from another.
         Ok(None)

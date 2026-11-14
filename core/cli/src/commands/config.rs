@@ -54,55 +54,70 @@ impl From<io::Error> for ConfigError {
 }
 
 /// Result of a `get`: the persisted value, or the compiled default
-/// when the key has never been persisted. `None` only for keys with no
-/// default (`deviceId`, which the daemon derives at first run).
+/// when the key has never been persisted. `None` for keys with no
+/// default (`deviceId` before the daemon's first run,
+/// `resourceLimits.concurrentTransfers` while automatic). A dotted key
+/// (`resourceLimits.cpuPercent`) reads one field of a group.
 pub fn get(path: &Path, key: &str) -> Result<Option<String>, ConfigError> {
-    validate_key(key)?;
+    let segments = validate_key(key)?;
     let document = read_or_empty_object(path)?;
-    if let Some(value) = document.get(key).filter(|value| !value.is_null()) {
+    if let Some(value) = lookup(&document, &segments).filter(|value| !value.is_null()) {
         return Ok(Some(format_json_scalar(value)));
     }
     // The cloud root's default depends on the provider the same file
     // selects, so it is resolved here rather than read off the struct.
-    if key == constants::config::KEY_CLOUD_SYNC_DIRECTORY {
+    if key == constants::config::KEY_CLOUD_ROOT {
         let provider = document
             .get(constants::config::KEY_PROVIDER)
             .and_then(Value::as_str)
             .unwrap_or(constants::provider::DEFAULT);
         return Ok(Some(
-            constants::filtering::default_cloud_sync_directory(provider).to_string(),
+            constants::filtering::default_cloud_root(provider).to_string(),
         ));
     }
-    Ok(default_for_key(key)
+    let defaults = serde_json::to_value(vapor_shared::config::VaporConfig::default())
+        .map_err(|error| ConfigError::Parse(error.to_string()))?;
+    Ok(lookup(&defaults, &segments)
         .filter(|value| !value.is_null())
-        .as_ref()
         .map(format_json_scalar))
+}
+
+fn lookup<'a>(document: &'a Value, segments: &[&str]) -> Option<&'a Value> {
+    segments
+        .iter()
+        .try_fold(document, |value, segment| value.get(*segment))
 }
 
 /// One line telling the user when the value takes effect, from the
 /// same key classes the daemon's live reload uses.
 pub fn apply_hint(key: &str) -> String {
-    if constants::config::LIVE_RELOAD_KEYS.contains(&key) {
+    let top = key.split('.').next().unwrap_or(key);
+    if constants::config::LIVE_RELOAD_KEYS.contains(&top) {
         format!("{key} saved; a running daemon applies it within a few seconds")
-    } else if constants::config::RESTART_REQUIRED_KEYS.contains(&key) {
+    } else if constants::config::RESTART_REQUIRED_KEYS.contains(&top) {
         format!("{key} saved; restart the daemon to apply it (vapor service restart)")
     } else {
         format!("{key} saved")
     }
 }
 
-/// The compiled default for a key, rendered from the same struct the
-/// daemon starts from so the two can never disagree.
-fn default_for_key(key: &str) -> Option<Value> {
-    let defaults = serde_json::to_value(vapor_shared::config::VaporConfig::default()).ok()?;
-    defaults.get(key).cloned()
-}
-
-/// Updates one key in-place. Preserves every other key so the macOS
-/// Swift `VaporConfigurationStore` doesn't lose state on next read.
+/// Updates one key in place and keeps every other key, so the Swift
+/// `VaporConfigurationStore` and the daemon never lose state. A dotted
+/// key (`resourceLimits.cpuPercent`, `safeguards.massDelete.threshold`)
+/// changes one field of a group and keeps its other fields; `null`
+/// removes the field so it takes its default. A whole group given as
+/// JSON replaces the group.
 pub fn set(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
-    validate_key(key)?;
-    let new_value = parse_value_for_key(key, value)?;
+    let segments = validate_key(key)?;
+    let top = segments[0];
+    let field_value = if segments.len() == 1 {
+        parse_value_for_key(top, value)?
+    } else {
+        // One field of a group: a number, a boolean, or `null` reads as
+        // JSON; anything else is a string. The whole group is checked
+        // below against the type the daemon loads.
+        serde_json::from_str::<Value>(value).unwrap_or_else(|_| Value::String(value.to_string()))
+    };
 
     // Serialize the whole read-modify-write against every other vapor.json
     // writer (the daemon, the app, a concurrent CLI): otherwise two writers
@@ -113,15 +128,66 @@ pub fn set(path: &Path, key: &str, value: &str) -> Result<(), ConfigError> {
         let object = document
             .as_object_mut()
             .expect("read_or_empty_object returns an object");
-        object.insert(key.to_string(), new_value);
+        if segments.len() == 1 {
+            object.insert(top.to_string(), field_value);
+        } else {
+            let mut group = object
+                .get(top)
+                .filter(|group| group.is_object())
+                .cloned()
+                .unwrap_or_else(|| Value::Object(Default::default()));
+            set_path(&mut group, &segments[1..], field_value);
+            let checked = parse_value_for_key(top, &group.to_string())?;
+            object.insert(top.to_string(), checked);
+        }
         vapor_shared::runtime_paths::write_config_document(path, &document)?;
         Ok(())
     })
 }
 
-fn validate_key(key: &str) -> Result<(), ConfigError> {
-    if constants::config::ALL_KEYS.contains(&key) {
-        Ok(())
+fn set_path(target: &mut Value, segments: &[&str], value: Value) {
+    let Some((last, parents)) = segments.split_last() else {
+        return;
+    };
+    let mut node = target;
+    for segment in parents {
+        let object = node.as_object_mut().expect("groups are objects");
+        let child = object
+            .entry(segment.to_string())
+            .or_insert_with(|| Value::Object(Default::default()));
+        if !child.is_object() {
+            *child = Value::Object(Default::default());
+        }
+        node = child;
+    }
+    let object = node.as_object_mut().expect("groups are objects");
+    if value.is_null() {
+        object.remove(*last);
+    } else {
+        object.insert(last.to_string(), value);
+    }
+}
+
+/// The key's path: one segment for a top-level key, more for a field of
+/// a group (`resourceLimits.cpuPercent`, `safeguards.massDelete.enabled`).
+fn validate_key(key: &str) -> Result<Vec<&str>, ConfigError> {
+    use constants::config as keys;
+    let segments: Vec<&str> = key.split('.').collect();
+    let known = match segments.as_slice() {
+        [top] => keys::ALL_KEYS.contains(top),
+        [keys::KEY_RESOURCE_LIMITS, field] => constants::resource_limits::ALL_KEYS.contains(field),
+        [keys::KEY_IDLE_BOOST, field] => constants::idle_boost::ALL_KEYS.contains(field),
+        [keys::KEY_TRASH, field] => constants::trash::ALL_KEYS.contains(field),
+        [keys::KEY_SAFEGUARDS, constants::safeguards::KEY_MASS_DELETE] => true,
+        [
+            keys::KEY_SAFEGUARDS,
+            constants::safeguards::KEY_MASS_DELETE,
+            field,
+        ] => constants::safeguards::MASS_DELETE_KEYS.contains(field),
+        _ => false,
+    };
+    if known {
+        Ok(segments)
     } else {
         Err(ConfigError::UnknownKey(key.to_string()))
     }
@@ -141,13 +207,13 @@ fn read_or_empty_object(path: &Path) -> Result<Value, ConfigError> {
 
 fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
     use constants::config::{
-        KEY_AUTO_LAUNCH, KEY_IDLE_BOOST, KEY_PROFILES, KEY_PROVIDER, KEY_RESOURCE_LIMITS,
-        KEY_SAFEGUARDS, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT, KEY_TRASH, KEY_USE_GIT_IGNORE,
-        KEY_USE_VAPOR_IGNORE,
+        KEY_AUTO_LAUNCH, KEY_IDLE_BOOST, KEY_POST_IGNORE_RULES, KEY_PRE_IGNORE_RULES, KEY_PROFILES,
+        KEY_PROVIDER, KEY_RESOURCE_LIMITS, KEY_SAFEGUARDS, KEY_SYNC_MODE, KEY_TIMELINE_LIMIT,
+        KEY_TRASH, KEY_USE_GITIGNORE, KEY_USE_VAPORIGNORE,
     };
     if matches!(
         key,
-        KEY_AUTO_LAUNCH | KEY_USE_GIT_IGNORE | KEY_USE_VAPOR_IGNORE
+        KEY_AUTO_LAUNCH | KEY_USE_GITIGNORE | KEY_USE_VAPORIGNORE
     ) {
         return match raw {
             "true" => Ok(Value::Bool(true)),
@@ -177,6 +243,13 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
     if key == KEY_SYNC_MODE {
         return parse_enum_value(key, raw, constants::sync_mode::ALL);
     }
+    if matches!(key, KEY_PRE_IGNORE_RULES | KEY_POST_IGNORE_RULES) {
+        return parse_json_value::<Vec<String>>(
+            key,
+            raw,
+            "a JSON array of rules such as [\"build/\", \"*.log\"]",
+        );
+    }
     if key == KEY_PROFILES {
         return parse_json_value::<Vec<vapor_shared::config::ProfileConfig>>(
             key,
@@ -202,7 +275,7 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
         return parse_json_value::<vapor_shared::config::SafeguardsConfig>(
             key,
             raw,
-            "a JSON object such as {\"massDeleteThreshold\": 500}",
+            "a JSON object such as {\"massDelete\": {\"threshold\": 500}}",
         );
     }
     if key == KEY_TRASH {
@@ -216,9 +289,8 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
 }
 
 /// Structured keys take JSON and must deserialize into the type the
-/// daemon loads, otherwise the daemon would log the value as invalid at
-/// startup and silently run on defaults. The parsed document is stored
-/// as given (unknown fields survive, as the daemon ignores them).
+/// daemon loads, with no field it does not know; otherwise the daemon
+/// would fall back to defaults for what the user meant to set.
 fn parse_json_value<T: serde::de::DeserializeOwned>(
     key: &str,
     raw: &str,
@@ -231,6 +303,13 @@ fn parse_json_value<T: serde::de::DeserializeOwned>(
     })?;
     serde_json::from_value::<T>(value.clone())
         .map_err(|error| ConfigError::Parse(format!("'{key}' is not {shape}: {error}")))?;
+    let unknown = vapor_shared::config::unknown_nested_keys(key, &value);
+    if !unknown.is_empty() {
+        return Err(ConfigError::Parse(format!(
+            "unknown field(s) {} in '{key}'; docs/product/configuration.md lists its fields",
+            unknown.join(", ")
+        )));
+    }
     Ok(value)
 }
 
@@ -287,17 +366,17 @@ mod tests {
         let temp = TempDir::new().expect("temp");
         let path = config_path(&temp);
         assert_eq!(
-            get(&path, "cloudSyncDirectory").expect("get"),
-            Some(constants::filtering::DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY.to_string())
+            get(&path, "cloudRoot").expect("get"),
+            Some(constants::filtering::DEFAULT_FILESYSTEM_CLOUD_ROOT.to_string())
         );
         set(&path, "provider", "gdrive").expect("set provider");
         assert_eq!(
-            get(&path, "cloudSyncDirectory").expect("get"),
-            Some(constants::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY.to_string())
+            get(&path, "cloudRoot").expect("get"),
+            Some(constants::filtering::DEFAULT_CLOUD_ROOT.to_string())
         );
-        set(&path, "cloudSyncDirectory", "/Work").expect("set root");
+        set(&path, "cloudRoot", "/Work").expect("set root");
         assert_eq!(
-            get(&path, "cloudSyncDirectory").expect("get"),
+            get(&path, "cloudRoot").expect("get"),
             Some("/Work".to_string())
         );
     }
@@ -320,7 +399,7 @@ mod tests {
         let contents = fs::read_to_string(&path).expect("file");
         // Stored as JSON, not as a string containing JSON.
         assert!(contents.contains("\"profiles\": ["), "{contents}");
-        let error = set(&path, "safeguards", "massDeleteThreshold=500").expect_err("not JSON");
+        let error = set(&path, "safeguards", "massDelete.threshold=500").expect_err("not JSON");
         assert!(matches!(error, ConfigError::Parse(_)));
         let error = set(&path, "profiles", r#"{"id": "x"}"#).expect_err("wrong shape");
         assert!(error.to_string().contains("profiles"), "{error}");
@@ -354,17 +433,17 @@ mod tests {
             &path,
             r#"{
   "autoLaunch": true,
-  "languageCode": "en"
+  "language": "en"
 }
 "#,
         )
         .expect("seed");
 
-        set(&path, "useGitIgnore", "false").expect("set");
+        set(&path, "useGitignore", "false").expect("set");
         let contents = fs::read_to_string(&path).expect("file");
         assert!(contents.contains("\"autoLaunch\": true"));
-        assert!(contents.contains("\"languageCode\": \"en\""));
-        assert!(contents.contains("\"useGitIgnore\": false"));
+        assert!(contents.contains("\"language\": \"en\""));
+        assert!(contents.contains("\"useGitignore\": false"));
     }
 
     #[test]
@@ -375,14 +454,90 @@ mod tests {
     }
 
     #[test]
+    fn a_dotted_key_sets_one_field_and_keeps_the_rest_of_its_group() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        set(
+            &path,
+            "resourceLimits",
+            r#"{"bandwidthPercent": 5, "concurrentTransfers": 2}"#,
+        )
+        .expect("set group");
+        set(&path, "resourceLimits.cpuPercent", "10").expect("set field");
+        assert_eq!(
+            get(&path, "resourceLimits.cpuPercent").expect("get"),
+            Some("10".into())
+        );
+        assert_eq!(
+            get(&path, "resourceLimits.bandwidthPercent").expect("get"),
+            Some("5".into())
+        );
+
+        // `null` removes the field, so it takes its default again.
+        set(&path, "resourceLimits.concurrentTransfers", "null").expect("unset");
+        assert_eq!(
+            get(&path, "resourceLimits.concurrentTransfers").expect("get"),
+            None
+        );
+        assert_eq!(
+            get(&path, "safeguards.massDelete.threshold").expect("default"),
+            Some("1000".into())
+        );
+        set(&path, "safeguards.massDelete.enabled", "false").expect("nested field");
+        assert_eq!(
+            get(&path, "safeguards.massDelete.enabled").expect("get"),
+            Some("false".into())
+        );
+
+        // The field's type is checked like the whole group's.
+        assert!(set(&path, "resourceLimits.cpuPercent", "lots").is_err());
+        assert!(matches!(
+            set(&path, "resourceLimits.boostCpuPercent", "10"),
+            Err(ConfigError::UnknownKey(_))
+        ));
+        assert!(apply_hint("resourceLimits.cpuPercent").contains("within a few seconds"));
+    }
+
+    #[test]
+    fn a_group_with_a_field_it_does_not_have_is_refused() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        let error = set(&path, "idleBoost", r#"{"boostCpuPercent": 10}"#).expect_err("old name");
+        assert!(
+            error.to_string().contains("idleBoost.boostCpuPercent"),
+            "{error}"
+        );
+        let error = set(
+            &path,
+            "profiles",
+            r#"[{"id": "work", "localSyncDirectory": "~/W"}]"#,
+        )
+        .expect_err("old name in a profile");
+        assert!(
+            error.to_string().contains("profiles[0].localSyncDirectory"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn ignore_rules_are_set_as_a_json_list() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        set(&path, "postIgnoreRules", r#"["build/", "*.log"]"#).expect("set");
+        assert_eq!(
+            get(&path, "postIgnoreRules").expect("get"),
+            Some(r#"["build/","*.log"]"#.to_string())
+        );
+        let error = set(&path, "postIgnoreRules", "build/").expect_err("not a list");
+        assert!(error.to_string().contains("JSON array"), "{error}");
+    }
+
+    #[test]
     fn set_persists_string_keys_verbatim() {
         let temp = TempDir::new().expect("temp");
         let path = config_path(&temp);
-        set(&path, "languageCode", "es").expect("set");
-        assert_eq!(
-            get(&path, "languageCode").expect("get"),
-            Some("es".to_string())
-        );
+        set(&path, "language", "es").expect("set");
+        assert_eq!(get(&path, "language").expect("get"), Some("es".to_string()));
     }
 
     #[test]

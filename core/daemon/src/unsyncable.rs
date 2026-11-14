@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::state_db::DecisionOption;
 
-pub const DECISION_KIND: &str = "unsyncable-name";
-pub const OPTION_SKIP: &str = "skip";
+pub use vapor_shared::constants::decision::{KIND_UNSYNCABLE_NAME as DECISION_KIND, OPTION_SKIP};
 
 /// A name the walk could not carry, with the reason.
 #[derive(Clone, Debug, PartialEq, Eq)]

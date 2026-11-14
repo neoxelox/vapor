@@ -1,5 +1,4 @@
-//! `vapor support-bundle`: diagnostics history + support
-//! export.
+//! `vapor report`: a support report to share when asking for help.
 //!
 //! Collects everything a maintainer needs to triage a report into one
 //! shareable directory: the runtime config, the daemon logs, and — when
@@ -9,7 +8,7 @@
 //!
 //! Privacy posture: the config carries no secrets (tokens live only in
 //! the platform secret store, §6) and the daemon logs are written
-//! through the redacting logger. The bundle therefore contains no
+//! through the redacting logger. The report therefore contains no
 //! credentials by construction; the manifest states this so users know
 //! what they are sharing.
 
@@ -35,16 +34,16 @@ pub struct LiveCaptures {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SupportBundleReport {
-    pub bundle_dir: PathBuf,
-    /// Bundle-relative paths of everything captured.
+pub struct SupportReport {
+    pub path: PathBuf,
+    /// Report-relative paths of everything captured.
     pub artifacts: Vec<String>,
     pub daemon_reachable: bool,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BundleManifest<'a> {
+struct ReportManifest<'a> {
     created_at_ms: u64,
     vapor_version: &'a str,
     os: &'a str,
@@ -54,22 +53,22 @@ struct BundleManifest<'a> {
     /// Per-endpoint live-capture failures (empty when all succeeded or the
     /// daemon was fully unreachable).
     capture_errors: &'a [String],
-    /// Human-facing note on what the bundle can and cannot contain.
+    /// Human-facing note on what the report can and cannot contain.
     redaction: &'a str,
 }
 
-/// Collects the bundle under `output_root/vapor-support-{timestamp}/`.
+/// Writes the report under `output_root/vapor-report-{timestamp}/`.
 ///
 /// Pure filesystem work over an explicit `vapor_dir` — no IPC, no
 /// network — so tests drive it hermetically; `main.rs` supplies the
 /// live captures.
-pub fn collect_support_bundle(
+pub fn write_support_report(
     vapor_dir: &Path,
     output_root: &Path,
     live: Option<LiveCaptures>,
     timestamp_ms: u64,
-) -> io::Result<SupportBundleReport> {
-    let bundle_dir = create_unique_bundle_dir(output_root, timestamp_ms)?;
+) -> io::Result<SupportReport> {
+    let path = create_unique_report_dir(output_root, timestamp_ms)?;
     let mut artifacts = Vec::new();
 
     // Runtime config (no secrets by design; tokens live in the secret
@@ -78,7 +77,7 @@ pub fn collect_support_bundle(
     if config_path.is_file() {
         fs::copy(
             &config_path,
-            bundle_dir.join(vapor_shared::constants::runtime::CONFIGURATION_FILE_NAME),
+            path.join(vapor_shared::constants::runtime::CONFIGURATION_FILE_NAME),
         )?;
         artifacts.push(vapor_shared::constants::runtime::CONFIGURATION_FILE_NAME.to_string());
     }
@@ -86,8 +85,8 @@ pub fn collect_support_bundle(
     // Daemon/CLI logs (written through the redacting logger).
     let logs_dir = vapor_dir.join(vapor_shared::constants::runtime::LOGS_DIRECTORY_NAME);
     if logs_dir.is_dir() {
-        let bundle_logs = bundle_dir.join(vapor_shared::constants::runtime::LOGS_DIRECTORY_NAME);
-        fs::create_dir_all(&bundle_logs)?;
+        let report_logs = path.join(vapor_shared::constants::runtime::LOGS_DIRECTORY_NAME);
+        fs::create_dir_all(&report_logs)?;
         let mut entries: Vec<_> = fs::read_dir(&logs_dir)?
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.path().is_file())
@@ -95,7 +94,7 @@ pub fn collect_support_bundle(
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let name = entry.file_name();
-            fs::copy(entry.path(), bundle_logs.join(&name))?;
+            fs::copy(entry.path(), report_logs.join(&name))?;
             artifacts.push(format!(
                 "{}/{}",
                 vapor_shared::constants::runtime::LOGS_DIRECTORY_NAME,
@@ -120,16 +119,16 @@ pub fn collect_support_bundle(
             ("timeline.json", &live.timeline_json),
         ] {
             if let Some(contents) = contents {
-                fs::write(bundle_dir.join(name), contents)?;
+                fs::write(path.join(name), contents)?;
                 artifacts.push(name.to_string());
             }
         }
     }
 
     // The manifest lists itself, so its artifact array matches both the
-    // report and the actual bundle contents.
+    // report and the actual report contents.
     artifacts.push("manifest.json".to_string());
-    let manifest = BundleManifest {
+    let manifest = ReportManifest {
         created_at_ms: timestamp_ms,
         vapor_version: vapor_daemon::build_info::VERSION,
         os: std::env::consts::OS,
@@ -143,23 +142,23 @@ pub fn collect_support_bundle(
     };
     let manifest_json = serde_json::to_string_pretty(&manifest)
         .map_err(|error| io::Error::other(format!("cannot serialize manifest: {error}")))?;
-    fs::write(bundle_dir.join("manifest.json"), manifest_json)?;
+    fs::write(path.join("manifest.json"), manifest_json)?;
 
-    Ok(SupportBundleReport {
-        bundle_dir,
+    Ok(SupportReport {
+        path,
         artifacts,
         daemon_reachable,
     })
 }
 
-/// Creates a fresh bundle directory, disambiguating a name collision
+/// Creates a fresh report directory, disambiguating a name collision
 /// (same-millisecond invocations, or a repeated pre-epoch timestamp) with
 /// a numeric suffix. `create_dir` fails on an existing directory (unlike
-/// `create_dir_all`), so two bundles can never silently merge into one
+/// `create_dir_all`), so two reports can never silently merge into one
 /// and leave the manifest describing contents that are not all there.
-fn create_unique_bundle_dir(output_root: &Path, timestamp_ms: u64) -> io::Result<PathBuf> {
+fn create_unique_report_dir(output_root: &Path, timestamp_ms: u64) -> io::Result<PathBuf> {
     fs::create_dir_all(output_root)?;
-    let base = format!("vapor-support-{timestamp_ms}");
+    let base = format!("vapor-report-{timestamp_ms}");
     for suffix in 0..1_000 {
         let name = if suffix == 0 {
             base.clone()
@@ -175,22 +174,19 @@ fn create_unique_bundle_dir(output_root: &Path, timestamp_ms: u64) -> io::Result
     }
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
-        "too many support bundles share this timestamp",
+        "too many support reports share this timestamp",
     ))
 }
 
 /// Render the report for the human (non-`--json`) path.
-pub fn render_report(report: &SupportBundleReport) -> String {
-    let mut out = format!(
-        "support bundle written to {}\n",
-        report.bundle_dir.display()
-    );
+pub fn render_report(report: &SupportReport) -> String {
+    let mut out = format!("support report written to {}\n", report.path.display());
     out.push_str(&format!(
         "daemon: {}\n",
         if report.daemon_reachable {
             "reachable (live status/diagnostics/timeline captured)"
         } else {
-            "not reachable (bundle contains on-disk artifacts only)"
+            "not reachable (the report holds on-disk files only)"
         }
     ));
     for artifact in &report.artifacts {
@@ -206,31 +202,30 @@ mod tests {
 
     fn seed_vapor_dir(root: &Path) {
         fs::create_dir_all(root.join("logs")).expect("logs dir");
-        fs::write(root.join("vapor.json"), "{\"languageCode\":\"en\"}").expect("config");
-        fs::write(root.join("logs/vapord.logs"), "line-1\n").expect("log file");
-        fs::write(root.join("logs/vapor-cli.logs"), "line-2\n").expect("log file");
+        fs::write(root.join("vapor.json"), "{\"language\":\"en\"}").expect("config");
+        fs::write(root.join("logs/vapord.log"), "line-1\n").expect("log file");
+        fs::write(root.join("logs/vapor.log"), "line-2\n").expect("log file");
     }
 
     #[test]
-    fn bundle_collects_config_logs_and_manifest_without_a_daemon() {
+    fn report_collects_config_logs_and_manifest_without_a_daemon() {
         let vapor_dir = TempDir::new().expect("vapor dir");
         let output = TempDir::new().expect("output dir");
         seed_vapor_dir(vapor_dir.path());
 
-        let report = collect_support_bundle(vapor_dir.path(), output.path(), None, 1_234)
-            .expect("bundle collects");
+        let report = write_support_report(vapor_dir.path(), output.path(), None, 1_234)
+            .expect("report collects");
 
         assert!(!report.daemon_reachable);
-        assert!(report.bundle_dir.ends_with("vapor-support-1234"));
-        assert!(report.bundle_dir.join("vapor.json").is_file());
-        assert!(report.bundle_dir.join("logs/vapord.logs").is_file());
-        assert!(report.bundle_dir.join("logs/vapor-cli.logs").is_file());
-        assert!(report.bundle_dir.join("manifest.json").is_file());
+        assert!(report.path.ends_with("vapor-report-1234"));
+        assert!(report.path.join("vapor.json").is_file());
+        assert!(report.path.join("logs/vapord.log").is_file());
+        assert!(report.path.join("logs/vapor.log").is_file());
+        assert!(report.path.join("manifest.json").is_file());
         assert!(report.artifacts.contains(&"vapor.json".to_string()));
         assert!(report.artifacts.contains(&"manifest.json".to_string()));
 
-        let manifest =
-            fs::read_to_string(report.bundle_dir.join("manifest.json")).expect("manifest");
+        let manifest = fs::read_to_string(report.path.join("manifest.json")).expect("manifest");
         let parsed: serde_json::Value = serde_json::from_str(&manifest).expect("manifest json");
         assert_eq!(parsed["daemonReachable"], serde_json::Value::Bool(false));
         assert_eq!(parsed["createdAtMs"], serde_json::json!(1_234));
@@ -244,17 +239,17 @@ mod tests {
         seed_vapor_dir(vapor_dir.path());
 
         let live = LiveCaptures {
-            status_json: Some("{\"runState\":\"Running\"}".to_string()),
-            diagnostics_json: Some("{\"intents\":[]}".to_string()),
+            status_json: Some("{\"run\":{\"state\":\"running\"}}".to_string()),
+            diagnostics_json: Some("{\"items\":[]}".to_string()),
             timeline_json: Some("{\"entries\":[]}".to_string()),
             capture_errors: Vec::new(),
         };
-        let report = collect_support_bundle(vapor_dir.path(), output.path(), Some(live), 99)
-            .expect("bundle collects");
+        let report = write_support_report(vapor_dir.path(), output.path(), Some(live), 99)
+            .expect("report collects");
 
         assert!(report.daemon_reachable);
         for name in ["status.json", "diagnostics.json", "timeline.json"] {
-            assert!(report.bundle_dir.join(name).is_file(), "missing {name}");
+            assert!(report.path.join(name).is_file(), "missing {name}");
             assert!(report.artifacts.contains(&name.to_string()));
         }
     }
@@ -267,22 +262,21 @@ mod tests {
 
         // status succeeded; timeline failed mid-capture.
         let live = LiveCaptures {
-            status_json: Some("{\"runState\":\"Running\"}".to_string()),
-            diagnostics_json: Some("{\"intents\":[]}".to_string()),
+            status_json: Some("{\"run\":{\"state\":\"running\"}}".to_string()),
+            diagnostics_json: Some("{\"items\":[]}".to_string()),
             timeline_json: None,
             capture_errors: vec!["timeline: daemon not responding".to_string()],
         };
-        let report = collect_support_bundle(vapor_dir.path(), output.path(), Some(live), 42)
-            .expect("bundle collects");
+        let report = write_support_report(vapor_dir.path(), output.path(), Some(live), 42)
+            .expect("report collects");
 
         // Reachability is decided by status, not by the failed endpoint.
         assert!(report.daemon_reachable);
-        assert!(report.bundle_dir.join("status.json").is_file());
-        assert!(report.bundle_dir.join("diagnostics.json").is_file());
-        assert!(!report.bundle_dir.join("timeline.json").exists());
+        assert!(report.path.join("status.json").is_file());
+        assert!(report.path.join("diagnostics.json").is_file());
+        assert!(!report.path.join("timeline.json").exists());
 
-        let manifest =
-            fs::read_to_string(report.bundle_dir.join("manifest.json")).expect("manifest");
+        let manifest = fs::read_to_string(report.path.join("manifest.json")).expect("manifest");
         let parsed: serde_json::Value = serde_json::from_str(&manifest).expect("manifest json");
         assert_eq!(parsed["daemonReachable"], serde_json::Value::Bool(true));
         assert_eq!(
@@ -292,22 +286,22 @@ mod tests {
     }
 
     #[test]
-    fn same_timestamp_bundles_get_distinct_directories() {
+    fn same_timestamp_reports_get_distinct_directories() {
         let vapor_dir = TempDir::new().expect("vapor dir");
         let output = TempDir::new().expect("output dir");
         seed_vapor_dir(vapor_dir.path());
 
-        let first = collect_support_bundle(vapor_dir.path(), output.path(), None, 1_000)
-            .expect("first bundle");
-        let second = collect_support_bundle(vapor_dir.path(), output.path(), None, 1_000)
-            .expect("second bundle");
+        let first = write_support_report(vapor_dir.path(), output.path(), None, 1_000)
+            .expect("first report");
+        let second = write_support_report(vapor_dir.path(), output.path(), None, 1_000)
+            .expect("second report");
 
         assert_ne!(
-            first.bundle_dir, second.bundle_dir,
-            "a repeated timestamp must not merge two bundles into one directory"
+            first.path, second.path,
+            "a repeated timestamp must not merge two reports into one directory"
         );
-        assert!(first.bundle_dir.join("manifest.json").is_file());
-        assert!(second.bundle_dir.join("manifest.json").is_file());
+        assert!(first.path.join("manifest.json").is_file());
+        assert!(second.path.join("manifest.json").is_file());
     }
 
     #[test]
@@ -315,24 +309,24 @@ mod tests {
         let vapor_dir = TempDir::new().expect("vapor dir");
         let output = TempDir::new().expect("output dir");
 
-        let report = collect_support_bundle(vapor_dir.path(), output.path(), None, 7)
-            .expect("bundle collects from an empty runtime dir");
+        let report = write_support_report(vapor_dir.path(), output.path(), None, 7)
+            .expect("report collects from an empty runtime dir");
 
         // Only the manifest is guaranteed.
         assert_eq!(report.artifacts, vec!["manifest.json".to_string()]);
-        assert!(report.bundle_dir.join("manifest.json").is_file());
+        assert!(report.path.join("manifest.json").is_file());
     }
 
     #[test]
     fn report_json_shape_is_camel_case_for_the_json_flag() {
-        let report = SupportBundleReport {
-            bundle_dir: PathBuf::from("/tmp/vapor-support-1"),
+        let report = SupportReport {
+            path: PathBuf::from("/tmp/vapor-report-1"),
             artifacts: vec!["manifest.json".to_string()],
             daemon_reachable: false,
         };
-        let value = serde_json::to_value(&report).expect("serializes");
-        assert!(value.get("bundleDir").is_some());
-        assert!(value.get("daemonReachable").is_some());
-        assert!(value.get("artifacts").is_some());
+        assert_eq!(
+            serde_json::to_string(&report).expect("serializes"),
+            r#"{"path":"/tmp/vapor-report-1","artifacts":["manifest.json"],"daemonReachable":false}"#
+        );
     }
 }

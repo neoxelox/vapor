@@ -342,10 +342,7 @@ impl Provider for MockObjectStoreProvider {
         }
     }
 
-    fn ensure_cloud_sync_directory(
-        &self,
-        _cloud_sync_directory: &str,
-    ) -> Result<(), ProviderError> {
+    fn ensure_cloud_root(&self, _cloud_root: &str) -> Result<(), ProviderError> {
         Ok(())
     }
 

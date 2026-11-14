@@ -1,4 +1,3 @@
-use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,76 +19,30 @@ impl Default for EventPathFilterOptions {
         Self {
             use_gitignore: true,
             use_vaporignore: true,
-            pre_user_rules: constants::filtering::DEFAULT_PRE_IGNORE_RULES
-                .iter()
-                .map(|rule| (*rule).to_string())
-                .collect(),
+            pre_user_rules: vapor_shared::config::default_pre_ignore_rules(),
             post_user_rules: Vec::new(),
         }
     }
 }
 
 impl EventPathFilterOptions {
-    pub fn from_process_environment() -> Self {
-        Self::from_environment_and_config(&vapor_shared::config::VaporConfig::default())
-    }
-
-    /// Resolves the filter options with the canonical precedence:
-    /// `VAPOR_*` environment variable → `vapor.json` value → compiled
-    /// default (already baked into [`vapor_shared::config::VaporConfig`]).
-    pub fn from_environment_and_config(config: &vapor_shared::config::VaporConfig) -> Self {
-        Self::resolve(
-            env::var(constants::env::VAPOR_USE_GITIGNORE)
-                .ok()
-                .as_deref(),
-            env::var(constants::env::VAPOR_USE_VAPORIGNORE)
-                .ok()
-                .as_deref(),
-            env::var(constants::env::VAPOR_PRE_IGNORE_RULES)
-                .ok()
-                .as_deref(),
-            env::var(constants::env::VAPOR_POST_IGNORE_RULES)
-                .ok()
-                .as_deref(),
-            config,
-        )
-    }
-
-    fn resolve(
-        env_use_gitignore: Option<&str>,
-        env_use_vaporignore: Option<&str>,
-        env_pre_rules: Option<&str>,
-        env_post_rules: Option<&str>,
-        config: &vapor_shared::config::VaporConfig,
-    ) -> Self {
-        let use_gitignore = env_use_gitignore
-            .and_then(parse_bool_flag)
-            .unwrap_or(config.use_git_ignore);
-        let use_vaporignore = env_use_vaporignore
-            .and_then(parse_bool_flag)
-            .unwrap_or(config.use_vapor_ignore);
-        let pre_user_rules = match env_pre_rules {
-            Some(raw) => parse_rule_lines(raw),
-            None => parse_rule_lines(&config.pre_ignore_rules),
-        };
-        let post_user_rules = match env_post_rules {
-            Some(raw) => parse_rule_lines(raw),
-            None => parse_rule_lines(&config.post_ignore_rules),
-        };
-
+    /// The filter options `vapor.json` sets (defaults already baked into
+    /// [`vapor_shared::config::VaporConfig`]).
+    pub fn from_config(config: &vapor_shared::config::VaporConfig) -> Self {
         Self {
-            use_gitignore,
-            use_vaporignore,
-            pre_user_rules,
-            post_user_rules,
+            use_gitignore: config.use_gitignore,
+            use_vaporignore: config.use_vaporignore,
+            pre_user_rules: parse_rule_lines(&config.pre_ignore_rules),
+            post_user_rules: parse_rule_lines(&config.post_ignore_rules),
         }
     }
 }
 
-fn parse_rule_lines(raw: &str) -> Vec<String> {
-    raw.lines()
-        .map(|line| line.trim())
-        .filter(|line| !line.is_empty())
+fn parse_rule_lines(rules: &[String]) -> Vec<String> {
+    rules
+        .iter()
+        .map(|rule| rule.trim())
+        .filter(|rule| !rule.is_empty())
         .map(ToOwned::to_owned)
         .collect()
 }
@@ -594,14 +547,6 @@ fn normalize_relative_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn parse_bool_flag(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,7 +601,7 @@ mod tests {
         // at any depth, files included.
         assert!(filter.should_ignore(&watch_root.join(".vapor")));
         assert!(filter.should_ignore(&watch_root.join(".vapor/trash/default/1-0000/keep.txt")));
-        assert!(filter.should_ignore(&watch_root.join("projects/app/.vapor/logs/vapord.logs")));
+        assert!(filter.should_ignore(&watch_root.join("projects/app/.vapor/logs/vapord.log")));
         // The user's ignore file is a different name and still syncs.
         assert!(!filter.should_ignore(&watch_root.join(".vaporignore")));
         assert!(!filter.should_ignore(&watch_root.join("docs/.vapor-notes.md")));
@@ -919,16 +864,16 @@ mod tests {
     }
 
     #[test]
-    fn options_default_to_config_values_when_environment_is_unset() {
+    fn options_come_from_the_config() {
         let config = vapor_shared::config::VaporConfig {
-            use_git_ignore: false,
-            use_vapor_ignore: true,
-            pre_ignore_rules: "tmp/\n*.cache".to_string(),
-            post_ignore_rules: "keep-out/".to_string(),
+            use_gitignore: false,
+            use_vaporignore: true,
+            pre_ignore_rules: vec!["tmp/".into(), " *.cache".into(), String::new()],
+            post_ignore_rules: vec!["keep-out/".into()],
             ..vapor_shared::config::VaporConfig::default()
         };
 
-        let options = EventPathFilterOptions::resolve(None, None, None, None, &config);
+        let options = EventPathFilterOptions::from_config(&config);
 
         assert!(!options.use_gitignore);
         assert!(options.use_vaporignore);
@@ -937,39 +882,9 @@ mod tests {
     }
 
     #[test]
-    fn environment_variables_override_config_values() {
-        let config = vapor_shared::config::VaporConfig {
-            use_git_ignore: true,
-            pre_ignore_rules: "from-config/".to_string(),
-            ..vapor_shared::config::VaporConfig::default()
-        };
-
-        let options = EventPathFilterOptions::resolve(
-            Some("false"),
-            Some("invalid-falls-back-to-config"),
-            Some("from-env/\n\n"),
-            None,
-            &config,
-        );
-
-        assert!(!options.use_gitignore, "env override wins");
-        assert!(
-            options.use_vaporignore,
-            "unparseable env value falls back to config"
-        );
-        assert_eq!(options.pre_user_rules, vec!["from-env/"]);
-        assert!(options.post_user_rules.is_empty());
-    }
-
-    #[test]
     fn default_config_yields_the_compiled_default_rule_set() {
-        let options = EventPathFilterOptions::resolve(
-            None,
-            None,
-            None,
-            None,
-            &vapor_shared::config::VaporConfig::default(),
-        );
+        let options =
+            EventPathFilterOptions::from_config(&vapor_shared::config::VaporConfig::default());
         assert!(options.use_gitignore);
         assert!(options.use_vaporignore);
         assert!(
@@ -979,15 +894,6 @@ mod tests {
                 .any(|rule| rule == "node_modules/")
         );
         assert!(options.post_user_rules.is_empty());
-    }
-
-    #[test]
-    fn parses_boolean_environment_flags() {
-        assert_eq!(parse_bool_flag("true"), Some(true));
-        assert_eq!(parse_bool_flag("YES"), Some(true));
-        assert_eq!(parse_bool_flag("0"), Some(false));
-        assert_eq!(parse_bool_flag("off"), Some(false));
-        assert_eq!(parse_bool_flag("invalid"), None);
     }
 
     /// Owns the `TempDir` guard so the directory lives for the test and

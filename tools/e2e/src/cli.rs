@@ -106,7 +106,7 @@ impl Cli {
     }
 
     pub fn run_state(&self) -> Option<String> {
-        self.status().map(|status| status.run_state)
+        self.status().map(|status| status.run.state)
     }
 
     pub fn run_state_is(&self, expected: &str) -> bool {
@@ -124,11 +124,6 @@ impl Cli {
             ),
             || self.run_state_is(expected),
         )
-    }
-
-    /// A drain hint; allowed to fail benignly when it races a state flip.
-    pub fn flush_now(&self) {
-        let _ = self.run(&["flush-now"]);
     }
 
     pub fn reconcile(&self) -> Result<(), Failure> {

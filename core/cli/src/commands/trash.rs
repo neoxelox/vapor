@@ -70,7 +70,7 @@ fn open(config: &VaporConfig, profile_id: &str) -> LocalTrash {
     let sync_root = resolve_profiles(config)
         .into_iter()
         .find(|profile| profile.id == profile_id)
-        .and_then(|profile| profile.scope.local_sync_directory);
+        .and_then(|profile| profile.scope.local_root);
     LocalTrash::open(
         profile_id,
         vapor_shared::runtime_paths::profile_trash_directory(profile_id),
@@ -182,6 +182,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn restore_and_empty_json_shapes_are_locked() {
+        let restored = RestoreReport {
+            profile_id: "default".into(),
+            id: "1700000000000-0001".into(),
+            restored_to: PathBuf::from("/r/notes.txt"),
+        };
+        assert_eq!(
+            serde_json::to_string(&restored).expect("serialize"),
+            r#"{"profileId":"default","id":"1700000000000-0001","restoredTo":"/r/notes.txt"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EmptyReport { removed: 3 }).expect("serialize"),
+            r#"{"removed":3}"#
+        );
+    }
+
+    #[test]
     fn json_shape_is_locked() {
         let report = TrashListReport {
             entries: vec![TrashEntryJson {
@@ -189,7 +206,7 @@ mod tests {
                 id: "1700000000000-0001".into(),
                 original_path: PathBuf::from("/r/notes.txt"),
                 kind: "file".into(),
-                reason: "deleted-in-cloud".into(),
+                reason: "cloud-delete".into(),
                 discarded_at_ms: 1_700_000_000_000,
                 size_bytes: 12,
             }],
@@ -204,7 +221,7 @@ mod tests {
       "id": "1700000000000-0001",
       "originalPath": "/r/notes.txt",
       "kind": "file",
-      "reason": "deleted-in-cloud",
+      "reason": "cloud-delete",
       "discardedAtMs": 1700000000000,
       "sizeBytes": 12
     }
@@ -221,7 +238,7 @@ mod tests {
                 id: "1-0001".into(),
                 original_path: PathBuf::from("/r/big.bin"),
                 kind: "file".into(),
-                reason: "mirror-removal".into(),
+                reason: "mirror-delete".into(),
                 discarded_at_ms: 1,
                 size_bytes: 3 * 1024 * 1024,
             }],

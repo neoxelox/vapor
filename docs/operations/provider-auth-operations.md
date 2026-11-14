@@ -9,7 +9,7 @@ are provider-neutral unless a section says otherwise.
 ## OAuth flow baseline (Google Drive)
 
 - OAuth 2.0 with PKCE (`S256` code challenge, RFC 7636).
-  `vapor auth login gdrive` runs the whole flow: it starts a
+  `vapor auth login` runs the whole flow: it starts a
   loopback listener on `127.0.0.1`, opens the consent page in the
   default browser, receives the redirect, and exchanges the code. It
   waits up to five minutes for the consent. It runs the browser flow
@@ -49,7 +49,7 @@ are provider-neutral unless a section says otherwise.
   the built-in secret would fail every token request with
   `invalid_client`.
 - `vapor doctor` names the client a binary uses in its
-  `gdrive_oauth_client` row: built in, from the environment, or none.
+  `gdrive-oauth-client` row: built in, from the environment, or none.
   It prints the id, which is public, and never the secret.
 - The e2e harness and the soak build their binaries without a client
   and refuse a filesystem-provider run over binaries that carry one.
@@ -126,7 +126,7 @@ Google's rules for the consent screen decide how long a sign-in lasts:
 - Failure classification (`ProviderErrorKind`):
   - `invalid_grant` / `invalid_client` → `Authentication`
     (user-action-required; the message names the exact command:
-    `vapor auth login gdrive`).
+    `vapor auth login`).
   - Token-endpoint 5xx or transport failure → `Transient` (bounded
     retries with backoff through the normal retry policy).
 - A daemon with no OAuth client (none built in, none in the
@@ -151,15 +151,15 @@ file, so it holds the profile instead of failing work
   polled; ingest keeps recording local changes durably. An intent whose
   transfer hit the refusal goes back to the queue without spending a
   retry attempt.
-- **What the user sees.** The profile's `sign_in_required` is `true`
-  in `vapor status --json`, its run state is `Error` with the reason
+- **What the user sees.** The profile's `signInRequired` is `true`
+  in `vapor status --json`, its run state is `error` with the reason
   `Vapor needs to sign in to gdrive again: sync is on hold until then
-  (vapor auth login gdrive --profile <id>)`, `vapor status` prints a
+  (vapor auth login --profile <id>)`, `vapor status` prints a
   `Sign-in required` line, and the timeline records a `sign-in` entry.
   The daemon logs one WARNING when the hold starts and an INFO line
   when it lifts. In the macOS app the menu bar mark turns orange, and
   the Dashboard and the menu show the notice with a Sign In button,
-  which runs `vapor auth login gdrive --profile <id> --browser` from
+  which runs `vapor auth login --profile <id> --browser` from
   the bundled CLI.
 - **Recovery.** `vapor auth login` replaces the stored token set. The
   provider dropped its cached tokens when Google refused them, so the
@@ -173,9 +173,13 @@ file, so it holds the profile instead of failing work
   through after the sign-in runs the recovery a returning root runs:
   it drops the queued deletions and schedules a whole-scope reconcile,
   which re-derives them from the sync index.
-- `vapor auth logout <provider> --profile <id>` removes the stored
-  token; `vapor auth status` reports bound/not-bound without ever
-  revealing token values.
+- `vapor auth logout --profile <id>` removes every credential the
+  profile holds; `vapor auth status` reports each profile as
+  `signed-in`, `signed-out`, or `not-needed` without ever revealing
+  token values.
+- `--profile` names the profile; its provider decides what signing in
+  means. With one profile the flag is optional; with several, a command
+  that acts on one profile refuses without it and lists the ids.
 
 ## Security requirements
 
@@ -197,11 +201,11 @@ file, so it holds the profile instead of failing work
 - Store the id and secret as the `VAPOR_GDRIVE_CLIENT_ID` and
   `VAPOR_GDRIVE_CLIENT_SECRET` secrets of every `release-<platform>`
   environment, and in your local `.env` for local builds.
-- Check a build: `vapor doctor` shows `gdrive_oauth_client: built into
+- Check a build: `vapor doctor` shows `gdrive-oauth-client: built into
   this build: <id>`.
 - Loopback redirects (`http://127.0.0.1:<port>`) need no registration:
   Desktop-app clients accept them.
 - Test revoke and re-auth: revoke the grant in the Google account,
-  confirm the profile reports `sign_in_required` and its queue stays
+  confirm the profile reports `signInRequired` and its queue stays
   put, sign in again, and confirm sync resumes within a root check
   without losing an intent.

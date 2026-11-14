@@ -153,12 +153,12 @@ private final class OrderedRecordingServiceController: LaunchAgentControlling {
 
   func daemonStatus() throws -> DaemonStatusSnapshot {
     DaemonStatusSnapshot(
-      runState: "Running", throttleState: "IdleDrain", throttleReason: "",
-      providerName: "filesystem", queueDepth: 0, failedIntents: 0)
+      runState: "running", throttleState: "idle", throttleReason: "",
+      provider: "filesystem", queued: 0, failed: 0)
   }
-  func syncNow() throws {}
+  func reconcile() throws {}
 
-  func signIn(provider _: String, profile _: String) throws {}
+  func signIn(profile _: String) throws {}
 }
 
 @MainActor

@@ -299,26 +299,8 @@ reference consumer of the portable runtime and the universal control plane.
 
 Command surface:
 
-```
-vapor run [--foreground]                # run the daemon in-process
-vapor service install [--user|--system] # §3.2 ServiceInstaller
-vapor service uninstall [--keep-running]
-vapor service bootstrap                 # install+start only when autolaunch is enabled (app-startup path)
-vapor service start|stop|restart|status
-vapor service check                     # one crash-loop supervision tick
-vapor service acknowledge               # clear a crash-loop pause
-vapor config get|set <key> [value]      # edits vapor.json
-vapor auth login <provider>             # OAuth PKCE via localhost loopback
-vapor auth logout <provider>
-vapor status [--json]                   # queue depth, throttle state, reason
-vapor pause|resume
-vapor flush-now                         # force-flush pending intents
-vapor reconcile                         # request whole-scope reconcile
-vapor timeline [--tail] [--json]        # diagnostics timeline
-vapor logs [--tail] [--level=debug]
-vapor doctor                            # checks inotify watches, permissions, etc.
-vapor version
-```
+The command list and its naming rules live in `docs/plans/cli.md` §3;
+`vapor --help` is the reference.
 
 Design rules:
 

@@ -88,9 +88,11 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
         vapor_shared::logging::trim_redirect_log_if_oversized(&logs_directory.join(redirect));
     }
 
-    // Persisted configuration reaches the runtime here; environment
-    // variables stay as per-field overrides (docs: README Configuration).
-    let VaporConfigLoadResult { config, load_issue } = config::load_default();
+    // Persisted configuration reaches the runtime here; no environment
+    // variable overrides a key (README Configuration).
+    let VaporConfigLoadResult {
+        config, load_issue, ..
+    } = config::load_default();
     if let Some(issue) = load_issue {
         logging::error(
             "Preserved unreadable vapor configuration; continuing with defaults",
@@ -119,7 +121,7 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // `profiles` array runs the single implicit `default` profile on
     // the legacy state paths.
     let profiles = crate::profiles::resolve_profiles(&config);
-    let filter_options = EventPathFilterOptions::from_environment_and_config(&config);
+    let filter_options = EventPathFilterOptions::from_config(&config);
     let inputs_source = throttle_inputs_source();
     let static_inputs = matches!(inputs_source, ThrottleInputsSource::Static);
     let metrics_sampler: Arc<dyn crate::metrics::MetricsSampler> = if static_inputs {
@@ -193,9 +195,9 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // kept alive for the duration of the runtime loop; its Drop removes
     // the socket file.
     let initial_snapshot = DaemonStatusSnapshot {
-        run_state: "Starting".to_string(),
+        run_state: vapor_shared::RunState::Starting.wire_name().to_string(),
         throttle_state: vapor_shared::ThrottleState::Light,
-        provider_name: config.provider.clone(),
+        provider: config.provider.clone(),
         throttle_reason: "starting up".to_string(),
         ..DaemonStatusSnapshot::default()
     };

@@ -95,20 +95,20 @@ fn config_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     // provider: a folder the daemon can create when a local folder
     // plays the cloud, the account root folder for a cloud provider.
     ensure!(
-        cli.config_get("cloudSyncDirectory")? == "~/cloud/Vapor",
-        "unset cloudSyncDirectory must default to the filesystem provider's folder"
+        cli.config_get("cloudRoot")? == "~/cloud/Vapor",
+        "unset cloudRoot must default to the filesystem provider's folder"
     );
     cli.config_set("provider", "gdrive")?;
     ensure!(
-        cli.config_get("cloudSyncDirectory")? == "/Vapor",
-        "unset cloudSyncDirectory must default to the account root for a cloud provider"
+        cli.config_get("cloudRoot")? == "/Vapor",
+        "unset cloudRoot must default to the account root for a cloud provider"
     );
     cli.config_set("provider", "filesystem")?;
     ctx.configure_scope(&home)?;
-    let local = cli.config_get("localSyncDirectory")?;
+    let local = cli.config_get("localRoot")?;
     ensure!(
         local == home.local.to_string_lossy(),
-        "config get did not round-trip localSyncDirectory: got {local:?}"
+        "config get did not round-trip localRoot: got {local:?}"
     );
     ensure!(
         home.config_path().is_file(),
@@ -116,10 +116,10 @@ fn config_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     );
     // Structured keys are stored as JSON (a string containing JSON would
     // make the daemon ignore the group) and unset keys read as defaults.
-    cli.config_set("safeguards", r#"{"massDeleteThreshold": 500}"#)?;
+    cli.config_set("safeguards", r#"{"massDelete": {"threshold": 500}}"#)?;
     let raw = fs::read_to_string(home.config_path())?;
     ensure!(
-        raw.contains("\"massDeleteThreshold\": 500"),
+        raw.contains("\"threshold\": 500"),
         "safeguards was not stored as a JSON object: {raw}"
     );
     ensure!(
@@ -163,9 +163,9 @@ fn daemon_startup(ctx: &mut Ctx) -> Result<(), Failure> {
         .status()
         .ok_or_else(|| Failure::new("status --json did not answer"))?;
     ensure!(
-        status.provider_name.to_lowercase().contains("filesystem"),
-        "provider_name should name the filesystem provider, got {:?}",
-        status.provider_name
+        status.provider == vapor_shared::constants::provider::FILESYSTEM,
+        "provider should name the filesystem provider, got {:?}",
+        status.provider
     );
     Ok(())
 }
@@ -205,11 +205,11 @@ fn pause_resume(ctx: &mut Ctx) -> Result<(), Failure> {
     ctx.start_daemon()?;
     let cli = ctx.cli();
     cli.pause()?;
-    cli.wait_run_state("Paused", Duration::from_secs(10))?;
+    cli.wait_run_state("paused", Duration::from_secs(10))?;
     let mark = ctx.mark();
     write_file(&home.local.join("e2e-paused.txt"), "written while paused\n")?;
     cli.resume()?;
-    cli.wait_run_state("Running", Duration::from_secs(10))?;
+    cli.wait_run_state("running", Duration::from_secs(10))?;
     ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
     ctx.wait_exists(&home.cloud.join("e2e-paused.txt"), CONVERGE_TIMEOUT)?;
     Ok(())
@@ -248,8 +248,8 @@ fn doctor(ctx: &mut Ctx) -> Result<(), Failure> {
     cli.ok(&["doctor"])?;
     let report = cli.json(&["doctor", "--json"])?;
     ensure!(
-        report.get("worst_status").is_some(),
-        "doctor --json lacks worst_status"
+        report.get("worstStatus").is_some(),
+        "doctor --json lacks worstStatus"
     );
     let checks = report
         .get("checks")
@@ -259,7 +259,7 @@ fn doctor(ctx: &mut Ctx) -> Result<(), Failure> {
         .iter()
         .filter_map(|check| check.get("name").and_then(|name| name.as_str()))
         .collect();
-    for required in ["vapord_binary", "secret_store"] {
+    for required in ["vapord-binary", "secret-store"] {
         ensure!(
             names.contains(&required),
             "doctor --json lacks the {required} row; rows: {names:?}"

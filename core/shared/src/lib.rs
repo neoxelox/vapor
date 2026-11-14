@@ -11,7 +11,7 @@ pub mod runtime_paths;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThrottleState {
-    IdleDrain,
+    Idle,
     Light,
     Throttled,
     Suspended,
@@ -23,6 +23,32 @@ pub enum RunState {
     Running,
     Paused,
     Error,
+}
+
+impl ThrottleState {
+    /// The name `vapor status` and every surface print.
+    pub fn wire_name(self) -> &'static str {
+        use constants::throttle_state as names;
+        match self {
+            Self::Idle => names::IDLE,
+            Self::Light => names::LIGHT,
+            Self::Throttled => names::THROTTLED,
+            Self::Suspended => names::SUSPENDED,
+        }
+    }
+}
+
+impl RunState {
+    /// The name `vapor status` and every surface print.
+    pub fn wire_name(self) -> &'static str {
+        use constants::run_state as names;
+        match self {
+            Self::Starting => names::STARTING,
+            Self::Running => names::RUNNING,
+            Self::Paused => names::PAUSED,
+            Self::Error => names::ERROR,
+        }
+    }
 }
 
 /// Thermal pressure tiers reported by the platform metrics sampler and

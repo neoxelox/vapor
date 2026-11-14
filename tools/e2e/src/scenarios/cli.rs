@@ -24,26 +24,26 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             id: "S13",
             name: "observability",
-            proves: "diagnostics answers over IPC and the support bundle exports config, logs, and live captures with a manifest",
+            proves: "diagnostics answers over IPC and vapor report exports config, logs, and live captures with a manifest",
             needs: &[Need::NativeWatcher],
             expect: Expect::Pass,
             run: observability,
         },
         Scenario {
             id: "S15",
-            name: "conflict-tooling",
-            proves: "conflicts list finds a keep-both copy from the files, resolve --keep copy promotes it, the resolution syncs, the list drains",
+            name: "conflict-decisions",
+            proves: "every version of a file edited in three places is one conflict decision naming each device, decisions resolve --choose <file> keeps that version at once and trashes the others, the resolution syncs, and the question closes",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
             run: conflict_tooling,
         },
         Scenario {
             id: "S51",
-            name: "sync-now-under-user-activity",
-            proves: "a startup scan held by the throttle says so in status; vapor sync-now runs it under user activity and an offline divergence resolves as a keep-both copy",
+            name: "reconcile-under-user-activity",
+            proves: "a startup scan held by the throttle says so in status; vapor reconcile runs it under user activity and an offline divergence resolves as a keep-both copy",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
-            run: sync_now_under_user_activity,
+            run: reconcile_under_user_activity,
         },
         Scenario {
             id: "S18",
@@ -86,33 +86,33 @@ fn observability(ctx: &mut Ctx) -> Result<(), Failure> {
     let cli = ctx.cli();
     let diagnostics = cli.json(&["diagnostics", "--json"])?;
     ensure!(
-        diagnostics.get("schema_version").is_some(),
-        "diagnostics --json lacks schema_version: {diagnostics}"
+        diagnostics.get("schemaVersion").is_some(),
+        "diagnostics --json lacks schemaVersion: {diagnostics}"
     );
-    let output_dir = ctx.sandbox.root.join("support");
-    let bundle = cli.json(&[
-        "support-bundle",
+    let output_dir = ctx.sandbox.root.join("reports");
+    let report = cli.json(&[
+        "report",
         "--output",
         &output_dir.to_string_lossy(),
         "--json",
     ])?;
     ensure!(
-        bundle.get("daemonReachable") == Some(&serde_json::Value::Bool(true)),
-        "support bundle did not capture the live daemon: {bundle}"
+        report.get("daemonReachable") == Some(&serde_json::Value::Bool(true)),
+        "the support report did not capture the live daemon: {report}"
     );
-    let bundle_dir = fs::read_dir(&output_dir)?
+    let report_dir = fs::read_dir(&output_dir)?
         .flatten()
         .map(|entry| entry.path())
         .find(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("vapor-support-"))
+                .is_some_and(|name| name.starts_with("vapor-report-"))
         })
-        .ok_or_else(|| Failure::new("support bundle directory missing"))?;
+        .ok_or_else(|| Failure::new("support report directory missing"))?;
     for required in ["manifest.json", "status.json"] {
         ensure!(
-            bundle_dir.join(required).is_file(),
-            "support bundle lacks {required}"
+            report_dir.join(required).is_file(),
+            "the support report lacks {required}"
         );
     }
     let _ = home;
@@ -127,82 +127,114 @@ fn conflict_tooling(ctx: &mut Ctx) -> Result<(), Failure> {
     ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
     ctx.wait_exists(&home.cloud.join("doc.txt"), CONVERGE_TIMEOUT)?;
     ctx.stop_daemon(first)?;
+    // Three edits of one file while no daemon watched: this device's,
+    // the one that reached the cloud first, and a third device's that
+    // already lost its race and sits in the cloud as its copy.
     write_file(&home.local.join("doc.txt"), "local divergence\n")?;
     write_file(&home.cloud.join("doc.txt"), "cloud divergence\n")?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|age| age.as_millis())
+        .unwrap_or_default();
+    let third = format!("doc~conflict-third-device-{now_ms}.txt");
+    write_file(&home.cloud.join(&third), "third device\n")?;
     ctx.start_daemon()?;
     ctx.cli().reconcile()?;
-    ctx.wait_until(
-        CONVERGE_TIMEOUT,
-        "a keep-both conflict copy to appear locally",
-        || conflict_copy_exists(&home.local, "doc"),
-    )?;
+    ctx.wait_until(CONVERGE_TIMEOUT, "both conflict copies to be here", || {
+        conflict_copies(&home.local, "doc").count() == 2
+    })?;
     ctx.settle(CONVERGE_TIMEOUT)?;
     ctx.allow_warning("Resolved concurrent divergence by keeping both versions");
 
     let cli = ctx.cli();
-    let listed = cli.json(&["conflicts", "list", "--json"])?;
-    let rendered = listed.to_string();
+    // The three versions are one question, within the daemon's
+    // matching cadence.
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "one conflict decision listing the three versions",
+        || {
+            open_conflicts(&cli).is_some_and(|open| {
+                open.len() == 1 && open[0]["options"].as_array().is_some_and(|o| o.len() == 3)
+            })
+        },
+    )?;
+    let decision = open_conflicts(&cli)
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .ok_or_else(|| Failure::new("no conflict decision to answer"))?;
     ensure!(
-        rendered.contains("doc~conflict-"),
-        "conflicts list did not find the conflict copy: {rendered}"
+        decision["path"].as_str() == home.local.join("doc.txt").to_str(),
+        "the decision is not about doc.txt: {decision}"
     );
-    ensure!(
-        rendered.contains("\"deviceId\""),
-        "conflict record is missing the origin device id"
-    );
-    // The status endpoint carries the unresolved count so surfaces can
-    // flag the copy without walking the tree themselves.
-    let listed_count = listed["conflicts"]
+    let third_option = decision["options"]
         .as_array()
-        .map(Vec::len)
-        .unwrap_or_default() as u64;
-    let status = cli
-        .status()
-        .ok_or_else(|| Failure::new("status did not answer"))?;
-    ensure!(
-        status.conflicts_unresolved == listed_count,
-        "status counts {} unresolved conflicts while the list holds {listed_count}",
-        status.conflicts_unresolved
-    );
-
-    let copies: Vec<_> = conflict_copies(&home.local, "doc").collect();
-    let promoted = copies
-        .first()
+        .and_then(|options| {
+            options
+                .iter()
+                .find(|option| option["key"] == third.as_str())
+        })
         .cloned()
-        .ok_or_else(|| Failure::new("local conflict copy missing"))?;
-    let kept_payload = read_string(&promoted)?;
+        .ok_or_else(|| {
+            Failure::new(format!(
+                "the third device's version is not offered: {decision}"
+            ))
+        })?;
+    ensure!(
+        third_option["label"] == "Keep the edit made on third-device",
+        "the option does not name the device: {third_option}"
+    );
+    ensure!(
+        decision["evidence"]["versions"]
+            .as_array()
+            .is_some_and(
+                |versions| versions.iter().filter(|v| v["device"].is_string()).count() == 2
+            ),
+        "the evidence does not name a device per copy: {decision}"
+    );
+    // The status endpoint counts it with the other decisions, so
+    // surfaces can flag it without listing.
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "status to count the conflict decision",
+        || cli.status().is_some_and(|status| status.decisions == 1),
+    )?;
+
     let mark = ctx.mark();
-    cli.ok(&[
-        "conflicts",
+    let answered = cli.json(&[
+        "decisions",
         "resolve",
-        &promoted.to_string_lossy(),
-        "--keep",
-        "copy",
+        &decision["id"].to_string(),
+        "--choose",
+        &third,
+        "--json",
     ])?;
     ensure!(
-        read_string(&home.local.join("doc.txt"))? == kept_payload,
-        "the kept copy's payload did not become the canonical content"
+        answered["appliedAtMs"].is_number(),
+        "a conflict answer must apply at once: {answered}"
     );
     ensure!(
-        !promoted.exists(),
-        "resolved conflict copy still exists locally"
+        read_string(&home.local.join("doc.txt"))? == "third device\n",
+        "the chosen version did not take the name"
     );
-    // Divergence on both sides can preserve one copy per side; discard
-    // the rest so the scope ends conflict-free.
-    for leftover in conflict_copies(&home.local, "doc") {
-        cli.ok(&[
-            "conflicts",
-            "resolve",
-            &leftover.to_string_lossy(),
-            "--keep",
-            "canonical",
-        ])?;
-    }
-    // At least the promotion (a rename) produced intents.
+    ensure!(
+        !conflict_copy_exists(&home.local, "doc"),
+        "a conflict copy is still here after the answer"
+    );
+    let trash = cli.json(&["trash", "list", "--json"])?;
+    let trashed = trash["entries"]
+        .as_array()
+        .map(|entries| entries.iter().filter(|e| e["reason"] == "conflict").count())
+        .unwrap_or_default();
+    ensure!(
+        trashed == 2,
+        "the two versions not kept must be in the trash: {trash}"
+    );
+    // At least the rename and the removals produced intents.
     ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
     ctx.wait_until(
         CONVERGE_TIMEOUT,
-        "resolved conflict copies to disappear from the cloud root",
+        "the conflict copies to disappear from the cloud root",
         || !conflict_copy_exists(&home.cloud, "doc"),
     )?;
     ctx.wait_same_content(
@@ -211,27 +243,33 @@ fn conflict_tooling(ctx: &mut Ctx) -> Result<(), Failure> {
         CONVERGE_TIMEOUT,
     )?;
     ctx.settle(CONVERGE_TIMEOUT)?;
-    let after = cli.json(&["conflicts", "list", "--json"])?;
-    let empty = after
-        .get("conflicts")
-        .and_then(|value| value.as_array())
-        .is_some_and(|list| list.is_empty());
-    ensure!(
-        empty,
-        "conflicts list is not empty after resolution: {after}"
-    );
-    let status = cli
-        .status()
-        .ok_or_else(|| Failure::new("status did not answer"))?;
-    ensure!(
-        status.conflicts_unresolved == 0,
-        "status still counts {} unresolved conflicts after resolution",
-        status.conflicts_unresolved
-    );
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "no conflict question to remain open",
+        || open_conflicts(&cli).is_some_and(|open| open.is_empty()),
+    )?;
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "status to count no open decision after resolution",
+        || cli.status().is_some_and(|status| status.decisions == 0),
+    )?;
     Ok(())
 }
 
-fn sync_now_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
+/// The open `conflict` decisions `vapor decisions list --json` reports.
+fn open_conflicts(cli: &crate::cli::Cli) -> Option<Vec<serde_json::Value>> {
+    let listed = cli.json(&["decisions", "list", "--json"]).ok()?;
+    Some(
+        listed["decisions"]
+            .as_array()?
+            .iter()
+            .filter(|decision| decision["kind"] == "conflict" && decision["choice"].is_null())
+            .cloned()
+            .collect(),
+    )
+}
+
+fn reconcile_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
     // Throttle inputs from a file that says the user is typing, so the
     // daemon sits in Throttled and the startup scan waits (the shape a
     // developer machine produces with the host sampler).
@@ -268,21 +306,21 @@ fn sync_now_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
         "status to report the startup scan waiting on the throttle",
         || {
             cli.status()
-                .is_some_and(|status| status.reconcile_state == "waiting")
+                .is_some_and(|status| status.reconcile.state == "waiting")
         },
     )?;
     let status = cli
         .status()
         .ok_or_else(|| Failure::new("status did not answer"))?;
     ensure!(
-        status.throttle_state == "Throttled",
+        status.throttle.state == "throttled",
         "the file inputs must hold the daemon at Throttled, got {}",
-        status.throttle_state
+        status.throttle.state
     );
     ensure!(
-        status.reconcile_detail.contains("user activity is active"),
+        status.reconcile.detail.contains("user activity is active"),
         "the waiting scan must name what it waits for: {:?}",
-        status.reconcile_detail
+        status.reconcile.detail
     );
     ensure!(
         read_string(&home.local.join("alex.txt"))? == "local\n"
@@ -291,7 +329,7 @@ fn sync_now_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
     );
 
     // The user asks for it: the scan runs although the user is active.
-    cli.ok(&["sync-now", "--json"])?;
+    cli.ok(&["reconcile", "--json"])?;
     ctx.wait_until(
         CONVERGE_TIMEOUT,
         "the offline divergence to resolve as a keep-both copy on both sides",
@@ -316,15 +354,14 @@ fn sync_now_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
             root.display()
         );
     }
-    let status = cli
-        .status()
-        .ok_or_else(|| Failure::new("status did not answer"))?;
-    ensure!(
-        status.reconcile_state != "waiting" && status.conflicts_unresolved >= 1,
-        "after the requested scan status must count the copy and stop reporting a wait: state {} unresolved {}",
-        status.reconcile_state,
-        status.conflicts_unresolved
-    );
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "status to count the copy as a decision and stop reporting a wait",
+        || {
+            cli.status()
+                .is_some_and(|status| status.reconcile.state != "waiting" && status.decisions >= 1)
+        },
+    )?;
     ctx.allow_warning("Resolved concurrent divergence by keeping both versions");
     Ok(())
 }
@@ -369,8 +406,8 @@ fn misconfigured_daemon(ctx: &mut Ctx) -> Result<(), Failure> {
         .push(constants::env::VAPOR_GDRIVE_CLIENT_ID.to_string());
     ctx.register_home(home.clone());
     let cli = ctx.cli_for(&home);
-    cli.config_set("localSyncDirectory", &home.local.to_string_lossy())?;
-    cli.config_set("cloudSyncDirectory", "/VaporBad")?;
+    cli.config_set("localRoot", &home.local.to_string_lossy())?;
+    cli.config_set("cloudRoot", "/VaporBad")?;
     cli.config_set("provider", "gdrive")?;
     let daemon = ctx.start_daemon_in(&home, DaemonKind::CliRun, false)?;
     wait::wait_until(
@@ -379,10 +416,7 @@ fn misconfigured_daemon(ctx: &mut Ctx) -> Result<(), Failure> {
         || {
             cli.status().is_some_and(|status| {
                 status.profiles.iter().any(|profile| {
-                    profile
-                        .suspended_reason
-                        .as_deref()
-                        .is_some_and(|reason| reason.contains("VAPOR_GDRIVE_CLIENT_ID"))
+                    profile.suspended && profile.run.reason.contains("VAPOR_GDRIVE_CLIENT_ID")
                 })
             })
         },
@@ -424,13 +458,13 @@ fn sign_in_required_holds_the_queue(ctx: &mut Ctx) -> Result<(), Failure> {
         constants::profile::KEY_NAME: "Signed out",
         constants::profile::KEY_ENABLED: true,
         constants::profile::KEY_PROVIDER: constants::provider::GDRIVE,
-        constants::profile::KEY_LOCAL_SYNC_DIRECTORY: home.local.to_string_lossy(),
-        constants::profile::KEY_CLOUD_SYNC_DIRECTORY: "/VaporE2E",
+        constants::profile::KEY_LOCAL_ROOT: home.local.to_string_lossy(),
+        constants::profile::KEY_CLOUD_ROOT: "/VaporE2E",
     }]);
     cli.config_set("profiles", &profiles.to_string())?;
     ctx.start_daemon_in(&home, DaemonKind::CliRun, false)?;
 
-    let command = format!("vapor auth login gdrive --profile {SIGNED_OUT_PROFILE}");
+    let command = format!("vapor auth login --profile {SIGNED_OUT_PROFILE}");
     wait::wait_until(
         CONVERGE_TIMEOUT,
         "the profile to report that it needs a sign-in",
@@ -439,8 +473,8 @@ fn sign_in_required_holds_the_queue(ctx: &mut Ctx) -> Result<(), Failure> {
                 status.profiles.iter().any(|profile| {
                     profile.id == SIGNED_OUT_PROFILE
                         && profile.sign_in_required
-                        && profile.run_state == "Error"
-                        && profile.reason.contains(&command)
+                        && profile.run.state == constants::run_state::ERROR
+                        && profile.run.reason.contains(&command)
                 })
             })
         },
@@ -493,8 +527,8 @@ fn live_config_reload(ctx: &mut Ctx) -> Result<(), Failure> {
         "the running daemon to adopt cpuPercent 7",
         || {
             cli.status()
-                .and_then(|status| status.resource_budget)
-                .is_some_and(|budget| budget.effective_cpu_percent == 7)
+                .and_then(|status| status.resources)
+                .is_some_and(|resources| resources.cpu.limit_percent == 7)
         },
     )?;
     let said = cli.config_set("syncMode", "push-only")?;
@@ -507,7 +541,7 @@ fn live_config_reload(ctx: &mut Ctx) -> Result<(), Failure> {
         "status to report the pending restart",
         || {
             cli.status()
-                .and_then(|status| status.config_restart_required)
+                .and_then(|status| status.restart_required)
                 .is_some_and(|keys| keys.contains("syncMode"))
         },
     )?;

@@ -98,7 +98,7 @@ pub fn check_local_root(
         (None, false) => {
             if let Err(error) = std::fs::create_dir_all(root) {
                 crate::logging::error(
-                    "Failed to create missing local sync directory",
+                    "Failed to create missing local root",
                     &[
                         ("path", root.display().to_string()),
                         ("error", error.to_string()),
@@ -107,7 +107,7 @@ pub fn check_local_root(
                 return Ok(RootStatus::Missing);
             }
             crate::logging::info(
-                "Created missing local sync directory",
+                "Created missing local root",
                 &[("path", root.display().to_string())],
             );
             adopt_local(state_db, root, device_id, now)
@@ -138,7 +138,7 @@ fn adopt_local(
         Ok(marker) => {
             record_identity(state_db, RootSide::Local, &marker.root_id, now)?;
             crate::logging::info(
-                "Adopted the local sync directory",
+                "Adopted the local root",
                 &[
                     ("path", root.display().to_string()),
                     ("root_id", marker.root_id),
@@ -151,7 +151,7 @@ fn adopt_local(
             // filesystem) is still usable; it just cannot be told apart
             // from a replacement later. Recorded as identity-less.
             crate::logging::warning(
-                "Cannot write the root marker into the local sync directory; replacement detection is off for it",
+                "Cannot write the root marker into the local root; replacement detection is off for it",
                 &[
                     ("path", root.display().to_string()),
                     ("error", error.to_string()),
@@ -177,7 +177,7 @@ pub fn reattach_local(
             Ok(marker) => marker,
             Err(error) => {
                 crate::logging::warning(
-                    "Cannot write the root marker into the reattached local sync directory",
+                    "Cannot write the root marker into the reattached local root",
                     &[
                         ("path", root.display().to_string()),
                         ("error", error.to_string()),
@@ -220,22 +220,22 @@ pub fn classify_cloud_probe(
     }
 }
 
-pub const DECISION_KIND: &str = "root-replaced";
-pub const OPTION_REATTACH: &str = "reattach";
-pub const MISSING_DECISION_KIND: &str = "root-missing";
-pub const OPTION_RECREATE: &str = "recreate";
+pub use vapor_shared::constants::decision::{
+    KIND_ROOT_MISSING as MISSING_DECISION_KIND, KIND_ROOT_REPLACED as DECISION_KIND,
+    OPTION_REATTACH, OPTION_RECREATE,
+};
 
 /// The question a missing root asks.
 pub fn missing_question(side: RootSide, root: &str) -> String {
     match side {
         RootSide::Local => format!(
-            "The local sync directory {root} is missing (a volume unplugged, a folder moved or \
+            "The local root {root} is missing (a volume unplugged, a folder moved or \
              deleted). Vapor is waiting for it and will not create a folder there on its own, \
              so nothing gets deleted anywhere. Put it back and Vapor resumes on its own, or \
              re-create it empty and let the cloud fill it: nothing is deleted on either side."
         ),
         RootSide::Cloud => format!(
-            "The cloud sync directory {root} is missing (deleted, moved, or on a volume that is \
+            "The cloud root {root} is missing (deleted, moved, or on a volume that is \
              not mounted). Vapor is waiting for it and will not create it on its own, so nothing \
              gets deleted anywhere. Restore it and Vapor resumes on its own, or re-create it \
              empty and let this device fill it: nothing is deleted on either side."
@@ -251,13 +251,13 @@ pub fn question(side: RootSide, root: &str, found: Option<&str>) -> String {
     };
     match side {
         RootSide::Local => format!(
-            "The local sync directory {root} now holds {what}. Vapor is not syncing it, so \
+            "The local root {root} now holds {what}. Vapor is not syncing it, so \
              nothing gets deleted anywhere. Put the original folder back and Vapor resumes on \
              its own, or reattach this folder: its files and the cloud's are merged and nothing \
              is deleted on either side."
         ),
         RootSide::Cloud => format!(
-            "The cloud sync directory {root} now holds {what}. Vapor is not syncing it, so \
+            "The cloud root {root} now holds {what}. Vapor is not syncing it, so \
              nothing gets deleted anywhere. Restore the original folder and Vapor resumes on \
              its own, or reattach this folder: its files and this device's are merged and \
              nothing is deleted on either side."

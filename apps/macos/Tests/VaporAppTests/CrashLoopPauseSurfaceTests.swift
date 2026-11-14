@@ -73,7 +73,7 @@ private final class StubServiceController: LaunchAgentControlling {
 
   func status() throws -> ServiceStatusSnapshot {
     ServiceStatusSnapshot(
-      status: crashLoopPaused ? "crash_loop_paused" : "running",
+      status: crashLoopPaused ? "crash-loop-paused" : "running",
       label: VaporConstants.Daemon.launchAgentLabel,
       autoLaunchEnabled: true,
       crashLoopPaused: crashLoopPaused,
@@ -94,10 +94,10 @@ private final class StubServiceController: LaunchAgentControlling {
 
   func daemonStatus() throws -> DaemonStatusSnapshot {
     DaemonStatusSnapshot(
-      runState: "Running", throttleState: "IdleDrain", throttleReason: "",
-      providerName: "filesystem", queueDepth: 0, failedIntents: 0)
+      runState: "running", throttleState: "idle", throttleReason: "",
+      provider: "filesystem", queued: 0, failed: 0)
   }
-  func syncNow() throws {}
+  func reconcile() throws {}
 
-  func signIn(provider _: String, profile _: String) throws {}
+  func signIn(profile _: String) throws {}
 }

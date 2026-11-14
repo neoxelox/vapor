@@ -1,64 +1,53 @@
 //! `vapor auth login|logout|status`.
 //!
-//! SecretStore-backed auth plumbing. For Google Drive, `login` runs an
-//! OAuth-PKCE browser flow when `--token` is omitted; otherwise `login`
-//! takes an explicit `--token` argument so headless / CI flows can
-//! preload tokens, and the CLI surface is wire-compatible with the
-//! browser-based flow that arrives later.
+//! A profile's provider decides what signing in means: Google Drive runs
+//! an OAuth-PKCE browser flow (or reads a token for a headless host), the
+//! filesystem provider needs no sign-in. Tokens live in the platform
+//! secret store under the profile's namespace, never in `vapor.json`.
 
 use std::error::Error;
 use std::fmt::{self, Display};
 
+use serde::Serialize;
+use vapor_daemon::profiles::{ResolvedProfile, resolve_profiles};
 use vapor_platform::{InMemorySecretStore, NativeSecretStore, SecretStore, SecretStoreError};
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum AuthCommand {
-    Login {
-        provider: String,
-        /// The resolved token value (from `--token`, stdin, or the
-        /// OAuth-PKCE flow for `gdrive`).
-        token: String,
-        /// Credentials are namespaced per profile; omitting
-        /// `--profile` targets the implicit `default` profile.
-        profile: String,
-    },
-    Logout {
-        provider: String,
-        profile: String,
-    },
-    Status {
-        profile: String,
-    },
-}
+use vapor_shared::config::VaporConfig;
+use vapor_shared::constants;
 
 #[derive(Debug)]
 pub enum AuthError {
-    /// The supported provider names are documented inline.
-    /// Unknown provider strings fail fast so users don't accidentally
-    /// store a token under a typoed key.
-    UnknownProvider(String),
-    /// Profile ids are validated the same way the daemon validates
-    /// them, so a typo never mints a stray secret namespace.
-    InvalidProfile(String),
+    /// No profile has this id.
+    UnknownProfile {
+        requested: String,
+        known: Vec<String>,
+    },
+    /// Several profiles exist and none was named.
+    AmbiguousProfile(Vec<String>),
+    /// The profile's provider has nothing to sign in to.
+    NoSignIn {
+        profile: String,
+        provider: String,
+    },
     Store(SecretStoreError),
 }
 
 impl Display for AuthError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownProvider(name) => {
-                write!(
-                    f,
-                    "unknown provider '{name}' — supported providers: {}",
-                    SUPPORTED_PROVIDERS.join(", ")
-                )
-            }
-            Self::InvalidProfile(name) => {
-                write!(
-                    f,
-                    "invalid profile id '{name}' — profile ids are short lowercase slugs"
-                )
-            }
+            Self::UnknownProfile { requested, known } => write!(
+                f,
+                "no profile '{requested}' (profiles: {})",
+                known.join(", ")
+            ),
+            Self::AmbiguousProfile(known) => write!(
+                f,
+                "several profiles exist; pass --profile <id> ({})",
+                known.join(", ")
+            ),
+            Self::NoSignIn { profile, provider } => write!(
+                f,
+                "profile '{profile}' uses the {provider} provider, which needs no sign-in"
+            ),
             Self::Store(error) => write!(f, "secret store error: {error}"),
         }
     }
@@ -79,75 +68,134 @@ impl From<SecretStoreError> for AuthError {
     }
 }
 
-const SUPPORTED_PROVIDERS: &[&str] = vapor_shared::constants::provider::ALL;
-
-fn validate_provider(name: &str) -> Result<(), AuthError> {
-    if SUPPORTED_PROVIDERS.contains(&name) {
-        Ok(())
-    } else {
-        Err(AuthError::UnknownProvider(name.to_string()))
-    }
-}
-
-fn validate_profile(profile_id: &str) -> Result<(), AuthError> {
-    if vapor_daemon::profiles::is_valid_profile_id(profile_id) {
-        Ok(())
-    } else {
-        Err(AuthError::InvalidProfile(profile_id.to_string()))
-    }
-}
-
 fn key(profile_id: &str, provider: &str) -> String {
     vapor_daemon::profiles::secret_key(profile_id, provider, "token")
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AuthStatusEntry {
-    pub profile: String,
-    pub provider: String,
-    /// `true` when a token is present in the secret store; we never
-    /// expose the token value itself.
-    pub bound: bool,
+fn needs_sign_in(provider: &str) -> bool {
+    constants::provider::SIGN_IN_REQUIRED.contains(&provider)
+}
+
+/// The profile a command that acts on exactly one profile targets:
+/// `--profile` when given, otherwise the only profile there is. With
+/// several profiles and no `--profile`, the command refuses and lists
+/// them rather than guessing.
+pub fn select_profile(
+    config: &VaporConfig,
+    requested: Option<&str>,
+) -> Result<ResolvedProfile, AuthError> {
+    let profiles = resolve_profiles(config);
+    let ids = || profiles.iter().map(|p| p.id.clone()).collect::<Vec<_>>();
+    match requested {
+        Some(id) => profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .cloned()
+            .ok_or_else(|| AuthError::UnknownProfile {
+                requested: id.to_string(),
+                known: ids(),
+            }),
+        None => match profiles.as_slice() {
+            [only] => Ok(only.clone()),
+            _ => Err(AuthError::AmbiguousProfile(ids())),
+        },
+    }
+}
+
+/// Whether the profile's provider needs a sign-in, for `login` to refuse
+/// early instead of storing a credential nothing reads.
+pub fn require_sign_in(profile: &ResolvedProfile) -> Result<(), AuthError> {
+    if needs_sign_in(&profile.provider_kind) {
+        Ok(())
+    } else {
+        Err(AuthError::NoSignIn {
+            profile: profile.id.clone(),
+            provider: profile.provider_kind.clone(),
+        })
+    }
 }
 
 pub fn login_into(
     store: &dyn SecretStore,
-    profile_id: &str,
-    provider: &str,
+    profile: &ResolvedProfile,
     token: &str,
 ) -> Result<(), AuthError> {
-    validate_profile(profile_id)?;
-    validate_provider(provider)?;
-    store.set(&key(profile_id, provider), token)?;
+    require_sign_in(profile)?;
+    store.set(&key(&profile.id, &profile.provider_kind), token)?;
     Ok(())
 }
 
-pub fn logout_from(
-    store: &dyn SecretStore,
-    profile_id: &str,
-    provider: &str,
-) -> Result<(), AuthError> {
-    validate_profile(profile_id)?;
-    validate_provider(provider)?;
-    store.delete(&key(profile_id, provider))?;
-    Ok(())
+/// Removes every credential the profile holds, for any provider, so a
+/// profile that switched providers leaves nothing behind. Returns whether
+/// anything was removed.
+pub fn logout_from(store: &dyn SecretStore, profile_id: &str) -> Result<bool, AuthError> {
+    let mut removed = false;
+    for provider in constants::provider::ALL {
+        let name = key(profile_id, provider);
+        if store.get(&name).is_err() {
+            continue;
+        }
+        match store.delete(&name) {
+            Ok(()) | Err(SecretStoreError::NotFound(_)) => removed = true,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(removed)
 }
 
+/// One profile's sign-in state; never the token itself.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthStatusEntry {
+    pub profile_id: String,
+    pub provider: String,
+    /// One of `constants::auth::STATE_*`.
+    pub state: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthStatusReport {
+    pub profiles: Vec<AuthStatusEntry>,
+}
+
+/// The sign-in state of `profile`, or of every profile when `None`.
 pub fn status_from(
     store: &dyn SecretStore,
-    profile_id: &str,
-) -> Result<Vec<AuthStatusEntry>, AuthError> {
-    validate_profile(profile_id)?;
-    let mut entries = Vec::new();
-    for provider in SUPPORTED_PROVIDERS {
-        let bound = store.get(&key(profile_id, provider)).is_ok();
-        entries.push(AuthStatusEntry {
-            profile: profile_id.to_string(),
-            provider: provider.to_string(),
-            bound,
-        });
-    }
-    Ok(entries)
+    config: &VaporConfig,
+    profile: Option<&str>,
+) -> Result<AuthStatusReport, AuthError> {
+    let profiles = match profile {
+        Some(id) => vec![select_profile(config, Some(id))?],
+        None => resolve_profiles(config),
+    };
+    let entries = profiles
+        .into_iter()
+        .map(|profile| {
+            let state = if !needs_sign_in(&profile.provider_kind) {
+                constants::auth::STATE_NOT_NEEDED
+            } else if store.get(&key(&profile.id, &profile.provider_kind)).is_ok() {
+                constants::auth::STATE_SIGNED_IN
+            } else {
+                constants::auth::STATE_SIGNED_OUT
+            };
+            AuthStatusEntry {
+                profile_id: profile.id,
+                provider: profile.provider_kind,
+                state,
+            }
+        })
+        .collect();
+    Ok(AuthStatusReport { profiles: entries })
+}
+
+pub fn render_status(report: &AuthStatusReport) -> String {
+    report
+        .profiles
+        .iter()
+        .map(|entry| format!("{} ({}): {}", entry.profile_id, entry.provider, entry.state))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Production constructor for the native secret store (the login
@@ -228,7 +276,7 @@ pub fn run_gdrive_pkce_flow() -> Result<String, String> {
     let code = loop {
         if std::time::Instant::now() >= overall_deadline {
             return Err(
-                "timed out waiting for the authorization redirect; rerun `vapor auth login gdrive`"
+                "timed out waiting for the authorization redirect; rerun `vapor auth login`"
                     .to_string(),
             );
         }
@@ -362,78 +410,122 @@ mod tests {
         assert_eq!(percent_decode("%zz"), "%zz");
     }
 
-    #[test]
-    fn login_then_status_reports_provider_as_bound() {
-        let store = InMemorySecretStore::new();
-        login_into(&store, "default", "filesystem", "abc").expect("login");
-        let entries = status_from(&store, "default").expect("status");
-        let filesystem = entries
-            .iter()
-            .find(|e| e.provider == "filesystem")
-            .expect("filesystem entry");
-        assert!(filesystem.bound);
-        let google = entries
-            .iter()
-            .find(|e| e.provider == "gdrive")
-            .expect("gdrive entry");
-        assert!(!google.bound);
+    fn config_with(profiles: &[(&str, &str)]) -> VaporConfig {
+        VaporConfig {
+            profiles: profiles
+                .iter()
+                .map(|(id, provider)| vapor_shared::config::ProfileConfig {
+                    id: id.to_string(),
+                    provider: Some(provider.to_string()),
+                    local_root: Some(format!("/tmp/vapor-auth-test/{id}")),
+                    cloud_root: Some(format!("/{id}")),
+                    ..Default::default()
+                })
+                .collect(),
+            ..VaporConfig::default()
+        }
     }
 
     #[test]
-    fn credentials_are_namespaced_per_profile() {
-        // A token bound to one profile must be invisible to
-        // every other profile.
-        let store = InMemorySecretStore::new();
-        login_into(&store, "work", "gdrive", "ya29.work").expect("login");
-        let work = status_from(&store, "work").expect("status");
-        assert!(work.iter().any(|e| e.provider == "gdrive" && e.bound));
-        let home = status_from(&store, "home").expect("status");
-        assert!(home.iter().all(|e| !e.bound));
+    fn the_only_profile_is_selected_without_a_flag() {
+        let config = VaporConfig::default();
+        let profile = select_profile(&config, None).expect("single profile");
+        assert_eq!(profile.id, constants::profile::DEFAULT_PROFILE_ID);
     }
 
     #[test]
-    fn logout_clears_token_from_store() {
-        let store = InMemorySecretStore::new();
-        login_into(&store, "default", "gdrive", "ya29.x").expect("login");
-        logout_from(&store, "default", "gdrive").expect("logout");
-        let entries = status_from(&store, "default").expect("status");
-        assert!(entries.iter().all(|entry| !entry.bound));
+    fn several_profiles_need_an_explicit_profile() {
+        let config = config_with(&[("work", "gdrive"), ("home", "gdrive")]);
+        let error = select_profile(&config, None).expect_err("ambiguous");
+        assert!(matches!(error, AuthError::AmbiguousProfile(ref ids) if ids.len() == 2));
+        let error = select_profile(&config, Some("play")).expect_err("unknown");
+        assert!(matches!(error, AuthError::UnknownProfile { .. }));
+        assert_eq!(
+            select_profile(&config, Some("home")).expect("named").id,
+            "home"
+        );
     }
 
     #[test]
-    fn login_rejects_unknown_provider_with_typed_error() {
-        let store = InMemorySecretStore::new();
-        let error =
-            login_into(&store, "default", "icloud_drive", "x").expect_err("unknown provider");
-        assert!(matches!(error, AuthError::UnknownProvider(_)));
-    }
-
-    #[test]
-    fn login_rejects_invalid_profile_ids() {
-        let store = InMemorySecretStore::new();
-        let error =
-            login_into(&store, "Not A Slug!", "filesystem", "x").expect_err("invalid profile");
-        assert!(matches!(error, AuthError::InvalidProfile(_)));
-    }
-
-    #[test]
-    fn logout_rejects_unknown_provider() {
-        let store = InMemorySecretStore::new();
-        let error = logout_from(&store, "default", "icloud_drive").expect_err("unknown provider");
-        assert!(matches!(error, AuthError::UnknownProvider(_)));
-    }
-
-    #[test]
-    fn status_never_returns_the_token_value_itself() {
-        // Invariant: `vapor auth status` lists bound providers,
-        // never the secret. We assert structurally — `AuthStatusEntry`
-        // intentionally has no token field.
-        let entry = AuthStatusEntry {
-            profile: "default".to_string(),
-            provider: "filesystem".to_string(),
-            bound: true,
+    fn status_json_shape_is_locked() {
+        let report = AuthStatusReport {
+            profiles: vec![AuthStatusEntry {
+                profile_id: "work".into(),
+                provider: "gdrive".into(),
+                state: constants::auth::STATE_SIGNED_IN,
+            }],
         };
-        let debug = format!("{entry:?}");
-        assert!(!debug.contains("token"));
+        assert_eq!(
+            serde_json::to_string(&report).expect("serialize"),
+            r#"{"profiles":[{"profileId":"work","provider":"gdrive","state":"signed-in"}]}"#
+        );
+    }
+
+    #[test]
+    fn login_uses_the_profile_provider_and_status_reports_it() {
+        let store = InMemorySecretStore::new();
+        let config = config_with(&[("work", "gdrive"), ("local", "filesystem")]);
+        let work = select_profile(&config, Some("work")).expect("work");
+        login_into(&store, &work, "ya29.work").expect("login");
+
+        let report = status_from(&store, &config, None).expect("status");
+        let states: Vec<_> = report
+            .profiles
+            .iter()
+            .map(|entry| {
+                (
+                    entry.profile_id.as_str(),
+                    entry.provider.as_str(),
+                    entry.state,
+                )
+            })
+            .collect();
+        assert_eq!(
+            states,
+            vec![
+                ("work", "gdrive", constants::auth::STATE_SIGNED_IN),
+                ("local", "filesystem", constants::auth::STATE_NOT_NEEDED),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_provider_without_sign_in_refuses_login() {
+        let store = InMemorySecretStore::new();
+        let profile = select_profile(&VaporConfig::default(), None).expect("default");
+        let error = login_into(&store, &profile, "x").expect_err("filesystem needs no sign-in");
+        assert!(matches!(error, AuthError::NoSignIn { .. }));
+    }
+
+    #[test]
+    fn logout_removes_every_credential_of_the_profile_only() {
+        let store = InMemorySecretStore::new();
+        let config = config_with(&[("work", "gdrive"), ("home", "gdrive")]);
+        for id in ["work", "home"] {
+            let profile = select_profile(&config, Some(id)).expect("profile");
+            login_into(&store, &profile, "token").expect("login");
+        }
+        assert!(logout_from(&store, "work").expect("logout"));
+        assert!(!logout_from(&store, "work").expect("second logout"));
+
+        let report = status_from(&store, &config, None).expect("status");
+        let signed_in: Vec<_> = report
+            .profiles
+            .iter()
+            .filter(|entry| entry.state == constants::auth::STATE_SIGNED_IN)
+            .map(|entry| entry.profile_id.as_str())
+            .collect();
+        assert_eq!(signed_in, vec!["home"]);
+    }
+
+    #[test]
+    fn status_never_carries_the_token() {
+        let store = InMemorySecretStore::new();
+        let config = config_with(&[("work", "gdrive")]);
+        let work = select_profile(&config, Some("work")).expect("work");
+        login_into(&store, &work, "ya29.secret-value").expect("login");
+        let report = status_from(&store, &config, None).expect("status");
+        let json = serde_json::to_string(&report).expect("serialize");
+        assert!(!json.contains("ya29"), "{json}");
     }
 }

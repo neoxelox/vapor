@@ -188,8 +188,8 @@ struct SettingsView: View {
 
       Toggle(viewModel.localized("settings_start_at_login"), isOn: autoLaunchBinding)
       loginItemApprovalHint
-      Toggle(viewModel.localized("settings_use_gitignore"), isOn: useGitIgnoreBinding)
-      Toggle(viewModel.localized("settings_use_vaporignore"), isOn: useVaporIgnoreBinding)
+      Toggle(viewModel.localized("settings_use_gitignore"), isOn: useGitignoreBinding)
+      Toggle(viewModel.localized("settings_use_vaporignore"), isOn: useVaporignoreBinding)
 
       Section(viewModel.localized("settings_user_ignore_rules")) {
         VStack(alignment: .leading, spacing: 6) {
@@ -224,7 +224,7 @@ struct SettingsView: View {
           .foregroundStyle(.secondary)
       }
 
-      Picker(viewModel.localized("settings_language"), selection: languageCodeBinding) {
+      Picker(viewModel.localized("settings_language"), selection: languageBinding) {
         ForEach(viewModel.availableLanguageCodes, id: \.self) { code in
           Text(code).tag(code)
         }
@@ -271,17 +271,17 @@ struct SettingsView: View {
     )
   }
 
-  private var useGitIgnoreBinding: Binding<Bool> {
+  private var useGitignoreBinding: Binding<Bool> {
     Binding(
-      get: { viewModel.state.useGitIgnore },
-      set: { viewModel.setUseGitIgnore($0) }
+      get: { viewModel.state.useGitignore },
+      set: { viewModel.setUseGitignore($0) }
     )
   }
 
-  private var useVaporIgnoreBinding: Binding<Bool> {
+  private var useVaporignoreBinding: Binding<Bool> {
     Binding(
-      get: { viewModel.state.useVaporIgnore },
-      set: { viewModel.setUseVaporIgnore($0) }
+      get: { viewModel.state.useVaporignore },
+      set: { viewModel.setUseVaporignore($0) }
     )
   }
 
@@ -299,10 +299,10 @@ struct SettingsView: View {
     )
   }
 
-  private var languageCodeBinding: Binding<String> {
+  private var languageBinding: Binding<String> {
     Binding(
-      get: { viewModel.state.languageCode },
-      set: { viewModel.setLanguageCode($0) }
+      get: { viewModel.state.language },
+      set: { viewModel.setLanguage($0) }
     )
   }
 }
@@ -313,7 +313,7 @@ struct RestartRequiredNotice: View {
   @ObservedObject var viewModel: AppShellViewModel
 
   var body: some View {
-    if let notice = viewModel.state.configRestartRequired {
+    if let notice = viewModel.state.restartRequired {
       VStack(alignment: .leading, spacing: 4) {
         Text(viewModel.localized("settings_restart_required_format", notice))
           .font(.caption)
@@ -360,35 +360,23 @@ struct SignInNotice: View {
   }
 }
 
-/// The questions and conflicts waiting on the user, as counted by the
-/// daemon's status. Empty when nothing is waiting. The counts are the
-/// signal; the CLI is the place to act until the app has panes for both.
+/// The questions waiting on the user (conflicts included), as counted
+/// by the daemon's status. Empty when nothing is waiting. The count is
+/// the signal; the CLI is the place to answer until the app has a pane.
 struct UserActionNotice: View {
   @ObservedObject var viewModel: AppShellViewModel
 
   var body: some View {
-    let decisions = viewModel.state.decisionsPending
-    let conflicts = viewModel.state.conflictsUnresolved
-    if decisions > 0 || conflicts > 0 {
+    let decisions = viewModel.state.decisions
+    if decisions > 0 {
       VStack(alignment: .leading, spacing: 4) {
-        if decisions > 0 {
-          Text(
-            decisions == 1
-              ? viewModel.localized("attention_decision_one")
-              : viewModel.localized("attention_decisions_format", Int64(decisions))
-          )
-          .font(.caption)
-          .foregroundStyle(Color.vaporPrimary)
-        }
-        if conflicts > 0 {
-          Text(
-            conflicts == 1
-              ? viewModel.localized("attention_conflict_one")
-              : viewModel.localized("attention_conflicts_format", Int64(conflicts))
-          )
-          .font(.caption)
-          .foregroundStyle(Color.vaporPrimary)
-        }
+        Text(
+          decisions == 1
+            ? viewModel.localized("attention_decision_one")
+            : viewModel.localized("attention_decisions_format", Int64(decisions))
+        )
+        .font(.caption)
+        .foregroundStyle(Color.vaporPrimary)
         Text(viewModel.localized("attention_cli_hint"))
           .font(.caption2)
           .foregroundStyle(.secondary)

@@ -23,11 +23,13 @@ func initialStateUsesSafeDefaults() {
   #expect(state.configurationIssueReason == nil)
   #expect(!state.hasConfigurationIssue)
   #expect(state.autoLaunchEnabled)
-  #expect(state.useGitIgnore)
-  #expect(state.useVaporIgnore)
-  #expect(state.preIgnoreRules == VaporConfiguration.defaultPreIgnoreRules)
-  #expect(state.postIgnoreRules == VaporConfiguration.defaultPostIgnoreRules)
-  #expect(state.languageCode == "en")
+  #expect(state.useGitignore)
+  #expect(state.useVaporignore)
+  #expect(
+    VaporConfiguration.rules(fromEditorText: state.preIgnoreRules)
+      == VaporConfiguration.defaultPreIgnoreRules)
+  #expect(state.postIgnoreRules.isEmpty)
+  #expect(state.language == "en")
   #expect(state.effectiveLanguageCode == "en")
   #expect(state.providerName == "Filesystem")
   #expect(!state.vaporDirectoryPath.isEmpty)
@@ -40,11 +42,11 @@ func configurationIssueFlagReflectsPresenceOfDiagnosticPath() {
     configurationIssuePath: "/tmp/.vapor/vapor.json",
     configurationIssueReason: "invalid JSON",
     autoLaunchEnabled: true,
-    useGitIgnore: true,
-    useVaporIgnore: true,
-    preIgnoreRules: VaporConfiguration.defaultPreIgnoreRules,
-    postIgnoreRules: VaporConfiguration.defaultPostIgnoreRules,
-    languageCode: "en",
+    useGitignore: true,
+    useVaporignore: true,
+    preIgnoreRules: "",
+    postIgnoreRules: "",
+    language: "en",
     effectiveLanguageCode: "en",
     providerName: "Google Drive",
     vaporDirectoryPath: "~/.vapor"
@@ -56,23 +58,23 @@ func configurationIssueFlagReflectsPresenceOfDiagnosticPath() {
 @Test
 func surfaceStateFollowsTheDaemonStatusWhenRunning() {
   func status(
-    run: String = "Running", throttle: String = "IdleDrain", queue: UInt64 = 0,
+    run: String = "running", throttle: String = "idle", queue: UInt64 = 0,
     failed: UInt64 = 0
   ) -> DaemonStatusSnapshot {
     DaemonStatusSnapshot(
-      runState: run, throttleState: throttle, throttleReason: "", providerName: "filesystem",
-      queueDepth: queue, failedIntents: failed)
+      runState: run, throttleState: throttle, throttleReason: "", provider: "filesystem",
+      queued: queue, failed: failed)
   }
   #expect(SyncSurfaceState.from(health: .running, status: status()) == .idle)
   #expect(SyncSurfaceState.from(health: .running, status: status(queue: 3)) == .syncing)
   #expect(
-    SyncSurfaceState.from(health: .running, status: status(throttle: "Throttled", queue: 3))
+    SyncSurfaceState.from(health: .running, status: status(throttle: "throttled", queue: 3))
       == .throttled)
   #expect(
-    SyncSurfaceState.from(health: .running, status: status(throttle: "Suspended", queue: 3))
+    SyncSurfaceState.from(health: .running, status: status(throttle: "suspended", queue: 3))
       == .suspended)
-  #expect(SyncSurfaceState.from(health: .running, status: status(run: "Paused")) == .paused)
-  #expect(SyncSurfaceState.from(health: .running, status: status(run: "Error")) == .error)
+  #expect(SyncSurfaceState.from(health: .running, status: status(run: "paused")) == .paused)
+  #expect(SyncSurfaceState.from(health: .running, status: status(run: "error")) == .error)
   #expect(SyncSurfaceState.from(health: .running, status: status(failed: 2)) == .error)
   // No status while the tick says running: the endpoint did not answer.
   #expect(SyncSurfaceState.from(health: .running, status: nil) == .stopped)
@@ -93,13 +95,9 @@ func needsUserActionFollowsEveryStateOnlyTheUserCanClear() {
   state.signInRequired = []
   #expect(state.signInProviderName == nil)
 
-  state.decisionsPending = 1
+  state.decisions = 1
   #expect(state.needsUserAction)
-  state.decisionsPending = 0
-
-  state.conflictsUnresolved = 2
-  #expect(state.needsUserAction)
-  state.conflictsUnresolved = 0
+  state.decisions = 0
 
   state.crashLoopPaused = true
   #expect(state.needsUserAction)
@@ -109,9 +107,9 @@ func needsUserActionFollowsEveryStateOnlyTheUserCanClear() {
   #expect(state.needsUserAction)
   state.loginItemRequiresApproval = false
 
-  state.configRestartRequired = "syncMode changed"
+  state.restartRequired = "syncMode changed"
   #expect(state.needsUserAction)
-  state.configRestartRequired = nil
+  state.restartRequired = nil
 
   state.configurationIssuePath = "/tmp/.vapor/vapor.json"
   #expect(state.needsUserAction)
@@ -127,15 +125,16 @@ func needsUserActionFollowsEveryStateOnlyTheUserCanClear() {
 @Test
 func syncDetailPrefersTheReasonTheUserCanActOn() {
   func status(
+    run: String = "running",
     throttle: String = "user activity is active",
-    runStateReason: String? = nil,
+    runReason: String? = nil,
     scan: String = "",
     scanDetail: String = ""
   ) -> DaemonStatusSnapshot {
     DaemonStatusSnapshot(
-      runState: "Running", throttleState: "Throttled", throttleReason: throttle,
-      providerName: "filesystem", queueDepth: 1, failedIntents: 0,
-      runStateReason: runStateReason, reconcileState: scan, reconcileDetail: scanDetail)
+      runState: run, throttleState: "throttled", throttleReason: throttle,
+      provider: "filesystem", queued: 1, failed: 0,
+      runReason: runReason, reconcileState: scan, reconcileDetail: scanDetail)
   }
   // Nothing answered: nothing to say.
   #expect(AppShellState.syncDetail(for: .stopped, status: nil) == nil)
@@ -158,9 +157,13 @@ func syncDetailPrefersTheReasonTheUserCanActOn() {
     AppShellState.syncDetail(
       for: .error,
       status: status(
-        runStateReason: "cloud sync directory /Vapor is unavailable", scan: "waiting",
+        run: "error", runReason: "cloud root /Vapor is unavailable", scan: "waiting",
         scanDetail: "waiting")
-    ) == "cloud sync directory /Vapor is unavailable")
+    ) == "cloud root /Vapor is unavailable")
+  // An Error the app derived from failed changes never borrows the
+  // reason of a healthy run.
+  #expect(
+    AppShellState.syncDetail(for: .error, status: status(runReason: "watching ~/Vapor")) == nil)
   // An empty throttle reason is no detail at all.
   #expect(AppShellState.syncDetail(for: .idle, status: status(throttle: "")) == nil)
 }

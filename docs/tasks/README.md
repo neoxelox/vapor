@@ -177,8 +177,8 @@ Status: complete (against the filesystem-provider no-op auth path; the
 OAuth-PKCE browser flow lands with Wave 8 / C8-48). Required Wave 6
 (IPC).
 
-- `cli.md` L3-1 … L3-7 — `vapor status / pause / resume / flush-now /
-  reconcile / timeline / logs`. All IPC-backed. `--json` stable; never
+- `cli.md` L3-1 … L3-7 — `vapor status / pause / resume / reconcile /
+  timeline / logs`. All IPC-backed. `--json` stable; never
   hang when no daemon is running.
 - `cli.md` L4-1 … L4-3 — `vapor auth login / logout / status` via PKCE.
   Depends on `SecretStore` from Wave 4 and a provider with an OAuth
@@ -228,7 +228,7 @@ IDs stable; they do not imply low priority.)
 
 Status: **complete** (SF-1 … SF-9 in `core.md` "Sync safety
 follow-ups", landed 2026-09-06 and 2026-09-07): decisions and the
-two-direction mass-deletion guard, the local trash, root identity,
+two-direction mass-delete guard, the local trash, root identity,
 offline deletions through the index, the type-mismatch decision,
 collisions as aliased conflict copies, the headless supervisor,
 hash-based move detection, and the knowledge base for each. Wave 9
@@ -243,14 +243,13 @@ Status: pending — **now unblocked** (every Wave 8 dependency below has
 landed).
 
 - `macos.md` M3-1 … M3-13 — diagnostics UX in the macOS app: real
-  IPC-backed controls (`Pause`/`Resume`/`Flush now`), full menubar
-  state model, diagnostics panel with throttle reason + queue depth +
-  conflicts + failures + effective ceilings + utilization + idle-boost
-  reason, per-intent "why stuck" UI, live timeline tab, tests, the
-  conflicts pane and conflict notifications (M3-7/M3-8, driving the
-  shipped `vapor conflicts` CLI per
-  `docs/architecture/conflict-resolution.md`), and the decisions pane,
-  trash pane, and root-state display (M3-9 … M3-11, driving the shipped
+  IPC-backed controls (`Pause`/`Resume`), full menubar state model,
+  diagnostics panel with throttle reason + queue depth + failures +
+  effective ceilings + utilization + idle-boost reason, per-item "why
+  stuck" UI, live timeline tab, tests, conflict notifications (M3-8),
+  and the decisions pane (conflicts included, per
+  `docs/architecture/conflict-resolution.md`), trash pane, and
+  root-state display (M3-9 … M3-11, driving the shipped
   `vapor decisions` and `vapor trash` commands), and the sign-in
   notification (M3-13; the sign-in notice and button, M3-12, landed).
   Depends on C8-27 …

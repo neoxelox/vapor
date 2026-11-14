@@ -7,113 +7,43 @@ use crate::logging;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SyncScope {
-    pub local_sync_directory: Option<PathBuf>,
-    pub cloud_sync_directory: String,
+    pub local_root: Option<PathBuf>,
+    pub cloud_root: String,
     /// Sync direction for this scope. Carried on the scope so
     /// every pipeline gate (ingest, remote apply, reconcile, executor)
     /// consults the same value — no operation can bypass it.
     pub sync_mode: SyncMode,
 }
 
-/// Resolves the sync scope from environment variables layered over
-/// compiled defaults only. Prefer [`resolve_with_config`] in daemon
-/// composition so persisted `vapor.json` settings take effect.
-pub fn resolve_from_process_environment() -> SyncScope {
-    resolve_with_config(&vapor_shared::config::VaporConfig::default())
-}
-
-/// Resolves the sync scope with the canonical precedence per field:
-/// `VAPOR_*` environment variable → `vapor.json` value → compiled
-/// default. Explicitly empty values (empty or whitespace-only strings)
-/// are treated as unset at every layer, so an empty env var falls back
-/// to the config file rather than silently disabling sync.
+/// Resolves the sync scope from `vapor.json`: the configured value, or
+/// the compiled default when the key is unset or blank.
 pub fn resolve_with_config(config: &vapor_shared::config::VaporConfig) -> SyncScope {
-    resolve_scope_with_env(config, true, true)
-}
-
-/// Per-profile scope resolution. A process-wide
-/// `VAPOR_LOCAL/CLOUD_SYNC_DIRECTORY` env var must NOT override a
-/// directory the profile set explicitly: doing so would collapse every
-/// profile onto one root, and for a one-way mirror profile that means
-/// strict-mirroring a cloud root over a directory the user never chose.
-/// The env layer therefore applies only to a field the profile did not
-/// set; when an env var is present but overridden by an explicit profile
-/// field, it is ignored with a loud warning rather than silently winning.
-pub fn resolve_profile_scope(
-    config: &vapor_shared::config::VaporConfig,
-    profile_sets_local: bool,
-    profile_sets_cloud: bool,
-) -> SyncScope {
-    if profile_sets_local && env::var_os(constants::env::VAPOR_LOCAL_SYNC_DIRECTORY).is_some() {
-        logging::warning(
-            "Ignoring VAPOR_LOCAL_SYNC_DIRECTORY for a profile that sets localSyncDirectory explicitly",
-            &[],
-        );
-    }
-    if profile_sets_cloud && env::var_os(constants::env::VAPOR_CLOUD_SYNC_DIRECTORY).is_some() {
-        logging::warning(
-            "Ignoring VAPOR_CLOUD_SYNC_DIRECTORY for a profile that sets cloudSyncDirectory explicitly",
-            &[],
-        );
-    }
-    resolve_scope_with_env(config, !profile_sets_local, !profile_sets_cloud)
-}
-
-fn resolve_scope_with_env(
-    config: &vapor_shared::config::VaporConfig,
-    allow_env_local: bool,
-    allow_env_cloud: bool,
-) -> SyncScope {
-    let env_local = if allow_env_local {
-        env::var(constants::env::VAPOR_LOCAL_SYNC_DIRECTORY).ok()
-    } else {
-        None
-    };
-    let env_cloud = if allow_env_cloud {
-        env::var(constants::env::VAPOR_CLOUD_SYNC_DIRECTORY).ok()
-    } else {
-        None
-    };
     let current_directory = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home_directory = home_directory();
-
-    resolve_scope(
-        env_local.as_deref(),
-        env_cloud.as_deref(),
-        config,
-        &current_directory,
-        home_directory.as_deref(),
-    )
+    resolve_scope(config, &current_directory, home_directory.as_deref())
 }
 
 fn resolve_scope(
-    env_local: Option<&str>,
-    env_cloud: Option<&str>,
     config: &vapor_shared::config::VaporConfig,
     current_directory: &Path,
     home_directory: Option<&Path>,
 ) -> SyncScope {
     let local_raw = first_non_empty(&[
-        env_local,
-        Some(config.local_sync_directory.as_str()),
-        Some(constants::filtering::DEFAULT_LOCAL_SYNC_DIRECTORY),
+        Some(config.local_root.as_str()),
+        Some(constants::filtering::DEFAULT_LOCAL_ROOT),
     ]);
-    let cloud_raw = first_non_empty(&[env_cloud, Some(config.effective_cloud_sync_directory())]);
-
-    let local_sync_directory =
+    let local_root =
         local_raw.and_then(|raw| resolve_local_directory(raw, current_directory, home_directory));
-    let cloud_sync_directory = resolve_cloud_directory(
-        cloud_raw.unwrap_or_else(|| {
-            constants::filtering::default_cloud_sync_directory(&config.provider)
-        }),
+    let cloud_root = resolve_cloud_directory(
+        config.effective_cloud_root(),
         &config.provider,
         current_directory,
         home_directory,
     );
 
     SyncScope {
-        local_sync_directory,
-        cloud_sync_directory,
+        local_root,
+        cloud_root,
         sync_mode: resolve_sync_mode(&config.sync_mode),
     }
 }
@@ -155,10 +85,7 @@ fn resolve_local_directory(
     home_directory: Option<&Path>,
 ) -> Option<PathBuf> {
     let Some(path) = resolve_path(raw, current_directory, home_directory) else {
-        logging::warning(
-            "No local sync directory configured; daemon will remain idle",
-            &[],
-        );
+        logging::warning("No local root configured; daemon will remain idle", &[]);
         return None;
     };
 
@@ -167,7 +94,7 @@ fn resolve_local_directory(
     // knows whether this profile synced there before.
     if path.exists() && !path.is_dir() {
         logging::warning(
-            "Skipping local sync directory because path is not a directory",
+            "Skipping local root because path is not a directory",
             &[("path", path.display().to_string())],
         );
         return None;
@@ -184,7 +111,7 @@ fn resolve_cloud_directory(
 ) -> String {
     let trimmed = raw.trim();
     let trimmed = if trimmed.is_empty() {
-        constants::filtering::default_cloud_sync_directory(provider_kind)
+        constants::filtering::default_cloud_root(provider_kind)
     } else {
         trimmed
     };
@@ -217,26 +144,23 @@ fn resolve_cloud_directory(
 /// provider writes as fresh local changes (self-sustaining churn, and
 /// potentially destructive under a pull-only strict mirror). Returns
 /// the actionable refusal reason when the roots overlap.
-pub fn filesystem_roots_overlap(
-    local_sync_directory: &Path,
-    cloud_sync_directory: &str,
-) -> Option<String> {
-    let local = canonicalize_for_overlap(local_sync_directory);
-    let cloud = canonicalize_for_overlap(Path::new(cloud_sync_directory));
+pub fn filesystem_roots_overlap(local_root: &Path, cloud_root: &str) -> Option<String> {
+    let local = canonicalize_for_overlap(local_root);
+    let cloud = canonicalize_for_overlap(Path::new(cloud_root));
     if local == cloud {
         Some(format!(
-            "localSyncDirectory and cloudSyncDirectory resolve to the same directory ({})",
+            "localRoot and cloudRoot resolve to the same directory ({})",
             local.display()
         ))
     } else if cloud.starts_with(&local) {
         Some(format!(
-            "cloudSyncDirectory {} is inside localSyncDirectory {}",
+            "cloudRoot {} is inside localRoot {}",
             cloud.display(),
             local.display()
         ))
     } else if local.starts_with(&cloud) {
         Some(format!(
-            "localSyncDirectory {} is inside cloudSyncDirectory {}",
+            "localRoot {} is inside cloudRoot {}",
             local.display(),
             cloud.display()
         ))
@@ -314,20 +238,11 @@ mod tests {
     fn defaults_to_two_folders_under_home_for_the_filesystem_provider() {
         let (_guard, home) = create_test_directory();
 
-        let scope = resolve_scope(
-            None,
-            None,
-            &default_config(),
-            Path::new("/tmp"),
-            Some(home.as_path()),
-        );
-        assert_eq!(scope.local_sync_directory, Some(home.join("Vapor")));
-        assert_eq!(
-            scope.cloud_sync_directory,
-            home.join("cloud/Vapor").to_string_lossy()
-        );
+        let scope = resolve_scope(&default_config(), Path::new("/tmp"), Some(home.as_path()));
+        assert_eq!(scope.local_root, Some(home.join("Vapor")));
+        assert_eq!(scope.cloud_root, home.join("cloud/Vapor").to_string_lossy());
         assert!(
-            filesystem_roots_overlap(&home.join("Vapor"), &scope.cloud_sync_directory).is_none(),
+            filesystem_roots_overlap(&home.join("Vapor"), &scope.cloud_root).is_none(),
             "the two defaults must never nest"
         );
         assert!(
@@ -342,22 +257,22 @@ mod tests {
         let mut config = default_config();
         config.provider = constants::provider::GDRIVE.to_string();
 
-        let scope = resolve_scope(None, None, &config, Path::new("/tmp"), Some(home.as_path()));
-        assert_eq!(scope.cloud_sync_directory, "/Vapor");
+        let scope = resolve_scope(&config, Path::new("/tmp"), Some(home.as_path()));
+        assert_eq!(scope.cloud_root, "/Vapor");
     }
 
     #[test]
     fn filesystem_cloud_directory_expands_tilde_like_the_local_root() {
         let (_guard, home) = create_test_directory();
         let config = VaporConfig {
-            cloud_sync_directory: Some("~/Desktop/VaporCloud".to_string()),
+            cloud_root: Some("~/Desktop/VaporCloud".to_string()),
             ..VaporConfig::default()
         };
 
-        let scope = resolve_scope(None, None, &config, Path::new("/tmp"), Some(home.as_path()));
+        let scope = resolve_scope(&config, Path::new("/tmp"), Some(home.as_path()));
 
         assert_eq!(
-            scope.cloud_sync_directory,
+            scope.cloud_root,
             home.join("Desktop/VaporCloud").to_string_lossy(),
             "the filesystem provider's cloud root is a local path and must expand ~"
         );
@@ -368,13 +283,13 @@ mod tests {
         let (_guard, home) = create_test_directory();
         let config = VaporConfig {
             provider: "gdrive".to_string(),
-            cloud_sync_directory: Some("Backups/Vapor".to_string()),
+            cloud_root: Some("Backups/Vapor".to_string()),
             ..VaporConfig::default()
         };
 
-        let scope = resolve_scope(None, None, &config, Path::new("/tmp"), Some(home.as_path()));
+        let scope = resolve_scope(&config, Path::new("/tmp"), Some(home.as_path()));
 
-        assert_eq!(scope.cloud_sync_directory, "/Backups/Vapor");
+        assert_eq!(scope.cloud_root, "/Backups/Vapor");
     }
 
     #[test]
@@ -424,63 +339,37 @@ mod tests {
     }
 
     #[test]
-    fn config_file_values_are_used_when_environment_is_unset() {
+    fn config_file_values_are_used() {
         let (_guard, root) = create_test_directory();
         let configured = root.join("from-config");
         let config = VaporConfig {
-            local_sync_directory: configured.to_string_lossy().into_owned(),
-            cloud_sync_directory: Some("/FromConfig".to_string()),
+            local_root: configured.to_string_lossy().into_owned(),
+            cloud_root: Some("/FromConfig".to_string()),
             ..VaporConfig::default()
         };
 
-        let scope = resolve_scope(None, None, &config, Path::new("/tmp"), None);
+        let scope = resolve_scope(&config, Path::new("/tmp"), None);
 
-        assert_eq!(scope.local_sync_directory, Some(configured));
-        assert_eq!(scope.cloud_sync_directory, "/FromConfig");
+        assert_eq!(scope.local_root, Some(configured));
+        assert_eq!(scope.cloud_root, "/FromConfig");
     }
 
     #[test]
-    fn environment_overrides_config_file_values() {
-        let (_guard, root) = create_test_directory();
-        let from_env = root.join("from-env");
+    fn blank_values_fall_back_to_the_defaults() {
         let config = VaporConfig {
-            local_sync_directory: root.join("from-config").to_string_lossy().into_owned(),
-            cloud_sync_directory: Some("/FromConfig".to_string()),
+            local_root: "   ".to_string(),
+            cloud_root: Some(String::new()),
             ..VaporConfig::default()
         };
 
-        let scope = resolve_scope(
-            Some(from_env.to_string_lossy().as_ref()),
-            Some("/FromEnv"),
-            &config,
-            Path::new("/tmp"),
-            None,
-        );
+        let scope = resolve_scope(&config, Path::new("/tmp"), None);
 
-        assert_eq!(scope.local_sync_directory, Some(from_env));
-        assert_eq!(scope.cloud_sync_directory, "/FromEnv");
-    }
-
-    #[test]
-    fn empty_environment_values_fall_back_to_config_then_default() {
-        // An explicitly-empty env var is "unset", not "disable sync":
-        // the same rule the cloud side always had now applies to the
-        // local side too.
-        let (_guard, root) = create_test_directory();
-        let configured = root.join("from-config");
-        let config = VaporConfig {
-            local_sync_directory: configured.to_string_lossy().into_owned(),
-            ..VaporConfig::default()
-        };
-
-        let scope = resolve_scope(Some("   "), Some(""), &config, Path::new("/tmp"), None);
-
-        assert_eq!(scope.local_sync_directory, Some(configured));
-        // No home directory to expand `~` against, so the filesystem
-        // default stays as written rather than becoming a bogus path.
+        // No home directory to expand `~` against, so both defaults stay
+        // as written rather than becoming a bogus path.
+        assert_eq!(scope.local_root, None);
         assert_eq!(
-            scope.cloud_sync_directory,
-            constants::filtering::DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY
+            scope.cloud_root,
+            constants::filtering::DEFAULT_FILESYSTEM_CLOUD_ROOT
         );
     }
 
@@ -489,16 +378,16 @@ mod tests {
         let (_guard, root) = create_test_directory();
         let missing = root.join("missing");
 
-        let scope = resolve_scope(
-            Some(missing.to_string_lossy().as_ref()),
-            Some("/Cloud"),
-            &default_config(),
-            Path::new("/tmp"),
-            None,
-        );
-        assert_eq!(scope.local_sync_directory, Some(missing.clone()));
+        let config = VaporConfig {
+            local_root: missing.to_string_lossy().into_owned(),
+            cloud_root: Some("/Cloud".to_string()),
+            provider: constants::provider::GDRIVE.to_string(),
+            ..VaporConfig::default()
+        };
+        let scope = resolve_scope(&config, Path::new("/tmp"), None);
+        assert_eq!(scope.local_root, Some(missing.clone()));
         assert!(!missing.exists());
-        assert_eq!(scope.cloud_sync_directory, "/Cloud");
+        assert_eq!(scope.cloud_root, "/Cloud");
     }
 
     #[test]
@@ -507,15 +396,15 @@ mod tests {
         let file_path = root.join("not-a-directory");
         std::fs::write(&file_path, b"x").expect("failed to create file path");
 
-        let scope = resolve_scope(
-            Some(file_path.to_string_lossy().as_ref()),
-            Some("/Cloud"),
-            &default_config(),
-            Path::new("/tmp"),
-            None,
-        );
-        assert!(scope.local_sync_directory.is_none());
-        assert_eq!(scope.cloud_sync_directory, "/Cloud");
+        let config = VaporConfig {
+            local_root: file_path.to_string_lossy().into_owned(),
+            cloud_root: Some("/Cloud".to_string()),
+            provider: constants::provider::GDRIVE.to_string(),
+            ..VaporConfig::default()
+        };
+        let scope = resolve_scope(&config, Path::new("/tmp"), None);
+        assert!(scope.local_root.is_none());
+        assert_eq!(scope.cloud_root, "/Cloud");
     }
 
     #[test]
@@ -528,17 +417,19 @@ mod tests {
         std::fs::create_dir_all(&home_directory).expect("failed to create home directory");
         std::fs::write(&file_path, b"x").expect("failed to create file path");
 
+        let config = VaporConfig {
+            local_root: file_path.to_string_lossy().into_owned(),
+            ..VaporConfig::default()
+        };
         let scope = resolve_scope(
-            Some(file_path.to_string_lossy().as_ref()),
-            Some("/Cloud"),
-            &default_config(),
+            &config,
             current_directory.as_path(),
             Some(home_directory.as_path()),
         );
 
-        assert!(scope.local_sync_directory.is_none());
-        assert_ne!(scope.local_sync_directory, Some(current_directory));
-        assert_ne!(scope.local_sync_directory, Some(home_directory));
+        assert!(scope.local_root.is_none());
+        assert_ne!(scope.local_root, Some(current_directory));
+        assert_ne!(scope.local_root, Some(home_directory));
     }
 
     #[test]
@@ -547,19 +438,18 @@ mod tests {
         let projects = root.join("projects");
         std::fs::create_dir_all(&projects).expect("failed to create projects directory");
 
-        let scope = resolve_scope(
-            Some("projects"),
-            Some("cloud-folder"),
-            &default_config(),
-            &root,
-            None,
-        );
-        assert_eq!(scope.local_sync_directory, Some(projects));
+        let config = VaporConfig {
+            local_root: "projects".to_string(),
+            cloud_root: Some("cloud-folder".to_string()),
+            ..VaporConfig::default()
+        };
+        let scope = resolve_scope(&config, &root, None);
+        assert_eq!(scope.local_root, Some(projects));
         // The default provider is filesystem-backed: its cloud root is a
         // local path and resolves against the current directory like the
         // local root does.
         assert_eq!(
-            scope.cloud_sync_directory,
+            scope.cloud_root,
             root.join("cloud-folder").to_string_lossy()
         );
     }
@@ -573,17 +463,19 @@ mod tests {
         std::fs::create_dir_all(&current_directory).expect("failed to create current directory");
         std::fs::create_dir_all(&home_directory).expect("failed to create home directory");
 
+        let config = VaporConfig {
+            local_root: configured.to_string_lossy().into_owned(),
+            ..VaporConfig::default()
+        };
         let scope = resolve_scope(
-            Some(configured.to_string_lossy().as_ref()),
-            Some("/Cloud"),
-            &default_config(),
+            &config,
             current_directory.as_path(),
             Some(home_directory.as_path()),
         );
 
-        assert_eq!(scope.local_sync_directory, Some(configured.clone()));
-        assert_ne!(scope.local_sync_directory, Some(current_directory));
-        assert_ne!(scope.local_sync_directory, Some(home_directory));
+        assert_eq!(scope.local_root, Some(configured.clone()));
+        assert_ne!(scope.local_root, Some(current_directory));
+        assert_ne!(scope.local_root, Some(home_directory));
     }
 
     #[test]
@@ -591,7 +483,7 @@ mod tests {
         // One-way modes are never inferred. Only the
         // exact configured value activates them; anything else lands on
         // the safe two-way default.
-        let scope = resolve_scope(None, None, &default_config(), Path::new("/tmp"), None);
+        let scope = resolve_scope(&default_config(), Path::new("/tmp"), None);
         assert_eq!(scope.sync_mode, vapor_shared::SyncMode::TwoWay);
 
         let pull = VaporConfig {
@@ -599,7 +491,7 @@ mod tests {
             ..VaporConfig::default()
         };
         assert_eq!(
-            resolve_scope(None, None, &pull, Path::new("/tmp"), None).sync_mode,
+            resolve_scope(&pull, Path::new("/tmp"), None).sync_mode,
             vapor_shared::SyncMode::PullOnly
         );
 
@@ -608,7 +500,7 @@ mod tests {
             ..VaporConfig::default()
         };
         assert_eq!(
-            resolve_scope(None, None, &push, Path::new("/tmp"), None).sync_mode,
+            resolve_scope(&push, Path::new("/tmp"), None).sync_mode,
             vapor_shared::SyncMode::PushOnly
         );
     }
@@ -621,7 +513,7 @@ mod tests {
                 ..VaporConfig::default()
             };
             assert_eq!(
-                resolve_scope(None, None, &config, Path::new("/tmp"), None).sync_mode,
+                resolve_scope(&config, Path::new("/tmp"), None).sync_mode,
                 vapor_shared::SyncMode::TwoWay,
                 "'{bogus}' must not activate any mode"
             );

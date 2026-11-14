@@ -57,9 +57,9 @@ impl ReconcileStatus {
     /// Wire label for the status payload.
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Idle => "idle",
-            Self::Waiting { .. } => "waiting",
-            Self::Running { .. } => "running",
+            Self::Idle => constants::reconcile_state::IDLE,
+            Self::Waiting { .. } => constants::reconcile_state::WAITING,
+            Self::Running { .. } => constants::reconcile_state::RUNNING,
         }
     }
 
@@ -154,13 +154,13 @@ fn probe_cloud_root(
         }
     };
     match recorded {
-        None => match provider.ensure_cloud_sync_directory(cloud_root) {
+        None => match provider.ensure_cloud_root(cloud_root) {
             Ok(()) => match provider.adopt_root(cloud_root, device_id) {
                 Ok(identity) => {
                     logging::info(
-                        "Adopted the cloud sync directory",
+                        "Adopted the cloud root",
                         &[
-                            ("cloud_sync_directory", cloud_root.to_string()),
+                            ("cloud_root", cloud_root.to_string()),
                             (
                                 "identity",
                                 identity.clone().unwrap_or_else(|| "none".to_string()),
@@ -183,7 +183,7 @@ fn probe_cloud_root(
                 probe => probe,
             };
             match classify_cloud_probe(&recorded, probe) {
-                RootStatus::Ready => match provider.ensure_cloud_sync_directory(cloud_root) {
+                RootStatus::Ready => match provider.ensure_cloud_root(cloud_root) {
                     Ok(()) => CloudRootOutcome::Ready { adopted: None },
                     Err(error) => unreachable(error),
                 },
@@ -435,6 +435,11 @@ pub struct DaemonRuntime {
     /// the profile runtime attaches one; the bare fixtures unlink.
     trash: Option<crate::trash::LocalTrash>,
     last_trash_purge_inst: Option<Instant>,
+    last_conflict_sync_inst: Option<Instant>,
+    /// Bumped whenever this runtime opens or closes a decision, so the
+    /// status publisher knows the open count moved without querying it
+    /// on every idle tick.
+    decision_changes: u64,
     /// Flush boost deadline (monotonic). While set and in the
     /// future, deferred reconciles release immediately regardless of
     /// the idle gate.
@@ -479,7 +484,7 @@ impl DaemonRuntime {
     ) -> Result<Self, DaemonRuntimeError> {
         Self::start_configured(
             sync_scope,
-            EventPathFilterOptions::from_process_environment(),
+            EventPathFilterOptions::from_config(&vapor_shared::config::VaporConfig::default()),
             state_db,
             provider,
             metrics_sampler,
@@ -488,8 +493,7 @@ impl DaemonRuntime {
     }
 
     /// Fully-parameterized start used by the daemon bootstrap: explicit
-    /// filter options (resolved from `vapor.json` + environment) instead
-    /// of environment-only defaults.
+    /// filter options resolved from `vapor.json`.
     pub fn start_configured(
         sync_scope: SyncScope,
         filter_options: EventPathFilterOptions,
@@ -624,6 +628,7 @@ impl DaemonRuntime {
         self.check_roots_if_due(now)?;
         self.apply_resolved_decisions(now)?;
         self.withdraw_holds_left_empty(now)?;
+        self.sync_conflict_decisions(now)?;
 
         let (stabilized_events, suppressed_local_echoes, stabilize_mirror_reverts) =
             self.stabilize_events(now);
@@ -633,7 +638,7 @@ impl DaemonRuntime {
         // lost, and work already in flight runs to completion — but no
         // new work is released or leased while paused. An unavailable
         // cloud root blocks the same way. Evaluated *after*
-        // stabilization so a mass-deletion guard trip stops
+        // stabilization so a mass-delete guard trip stops
         // admission in the same tick that detected the storm.
         let paused = self.app.snapshot().run_state == RunState::Paused
             || !self.cloud_root_ready
@@ -664,7 +669,7 @@ impl DaemonRuntime {
                 &mut self.app,
                 &mut self.state_db,
                 &mut self.remote_echoes,
-                self.sync_scope.local_sync_directory.as_deref(),
+                self.sync_scope.local_root.as_deref(),
                 self.path_filter.as_deref(),
                 self.sync_scope.sync_mode,
                 &self.clock,
@@ -683,7 +688,7 @@ impl DaemonRuntime {
             {
                 for (wanted, existing) in self.remote_poller.take_name_collisions() {
                     timeline.push(
-                        "collision",
+                        constants::timeline::KIND_COLLISION,
                         self.profile_id.clone(),
                         name_collision_message(&wanted, &existing),
                         now,
@@ -696,7 +701,7 @@ impl DaemonRuntime {
 
         let staged_report = {
             let mut env = ExecutionEnv {
-                local_root: self.sync_scope.local_sync_directory.as_deref(),
+                local_root: self.sync_scope.local_root.as_deref(),
                 sync_mode: self.sync_scope.sync_mode,
                 device_id: &self.device_id,
                 hash_algorithm: self.app.provider().content_hash_algorithm(),
@@ -784,7 +789,7 @@ impl DaemonRuntime {
                         if let Some(timeline) = &self.timeline {
                             for (wanted, existing) in collisions {
                                 timeline.push(
-                                    "collision",
+                                    constants::timeline::KIND_COLLISION,
                                     self.profile_id.clone(),
                                     name_collision_message(&wanted, &existing),
                                     now,
@@ -803,9 +808,7 @@ impl DaemonRuntime {
                             self.reconcile_walker = None;
                             self.state_db.complete_leased(reconcile_intent_id)?;
                             self.running_reconcile_intent_id = None;
-                            if self.sync_scope.local_sync_directory.as_ref()
-                                == Some(&completed_root)
-                            {
+                            if self.sync_scope.local_root.as_ref() == Some(&completed_root) {
                                 // The merge flag covers one whole-scope walk.
                                 self.state_db
                                     .delete_state(constants::state::MERGE_WITHOUT_DELETIONS_KEY)?;
@@ -854,7 +857,7 @@ impl DaemonRuntime {
                 // tick: without this pass every file would pay one full
                 // tick of dead latency between admission and its planner.
                 let mut env = ExecutionEnv {
-                    local_root: self.sync_scope.local_sync_directory.as_deref(),
+                    local_root: self.sync_scope.local_root.as_deref(),
                     sync_mode: self.sync_scope.sync_mode,
                     device_id: &self.device_id,
                     hash_algorithm: self.app.provider().content_hash_algorithm(),
@@ -890,7 +893,7 @@ impl DaemonRuntime {
                 if let Some(timeline) = &self.timeline {
                     for (wanted, existing) in &admission_report.name_collisions {
                         timeline.push(
-                            "collision",
+                            constants::timeline::KIND_COLLISION,
                             self.profile_id.clone(),
                             name_collision_message(wanted, existing),
                             now,
@@ -929,9 +932,136 @@ impl DaemonRuntime {
         }
     }
 
-    /// Periodic in-run recovery of leases that exceeded the lease
-    /// timeout (an orphaned execution). Startup recovery handles dead
-    /// processes; this sweep handles a lease lost *within* a live run.
+    /// Keeps one `conflict` decision per conflicted file, listing every
+    /// version: a file with copies gets its question, a question whose
+    /// versions changed is rewritten in place, and a question with no
+    /// copy left (resolved in the Finder, on another device, or through
+    /// `vapor decisions resolve`) closes. Runs on its own cadence, and
+    /// not while the throttle is `Suspended`.
+    fn sync_conflict_decisions(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
+        let now_inst = self.clock.now();
+        let interval = Duration::from_secs(constants::conflict::DECISION_SYNC_SECONDS);
+        let due = self
+            .last_conflict_sync_inst
+            .map(|last| now_inst.saturating_duration_since(last) >= interval)
+            .unwrap_or(true);
+        if !due || self.app.snapshot().throttle_state == vapor_shared::ThrottleState::Suspended {
+            return Ok(());
+        }
+        self.last_conflict_sync_inst = Some(now_inst);
+
+        let originals: std::collections::BTreeSet<PathBuf> = self
+            .state_db
+            .conflict_copy_paths()?
+            .iter()
+            .filter(|copy| copy.is_file())
+            .filter_map(|copy| crate::conflict::original_path(copy))
+            .collect();
+        let trash_enabled = self
+            .trash
+            .as_ref()
+            .is_none_or(|trash| trash.settings().enabled);
+        let mut asked = std::collections::BTreeSet::new();
+        for decision in self.state_db.decisions(false)? {
+            if decision.kind != constants::decision::KIND_CONFLICT {
+                continue;
+            }
+            let Some(original) = decision.path.clone() else {
+                continue;
+            };
+            let conflict = match crate::conflict::Conflict::find(&original) {
+                Ok(found) => found,
+                Err(error) => {
+                    // Cannot look (an unplugged drive): the question
+                    // stands until the folder can be read again.
+                    logging::debug(
+                        "Cannot list a conflicted file's folder; leaving its question as it is",
+                        &[
+                            ("decision_id", decision.id.to_string()),
+                            ("error", error.to_string()),
+                        ],
+                    );
+                    asked.insert(original);
+                    continue;
+                }
+            };
+            let Some(conflict) = conflict else {
+                self.withdraw_decision(decision.id, now)?;
+                logging::info(
+                    "Closed a conflict question: no copy is left",
+                    &[("decision_id", decision.id.to_string())],
+                );
+                continue;
+            };
+            let fresh = crate::conflict::question(&conflict, &self.device_id, trash_enabled);
+            if fresh.options != decision.options
+                || fresh.question != decision.question
+                || fresh.evidence != decision.evidence
+            {
+                self.state_db.update_open_decision(
+                    decision.id,
+                    &fresh.question,
+                    &fresh.options,
+                    &fresh.evidence,
+                )?;
+            }
+            asked.insert(conflict.original);
+        }
+        // An answer the CLI is applying keeps its versions for a moment;
+        // asking again would duplicate the question.
+        for decision in self.state_db.resolved_unapplied_decisions()? {
+            if decision.kind == constants::decision::KIND_CONFLICT
+                && let Some(original) = decision.path
+            {
+                asked.insert(original);
+            }
+        }
+
+        let mut opened = Vec::new();
+        for original in originals.difference(&asked) {
+            // A keep-both moves this device's edit aside before the
+            // cloud's version lands under the name; ask once both are
+            // there. While the name is still empty, a copy made by
+            // answering a file/folder clash with `keep-both` is that
+            // answer (the folder is on its way), not a question.
+            if !original.exists() {
+                let landing = !self.state_db.queued_kinds_at(original)?.is_empty();
+                let kept_both = self.state_db.decision_answered(
+                    crate::type_mismatch::DECISION_KIND,
+                    original,
+                    crate::type_mismatch::OPTION_KEEP_BOTH,
+                )?;
+                if landing || kept_both {
+                    continue;
+                }
+            }
+            let Ok(Some(conflict)) = crate::conflict::Conflict::find(original) else {
+                continue;
+            };
+            let asking = crate::conflict::question(&conflict, &self.device_id, trash_enabled);
+            opened.push(self.state_db.create_decision(
+                constants::decision::KIND_CONFLICT,
+                crate::state_db::DecisionScope::Path,
+                Some(original),
+                &asking.question,
+                &asking.options,
+                &asking.evidence,
+                now,
+            )?);
+        }
+        if !opened.is_empty() {
+            logging::info(
+                "Asked which version of a conflicted file stays",
+                &[
+                    ("profile_id", self.profile_id.clone()),
+                    ("questions", opened.len().to_string()),
+                ],
+            );
+            self.announce_decisions(&opened, now);
+        }
+        Ok(())
+    }
+
     /// Drops managed-trash entries past their retention, at startup and
     /// then on a slow cadence. A directory scan of the trash, cheap at
     /// the cadence and only while the daemon is otherwise ticking.
@@ -961,6 +1091,9 @@ impl DaemonRuntime {
         }
     }
 
+    /// Periodic in-run recovery of leases that exceeded the lease
+    /// timeout (an orphaned execution). Startup recovery handles dead
+    /// processes; this sweep handles a lease lost *within* a live run.
     fn sweep_stale_leases_if_due(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
         let now_inst = self.clock.now();
         let due = self
@@ -1135,7 +1268,7 @@ impl DaemonRuntime {
 
         let device_id = vapor_shared::device_id::derive_device_id();
         let mut local_replacement: Option<Option<String>> = None;
-        if let Some(local_root) = sync_scope.local_sync_directory.as_deref() {
+        if let Some(local_root) = sync_scope.local_root.as_deref() {
             match crate::root_identity::check_local_root(
                 &mut state_db,
                 local_root,
@@ -1154,8 +1287,8 @@ impl DaemonRuntime {
                 crate::root_identity::RootStatus::Unreachable(_) => {}
             }
         }
-        sync_scope.local_sync_directory = sync_scope
-            .local_sync_directory
+        sync_scope.local_root = sync_scope
+            .local_root
             .take()
             .map(normalize_watch_root)
             .transpose()?;
@@ -1164,10 +1297,10 @@ impl DaemonRuntime {
         // recorded identity afterwards. Synchronous only here, at
         // startup; every later probe runs on a worker. A runtime with
         // no local root (a parked profile) never touches the cloud.
-        let cloud_outcome = if sync_scope.local_sync_directory.is_some() {
+        let cloud_outcome = if sync_scope.local_root.is_some() {
             probe_cloud_root(
                 app.provider_handle(),
-                sync_scope.cloud_sync_directory.as_str(),
+                sync_scope.cloud_root.as_str(),
                 crate::root_identity::recorded_identity(
                     &state_db,
                     crate::root_identity::RootSide::Cloud,
@@ -1197,7 +1330,7 @@ impl DaemonRuntime {
                 true
             }
             CloudRootOutcome::Missing => {
-                cloud_missing = sync_scope.local_sync_directory.is_some();
+                cloud_missing = sync_scope.local_root.is_some();
                 false
             }
             CloudRootOutcome::Unreachable(_) => false,
@@ -1209,20 +1342,20 @@ impl DaemonRuntime {
 
         let tick_waker = Arc::new(TickWaker::default());
         let recorder = sync_scope
-            .local_sync_directory
+            .local_root
             .as_ref()
             .map(|watch_root| Arc::new(BoundedFsEventRecorder::new(watch_root.clone())));
         // Built even when no watcher starts (multi-profile, tests): the
         // reconcile walk and remote-change mapping filter through it, so
         // remote-side ingest honors the same rules as local ingest.
-        let path_filter = sync_scope.local_sync_directory.as_ref().map(|watch_root| {
+        let path_filter = sync_scope.local_root.as_ref().map(|watch_root| {
             Arc::new(crate::fs_events::SharedEventPathFilter::new(
                 watch_root,
                 filter_options,
             ))
         });
         let watcher = if start_watcher {
-            match (&sync_scope.local_sync_directory, &recorder, &path_filter) {
+            match (&sync_scope.local_root, &recorder, &path_filter) {
                 (Some(watch_root), Some(recorder), Some(path_filter)) => {
                     if native_watcher_available() {
                         Some(FsEventsWatcher::start_with_shared_filter(
@@ -1255,27 +1388,27 @@ impl DaemonRuntime {
             app.set_run_state(
                 RunState::Error,
                 format!(
-                    "cloud sync directory {} is unavailable; sync work is blocked until it can be ensured",
-                    sync_scope.cloud_sync_directory
+                    "cloud root {} is unavailable; sync work is blocked until it can be ensured",
+                    sync_scope.cloud_root
                 ),
             );
-        } else if let Some(local_sync_directory) = &sync_scope.local_sync_directory {
+        } else if let Some(local_root) = &sync_scope.local_root {
             if start_watcher && watcher.is_none() {
                 app.set_run_state(
                     RunState::Error,
                     format!(
                         "no native filesystem watcher on this host yet; local changes under {} are not detected",
-                        local_sync_directory.display()
+                        local_root.display()
                     ),
                 );
             } else {
                 app.set_run_state(
                     RunState::Running,
-                    format!("watching {}", local_sync_directory.display()),
+                    format!("watching {}", local_root.display()),
                 );
             }
         } else {
-            app.set_run_state(RunState::Paused, "no local sync directory configured");
+            app.set_run_state(RunState::Paused, "no local root configured");
         }
 
         let debounce =
@@ -1352,6 +1485,8 @@ impl DaemonRuntime {
             mass_delete_settings: crate::safeguards::MassDeleteGuardSettings::default(),
             trash: None,
             last_trash_purge_inst: None,
+            last_conflict_sync_inst: None,
+            decision_changes: 0,
             flush_boost_until_inst: None,
         };
         if let Some(found) = local_replacement {
@@ -1417,9 +1552,9 @@ impl DaemonRuntime {
     }
 
     /// Passes the explicit transfer-concurrency ceiling to the app (see
-    /// `resourceLimits.maxConcurrentTransfers`).
-    pub fn set_max_concurrent_transfers(&mut self, ceiling: Option<usize>) {
-        self.app.set_max_concurrent_transfers(ceiling);
+    /// `resourceLimits.concurrentTransfers`).
+    pub fn set_concurrent_transfers(&mut self, ceiling: Option<usize>) {
+        self.app.set_concurrent_transfers(ceiling);
     }
 
     /// Wires the daemon-wide resource management set in:
@@ -1445,7 +1580,7 @@ impl DaemonRuntime {
 
     /// Latest effective ceilings + utilization for the IPC surface
     ///. `None` until the first 1s sample.
-    pub fn resource_budget_status(&self) -> Option<vapor_ipc::ResourceBudgetStatus> {
+    pub fn resources_status(&self) -> Option<vapor_ipc::ResourcesStatus> {
         let ceilings = self.latest_ceilings.as_ref()?;
         let inputs = self.last_sampled_inputs.as_ref();
         let bandwidth_rate_kbps = self
@@ -1455,17 +1590,25 @@ impl DaemonRuntime {
             .rate()
             .map(|bytes_per_sec| bytes_per_sec * 8 / 1_000)
             .unwrap_or(0);
-        Some(vapor_ipc::ResourceBudgetStatus {
-            effective_cpu_percent: ceilings.cpu_percent,
-            effective_memory_percent: ceilings.memory_percent,
-            effective_bandwidth_percent: ceilings.bandwidth_percent,
-            cpu_utilization_percent: inputs.map(|i| i.vapor_cpu_load_percent).unwrap_or(0),
-            memory_utilization_percent: inputs
-                .and_then(|i| memory_share_percent(i.vapor_memory_bytes, i.device_memory_bytes))
-                .unwrap_or(0),
-            bandwidth_utilization_kbps: bandwidth_rate_kbps,
-            idle_boost_state: ceilings.boost_state.to_string(),
-            idle_boost_reason: ceilings.reason.clone(),
+        Some(vapor_ipc::ResourcesStatus {
+            cpu: vapor_ipc::Ceiling {
+                limit_percent: ceilings.cpu_percent,
+                used_percent: inputs.map(|i| i.vapor_cpu_load_percent).unwrap_or(0),
+            },
+            memory: vapor_ipc::Ceiling {
+                limit_percent: ceilings.memory_percent,
+                used_percent: inputs
+                    .and_then(|i| memory_share_percent(i.vapor_memory_bytes, i.device_memory_bytes))
+                    .unwrap_or(0),
+            },
+            bandwidth: vapor_ipc::BandwidthCeiling {
+                limit_percent: ceilings.bandwidth_percent,
+                used_kbps: bandwidth_rate_kbps,
+            },
+            idle_boost: vapor_ipc::StateReason {
+                state: ceilings.boost_state.to_string(),
+                reason: ceilings.reason.clone(),
+            },
         })
     }
 
@@ -1485,12 +1628,12 @@ impl DaemonRuntime {
     /// Per-intent "why stuck" rows: active executor stages plus
     /// the oldest queued/retrying durable rows, each with a
     /// human-readable blocker.
-    pub fn intent_diagnostics(
+    pub fn work_items(
         &self,
         profile_id: &str,
         limit: usize,
         now: SystemTime,
-    ) -> Vec<vapor_ipc::IntentDiagnostic> {
+    ) -> Vec<vapor_ipc::WorkItem> {
         let mut rows = Vec::new();
         let mut active_ids = std::collections::BTreeSet::new();
         let workgate = self.app.workgate_snapshot();
@@ -1518,16 +1661,16 @@ impl DaemonRuntime {
                 ),
                 _ => String::new(),
             };
-            rows.push(vapor_ipc::IntentDiagnostic {
-                intent_id,
+            rows.push(vapor_ipc::WorkItem {
+                id: intent_id,
                 profile_id: profile_id.to_string(),
                 path: path.to_string_lossy().into_owned(),
-                action: format!("{kind:?}").to_lowercase(),
-                stage: format!("{stage:?}"),
-                elapsed_in_stage_ms: elapsed_ms,
-                attempt_count,
-                last_error,
-                blocker_reason,
+                action: kind.wire_action().to_string(),
+                stage: stage.wire_name().to_string(),
+                elapsed_ms,
+                attempts: attempt_count,
+                error: last_error,
+                reason: blocker_reason,
             });
             if rows.len() >= limit {
                 return rows;
@@ -1550,11 +1693,11 @@ impl DaemonRuntime {
             }
             let retrying = intent.available_at > now;
             let stage = if intent.held_by.is_some() {
-                "Held"
+                constants::intent::STAGE_HELD
             } else if retrying {
-                "Retrying"
+                constants::intent::STAGE_RETRYING
             } else {
-                "Queued"
+                constants::intent::STAGE_QUEUED
             };
             let blocker_reason = if let Some(decision) = intent.held_by {
                 format!("waiting for decision #{decision} (vapor decisions list)")
@@ -1563,7 +1706,7 @@ impl DaemonRuntime {
             } else if let Some(reason) = self.sign_in_reason() {
                 reason
             } else if !self.cloud_root_ready {
-                "cloud sync directory is unavailable".to_string()
+                "cloud root is unavailable".to_string()
             } else if self.startup_reconstruction_barrier {
                 "waiting for the startup reconstruction reconcile".to_string()
             } else if retrying {
@@ -1581,16 +1724,16 @@ impl DaemonRuntime {
                 .duration_since(intent.enqueued_at)
                 .map(|duration| duration.as_millis() as u64)
                 .unwrap_or(0);
-            rows.push(vapor_ipc::IntentDiagnostic {
-                intent_id: intent.id,
+            rows.push(vapor_ipc::WorkItem {
+                id: intent.id,
                 profile_id: profile_id.to_string(),
                 path: intent.path.to_string_lossy().into_owned(),
-                action: format!("{:?}", intent.kind).to_lowercase(),
+                action: intent.kind.wire_action().to_string(),
                 stage: stage.to_string(),
-                elapsed_in_stage_ms,
-                attempt_count: intent.attempt_count,
-                last_error: intent.last_error.unwrap_or_default(),
-                blocker_reason,
+                elapsed_ms: elapsed_in_stage_ms,
+                attempts: intent.attempt_count,
+                error: intent.last_error.unwrap_or_default(),
+                reason: blocker_reason,
             });
         }
         rows
@@ -1608,9 +1751,9 @@ impl DaemonRuntime {
         let run_state = self.app.snapshot().run_state;
         if self.last_timeline_run_state != Some(run_state) {
             timeline.push(
-                "run_state",
+                constants::timeline::KIND_RUN_STATE,
                 profile_id,
-                format!("{:?}: {}", run_state, self.app.snapshot().reason),
+                format!("{}: {}", run_state.wire_name(), self.app.snapshot().reason),
                 now,
             );
             self.last_timeline_run_state = Some(run_state);
@@ -1618,11 +1761,11 @@ impl DaemonRuntime {
         let throttle_state = self.app.snapshot().throttle_state;
         if self.last_timeline_throttle != Some(throttle_state) {
             timeline.push(
-                "throttle",
+                constants::timeline::KIND_THROTTLE,
                 profile_id,
                 format!(
-                    "{:?}: {}",
-                    throttle_state,
+                    "{}: {}",
+                    throttle_state.wire_name(),
                     self.app
                         .throttle_decision()
                         .map(|decision| decision.reason.clone())
@@ -1634,7 +1777,7 @@ impl DaemonRuntime {
         }
         if report.conflicts > 0 {
             timeline.push(
-                "conflict",
+                constants::timeline::KIND_CONFLICT,
                 profile_id,
                 format!("kept both versions for {} path(s)", report.conflicts),
                 now,
@@ -1642,15 +1785,15 @@ impl DaemonRuntime {
         }
         if report.failed_intents > 0 {
             timeline.push(
-                "intent_failed",
+                constants::timeline::KIND_FAILURE,
                 profile_id,
-                format!("{} intent(s) failed terminally", report.failed_intents),
+                format!("{} change(s) failed for good", report.failed_intents),
                 now,
             );
         }
         if report.mirror_reverts > 0 || report.mirror_deletes > 0 {
             timeline.push(
-                "mirror",
+                constants::timeline::KIND_MIRROR,
                 profile_id,
                 format!(
                     "strict mirror reverted {} and removed {} path(s)",
@@ -1661,7 +1804,7 @@ impl DaemonRuntime {
         }
         if let Some(root) = &report.completed_reconcile_root {
             timeline.push(
-                "reconcile",
+                constants::timeline::KIND_RECONCILE,
                 profile_id,
                 format!("reconcile completed for {}", root.display()),
                 now,
@@ -1669,7 +1812,7 @@ impl DaemonRuntime {
         }
         if report.remote_poll.cursor_expired {
             timeline.push(
-                "feed",
+                constants::timeline::KIND_FEED,
                 profile_id,
                 "remote changes cursor expired; whole-scope reconcile scheduled",
                 now,
@@ -1708,10 +1851,10 @@ impl DaemonRuntime {
     /// and the command that ends it.
     fn sign_in_reason(&self) -> Option<String> {
         self.sign_in_hold.then(|| {
-            let provider = self.app.provider_name();
             format!(
-                "Vapor needs to sign in to {provider} again: sync is on hold until then \
-                 (vapor auth login {provider} --profile {})",
+                "Vapor needs to sign in to {} again: sync is on hold until then \
+                 (vapor auth login --profile {})",
+                self.app.provider_name(),
                 self.profile_id
             )
         })
@@ -1741,7 +1884,7 @@ impl DaemonRuntime {
         }
         if let Some(timeline) = &self.timeline {
             timeline.push(
-                "sign-in",
+                constants::timeline::KIND_SIGN_IN,
                 self.profile_id.clone(),
                 format!(
                     "Vapor needs to sign in to {} again; sync is on hold until then",
@@ -1767,7 +1910,7 @@ impl DaemonRuntime {
         );
         if let Some(timeline) = &self.timeline {
             timeline.push(
-                "sign-in",
+                constants::timeline::KIND_SIGN_IN,
                 self.profile_id.clone(),
                 format!(
                     "signed in to {} again; sync resumes",
@@ -1823,31 +1966,28 @@ impl DaemonRuntime {
         // Retry immediately on the next tick, then at the ensure cadence.
         self.last_cloud_root_attempt_inst = None;
         logging::warning(
-            "Cloud sync directory became unavailable; blocking sync work until it is re-ensured",
+            "Cloud root became unavailable; blocking sync work until it is re-ensured",
             &[
-                (
-                    "cloud_sync_directory",
-                    self.sync_scope.cloud_sync_directory.clone(),
-                ),
+                ("cloud_root", self.sync_scope.cloud_root.clone()),
                 ("reason", reason.to_string()),
             ],
         );
-        // Preserve an explicit pause (user or mass-deletion guard): the
+        // Preserve an explicit pause (user or mass-delete guard): the
         // root recovery path must not silently resume either.
         if self.app.snapshot().run_state != RunState::Paused {
             self.app.set_run_state(
                 RunState::Error,
                 format!(
-                    "cloud sync directory {} is unavailable; sync work is blocked until it can be ensured",
-                    self.sync_scope.cloud_sync_directory
+                    "cloud root {} is unavailable; sync work is blocked until it can be ensured",
+                    self.sync_scope.cloud_root
                 ),
             );
         }
         if let Some(timeline) = &self.timeline {
             timeline.push(
-                "cloud-root",
+                constants::timeline::KIND_CLOUD_ROOT,
                 self.profile_id.clone(),
-                "cloud sync directory became unavailable; sync blocked until it is restored",
+                "cloud root became unavailable; sync blocked until it is restored",
                 now,
             );
         }
@@ -1907,7 +2047,7 @@ impl DaemonRuntime {
                         &[("error", format!("{error:?}"))],
                     );
                 }
-                self.restore_run_state_after_root_recovery("cloud sync directory recovered");
+                self.restore_run_state_after_root_recovery("cloud root recovered");
             }
             CloudRootOutcome::Replaced { found } => {
                 self.cloud_root_ready = true;
@@ -1969,7 +2109,7 @@ impl DaemonRuntime {
             }
         };
         let provider = self.app.provider_handle();
-        let cloud_root = self.sync_scope.cloud_sync_directory.clone();
+        let cloud_root = self.sync_scope.cloud_root.clone();
         let device_id = self.device_id.clone();
         let mut call = crate::provider_jobs::ProviderCall::start(
             &self.provider_call_mode,
@@ -2008,8 +2148,8 @@ impl DaemonRuntime {
             self.app.set_run_state(
                 RunState::Error,
                 format!(
-                    "cloud sync directory {} is unavailable; sync work is blocked until it comes back",
-                    self.sync_scope.cloud_sync_directory
+                    "cloud root {} is unavailable; sync work is blocked until it comes back",
+                    self.sync_scope.cloud_root
                 ),
             );
             return;
@@ -2017,14 +2157,14 @@ impl DaemonRuntime {
         if self.app.snapshot().run_state == RunState::Paused {
             return;
         }
-        match self.sync_scope.local_sync_directory.as_ref() {
+        match self.sync_scope.local_root.as_ref() {
             Some(path) => self.app.set_run_state(
                 RunState::Running,
                 format!("{what}; watching {}", path.display()),
             ),
             None => self
                 .app
-                .set_run_state(RunState::Paused, "no local sync directory configured"),
+                .set_run_state(RunState::Paused, "no local root configured"),
         }
     }
 
@@ -2048,14 +2188,14 @@ impl DaemonRuntime {
         let root = match side {
             RootSide::Local => self
                 .sync_scope
-                .local_sync_directory
+                .local_root
                 .as_ref()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
-            RootSide::Cloud => self.sync_scope.cloud_sync_directory.clone(),
+            RootSide::Cloud => self.sync_scope.cloud_root.clone(),
         };
         let path = match side {
-            RootSide::Local => self.sync_scope.local_sync_directory.clone(),
+            RootSide::Local => self.sync_scope.local_root.clone(),
             RootSide::Cloud => None,
         };
         let decision_id = match self
@@ -2096,7 +2236,7 @@ impl DaemonRuntime {
             }
         };
         let reason = format!(
-            "{} sync directory {root} is not the folder this profile adopted; answer decision #{decision_id} (vapor decisions list) or put the original folder back",
+            "{} root {root} is not the folder this profile adopted; answer decision #{decision_id} (vapor decisions list) or put the original folder back",
             side.label()
         );
         self.root_hold = Some(RootHold {
@@ -2133,14 +2273,14 @@ impl DaemonRuntime {
         let root = match side {
             RootSide::Local => self
                 .sync_scope
-                .local_sync_directory
+                .local_root
                 .as_ref()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
-            RootSide::Cloud => self.sync_scope.cloud_sync_directory.clone(),
+            RootSide::Cloud => self.sync_scope.cloud_root.clone(),
         };
         let path = match side {
-            RootSide::Local => self.sync_scope.local_sync_directory.clone(),
+            RootSide::Local => self.sync_scope.local_root.clone(),
             RootSide::Cloud => None,
         };
         let decision_id = match self
@@ -2186,7 +2326,7 @@ impl DaemonRuntime {
             }
         };
         let reason = format!(
-            "{} sync directory {root} is missing; Vapor waits for it and never re-creates a folder it synced before (decision #{decision_id}: vapor decisions list)",
+            "{} root {root} is missing; Vapor waits for it and never re-creates a folder it synced before (decision #{decision_id}: vapor decisions list)",
             side.label()
         );
         self.root_hold = Some(RootHold {
@@ -2211,10 +2351,10 @@ impl DaemonRuntime {
     ) -> Result<(), DaemonRuntimeError> {
         for decision in self.state_db.decisions(false)? {
             if decision.kind == kind && decision.evidence["side"] == side.label() {
-                self.state_db.withdraw_decision(decision.id, now)?;
+                self.withdraw_decision(decision.id, now)?;
                 if let Some(timeline) = &self.timeline {
                     timeline.push(
-                        "decision",
+                        constants::timeline::KIND_DECISION,
                         self.profile_id.clone(),
                         format!(
                             "Decision {} ({kind}) withdrawn: the {} root changed state",
@@ -2242,7 +2382,7 @@ impl DaemonRuntime {
             && let Ok(Some(decision)) = self.state_db.decision(decision_id)
             && decision.is_open()
         {
-            if let Err(error) = self.state_db.withdraw_decision(decision_id, now) {
+            if let Err(error) = self.withdraw_decision(decision_id, now) {
                 logging::warning(
                     "Could not withdraw the root-replaced decision",
                     &[("error", error.to_string())],
@@ -2250,7 +2390,7 @@ impl DaemonRuntime {
             }
             if let Some(timeline) = &self.timeline {
                 timeline.push(
-                    "decision",
+                    constants::timeline::KIND_DECISION,
                     self.profile_id.clone(),
                     format!(
                         "Decision {decision_id} ({}) withdrawn: the original {} root is back",
@@ -2281,7 +2421,7 @@ impl DaemonRuntime {
             return Ok(());
         }
         self.last_root_check_inst = Some(now_inst);
-        if let Some(local_root) = self.sync_scope.local_sync_directory.clone() {
+        if let Some(local_root) = self.sync_scope.local_root.clone() {
             use crate::root_identity::{RootSide, RootStatus};
             match crate::root_identity::check_local_root(
                 &mut self.state_db,
@@ -2297,7 +2437,7 @@ impl DaemonRuntime {
                     {
                         self.release_root_hold(RootSide::Local, now);
                         self.enqueue_startup_reconstruction_reconcile(now)?;
-                        self.restore_run_state_after_root_recovery("local sync directory is back");
+                        self.restore_run_state_after_root_recovery("local root is back");
                     } else if std::mem::take(&mut self.reconcile_after_root_check) {
                         self.enqueue_startup_reconstruction_reconcile(now)?;
                     }
@@ -2341,7 +2481,7 @@ impl DaemonRuntime {
                     &[("error", message)],
                 ),
                 CloudRootOutcome::Missing => {
-                    self.mark_cloud_root_unavailable("the cloud sync directory is missing", now);
+                    self.mark_cloud_root_unavailable("the cloud root is missing", now);
                     self.hold_for_missing_root(crate::root_identity::RootSide::Cloud, now)?;
                 }
                 CloudRootOutcome::Replaced { found } => {
@@ -2362,33 +2502,29 @@ impl DaemonRuntime {
         // Snapshot the pending requests up-front so we can drop the
         // immutable borrow on `self.runtime_control` before mutating
         // `self` via `enqueue_startup_reconstruction_reconcile`.
-        let (pause_request, reconcile_request, flush_request, sync_now_request) =
-            match self.runtime_control.as_ref() {
-                Some(control) => {
-                    let pause = control.take_pause_request();
-                    let reconcile = control.take_reconcile_request();
-                    let flush = control.take_flush_request();
-                    let sync_now = control.take_sync_now_request();
-                    (pause, reconcile, flush, sync_now)
-                }
-                None => (None, false, false, false),
-            };
-        // Sync now is a reconcile the throttle may not hold back plus
-        // the flush boost, so what the scan finds moves at once.
-        let reconcile_request = reconcile_request || sync_now_request;
-        let flush_request = flush_request || sync_now_request;
-        if sync_now_request {
+        let (pause_request, reconcile_request) = match self.runtime_control.as_ref() {
+            Some(control) => (
+                control.take_pause_request(),
+                control.take_reconcile_request(),
+            ),
+            None => (None, false),
+        };
+        // `vapor reconcile` is the user's own request: a scan the
+        // throttle may not hold back (Suspended aside), plus the boost
+        // that releases deferred work, so what the scan finds moves at
+        // once.
+        if reconcile_request {
             self.app.request_on_demand_reconcile();
             if let Some(timeline) = &self.timeline {
                 timeline.push(
-                    "sync-now",
+                    constants::timeline::KIND_RECONCILE,
                     self.profile_id.as_str(),
-                    "sync requested by the user: the scan runs under any throttle state but Suspended",
+                    "reconcile requested by the user: the scan runs under any throttle state but suspended",
                     now,
                 );
             }
             logging::info(
-                "Sync requested by the user; the scan will not wait for an idle moment",
+                "Reconcile requested by the user; the scan will not wait for an idle moment",
                 &[],
             );
         }
@@ -2408,12 +2544,12 @@ impl DaemonRuntime {
                     self.app.set_run_state(
                         RunState::Error,
                         format!(
-                            "cloud sync directory {} is unavailable; sync work is blocked until it can be ensured",
-                            self.sync_scope.cloud_sync_directory
+                            "cloud root {} is unavailable; sync work is blocked until it can be ensured",
+                            self.sync_scope.cloud_root
                         ),
                     );
                 } else {
-                    let reason = match self.sync_scope.local_sync_directory.as_ref() {
+                    let reason = match self.sync_scope.local_root.as_ref() {
                         Some(path) => {
                             format!("user resumed via vapor resume; watching {}", path.display())
                         }
@@ -2423,31 +2559,18 @@ impl DaemonRuntime {
                 }
             }
         }
-        if flush_request {
-            // Flush boost: pull deferred work forward for a
-            // bounded window. Deferred reconciles release immediately
-            // (bypassing the idle gate) and the remote feed polls on
-            // the next tick; execution still answers to the normal
-            // throttle ladder, so device-impact invariants hold.
-            let window = Duration::from_secs(constants::engine::FLUSH_BOOST_SECONDS);
+        if reconcile_request {
+            // Execution still answers to the normal throttle ladder, so
+            // device-impact invariants hold; deferred reconciles release
+            // at once and the cloud feed polls on the next tick.
+            let window = Duration::from_secs(constants::engine::RECONCILE_BOOST_SECONDS);
             self.flush_boost_until_inst = Some(self.clock.now() + window);
             self.remote_poller.request_immediate_poll();
-            if let Some(timeline) = &self.timeline {
-                timeline.push(
-                    "flush",
-                    self.profile_id.as_str(),
-                    format!(
-                        "flush requested: deferred work released for {}s",
-                        constants::engine::FLUSH_BOOST_SECONDS
-                    ),
-                    now,
-                );
-            }
             logging::info(
-                "Flush boost activated",
+                "Reconcile boost activated",
                 &[(
                     "window_seconds",
-                    constants::engine::FLUSH_BOOST_SECONDS.to_string(),
+                    constants::engine::RECONCILE_BOOST_SECONDS.to_string(),
                 )],
             );
         }
@@ -2571,12 +2694,12 @@ impl DaemonRuntime {
         &mut self,
         now: SystemTime,
     ) -> Result<(), DaemonRuntimeError> {
-        let Some(local_sync_directory) = self.sync_scope.local_sync_directory.as_ref() else {
+        let Some(local_root) = self.sync_scope.local_root.as_ref() else {
             return Ok(());
         };
 
         self.state_db
-            .enqueue_startup_reconcile_intent(local_sync_directory, now)?;
+            .enqueue_startup_reconcile_intent(local_root, now)?;
         self.startup_reconstruction_barrier = true;
         // Monotonic deadline: a wall-clock rewind must not extend the
         // barrier (discipline, same as every other elapsed check).
@@ -2584,7 +2707,7 @@ impl DaemonRuntime {
         logging::info(
             "Queued startup whole-scope reconcile for volatile-state reconstruction",
             &[
-                ("root", local_sync_directory.display().to_string()),
+                ("root", local_root.display().to_string()),
                 (
                     "barrier_deadline_ms",
                     self.startup_barrier_deadline.as_millis().to_string(),
@@ -2625,7 +2748,7 @@ impl DaemonRuntime {
 
         // Flush boost: while boosted, deferred reconciles
         // release immediately, bypassing both their not-before times
-        // and the IdleDrain gate. Execution still answers to the
+        // and the Idle gate. Execution still answers to the
         // throttle ladder — this only moves work from "deferred" to
         // "queued".
         if self.flush_boost_active() {
@@ -2674,7 +2797,7 @@ impl DaemonRuntime {
             return (0, 0, 0);
         };
 
-        let Some(watch_root) = self.sync_scope.local_sync_directory.clone() else {
+        let Some(watch_root) = self.sync_scope.local_root.clone() else {
             return (0, 0, 0);
         };
         let watch_root = watch_root.as_path();
@@ -2881,14 +3004,30 @@ impl DaemonRuntime {
 
     /// Pushes a timeline event for every decision the executor opened
     /// this tick, so surfaces learn about the question right away.
+    /// How many times this runtime opened or closed a decision; the
+    /// status publisher compares it between ticks.
+    pub fn decision_changes(&self) -> u64 {
+        self.decision_changes
+    }
+
+    fn withdraw_decision(
+        &mut self,
+        id: i64,
+        now: SystemTime,
+    ) -> Result<(), crate::state_db::StateDbError> {
+        self.decision_changes += 1;
+        self.state_db.withdraw_decision(id, now)
+    }
+
     fn announce_decisions(&mut self, ids: &[i64], now: SystemTime) {
+        self.decision_changes += ids.len() as u64;
         for id in ids {
             let Ok(Some(decision)) = self.state_db.decision(*id) else {
                 continue;
             };
             if let Some(timeline) = &self.timeline {
                 timeline.push(
-                    "decision",
+                    constants::timeline::KIND_DECISION,
                     self.profile_id.clone(),
                     format!(
                         "{} Answer with `vapor decisions resolve {} --choose <option>` ({}).",
@@ -2962,10 +3101,10 @@ impl DaemonRuntime {
             if still_there {
                 continue;
             }
-            self.state_db.withdraw_decision(decision.id, now)?;
+            self.withdraw_decision(decision.id, now)?;
             if let Some(timeline) = &self.timeline {
                 timeline.push(
-                    "decision",
+                    constants::timeline::KIND_DECISION,
                     self.profile_id.clone(),
                     format!(
                         "Decision {} (unsyncable-name) withdrawn: the name is gone",
@@ -2978,28 +3117,28 @@ impl DaemonRuntime {
         Ok(())
     }
 
-    /// A mass-deletion question whose every held deletion the other
+    /// A mass-delete question whose every held deletion the other
     /// side applied meanwhile has nothing left to decide: withdraw it
     /// and re-arm the guard.
     fn withdraw_holds_left_empty(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
         for decision in self.state_db.decisions(false)? {
-            if decision.kind != "mass-deletion"
+            if decision.kind != constants::decision::KIND_MASS_DELETE
                 || !self.state_db.held_intents(decision.id)?.is_empty()
             {
                 continue;
             }
-            self.state_db.withdraw_decision(decision.id, now)?;
+            self.withdraw_decision(decision.id, now)?;
             self.mass_change_guard.reset();
             logging::info(
-                "Withdrew the mass-deletion decision: the other side already applied every held deletion",
+                "Withdrew the mass-delete decision: the other side already applied every held deletion",
                 &[("decision_id", decision.id.to_string())],
             );
             if let Some(timeline) = &self.timeline {
                 timeline.push(
-                    "decision",
+                    constants::timeline::KIND_DECISION,
                     self.profile_id.clone(),
                     format!(
-                        "Decision {} (mass-deletion) withdrawn: the other side already applied every held deletion",
+                        "Decision {} (mass-delete) withdrawn: the other side already applied every held deletion",
                         decision.id
                     ),
                     now,
@@ -3017,12 +3156,12 @@ impl DaemonRuntime {
         for decision in resolved {
             let choice = decision.choice.clone().unwrap_or_default();
             let summary = match (decision.kind.as_str(), choice.as_str()) {
-                ("mass-deletion", "apply") => {
+                (constants::decision::KIND_MASS_DELETE, constants::decision::OPTION_APPLY) => {
                     let released = self.state_db.release_held(decision.id, now)?;
                     self.mass_change_guard.reset();
                     format!("applied: {released} held deletion(s) released")
                 }
-                ("mass-deletion", "discard") => {
+                (constants::decision::KIND_MASS_DELETE, constants::decision::OPTION_DISCARD) => {
                     // The deletions are not wanted: restore each path
                     // from the side that still has it.
                     let held = self.state_db.held_intents(decision.id)?;
@@ -3079,6 +3218,27 @@ impl DaemonRuntime {
                 (crate::unsyncable::DECISION_KIND, crate::unsyncable::OPTION_SKIP) => {
                     "skipped: the file stays on this device only".to_string()
                 }
+                (constants::decision::KIND_CONFLICT, _) => {
+                    // `vapor decisions resolve` applies a conflict answer
+                    // itself and records it applied; the daemon never
+                    // moves conflict files. One still unapplied past the
+                    // grace period belongs to a command that died: ask
+                    // again, about the versions there are now.
+                    let grace = Duration::from_secs(constants::conflict::ANSWER_GRACE_SECONDS);
+                    let stale = decision
+                        .resolved_at
+                        .and_then(|at| now.duration_since(at).ok())
+                        .is_some_and(|age| age >= grace);
+                    if stale {
+                        self.state_db.reopen_decision(decision.id)?;
+                        self.decision_changes += 1;
+                        logging::info(
+                            "Reopened a conflict question whose answer was never applied",
+                            &[("decision_id", decision.id.to_string())],
+                        );
+                    }
+                    continue;
+                }
                 (kind, choice) => {
                     // A kind this runtime does not know how to apply is
                     // left answered-but-unapplied for a build that does;
@@ -3106,7 +3266,7 @@ impl DaemonRuntime {
             );
             if let Some(timeline) = &self.timeline {
                 timeline.push(
-                    "decision",
+                    constants::timeline::KIND_DECISION,
                     self.profile_id.clone(),
                     format!("Decision {} ({}) {}", decision.id, decision.kind, summary),
                     now,
@@ -3214,7 +3374,7 @@ impl DaemonRuntime {
                     .as_ref()
                     .ok_or_else(|| "no trash attached".to_string())?;
                 trash
-                    .discard(&path, constants::trash::REASON_CLOUD_DELETION, now)
+                    .discard(&path, constants::trash::REASON_CLOUD_DELETE, now)
                     .map_err(|error| {
                         format!("cannot move {} to the trash: {error}", path.display())
                     })?;
@@ -3263,9 +3423,9 @@ impl DaemonRuntime {
             RootSide::Local => {
                 let root = self
                     .sync_scope
-                    .local_sync_directory
+                    .local_root
                     .clone()
-                    .ok_or_else(|| "no local sync directory configured".to_string())?;
+                    .ok_or_else(|| "no local root configured".to_string())?;
                 if decision.kind == crate::root_identity::MISSING_DECISION_KIND {
                     std::fs::create_dir_all(&root)
                         .map_err(|error| format!("cannot re-create {}: {error}", root.display()))?;
@@ -3284,11 +3444,11 @@ impl DaemonRuntime {
             RootSide::Cloud => {
                 // Rare and user-triggered: the one provider call the
                 // tick thread makes outside startup.
-                let cloud_root = self.sync_scope.cloud_sync_directory.clone();
+                let cloud_root = self.sync_scope.cloud_root.clone();
                 if decision.kind == crate::root_identity::MISSING_DECISION_KIND {
                     self.app
                         .provider()
-                        .ensure_cloud_sync_directory(cloud_root.as_str())
+                        .ensure_cloud_root(cloud_root.as_str())
                         .map_err(|error| error.message)?;
                 }
                 let identity = self
@@ -3316,7 +3476,7 @@ impl DaemonRuntime {
             .map_err(|error| format!("{error:?}"))?;
         self.restore_run_state_after_root_recovery("sync root reattached");
         Ok(format!(
-            "{} the {} sync directory; merging without deletions",
+            "{} the {} root; merging without deletions",
             if decision.kind == crate::root_identity::MISSING_DECISION_KIND {
                 "re-created"
             } else {
@@ -3441,7 +3601,7 @@ impl DaemonRuntime {
             match intent.kind {
                 PendingIntentKind::ReconcileSubtree => {
                     let is_startup_root_reconcile = self.startup_reconstruction_barrier
-                        && self.sync_scope.local_sync_directory.as_ref() == Some(&intent.path);
+                        && self.sync_scope.local_root.as_ref() == Some(&intent.path);
                     self.scheduler.upsert_intent(
                         intent.path.clone(),
                         intent.kind,
@@ -3564,7 +3724,7 @@ impl DaemonRuntime {
         &mut self,
         now: SystemTime,
     ) -> Result<bool, crate::reconcile_walk::WalkError> {
-        let Some(scope_root) = self.sync_scope.local_sync_directory.clone() else {
+        let Some(scope_root) = self.sync_scope.local_root.clone() else {
             return Ok(true);
         };
         let Some(running_root) = self.app.running_reconcile_root() else {
@@ -3604,7 +3764,7 @@ impl DaemonRuntime {
         // Bound the chunk by a wall-clock slice so a slow provider's
         // enumerate cannot hold the tick thread for the whole directory
         // budget; the high directory budget lets a fast provider converge
-        // a large tree quickly under IdleDrain.
+        // a large tree quickly under Idle.
         let clock = self.clock.clone();
         let deadline =
             clock.now() + Duration::from_millis(constants::engine::RECONCILE_SLICE_MILLIS);
@@ -3618,7 +3778,7 @@ impl DaemonRuntime {
             &self.provider_call_mode,
             self.sync_scope.sync_mode,
             &mut self.state_db,
-            constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN,
+            constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE,
             now,
             &should_continue,
         )
@@ -3680,9 +3840,6 @@ impl DaemonRuntime {
     }
 }
 
-/// Requeue delay applied when a leased intent cannot start because no
-/// permit / slot is available. Coarser than the tick interval so blocked
-/// intents don't churn a lease+requeue write pair on every tick.
 /// Timeline text for a remote name that would alias a local file.
 fn name_collision_message(wanted: &Path, existing: &Path) -> String {
     format!(
@@ -3693,6 +3850,9 @@ fn name_collision_message(wanted: &Path, existing: &Path) -> String {
     )
 }
 
+/// Requeue delay applied when a leased intent cannot start because no
+/// permit / slot is available. Coarser than the tick interval so blocked
+/// intents don't churn a lease+requeue write pair on every tick.
 fn blocked_intent_requeue_delay() -> Duration {
     Duration::from_millis(constants::engine::BLOCKED_INTENT_REQUEUE_DELAY_MILLIS)
 }
@@ -3834,15 +3994,15 @@ mod tests {
     }
 
     #[test]
-    fn start_skips_whole_scope_reconcile_when_no_local_sync_directory_exists() {
+    fn start_skips_whole_scope_reconcile_when_no_local_root_exists() {
         let temp_dir = TempDir::new().expect("temp dir");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let state_db = DurableStateDb::open(&database_path).expect("open durable state db");
 
         let runtime = DaemonRuntime::start(
             SyncScope {
-                local_sync_directory: None,
-                cloud_sync_directory: "/Vapor".to_string(),
+                local_root: None,
+                cloud_root: "/Vapor".to_string(),
                 sync_mode: vapor_shared::SyncMode::TwoWay,
             },
             state_db,
@@ -3873,7 +4033,7 @@ mod tests {
         .expect("runtime");
 
         assert_eq!(
-            runtime.sync_scope().local_sync_directory,
+            runtime.sync_scope().local_root,
             Some(
                 vapor_shared::paths::canonicalize(&real_watch_root).expect("canonical watch root"),
             )
@@ -3885,7 +4045,7 @@ mod tests {
             .expect("startup reconcile record");
         assert_eq!(
             leased.path,
-            runtime.sync_scope().local_sync_directory.clone().unwrap()
+            runtime.sync_scope().local_root.clone().unwrap()
         );
     }
 
@@ -3948,7 +4108,7 @@ mod tests {
 
         assert_eq!(
             first_tick.started_reconcile_root,
-            runtime.sync_scope().local_sync_directory.clone()
+            runtime.sync_scope().local_root.clone()
         );
         assert_eq!(first_tick.completed_intents, 0);
         assert_eq!(runtime.state_db().leased_depth().expect("leased depth"), 1);
@@ -3970,8 +4130,8 @@ mod tests {
         // A real filesystem provider rooted in the sandbox: the scope's
         // cloud directory names the provider-side root.
         let sync_scope = SyncScope {
-            local_sync_directory: Some(watch_root.clone()),
-            cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            local_root: Some(watch_root.clone()),
+            cloud_root: cloud_root.to_string_lossy().into_owned(),
             sync_mode: vapor_shared::SyncMode::TwoWay,
         };
         let mut runtime = DaemonRuntime::build(
@@ -3986,7 +4146,7 @@ mod tests {
         .expect("runtime");
         let runtime_watch_root = runtime
             .sync_scope()
-            .local_sync_directory
+            .local_root
             .clone()
             .expect("runtime watch root");
         // Real payload on disk: the pipeline hashes and uploads actual
@@ -4055,7 +4215,7 @@ mod tests {
             vapor_shared::paths::canonicalize(&watch_root).expect("canonical watch root");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
-        let planner_cap = crate::throttle::idle_drain_concurrency();
+        let planner_cap = crate::throttle::idle_concurrency();
         for index in 0..planner_cap + 2 {
             state_db
                 .enqueue_intent(
@@ -4115,7 +4275,7 @@ mod tests {
         .expect("runtime");
         let runtime_watch_root = runtime
             .sync_scope()
-            .local_sync_directory
+            .local_root
             .clone()
             .expect("runtime watch root");
         let recorder = runtime.recorder.as_ref().expect("runtime recorder");
@@ -4173,7 +4333,7 @@ mod tests {
         .expect("runtime");
         let runtime_watch_root = runtime
             .sync_scope()
-            .local_sync_directory
+            .local_root
             .clone()
             .expect("runtime watch root");
         let recorder = runtime.recorder.as_ref().expect("runtime recorder");
@@ -4207,7 +4367,7 @@ mod tests {
         // Advance past the throttle dwell window for `Throttled`
         // (MIN_DWELL_THROTTLED_SECONDS = 5 s) before the second
         // evaluation so the controller is allowed to transition back to
-        // IdleDrain.
+        // Idle.
         clock.advance(Duration::from_secs(6));
         let started = runtime
             .tick_with_inputs(timestamp_ms(32_000), ThrottleInputs::default())
@@ -4226,8 +4386,8 @@ mod tests {
 
     fn test_sync_scope(watch_root: &std::path::Path) -> SyncScope {
         SyncScope {
-            local_sync_directory: Some(watch_root.to_path_buf()),
-            cloud_sync_directory: "/Vapor".to_string(),
+            local_root: Some(watch_root.to_path_buf()),
+            cloud_root: "/Vapor".to_string(),
             sync_mode: vapor_shared::SyncMode::TwoWay,
         }
     }
@@ -4290,8 +4450,8 @@ mod tests {
                 vapor_providers::FilesystemProvider::with_manual_feed(&cloud_root, caps)
                     .expect("manual-feed provider");
             let sync_scope = SyncScope {
-                local_sync_directory: Some(watch_root.clone()),
-                cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+                local_root: Some(watch_root.clone()),
+                cloud_root: cloud_root.to_string_lossy().into_owned(),
                 sync_mode,
             };
             let runtime = DaemonRuntime::build(
@@ -4306,7 +4466,7 @@ mod tests {
             .expect("runtime");
             let watch_root = runtime
                 .sync_scope()
-                .local_sync_directory
+                .local_root
                 .clone()
                 .expect("normalized watch root");
             Self {
@@ -4388,12 +4548,9 @@ mod tests {
         fn content_hash_algorithm(&self) -> vapor_providers::HashAlgorithm {
             self.inner.content_hash_algorithm()
         }
-        fn ensure_cloud_sync_directory(
-            &self,
-            dir: &str,
-        ) -> Result<(), vapor_providers::ProviderError> {
+        fn ensure_cloud_root(&self, dir: &str) -> Result<(), vapor_providers::ProviderError> {
             self.gate()?;
-            self.inner.ensure_cloud_sync_directory(dir)
+            self.inner.ensure_cloud_root(dir)
         }
         fn root_identity(
             &self,
@@ -4512,7 +4669,7 @@ mod tests {
         assert!(
             snapshot
                 .reason
-                .contains("vapor auth login filesystem --profile default"),
+                .contains("vapor auth login --profile default"),
             "the reason names the command that ends the hold: {}",
             snapshot.reason
         );
@@ -5300,8 +5457,8 @@ mod tests {
         let clock = Arc::new(crate::clock::ManualClock::at_now());
         let mut runtime = DaemonRuntime::build(
             SyncScope {
-                local_sync_directory: Some(watch_root.clone()),
-                cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+                local_root: Some(watch_root.clone()),
+                cloud_root: cloud_root.to_string_lossy().into_owned(),
                 sync_mode: vapor_shared::SyncMode::PullOnly,
             },
             EventPathFilterOptions::default(),
@@ -5362,11 +5519,11 @@ mod tests {
     }
 
     #[test]
-    fn sync_now_runs_the_waiting_startup_scan_under_user_activity() {
+    fn reconcile_runs_the_waiting_startup_scan_under_user_activity() {
         // The manual-test shape: both roots hold a different `alex.txt`
         // written while no daemon watched, the daemon starts, and the
         // user keeps typing. The startup scan must say it is waiting
-        // and why; a sync-now request must run it anyway and keep both.
+        // and why; a reconcile request must run it anyway and keep both.
         let mut fixture = BidirectionalFixture::new();
         std::fs::write(fixture.watch_root.join("alex.txt"), b"local").expect("seed local");
         std::fs::write(fixture.cloud_root.join("alex.txt"), b"cloud").expect("seed cloud");
@@ -5405,7 +5562,7 @@ mod tests {
             "nothing may move while the scan waits"
         );
 
-        control.request_sync_now();
+        control.request_reconcile();
         let mut converged = false;
         for _ in 0..40 {
             fixture.clock.advance(Duration::from_secs(6));
@@ -5426,7 +5583,7 @@ mod tests {
         }
         assert!(
             converged,
-            "sync-now must run the scan under user activity and keep both versions; local {:?} cloud {:?}",
+            "reconcile must run the scan under user activity and keep both versions; local {:?} cloud {:?}",
             files_in(&fixture.watch_root),
             files_in(&fixture.cloud_root)
         );
@@ -5490,6 +5647,141 @@ mod tests {
             b"v2 local edit"
         );
         assert!(fixture.runtime.conflict_count() >= 1);
+    }
+
+    fn conflict_questions(fixture: &BidirectionalFixture) -> Vec<crate::state_db::DecisionRecord> {
+        fixture
+            .runtime
+            .state_db()
+            .decisions(false)
+            .expect("decisions")
+            .into_iter()
+            .filter(|decision| decision.kind == constants::decision::KIND_CONFLICT)
+            .collect()
+    }
+
+    /// `report.md` and one copy of it, indexed the way a synced copy is.
+    fn seed_conflict(fixture: &mut BidirectionalFixture) -> (PathBuf, PathBuf) {
+        let original = fixture.watch_root.join("report.md");
+        let copy = fixture
+            .watch_root
+            .join("report~conflict-other-mac-1750000000123.md");
+        std::fs::write(&original, b"the cloud's version").expect("seed original");
+        std::fs::write(&copy, b"the other mac's version").expect("seed copy");
+        fixture
+            .runtime
+            .state_db
+            .set_sync_index(
+                &copy,
+                "hash",
+                23,
+                None,
+                None,
+                "op",
+                timestamp_ms(fixture.now_ms),
+            )
+            .expect("index the copy");
+        (original, copy)
+    }
+
+    #[test]
+    fn a_conflicted_file_is_one_decision_until_no_copy_is_left() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+        let (original, copy) = seed_conflict(&mut fixture);
+
+        fixture.tick(6_000);
+        let asked = conflict_questions(&fixture);
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(asked[0].path.as_deref(), Some(original.as_path()));
+        let keys = |decision: &crate::state_db::DecisionRecord| {
+            decision
+                .options
+                .iter()
+                .map(|option| option.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            keys(&asked[0]),
+            vec!["report.md", "report~conflict-other-mac-1750000000123.md"]
+        );
+
+        // A third device's edit lands as a second copy: the same
+        // question now offers three versions.
+        let third = fixture
+            .watch_root
+            .join("report~conflict-third-mac-1750000000456.md");
+        std::fs::write(&third, b"the third mac's version").expect("seed copy");
+        fixture.tick(6_000);
+        let grown = conflict_questions(&fixture);
+        assert_eq!(grown.len(), 1, "one question per file: {grown:?}");
+        assert_eq!(grown[0].id, asked[0].id, "the id the user saw stays valid");
+        assert_eq!(keys(&grown[0]).len(), 3);
+        assert!(
+            grown[0].question.contains("all 3 versions"),
+            "{}",
+            grown[0].question
+        );
+
+        // Resolved by hand (the Finder, another device): the question
+        // closes on its own.
+        std::fs::remove_file(&copy).expect("resolve by hand");
+        std::fs::remove_file(&third).expect("resolve by hand");
+        fixture.tick(6_000);
+        assert!(conflict_questions(&fixture).is_empty());
+    }
+
+    #[test]
+    fn a_conflict_answer_never_applied_is_asked_again_and_the_files_stay() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline
+        let (original, copy) = seed_conflict(&mut fixture);
+        fixture.tick(6_000);
+        let id = conflict_questions(&fixture)[0].id;
+        let choice = copy.file_name().unwrap().to_str().unwrap().to_string();
+
+        // A command that recorded the answer and died before applying it.
+        fixture
+            .runtime
+            .state_db
+            .resolve_decision(id, &choice, timestamp_ms(fixture.now_ms))
+            .expect("answer");
+        fixture.tick(6_000);
+        let pending = fixture
+            .runtime
+            .state_db()
+            .decision(id)
+            .expect("read")
+            .expect("decision");
+        assert!(
+            pending.resolved_at.is_some(),
+            "left alone inside the grace period"
+        );
+        assert!(
+            original.exists() && copy.exists(),
+            "the daemon never moves conflict files"
+        );
+
+        fixture.tick(constants::conflict::ANSWER_GRACE_SECONDS * 1_000);
+        fixture.tick(6_000);
+        let reopened = fixture
+            .runtime
+            .state_db()
+            .decision(id)
+            .expect("read")
+            .expect("decision");
+        assert!(reopened.is_open(), "asked again: {reopened:?}");
+        assert!(reopened.choice.is_none());
+        assert_eq!(
+            std::fs::read(&original).expect("untouched"),
+            b"the cloud's version"
+        );
+        assert!(copy.exists());
+        assert_eq!(
+            conflict_questions(&fixture).len(),
+            1,
+            "one question, not two"
+        );
     }
 
     #[test]
@@ -5620,8 +5912,8 @@ mod tests {
                 .expect("no-xattr provider");
         let mut runtime = DaemonRuntime::build(
             SyncScope {
-                local_sync_directory: Some(watch_root.clone()),
-                cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+                local_root: Some(watch_root.clone()),
+                cloud_root: cloud_root.to_string_lossy().into_owned(),
                 sync_mode: vapor_shared::SyncMode::TwoWay,
             },
             EventPathFilterOptions::default(),
@@ -5634,7 +5926,7 @@ mod tests {
         .expect("runtime");
         let watch_root = runtime
             .sync_scope()
-            .local_sync_directory
+            .local_root
             .clone()
             .expect("normalized root");
 
@@ -5697,7 +5989,7 @@ mod tests {
     #[test]
     fn burst_of_real_uploads_drains_without_admission_serialization() {
         // Guard-rail: a burst of provider-backed uploads must
-        // drain with parallel admission (planner cap 4 in IdleDrain),
+        // drain with parallel admission (planner cap 4 in Idle),
         // not one-intent-per-tick serialization. 40 files with 4-wide
         // stages should finish comfortably under 60 ticks; a regression
         // to serialized admission would need 120+.
@@ -5804,7 +6096,7 @@ mod tests {
 
     #[test]
     fn idle_boost_scales_workgate_caps_and_snaps_back_on_throttle_exit() {
-        // The AlwaysIdle notifier + IdleDrain inputs engage
+        // The AlwaysIdle notifier + Idle inputs engage
         // boost; after the ramp the workgate caps exceed their base, and
         // a throttle exit snaps them back in the same sample.
         let mut fixture = BidirectionalFixture::new();
@@ -5816,19 +6108,19 @@ mod tests {
         }
         let boosted = fixture.runtime.app().workgate_snapshot();
         assert!(
-            boosted.caps.planner_workers > crate::throttle::idle_drain_concurrency(),
+            boosted.caps.planner_workers > crate::throttle::idle_concurrency(),
             "boost must raise caps above the base ({} <= {})",
             boosted.caps.planner_workers,
-            crate::throttle::idle_drain_concurrency()
+            crate::throttle::idle_concurrency()
         );
         let status = fixture
             .runtime
-            .resource_budget_status()
+            .resources_status()
             .expect("published after first sample");
-        assert_eq!(status.idle_boost_state, "active");
-        assert!(status.effective_cpu_percent > 15);
+        assert_eq!(status.idle_boost.state, "active");
+        assert!(status.cpu.limit_percent > 15);
 
-        // Heavy foreign load drives the throttle out of IdleDrain: caps
+        // Heavy foreign load drives the throttle out of Idle: caps
         // snap to (at most) their throttled base values immediately.
         let busy = ThrottleInputs {
             system_cpu_load_percent: 70,
@@ -5842,15 +6134,12 @@ mod tests {
             .expect("tick");
         let snapped = fixture.runtime.app().workgate_snapshot();
         assert!(
-            snapped.caps.planner_workers <= crate::throttle::idle_drain_concurrency(),
-            "post-IdleDrain states never run against boosted caps"
+            snapped.caps.planner_workers <= crate::throttle::idle_concurrency(),
+            "post-Idle states never run against boosted caps"
         );
-        let status = fixture
-            .runtime
-            .resource_budget_status()
-            .expect("still published");
-        assert_eq!(status.idle_boost_state, "off");
-        assert_eq!(status.effective_cpu_percent, 15);
+        let status = fixture.runtime.resources_status().expect("still published");
+        assert_eq!(status.idle_boost.state, "off");
+        assert_eq!(status.cpu.limit_percent, 15);
     }
 
     #[test]
@@ -5869,8 +6158,8 @@ mod tests {
         std::fs::write(&local_file, b"survives restarts").expect("seed local");
 
         let sync_scope = || SyncScope {
-            local_sync_directory: Some(watch_root.clone()),
-            cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            local_root: Some(watch_root.clone()),
+            cloud_root: cloud_root.to_string_lossy().into_owned(),
             sync_mode: vapor_shared::SyncMode::TwoWay,
         };
 
@@ -5955,8 +6244,8 @@ mod tests {
         std::fs::write(&local_file, b"version-A").expect("seed local");
 
         let sync_scope = || SyncScope {
-            local_sync_directory: Some(watch_root.clone()),
-            cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            local_root: Some(watch_root.clone()),
+            cloud_root: cloud_root.to_string_lossy().into_owned(),
             sync_mode: vapor_shared::SyncMode::TwoWay,
         };
         use crate::clock::Clock as _;
@@ -6082,8 +6371,8 @@ mod tests {
 
         fn scope(&self) -> SyncScope {
             SyncScope {
-                local_sync_directory: Some(self.watch_root.clone()),
-                cloud_sync_directory: self.cloud_root.to_string_lossy().into_owned(),
+                local_root: Some(self.watch_root.clone()),
+                cloud_root: self.cloud_root.to_string_lossy().into_owned(),
                 sync_mode: vapor_shared::SyncMode::TwoWay,
             }
         }
@@ -6348,13 +6637,8 @@ mod tests {
             b"inside the cloud folder"
         );
         assert!(fixture.cloud_root.join("notes/inner.txt").is_file());
-        assert!(
-            runtime
-                .state_db()
-                .decisions(false)
-                .expect("open")
-                .is_empty()
-        );
+        let open = runtime.state_db().decisions(false).expect("open");
+        assert!(open.is_empty(), "{open:?}");
     }
 
     #[cfg(unix)]
@@ -6552,8 +6836,8 @@ mod tests {
         std::fs::write(&local_file, b"version-A").expect("seed local");
 
         let sync_scope = || SyncScope {
-            local_sync_directory: Some(watch_root.clone()),
-            cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            local_root: Some(watch_root.clone()),
+            cloud_root: cloud_root.to_string_lossy().into_owned(),
             sync_mode: vapor_shared::SyncMode::TwoWay,
         };
         use crate::clock::Clock as _;
@@ -6697,11 +6981,7 @@ mod tests {
 
         // Ingest keeps capturing intent state while paused.
         let recorder = runtime.recorder.as_ref().expect("recorder").clone();
-        let runtime_watch_root = runtime
-            .sync_scope()
-            .local_sync_directory
-            .clone()
-            .expect("watch root");
+        let runtime_watch_root = runtime.sync_scope().local_root.clone().expect("watch root");
         FsEventRecording::record_event(
             recorder.as_ref(),
             FsEventRecord {
@@ -6750,10 +7030,10 @@ mod tests {
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let subtree_root = watch_root.join("project");
         // Enough matched directories on BOTH sides that one walk chunk
-        // (RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN) cannot finish the
+        // (RECONCILE_DIRS_PER_SLICE_IDLE) cannot finish the
         // comparison: a finished walk completes instead of pausing, so
         // observing pause cycles requires a genuinely in-progress walk.
-        for index in 0..(constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN * 2) {
+        for index in 0..(constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE * 2) {
             std::fs::create_dir_all(subtree_root.join(format!("dir-{index}")))
                 .expect("create local walk fodder");
             std::fs::create_dir_all(cloud_root.join(format!("project/dir-{index}")))
@@ -6774,8 +7054,8 @@ mod tests {
             vapor_providers::FilesystemProvider::with_manual_feed(&cloud_root, caps)
                 .expect("manual-feed provider");
         let sync_scope = SyncScope {
-            local_sync_directory: Some(watch_root.clone()),
-            cloud_sync_directory: cloud_root.to_string_lossy().into_owned(),
+            local_root: Some(watch_root.clone()),
+            cloud_root: cloud_root.to_string_lossy().into_owned(),
             sync_mode: vapor_shared::SyncMode::TwoWay,
         };
         let mut runtime = DaemonRuntime::build(
@@ -6839,7 +7119,7 @@ mod tests {
         // its ThrottleInputs from the injected `MetricsSampler` and feed
         // them through to the throttle controller / workgate. We inject a
         // sampler that reports user-active + warm thermal state; the
-        // resulting throttle decision must downshift away from `IdleDrain`.
+        // resulting throttle decision must downshift away from `Idle`.
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
@@ -6874,10 +7154,10 @@ mod tests {
     }
 
     #[test]
-    fn tick_with_default_static_sampler_picks_idle_drain() {
+    fn tick_with_default_static_sampler_picks_idle() {
         // Sanity check: with no overrides, the default static sampler
         // mirrors `ThrottleInputs::default()` so the engine starts in
-        // IdleDrain — the existing behavior the clock plumbing must preserve.
+        // Idle — the existing behavior the clock plumbing must preserve.
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
@@ -6896,7 +7176,7 @@ mod tests {
             .app()
             .throttle_decision()
             .expect("throttle decision recorded after first tick");
-        assert_eq!(decision.state, vapor_shared::ThrottleState::IdleDrain);
+        assert_eq!(decision.state, vapor_shared::ThrottleState::Idle);
     }
 
     fn timestamp_ms(milliseconds: u64) -> SystemTime {
@@ -6932,7 +7212,7 @@ mod tests {
         // Attaching the publisher must immediately flush an initial
         // snapshot so consumers don't wait for the first tick.
         let initial = publisher.last().expect("attach publishes initial snapshot");
-        assert_eq!(initial.run_state, "Running");
+        assert_eq!(initial.run_state, "running");
 
         let control = Arc::new(crate::runtime_control::RuntimeControl::new());
         runtime.attach_control(control.clone());
@@ -6945,7 +7225,7 @@ mod tests {
         let after = publisher
             .last()
             .expect("publisher saw a post-tick snapshot");
-        assert_eq!(after.run_state, "Paused");
+        assert_eq!(after.run_state, "paused");
     }
 
     #[derive(Debug, Default)]
@@ -7006,12 +7286,11 @@ mod tests {
     }
 
     #[test]
-    fn requested_reconcile_with_flush_boost_downloads_external_cloud_file_and_drains() {
+    fn requested_reconcile_downloads_external_cloud_file_and_drains() {
         // The e2e S10 shape: a file appears in the cloud root without a
-        // feed event (external write), the user runs `vapor reconcile`
-        // (startup-barrier semantics) and `vapor flush-now` (boost).
-        // The scheduled download must complete and the queue drain —
-        // nothing may wedge leased.
+        // feed event (external write) and the user runs `vapor
+        // reconcile`. The scheduled download must complete and the queue
+        // drain — nothing may wedge leased.
         let mut fixture = BidirectionalFixture::new();
         let control = Arc::new(crate::runtime_control::RuntimeControl::new());
         fixture.runtime.attach_control(control.clone());
@@ -7020,7 +7299,6 @@ mod tests {
         std::fs::write(fixture.cloud_root.join("external.txt"), b"external payload")
             .expect("seed cloud file without a feed event");
         control.request_reconcile();
-        control.request_flush();
 
         let mut drained = false;
         for _ in 0..30 {
@@ -7220,7 +7498,7 @@ mod tests {
         let diagnostics =
             fixture
                 .runtime
-                .intent_diagnostics("default", 10, timestamp_ms(fixture.now_ms + 20));
+                .work_items("default", 10, timestamp_ms(fixture.now_ms + 20));
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].path, file.display().to_string());
         assert_eq!(diagnostics[0].action, "upload");
@@ -7333,9 +7611,9 @@ mod tests {
         let decision = fixture
             .runtime
             .state_db()
-            .open_decision("mass-deletion", None)
+            .open_decision("mass-delete", None)
             .expect("query")
-            .expect("the burst must open a mass-deletion decision");
+            .expect("the burst must open a mass-delete decision");
         assert_eq!(
             decision.held_intents, 12,
             "the whole burst is held before any of it lands"
@@ -7393,7 +7671,7 @@ mod tests {
             fixture
                 .runtime
                 .state_db()
-                .open_decision("mass-deletion", None)
+                .open_decision("mass-delete", None)
                 .expect("query")
                 .is_none(),
             "the answered decision is closed"
@@ -7428,7 +7706,7 @@ mod tests {
             decision = fixture
                 .runtime
                 .state_db()
-                .open_decision("mass-deletion", None)
+                .open_decision("mass-delete", None)
                 .expect("query");
             if decision.is_some() {
                 break;
@@ -7457,7 +7735,7 @@ mod tests {
             .decisions(true)
             .expect("history")
             .into_iter()
-            .filter(|decision| decision.kind == "mass-deletion")
+            .filter(|decision| decision.kind == "mass-delete")
             .count();
         assert_eq!(asked, 1, "one burst, one question");
     }
@@ -7486,7 +7764,7 @@ mod tests {
         let decision = fixture
             .runtime
             .state_db()
-            .open_decision("mass-deletion", None)
+            .open_decision("mass-delete", None)
             .expect("query")
             .expect("the burst opens a decision");
         assert_eq!(decision.held_intents, 12);
@@ -7510,7 +7788,7 @@ mod tests {
             fixture
                 .runtime
                 .state_db()
-                .open_decision("mass-deletion", None)
+                .open_decision("mass-delete", None)
                 .expect("query")
                 .is_none(),
             "an emptied hold is withdrawn without an answer"
@@ -7521,7 +7799,7 @@ mod tests {
             .decisions(true)
             .expect("history")
             .into_iter()
-            .find(|decision| decision.kind == "mass-deletion")
+            .find(|decision| decision.kind == "mass-delete")
             .expect("kept in history");
         assert_eq!(withdrawn.choice.as_deref(), Some("withdrawn"));
         assert_eq!(
@@ -7553,7 +7831,7 @@ mod tests {
         let decision = fixture
             .runtime
             .state_db()
-            .open_decision("mass-deletion", None)
+            .open_decision("mass-delete", None)
             .expect("query")
             .expect("decision");
         fixture
@@ -7606,9 +7884,9 @@ mod tests {
         let decision = fixture
             .runtime
             .state_db()
-            .open_decision("mass-deletion", None)
+            .open_decision("mass-delete", None)
             .expect("query")
-            .expect("the burst must open a mass-deletion decision");
+            .expect("the burst must open a mass-delete decision");
         assert_eq!(decision.held_intents, 12);
         assert!(decision.question.contains("from the cloud"));
         for path in &paths[..12] {
@@ -7690,7 +7968,7 @@ mod tests {
         let entries = fixture.runtime.trash().expect("trash").list();
         assert_eq!(entries.len(), 1, "the removed file is kept in the trash");
         assert_eq!(entries[0].original_path, local);
-        assert_eq!(entries[0].reason, constants::trash::REASON_CLOUD_DELETION);
+        assert_eq!(entries[0].reason, constants::trash::REASON_CLOUD_DELETE);
 
         // The user brings it back; it syncs up like any other write.
         let landed = fixture
@@ -7733,7 +8011,7 @@ mod tests {
         );
         let entries = fixture.runtime.trash().expect("trash").list();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].reason, constants::trash::REASON_MIRROR_REMOVAL);
+        assert_eq!(entries[0].reason, constants::trash::REASON_MIRROR_DELETE);
         assert_eq!(entries[0].original_path, local_only);
     }
 
@@ -8022,11 +8300,11 @@ mod tests {
     fn cloud_root_recovery_does_not_override_an_active_pause() {
         let mut fixture = BidirectionalFixture::new();
         // Boot state: cloud root was unavailable and a pause (user or the
-        // mass-deletion guard) is active.
+        // mass-delete guard) is active.
         fixture.runtime.cloud_root_ready = false;
         fixture.runtime.app.set_run_state(
             RunState::Paused,
-            "mass-deletion guard: review the changes, then run `vapor resume`",
+            "mass-delete guard: review the changes, then run `vapor resume`",
         );
 
         // The cloud root becomes reachable and the retry recovers it.
@@ -8055,7 +8333,7 @@ mod tests {
         fixture.runtime.cloud_root_ready = false;
         fixture.runtime.app.set_run_state(
             RunState::Error,
-            "cloud sync directory /nope is unavailable; sync work is blocked until it can be ensured",
+            "cloud root /nope is unavailable; sync work is blocked until it can be ensured",
         );
 
         // Resume while still unavailable: applied in isolation (retry would
@@ -8073,12 +8351,7 @@ mod tests {
             "resume must not report Running while the cloud root is unavailable"
         );
         assert!(
-            fixture
-                .runtime
-                .app
-                .snapshot()
-                .reason
-                .contains("cloud sync directory"),
+            fixture.runtime.app.snapshot().reason.contains("cloud root"),
             "the real blocker must remain visible in the reason"
         );
     }
@@ -8089,7 +8362,7 @@ mod tests {
         fixture.tick(6_000);
         assert_eq!(
             fixture.runtime.app.snapshot().throttle_state,
-            vapor_shared::ThrottleState::IdleDrain,
+            vapor_shared::ThrottleState::Idle,
             "quiet defaults sample as idle"
         );
 
@@ -8111,7 +8384,7 @@ mod tests {
     }
 
     #[test]
-    fn flush_request_boosts_remote_poll_cadence_and_lands_on_timeline() {
+    fn reconcile_request_boosts_remote_poll_cadence_and_lands_on_timeline() {
         let mut fixture = BidirectionalFixture::new();
         let timeline = crate::timeline::TimelineBuffer::new(256);
         fixture.runtime.attach_timeline(timeline.clone());
@@ -8123,18 +8396,18 @@ mod tests {
         let quiet = fixture.tick(1_000); // 1s later: cadence not due
         assert!(!quiet.remote_poll.polled);
 
-        control.request_flush();
+        control.request_reconcile();
         let boosted = fixture.tick(1_000);
         assert!(
             boosted.remote_poll.polled,
-            "flush boost must clear the remote poll cadence"
+            "the reconcile boost must clear the remote poll cadence"
         );
         assert!(
             timeline
                 .snapshot(None)
                 .iter()
-                .any(|entry| entry.kind == "flush"),
-            "flush boost must land on the activity timeline"
+                .any(|entry| entry.kind == constants::timeline::KIND_RECONCILE),
+            "a reconcile request must land on the activity timeline"
         );
     }
 }

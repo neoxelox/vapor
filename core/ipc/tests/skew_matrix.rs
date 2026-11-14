@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 use vapor_ipc::{
-    Client, ClientError, ResponseBody, Service, StatusResponse,
+    Client, ClientError, ResponseBody, Service, StateReason, StatusResponse,
     framing::write_frame,
     protocol::{Hello, IncompatibleVersion, Request, Response, daemon_supported_versions},
     serve_connection,
@@ -35,11 +35,16 @@ impl Service for StaticService {
 fn fixture_status() -> StatusResponse {
     StatusResponse {
         schema_version: daemon_supported_versions().0,
-        run_state: "Running".to_string(),
-        throttle_state: "IdleDrain".to_string(),
-        provider_name: "Filesystem (stub)".to_string(),
-        throttle_reason: "idle, plugged in, and cool".to_string(),
-        daemon_id: "vapord/test".to_string(),
+        daemon: "vapord/test".to_string(),
+        provider: "Filesystem (stub)".to_string(),
+        run: StateReason {
+            state: "running".to_string(),
+            reason: String::new(),
+        },
+        throttle: StateReason {
+            state: "idle".to_string(),
+            reason: "idle, plugged in, and cool".to_string(),
+        },
         ..StatusResponse::default()
     }
 }
@@ -119,17 +124,18 @@ fn handshake_n_n_succeeds_and_status_round_trips() {
 
     let mut client = Client::connect(&handle.socket_path, "vapor-cli/test").expect("connect");
     let status = client.status().expect("status");
-    assert_eq!(status.run_state, "Running");
+    assert_eq!(status.run.state, "running");
 
     handle.shutdown();
 }
 
 #[test]
-fn handshake_n_minus_1_n_succeeds_when_within_skew_window() {
-    // Client says it speaks version (current - 1) but supports a min
-    // of (current - 1). Daemon at `current` accepts, since
-    // `|current - (current - 1)| = 1`.
-    let (current, _min) = daemon_supported_versions();
+fn handshake_n_minus_1_follows_the_support_window() {
+    // Client says it speaks version (current - 1) and supports a min of
+    // (current - 1). The daemon accepts it when (current - 1) is inside
+    // its support window and refuses it with IncompatibleVersion when a
+    // breaking bump moved the window's floor up to `current`.
+    let (current, min) = daemon_supported_versions();
     if current < 2 {
         // No way to construct N-1 when N == 1; skip in that case.
         return;
@@ -156,7 +162,14 @@ fn handshake_n_minus_1_n_succeeds_when_within_skew_window() {
     let mut payload = vec![0u8; len as usize];
     stream.read_exact(&mut payload).expect("ack payload");
     let response: Response = serde_json::from_slice(&payload).expect("ack");
-    assert!(matches!(response, Response::Ok(ResponseBody::HelloAck(_))));
+    if current > min {
+        assert!(matches!(response, Response::Ok(ResponseBody::HelloAck(_))));
+    } else {
+        assert!(
+            format!("{response:?}").contains("IncompatibleVersion"),
+            "a peer below the window must be refused, got {response:?}"
+        );
+    }
 
     drop(stream);
     handle.shutdown();
@@ -194,6 +207,35 @@ fn handshake_skew_of_two_is_rejected_with_incompatible_version() {
     assert!(
         body.contains("IncompatibleVersion"),
         "expected IncompatibleVersion error, got {body}"
+    );
+
+    drop(stream);
+    handle.shutdown();
+}
+
+#[test]
+fn an_older_build_s_snake_case_hello_is_refused_by_version_not_by_parse() {
+    // Schema 2 and 3 sent snake_case handshake keys; the refusal must
+    // still name the version so either side can say what to upgrade.
+    let service = Arc::new(StaticService {
+        status: Mutex::new(fixture_status()),
+    });
+    let handle = spawn_server(service);
+    thread::sleep(Duration::from_millis(20));
+
+    let mut stream = UnixStream::connect(&handle.socket_path).expect("connect");
+    let frame = br#"{"kind":"Hello","payload":{"schema_version":2,"supported_min_version":2,"client_id":"vapor-cli/0.2.0-alpha.3"}}"#;
+    write_frame(&mut stream, frame).expect("write");
+
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).expect("error length");
+    let mut payload = vec![0u8; u32::from_le_bytes(len_buf) as usize];
+    stream.read_exact(&mut payload).expect("error payload");
+    let response: Response = serde_json::from_slice(&payload).expect("error");
+    let body = format!("{response:?}");
+    assert!(
+        body.contains("IncompatibleVersion") && body.contains("peer_version: 2"),
+        "expected IncompatibleVersion for schema 2, got {body}"
     );
 
     drop(stream);

@@ -1,10 +1,11 @@
 //! Wire-format types for the Vapor IPC channel.
 //!
-//! All payloads are JSON. Top-level types carry an explicit
-//! `schema_version: u32` per `docs/architecture/ipc-contracts.md`. We
-//! use `serde(default)` on every optional field so peer N-1 can omit
-//! fields peer N introduced without forcing a hard parse error — the
-//! "field omission tolerance" rule from the contracts doc.
+//! All payloads are JSON with camelCase keys and kebab-case values, the
+//! same shape `vapor … --json` prints. Top-level types carry an explicit
+//! `schemaVersion` per `docs/architecture/ipc-contracts.md`. We use
+//! `serde(default)` on every optional field so peer N-1 can omit fields
+//! peer N introduced without forcing a hard parse error — the "field
+//! omission tolerance" rule from the contracts doc.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,22 +21,32 @@ pub fn daemon_supported_versions() -> (u32, u32) {
 
 /// First message every client sends. The server matches the version
 /// against its own support window and responds with [`HelloAck`].
+///
+/// The handshake is what lets two builds find out they cannot talk, so
+/// its frames also accept the snake_case keys schema 3 and earlier
+/// sent: an older peer gets `IncompatibleVersion`, not a parse error.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Hello {
+    #[serde(alias = "schema_version")]
     pub schema_version: u32,
+    #[serde(alias = "supported_min_version")]
     pub supported_min_version: u32,
     /// Free-form identifier — e.g. `"vapor-cli/0.2.0-alpha.3"`. Not
     /// part of the contract; logged on the server side for diagnostics.
-    #[serde(default)]
+    #[serde(default, alias = "client_id")]
     pub client_id: String,
 }
 
 /// Server's reply to [`Hello`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HelloAck {
+    #[serde(alias = "schema_version")]
     pub schema_version: u32,
+    #[serde(alias = "supported_min_version")]
     pub supported_min_version: u32,
-    #[serde(default)]
+    #[serde(default, alias = "server_id")]
     pub server_id: String,
 }
 
@@ -43,9 +54,13 @@ pub struct HelloAck {
 /// supported window. Mirrors the `IncompatibleVersion` error in the
 /// contracts doc.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IncompatibleVersion {
+    #[serde(alias = "peer_version")]
     pub peer_version: u32,
+    #[serde(alias = "required_min")]
     pub required_min: u32,
+    #[serde(alias = "local_version")]
     pub local_version: u32,
 }
 
@@ -60,33 +75,14 @@ pub enum Method {
     Pause,
     /// Flip `RunState` back to `Running` — idempotent.
     Resume,
-    /// Hint the runtime to drain pending work as fast as the throttle
-    /// allows. The engine already drains opportunistically; this is
-    /// effectively an acknowledgement.
-    FlushNow,
-    /// Request a fresh whole-scope reconcile against the local sync
-    /// directory.
+    /// The user's on-demand sync: a whole-scope reconcile admitted
+    /// under any throttle state but `Suspended`, and deferred work
+    /// released for a short window so what the scan finds moves at once.
     Reconcile,
-    /// The user's on-demand sync (schema v2, later addition): a
-    /// whole-scope reconcile admitted under any throttle state but
-    /// `Suspended`, plus the flush boost.
-    SyncNow,
     /// Read the bounded daemon activity timeline.
     Timeline,
     /// Per-intent "why stuck" diagnostics (schema v2).
     Diagnostics,
-    /// Persist the `autoLaunch` config value (schema v2). The
-    /// service-manager (un)install itself stays with `vapor service`.
-    SetAutoLaunch { enabled: bool },
-    /// Persist updated ignore rules (schema v2). Applied to the
-    /// live path filter at the next daemon restart (pre-GA contract;
-    /// the ack note says so).
-    UpdateExcludes {
-        #[serde(default)]
-        pre_ignore_rules: Option<String>,
-        #[serde(default)]
-        post_ignore_rules: Option<String>,
-    },
 }
 
 /// Top-level request envelope.
@@ -106,7 +102,7 @@ pub enum ResponseBody {
     IncompatibleVersion(IncompatibleVersion),
     Status(StatusResponse),
     /// Generic acknowledgement for fire-and-forget control endpoints
-    /// (Pause / Resume / FlushNow / Reconcile). The `accepted` flag
+    /// (Pause / Resume / Reconcile). The `accepted` flag
     /// reflects whether the request actually changed any state — the
     /// daemon currently always returns `true` once the request reaches
     /// the runtime, but
@@ -118,6 +114,7 @@ pub enum ResponseBody {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AckResponse {
     pub schema_version: u32,
     pub accepted: bool,
@@ -126,6 +123,7 @@ pub struct AckResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TimelineEntry {
     pub timestamp_ms: u64,
     pub kind: String,
@@ -135,47 +133,53 @@ pub struct TimelineEntry {
     pub profile_id: String,
 }
 
-/// One pending or in-flight intent with its "why stuck" context
-/// (schema v2).
+/// One queued or in-flight piece of work with the reason it is not
+/// moving yet: the rows of `vapor diagnostics`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct IntentDiagnostic {
-    pub intent_id: i64,
+#[serde(rename_all = "camelCase")]
+pub struct WorkItem {
+    pub id: i64,
     #[serde(default)]
     pub profile_id: String,
     pub path: String,
-    /// Intent kind label (`upload`, `download`, `delete`,
-    /// `apply_remote_delete`, `rename`, `reconcile_subtree`).
+    /// What the item does: one of `constants::intent::ACTION_*`.
     pub action: String,
-    /// Current stage (`Queued`, `Retrying`, `Planner`, `Hash`,
-    /// `WaitingForUpload`, `Upload`, `WaitingForDownload`, `Download`,
-    /// ...).
+    /// Where it is: one of `constants::intent::STAGE_*`.
     pub stage: String,
+    /// How long it has been in `stage`.
     #[serde(default)]
-    pub elapsed_in_stage_ms: u64,
+    pub elapsed_ms: u64,
     #[serde(default)]
-    pub attempt_count: u32,
+    pub attempts: u32,
+    /// The last error, when an attempt failed.
     #[serde(default)]
-    pub last_error: String,
-    /// Human-readable reason the intent is not progressing right now.
+    pub error: String,
+    /// Why the item is not progressing right now.
     #[serde(default)]
-    pub blocker_reason: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiagnosticsResponse {
     pub schema_version: u32,
     #[serde(default)]
-    pub intents: Vec<IntentDiagnostic>,
+    pub items: Vec<WorkItem>,
     /// True when the daemon truncated the list to its per-response cap.
     #[serde(default)]
     pub truncated: bool,
     /// Events dropped at the bounded fs-event ingest boundary since
     /// startup (callback-vs-runtime backpressure signal).
     #[serde(default)]
-    pub dropped_incoming_events: u64,
+    pub dropped_events: u64,
+    /// The daemon's own writes seen again by the watcher or the cloud
+    /// feed and skipped, since startup (loop prevention).
+    #[serde(default)]
+    pub suppressed_echoes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TimelineResponse {
     pub schema_version: u32,
     #[serde(default)]
@@ -207,142 +211,150 @@ pub enum ErrorBody {
     Backend(String),
 }
 
-/// `Status` method response.
-///
-/// Kept minimal — the runtime's `RunState`, throttle state, and the
-/// last decision reason — and expanded over time (queue depth,
-/// ceilings, idle-boost state, etc.) per the contracts doc.
+/// A state and why it holds.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct StatusResponse {
-    pub schema_version: u32,
-    pub run_state: String,
-    pub throttle_state: String,
-    pub provider_name: String,
-    /// Latest throttle reason string (`"idle, plugged in, and cool"`,
-    /// etc.). Empty when no decision has been recorded yet.
+#[serde(rename_all = "camelCase")]
+pub struct StateReason {
+    pub state: String,
     #[serde(default)]
-    pub throttle_reason: String,
-    /// Daemon identity string (`"vapord/<product version>"`). Purely
-    /// diagnostic — lets clients report which daemon build answered.
-    #[serde(default)]
-    pub daemon_id: String,
-    /// Schema v2 — every field defaulted so v1
-    /// peers interoperate under the skew rules.
-    /// Total durable queue depth across profiles.
-    #[serde(default)]
-    pub queue_depth: u64,
-    /// Terminally-failed intents across profiles.
-    #[serde(default)]
-    pub failed_intents: u64,
-    /// Self-write echoes suppressed by loop prevention since startup.
-    #[serde(default)]
-    pub loop_prevention_suppressions: u64,
-    /// Keep-both conflict copies created since startup.
-    #[serde(default)]
-    pub conflicts: u64,
-    /// Strict-mirror reverts/deletes since startup (one-way modes).
-    #[serde(default)]
-    pub mirror_reverts: u64,
-    #[serde(default)]
-    pub mirror_deletes: u64,
-    /// Per-profile status rows.
-    #[serde(default)]
-    pub profiles: Vec<ProfileStatus>,
-    /// Effective resource ceilings, utilization and idle-boost state.
-    /// `None` until the resource-budget runtime publishes.
-    #[serde(default)]
-    pub resource_budget: Option<ResourceBudgetStatus>,
-    /// Present when a restart-required key of `vapor.json` changed under
-    /// the running daemon; names the keys and the command to run.
-    #[serde(default)]
-    pub config_restart_required: Option<String>,
-    /// Open decisions across profiles: questions the daemon parked
-    /// because an irreversible action rested on ambiguous evidence
-    /// (`vapor decisions list`).
-    #[serde(default)]
-    pub decisions_pending: u64,
-    /// Keep-both conflict copies the user has not resolved yet, across
-    /// profiles: the copies the sync index knows about plus the ones
-    /// still queued for their first upload (`vapor conflicts list`).
-    /// Unlike `conflicts`, this goes back to zero when the user
-    /// resolves them.
-    #[serde(default)]
-    pub conflicts_unresolved: u64,
-    /// What the whole-scope scan is doing across profiles: `idle`,
-    /// `waiting` (queued, held by the throttle), or `running`. The
-    /// daemon-wide value is the most active profile's.
-    #[serde(default)]
-    pub reconcile_state: String,
-    /// Why the scan waits, or what it scans; empty when idle.
-    #[serde(default)]
-    pub reconcile_detail: String,
+    pub reason: String,
 }
 
-/// One profile's status row inside [`StatusResponse`] (schema v2).
+/// What the whole-scope scan is doing: `state` is one of
+/// `constants::reconcile_state::*`; `detail` says what it waits for or
+/// what it scans, and is empty when idle.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconcileStatus {
+    pub state: String,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// What a one-way mirror changed to match its source, since startup.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MirrorCounts {
+    #[serde(default)]
+    pub reverts: u64,
+    #[serde(default)]
+    pub deletes: u64,
+}
+
+/// `Status` method response: the daemon as a whole, then one row per
+/// profile. The daemon-wide run state is the most severe profile's.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusResponse {
+    pub schema_version: u32,
+    /// Which daemon build answered (`vapord/<version>`).
+    #[serde(default)]
+    pub daemon: String,
+    /// The provider of the profile the daemon-wide state comes from
+    /// (`filesystem`, `gdrive`); `none` when no profile is enabled.
+    pub provider: String,
+    /// `state` is one of `constants::run_state::*`; `reason` is the
+    /// profile's own explanation (a suspension first, otherwise the
+    /// first profile in that state that gives one).
+    pub run: StateReason,
+    /// `state` is one of `constants::throttle_state::*`.
+    pub throttle: StateReason,
+    #[serde(default)]
+    pub reconcile: ReconcileStatus,
+    /// Work waiting in the durable queue, across profiles.
+    #[serde(default)]
+    pub queued: u64,
+    /// Work that failed for good, across profiles.
+    #[serde(default)]
+    pub failed: u64,
+    /// Open decisions across profiles (`vapor decisions list`),
+    /// conflicts included.
+    #[serde(default)]
+    pub decisions: u64,
+    #[serde(default)]
+    pub mirror: MirrorCounts,
+    /// Set when a restart-required key of `vapor.json` changed under the
+    /// running daemon; names the keys and the command to run.
+    #[serde(default)]
+    pub restart_required: Option<String>,
+    /// Ceilings, measured use, and idle boost. `None` until the daemon
+    /// has sampled once.
+    #[serde(default)]
+    pub resources: Option<ResourcesStatus>,
+    #[serde(default)]
+    pub profiles: Vec<ProfileStatus>,
+}
+
+/// One profile's row inside [`StatusResponse`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileStatus {
     pub id: String,
     #[serde(default)]
-    pub display_name: String,
+    pub name: String,
     #[serde(default)]
-    pub provider_name: String,
+    pub provider: String,
     /// `two-way` / `pull-only` / `push-only`.
     #[serde(default)]
     pub sync_mode: String,
+    /// What is watched, what blocks sync, or which decision it waits on.
     #[serde(default)]
-    pub run_state: String,
+    pub run: StateReason,
     #[serde(default)]
-    pub reason: String,
+    pub reconcile: ReconcileStatus,
     #[serde(default)]
-    pub queue_depth: u64,
+    pub queued: u64,
     #[serde(default)]
-    pub failed_intents: u64,
+    pub failed: u64,
     #[serde(default)]
-    pub conflicts: u64,
+    pub decisions: u64,
     #[serde(default)]
-    pub mirror_reverts: u64,
+    pub mirror: MirrorCounts,
+    /// The profile was stopped by its configuration or by repeated
+    /// failures; `run.reason` says why. The other profiles keep syncing.
     #[serde(default)]
-    pub mirror_deletes: u64,
-    /// Set when the profile was suspended by blast-radius containment.
-    #[serde(default)]
-    pub suspended_reason: Option<String>,
-    #[serde(default)]
-    pub decisions_pending: u64,
-    #[serde(default)]
-    pub conflicts_unresolved: u64,
-    #[serde(default)]
-    pub reconcile_state: String,
-    #[serde(default)]
-    pub reconcile_detail: String,
+    pub suspended: bool,
     /// The provider refused this profile's sign-in (expired, revoked, or
     /// never stored). Sync is on hold until the user runs
-    /// `vapor auth login <provider_name> --profile <id>`; queued work is
-    /// kept.
+    /// `vapor auth login --profile <id>`; queued work is kept.
     #[serde(default)]
     pub sign_in_required: bool,
 }
 
-/// Effective resource ceilings, measured utilization, and idle-boost
-/// state (schema v2).
+/// A resource ceiling and how much of it is in use.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
-pub struct ResourceBudgetStatus {
+#[serde(rename_all = "camelCase")]
+pub struct Ceiling {
     #[serde(default)]
-    pub effective_cpu_percent: u8,
+    pub limit_percent: u8,
     #[serde(default)]
-    pub effective_memory_percent: u8,
+    pub used_percent: u8,
+}
+
+/// The bandwidth ceiling; use is measured in kbit/s.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BandwidthCeiling {
     #[serde(default)]
-    pub effective_bandwidth_percent: u8,
+    pub limit_percent: u8,
     #[serde(default)]
-    pub cpu_utilization_percent: u8,
+    pub used_kbps: u64,
+}
+
+/// The effective ceilings (raised by idle boost while it is active),
+/// what the daemon uses of them, and idle boost's state.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourcesStatus {
     #[serde(default)]
-    pub memory_utilization_percent: u8,
+    pub cpu: Ceiling,
     #[serde(default)]
-    pub bandwidth_utilization_kbps: u64,
-    /// `off` / `ramping-up` / `active` / `ramping-down`.
+    pub memory: Ceiling,
     #[serde(default)]
-    pub idle_boost_state: String,
+    pub bandwidth: BandwidthCeiling,
+    /// `state` is one of `constants::idle_boost_state::*`.
     #[serde(default)]
-    pub idle_boost_reason: String,
+    pub idle_boost: StateReason,
 }
 
 #[cfg(test)]
@@ -363,7 +375,7 @@ mod tests {
 
     #[test]
     fn hello_tolerates_missing_client_id_field() {
-        let raw = r#"{"schema_version":1,"supported_min_version":1}"#;
+        let raw = r#"{"schemaVersion":3,"supportedMinVersion":3}"#;
         let decoded: Hello = serde_json::from_str(raw).expect("deserialize without client_id");
         assert_eq!(decoded.client_id, "");
     }
@@ -373,13 +385,13 @@ mod tests {
         // C5 forward-compat rule: a future field appended by peer N+1
         // must not break peer N's parser.
         let raw = r#"{
-            "schema_version": 1,
-            "supported_min_version": 1,
-            "client_id": "vapor-cli/test",
-            "future_field": ["data", 42]
+            "schemaVersion": 3,
+            "supportedMinVersion": 3,
+            "clientId": "vapor-cli/test",
+            "futureField": ["data", 42]
         }"#;
         let decoded: Hello = serde_json::from_str(raw).expect("deserialize with future field");
-        assert_eq!(decoded.schema_version, 1);
+        assert_eq!(decoded.schema_version, 3);
     }
 
     #[test]
@@ -396,11 +408,16 @@ mod tests {
     fn response_envelope_round_trips_ok_and_err_variants() {
         let ok = Response::Ok(ResponseBody::Status(StatusResponse {
             schema_version: 1,
-            run_state: "Running".to_string(),
-            throttle_state: "IdleDrain".to_string(),
-            provider_name: "Filesystem (stub)".to_string(),
-            throttle_reason: "idle, plugged in, and cool".to_string(),
-            daemon_id: "vapord/test".to_string(),
+            daemon: "vapord/test".to_string(),
+            provider: "Filesystem (stub)".to_string(),
+            run: StateReason {
+                state: "running".to_string(),
+                reason: String::new(),
+            },
+            throttle: StateReason {
+                state: "idle".to_string(),
+                reason: "idle, plugged in, and cool".to_string(),
+            },
             ..StatusResponse::default()
         }));
         let err = Response::Err(ErrorBody::PayloadTooLarge(8_388_608));
@@ -418,40 +435,20 @@ mod tests {
     }
 
     #[test]
-    fn v1_status_payload_without_v2_fields_parses_with_defaults() {
-        // Field-omission tolerance across the v1 -> v2 bump: a v1
-        // daemon's status omits every v2 field; a v2 client must read
-        // it with defaults instead of failing.
+    fn status_payload_missing_later_fields_parses_with_defaults() {
+        // Field-omission tolerance: a peer that omits fields added later
+        // is read with defaults instead of failing.
         let raw = r#"{
-            "schema_version": 1,
-            "run_state": "Running",
-            "throttle_state": "IdleDrain",
-            "provider_name": "filesystem",
-            "throttle_reason": "idle",
-            "daemon_id": "vapord/old"
+            "schemaVersion": 4,
+            "provider": "filesystem",
+            "run": {"state": "running"},
+            "throttle": {"state": "idle", "reason": "idle"}
         }"#;
-        let decoded: StatusResponse = serde_json::from_str(raw).expect("v1 payload parses");
-        assert_eq!(decoded.queue_depth, 0);
+        let decoded: StatusResponse = serde_json::from_str(raw).expect("payload parses");
+        assert_eq!(decoded.run.state, "running");
+        assert_eq!(decoded.queued, 0);
         assert!(decoded.profiles.is_empty());
-        assert!(decoded.resource_budget.is_none());
-    }
-
-    #[test]
-    fn v2_method_payloads_round_trip() {
-        let set = Request::Call {
-            method: Method::SetAutoLaunch { enabled: false },
-        };
-        let update = Request::Call {
-            method: Method::UpdateExcludes {
-                pre_ignore_rules: Some(".git/\nnode_modules/".to_string()),
-                post_ignore_rules: None,
-            },
-        };
-        for request in [set, update] {
-            let bytes = serde_json::to_vec(&request).expect("serialize");
-            let decoded: Request = serde_json::from_slice(&bytes).expect("deserialize");
-            assert_eq!(decoded, request);
-        }
+        assert!(decoded.resources.is_none());
     }
 
     #[test]

@@ -7,10 +7,9 @@ use std::path::Path;
 
 use crate::state_db::DecisionOption;
 
-pub const DECISION_KIND: &str = "type-mismatch";
-pub const OPTION_KEEP_BOTH: &str = "keep-both";
-pub const OPTION_PREFER_LOCAL: &str = "prefer-local";
-pub const OPTION_PREFER_CLOUD: &str = "prefer-cloud";
+pub use vapor_shared::constants::decision::{
+    KIND_TYPE_MISMATCH as DECISION_KIND, OPTION_KEEP_BOTH, OPTION_PREFER_CLOUD, OPTION_PREFER_LOCAL,
+};
 
 pub fn question(path: &Path, local_is_dir: bool) -> String {
     let (here, there) = if local_is_dir {

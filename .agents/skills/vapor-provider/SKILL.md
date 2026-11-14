@@ -48,7 +48,7 @@ Full checklist with acceptance criteria:
   Authentication errors name the command the user must run.
 - **Secrets.** Tokens only through `vapor_platform::SecretStore`, keyed
   `auth.<profile>.<provider>.token`; never in `vapor.json`, the state DB,
-  logs, or support bundles.
+  logs, or support reports.
 - **Threads.** Provider calls run on worker threads; a provider must be
   `Send + Sync` and must not hold locks across network calls.
 

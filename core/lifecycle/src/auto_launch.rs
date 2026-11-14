@@ -134,7 +134,7 @@ impl AutoLaunchSettingStore for JsonFileAutoLaunchSettingStore {
 
     fn write(&self, value: bool) -> Result<(), JsonFileError> {
         // Every `vapor.json` writer (this store, `vapor config`, the daemon's
-        // IPC config path) shares one advisory file-lock so the read → mutate
+        // device-id write, the Mac app) shares one advisory file-lock so the read → mutate
         // one key → rewrite cycle is atomic across processes; otherwise the
         // last rename re-emits its stale snapshot of every other top-level key
         // and silently reverts a concurrent writer's change.
@@ -221,8 +221,8 @@ mod tests {
             &path,
             r#"{
   "autoLaunch": false,
-  "useGitIgnore": true,
-  "languageCode": "en"
+  "useGitignore": true,
+  "language": "en"
 }
 "#,
         )
@@ -233,20 +233,20 @@ mod tests {
 
         let contents = fs::read_to_string(&path).expect("file");
         assert!(contents.contains("\"autoLaunch\": true"));
-        assert!(contents.contains("\"useGitIgnore\": true"));
-        assert!(contents.contains("\"languageCode\": \"en\""));
+        assert!(contents.contains("\"useGitignore\": true"));
+        assert!(contents.contains("\"language\": \"en\""));
     }
 
     #[test]
     fn json_file_store_inserts_auto_launch_when_only_other_keys_exist() {
         let temp = TempDir::new().expect("temp");
         let path = temp.path().join("vapor.json");
-        fs::write(&path, "{ \"useGitIgnore\": true }\n").expect("seed file");
+        fs::write(&path, "{ \"useGitignore\": true }\n").expect("seed file");
         let store = JsonFileAutoLaunchSettingStore::new(path.clone());
         store.write(false).expect("write");
         let contents = fs::read_to_string(&path).expect("file");
         assert!(contents.contains("\"autoLaunch\": false"));
-        assert!(contents.contains("\"useGitIgnore\": true"));
+        assert!(contents.contains("\"useGitignore\": true"));
     }
 
     #[test]

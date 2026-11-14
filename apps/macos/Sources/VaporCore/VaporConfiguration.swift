@@ -50,15 +50,16 @@ public enum JSONValue: Codable, Equatable, Sendable {
 
 public struct VaporConfiguration: Codable, Equatable, Sendable {
   public var autoLaunch: Bool
-  public var useGitIgnore: Bool
-  public var useVaporIgnore: Bool
-  public var localSyncDirectory: String
+  public var useGitignore: Bool
+  public var useVaporignore: Bool
+  public var localRoot: String
   /// The cloud root, or `nil` while the file leaves it to the provider's
   /// default (the daemon resolves that; the app never writes one).
-  public var cloudSyncDirectory: String?
-  public var preIgnoreRules: String
-  public var postIgnoreRules: String
-  public var languageCode: String
+  public var cloudRoot: String?
+  /// Ignore rules in `.gitignore` syntax, one rule per entry.
+  public var preIgnoreRules: [String]
+  public var postIgnoreRules: [String]
+  public var language: String
   public var timelineLimit: Int
   /// Stable per-device identifier. Generated and persisted by
   /// the daemon; the app only preserves and displays it, so `nil`
@@ -69,6 +70,14 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   /// `idleBoost`). Preserved verbatim across load/save so an app-side
   /// settings write can never destroy runtime configuration.
   public var additionalKeys: [String: JSONValue]
+  /// Modelled keys whose value had the wrong type and fell back to the
+  /// default, the way the daemon reads the file: one bad value never
+  /// costs the rest of the configuration. Not written back.
+  public var invalidKeys: [String] = []
+
+  /// Every key the app models and may write. `deviceId` is the daemon's.
+  public static let modelledKeys: Set<String> = Set(
+    CodingKeys.allCases.map(\.stringValue).filter { $0 != VaporConstants.ConfigKeys.deviceId })
 
   /// The configured provider kind. The app does not model `provider`
   /// as a first-class field (it lives in `additionalKeys` so app-side
@@ -82,33 +91,46 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     return VaporConstants.Provider.defaultKind
   }
 
-  public static let defaultPreIgnoreRuleLines = VaporConstants.Defaults.preIgnoreRuleLines
-  public static let defaultLocalSyncDirectory = VaporConstants.Defaults.localSyncDirectory
+  public static let defaultLocalRoot = VaporConstants.Defaults.localRoot
   public static let defaultPreIgnoreRules = VaporConstants.Defaults.preIgnoreRules
   public static let defaultPostIgnoreRules = VaporConstants.Defaults.postIgnoreRules
-  public static let defaultLanguageCode = VaporConstants.Defaults.languageCode
+  public static let defaultLanguage = VaporConstants.Defaults.language
+
+  /// The settings editor shows one rule per line.
+  public static func editorText(for rules: [String]) -> String {
+    rules.joined(separator: "\n")
+  }
+
+  /// The rules an editor text holds: one per line, trimmed, blank
+  /// lines dropped.
+  public static func rules(fromEditorText text: String) -> [String] {
+    text
+      .split(whereSeparator: \.isNewline)
+      .map { $0.trimmingCharacters(in: .whitespaces) }
+      .filter { !$0.isEmpty }
+  }
 
   public init(
     autoLaunch: Bool = VaporConstants.Defaults.autoLaunch,
-    useGitIgnore: Bool = VaporConstants.Defaults.useGitIgnore,
-    useVaporIgnore: Bool = VaporConstants.Defaults.useVaporIgnore,
-    localSyncDirectory: String = defaultLocalSyncDirectory,
-    cloudSyncDirectory: String? = nil,
-    preIgnoreRules: String = defaultPreIgnoreRules,
-    postIgnoreRules: String = defaultPostIgnoreRules,
-    languageCode: String = defaultLanguageCode,
+    useGitignore: Bool = VaporConstants.Defaults.useGitignore,
+    useVaporignore: Bool = VaporConstants.Defaults.useVaporignore,
+    localRoot: String = defaultLocalRoot,
+    cloudRoot: String? = nil,
+    preIgnoreRules: [String] = defaultPreIgnoreRules,
+    postIgnoreRules: [String] = defaultPostIgnoreRules,
+    language: String = defaultLanguage,
     timelineLimit: Int = VaporConstants.Defaults.timelineLimit,
     deviceId: String? = nil,
     additionalKeys: [String: JSONValue] = [:]
   ) {
     self.autoLaunch = autoLaunch
-    self.useGitIgnore = useGitIgnore
-    self.useVaporIgnore = useVaporIgnore
-    self.localSyncDirectory = localSyncDirectory
-    self.cloudSyncDirectory = cloudSyncDirectory
+    self.useGitignore = useGitignore
+    self.useVaporignore = useVaporignore
+    self.localRoot = localRoot
+    self.cloudRoot = cloudRoot
     self.preIgnoreRules = preIgnoreRules
     self.postIgnoreRules = postIgnoreRules
-    self.languageCode = Self.normalizedLanguageCode(languageCode)
+    self.language = Self.normalizedLanguage(language)
     self.timelineLimit = timelineLimit
     self.deviceId = deviceId
     self.additionalKeys = additionalKeys
@@ -116,13 +138,13 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
 
   enum CodingKeys: String, CodingKey, CaseIterable {
     case autoLaunch
-    case useGitIgnore
-    case useVaporIgnore
-    case localSyncDirectory
-    case cloudSyncDirectory
+    case useGitignore
+    case useVaporignore
+    case localRoot
+    case cloudRoot
     case preIgnoreRules
     case postIgnoreRules
-    case languageCode
+    case language
     case timelineLimit
     case deviceId
   }
@@ -145,39 +167,41 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     for key in dynamic.allKeys where !knownKeys.contains(key.stringValue) {
       additionalKeys[key.stringValue] = try dynamic.decode(JSONValue.self, forKey: key)
     }
+    var invalidKeys: [String] = []
+    func value<T: Decodable>(_ key: CodingKeys) -> T? {
+      do {
+        return try container.decodeIfPresent(T.self, forKey: key)
+      } catch {
+        invalidKeys.append(key.stringValue)
+        return nil
+      }
+    }
     self.init(
-      autoLaunch: try container.decodeIfPresent(Bool.self, forKey: .autoLaunch)
-        ?? VaporConstants.Defaults.autoLaunch,
-      useGitIgnore: try container.decodeIfPresent(Bool.self, forKey: .useGitIgnore)
-        ?? VaporConstants.Defaults.useGitIgnore,
-      useVaporIgnore: try container.decodeIfPresent(Bool.self, forKey: .useVaporIgnore)
-        ?? VaporConstants.Defaults.useVaporIgnore,
-      localSyncDirectory: try container.decodeIfPresent(String.self, forKey: .localSyncDirectory)
-        ?? Self.defaultLocalSyncDirectory,
-      cloudSyncDirectory: try container.decodeIfPresent(String.self, forKey: .cloudSyncDirectory),
-      preIgnoreRules: try container.decodeIfPresent(String.self, forKey: .preIgnoreRules)
-        ?? Self.defaultPreIgnoreRules,
-      postIgnoreRules: try container.decodeIfPresent(String.self, forKey: .postIgnoreRules)
-        ?? Self.defaultPostIgnoreRules,
-      languageCode: try container.decodeIfPresent(String.self, forKey: .languageCode)
-        ?? Self.defaultLanguageCode,
-      timelineLimit: try container.decodeIfPresent(Int.self, forKey: .timelineLimit)
-        ?? VaporConstants.Defaults.timelineLimit,
-      deviceId: try container.decodeIfPresent(String.self, forKey: .deviceId),
+      autoLaunch: value(.autoLaunch) ?? VaporConstants.Defaults.autoLaunch,
+      useGitignore: value(.useGitignore) ?? VaporConstants.Defaults.useGitignore,
+      useVaporignore: value(.useVaporignore) ?? VaporConstants.Defaults.useVaporignore,
+      localRoot: value(.localRoot) ?? Self.defaultLocalRoot,
+      cloudRoot: value(.cloudRoot),
+      preIgnoreRules: value(.preIgnoreRules) ?? Self.defaultPreIgnoreRules,
+      postIgnoreRules: value(.postIgnoreRules) ?? Self.defaultPostIgnoreRules,
+      language: value(.language) ?? Self.defaultLanguage,
+      timelineLimit: value(.timelineLimit) ?? VaporConstants.Defaults.timelineLimit,
+      deviceId: value(.deviceId),
       additionalKeys: additionalKeys
     )
+    self.invalidKeys = invalidKeys
   }
 
   public func encode(to encoder: any Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
     try container.encode(autoLaunch, forKey: .autoLaunch)
-    try container.encode(useGitIgnore, forKey: .useGitIgnore)
-    try container.encode(useVaporIgnore, forKey: .useVaporIgnore)
-    try container.encode(localSyncDirectory, forKey: .localSyncDirectory)
-    try container.encodeIfPresent(cloudSyncDirectory, forKey: .cloudSyncDirectory)
+    try container.encode(useGitignore, forKey: .useGitignore)
+    try container.encode(useVaporignore, forKey: .useVaporignore)
+    try container.encode(localRoot, forKey: .localRoot)
+    try container.encodeIfPresent(cloudRoot, forKey: .cloudRoot)
     try container.encode(preIgnoreRules, forKey: .preIgnoreRules)
     try container.encode(postIgnoreRules, forKey: .postIgnoreRules)
-    try container.encode(languageCode, forKey: .languageCode)
+    try container.encode(language, forKey: .language)
     try container.encode(timelineLimit, forKey: .timelineLimit)
     // The daemon owns device-id generation; the app writes the key only
     // when one already exists.
@@ -188,9 +212,21 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     }
   }
 
-  private static func normalizedLanguageCode(_ languageCode: String) -> String {
-    let normalized = languageCode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    return normalized.isEmpty ? defaultLanguageCode : normalized
+  private static func normalizedLanguage(_ language: String) -> String {
+    let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized.isEmpty ? defaultLanguage : normalized
+  }
+}
+
+public enum VaporConfigurationStoreError: Error, CustomStringConvertible {
+  /// `vapor.json` exists but is not a JSON object the app can read.
+  case unreadableFile(String)
+
+  public var description: String {
+    switch self {
+    case .unreadableFile(let path):
+      return "\(path) cannot be read; fix or remove it before changing settings"
+    }
   }
 }
 
@@ -220,7 +256,7 @@ public final class VaporConfigurationStore {
     self.environment = environment
     self.logger = logger
 
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
   }
 
   public func load() -> VaporConfiguration {
@@ -240,10 +276,26 @@ public final class VaporConfigurationStore {
 
     do {
       let data = try Data(contentsOf: configurationURL)
-      return VaporConfigurationLoadResult(
-        configuration: try decoder.decode(VaporConfiguration.self, from: data),
-        issue: nil
-      )
+      // An empty file is the defaults, as the daemon and the CLI read it.
+      if Self.isBlank(data) {
+        return VaporConfigurationLoadResult(configuration: VaporConfiguration(), issue: nil)
+      }
+      let configuration = try decoder.decode(VaporConfiguration.self, from: data)
+      guard configuration.invalidKeys.isEmpty else {
+        let keys = configuration.invalidKeys.map { "`\($0)`" }.joined(separator: ", ")
+        logger.error(
+          "Ignoring invalid vapor configuration values; using their defaults",
+          metadata: ["config_path": configurationURL.path, "keys": keys]
+        )
+        return VaporConfigurationLoadResult(
+          configuration: configuration,
+          issue: VaporConfigurationLoadIssue(
+            configPath: configurationURL.path,
+            reason: "ignoring invalid \(keys); using the default"
+          )
+        )
+      }
+      return VaporConfigurationLoadResult(configuration: configuration, issue: nil)
     } catch {
       logger.error(
         "Failed to load vapor configuration; preserving existing file and using in-memory defaults",
@@ -306,43 +358,80 @@ public final class VaporConfigurationStore {
     }
   }
 
-  public func save(_ configuration: VaporConfiguration) throws {
+  /// Writes `keys` from `configuration` onto `vapor.json` as it is now,
+  /// under the lock every writer of the file takes. Every other key
+  /// keeps the value on disk: settings changed with `vapor config set`
+  /// or `vapor service` since the app read the file, keys the app does
+  /// not model, and values it could not read. The daemon owns
+  /// `deviceId`, so it is never written here. A file that does not parse
+  /// is the user's to fix and is never overwritten.
+  public func save(_ configuration: VaporConfiguration, keys: Set<String>) throws {
     let vaporDirectoryURL = resolveVaporDirectoryURL()
-
     try VaporPaths.prepareRuntimeDirectories(
       vaporDirectoryURL: vaporDirectoryURL,
       fileManager: fileManager
     )
-
     let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: vaporDirectoryURL)
-
-    // Merge onto a FRESH read of the on-disk file rather than writing the
-    // caller's (possibly stale) snapshot. The app loads its configuration
-    // once at launch, so a naive write would clobber daemon/CLI-owned keys
-    // that changed since: `deviceId` (persisted by the daemon) and every
-    // key the app does not model — `provider`, `syncMode`, `profiles`,
-    // `resourceLimits`, `idleBoost` (carried in `additionalKeys`).
-    var merged = configuration
-    if let onDisk = decodeOnDisk(at: configurationURL) {
-      merged.additionalKeys = onDisk.additionalKeys
-      if let diskDeviceId = onDisk.deviceId {
-        merged.deviceId = diskDeviceId
+    try withConfigurationLock(configurationURL) {
+      var document = try readDocument(at: configurationURL)
+      let encoded = try decoder.decode(
+        [String: JSONValue].self, from: try encoder.encode(configuration))
+      for key in keys where key != VaporConstants.ConfigKeys.deviceId {
+        document[key] = encoded[key]
       }
+      var data = try encoder.encode(document)
+      data.append(contentsOf: Array("\n".utf8))
+      try data.write(to: configurationURL, options: .atomic)
+      try VaporPaths.ensurePrivateFile(at: configurationURL, fileManager: fileManager)
     }
-
-    let data = try encoder.encode(merged)
-    try data.write(to: configurationURL, options: .atomic)
-    try VaporPaths.ensurePrivateFile(at: configurationURL, fileManager: fileManager)
-
     logger.info(
       "Persisted vapor configuration",
-      metadata: ["config_path": configurationURL.path]
+      metadata: [
+        "config_path": configurationURL.path,
+        "keys": keys.sorted().joined(separator: ","),
+      ]
     )
   }
 
-  /// Best-effort decode of the current on-disk configuration (nil on
-  /// missing/unreadable/corrupt file), used to preserve daemon-owned keys
-  /// across an app-side save.
+  /// The file as a JSON object: empty when it is missing or blank.
+  private func readDocument(at configurationURL: URL) throws -> [String: JSONValue] {
+    guard fileManager.fileExists(atPath: configurationURL.path) else {
+      return [:]
+    }
+    let data = try Data(contentsOf: configurationURL)
+    if Self.isBlank(data) {
+      return [:]
+    }
+    guard let document = try? decoder.decode([String: JSONValue].self, from: data) else {
+      throw VaporConfigurationStoreError.unreadableFile(configurationURL.path)
+    }
+    return document
+  }
+
+  /// Runs `body` holding the advisory lock on `vapor.json.lock`, the
+  /// same lock the CLI, the daemon, and `vapor service` take (`flock`).
+  private func withConfigurationLock(_ configurationURL: URL, _ body: () throws -> Void) throws {
+    let lockPath = configurationURL.path + ".lock"
+    let descriptor = open(lockPath, O_CREAT | O_WRONLY, 0o600)
+    guard descriptor >= 0 else {
+      throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    defer { close(descriptor) }
+    guard flock(descriptor, LOCK_EX) == 0 else {
+      throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+    defer { flock(descriptor, LOCK_UN) }
+    try body()
+  }
+
+  private static func isBlank(_ data: Data) -> Bool {
+    String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+      .isEmpty
+  }
+
+  /// Best-effort decode of the current on-disk configuration (nil on a
+  /// missing, unreadable, or corrupt file), used to adopt the file a
+  /// concurrently starting daemon wrote first.
   private func decodeOnDisk(at configurationURL: URL) -> VaporConfiguration? {
     guard let data = try? Data(contentsOf: configurationURL) else {
       return nil

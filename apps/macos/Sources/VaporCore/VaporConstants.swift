@@ -5,12 +5,6 @@ public enum VaporConstants {
     public static let vaporDirectory = "VAPOR_DIR"
     public static let vaporEnvironment = "VAPOR_ENV"
     public static let vaporLogLevel = "VAPOR_LOG_LEVEL"
-    public static let useGitIgnore = "VAPOR_USE_GITIGNORE"
-    public static let useVaporIgnore = "VAPOR_USE_VAPORIGNORE"
-    public static let localSyncDirectory = "VAPOR_LOCAL_SYNC_DIRECTORY"
-    public static let cloudSyncDirectory = "VAPOR_CLOUD_SYNC_DIRECTORY"
-    public static let preIgnoreRules = "VAPOR_PRE_IGNORE_RULES"
-    public static let postIgnoreRules = "VAPOR_POST_IGNORE_RULES"
     public static let gdriveClientId = "VAPOR_GDRIVE_CLIENT_ID"
     public static let gdriveClientSecret = "VAPOR_GDRIVE_CLIENT_SECRET"
     public static let throttleInputs = "VAPOR_THROTTLE_INPUTS"
@@ -22,8 +16,8 @@ public enum VaporConstants {
     public static let stateDirectoryName = "state"
     public static let configurationFileName = "vapor.json"
     public static let sqliteDatabaseFileName = "vapor.sqlite"
-    public static let appLogFileName = "vapor.logs"
-    public static let daemonLogFileName = "vapord.logs"
+    public static let appLogFileName = "vapor.log"
+    public static let daemonLogFileName = "vapord.log"
     public static let daemonStdoutLogFileName = "vapord.stdout.log"
     public static let daemonStderrLogFileName = "vapord.stderr.log"
     public static let vaporDirectoryName = ".vapor"
@@ -31,29 +25,40 @@ public enum VaporConstants {
 
   public enum Defaults {
     public static let autoLaunch = true
-    public static let useGitIgnore = true
-    public static let useVaporIgnore = true
-    public static let localSyncDirectory = "~/Vapor"
-    /// The cloud root a remote provider uses while `cloudSyncDirectory`
-    /// is unset. Mirrors `constants.rs::filtering::DEFAULT_CLOUD_SYNC_DIRECTORY`.
-    public static let cloudSyncDirectory = "/Vapor"
+    public static let useGitignore = true
+    public static let useVaporignore = true
+    public static let localRoot = "~/Vapor"
+    /// The cloud root a remote provider uses while `cloudRoot`
+    /// is unset. Mirrors `constants.rs::filtering::DEFAULT_CLOUD_ROOT`.
+    public static let cloudRoot = "/Vapor"
     /// The cloud root the filesystem provider uses while the key is
-    /// unset. Mirrors `DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY`; the
+    /// unset. Mirrors `DEFAULT_FILESYSTEM_CLOUD_ROOT`; the
     /// daemon picks between the two by provider, which is why the app
     /// never writes a cloud root it did not read.
-    public static let filesystemCloudSyncDirectory = "~/cloud/Vapor"
-    public static let postIgnoreRules = ""
-    public static let languageCode = VaporConstants.Localization.defaultLanguageCode
+    public static let filesystemCloudRoot = "~/cloud/Vapor"
+    public static let postIgnoreRules: [String] = []
+    public static let language = VaporConstants.Localization.defaultLanguageCode
     public static let timelineLimit = 1000
     /// Mirrors `constants.rs::provider::DEFAULT` / `sync_mode::DEFAULT`.
     public static let provider = "filesystem"
     public static let syncMode = "two-way"
 
-    public static let preIgnoreRuleLines: [String] = [
+    public static let preIgnoreRules: [String] = [
       // OS junk
       ".DS_Store",
       "Thumbs.db",
       "desktop.ini",
+      // What an OS keeps at the root of a volume, for a sync root that
+      // is a whole external drive
+      ".fseventsd/",
+      ".Spotlight-V100/",
+      ".Trashes/",
+      ".TemporaryItems/",
+      ".DocumentRevisions-V100/",
+      "System Volume Information/",
+      "$RECYCLE.BIN/",
+      "lost+found/",
+      ".Trash-*/",
       // Editor swap / temp / partial files
       "*.tmp",
       "*.temp",
@@ -132,7 +137,6 @@ public enum VaporConstants {
       ".terraform/",
     ]
 
-    public static let preIgnoreRules = preIgnoreRuleLines.joined(separator: "\n")
   }
 
   public enum Localization {
@@ -193,13 +197,13 @@ public enum VaporConstants {
   /// `core/shared/src/constants.rs::config::*` per AGENTS.md §8.6.
   public enum ConfigKeys {
     public static let autoLaunch = "autoLaunch"
-    public static let useGitIgnore = "useGitIgnore"
-    public static let useVaporIgnore = "useVaporIgnore"
-    public static let localSyncDirectory = "localSyncDirectory"
-    public static let cloudSyncDirectory = "cloudSyncDirectory"
+    public static let useGitignore = "useGitignore"
+    public static let useVaporignore = "useVaporignore"
+    public static let localRoot = "localRoot"
+    public static let cloudRoot = "cloudRoot"
     public static let preIgnoreRules = "preIgnoreRules"
     public static let postIgnoreRules = "postIgnoreRules"
-    public static let languageCode = "languageCode"
+    public static let language = "language"
     public static let timelineLimit = "timelineLimit"
     public static let provider = "provider"
     public static let syncMode = "syncMode"
@@ -209,6 +213,56 @@ public enum VaporConstants {
     public static let idleBoost = "idleBoost"
     public static let safeguards = "safeguards"
     public static let trash = "trash"
+  }
+
+  /// Values `vapor … --json` prints. Every value is kebab-case and every
+  /// key camelCase. Mirrors the `run_state`, `throttle_state`,
+  /// `reconcile_state`, and `service` modules of
+  /// `core/shared/src/constants.rs` per AGENTS.md §8.6.
+  public enum RunState {
+    public static let starting = "starting"
+    public static let running = "running"
+    public static let paused = "paused"
+    public static let error = "error"
+  }
+
+  public enum ThrottleState {
+    public static let idle = "idle"
+    public static let light = "light"
+    public static let throttled = "throttled"
+    public static let suspended = "suspended"
+  }
+
+  public enum ReconcileState {
+    public static let idle = "idle"
+    public static let waiting = "waiting"
+    public static let running = "running"
+  }
+
+  public enum ServiceStatus {
+    public static let notInstalled = "not-installed"
+    public static let stopped = "stopped"
+    public static let running = "running"
+    public static let crashLoopPaused = "crash-loop-paused"
+  }
+
+  public enum ServiceResult {
+    public static let unchanged = "unchanged"
+    public static let started = "started"
+    public static let stopped = "stopped"
+    public static let notInstalled = "not-installed"
+    public static let crashLoopPaused = "crash-loop-paused"
+    public static let relaunchDeferred = "relaunch-deferred"
+    public static let acknowledged = "acknowledged"
+  }
+
+  public enum ServiceHealth {
+    public static let running = "running"
+    public static let notInstalled = "not-installed"
+    public static let stoppedExpected = "stopped-expected"
+    public static let restartedAfterCrash = "restarted-after-crash"
+    public static let restartDeferred = "restart-deferred"
+    public static let crashLoopPaused = "crash-loop-paused"
   }
 
   /// Accepted `syncMode` values. Mirrors

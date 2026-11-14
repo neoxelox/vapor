@@ -308,7 +308,7 @@ fn cloud_root_vanishes(ctx: &mut Ctx) -> Result<(), Failure> {
         "written during the outage\n",
     )?;
     let cli = ctx.cli();
-    cli.wait_run_state("Error", Duration::from_secs(60))?;
+    cli.wait_run_state("error", Duration::from_secs(60))?;
     ensure!(
         !home.cloud.exists(),
         "the daemon recreated the cloud root while it was parked"
@@ -316,11 +316,11 @@ fn cloud_root_vanishes(ctx: &mut Ctx) -> Result<(), Failure> {
 
     // The volume comes back with its content intact.
     fs::rename(&parked, &home.cloud)?;
-    cli.wait_run_state("Running", Duration::from_secs(60))?;
+    cli.wait_run_state("running", Duration::from_secs(60))?;
     ctx.wait_exists(&home.cloud.join("during.txt"), Duration::from_secs(60))?;
     ctx.settle(CONVERGE_TIMEOUT)?;
-    ctx.allow_warning("Cloud sync directory became unavailable");
-    ctx.allow_warning("cloud sync directory");
+    ctx.allow_warning("Cloud root became unavailable");
+    ctx.allow_warning("cloud root");
     Ok(())
 }
 
@@ -369,14 +369,11 @@ fn local_root_replaced(ctx: &mut Ctx) -> Result<(), Failure> {
         decision["evidence"]["side"] == "local",
         "wrong side: {decision}"
     );
-    cli.wait_run_state("Error", Duration::from_secs(30))?;
+    cli.wait_run_state("error", Duration::from_secs(30))?;
     let status = cli
         .status()
         .ok_or_else(|| Failure::new("status did not answer"))?;
-    ensure!(
-        status.decisions_pending == 1,
-        "status must count the open decision"
-    );
+    ensure!(status.decisions == 1, "status must count the open decision");
     // Nothing moves while the question is open.
     std::thread::sleep(Duration::from_secs(5));
     ensure!(
@@ -390,7 +387,7 @@ fn local_root_replaced(ctx: &mut Ctx) -> Result<(), Failure> {
 
     let id = decision["id"].as_i64().unwrap_or_default().to_string();
     cli.ok(&["decisions", "resolve", &id, "--choose", "reattach"])?;
-    cli.wait_run_state("Running", Duration::from_secs(60))?;
+    cli.wait_run_state("running", Duration::from_secs(60))?;
     ctx.wait_exists(&home.local.join("kept.txt"), Duration::from_secs(60))?;
     ctx.settle(CONVERGE_TIMEOUT)?;
     ensure!(
@@ -422,7 +419,7 @@ fn local_root_missing_at_start(ctx: &mut Ctx) -> Result<(), Failure> {
     // Running is not what to wait for here.
     ctx.start_daemon_in(&home, DaemonKind::CliRun, false)?;
     let cli = ctx.cli();
-    cli.wait_run_state("Error", Duration::from_secs(30))?;
+    cli.wait_run_state("error", Duration::from_secs(30))?;
     let decision = wait_open_decision(&cli, "root-missing", Duration::from_secs(60))?;
     ensure!(
         decision["evidence"]["side"] == "local",
@@ -434,7 +431,7 @@ fn local_root_missing_at_start(ctx: &mut Ctx) -> Result<(), Failure> {
     let reason = status
         .profiles
         .first()
-        .map(|profile| profile.suspended_reason.clone().unwrap_or_default())
+        .map(|profile| profile.run.reason.clone())
         .unwrap_or_default();
     ensure!(
         reason.contains("is missing"),
@@ -452,7 +449,7 @@ fn local_root_missing_at_start(ctx: &mut Ctx) -> Result<(), Failure> {
 
     // The volume returns: the profile is composed again and syncs.
     fs::rename(&parked, &home.local)?;
-    cli.wait_run_state("Running", Duration::from_secs(60))?;
+    cli.wait_run_state("running", Duration::from_secs(60))?;
     let mark = ctx.mark();
     write_file(&home.local.join("after.txt"), "after the volume returned\n")?;
     ctx.converge_from(&mark, 1, Duration::from_secs(60))?;
@@ -463,7 +460,7 @@ fn local_root_missing_at_start(ctx: &mut Ctx) -> Result<(), Failure> {
         open["decisions"].as_array().is_some_and(Vec::is_empty),
         "the question is withdrawn once the root is back: {open}"
     );
-    ctx.allow_warning("Local sync directory is missing");
+    ctx.allow_warning("Local root is missing");
     Ok(())
 }
 
@@ -483,7 +480,7 @@ fn cloud_root_deleted_recreate(ctx: &mut Ctx) -> Result<(), Failure> {
         decision["evidence"]["side"] == "cloud",
         "wrong side: {decision}"
     );
-    cli.wait_run_state("Error", Duration::from_secs(30))?;
+    cli.wait_run_state("error", Duration::from_secs(30))?;
     std::thread::sleep(Duration::from_secs(3));
     ensure!(
         !home.cloud.exists(),
@@ -496,16 +493,16 @@ fn cloud_root_deleted_recreate(ctx: &mut Ctx) -> Result<(), Failure> {
 
     let id = decision["id"].as_i64().unwrap_or_default().to_string();
     cli.ok(&["decisions", "resolve", &id, "--choose", "recreate"])?;
-    cli.wait_run_state("Running", Duration::from_secs(60))?;
+    cli.wait_run_state("running", Duration::from_secs(60))?;
     ctx.wait_exists(&home.cloud.join("kept.txt"), Duration::from_secs(60))?;
     ctx.settle(CONVERGE_TIMEOUT)?;
     ensure!(
         home.cloud.join(".vapor-root").is_file(),
         "the re-created root is adopted afresh"
     );
-    ctx.allow_warning("Cloud sync directory became unavailable");
+    ctx.allow_warning("Cloud root became unavailable");
     ctx.allow_warning("Sync root is missing");
-    ctx.allow_warning("cloud sync directory");
+    ctx.allow_warning("cloud root");
     Ok(())
 }
 

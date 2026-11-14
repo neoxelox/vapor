@@ -39,9 +39,9 @@ const EXPECTED_WARNINGS: &[&str] = &[
     "Kept both versions on download-apply",
     "Remote changed since last sync; preserving it over a local deletion",
     "Mass-deletion guard tripped",
-    "Cloud sync directory became unavailable",
+    "Cloud root became unavailable",
     "Sync root is missing",
-    "Cloud sync directory",
+    "Cloud root",
     "Configuration keys changed",
     "collides with a differently-cased local file",
     "differ only by case",
@@ -228,8 +228,8 @@ impl Driver {
             }
         };
         let cli = Cli::new(&paths.cli_bin, &home);
-        cli.config_set("localSyncDirectory", &home.local.to_string_lossy())?;
-        cli.config_set("cloudSyncDirectory", &home.cloud.to_string_lossy())?;
+        cli.config_set("localRoot", &home.local.to_string_lossy())?;
+        cli.config_set("cloudRoot", &home.cloud.to_string_lossy())?;
         cli.config_set("syncMode", cfg.mode.label())?;
         let db = StateDb::at(&home.state_db());
         let now = Instant::now();
@@ -307,9 +307,9 @@ impl Driver {
         // A daemon started while the cloud root is parked or locked
         // blocks (Error) until the root is usable again.
         let expected = if self.cloud_unavailable() {
-            "Error"
+            "error"
         } else {
-            "Running"
+            "running"
         };
         self.cli.wait_run_state(expected, STARTUP_TIMEOUT)?;
         Ok(())
@@ -905,7 +905,7 @@ impl Driver {
     /// Waits until the daemon has nothing left to do: queue empty and no
     /// new intent for a quiet window, a requested reconcile, and the
     /// same again. Handles the states the workload legitimately
-    /// provokes (the mass-deletion guard, a parked cloud root).
+    /// provokes (the mass-delete guard, a parked cloud root).
     fn converge(&mut self) -> Result<(), Failure> {
         let deadline = Instant::now() + self.cfg.converge_deadline;
         self.ensure_daemon_working(deadline)?;
@@ -924,7 +924,6 @@ impl Driver {
         let quiet = Duration::from_secs(10);
         loop {
             self.ensure_daemon_working(deadline)?;
-            self.cli.flush_now();
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(Failure::new(format!(
@@ -979,7 +978,7 @@ impl Driver {
         }
     }
 
-    /// Restarts a dead daemon, answers the mass-deletion decisions the
+    /// Restarts a dead daemon, answers the mass-delete decisions the
     /// workload provokes, and waits for the daemon to be running, so
     /// the run never hangs on a state the workload itself caused.
     fn ensure_daemon_working(&mut self, deadline: Instant) -> Result<(), Failure> {
@@ -993,9 +992,9 @@ impl Driver {
         // unreadable sync blocks (Error, no decision); that is the
         // product working as designed, not a daemon to wait on.
         let expected = if self.cloud_unavailable() {
-            "Error"
+            "error"
         } else {
-            "Running"
+            "running"
         };
         let started = Instant::now();
         while self.cli.run_state().as_deref() != Some(expected) {
@@ -1011,7 +1010,7 @@ impl Driver {
     }
 
     /// The workload's subtree removals are deliberate, so every open
-    /// mass-deletion decision is answered `apply`; each one is recorded
+    /// mass-delete decision is answered `apply`; each one is recorded
     /// as a `guard-trip`, the product working as designed. A
     /// `root-missing` question about the cloud root while the driver
     /// has it parked is expected and left open: it withdraws itself when
@@ -1038,7 +1037,12 @@ impl Driver {
             {
                 continue;
             }
-            if kind != "mass-deletion" {
+            // Keep-both copies are part of what the model checks (both
+            // contested payloads survive), so their questions stay open.
+            if kind == "conflict" {
+                continue;
+            }
+            if kind != "mass-delete" {
                 return Err(Failure::new(format!(
                     "the daemon opened a {kind} decision (#{id}) the driver cannot answer: {}",
                     decision["question"].as_str().unwrap_or_default()
@@ -1047,8 +1051,8 @@ impl Driver {
             self.record_fault_event(
                 "guard-trip",
                 format!(
-                    "mass-deletion guard held {} deletion(s) behind decision #{id}; applying ({})",
-                    decision["heldIntents"].as_u64().unwrap_or_default(),
+                    "mass-delete guard held {} deletion(s) behind decision #{id}; applying ({})",
+                    decision["held"].as_u64().unwrap_or_default(),
                     decision["question"].as_str().unwrap_or_default()
                 ),
             );
@@ -1269,7 +1273,7 @@ impl Driver {
                     // lifts the hold on its own; give it that long.
                     if self.daemon_pid().is_some() {
                         self.cli
-                            .wait_run_state("Running", Duration::from_secs(90))?;
+                            .wait_run_state("running", Duration::from_secs(90))?;
                     }
                 }
             }
@@ -1284,7 +1288,7 @@ impl Driver {
                     // never asked about; the daemon recovers on its own.
                     if self.daemon_pid().is_some() {
                         self.cli
-                            .wait_run_state("Running", Duration::from_secs(90))?;
+                            .wait_run_state("running", Duration::from_secs(90))?;
                     }
                 }
             }

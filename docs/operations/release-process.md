@@ -218,7 +218,7 @@ one it gates.
      `format`, `lint`, `test`, and the e2e suite once per provider the
      harness knows (`./scripts/e2e.sh --providers`). The Google Drive
      leg runs only here, never in CI: it needs the dedicated test
-     account signed in (`vapor auth login gdrive`) and
+     account signed in (`vapor auth login`) and
      `VAPOR_GDRIVE_CLIENT_ID` in the environment or in `.env`, and a
      missing leg fails the gate. The harness builds its binaries
      without a client, so the leg's daemon takes it from the

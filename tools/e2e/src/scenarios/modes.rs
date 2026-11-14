@@ -69,7 +69,7 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             id: "S31",
             name: "mass-delete-decision-apply",
-            proves: "a burst of local deletions is held whole behind a mass-deletion decision while other work continues; vapor decisions resolve --choose apply releases it",
+            proves: "a burst of local deletions is held whole behind a mass-delete decision while other work continues; vapor decisions resolve --choose apply releases it",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
             run: mass_delete_guard,
@@ -333,15 +333,15 @@ fn two_profiles_isolated(ctx: &mut Ctx) -> Result<(), Failure> {
             "id": "alpha",
             "name": "Alpha",
             "enabled": true,
-            "localSyncDirectory": alpha_local.to_string_lossy(),
-            "cloudSyncDirectory": alpha_cloud.to_string_lossy(),
+            "localRoot": alpha_local.to_string_lossy(),
+            "cloudRoot": alpha_cloud.to_string_lossy(),
         },
         {
             "id": "beta",
             "name": "Beta",
             "enabled": true,
-            "localSyncDirectory": beta_local.to_string_lossy(),
-            "cloudSyncDirectory": beta_cloud.to_string_lossy(),
+            "localRoot": beta_local.to_string_lossy(),
+            "cloudRoot": beta_cloud.to_string_lossy(),
         }
     ]);
     ctx.cli().config_set("profiles", &profiles.to_string())?;
@@ -398,28 +398,22 @@ fn two_profiles_isolated(ctx: &mut Ctx) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The one open mass-deletion decision, once the daemon has opened it.
+/// The one open mass-delete decision, once the daemon has opened it.
 fn wait_open_mass_deletion(cli: &crate::cli::Cli, timeout: Duration) -> Result<i64, Failure> {
     let mut found = None;
-    wait::wait_until(
-        timeout,
-        "the mass-deletion guard to open a decision",
-        || {
-            let Ok(report) = cli.json(&["decisions", "list", "--json"]) else {
-                return false;
-            };
-            found = report["decisions"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|decision| {
-                    decision["kind"] == "mass-deletion" && decision["choice"].is_null()
-                })
-                .and_then(|decision| decision["id"].as_i64());
-            found.is_some()
-        },
-    )?;
-    found.ok_or_else(|| Failure::new("no open mass-deletion decision"))
+    wait::wait_until(timeout, "the mass-delete guard to open a decision", || {
+        let Ok(report) = cli.json(&["decisions", "list", "--json"]) else {
+            return false;
+        };
+        found = report["decisions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|decision| decision["kind"] == "mass-delete" && decision["choice"].is_null())
+            .and_then(|decision| decision["id"].as_i64());
+        found.is_some()
+    })?;
+    found.ok_or_else(|| Failure::new("no open mass-delete decision"))
 }
 
 fn victims_in(root: &Path) -> usize {
@@ -469,13 +463,13 @@ fn mass_delete_guard(ctx: &mut Ctx) -> Result<(), Failure> {
         || {
             cli.json(&["decisions", "show", &id.to_string(), "--json"])
                 .ok()
-                .and_then(|decision| decision["heldIntents"].as_u64())
+                .and_then(|decision| decision["held"].as_u64())
                 == Some(12)
         },
     )?;
     let decision = cli.json(&["decisions", "show", &id.to_string(), "--json"])?;
     ensure!(
-        decision["heldIntents"].as_u64() == Some(12),
+        decision["held"].as_u64() == Some(12),
         "the whole burst must be held before any of it lands: {decision}"
     );
     ensure!(
@@ -486,14 +480,14 @@ fn mass_delete_guard(ctx: &mut Ctx) -> Result<(), Failure> {
         .status()
         .ok_or_else(|| Failure::new("status did not answer"))?;
     ensure!(
-        status.run_state == "Running",
-        "a held batch must not pause the daemon (run_state {})",
-        status.run_state
+        status.run.state == "running",
+        "a held batch must not pause the daemon (run state {})",
+        status.run.state
     );
     ensure!(
-        status.decisions_pending == 1,
+        status.decisions == 1,
         "status must count the open decision, got {}",
-        status.decisions_pending
+        status.decisions
     );
     ensure!(
         victims_in(&home.cloud) == 20,
@@ -526,10 +520,7 @@ fn mass_delete_guard(ctx: &mut Ctx) -> Result<(), Failure> {
     let status = cli
         .status()
         .ok_or_else(|| Failure::new("status did not answer"))?;
-    ensure!(
-        status.decisions_pending == 0,
-        "status still counts a decision"
-    );
+    ensure!(status.decisions == 0, "status still counts a decision");
     ctx.allow_warning("Mass-deletion guard tripped");
     Ok(())
 }
@@ -723,7 +714,7 @@ fn trash_keeps_cloud_deletions(ctx: &mut Ctx) -> Result<(), Failure> {
     let entries = listed["entries"].as_array().cloned().unwrap_or_default();
     ensure!(entries.len() == 1, "expected one trash entry, got {listed}");
     ensure!(
-        entries[0]["reason"] == "deleted-in-cloud"
+        entries[0]["reason"] == "cloud-delete"
             && entries[0]["originalPath"].as_str() == Some(local.to_str().unwrap_or_default()),
         "unexpected trash entry: {}",
         entries[0]

@@ -34,8 +34,8 @@ func ignoreRuleDraftsStartFromConfigurationAndTrackPendingChanges() throws {
     environment: ["VAPOR_DIR": rootURL.path]
   )
   let configuration = VaporConfiguration(
-    preIgnoreRules: "node_modules/\n",
-    postIgnoreRules: "!node_modules/keep.txt\n"
+    preIgnoreRules: ["node_modules/"],
+    postIgnoreRules: ["!node_modules/keep.txt"]
   )
 
   let viewModel = AppShellViewModel(
@@ -44,8 +44,8 @@ func ignoreRuleDraftsStartFromConfigurationAndTrackPendingChanges() throws {
     configuration: configuration
   )
 
-  #expect(viewModel.state.preIgnoreRules == "node_modules/\n")
-  #expect(viewModel.state.postIgnoreRules == "!node_modules/keep.txt\n")
+  #expect(viewModel.state.preIgnoreRules == "node_modules/")
+  #expect(viewModel.state.postIgnoreRules == "!node_modules/keep.txt")
   #expect(!viewModel.hasPendingIgnoreRuleChanges)
 
   viewModel.updatePreIgnoreRulesDraft("tmp/\n")
@@ -65,8 +65,8 @@ func startupPreservesUserSelectedLanguageCodeEvenWhenCatalogFallsBackToEnglish()
     fileManager: fileManager,
     environment: ["VAPOR_DIR": rootURL.path]
   )
-  let configuration = VaporConfiguration(languageCode: "zz-unavailable-locale")
-  try configurationStore.save(configuration)
+  let configuration = VaporConfiguration(language: "zz-unavailable-locale")
+  try configurationStore.save(configuration, keys: VaporConfiguration.modelledKeys)
 
   let viewModel = AppShellViewModel(
     daemonLifecycleManager: .placeholder(),
@@ -74,11 +74,11 @@ func startupPreservesUserSelectedLanguageCodeEvenWhenCatalogFallsBackToEnglish()
     configuration: configuration
   )
 
-  #expect(viewModel.state.languageCode == "zz-unavailable-locale")
+  #expect(viewModel.state.language == "zz-unavailable-locale")
   #expect(viewModel.state.effectiveLanguageCode == "en")
 
   let persisted = configurationStore.load()
-  #expect(persisted.languageCode == "zz-unavailable-locale")
+  #expect(persisted.language == "zz-unavailable-locale")
 }
 
 @MainActor
@@ -93,8 +93,8 @@ func saveIgnoreRuleSettingsPersistsConfigurationAndRefreshesLifecycleFactory() t
     environment: ["VAPOR_DIR": rootURL.path]
   )
   let configuration = VaporConfiguration(
-    preIgnoreRules: "node_modules/\n",
-    postIgnoreRules: ""
+    preIgnoreRules: ["node_modules/"],
+    postIgnoreRules: []
   )
 
   var refreshedConfigurations: [VaporConfiguration] = []
@@ -114,19 +114,19 @@ func saveIgnoreRuleSettingsPersistsConfigurationAndRefreshesLifecycleFactory() t
   viewModel.saveIgnoreRuleSettings()
 
   let persisted = configurationStore.load()
-  #expect(persisted.preIgnoreRules == "tmp/\n!.keep\n")
-  #expect(persisted.postIgnoreRules == "build/\n")
-  #expect(viewModel.state.preIgnoreRules == "tmp/\n!.keep\n")
-  #expect(viewModel.state.postIgnoreRules == "build/\n")
+  #expect(persisted.preIgnoreRules == ["tmp/", "!.keep"])
+  #expect(persisted.postIgnoreRules == ["build/"])
+  #expect(viewModel.state.preIgnoreRules == "tmp/\n!.keep")
+  #expect(viewModel.state.postIgnoreRules == "build/")
   #expect(!viewModel.hasPendingIgnoreRuleChanges)
   #expect(refreshedConfigurations.count == 1)
-  #expect(refreshedConfigurations[0].preIgnoreRules == "tmp/\n!.keep\n")
-  #expect(refreshedConfigurations[0].postIgnoreRules == "build/\n")
+  #expect(refreshedConfigurations[0].preIgnoreRules == ["tmp/", "!.keep"])
+  #expect(refreshedConfigurations[0].postIgnoreRules == ["build/"])
 }
 
 @MainActor
 @Test
-func useGitIgnoreTogglePersistsConfigurationAndRefreshesLifecycleFactory() throws {
+func useGitignoreTogglePersistsConfigurationAndRefreshesLifecycleFactory() throws {
   let fileManager = FileManager.default
   let rootURL = makeTemporaryRoot(fileManager: fileManager)
   defer { try? fileManager.removeItem(at: rootURL) }
@@ -139,25 +139,25 @@ func useGitIgnoreTogglePersistsConfigurationAndRefreshesLifecycleFactory() throw
   let viewModel = AppShellViewModel(
     daemonLifecycleManager: .placeholder(),
     configurationStore: configurationStore,
-    configuration: VaporConfiguration(useGitIgnore: true),
+    configuration: VaporConfiguration(useGitignore: true),
     lifecycleManagerFactory: { configuration in
       refreshedConfigurations.append(configuration)
       return .placeholder()
     }
   )
 
-  viewModel.setUseGitIgnore(false)
+  viewModel.setUseGitignore(false)
 
   let persisted = configurationStore.load()
-  #expect(persisted.useGitIgnore == false)
-  #expect(viewModel.state.useGitIgnore == false)
+  #expect(persisted.useGitignore == false)
+  #expect(viewModel.state.useGitignore == false)
   #expect(refreshedConfigurations.count == 1)
-  #expect(refreshedConfigurations[0].useGitIgnore == false)
+  #expect(refreshedConfigurations[0].useGitignore == false)
 }
 
 @MainActor
 @Test
-func useVaporIgnoreTogglePersistsConfigurationAndRefreshesLifecycleFactory() throws {
+func useVaporignoreTogglePersistsConfigurationAndRefreshesLifecycleFactory() throws {
   let fileManager = FileManager.default
   let rootURL = makeTemporaryRoot(fileManager: fileManager)
   defer { try? fileManager.removeItem(at: rootURL) }
@@ -170,20 +170,20 @@ func useVaporIgnoreTogglePersistsConfigurationAndRefreshesLifecycleFactory() thr
   let viewModel = AppShellViewModel(
     daemonLifecycleManager: .placeholder(),
     configurationStore: configurationStore,
-    configuration: VaporConfiguration(useVaporIgnore: true),
+    configuration: VaporConfiguration(useVaporignore: true),
     lifecycleManagerFactory: { configuration in
       refreshedConfigurations.append(configuration)
       return .placeholder()
     }
   )
 
-  viewModel.setUseVaporIgnore(false)
+  viewModel.setUseVaporignore(false)
 
   let persisted = configurationStore.load()
-  #expect(persisted.useVaporIgnore == false)
-  #expect(viewModel.state.useVaporIgnore == false)
+  #expect(persisted.useVaporignore == false)
+  #expect(viewModel.state.useVaporignore == false)
   #expect(refreshedConfigurations.count == 1)
-  #expect(refreshedConfigurations[0].useVaporIgnore == false)
+  #expect(refreshedConfigurations[0].useVaporignore == false)
 }
 
 @MainActor
@@ -195,7 +195,7 @@ func startupPreservesMalformedConfigurationAndSurfacesDiagnosticState() throws {
 
   try fileManager.createDirectory(at: rootURL, withIntermediateDirectories: true)
   let configurationURL = VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL)
-  let malformedContents = "{\n  \"autoLaunch\": true,\n  \"useGitIgnore\":\n".data(using: .utf8)!
+  let malformedContents = "{\n  \"autoLaunch\": true,\n  \"useGitignore\":\n".data(using: .utf8)!
   try malformedContents.write(to: configurationURL, options: .atomic)
 
   let configurationStore = VaporConfigurationStore(

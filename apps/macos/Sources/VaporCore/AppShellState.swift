@@ -69,20 +69,20 @@ public enum SyncSurfaceState: String, CaseIterable, Codable, Sendable {
       return .stopped
     }
     switch status.runState {
-    case "Error":
+    case VaporConstants.RunState.error:
       return .error
-    case "Paused":
+    case VaporConstants.RunState.paused:
       return .paused
     default:
       break
     }
-    if status.throttleState == "Suspended" {
+    if status.throttleState == VaporConstants.ThrottleState.suspended {
       return .suspended
     }
-    if status.queueDepth == 0 {
-      return status.failedIntents > 0 ? .error : .idle
+    if status.queued == 0 {
+      return status.failed > 0 ? .error : .idle
     }
-    if status.throttleState == "Throttled" {
+    if status.throttleState == VaporConstants.ThrottleState.throttled {
       return .throttled
     }
     return .syncing
@@ -94,11 +94,11 @@ public struct AppShellState: Equatable, Codable, Sendable {
   public var configurationIssuePath: String?
   public var configurationIssueReason: String?
   public var autoLaunchEnabled: Bool
-  public var useGitIgnore: Bool
-  public var useVaporIgnore: Bool
+  public var useGitignore: Bool
+  public var useVaporignore: Bool
   public var preIgnoreRules: String
   public var postIgnoreRules: String
-  public var languageCode: String
+  public var language: String
   public var effectiveLanguageCode: String
   public var providerName: String
   public var vaporDirectoryPath: String
@@ -111,14 +111,11 @@ public struct AppShellState: Equatable, Codable, Sendable {
   /// while the daemon is running (diagnostic text, English).
   public var syncDetail: String?
   /// The daemon's notice that a restart-required setting changed.
-  public var configRestartRequired: String?
+  public var restartRequired: String?
   /// Questions the daemon parked until the user answers them
-  /// (`vapor decisions list`): a missing or replaced sync root, a
-  /// mass deletion, a file that changed type.
-  public var decisionsPending: UInt64
-  /// Keep-both conflict copies waiting for the user to pick a version
-  /// (`vapor conflicts list`).
-  public var conflictsUnresolved: UInt64
+  /// (`vapor decisions list`): a conflict, a missing or replaced sync
+  /// root, a mass delete, a file that changed type.
+  public var decisions: UInt64
   /// The whole-scope scan is queued but the throttle holds it (the
   /// user is active, the machine is busy). Sync now runs it anyway.
   public var scanIsWaiting: Bool
@@ -135,20 +132,19 @@ public struct AppShellState: Equatable, Codable, Sendable {
     configurationIssuePath: String?,
     configurationIssueReason: String?,
     autoLaunchEnabled: Bool,
-    useGitIgnore: Bool,
-    useVaporIgnore: Bool,
+    useGitignore: Bool,
+    useVaporignore: Bool,
     preIgnoreRules: String,
     postIgnoreRules: String,
-    languageCode: String,
+    language: String,
     effectiveLanguageCode: String,
     providerName: String,
     vaporDirectoryPath: String,
     crashLoopPaused: Bool = false,
     loginItemRequiresApproval: Bool = false,
     syncDetail: String? = nil,
-    configRestartRequired: String? = nil,
-    decisionsPending: UInt64 = 0,
-    conflictsUnresolved: UInt64 = 0,
+    restartRequired: String? = nil,
+    decisions: UInt64 = 0,
     scanIsWaiting: Bool = false,
     scanIsRunning: Bool = false,
     signInRequired: [SignInRequest] = [],
@@ -158,20 +154,19 @@ public struct AppShellState: Equatable, Codable, Sendable {
     self.configurationIssuePath = configurationIssuePath
     self.configurationIssueReason = configurationIssueReason
     self.autoLaunchEnabled = autoLaunchEnabled
-    self.useGitIgnore = useGitIgnore
-    self.useVaporIgnore = useVaporIgnore
+    self.useGitignore = useGitignore
+    self.useVaporignore = useVaporignore
     self.preIgnoreRules = preIgnoreRules
     self.postIgnoreRules = postIgnoreRules
-    self.languageCode = languageCode
+    self.language = language
     self.effectiveLanguageCode = effectiveLanguageCode
     self.providerName = providerName
     self.vaporDirectoryPath = vaporDirectoryPath
     self.crashLoopPaused = crashLoopPaused
     self.loginItemRequiresApproval = loginItemRequiresApproval
     self.syncDetail = syncDetail
-    self.configRestartRequired = configRestartRequired
-    self.decisionsPending = decisionsPending
-    self.conflictsUnresolved = conflictsUnresolved
+    self.restartRequired = restartRequired
+    self.decisions = decisions
     self.scanIsWaiting = scanIsWaiting
     self.scanIsRunning = scanIsRunning
     self.signInRequired = signInRequired
@@ -191,8 +186,14 @@ public struct AppShellState: Equatable, Codable, Sendable {
     guard let status else {
       return nil
     }
-    if syncState == .error || syncState == .paused, let reason = status.runStateReason {
-      return reason
+    if syncState == .error || syncState == .paused {
+      // The daemon's reason explains its own run state. An Error the app
+      // derived from failed changes comes with the reason of a healthy
+      // run ("watching ~/Vapor"), which would only mislead.
+      let explains =
+        status.runState == VaporConstants.RunState.error
+        || status.runState == VaporConstants.RunState.paused
+      return explains ? status.runReason : nil
     }
     if (status.scanIsWaiting || status.scanIsRunning) && !status.reconcileDetail.isEmpty {
       return status.reconcileDetail
@@ -205,11 +206,11 @@ public struct AppShellState: Equatable, Codable, Sendable {
     configurationIssuePath: nil,
     configurationIssueReason: nil,
     autoLaunchEnabled: true,
-    useGitIgnore: true,
-    useVaporIgnore: true,
-    preIgnoreRules: VaporConfiguration.defaultPreIgnoreRules,
-    postIgnoreRules: VaporConfiguration.defaultPostIgnoreRules,
-    languageCode: VaporConfiguration.defaultLanguageCode,
+    useGitignore: true,
+    useVaporignore: true,
+    preIgnoreRules: VaporConfiguration.editorText(for: VaporConfiguration.defaultPreIgnoreRules),
+    postIgnoreRules: VaporConfiguration.editorText(for: VaporConfiguration.defaultPostIgnoreRules),
+    language: VaporConfiguration.defaultLanguage,
     effectiveLanguageCode: VaporConstants.Localization.defaultLanguageCode,
     providerName: VaporConstants.Provider.displayName(
       forKind: VaporConstants.Provider.defaultKind),
@@ -248,11 +249,10 @@ public struct AppShellState: Equatable, Codable, Sendable {
   /// mark turns the brand colour while this holds.
   public var needsUserAction: Bool {
     !signInRequired.isEmpty
-      || decisionsPending > 0
-      || conflictsUnresolved > 0
+      || decisions > 0
       || crashLoopPaused
       || loginItemRequiresApproval
-      || configRestartRequired != nil
+      || restartRequired != nil
       || hasConfigurationIssue
       || syncState == .error
   }

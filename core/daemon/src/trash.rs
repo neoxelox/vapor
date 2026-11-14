@@ -10,7 +10,7 @@
 //! layout, so a discard there is a rename on that drive and never a
 //! copy onto this one; both locations are listed, restored from, and
 //! purged together. Entries older than the retention window are
-//! purged by the daemon. With `trash.useSystemTrash` the user's own
+//! purged by the daemon. With `trash.useSystem` the user's own
 //! trash is tried first (the Finder's Trash on macOS) and the managed
 //! trash is the fallback, so a discard never silently degrades to an
 //! unlink.
@@ -32,7 +32,7 @@ use vapor_shared::constants;
 pub struct TrashSettings {
     pub enabled: bool,
     pub retention: Duration,
-    pub use_system_trash: bool,
+    pub use_system: bool,
 }
 
 impl Default for TrashSettings {
@@ -42,7 +42,7 @@ impl Default for TrashSettings {
             retention: Duration::from_secs(
                 u64::from(constants::trash::DEFAULT_RETENTION_DAYS) * 86_400,
             ),
-            use_system_trash: constants::trash::DEFAULT_USE_SYSTEM_TRASH,
+            use_system: constants::trash::DEFAULT_USE_SYSTEM,
         }
     }
 }
@@ -53,7 +53,7 @@ impl TrashSettings {
         Self {
             enabled: configured.enabled,
             retention: Duration::from_secs(u64::from(configured.retention_days) * 86_400),
-            use_system_trash: configured.use_system_trash,
+            use_system: configured.use_system,
         }
     }
 }
@@ -245,7 +245,7 @@ impl LocalTrash {
             remove_any(path)?;
             return Ok(Disposition::Removed);
         }
-        if self.settings.use_system_trash {
+        if self.settings.use_system {
             match self.system.trash(path) {
                 Ok(landed) => return Ok(Disposition::System(landed)),
                 Err(error) => crate::logging::debug(
@@ -485,7 +485,7 @@ mod tests {
             TrashSettings {
                 enabled: true,
                 retention: Duration::from_secs(3_600),
-                use_system_trash: false,
+                use_system: false,
             },
             Arc::new(vapor_platform::InMemoryTrashBin::unsupported()),
         )
@@ -500,7 +500,7 @@ mod tests {
         fs::write(&file, b"keep me").expect("seed");
 
         let disposition = trash
-            .discard(&file, constants::trash::REASON_CLOUD_DELETION, at(100))
+            .discard(&file, constants::trash::REASON_CLOUD_DELETE, at(100))
             .expect("discard");
         let Disposition::Managed(id) = disposition else {
             panic!("expected the managed trash, got {disposition:?}");
@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(listed[0].original_path, file);
         assert_eq!(listed[0].kind, "file");
         assert_eq!(listed[0].size_bytes, 7);
-        assert_eq!(listed[0].reason, constants::trash::REASON_CLOUD_DELETION);
+        assert_eq!(listed[0].reason, constants::trash::REASON_CLOUD_DELETE);
 
         let landed = trash.restore(&id).expect("restore");
         assert_eq!(landed, file);
@@ -532,7 +532,7 @@ mod tests {
         fs::write(&on_volume, b"on the volume").expect("seed");
 
         let Disposition::Managed(id) = trash
-            .discard(&on_volume, constants::trash::REASON_CLOUD_DELETION, at(100))
+            .discard(&on_volume, constants::trash::REASON_CLOUD_DELETE, at(100))
             .expect("discard")
         else {
             panic!("expected the managed trash");
@@ -557,7 +557,7 @@ mod tests {
             original_path: temp.path().join("volume/Vapor/old.txt"),
             file_name: "old.txt".into(),
             kind: "file".into(),
-            reason: constants::trash::REASON_CLOUD_DELETION.into(),
+            reason: constants::trash::REASON_CLOUD_DELETE.into(),
             discarded_at_ms: 1_000,
             size_bytes: 3,
         };
@@ -579,11 +579,7 @@ mod tests {
         // one on the volume is not.
         fs::write(&on_volume, b"again").expect("seed again");
         trash
-            .discard(
-                &on_volume,
-                constants::trash::REASON_CLOUD_DELETION,
-                at(5_000),
-            )
+            .discard(&on_volume, constants::trash::REASON_CLOUD_DELETE, at(5_000))
             .expect("discard again");
         assert_eq!(trash.purge_expired(at(5_000)), 1);
         assert_eq!(trash.list().len(), 1);
@@ -599,7 +595,7 @@ mod tests {
         fs::create_dir_all(file.parent().unwrap()).expect("root");
         fs::write(&file, b"old").expect("seed");
         let Disposition::Managed(id) = trash
-            .discard(&file, constants::trash::REASON_CLOUD_DELETION, at(100))
+            .discard(&file, constants::trash::REASON_CLOUD_DELETE, at(100))
             .expect("discard")
         else {
             panic!("managed");
@@ -622,7 +618,7 @@ mod tests {
         fs::create_dir_all(dir.join("src")).expect("dir");
         fs::write(dir.join("src/main.rs"), b"fn main() {}").expect("file");
         let Disposition::Managed(id) = trash
-            .discard(&dir, constants::trash::REASON_MIRROR_REMOVAL, at(100))
+            .discard(&dir, constants::trash::REASON_MIRROR_DELETE, at(100))
             .expect("discard")
         else {
             panic!("managed");
@@ -647,7 +643,7 @@ mod tests {
         let settings = TrashSettings {
             enabled: true,
             retention: Duration::from_secs(60),
-            use_system_trash: true,
+            use_system: true,
         };
         let trash = LocalTrash::new("default", temp.path().join("trash"), settings, bin.clone());
         let file = temp.path().join("a.txt");

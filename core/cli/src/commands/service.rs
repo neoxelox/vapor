@@ -19,7 +19,7 @@
 //! The `restart` command is a stop-then-start sequence; both halves
 //! tolerate the daemon already being in the target state. With no
 //! service definition registered, `start` and `restart` report
-//! `not_installed` instead of asking the service manager to kick a job
+//! `not-installed` instead of asking the service manager to kick a job
 //! it does not have; auto-launch (`vapor service install`) is what
 //! registers one.
 
@@ -232,11 +232,12 @@ fn seconds(duration: Duration) -> f64 {
 }
 
 fn status_wire_name(status: ServiceStatus) -> &'static str {
+    use constants::service as names;
     match status {
-        ServiceStatus::NotInstalled => "not_installed",
-        ServiceStatus::Stopped => "stopped",
-        ServiceStatus::Running => "running",
-        ServiceStatus::CrashLoopPaused => "crash_loop_paused",
+        ServiceStatus::NotInstalled => names::STATUS_NOT_INSTALLED,
+        ServiceStatus::Stopped => names::STATUS_STOPPED,
+        ServiceStatus::Running => names::STATUS_RUNNING,
+        ServiceStatus::CrashLoopPaused => names::STATUS_CRASH_LOOP_PAUSED,
     }
 }
 
@@ -244,57 +245,68 @@ fn status_wire_name(status: ServiceStatus) -> &'static str {
 /// parses this; key names and value enums are a versioned contract —
 /// change them only with a coordinated Swift-side update.
 pub fn render_json(outcome: &ServiceCommandOutcome) -> serde_json::Value {
+    use constants::service as names;
     match outcome {
         ServiceCommandOutcome::Action(action) => match action {
-            DaemonLifecycleActionResult::Unchanged => serde_json::json!({"result": "unchanged"}),
-            DaemonLifecycleActionResult::Started => serde_json::json!({"result": "started"}),
-            DaemonLifecycleActionResult::Stopped => serde_json::json!({"result": "stopped"}),
+            DaemonLifecycleActionResult::Unchanged => {
+                serde_json::json!({"result": names::RESULT_UNCHANGED})
+            }
+            DaemonLifecycleActionResult::Started => {
+                serde_json::json!({"result": names::RESULT_STARTED})
+            }
+            DaemonLifecycleActionResult::Stopped => {
+                serde_json::json!({"result": names::RESULT_STOPPED})
+            }
             DaemonLifecycleActionResult::RelaunchDeferred(remaining) => {
                 if *remaining == Duration::MAX {
-                    serde_json::json!({"result": "crash_loop_paused"})
+                    serde_json::json!({"result": names::RESULT_CRASH_LOOP_PAUSED})
                 } else {
                     serde_json::json!({
-                        "result": "relaunch_deferred",
-                        "remaining_seconds": seconds(*remaining),
+                        "result": names::RESULT_RELAUNCH_DEFERRED,
+                        "remainingSeconds": seconds(*remaining),
                     })
                 }
             }
             DaemonLifecycleActionResult::NotInstalled => {
-                serde_json::json!({"result": "not_installed"})
+                serde_json::json!({"result": names::RESULT_NOT_INSTALLED})
             }
         },
         ServiceCommandOutcome::Health(health) => match health {
-            DaemonHealthCheckOutcome::Running => serde_json::json!({"health": "running"}),
+            DaemonHealthCheckOutcome::Running => {
+                serde_json::json!({"health": names::HEALTH_RUNNING})
+            }
             DaemonHealthCheckOutcome::NotInstalled => {
-                serde_json::json!({"health": "not_installed"})
+                serde_json::json!({"health": names::HEALTH_NOT_INSTALLED})
             }
             DaemonHealthCheckOutcome::StoppedExpected => {
-                serde_json::json!({"health": "stopped_expected"})
+                serde_json::json!({"health": names::HEALTH_STOPPED_EXPECTED})
             }
             DaemonHealthCheckOutcome::RestartedAfterCrash => {
-                serde_json::json!({"health": "restarted_after_crash"})
+                serde_json::json!({"health": names::HEALTH_RESTARTED_AFTER_CRASH})
             }
             DaemonHealthCheckOutcome::RestartDeferred(remaining) => serde_json::json!({
-                "health": "restart_deferred",
-                "remaining_seconds": seconds(*remaining),
+                "health": names::HEALTH_RESTART_DEFERRED,
+                "remainingSeconds": seconds(*remaining),
             }),
             DaemonHealthCheckOutcome::CrashLoopPaused => {
-                serde_json::json!({"health": "crash_loop_paused"})
+                serde_json::json!({"health": names::HEALTH_CRASH_LOOP_PAUSED})
             }
         },
         ServiceCommandOutcome::Status(report) => serde_json::json!({
             "status": status_wire_name(report.status),
             "label": report.label,
-            "auto_launch": report.auto_launch,
-            "crash_loop": {
+            "autoLaunch": report.auto_launch,
+            "crashLoop": {
                 "paused": report.crash_loop.paused,
-                "consecutive_crashes": report.crash_loop.consecutive_crashes,
-                "last_crash_at_ms": report.crash_loop.last_crash_at_ms,
-                "awaiting_restart": report.crash_loop.awaiting_restart,
+                "consecutiveCrashes": report.crash_loop.consecutive_crashes,
+                "lastCrashAtMs": report.crash_loop.last_crash_at_ms,
+                "awaitingRestart": report.crash_loop.awaiting_restart,
             },
-            "supervisor_installed": report.supervisor_installed,
+            "supervisorInstalled": report.supervisor_installed,
         }),
-        ServiceCommandOutcome::Acknowledged => serde_json::json!({"result": "acknowledged"}),
+        ServiceCommandOutcome::Acknowledged => {
+            serde_json::json!({"result": names::RESULT_ACKNOWLEDGED})
+        }
     }
 }
 
@@ -775,7 +787,7 @@ mod tests {
                 DaemonLifecycleActionResult::NotInstalled
             ))
             .to_string(),
-            r#"{"result":"not_installed"}"#
+            r#"{"result":"not-installed"}"#
         );
         assert!(
             render_text(&ServiceCommandOutcome::Action(
@@ -868,8 +880,8 @@ mod tests {
     #[test]
     fn status_report_carries_the_service_label_not_the_log_file_name() {
         // Regression: status used to emit DAEMON_LOG_FILE_NAME
-        // ("vapord.logs") in the label field, which made
-        // `vapor service status` say `(label: vapord.logs)` — wrong.
+        // ("vapord.log") in the label field, which made
+        // `vapor service status` say `(label: vapord.log)` — wrong.
         // The label is supposed to be the reverse-DNS service identifier.
         let installer = fake_installer();
         let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
@@ -1000,13 +1012,13 @@ mod tests {
             json_string(&ServiceCommandOutcome::Action(
                 DaemonLifecycleActionResult::RelaunchDeferred(Duration::from_millis(1_500))
             )),
-            r#"{"remaining_seconds":1.5,"result":"relaunch_deferred"}"#
+            r#"{"remainingSeconds":1.5,"result":"relaunch-deferred"}"#
         );
         assert_eq!(
             json_string(&ServiceCommandOutcome::Action(
                 DaemonLifecycleActionResult::RelaunchDeferred(Duration::MAX)
             )),
-            r#"{"result":"crash_loop_paused"}"#
+            r#"{"result":"crash-loop-paused"}"#
         );
         assert_eq!(
             json_string(&ServiceCommandOutcome::Acknowledged),
@@ -1026,31 +1038,31 @@ mod tests {
             json_string(&ServiceCommandOutcome::Health(
                 DaemonHealthCheckOutcome::NotInstalled
             )),
-            r#"{"health":"not_installed"}"#
+            r#"{"health":"not-installed"}"#
         );
         assert_eq!(
             json_string(&ServiceCommandOutcome::Health(
                 DaemonHealthCheckOutcome::StoppedExpected
             )),
-            r#"{"health":"stopped_expected"}"#
+            r#"{"health":"stopped-expected"}"#
         );
         assert_eq!(
             json_string(&ServiceCommandOutcome::Health(
                 DaemonHealthCheckOutcome::RestartedAfterCrash
             )),
-            r#"{"health":"restarted_after_crash"}"#
+            r#"{"health":"restarted-after-crash"}"#
         );
         assert_eq!(
             json_string(&ServiceCommandOutcome::Health(
                 DaemonHealthCheckOutcome::RestartDeferred(Duration::from_secs(2))
             )),
-            r#"{"health":"restart_deferred","remaining_seconds":2.0}"#
+            r#"{"health":"restart-deferred","remainingSeconds":2.0}"#
         );
         assert_eq!(
             json_string(&ServiceCommandOutcome::Health(
                 DaemonHealthCheckOutcome::CrashLoopPaused
             )),
-            r#"{"health":"crash_loop_paused"}"#
+            r#"{"health":"crash-loop-paused"}"#
         );
     }
 
@@ -1071,9 +1083,9 @@ mod tests {
         assert_eq!(
             json_string(&ServiceCommandOutcome::Status(report)),
             concat!(
-                r#"{"auto_launch":true,"crash_loop":{"awaiting_restart":true,"#,
-                r#""consecutive_crashes":5,"last_crash_at_ms":1750000000000,"paused":true},"#,
-                r#""label":"sh.arn.vapor.daemon","status":"crash_loop_paused","supervisor_installed":true}"#
+                r#"{"autoLaunch":true,"crashLoop":{"awaitingRestart":true,"#,
+                r#""consecutiveCrashes":5,"lastCrashAtMs":1750000000000,"paused":true},"#,
+                r#""label":"sh.arn.vapor.daemon","status":"crash-loop-paused","supervisorInstalled":true}"#
             )
         );
     }

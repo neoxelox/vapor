@@ -56,7 +56,7 @@ VAPOR_GDRIVE_CLIENT_SECRET=<secret>
 `apps/macos/scripts/package.sh` source `scripts/dotenv.sh`, which reads
 these two keys and nothing else from `.env`; a value already exported
 wins. Each build prints the client it compiles in, and
-`vapor doctor` shows it afterwards (`gdrive_oauth_client`). A plain
+`vapor doctor` shows it afterwards (`gdrive-oauth-client`). A plain
 `cargo build` sees only the shell's environment. Test and e2e builds
 leave the client out on purpose; see
 `docs/operations/provider-auth-operations.md` for the client, the

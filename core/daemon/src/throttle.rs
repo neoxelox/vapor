@@ -37,22 +37,22 @@ pub struct ThrottleCaps {
     pub allow_downloads: bool,
 }
 
-/// The IdleDrain concurrency tier, derived once from the machine's
+/// The Idle concurrency tier, derived once from the machine's
 /// available parallelism: half the cores, clamped into
-/// `[IDLE_DRAIN_CONCURRENCY_MIN, IDLE_DRAIN_CONCURRENCY_MAX]`. A
+/// `[IDLE_CONCURRENCY_MIN, IDLE_CONCURRENCY_MAX]`. A
 /// 16-core desktop drains at 8-wide while a small laptop keeps the
 /// classic 4 — the throttle ladder still collapses this whenever the
-/// user is active, and `resourceLimits.maxConcurrentTransfers` caps it
+/// user is active, and `resourceLimits.concurrentTransfers` caps it
 /// explicitly.
-pub fn idle_drain_concurrency() -> usize {
+pub fn idle_concurrency() -> usize {
     static TIER: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *TIER.get_or_init(|| {
         let cores = std::thread::available_parallelism()
             .map(|cores| cores.get())
-            .unwrap_or(constants::engine::IDLE_DRAIN_CONCURRENCY_MIN);
+            .unwrap_or(constants::engine::IDLE_CONCURRENCY_MIN);
         (cores / 2).clamp(
-            constants::engine::IDLE_DRAIN_CONCURRENCY_MIN,
-            constants::engine::IDLE_DRAIN_CONCURRENCY_MAX,
+            constants::engine::IDLE_CONCURRENCY_MIN,
+            constants::engine::IDLE_CONCURRENCY_MAX,
         )
     })
 }
@@ -60,8 +60,8 @@ pub fn idle_drain_concurrency() -> usize {
 /// Read tokens scale at half the tier (floor at the classic 2): they
 /// bound concurrent disk reads (hashing + reconcile), which saturate
 /// well before the transfer tier does.
-pub(crate) fn idle_drain_read_tokens() -> usize {
-    (idle_drain_concurrency() / 2).max(constants::engine::IDLE_DRAIN_READ_TOKENS)
+pub(crate) fn idle_read_tokens() -> usize {
+    (idle_concurrency() / 2).max(constants::engine::IDLE_READ_TOKENS)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -117,7 +117,7 @@ impl ThrottleController {
     /// state before allowing a transition.
     pub fn min_dwell_for(state: ThrottleState) -> Duration {
         match state {
-            ThrottleState::IdleDrain => Duration::ZERO,
+            ThrottleState::Idle => Duration::ZERO,
             ThrottleState::Light => Duration::from_secs(constants::engine::MIN_DWELL_LIGHT_SECONDS),
             ThrottleState::Throttled => {
                 Duration::from_secs(constants::engine::MIN_DWELL_THROTTLED_SECONDS)
@@ -130,7 +130,7 @@ impl ThrottleController {
 
     pub fn evaluate(&mut self, inputs: ThrottleInputs) -> ThrottleDecision {
         let mut selected = ThrottleCandidate {
-            state: ThrottleState::IdleDrain,
+            state: ThrottleState::Idle,
             cause: ThrottleCause::IdleReady,
             priority: 0,
         };
@@ -204,12 +204,12 @@ impl ThrottleController {
 
     pub fn caps_for(&self, state: ThrottleState) -> ThrottleCaps {
         match state {
-            ThrottleState::IdleDrain => ThrottleCaps {
-                planner_workers: idle_drain_concurrency(),
-                hash_workers: idle_drain_concurrency(),
-                read_tokens: idle_drain_read_tokens(),
-                upload_concurrency: idle_drain_concurrency(),
-                download_concurrency: idle_drain_concurrency(),
+            ThrottleState::Idle => ThrottleCaps {
+                planner_workers: idle_concurrency(),
+                hash_workers: idle_concurrency(),
+                read_tokens: idle_read_tokens(),
+                upload_concurrency: idle_concurrency(),
+                download_concurrency: idle_concurrency(),
                 allow_reconcile: true,
                 allow_hashing: true,
                 allow_uploads: true,
@@ -429,7 +429,7 @@ impl ThrottleController {
 
 fn throttle_state_rank(state: ThrottleState) -> u8 {
     match state {
-        ThrottleState::IdleDrain => 0,
+        ThrottleState::Idle => 0,
         ThrottleState::Light => 1,
         ThrottleState::Throttled => 2,
         ThrottleState::Suspended => 3,
@@ -447,24 +447,23 @@ mod tests {
     }
 
     #[test]
-    fn idle_plugged_cool_inputs_enter_idle_drain_with_full_caps() {
+    fn idle_plugged_cool_inputs_enter_idle_with_full_caps() {
         let mut controller = ThrottleController::default();
 
         let decision = controller.evaluate(ThrottleInputs::default());
 
-        assert_eq!(decision.state, ThrottleState::IdleDrain);
+        assert_eq!(decision.state, ThrottleState::Idle);
         assert_eq!(decision.cause, ThrottleCause::IdleReady);
         assert_eq!(decision.reason, "idle, plugged in, and cool");
-        let tier = idle_drain_concurrency();
+        let tier = idle_concurrency();
         assert!(
-            (constants::engine::IDLE_DRAIN_CONCURRENCY_MIN
-                ..=constants::engine::IDLE_DRAIN_CONCURRENCY_MAX)
+            (constants::engine::IDLE_CONCURRENCY_MIN..=constants::engine::IDLE_CONCURRENCY_MAX)
                 .contains(&tier),
             "the derived tier must respect its bounds, got {tier}"
         );
         assert_eq!(decision.caps.planner_workers, tier);
         assert_eq!(decision.caps.hash_workers, tier);
-        assert_eq!(decision.caps.read_tokens, idle_drain_read_tokens());
+        assert_eq!(decision.caps.read_tokens, idle_read_tokens());
         assert_eq!(decision.caps.upload_concurrency, tier);
         assert_eq!(decision.caps.download_concurrency, tier);
         assert!(decision.caps.allow_reconcile);
@@ -473,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn battery_power_prevents_idle_drain() {
+    fn battery_power_prevents_idle() {
         let mut controller = ThrottleController::default();
         let decision = controller.evaluate(ThrottleInputs {
             on_battery: true,
@@ -584,7 +583,7 @@ mod tests {
             ..ThrottleInputs::default()
         });
 
-        assert_eq!(unknown.state, ThrottleState::IdleDrain);
+        assert_eq!(unknown.state, ThrottleState::Idle);
         assert_eq!(constrained.state, ThrottleState::Throttled);
         assert_eq!(constrained.cause, ThrottleCause::NetworkThroughput);
         assert_eq!(constrained.reason, "network throughput is 100 kbps");
@@ -595,7 +594,7 @@ mod tests {
         // Sanity guard so the dwell-window helper stays in sync with the
         // shared constants. Future tweaks must update both sides.
         assert_eq!(
-            ThrottleController::min_dwell_for(ThrottleState::IdleDrain),
+            ThrottleController::min_dwell_for(ThrottleState::Idle),
             Duration::ZERO
         );
         assert_eq!(
@@ -651,13 +650,13 @@ mod tests {
         }
 
         // After the dwell elapses, the next "all clear" sample is allowed
-        // to transition back to IdleDrain.
+        // to transition back to Idle.
         clock.advance(Duration::from_secs(3));
         let recovered = controller.evaluate(ThrottleInputs {
             system_cpu_load_percent: 5,
             ..ThrottleInputs::default()
         });
-        assert_eq!(recovered.state, ThrottleState::IdleDrain);
+        assert_eq!(recovered.state, ThrottleState::Idle);
     }
 
     #[test]
@@ -698,7 +697,7 @@ mod tests {
         );
         clock.advance(Duration::from_secs(2));
         let recovered = controller.evaluate(ThrottleInputs::default());
-        assert_eq!(recovered.state, ThrottleState::IdleDrain);
+        assert_eq!(recovered.state, ThrottleState::Idle);
     }
 
     #[test]

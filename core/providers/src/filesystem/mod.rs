@@ -2,7 +2,7 @@
 //!
 //! A full [`Provider`] implementation backed by a local directory that
 //! plays the role of the cloud side. When `provider = "filesystem"`,
-//! `cloudSyncDirectory` is reinterpreted as an absolute local path.
+//! `cloudRoot` is reinterpreted as an absolute local path.
 //! The provider is the reference implementation the engine's
 //! bidirectional pipeline is validated against before any real cloud
 //! backend (Google Drive) goes live, and the backend the
@@ -154,7 +154,7 @@ pub struct FilesystemProvider {
 
 impl FilesystemProvider {
     /// A provider that resolves its root when the engine calls
-    /// [`Provider::ensure_cloud_sync_directory`] and watches it natively
+    /// [`Provider::ensure_cloud_root`] and watches it natively
     /// for the changes feed.
     pub fn new() -> Self {
         Self::with_capabilities(Arc::new(NativeFilesystemCapabilities::for_current_host()))
@@ -179,7 +179,7 @@ impl FilesystemProvider {
     ) -> Result<(Self, ManualFeedHandle), ProviderError> {
         let mut provider = Self::with_capabilities(caps);
         provider.feed_mode = FeedMode::Manual;
-        provider.ensure_cloud_sync_directory(&root.to_string_lossy())?;
+        provider.ensure_cloud_root(&root.to_string_lossy())?;
         let handle = provider.feed.manual_handle();
         Ok((provider, handle))
     }
@@ -188,7 +188,7 @@ impl FilesystemProvider {
     /// ensures `root` immediately with native capabilities.
     pub fn with_root(root: &Path) -> Result<Self, ProviderError> {
         let provider = Self::new();
-        provider.ensure_cloud_sync_directory(&root.to_string_lossy())?;
+        provider.ensure_cloud_root(&root.to_string_lossy())?;
         Ok(provider)
     }
 
@@ -199,7 +199,7 @@ impl FilesystemProvider {
             .clone()
             .ok_or_else(|| {
                 ProviderError::permanent(
-                    "filesystem provider has no ensured cloud sync directory yet; \
+                    "filesystem provider has no ensured cloud root yet; \
                      configuration must be validated before sync work starts",
                 )
             })
@@ -322,24 +322,24 @@ impl Provider for FilesystemProvider {
         HashAlgorithm::Sha256
     }
 
-    fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), ProviderError> {
-        let expanded = expand_cloud_directory(cloud_sync_directory)?;
+    fn ensure_cloud_root(&self, cloud_root: &str) -> Result<(), ProviderError> {
+        let expanded = expand_cloud_directory(cloud_root)?;
         if let Err(error) = fs::create_dir_all(&expanded) {
             return Err(ProviderError::permanent(format!(
-                "cannot create filesystem cloud sync directory {}: {error}. \
-                 Set `cloudSyncDirectory` to a writable absolute path when \
+                "cannot create filesystem cloud root {}: {error}. \
+                 Set `cloudRoot` to a writable absolute path when \
                  `provider` is \"filesystem\"",
                 expanded.display()
             )));
         }
         let canonical = vapor_shared::paths::canonicalize(&expanded).map_err(|error| {
             ProviderError::permanent(format!(
-                "cannot canonicalize filesystem cloud sync directory {}: {error}",
+                "cannot canonicalize filesystem cloud root {}: {error}",
                 expanded.display()
             ))
         })?;
         crate::logging::info(
-            "Filesystem provider ensured cloud sync directory",
+            "Filesystem provider ensured cloud root",
             &[("path", canonical.display().to_string())],
         );
         *self
@@ -388,25 +388,25 @@ impl Provider for FilesystemProvider {
         Ok(())
     }
 
-    fn root_identity(&self, cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
-        let expanded = expand_cloud_directory(cloud_sync_directory)?;
+    fn root_identity(&self, cloud_root: &str) -> Result<Option<String>, ProviderError> {
+        let expanded = expand_cloud_directory(cloud_root)?;
         match fs::symlink_metadata(&expanded) {
             Ok(metadata) if metadata.is_dir() => {}
             Ok(_) => {
                 return Err(ProviderError::permanent(format!(
-                    "filesystem cloud sync directory {} is not a directory",
+                    "filesystem cloud root {} is not a directory",
                     expanded.display()
                 )));
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Err(ProviderError::not_found(format!(
-                    "filesystem cloud sync directory {} is missing",
+                    "filesystem cloud root {} is missing",
                     expanded.display()
                 )));
             }
             Err(error) => {
                 return Err(ProviderError::transient(format!(
-                    "cannot stat filesystem cloud sync directory {}: {error}",
+                    "cannot stat filesystem cloud root {}: {error}",
                     expanded.display()
                 )));
             }
@@ -423,10 +423,10 @@ impl Provider for FilesystemProvider {
 
     fn adopt_root(
         &self,
-        cloud_sync_directory: &str,
+        cloud_root: &str,
         device_id: &str,
     ) -> Result<Option<String>, ProviderError> {
-        let expanded = expand_cloud_directory(cloud_sync_directory)?;
+        let expanded = expand_cloud_directory(cloud_root)?;
         crate::root_marker::adopt(&expanded, device_id, SystemTime::now())
             .map(|marker| Some(marker.root_id))
             .map_err(|error| {
@@ -730,14 +730,12 @@ fn expand_cloud_directory(raw: &str) -> Result<PathBuf, ProviderError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(ProviderError::permanent(
-            "cloudSyncDirectory is empty; the filesystem provider needs an absolute local path",
+            "cloudRoot is empty; the filesystem provider needs an absolute local path",
         ));
     }
     if trimmed == "~" || trimmed.starts_with("~/") {
         let home = vapor_shared::runtime_paths::home_directory().ok_or_else(|| {
-            ProviderError::permanent(
-                "cannot expand ~ in cloudSyncDirectory: no home directory resolved",
-            )
+            ProviderError::permanent("cannot expand ~ in cloudRoot: no home directory resolved")
         })?;
         return Ok(match trimmed.strip_prefix("~/") {
             Some(suffix) => home.join(suffix),
@@ -747,7 +745,7 @@ fn expand_cloud_directory(raw: &str) -> Result<PathBuf, ProviderError> {
     let path = PathBuf::from(trimmed);
     if !path.is_absolute() {
         return Err(ProviderError::permanent(format!(
-            "cloudSyncDirectory {trimmed} must be an absolute path when `provider` is \"filesystem\""
+            "cloudRoot {trimmed} must be an absolute path when `provider` is \"filesystem\""
         )));
     }
     Ok(path)
@@ -811,7 +809,7 @@ fn copy_permissions_from_handle(_source: &fs::File, _staged: &Path) {}
 fn classify_scope_failure(root: &Path, message: String) -> ProviderError {
     if !root.is_dir() {
         return ProviderError::cloud_root_unavailable(format!(
-            "cloud sync directory {} no longer exists ({message})",
+            "cloud root {} no longer exists ({message})",
             root.display()
         ));
     }
@@ -1311,7 +1309,7 @@ mod tests {
         let root = dir.path().join("cloud/Vapor");
         let provider = FilesystemProvider::new();
         provider
-            .ensure_cloud_sync_directory(&root.to_string_lossy())
+            .ensure_cloud_root(&root.to_string_lossy())
             .expect("ensure creates root");
         assert!(root.is_dir());
     }
@@ -1320,11 +1318,11 @@ mod tests {
     fn ensure_rejects_relative_and_empty_paths_with_actionable_error() {
         let provider = FilesystemProvider::new();
         let error = provider
-            .ensure_cloud_sync_directory("relative/cloud")
+            .ensure_cloud_root("relative/cloud")
             .expect_err("relative must be rejected");
         assert!(error.message.contains("absolute path"));
         assert!(
-            provider.ensure_cloud_sync_directory("  ").is_err(),
+            provider.ensure_cloud_root("  ").is_err(),
             "empty path must be rejected"
         );
     }

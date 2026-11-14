@@ -19,12 +19,6 @@ pub mod env {
     pub const VAPOR_DIR: &str = "VAPOR_DIR";
     pub const VAPOR_ENV: &str = "VAPOR_ENV";
     pub const VAPOR_LOG_LEVEL: &str = "VAPOR_LOG_LEVEL";
-    pub const VAPOR_USE_GITIGNORE: &str = "VAPOR_USE_GITIGNORE";
-    pub const VAPOR_USE_VAPORIGNORE: &str = "VAPOR_USE_VAPORIGNORE";
-    pub const VAPOR_LOCAL_SYNC_DIRECTORY: &str = "VAPOR_LOCAL_SYNC_DIRECTORY";
-    pub const VAPOR_CLOUD_SYNC_DIRECTORY: &str = "VAPOR_CLOUD_SYNC_DIRECTORY";
-    pub const VAPOR_PRE_IGNORE_RULES: &str = "VAPOR_PRE_IGNORE_RULES";
-    pub const VAPOR_POST_IGNORE_RULES: &str = "VAPOR_POST_IGNORE_RULES";
     /// OAuth client credentials for the Google Drive provider
     /// (installed-app PKCE). Read twice: at compile time, so a build
     /// carries the client it was built with, and at run time, where a
@@ -62,8 +56,8 @@ pub mod runtime {
     pub const TRASH_ENTRY_META_FILE_NAME: &str = "meta.json";
     pub const CONFIGURATION_FILE_NAME: &str = "vapor.json";
     pub const SQLITE_DATABASE_FILE_NAME: &str = "vapor.sqlite";
-    pub const APP_LOG_FILE_NAME: &str = "vapor.logs";
-    pub const DAEMON_LOG_FILE_NAME: &str = "vapord.logs";
+    pub const APP_LOG_FILE_NAME: &str = "vapor.log";
+    pub const DAEMON_LOG_FILE_NAME: &str = "vapord.log";
     /// launchd / service-manager stdout & stderr redirection targets for
     /// the daemon, under `vapor_dir/logs/`. Referenced by every surface
     /// that writes a service definition (macOS app, `vapor` CLI) per
@@ -127,13 +121,17 @@ pub mod config {
     /// `VaporConfigurationStore` keyspace; AGENTS.md §8.6 mandates
     /// centralization so the CLI and the macOS app cannot drift.
     pub const KEY_AUTO_LAUNCH: &str = "autoLaunch";
-    pub const KEY_USE_GIT_IGNORE: &str = "useGitIgnore";
-    pub const KEY_USE_VAPOR_IGNORE: &str = "useVaporIgnore";
-    pub const KEY_LOCAL_SYNC_DIRECTORY: &str = "localSyncDirectory";
-    pub const KEY_CLOUD_SYNC_DIRECTORY: &str = "cloudSyncDirectory";
+    pub const KEY_USE_GITIGNORE: &str = "useGitignore";
+    pub const KEY_USE_VAPORIGNORE: &str = "useVaporignore";
+    /// The local sync root: the folder on this device that Vapor keeps
+    /// in step with `cloudRoot`.
+    pub const KEY_LOCAL_ROOT: &str = "localRoot";
+    /// The cloud sync root: the folder on the provider side (a local
+    /// directory when the provider is `filesystem`).
+    pub const KEY_CLOUD_ROOT: &str = "cloudRoot";
     pub const KEY_PRE_IGNORE_RULES: &str = "preIgnoreRules";
     pub const KEY_POST_IGNORE_RULES: &str = "postIgnoreRules";
-    pub const KEY_LANGUAGE_CODE: &str = "languageCode";
+    pub const KEY_LANGUAGE: &str = "language";
     pub const KEY_TIMELINE_LIMIT: &str = "timelineLimit";
     /// Provider selection: `filesystem` (default pre-GA) or
     /// `gdrive`. See `provider::*` for the accepted values.
@@ -165,8 +163,8 @@ pub mod config {
     /// file changing, without a restart. The CLI tells the user which
     /// class a key falls in after `config set`.
     pub const LIVE_RELOAD_KEYS: &[&str] = &[
-        KEY_USE_GIT_IGNORE,
-        KEY_USE_VAPOR_IGNORE,
+        KEY_USE_GITIGNORE,
+        KEY_USE_VAPORIGNORE,
         KEY_PRE_IGNORE_RULES,
         KEY_POST_IGNORE_RULES,
         KEY_TIMELINE_LIMIT,
@@ -178,11 +176,11 @@ pub mod config {
 
     /// Keys that reshape the pipeline (roots, provider, direction,
     /// profile set) and therefore take effect on the next daemon start;
-    /// a running daemon reports them as `config_restart_required` in
-    /// status until it is restarted.
+    /// a running daemon reports them as `restartRequired` in status
+    /// until it is restarted.
     pub const RESTART_REQUIRED_KEYS: &[&str] = &[
-        KEY_LOCAL_SYNC_DIRECTORY,
-        KEY_CLOUD_SYNC_DIRECTORY,
+        KEY_LOCAL_ROOT,
+        KEY_CLOUD_ROOT,
         KEY_PROVIDER,
         KEY_SYNC_MODE,
         KEY_PROFILES,
@@ -193,13 +191,13 @@ pub mod config {
     /// `KEY_*` constants above; the CLI uses this for `validate_key`.
     pub const ALL_KEYS: &[&str] = &[
         KEY_AUTO_LAUNCH,
-        KEY_USE_GIT_IGNORE,
-        KEY_USE_VAPOR_IGNORE,
-        KEY_LOCAL_SYNC_DIRECTORY,
-        KEY_CLOUD_SYNC_DIRECTORY,
+        KEY_USE_GITIGNORE,
+        KEY_USE_VAPORIGNORE,
+        KEY_LOCAL_ROOT,
+        KEY_CLOUD_ROOT,
         KEY_PRE_IGNORE_RULES,
         KEY_POST_IGNORE_RULES,
-        KEY_LANGUAGE_CODE,
+        KEY_LANGUAGE,
         KEY_TIMELINE_LIMIT,
         KEY_PROVIDER,
         KEY_SYNC_MODE,
@@ -217,21 +215,24 @@ pub mod config {
     /// `VaporConstants.Defaults` per AGENTS.md §8.6 — the Rust side is
     /// the source of truth.
     pub const DEFAULT_AUTO_LAUNCH: bool = true;
-    pub const DEFAULT_USE_GIT_IGNORE: bool = true;
-    pub const DEFAULT_USE_VAPOR_IGNORE: bool = true;
-    pub const DEFAULT_LANGUAGE_CODE: &str = "en";
+    pub const DEFAULT_USE_GITIGNORE: bool = true;
+    pub const DEFAULT_USE_VAPORIGNORE: bool = true;
+    pub const DEFAULT_LANGUAGE: &str = "en";
     pub const DEFAULT_TIMELINE_LIMIT: i64 = 1_000;
 }
 
 pub mod provider {
     /// Accepted `provider` config values. `filesystem` is the pre-GA
-    /// default; when selected, `cloudSyncDirectory` is
+    /// default; when selected, `cloudRoot` is
     /// reinterpreted as an absolute local directory that plays the role
     /// of the cloud side. `gdrive` selects the real cloud provider.
     pub const FILESYSTEM: &str = "filesystem";
     pub const GDRIVE: &str = "gdrive";
     pub const DEFAULT: &str = FILESYSTEM;
     pub const ALL: &[&str] = &[FILESYSTEM, GDRIVE];
+    /// Providers whose profiles sign in (`vapor auth login`); the rest
+    /// need no credentials.
+    pub const SIGN_IN_REQUIRED: &[&str] = &[GDRIVE];
 
     /// Extended-attribute name carrying the daemon's operation id on
     /// files the daemon itself wrote (self-write loop prevention).
@@ -292,10 +293,24 @@ pub mod profile {
     pub const KEY_ID: &str = "id";
     pub const KEY_NAME: &str = "name";
     pub const KEY_PROVIDER: &str = "provider";
-    pub const KEY_LOCAL_SYNC_DIRECTORY: &str = "localSyncDirectory";
-    pub const KEY_CLOUD_SYNC_DIRECTORY: &str = "cloudSyncDirectory";
+    pub const KEY_LOCAL_ROOT: &str = "localRoot";
+    pub const KEY_CLOUD_ROOT: &str = "cloudRoot";
     pub const KEY_SYNC_MODE: &str = "syncMode";
     pub const KEY_ENABLED: &str = "enabled";
+    /// Partial overrides of the top-level groups of the same name.
+    pub const KEY_RESOURCE_LIMITS: &str = super::config::KEY_RESOURCE_LIMITS;
+    pub const KEY_IDLE_BOOST: &str = super::config::KEY_IDLE_BOOST;
+    pub const ALL_KEYS: &[&str] = &[
+        KEY_ID,
+        KEY_NAME,
+        KEY_PROVIDER,
+        KEY_LOCAL_ROOT,
+        KEY_CLOUD_ROOT,
+        KEY_SYNC_MODE,
+        KEY_ENABLED,
+        KEY_RESOURCE_LIMITS,
+        KEY_IDLE_BOOST,
+    ];
     /// The implicit profile id used when no `profiles` array is
     /// configured (single-scope setups; the pre-profile behavior).
     pub const DEFAULT_PROFILE_ID: &str = "default";
@@ -314,7 +329,13 @@ pub mod resource_limits {
     /// downloads (each direction separately). Absent means automatic:
     /// the throttle ladder derives the ceiling from the machine's core
     /// count. Clamped into `1..=16`.
-    pub const KEY_MAX_CONCURRENT_TRANSFERS: &str = "maxConcurrentTransfers";
+    pub const KEY_CONCURRENT_TRANSFERS: &str = "concurrentTransfers";
+    pub const ALL_KEYS: &[&str] = &[
+        KEY_CPU_PERCENT,
+        KEY_MEMORY_PERCENT,
+        KEY_BANDWIDTH_PERCENT,
+        KEY_CONCURRENT_TRANSFERS,
+    ];
     pub const DEFAULT_CPU_PERCENT: u8 = 15;
     pub const DEFAULT_MEMORY_PERCENT: u8 = 10;
     pub const DEFAULT_BANDWIDTH_PERCENT: u8 = 25;
@@ -326,20 +347,32 @@ pub mod resource_limits {
 
 pub mod idle_boost {
     /// Keys of the `idleBoost` config group: optional dynamic
-    /// headroom expansion while the device is verifiably idle.
+    /// headroom expansion while the device is verifiably idle. The
+    /// three percentages are the raised ceilings that replace the
+    /// `resourceLimits` ones while boost is active.
     pub const KEY_ENABLED: &str = "enabled";
     pub const KEY_MIN_IDLE_SECONDS: &str = "minIdleSeconds";
-    pub const KEY_BOOST_CPU_PERCENT: &str = "boostCpuPercent";
-    pub const KEY_BOOST_MEMORY_PERCENT: &str = "boostMemoryPercent";
-    pub const KEY_BOOST_BANDWIDTH_PERCENT: &str = "boostBandwidthPercent";
+    pub const KEY_CPU_PERCENT: &str = "cpuPercent";
+    pub const KEY_MEMORY_PERCENT: &str = "memoryPercent";
+    pub const KEY_BANDWIDTH_PERCENT: &str = "bandwidthPercent";
     pub const KEY_HEADROOM_CPU_PERCENT: &str = "headroomCpuPercent";
     pub const KEY_RAMP_UP_SECONDS: &str = "rampUpSeconds";
     pub const KEY_RAMP_DOWN_SECONDS: &str = "rampDownSeconds";
+    pub const ALL_KEYS: &[&str] = &[
+        KEY_ENABLED,
+        KEY_MIN_IDLE_SECONDS,
+        KEY_CPU_PERCENT,
+        KEY_MEMORY_PERCENT,
+        KEY_BANDWIDTH_PERCENT,
+        KEY_HEADROOM_CPU_PERCENT,
+        KEY_RAMP_UP_SECONDS,
+        KEY_RAMP_DOWN_SECONDS,
+    ];
     pub const DEFAULT_ENABLED: bool = true;
     pub const DEFAULT_MIN_IDLE_SECONDS: u64 = 300;
-    pub const DEFAULT_BOOST_CPU_PERCENT: u8 = 50;
-    pub const DEFAULT_BOOST_MEMORY_PERCENT: u8 = 20;
-    pub const DEFAULT_BOOST_BANDWIDTH_PERCENT: u8 = 80;
+    pub const DEFAULT_CPU_PERCENT: u8 = 50;
+    pub const DEFAULT_MEMORY_PERCENT: u8 = 20;
+    pub const DEFAULT_BANDWIDTH_PERCENT: u8 = 80;
     /// Non-Vapor utilization must stay at or below this for boost to
     /// engage (per-resource headroom gate).
     pub const DEFAULT_HEADROOM_CPU_PERCENT: u8 = 30;
@@ -350,33 +383,48 @@ pub mod idle_boost {
 }
 
 pub mod safeguards {
-    /// Keys of the `safeguards` config group. The mass-delete guard
-    /// holds a burst of deletions (in either direction) behind a
-    /// decision when the burst reaches the threshold or the ratio
-    /// inside a rolling window; the rest of the sync keeps flowing.
-    /// The ransomware / bulk-mistake backstop. Configurable because a
-    /// workflow that legitimately unlinks many files (`rm -rf` of large
-    /// trees, big build cleans) may need a higher threshold.
-    pub const KEY_MASS_DELETE_ENABLED: &str = "massDeleteEnabled";
-    pub const KEY_MASS_DELETE_THRESHOLD: &str = "massDeleteThreshold";
-    pub const KEY_MASS_DELETE_WINDOW_SECONDS: &str = "massDeleteWindowSeconds";
+    /// Keys of the `safeguards` config group. Each safeguard is its own
+    /// object inside the group.
+    pub const KEY_MASS_DELETE: &str = "massDelete";
+    pub const ALL_KEYS: &[&str] = &[KEY_MASS_DELETE];
+
+    /// Keys of `safeguards.massDelete`. The guard holds a burst of
+    /// deletes (in either direction) behind a decision when the burst
+    /// reaches the threshold or the ratio inside a rolling window; the
+    /// rest of the sync keeps flowing. The ransomware / bulk-mistake
+    /// backstop, configurable because a workflow that legitimately
+    /// unlinks many files (`rm -rf` of large trees, big build cleans)
+    /// may need a higher threshold.
+    pub const KEY_ENABLED: &str = "enabled";
+    /// Deletes inside the window that trip the guard.
+    pub const KEY_THRESHOLD: &str = "threshold";
+    pub const KEY_WINDOW_SECONDS: &str = "windowSeconds";
     /// Share of the synced files (percent) whose deletion inside the
-    /// window is held for a decision even when the absolute threshold is
-    /// not reached, so a small tree is protected too.
-    pub const KEY_MASS_DELETE_RATIO_PERCENT: &str = "massDeleteRatioPercent";
+    /// window is held for a decision even when the threshold is not
+    /// reached, so a small tree is protected too.
+    pub const KEY_RATIO_PERCENT: &str = "ratioPercent";
+    pub const MASS_DELETE_KEYS: &[&str] = &[
+        KEY_ENABLED,
+        KEY_THRESHOLD,
+        KEY_WINDOW_SECONDS,
+        KEY_RATIO_PERCENT,
+    ];
     pub const DEFAULT_MASS_DELETE_ENABLED: bool = true;
+    pub const DEFAULT_MASS_DELETE_THRESHOLD: usize = 1_000;
+    pub const DEFAULT_MASS_DELETE_WINDOW_SECONDS: u64 = 60;
+    pub const DEFAULT_MASS_DELETE_RATIO_PERCENT: u8 = 25;
     /// Floor clamps: a threshold/window too low would trip the guard on
     /// ordinary work and train users to blind-approve it.
     pub const MIN_MASS_DELETE_THRESHOLD: usize = 10;
     pub const MIN_MASS_DELETE_WINDOW_SECONDS: u64 = 5;
-    /// The ratio rule never holds fewer deletions than this, so a tree
-    /// of three files does not prompt on every second deletion.
+    /// The ratio rule never holds fewer deletes than this, so a tree of
+    /// three files does not prompt on every second delete.
     pub const MIN_MASS_DELETE_RATIO_COUNT: usize = 10;
 }
 
 pub mod trash {
     /// Keys of the `trash` config group. Every file Vapor itself
-    /// removes on this device (a deletion that arrived from the cloud,
+    /// removes on this device (a delete that arrived from the cloud,
     /// a mirror removal in `pull-only`) goes to a trash instead of
     /// being unlinked, so a wrong deletion can be undone here without
     /// the cloud's own trash.
@@ -385,15 +433,21 @@ pub mod trash {
     pub const KEY_RETENTION_DAYS: &str = "retentionDays";
     /// Try the user's own trash (the Finder's Trash on macOS) first and
     /// fall back to the managed trash when that fails.
-    pub const KEY_USE_SYSTEM_TRASH: &str = "useSystemTrash";
+    pub const KEY_USE_SYSTEM: &str = "useSystem";
+    pub const ALL_KEYS: &[&str] = &[KEY_ENABLED, KEY_RETENTION_DAYS, KEY_USE_SYSTEM];
     pub const DEFAULT_ENABLED: bool = true;
     pub const DEFAULT_RETENTION_DAYS: u32 = 7;
-    pub const DEFAULT_USE_SYSTEM_TRASH: bool = false;
+    pub const DEFAULT_USE_SYSTEM: bool = false;
     /// How often a running daemon looks for expired entries.
     pub const PURGE_INTERVAL_SECONDS: u64 = 1_800;
-    /// What a discarded item was to Vapor; recorded in `meta.json`.
-    pub const REASON_CLOUD_DELETION: &str = "deleted-in-cloud";
-    pub const REASON_MIRROR_REMOVAL: &str = "mirror-removal";
+    /// Why an item is in the trash; recorded in `meta.json` and shown by
+    /// `vapor trash list`. A `*-delete` name says where the delete came
+    /// from: a delete made in the cloud, or a mirror removing what its
+    /// source does not have.
+    pub const REASON_CLOUD_DELETE: &str = "cloud-delete";
+    pub const REASON_MIRROR_DELETE: &str = "mirror-delete";
+    /// A version of a conflicted file the user did not keep.
+    pub const REASON_CONFLICT: &str = "conflict";
 }
 
 pub mod sync_mode {
@@ -405,6 +459,182 @@ pub mod sync_mode {
     pub const PUSH_ONLY: &str = "push-only";
     pub const DEFAULT: &str = TWO_WAY;
     pub const ALL: &[&str] = &[TWO_WAY, PULL_ONLY, PUSH_ONLY];
+}
+
+/// The names every user-facing surface prints: values in `--json`
+/// output, in the IPC status, in the timeline, and in the options a
+/// command accepts. Every value is kebab-case and every JSON key is
+/// camelCase, on every surface; the Swift mirror in
+/// `apps/macos/Sources/VaporCore/VaporConstants.swift` repeats the ones
+/// the app reads.
+pub mod run_state {
+    pub const STARTING: &str = "starting";
+    pub const RUNNING: &str = "running";
+    pub const PAUSED: &str = "paused";
+    pub const ERROR: &str = "error";
+}
+
+pub mod throttle_state {
+    /// The device is idle: queued work drains at full width.
+    pub const IDLE: &str = "idle";
+    /// Some load or a user at the keyboard: reduced width.
+    pub const LIGHT: &str = "light";
+    /// Heavy load, battery, heat, or an active user: one transfer at a
+    /// time, no reconcile scans.
+    pub const THROTTLED: &str = "throttled";
+    /// Critical pressure: uploads and hashing stop; changes are still
+    /// recorded.
+    pub const SUSPENDED: &str = "suspended";
+}
+
+/// What the whole-scope reconcile is doing (`reconcile.state` in status).
+pub mod reconcile_state {
+    pub const IDLE: &str = "idle";
+    pub const WAITING: &str = "waiting";
+    pub const RUNNING: &str = "running";
+}
+
+/// Where idle boost is (`idleBoostState`).
+pub mod idle_boost_state {
+    pub const OFF: &str = "off";
+    pub const RAMPING_UP: &str = "ramping-up";
+    pub const ACTIVE: &str = "active";
+    pub const RAMPING_DOWN: &str = "ramping-down";
+}
+
+/// The work items `vapor diagnostics` lists: what each one does
+/// (`action`) and where it is (`stage`). A `*-delete` action names the
+/// side the delete was made on: `local-delete` carries a delete made on
+/// this device to the cloud, `cloud-delete` applies a delete made in the
+/// cloud to this device.
+pub mod intent {
+    pub const ACTION_UPLOAD: &str = "upload";
+    pub const ACTION_DOWNLOAD: &str = "download";
+    pub const ACTION_RENAME: &str = "rename";
+    pub const ACTION_LOCAL_DELETE: &str = "local-delete";
+    pub const ACTION_CLOUD_DELETE: &str = "cloud-delete";
+    pub const ACTION_RECONCILE: &str = "reconcile";
+
+    pub const STAGE_QUEUED: &str = "queued";
+    pub const STAGE_RETRYING: &str = "retrying";
+    /// Held behind an open decision.
+    pub const STAGE_HELD: &str = "held";
+    pub const STAGE_PLANNING: &str = "planning";
+    pub const STAGE_WAITING_TO_HASH: &str = "waiting-to-hash";
+    pub const STAGE_HASHING: &str = "hashing";
+    pub const STAGE_WAITING_TO_UPLOAD: &str = "waiting-to-upload";
+    pub const STAGE_UPLOADING: &str = "uploading";
+    pub const STAGE_WAITING_TO_DOWNLOAD: &str = "waiting-to-download";
+    pub const STAGE_DOWNLOADING: &str = "downloading";
+}
+
+/// Decisions: the questions the daemon parks (`vapor decisions`). Each
+/// kind lists the option keys `vapor decisions resolve --choose`
+/// accepts for it.
+pub mod decision {
+    /// A burst of deletes reached the `safeguards.massDelete` limits.
+    pub const KIND_MASS_DELETE: &str = "mass-delete";
+    /// A sync root is gone.
+    pub const KIND_ROOT_MISSING: &str = "root-missing";
+    /// A sync root is present but is not the folder the profile adopted.
+    pub const KIND_ROOT_REPLACED: &str = "root-replaced";
+    /// A file on one side is a folder on the other.
+    pub const KIND_TYPE_MISMATCH: &str = "type-mismatch";
+    /// A local name the cloud cannot store (not valid UTF-8).
+    pub const KIND_UNSYNCABLE_NAME: &str = "unsyncable-name";
+    /// A file changed in more than one place before the changes synced;
+    /// Vapor kept every version, and one has to stay.
+    pub const KIND_CONFLICT: &str = "conflict";
+
+    /// `mass-delete`: let the deletes through, or put the files back.
+    pub const OPTION_APPLY: &str = "apply";
+    pub const OPTION_DISCARD: &str = "discard";
+    /// `root-missing`: create the root again, empty, and let the other
+    /// side fill it.
+    pub const OPTION_RECREATE: &str = "recreate";
+    /// `root-replaced`: adopt the folder that is there now and merge it
+    /// without propagating any delete.
+    pub const OPTION_REATTACH: &str = "reattach";
+    /// `type-mismatch`: keep both under different names, or let one side
+    /// win.
+    pub const OPTION_KEEP_BOTH: &str = "keep-both";
+    pub const OPTION_PREFER_LOCAL: &str = "prefer-local";
+    pub const OPTION_PREFER_CLOUD: &str = "prefer-cloud";
+    /// `unsyncable-name`: leave the file out of sync.
+    pub const OPTION_SKIP: &str = "skip";
+    // A `conflict` has one option per version, keyed by the version's
+    // file name, so it has no fixed option keys.
+
+    /// What a decision covers.
+    pub const SCOPE_PATH: &str = "path";
+    pub const SCOPE_BATCH: &str = "batch";
+    pub const SCOPE_PROFILE: &str = "profile";
+}
+
+/// Keep-both conflicts. The original is the file at the path both sides
+/// edited; the copy is the other version, saved next to it as
+/// `{stem}~conflict-{deviceId}-{ms}{ext}` and holding the edit of the
+/// device it names. Each copy is a `conflict` decision.
+pub mod conflict {
+    pub const COPY_MARKER: &str = "~conflict-";
+    /// How often a running daemon matches the open `conflict` decisions
+    /// to the copies on disk: a file with copies gets a question, one
+    /// whose versions changed gets the question rewritten, and one with
+    /// no copy left has its question closed.
+    pub const DECISION_SYNC_SECONDS: u64 = 5;
+    /// `vapor decisions resolve` applies a conflict answer itself, in
+    /// milliseconds; one still answered but unapplied after this long
+    /// belongs to a command that died, and the daemon opens the
+    /// question again rather than touching the files.
+    pub const ANSWER_GRACE_SECONDS: u64 = 60;
+}
+
+/// Kinds of the entries in the activity timeline (`vapor timeline`).
+pub mod timeline {
+    pub const KIND_RUN_STATE: &str = "run-state";
+    pub const KIND_THROTTLE: &str = "throttle";
+    pub const KIND_PROFILE: &str = "profile";
+    pub const KIND_CONFIG: &str = "config";
+    pub const KIND_DECISION: &str = "decision";
+    pub const KIND_CONFLICT: &str = "conflict";
+    /// A download discarded because its name would collide with a
+    /// differently-cased local file.
+    pub const KIND_COLLISION: &str = "collision";
+    pub const KIND_MIRROR: &str = "mirror";
+    /// Work that failed for good (retries exhausted or a permanent error).
+    pub const KIND_FAILURE: &str = "failure";
+    pub const KIND_RECONCILE: &str = "reconcile";
+    /// The cloud changes feed.
+    pub const KIND_FEED: &str = "feed";
+    pub const KIND_CLOUD_ROOT: &str = "cloud-root";
+    /// A profile's provider refused the sign-in, or a new sign-in ended
+    /// the hold.
+    pub const KIND_SIGN_IN: &str = "sign-in";
+}
+
+/// A profile's sign-in state (`vapor auth status`).
+pub mod auth {
+    pub const STATE_SIGNED_IN: &str = "signed-in";
+    pub const STATE_SIGNED_OUT: &str = "signed-out";
+    /// The profile's provider has nothing to sign in to.
+    pub const STATE_NOT_NEEDED: &str = "not-needed";
+}
+
+/// `vapor doctor` check names and outcomes.
+pub mod doctor {
+    pub const CHECK_VAPOR_DIR: &str = "vapor-dir";
+    pub const CHECK_IPC_SOCKET: &str = "ipc-socket";
+    pub const CHECK_VAPORD_BINARY: &str = "vapord-binary";
+    pub const CHECK_SECRET_STORE: &str = "secret-store";
+    pub const CHECK_THROTTLE_INPUTS: &str = "throttle-inputs";
+    pub const CHECK_LAUNCH_AGENT: &str = "launch-agent";
+    pub const CHECK_SYSTEMD_UNIT: &str = "systemd-unit";
+    /// Which Google Drive OAuth client a sign-in would use: built in,
+    /// from the environment, or none.
+    pub const CHECK_GDRIVE_OAUTH_CLIENT: &str = "gdrive-oauth-client";
+    pub const STATUS_OK: &str = "ok";
+    pub const STATUS_WARNING: &str = "warning";
+    pub const STATUS_FAILURE: &str = "failure";
 }
 
 pub mod service {
@@ -423,6 +653,30 @@ pub mod service {
     /// CLI-only install still restarts a crashed daemon under the
     /// crash-loop guard's budget. Kept alive by the service manager.
     pub const SUPERVISOR_LABEL: &str = "sh.arn.vapor.supervisor";
+
+    /// `vapor service status --json` `status`.
+    pub const STATUS_NOT_INSTALLED: &str = "not-installed";
+    pub const STATUS_STOPPED: &str = "stopped";
+    pub const STATUS_RUNNING: &str = "running";
+    pub const STATUS_CRASH_LOOP_PAUSED: &str = "crash-loop-paused";
+
+    /// `result` of `bootstrap`, `install`, `uninstall`, `start`, `stop`,
+    /// `restart`, and `acknowledge`.
+    pub const RESULT_UNCHANGED: &str = "unchanged";
+    pub const RESULT_STARTED: &str = "started";
+    pub const RESULT_STOPPED: &str = "stopped";
+    pub const RESULT_NOT_INSTALLED: &str = "not-installed";
+    pub const RESULT_CRASH_LOOP_PAUSED: &str = "crash-loop-paused";
+    pub const RESULT_RELAUNCH_DEFERRED: &str = "relaunch-deferred";
+    pub const RESULT_ACKNOWLEDGED: &str = "acknowledged";
+
+    /// `health` of `vapor service check`.
+    pub const HEALTH_RUNNING: &str = "running";
+    pub const HEALTH_NOT_INSTALLED: &str = "not-installed";
+    pub const HEALTH_STOPPED_EXPECTED: &str = "stopped-expected";
+    pub const HEALTH_RESTARTED_AFTER_CRASH: &str = "restarted-after-crash";
+    pub const HEALTH_RESTART_DEFERRED: &str = "restart-deferred";
+    pub const HEALTH_CRASH_LOOP_PAUSED: &str = "crash-loop-paused";
 }
 
 pub mod secrets {
@@ -450,12 +704,14 @@ pub mod ipc {
     /// Windows / Linux apps, the daemon). Bump on any backwards-
     /// incompatible payload shape change. Pre-GA the sliding tolerance
     /// is `|N - M| <= 1`; see `docs/architecture/ipc-contracts.md`.
-    pub const SCHEMA_VERSION_CURRENT: u32 = 2;
+    pub const SCHEMA_VERSION_CURRENT: u32 = 4;
     /// Minimum peer schema version this build can interoperate with.
     /// Together with [`SCHEMA_VERSION_CURRENT`] this defines the local
     /// support window; the handshake fails when both sides cannot find
-    /// an overlapping version.
-    pub const SCHEMA_VERSION_MIN_SUPPORTED: u32 = 1;
+    /// an overlapping version. Version 4 regrouped the status payload
+    /// (`run`, `throttle`, `reconcile`, `resources`, `mirror`), so a
+    /// version 3 peer would misread it: the window starts at 4.
+    pub const SCHEMA_VERSION_MIN_SUPPORTED: u32 = 4;
     /// Maximum size of a single IPC frame in bytes. Frames whose
     /// declared length exceeds this cap are rejected before any
     /// deserialization attempt.
@@ -505,24 +761,24 @@ pub mod filtering {
     /// trash a sync root's volume carries at `<volume root>/.vapor/trash/`.
     /// Matched as a whole name only, so `.vaporignore` still syncs.
     pub const INTERNAL_IGNORE_DIRECTORY_NAMES: &[&str] = &[".vapor"];
-    pub const DEFAULT_LOCAL_SYNC_DIRECTORY: &str = "~/Vapor";
-    /// The cloud root a remote provider uses when `cloudSyncDirectory`
+    pub const DEFAULT_LOCAL_ROOT: &str = "~/Vapor";
+    /// The cloud root a remote provider uses when `cloudRoot`
     /// is unset: a folder at the account root.
-    pub const DEFAULT_CLOUD_SYNC_DIRECTORY: &str = "/Vapor";
+    pub const DEFAULT_CLOUD_ROOT: &str = "/Vapor";
     /// The cloud root the filesystem provider uses when
-    /// `cloudSyncDirectory` is unset. It plays the cloud role from a
+    /// `cloudRoot` is unset. It plays the cloud role from a
     /// local folder, so the default is a folder under the home
     /// directory that the daemon can create; a path at the filesystem
     /// root would never be writable on a stock macOS install.
-    pub const DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY: &str = "~/cloud/Vapor";
+    pub const DEFAULT_FILESYSTEM_CLOUD_ROOT: &str = "~/cloud/Vapor";
 
-    /// The cloud root that applies when `cloudSyncDirectory` is unset,
+    /// The cloud root that applies when `cloudRoot` is unset,
     /// by provider kind.
-    pub fn default_cloud_sync_directory(provider_kind: &str) -> &'static str {
+    pub fn default_cloud_root(provider_kind: &str) -> &'static str {
         if provider_kind.trim() == super::provider::FILESYSTEM {
-            DEFAULT_FILESYSTEM_CLOUD_SYNC_DIRECTORY
+            DEFAULT_FILESYSTEM_CLOUD_ROOT
         } else {
-            DEFAULT_CLOUD_SYNC_DIRECTORY
+            DEFAULT_CLOUD_ROOT
         }
     }
     /// Baseline low-signal exclusions applied before discovered ignore
@@ -675,15 +931,15 @@ pub mod engine {
     pub const THROTTLED_NETWORK_ERROR_RATE_PERCENT: u8 = 25;
     pub const LIGHT_NETWORK_THROUGHPUT_KBPS: u32 = 512;
     pub const THROTTLED_NETWORK_THROUGHPUT_KBPS: u32 = 128;
-    /// IdleDrain concurrency tier bounds. The effective tier derives
+    /// Idle concurrency tier bounds. The effective tier derives
     /// from the machine's available parallelism (half the cores),
     /// clamped into `[MIN, MAX]` — a 16-core desktop drains faster than
     /// a 2-core laptop without oversubscribing either. Light/Throttled
     /// tiers stay fixed: they bound device impact while the user is
     /// active, where core count is not the limit that matters.
-    pub const IDLE_DRAIN_CONCURRENCY_MIN: usize = 4;
-    pub const IDLE_DRAIN_CONCURRENCY_MAX: usize = 8;
-    pub const IDLE_DRAIN_READ_TOKENS: usize = 2;
+    pub const IDLE_CONCURRENCY_MIN: usize = 4;
+    pub const IDLE_CONCURRENCY_MAX: usize = 8;
+    pub const IDLE_READ_TOKENS: usize = 2;
     pub const LIGHT_PLANNER_WORKERS: usize = 2;
     pub const LIGHT_HASH_WORKERS: usize = 2;
     pub const LIGHT_READ_TOKENS: usize = 1;
@@ -706,7 +962,7 @@ pub mod engine {
     pub const TRANSFER_STAGE_STEP_BYTES: u64 = 8 * 1024 * 1024;
     /// Bounds on worker threads running blocking provider I/O (probes,
     /// transfer sessions, remote deletes) off the runtime tick thread.
-    /// The effective cap is twice the IdleDrain concurrency tier,
+    /// The effective cap is twice the Idle concurrency tier,
     /// clamped into `[MIN, MAX]`, so upload + download can both run at
     /// full width. Threads spawn lazily per in-flight job and sit
     /// parked on a channel otherwise; the throttle workgate, not this
@@ -715,7 +971,7 @@ pub mod engine {
     pub const PROVIDER_JOB_WORKERS_MAX: usize = 16;
     /// Remote changes-feed poll cadence per throttle state; Google
     /// Drive follows the same discipline. Suspended never polls.
-    pub const REMOTE_POLL_IDLE_DRAIN_SECONDS: u64 = 5;
+    pub const REMOTE_POLL_IDLE_SECONDS: u64 = 5;
     pub const REMOTE_POLL_LIGHT_SECONDS: u64 = 15;
     pub const REMOTE_POLL_THROTTLED_SECONDS: u64 = 60;
     /// Maximum remote changes consumed per poll page.
@@ -748,11 +1004,11 @@ pub mod engine {
     /// marker instead. Keeps the tick-thread walk bounded.
     pub const SYNTHESIZED_SUBTREE_EVENT_CAP: usize = 10_000;
     /// Per-tick directory budget for the reconcile walk (runs only under
-    /// IdleDrain). Higher than the checkpoint granularity so a large tree
+    /// Idle). Higher than the checkpoint granularity so a large tree
     /// converges quickly on a fast (filesystem) provider; the per-slice
     /// wall-clock deadline caps the cost when the provider's enumerate is
     /// a slow network call.
-    pub const RECONCILE_DIRS_PER_SLICE_IDLE_DRAIN: usize = 64;
+    pub const RECONCILE_DIRS_PER_SLICE_IDLE: usize = 64;
     /// Assumed link capacity when the platform sampler reports no
     /// measured throughput; the bandwidth ceiling applies against this
     /// until a real measurement exists.
@@ -775,16 +1031,9 @@ pub mod engine {
     /// when no HID signal is available.
     pub const ACTIVE_CODING_WINDOW_SECONDS: u64 = 60;
     pub const ACTIVE_CODING_EVENT_THRESHOLD: usize = 5;
-    /// Mass-change guard: deletions in either direction above this rate,
-    /// or above the ratio of the synced tree, are held behind a
-    /// decision instead of propagating what may be ransomware, an
-    /// accidental recursive delete, or a bad listing from the cloud.
-    pub const MASS_DELETE_WINDOW_SECONDS: u64 = 60;
-    pub const MASS_DELETE_THRESHOLD: usize = 1_000;
-    pub const MASS_DELETE_RATIO_PERCENT: u8 = 25;
-    /// FlushNow boost window: after an explicit flush request
-    /// the runtime releases deferred work eagerly for this long.
-    pub const FLUSH_BOOST_SECONDS: u64 = 30;
+    /// After `vapor reconcile` the runtime releases deferred work
+    /// eagerly for this long, so what the scan finds moves at once.
+    pub const RECONCILE_BOOST_SECONDS: u64 = 30;
     pub const RETRY_BASE_DELAY_MILLIS: u64 = 2_000;
     pub const RETRY_RATE_LIMIT_BASE_DELAY_MILLIS: u64 = 15_000;
     pub const RETRY_MAX_DELAY_MILLIS: u64 = 900_000;
@@ -801,7 +1050,7 @@ pub mod engine {
     pub const STORM_GLOBAL_PENDING_EVENT_COUNT_THRESHOLD: usize = 5_000;
     pub const DEFERRED_RECONCILE_DELAY_MILLIS: u64 = 30_000;
     /// Early-release path for a storm-deferred reconcile: once the
-    /// device is already idle (`IdleDrain`) and the storm has been
+    /// device is already idle (`Idle`) and the storm has been
     /// quiet this long, waiting out the full deferral only delays
     /// convergence the user is watching for (a repo clone appearing in
     /// the cloud folder). The full delay still applies while the user

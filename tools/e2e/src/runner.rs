@@ -137,9 +137,10 @@ pub fn refuse_built_in_oauth_client(cli_bin: &Path, scratch: &Path) -> Result<()
     let report: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| Failure::new(format!("vapor doctor --json is not JSON: {error}")))?;
     let built_in = report["checks"].as_array().is_some_and(|checks| {
-        checks
-            .iter()
-            .any(|check| check["name"] == "gdrive_oauth_client" && check["status"] == "ok")
+        checks.iter().any(|check| {
+            check["name"] == vapor_shared::constants::doctor::CHECK_GDRIVE_OAUTH_CLIENT
+                && check["status"] == "ok"
+        })
     });
     if built_in {
         return Err(Failure::new(format!(

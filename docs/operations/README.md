@@ -41,7 +41,7 @@ incident scenarios) live in per-platform subdirectories.
 - `runtime-logging-and-localization.md` — `VAPOR_DIR` runtime layout,
   log level override via `VAPOR_LOG_LEVEL`, structured log line format,
   redaction markers, locale catalog resolution (`assets/locales/*.json`),
-  `languageCode` with English fallback.
+  `language` with English fallback.
 
 ## Per-platform subdirectories
 

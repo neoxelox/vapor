@@ -47,5 +47,5 @@ Policy: `docs/architecture/testing-strategy.md`.
 ## Logging
 
 Provider modules use the structured logger from `vapor-shared`; lines
-land in `<vapor_dir>/logs/vapord.logs` and never contain tokens or auth
+land in `<vapor_dir>/logs/vapord.log` and never contain tokens or auth
 headers.

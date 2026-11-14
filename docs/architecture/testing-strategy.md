@@ -105,7 +105,7 @@ Priority scenarios:
 - Multi-profile runtime preserves isolation (own DB per profile,
   shared workgate caps, blast-radius containment on a panicking
   profile).
-- Safeguards: a deletion burst in either direction is held whole behind a `mass-deletion` decision while other work continues; `apply` releases, `discard` restores;
+- Safeguards: a deletion burst in either direction is held whole behind a `mass-delete` decision while other work continues; `apply` releases, `discard` restores;
   code-churn heuristic flips throttle to user-active; flush boost
   re-polls the remote feed.
 - Config reload mid-work does not lose in-flight intents.
@@ -146,7 +146,7 @@ Properties still to add:
 
 - **Throttle monotonicity** — monotonic input pressure produces
   monotonic state transitions; the controller never moves from
-  `Throttled` to `IdleDrain` while CPU pressure rises.
+  `Throttled` to `Idle` while CPU pressure rises.
 - **Conflict suffix determinism** — identical `(path, device_id,
   timestamp_ms)` inputs produce an identical conflict suffix across
   runs.

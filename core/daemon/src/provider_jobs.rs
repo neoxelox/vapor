@@ -747,7 +747,7 @@ mod tests {
         fn capabilities(&self) -> vapor_providers::ProviderCapabilities {
             vapor_providers::ProviderCapabilities::FILESYSTEM
         }
-        fn ensure_cloud_sync_directory(&self, _dir: &str) -> Result<(), ProviderError> {
+        fn ensure_cloud_root(&self, _dir: &str) -> Result<(), ProviderError> {
             Ok(())
         }
         fn enumerate(&self, _dir: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {

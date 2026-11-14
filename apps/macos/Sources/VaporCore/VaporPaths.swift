@@ -6,12 +6,6 @@ public enum VaporPaths {
 
   public static let directoryEnvironmentKey = VaporConstants.Environment.vaporDirectory
   public static let environmentKey = VaporConstants.Environment.vaporEnvironment
-  public static let useGitIgnoreEnvironmentKey = VaporConstants.Environment.useGitIgnore
-  public static let useVaporIgnoreEnvironmentKey = VaporConstants.Environment.useVaporIgnore
-  public static let localSyncDirectoryEnvironmentKey = VaporConstants.Environment.localSyncDirectory
-  public static let cloudSyncDirectoryEnvironmentKey = VaporConstants.Environment.cloudSyncDirectory
-  public static let preIgnoreRulesEnvironmentKey = VaporConstants.Environment.preIgnoreRules
-  public static let postIgnoreRulesEnvironmentKey = VaporConstants.Environment.postIgnoreRules
 
   public static let logsDirectoryName = VaporConstants.Runtime.logsDirectoryName
   public static let stateDirectoryName = VaporConstants.Runtime.stateDirectoryName
@@ -31,27 +25,13 @@ public enum VaporPaths {
       return configuredByEnvironment
     }
 
-    // Mirror the Rust resolution (core/shared/src/runtime_paths.rs): an
-    // explicit VAPOR_ENV wins over the CI heuristic, and CI is honored only
-    // when truthy (`true`/`1`) — a leaked or false `CI` must not redirect
-    // the runtime dir. The XCTest special case is intentionally gone: the
-    // wrapper scripts export VAPOR_DIR/VAPOR_ENV=dev (§8.5), so it only
-    // caused the app and the spawned CLI to diverge under XCTest.
-    let vaporEnv = environment[environmentKey]?
+    // `VAPOR_ENV=dev` (what the repository scripts set) picks the
+    // repo-local `./.vapor`; nothing else moves the directory. Mirrors
+    // core/shared/src/runtime_paths.rs.
+    let useDevDirectory =
+      environment[environmentKey]?
       .trimmingCharacters(in: .whitespacesAndNewlines)
-      .lowercased()
-    let useDevDirectory: Bool
-    switch vaporEnv {
-    case "dev":
-      useDevDirectory = true
-    case "prod":
-      useDevDirectory = false
-    default:
-      let ci = environment["CI"]?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-        .lowercased()
-      useDevDirectory = ci == "true" || ci == "1"
-    }
+      .lowercased() == "dev"
     if useDevDirectory {
       return URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
         .appendingPathComponent(VaporConstants.Runtime.vaporDirectoryName, isDirectory: true)

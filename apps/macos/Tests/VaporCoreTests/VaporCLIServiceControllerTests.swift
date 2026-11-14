@@ -63,7 +63,7 @@ func disableWithStopOmitsKeepRunningFlag() throws {
 @Test
 func deferredStartDecodesRemainingSeconds() throws {
   let runner = ScriptedCLIRunner(
-    standardOutput: #"{"result":"relaunch_deferred","remaining_seconds":1.5}"#
+    standardOutput: #"{"result":"relaunch-deferred","remainingSeconds":1.5}"#
   )
   let controller = VaporCLIServiceController(runner: runner)
 
@@ -74,7 +74,7 @@ func deferredStartDecodesRemainingSeconds() throws {
 
 @Test
 func crashLoopPausedActionDecodesToInfiniteDeferral() throws {
-  let runner = ScriptedCLIRunner(standardOutput: #"{"result":"crash_loop_paused"}"#)
+  let runner = ScriptedCLIRunner(standardOutput: #"{"result":"crash-loop-paused"}"#)
   let controller = VaporCLIServiceController(runner: runner)
 
   let result = try controller.startDaemon()
@@ -87,14 +87,14 @@ func statusDecodesTheFullReport() throws {
   let runner = ScriptedCLIRunner(
     standardOutput: """
       {
-        "status": "crash_loop_paused",
+        "status": "crash-loop-paused",
         "label": "sh.arn.vapor.daemon",
-        "auto_launch": true,
-        "crash_loop": {
+        "autoLaunch": true,
+        "crashLoop": {
           "paused": true,
-          "consecutive_crashes": 5,
-          "last_crash_at_ms": 1750000000000,
-          "awaiting_restart": true
+          "consecutiveCrashes": 5,
+          "lastCrashAtMs": 1750000000000,
+          "awaitingRestart": true
         }
       }
       """
@@ -104,7 +104,7 @@ func statusDecodesTheFullReport() throws {
   let snapshot = try controller.status()
 
   #expect(runner.invocations == [["service", "status", "--json"]])
-  #expect(snapshot.status == "crash_loop_paused")
+  #expect(snapshot.status == "crash-loop-paused")
   #expect(snapshot.label == "sh.arn.vapor.daemon")
   #expect(snapshot.autoLaunchEnabled)
   #expect(snapshot.crashLoopPaused)
@@ -118,19 +118,19 @@ func checkDecodesEveryHealthOutcome() throws {
 
   #expect(try controller.checkDaemonHealth() == .running)
 
-  runner.standardOutput = #"{"health":"not_installed"}"#
+  runner.standardOutput = #"{"health":"not-installed"}"#
   #expect(try controller.checkDaemonHealth() == .notInstalled)
 
-  runner.standardOutput = #"{"health":"stopped_expected"}"#
+  runner.standardOutput = #"{"health":"stopped-expected"}"#
   #expect(try controller.checkDaemonHealth() == .stoppedExpected)
 
-  runner.standardOutput = #"{"health":"restarted_after_crash"}"#
+  runner.standardOutput = #"{"health":"restarted-after-crash"}"#
   #expect(try controller.checkDaemonHealth() == .restartedAfterCrash)
 
-  runner.standardOutput = #"{"health":"restart_deferred","remaining_seconds":2.0}"#
+  runner.standardOutput = #"{"health":"restart-deferred","remainingSeconds":2.0}"#
   #expect(try controller.checkDaemonHealth() == .restartDeferred(2.0))
 
-  runner.standardOutput = #"{"health":"crash_loop_paused"}"#
+  runner.standardOutput = #"{"health":"crash-loop-paused"}"#
   #expect(try controller.checkDaemonHealth() == .crashLoopPaused)
 
   #expect(runner.invocations.allSatisfy { $0 == ["service", "check", "--json"] })
@@ -220,23 +220,19 @@ func daemonStatusDecodesTheCountsTheAppRenders() throws {
   let runner = ScriptedCLIRunner(
     standardOutput: """
       {
-        "schema_version": 2,
-        "run_state": "Running",
-        "throttle_state": "IdleDrain",
-        "provider_name": "filesystem",
-        "throttle_reason": "idle, plugged in, and cool",
-        "daemon_id": "vapord/0.0.0-test",
-        "queue_depth": 3,
-        "failed_intents": 1,
-        "loop_prevention_suppressions": 0,
-        "conflicts": 4,
-        "mirror_reverts": 0,
-        "mirror_deletes": 0,
-        "profiles": [],
-        "resource_budget": null,
-        "config_restart_required": "syncMode changed; restart the daemon to apply (vapor service restart)",
-        "decisions_pending": 2,
-        "conflicts_unresolved": 1
+        "schemaVersion": 4,
+        "daemon": "vapord/0.0.0-test",
+        "provider": "filesystem",
+        "run": {"state": "running", "reason": "watching ~/Vapor"},
+        "throttle": {"state": "idle", "reason": "idle, plugged in, and cool"},
+        "reconcile": {"state": "idle", "detail": ""},
+        "queued": 3,
+        "failed": 1,
+        "decisions": 2,
+        "mirror": {"reverts": 0, "deletes": 0},
+        "restartRequired": "syncMode changed; restart the daemon to apply (vapor service restart)",
+        "resources": null,
+        "profiles": []
       }
       """)
   let controller = VaporCLIServiceController(runner: runner)
@@ -244,74 +240,34 @@ func daemonStatusDecodesTheCountsTheAppRenders() throws {
   let snapshot = try controller.daemonStatus()
 
   #expect(runner.invocations == [["status", "--json"]])
-  #expect(snapshot.runState == "Running")
-  #expect(snapshot.queueDepth == 3)
-  #expect(snapshot.failedIntents == 1)
-  #expect(snapshot.configRestartRequired?.hasPrefix("syncMode changed") == true)
-  #expect(snapshot.decisionsPending == 2)
-  #expect(snapshot.conflictsUnresolved == 1)
-  #expect(snapshot.runStateReason == nil)
+  #expect(snapshot.runState == "running")
+  #expect(snapshot.runReason == "watching ~/Vapor")
+  #expect(snapshot.throttleState == "idle")
+  #expect(snapshot.throttleReason == "idle, plugged in, and cool")
+  #expect(snapshot.queued == 3)
+  #expect(snapshot.failed == 1)
+  #expect(snapshot.restartRequired?.hasPrefix("syncMode changed") == true)
+  #expect(snapshot.decisions == 2)
 }
 
 @Test
-func daemonStatusTreatsMissingCountsAsZeroForOlderDaemons() throws {
+func daemonStatusTreatsMissingCountsAsZero() throws {
   let runner = ScriptedCLIRunner(
     standardOutput: """
-      {"run_state":"Running","throttle_state":"Light","throttle_reason":"","provider_name":"filesystem","queue_depth":0,"failed_intents":0}
+      {"provider":"filesystem","run":{"state":"running"},"throttle":{"state":"light"}}
       """)
   let controller = VaporCLIServiceController(runner: runner)
 
   let snapshot = try controller.daemonStatus()
 
-  #expect(snapshot.decisionsPending == 0)
-  #expect(snapshot.conflictsUnresolved == 0)
-}
-
-@Test
-func daemonStatusLiftsTheWorstProfilesReasonIntoTheSnapshot() throws {
-  let runner = ScriptedCLIRunner(
-    standardOutput: """
-      {
-        "run_state": "Error",
-        "throttle_state": "Light",
-        "throttle_reason": "idle, plugged in, and cool",
-        "provider_name": "filesystem",
-        "queue_depth": 0,
-        "failed_intents": 0,
-        "profiles": [
-          {"id": "docs", "run_state": "Running", "reason": "watching ~/Docs"},
-          {"id": "default", "run_state": "Error", "reason": "cloud sync directory /Vapor is unavailable; sync work is blocked until it can be ensured"}
-        ]
-      }
-      """)
-  let controller = VaporCLIServiceController(runner: runner)
-
-  let snapshot = try controller.daemonStatus()
-
-  #expect(snapshot.runState == "Error")
-  #expect(snapshot.runStateReason?.hasPrefix("cloud sync directory /Vapor is unavailable") == true)
-
-  runner.standardOutput = """
-    {
-      "run_state": "Running",
-      "throttle_state": "Light",
-      "throttle_reason": "",
-      "provider_name": "filesystem",
-      "queue_depth": 0,
-      "failed_intents": 0,
-      "profiles": [
-        {"id": "default", "run_state": "Running", "reason": "held: root missing", "suspended_reason": "sync root is missing; waiting for decision #3"}
-      ]
-    }
-    """
-  #expect(
-    try controller.daemonStatus().runStateReason == "sync root is missing; waiting for decision #3",
-    "a suspension names itself before any run-state reason")
+  #expect(snapshot.decisions == 0)
+  #expect(snapshot.queued == 0)
+  #expect(snapshot.runReason == nil)
 }
 
 @Test
 func restartDecodesNotInstalledWithoutTreatingItAsAFailure() throws {
-  let runner = ScriptedCLIRunner(standardOutput: #"{"result":"not_installed"}"#)
+  let runner = ScriptedCLIRunner(standardOutput: #"{"result":"not-installed"}"#)
   let controller = VaporCLIServiceController(runner: runner)
 
   let result = try controller.restartDaemon()
@@ -321,18 +277,16 @@ func restartDecodesNotInstalledWithoutTreatingItAsAFailure() throws {
 }
 
 @Test
-func daemonStatusDecodesTheScanStateAndSyncNowDrivesTheCLI() throws {
+func daemonStatusDecodesTheScanStateAndReconcileDrivesTheCLI() throws {
   let runner = ScriptedCLIRunner(
     standardOutput: """
       {
-        "run_state": "Running",
-        "throttle_state": "Throttled",
-        "throttle_reason": "user activity is active",
-        "provider_name": "filesystem",
-        "queue_depth": 1,
-        "failed_intents": 0,
-        "reconcile_state": "waiting",
-        "reconcile_detail": "waiting for an idle moment: user activity is active"
+        "provider": "filesystem",
+        "run": {"state": "running"},
+        "throttle": {"state": "throttled", "reason": "user activity is active"},
+        "queued": 1,
+        "failed": 0,
+        "reconcile": {"state": "waiting", "detail": "waiting for an idle moment: user activity is active"}
       }
       """)
   let controller = VaporCLIServiceController(runner: runner)
@@ -342,13 +296,23 @@ func daemonStatusDecodesTheScanStateAndSyncNowDrivesTheCLI() throws {
   #expect(!snapshot.scanIsRunning)
   #expect(snapshot.reconcileDetail == "waiting for an idle moment: user activity is active")
 
-  runner.standardOutput = #"{"schema_version":2,"accepted":true,"note":"sync requested"}"#
-  try controller.syncNow()
-  #expect(runner.invocations.last == ["sync-now", "--json"])
+  runner.standardOutput = #"{"schemaVersion":4,"accepted":true,"note":"reconcile requested"}"#
+  try controller.reconcile()
+  #expect(runner.invocations.last == ["reconcile", "--json"])
 
-  runner.standardOutput = #"{"schema_version":2,"accepted":false,"note":"unsupported"}"#
+  runner.standardOutput = #"{"schemaVersion":4,"accepted":false,"note":"unsupported"}"#
   #expect(throws: (any Error).self) {
-    try controller.syncNow()
+    try controller.reconcile()
+  }
+
+  // A refusal exits non-zero; the daemon's note still reaches the error.
+  runner.exitCode = 1
+  runner.standardOutput = #"{"schemaVersion":4,"accepted":false,"note":"profile is paused"}"#
+  do {
+    try controller.reconcile()
+    Issue.record("a refusal must throw")
+  } catch {
+    #expect(String(describing: error).contains("profile is paused"))
   }
 }
 
@@ -357,15 +321,14 @@ func daemonStatusListsTheProfilesWaitingOnASignIn() throws {
   let runner = ScriptedCLIRunner(
     standardOutput: """
       {
-        "run_state": "Error",
-        "throttle_state": "Light",
-        "throttle_reason": "",
-        "provider_name": "gdrive",
-        "queue_depth": 2,
-        "failed_intents": 0,
+        "provider": "gdrive",
+        "run": {"state": "error", "reason": "Vapor needs to sign in to gdrive again"},
+        "throttle": {"state": "light"},
+        "queued": 2,
+        "failed": 0,
         "profiles": [
-          {"id": "docs", "provider_name": "filesystem", "run_state": "Running"},
-          {"id": "default", "provider_name": "gdrive", "run_state": "Error", "sign_in_required": true}
+          {"id": "docs", "provider": "filesystem", "run": {"state": "running"}},
+          {"id": "default", "provider": "gdrive", "run": {"state": "error"}, "signInRequired": true}
         ]
       }
       """)
@@ -379,18 +342,18 @@ func daemonStatusListsTheProfilesWaitingOnASignIn() throws {
 @Test
 func signInRunsTheBrowserLoginWithTheLongerBound() throws {
   let runner = ScriptedCLIRunner(
-    standardOutput: "auth login: stored token for gdrive (profile work)")
+    standardOutput: "Signed profile work in to gdrive.")
   let controller = VaporCLIServiceController(runner: runner)
 
-  try controller.signIn(provider: "gdrive", profile: "work")
+  try controller.signIn(profile: "work")
 
-  #expect(runner.invocations == [["auth", "login", "gdrive", "--profile", "work", "--browser"]])
+  #expect(runner.invocations == [["auth", "login", "--profile", "work", "--browser"]])
   let bound = try #require(runner.timeouts.first ?? nil)
   #expect(bound > VaporConstants.Provider.browserSignInTimeoutSeconds)
 
   runner.exitCode = 1
   runner.standardError = "vapor: authorization was denied by the user: access_denied"
   #expect(throws: VaporCLIServiceError.self) {
-    try controller.signIn(provider: "gdrive", profile: "work")
+    try controller.signIn(profile: "work")
   }
 }

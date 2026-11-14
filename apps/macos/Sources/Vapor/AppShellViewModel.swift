@@ -59,7 +59,7 @@ final class AppShellViewModel: ObservableObject {
     self.configurationStore = configurationStore
     self.localizationStore = localizationStore
     self.configuration = resolvedConfiguration
-    self.localization = localizationStore.resolve(languageCode: resolvedConfiguration.languageCode)
+    self.localization = localizationStore.resolve(languageCode: resolvedConfiguration.language)
 
     // Startup reads must stay in-process (config file only). The
     // lifecycle-backed values (`autoLaunchEnabled`, `crashLoopPaused`)
@@ -73,11 +73,11 @@ final class AppShellViewModel: ObservableObject {
     // with the diagnostics work.
     state.providerName = VaporConstants.Provider.displayName(
       forKind: self.configuration.providerKind)
-    state.useGitIgnore = self.configuration.useGitIgnore
-    state.useVaporIgnore = self.configuration.useVaporIgnore
-    state.preIgnoreRules = self.configuration.preIgnoreRules
-    state.postIgnoreRules = self.configuration.postIgnoreRules
-    state.languageCode = self.configuration.languageCode
+    state.useGitignore = self.configuration.useGitignore
+    state.useVaporignore = self.configuration.useVaporignore
+    state.preIgnoreRules = VaporConfiguration.editorText(for: self.configuration.preIgnoreRules)
+    state.postIgnoreRules = VaporConfiguration.editorText(for: self.configuration.postIgnoreRules)
+    state.language = self.configuration.language
     state.effectiveLanguageCode = localization.effectiveLanguageCode
     state.vaporDirectoryPath = self.configurationStore.resolveVaporDirectoryURL().path
     state.configurationIssuePath = resolvedConfigurationLoadIssue?.configPath
@@ -101,9 +101,9 @@ final class AppShellViewModel: ObservableObject {
       "Initialized app shell state",
       metadata: [
         "auto_launch_enabled": String(state.autoLaunchEnabled),
-        "use_gitignore": String(state.useGitIgnore),
-        "use_vaporignore": String(state.useVaporIgnore),
-        "language_code": state.languageCode,
+        "use_gitignore": String(state.useGitignore),
+        "use_vaporignore": String(state.useVaporignore),
+        "language": state.language,
         "effective_language": state.effectiveLanguageCode,
         "version": VaporBuildInfo.version,
         "bundle_build": VaporBuildInfo.buildVersion,
@@ -126,10 +126,9 @@ final class AppShellViewModel: ObservableObject {
   }
 
   var hasPendingIgnoreRuleChanges: Bool {
-    Self.normalizeRuleEditorText(state.preIgnoreRules)
-      != Self.normalizeRuleEditorText(configuration.preIgnoreRules)
-      || Self.normalizeRuleEditorText(state.postIgnoreRules)
-        != Self.normalizeRuleEditorText(configuration.postIgnoreRules)
+    VaporConfiguration.rules(fromEditorText: state.preIgnoreRules) != configuration.preIgnoreRules
+      || VaporConfiguration.rules(fromEditorText: state.postIgnoreRules)
+        != configuration.postIgnoreRules
   }
 
   func localized(_ key: String) -> String {
@@ -222,21 +221,25 @@ final class AppShellViewModel: ObservableObject {
           self.state.syncState = SyncSurfaceState.from(health: outcome, status: status)
         }
         self.state.syncDetail = AppShellState.syncDetail(for: self.state.syncState, status: status)
+        if self.state.syncDetail == nil, self.state.syncState == .error, let status,
+          status.failed > 0
+        {
+          self.state.syncDetail = self.localized("sync_detail_failed_format", String(status.failed))
+        }
         self.state.scanIsWaiting = status?.scanIsWaiting ?? false
         self.state.scanIsRunning = status?.scanIsRunning ?? false
-        self.state.configRestartRequired = status?.configRestartRequired
-        // Both counts are durable facts about the profile state, so a
+        self.state.restartRequired = status?.restartRequired
+        // The count is a durable fact about the profile state, so a
         // tick without a status answer (daemon stopped or restarting)
-        // keeps the last known values instead of pretending nothing is
+        // keeps the last known value instead of pretending nothing is
         // waiting.
         if let status {
-          self.state.decisionsPending = status.decisionsPending
-          self.state.conflictsUnresolved = status.conflictsUnresolved
+          self.state.decisions = status.decisions
           self.state.signInRequired = status.signInRequired
         }
-        if let status, !status.providerName.isEmpty {
+        if let status, !status.provider.isEmpty {
           self.state.providerName = VaporConstants.Provider.displayName(
-            forKind: status.providerName)
+            forKind: status.provider)
         }
       }
     }
@@ -406,7 +409,7 @@ final class AppShellViewModel: ObservableObject {
 
     lifecycleQueue.async {
       do {
-        try daemonLifecycleManager.syncNow()
+        try daemonLifecycleManager.reconcile()
       } catch {
         logger.warning(
           "On-demand sync was not accepted",
@@ -432,10 +435,7 @@ final class AppShellViewModel: ObservableObject {
     signInQueue.async { [weak self] in
       for request in requests {
         do {
-          try daemonLifecycleManager.signIn(
-            provider: request.providerKind,
-            profile: request.profileId
-          )
+          try daemonLifecycleManager.signIn(profile: request.profileId)
         } catch {
           logger.warning(
             "Browser sign-in did not complete",
@@ -478,7 +478,7 @@ final class AppShellViewModel: ObservableObject {
             )
             return
           }
-          self.state.configRestartRequired = nil
+          self.state.restartRequired = nil
           logger.info("Daemon restart completed", metadata: ["result": String(describing: result)])
         }
       } catch {
@@ -534,20 +534,20 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
-  func setUseGitIgnore(_ enabled: Bool) {
-    guard configuration.useGitIgnore != enabled else {
+  func setUseGitignore(_ enabled: Bool) {
+    guard configuration.useGitignore != enabled else {
       return
     }
 
-    configuration.useGitIgnore = enabled
-    state.useGitIgnore = enabled
+    configuration.useGitignore = enabled
+    state.useGitignore = enabled
 
     do {
-      try configurationStore.save(configuration)
+      try configurationStore.save(configuration, keys: [VaporConstants.ConfigKeys.useGitignore])
       refreshDaemonLifecycleManagerForCurrentConfiguration()
       clearConfigurationIssueIfResolved()
       logger.info(
-        "Updated useGitIgnore setting",
+        "Updated useGitignore setting",
         metadata: [
           "use_gitignore": String(enabled),
           "note": "persisted to vapor.json; the daemon reads it on next start",
@@ -556,26 +556,26 @@ final class AppShellViewModel: ObservableObject {
     } catch {
       state.syncState = .error
       logger.error(
-        "Failed to persist useGitIgnore setting",
+        "Failed to persist useGitignore setting",
         metadata: ["error": String(describing: error)]
       )
     }
   }
 
-  func setUseVaporIgnore(_ enabled: Bool) {
-    guard configuration.useVaporIgnore != enabled else {
+  func setUseVaporignore(_ enabled: Bool) {
+    guard configuration.useVaporignore != enabled else {
       return
     }
 
-    configuration.useVaporIgnore = enabled
-    state.useVaporIgnore = enabled
+    configuration.useVaporignore = enabled
+    state.useVaporignore = enabled
 
     do {
-      try configurationStore.save(configuration)
+      try configurationStore.save(configuration, keys: [VaporConstants.ConfigKeys.useVaporignore])
       refreshDaemonLifecycleManagerForCurrentConfiguration()
       clearConfigurationIssueIfResolved()
       logger.info(
-        "Updated useVaporIgnore setting",
+        "Updated useVaporignore setting",
         metadata: [
           "use_vaporignore": String(enabled),
           "note": "persisted to vapor.json; the daemon reads it on next start",
@@ -584,7 +584,7 @@ final class AppShellViewModel: ObservableObject {
     } catch {
       state.syncState = .error
       logger.error(
-        "Failed to persist useVaporIgnore setting",
+        "Failed to persist useVaporignore setting",
         metadata: ["error": String(describing: error)]
       )
     }
@@ -599,32 +599,32 @@ final class AppShellViewModel: ObservableObject {
   }
 
   func saveIgnoreRuleSettings() {
-    let normalizedPreIgnoreRules = Self.normalizeRuleEditorText(state.preIgnoreRules)
-    let normalizedPostIgnoreRules = Self.normalizeRuleEditorText(state.postIgnoreRules)
+    let preIgnoreRules = VaporConfiguration.rules(fromEditorText: state.preIgnoreRules)
+    let postIgnoreRules = VaporConfiguration.rules(fromEditorText: state.postIgnoreRules)
+    state.preIgnoreRules = VaporConfiguration.editorText(for: preIgnoreRules)
+    state.postIgnoreRules = VaporConfiguration.editorText(for: postIgnoreRules)
 
     guard
-      normalizedPreIgnoreRules != Self.normalizeRuleEditorText(configuration.preIgnoreRules)
-        || normalizedPostIgnoreRules != Self.normalizeRuleEditorText(configuration.postIgnoreRules)
+      preIgnoreRules != configuration.preIgnoreRules
+        || postIgnoreRules != configuration.postIgnoreRules
     else {
-      state.preIgnoreRules = normalizedPreIgnoreRules
-      state.postIgnoreRules = normalizedPostIgnoreRules
       return
     }
 
-    configuration.preIgnoreRules = normalizedPreIgnoreRules
-    configuration.postIgnoreRules = normalizedPostIgnoreRules
-    state.preIgnoreRules = normalizedPreIgnoreRules
-    state.postIgnoreRules = normalizedPostIgnoreRules
+    configuration.preIgnoreRules = preIgnoreRules
+    configuration.postIgnoreRules = postIgnoreRules
 
     do {
-      try configurationStore.save(configuration)
+      try configurationStore.save(
+        configuration,
+        keys: [VaporConstants.ConfigKeys.preIgnoreRules, VaporConstants.ConfigKeys.postIgnoreRules])
       refreshDaemonLifecycleManagerForCurrentConfiguration()
       clearConfigurationIssueIfResolved()
       logger.info(
         "Updated user ignore rules",
         metadata: [
-          "pre_rule_count": String(Self.countConfiguredRules(in: normalizedPreIgnoreRules)),
-          "post_rule_count": String(Self.countConfiguredRules(in: normalizedPostIgnoreRules)),
+          "pre_rule_count": String(preIgnoreRules.count),
+          "post_rule_count": String(postIgnoreRules.count),
           "note": "persisted to vapor.json; the daemon reads it on next start",
         ]
       )
@@ -637,23 +637,23 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
-  func setLanguageCode(_ languageCode: String) {
-    let sanitizedLanguageCode = Self.normalizedLanguageCode(languageCode)
+  func setLanguage(_ language: String) {
+    let sanitizedLanguage = Self.normalizedLanguage(language)
 
-    guard configuration.languageCode != sanitizedLanguageCode else {
+    guard configuration.language != sanitizedLanguage else {
       return
     }
 
-    configuration.languageCode = sanitizedLanguageCode
+    configuration.language = sanitizedLanguage
     refreshLocalization()
 
     do {
-      try configurationStore.save(configuration)
+      try configurationStore.save(configuration, keys: [VaporConstants.ConfigKeys.language])
       clearConfigurationIssueIfResolved()
       logger.info(
         "Updated language setting",
         metadata: [
-          "language_code": configuration.languageCode,
+          "language": configuration.language,
           "effective_language": state.effectiveLanguageCode,
         ]
       )
@@ -679,8 +679,8 @@ final class AppShellViewModel: ObservableObject {
   }
 
   private func refreshLocalization() {
-    localization = localizationStore.resolve(languageCode: configuration.languageCode)
-    state.languageCode = configuration.languageCode
+    localization = localizationStore.resolve(languageCode: configuration.language)
+    state.language = configuration.language
     state.effectiveLanguageCode = localization.effectiveLanguageCode
   }
 
@@ -692,35 +692,24 @@ final class AppShellViewModel: ObservableObject {
     refreshLifecycleCoordinator()
   }
 
+  /// After a save, the banner reflects the file as it is now: a value the
+  /// save did not touch can still be invalid.
   private func clearConfigurationIssueIfResolved() {
     guard state.configurationIssuePath != nil || state.configurationIssueReason != nil else {
       return
     }
 
-    state.configurationIssuePath = nil
-    state.configurationIssueReason = nil
-    if state.syncState == .error {
+    let issue = configurationStore.loadResult().issue
+    state.configurationIssuePath = issue?.configPath
+    state.configurationIssueReason = issue?.reason
+    if issue == nil && state.syncState == .error {
       state.syncState = .idle
     }
   }
 
-  private static func normalizeRuleEditorText(_ rules: String) -> String {
-    rules
-      .replacingOccurrences(of: "\r\n", with: "\n")
-      .replacingOccurrences(of: "\r", with: "\n")
-  }
-
-  private static func normalizedLanguageCode(_ languageCode: String) -> String {
-    let normalized = languageCode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    return normalized.isEmpty ? VaporConfiguration.defaultLanguageCode : normalized
-  }
-
-  private static func countConfiguredRules(in rules: String) -> Int {
-    normalizeRuleEditorText(rules)
-      .split(whereSeparator: \.isNewline)
-      .map { $0.trimmingCharacters(in: .whitespaces) }
-      .filter { !$0.isEmpty }
-      .count
+  private static func normalizedLanguage(_ language: String) -> String {
+    let normalized = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    return normalized.isEmpty ? VaporConfiguration.defaultLanguage : normalized
   }
 
   /// Builds the production lifecycle manager: a thin facade over the

@@ -2,7 +2,7 @@
 //!
 //! Pure helpers plus a transport-injected code exchange, so everything
 //! short of the interactive browser hop is unit-testable offline. The
-//! CLI drives the interactive flow (`vapor auth login gdrive`);
+//! CLI drives the interactive flow (`vapor auth login`);
 //! tokens live only in the profile-scoped `SecretStore` entry
 //! (`docs/operations/provider-auth-operations.md`).
 
@@ -272,7 +272,7 @@ fn token_request(
         let description = parsed.error_description.unwrap_or_default();
         return Err(if error == "invalid_grant" || error == "invalid_client" {
             ProviderError::authentication(format!(
-                "authorization is no longer valid ({error}): {description}; run `vapor auth login gdrive`"
+                "authorization is no longer valid ({error}): {description}; run `vapor auth login`"
             ))
         } else if response.status >= 500 {
             ProviderError::transient(format!("token endpoint failed: {error}"))

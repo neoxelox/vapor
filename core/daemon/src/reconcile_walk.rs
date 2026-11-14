@@ -558,7 +558,7 @@ impl ReconcileWalker {
                             // exactly what was last synced (the cloud side
                             // deleted it while no daemon was running).
                             // The executor's own guard and the
-                            // mass-deletion guard still get their say.
+                            // mass-delete guard still get their say.
                             batch.push((local_path, PendingIntentKind::ApplyRemoteDelete, now));
                         } else {
                             batch.push((local_path, PendingIntentKind::Upload, now));
@@ -1071,7 +1071,7 @@ mod tests {
         fn capabilities(&self) -> vapor_providers::ProviderCapabilities {
             vapor_providers::inert_stub_provider().capabilities()
         }
-        fn ensure_cloud_sync_directory(&self, _: &str) -> Result<(), ProviderError> {
+        fn ensure_cloud_root(&self, _: &str) -> Result<(), ProviderError> {
             Ok(())
         }
         fn enumerate(&self, directory: &RemotePath) -> Result<Vec<RemoteEntry>, ProviderError> {

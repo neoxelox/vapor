@@ -125,48 +125,47 @@ Depends on: `docs/tasks/core.md` C5 (IPC channel).
       and IPC schema version. Effective ceilings / idle-boost surface
       land alongside the C8-32 / C8-40 work.)*
 - [x] L3-2 `vapor pause` / `vapor resume` — control endpoints.
-- [x] L3-3 `vapor flush-now` — force-flush pending intents.
-      *(Wave 7 ships the IPC seam; the runtime tick already drains
-      opportunistically, so the CLI command is informational. C8 may
-      promote it to a real "process every queued intent regardless of
-      slice budget" trigger.)*
-- [x] L3-4 `vapor reconcile` — request whole-scope reconcile.
-- [x] L3-5 `vapor timeline [--tail] [--json]` — streams the diagnostics
+- [x] L3-3 A drain request. *(Shipped as `vapor flush-now`; the naming
+      pass folded it into `vapor reconcile`, which carries the boost.)*
+- [x] L3-4 `vapor reconcile [--json]` — the user's on-demand scan: runs
+      under any throttle state but `suspended` and releases deferred
+      work.
+- [x] L3-5 `vapor timeline [--json]` — streams the diagnostics
       timeline. *(Wave 7 ships the IPC seam; the in-memory timeline
       buffer lands with C8-30.)*
 - [x] L3-6 `vapor logs [--tail] [--level=debug]` — tails
-      `<vapor_dir>/logs/vapord.logs` with the existing log line format and
+      `<vapor_dir>/logs/vapord.log` with the existing log line format and
       redaction rules. *(Wave 7 ships `--tail`; `--level` filtering can
       land alongside the C8-29 diagnostics surface when the daemon
       starts emitting structured level metadata in addition to text.)*
 - [x] L3-7 Consistent behavior when no daemon is running: every IPC-backed
       command exits non-zero within 1s with `vapor: daemon not running —
       try \`vapor service start\``, never hangs.
-- [x] L3-8 `vapor conflicts list [--json]` + `vapor conflicts resolve
-      <copy> --keep <canonical|copy>` — keep-both conflict surfacing
-      (core.md C8-70). Filesystem scan of profile local roots (the copy
-      files are the durable registry), locked `--json` contract consumed
-      by app surfaces, resolution via plain file operations; both work
-      with the daemon stopped. Design:
-      `docs/architecture/conflict-resolution.md`.
+- [x] L3-8 Keep-both conflict surfacing (core.md C8-70). Shipped as
+      `vapor conflicts`; a conflicted file is now one `conflict`
+      decision listing every version, listed with `vapor decisions list`
+      and answered with `vapor decisions resolve <id> --choose <file>`,
+      which keeps that version, trashes the others, and works with the
+      daemon stopped. Design: `docs/architecture/conflict-resolution.md`.
 
 ## Phase L4 - Auth flows
 
 Depends on: `docs/tasks/core.md` C3-4 (`SecretStore` + macOS impl) and
 C8-48 (Google Drive provider).
 
-- [x] L4-1 `vapor auth login <provider>` — starts OAuth PKCE, opens the
+- [x] L4-1 `vapor auth login [--profile <id>]` — the profile's provider
+      decides the flow; for Google Drive it starts OAuth PKCE, opens the
       user's browser, listens on a localhost loopback, stores tokens via
       `core/platform/secrets`. Also supports `--no-browser` for headless
       flows (prints URL, accepts pasted auth code). *(Wave 7 ships the
       SecretStore-backed plumbing with explicit `--token` for headless
       / CI; the OAuth-PKCE browser flow lands alongside C8-48 when a
       provider with real auth ships.)*
-- [x] L4-2 `vapor auth logout <provider>` — removes tokens for the named
-      provider (or all providers with `--all`). *(`--all` deferred — Wave
-      7 ships per-provider `logout`.)*
-- [x] L4-3 `vapor auth status` — lists bound providers/accounts without
-      revealing tokens.
+- [x] L4-2 `vapor auth logout [--profile <id>]` — removes every stored
+      credential of the profile.
+- [x] L4-3 `vapor auth status [--profile <id>] [--json]` — each
+      profile's sign-in state (`signed-in`, `signed-out`, `not-needed`)
+      without revealing tokens.
 
 ## Phase L5 - Headless / server ergonomics
 

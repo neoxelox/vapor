@@ -12,14 +12,14 @@
 //! - `vapord_binary` is discoverable next to the CLI, inside the app
 //!   bundle, or on `PATH` (one resolver shared with `vapor service`).
 //! - `secret_store` reports whether provider tokens persist on this OS.
-//! - `gdrive_oauth_client` names the Google Drive OAuth client a sign-in
+//! - `gdrive-oauth-client` names the Google Drive OAuth client a sign-in
 //!   would use: built in, from the environment, or none.
 //! - `throttle_inputs` reports where the daemon's throttle signals come
 //!   from on this host.
 //! - `host_launch_agent_plist` (macOS) is present at the documented path.
 //!
 //! The report renders as text rows or, with `--json`, as
-//! `{"checks": [...], "worst_status": "..."}`.
+//! `{"checks": [...], "worstStatus": "..."}`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -29,12 +29,27 @@ use vapor_shared::constants;
 
 use super::daemon_binary;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DoctorCheckStatus {
     Ok,
     Warning,
     Failure,
+}
+
+impl DoctorCheckStatus {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Ok => constants::doctor::STATUS_OK,
+            Self::Warning => constants::doctor::STATUS_WARNING,
+            Self::Failure => constants::doctor::STATUS_FAILURE,
+        }
+    }
+}
+
+impl Serialize for DoctorCheckStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.wire_name())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -52,6 +67,7 @@ pub struct DoctorReport {
 /// The `--json` shape: the rows plus the aggregate the exit code is
 /// derived from, so scripts do not have to recompute it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DoctorReportJson<'a> {
     pub checks: &'a [DoctorCheck],
     pub worst_status: DoctorCheckStatus,
@@ -111,7 +127,7 @@ pub fn run() -> DoctorReport {
 }
 
 fn check_vapor_directory(path: &Path) -> DoctorCheck {
-    let name = "vapor_dir".to_string();
+    let name = constants::doctor::CHECK_VAPOR_DIR.to_string();
     if !path.exists() {
         return DoctorCheck {
             name,
@@ -179,7 +195,7 @@ fn private_mode_violation(_path: &Path) -> Option<String> {
 /// running. Warning (not Failure) — the relocation is functional, but
 /// the user should know their socket is not at the canonical path.
 fn check_ipc_socket_path(location: &vapor_shared::runtime_paths::IpcSocketLocation) -> DoctorCheck {
-    let name = "ipc_socket_path".to_string();
+    let name = constants::doctor::CHECK_IPC_SOCKET.to_string();
     if location.path.as_os_str().len() > constants::ipc::MAX_SOCKET_PATH_BYTES {
         return DoctorCheck {
             name,
@@ -211,7 +227,7 @@ fn check_ipc_socket_path(location: &vapor_shared::runtime_paths::IpcSocketLocati
 }
 
 fn check_daemon_binary(found: Option<daemon_binary::DaemonBinary>) -> DoctorCheck {
-    let name = "vapord_binary".to_string();
+    let name = constants::doctor::CHECK_VAPORD_BINARY.to_string();
     match found {
         Some(daemon) => DoctorCheck {
             name,
@@ -235,7 +251,7 @@ fn check_daemon_binary(found: Option<daemon_binary::DaemonBinary>) -> DoctorChec
 /// Constructing the store touches nothing, so this never prompts.
 fn check_secret_store() -> DoctorCheck {
     use vapor_platform::SecretStore;
-    let name = "secret_store".to_string();
+    let name = constants::doctor::CHECK_SECRET_STORE.to_string();
     match vapor_platform::NativeSecretStore::for_current_user() {
         Ok(store) if store.is_persistent() => DoctorCheck {
             name,
@@ -264,7 +280,7 @@ fn check_gdrive_oauth_client(
     client: Option<vapor_providers::gdrive::oauth::ClientCredentials>,
 ) -> DoctorCheck {
     use vapor_providers::gdrive::oauth::ClientSource;
-    let name = "gdrive_oauth_client".to_string();
+    let name = constants::doctor::CHECK_GDRIVE_OAUTH_CLIENT.to_string();
     match client {
         Some(client) => {
             let source = match client.source {
@@ -301,7 +317,7 @@ fn check_gdrive_oauth_client(
 
 /// Where the daemon's throttle inputs would come from if started here.
 fn check_throttle_inputs(override_value: Option<String>) -> DoctorCheck {
-    let name = "throttle_inputs".to_string();
+    let name = constants::doctor::CHECK_THROTTLE_INPUTS.to_string();
     let requested_static = override_value
         .as_deref()
         .map(str::trim)
@@ -351,7 +367,7 @@ fn check_throttle_inputs(override_value: Option<String>) -> DoctorCheck {
 }
 
 fn check_macos_launch_agent_plist() -> DoctorCheck {
-    let name = "host_launch_agent_plist".to_string();
+    let name = constants::doctor::CHECK_LAUNCH_AGENT.to_string();
     let Some(home) = std::env::var_os("HOME") else {
         return DoctorCheck {
             name,
@@ -382,7 +398,7 @@ fn check_macos_launch_agent_plist() -> DoctorCheck {
 
 /// The systemd user unit `vapor service install` writes on Linux.
 fn check_linux_systemd_unit() -> DoctorCheck {
-    let name = "host_systemd_user_unit".to_string();
+    let name = constants::doctor::CHECK_SYSTEMD_UNIT.to_string();
     let config_home = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -569,13 +585,13 @@ mod tests {
             ],
         };
         let json = serde_json::to_value(report.render_json()).expect("serialize");
-        assert_eq!(json["worst_status"], "warning");
+        assert_eq!(json["worstStatus"], "warning");
         assert_eq!(json["checks"][0]["name"], "a");
         assert_eq!(json["checks"][0]["status"], "ok");
         assert_eq!(json["checks"][1]["detail"], "hmm");
         assert_eq!(
             json.as_object().expect("object").keys().collect::<Vec<_>>(),
-            vec!["checks", "worst_status"]
+            vec!["checks", "worstStatus"]
         );
         assert!(report.render_text().contains("[WARN] b: hmm"));
     }

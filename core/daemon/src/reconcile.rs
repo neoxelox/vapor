@@ -15,7 +15,7 @@ pub struct ReconcileController {
     slice_budget: Duration,
     running: Option<RunningReconcile>,
     clock: Arc<dyn Clock>,
-    /// The user asked for a scan now (`vapor sync-now`, the app's Sync
+    /// The user asked for a scan now (`vapor reconcile`, the app's Sync
     /// now). While set, admission and the checkpoint accept every
     /// throttle state but `Suspended`, which still stops everything;
     /// the slice budget keeps the walk interruptible. Cleared when a
@@ -96,7 +96,7 @@ impl ReconcileController {
 
     /// Whether a reconcile may start or keep running under `state`.
     fn admits(&self, state: ThrottleState) -> bool {
-        state == ThrottleState::IdleDrain || (self.on_demand && state != ThrottleState::Suspended)
+        state == ThrottleState::Idle || (self.on_demand && state != ThrottleState::Suspended)
     }
 
     pub fn release_ready_deferred_reconciles(
@@ -106,7 +106,7 @@ impl ReconcileController {
         throttle_state: ThrottleState,
         now: SystemTime,
     ) -> usize {
-        if throttle_state != ThrottleState::IdleDrain {
+        if throttle_state != ThrottleState::Idle {
             return 0;
         }
 
@@ -273,7 +273,7 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     #[test]
-    fn deferred_reconciles_are_released_only_in_idle_drain() {
+    fn deferred_reconciles_are_released_only_in_idle() {
         let subtree_root = PathBuf::from("/tmp/vapor-root/project/sub");
         let mut maps = stormed_maps(&subtree_root);
         let mut scheduler = KeyedSupersedingScheduler::default();
@@ -294,7 +294,7 @@ mod tests {
             controller.release_ready_deferred_reconciles(
                 &mut maps,
                 &mut scheduler,
-                ThrottleState::IdleDrain,
+                ThrottleState::Idle,
                 timestamp(32),
             ),
             1
@@ -426,7 +426,7 @@ mod tests {
                 .try_start_next(
                     &mut scheduler,
                     &mut workgate,
-                    ThrottleState::IdleDrain,
+                    ThrottleState::Idle,
                     timestamp(1),
                 )
                 .expect("start reconcile"),
@@ -440,7 +440,7 @@ mod tests {
             .checkpoint(
                 &mut scheduler,
                 &mut workgate,
-                ThrottleState::IdleDrain,
+                ThrottleState::Idle,
                 timestamp(2),
             )
             .expect("reconcile should yield");
@@ -454,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn running_reconcile_interrupts_when_throttle_leaves_idle_drain() {
+    fn running_reconcile_interrupts_when_throttle_leaves_idle() {
         let root = PathBuf::from("/tmp/vapor-root/project");
         let mut scheduler = KeyedSupersedingScheduler::default();
         scheduler.upsert_intent(
@@ -469,7 +469,7 @@ mod tests {
             .try_start_next(
                 &mut scheduler,
                 &mut workgate,
-                ThrottleState::IdleDrain,
+                ThrottleState::Idle,
                 timestamp(1),
             )
             .expect("start reconcile");
@@ -510,7 +510,7 @@ mod tests {
             .try_start_next(
                 &mut scheduler,
                 &mut workgate,
-                ThrottleState::IdleDrain,
+                ThrottleState::Idle,
                 timestamp(1_000),
             )
             .expect("start reconcile");
@@ -523,7 +523,7 @@ mod tests {
                 .checkpoint(
                     &mut scheduler,
                     &mut workgate,
-                    ThrottleState::IdleDrain,
+                    ThrottleState::Idle,
                     timestamp(500),
                 )
                 .is_none(),
@@ -537,7 +537,7 @@ mod tests {
             .checkpoint(
                 &mut scheduler,
                 &mut workgate,
-                ThrottleState::IdleDrain,
+                ThrottleState::Idle,
                 timestamp(500),
             )
             .expect("monotonic-axis slice budget exceeded");
@@ -556,7 +556,7 @@ mod tests {
             controller.release_ready_deferred_reconciles(
                 &mut maps,
                 &mut scheduler,
-                ThrottleState::IdleDrain,
+                ThrottleState::Idle,
                 timestamp(32),
             ),
             1
@@ -565,7 +565,7 @@ mod tests {
             .try_start_next(
                 &mut scheduler,
                 &mut workgate,
-                ThrottleState::IdleDrain,
+                ThrottleState::Idle,
                 timestamp(32),
             )
             .expect("start reconcile");
@@ -598,14 +598,14 @@ mod tests {
         controller.release_ready_deferred_reconciles(
             &mut maps,
             &mut scheduler,
-            ThrottleState::IdleDrain,
+            ThrottleState::Idle,
             timestamp(32),
         );
         controller
             .try_start_next(
                 &mut scheduler,
                 &mut workgate,
-                ThrottleState::IdleDrain,
+                ThrottleState::Idle,
                 timestamp(32),
             )
             .expect("start reconcile");
@@ -628,8 +628,8 @@ mod tests {
     fn idle_reconcile_gate() -> ThrottleWorkgate {
         let controller = ThrottleController::default();
         ThrottleWorkgate::new(
-            ThrottleState::IdleDrain,
-            controller.caps_for(ThrottleState::IdleDrain),
+            ThrottleState::Idle,
+            controller.caps_for(ThrottleState::Idle),
         )
     }
 

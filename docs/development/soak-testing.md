@@ -92,7 +92,7 @@ touch those files too.
 fault performs stay on the phase's side and path subset, so the
 one-writer rule holds through a fault. After a crash the driver
 restarts the daemon itself (a CLI-only install has no supervisor); the
-mass-deletion guard holding a subtree removal is answered with `vapor
+mass-delete guard holding a subtree removal is answered with `vapor
 decisions resolve <id> --choose apply` and recorded as a `guard-trip`,
 since that is the product working as designed. While the driver has
 the cloud root parked, the daemon holds the profile with a
@@ -108,7 +108,7 @@ A daemon that re-creates the parked root is a finding.
 `VAPOR_THROTTLE_INPUTS=file:<sandbox>/throttle-inputs.json`. The daemon
 re-reads that document on every sample (a `ThrottleInputs` object under
 `inputs`, plus `idle_seconds`), so the driver walks it through
-`IdleDrain`, `Light`, `Throttled`, and `Suspended` while the workload
+`Idle`, `Light`, `Throttled`, and `Suspended` while the workload
 runs. A missing or half-written document samples as the neutral
 defaults, so the daemon never wedges on the driver. `vapor doctor`
 names the source.
@@ -151,7 +151,7 @@ that matter live in the sandbox:
 | `soak-report.json` | at the end, or at the freeze | every phase's verdict, every fault, every violation, the SLO checks, the daemon's error lines |
 | `ops.jsonl` | continuously | one line per operation, fault, and note, with the version and hash written |
 | `model.json` | after every phase | the model, for `--verify` |
-| `home/logs/vapord.logs` | by the daemon | the daemon log |
+| `home/logs/vapord.log` | by the daemon | the daemon log |
 
 A clean run deletes its sandbox (keep it with `--keep`) and leaves the
 report at `.vapor/e2e/soak-last-report.json`. The first violation
@@ -168,7 +168,7 @@ version, how many bytes, which hashes. The triage order:
 
 1. `ops.jsonl`, filtered on the path: which side wrote which version
    when, and which faults fired around it.
-2. `home/logs/vapord.logs` around those timestamps: what the daemon
+2. `home/logs/vapord.log` around those timestamps: what the daemon
    decided (a keep-both, a refused delete, a retry).
 3. The trees: the file's header line names its version.
 4. `vapor status --json` and `vapor diagnostics --json` against the

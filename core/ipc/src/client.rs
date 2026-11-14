@@ -3,7 +3,7 @@
 //!
 //! The surface is intentionally minimal: a handshake, a `status()`
 //! call, and the IPC-driven control commands (`pause`, `resume`,
-//! `flush-now`, etc.).
+//! `reconcile`, etc.).
 
 use std::error::Error;
 use std::fmt::{self, Display};
@@ -174,16 +174,8 @@ impl Client {
         self.call_for_ack(Method::Resume)
     }
 
-    pub fn flush_now(&mut self) -> Result<AckResponse, ClientError> {
-        self.call_for_ack(Method::FlushNow)
-    }
-
     pub fn reconcile(&mut self) -> Result<AckResponse, ClientError> {
         self.call_for_ack(Method::Reconcile)
-    }
-
-    pub fn sync_now(&mut self) -> Result<AckResponse, ClientError> {
-        self.call_for_ack(Method::SyncNow)
     }
 
     pub fn diagnostics(&mut self) -> Result<DiagnosticsResponse, ClientError> {
@@ -191,21 +183,6 @@ impl Client {
             ResponseBody::Diagnostics(diagnostics) => Ok(diagnostics),
             other => Err(ClientError::UnexpectedResponse(format!("{other:?}"))),
         }
-    }
-
-    pub fn set_auto_launch(&mut self, enabled: bool) -> Result<AckResponse, ClientError> {
-        self.call_for_ack(Method::SetAutoLaunch { enabled })
-    }
-
-    pub fn update_excludes(
-        &mut self,
-        pre_ignore_rules: Option<String>,
-        post_ignore_rules: Option<String>,
-    ) -> Result<AckResponse, ClientError> {
-        self.call_for_ack(Method::UpdateExcludes {
-            pre_ignore_rules,
-            post_ignore_rules,
-        })
     }
 
     pub fn timeline(&mut self) -> Result<TimelineResponse, ClientError> {

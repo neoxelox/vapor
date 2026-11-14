@@ -42,30 +42,35 @@ recompile + CI job once those waves land, not a rewrite.
 ## 3) Command surface
 
 ```
-vapor run [--foreground]                # run the daemon in-process
-vapor service install [--user|--system] # native ServiceInstaller
-vapor service uninstall [--keep-running]
-vapor service bootstrap                 # install+start only when autolaunch is enabled
-vapor service start|stop|restart|status
-vapor service check                     # one crash-loop supervision tick
-vapor service acknowledge               # clear a crash-loop pause
+vapor status [--json]                   # what the daemon does and why
+vapor pause|resume [--json]
+vapor reconcile [--json]                # scan now: any throttle state but suspended, plus the boost
+vapor decisions list|show|resolve       # conflicts and parked questions (resolve --choose <option>)
+vapor trash list|restore|empty          # what Vapor removed from this device
 vapor config get|set <key> [value]      # edits vapor.json
-vapor auth login <provider>             # OAuth PKCE via localhost loopback
-vapor auth logout <provider>
-vapor auth status                       # bound / not bound per provider, never the token
-vapor status [--json]                   # queue depth, throttle state, reason
-vapor pause|resume
-vapor flush-now                         # force-flush pending intents
-vapor reconcile                         # request whole-scope reconcile
-vapor sync-now [--json]                 # scan now: any throttle state but Suspended, plus the flush boost
-vapor timeline [--tail] [--json]        # diagnostics timeline
-vapor logs [--tail] [--level=debug]
+vapor auth login [--profile <id>]       # signs the profile in to its provider
+vapor auth logout [--profile <id>]
+vapor auth status [--profile <id>] [--json]  # signed-in / signed-out / not-needed, never the token
+vapor service bootstrap                 # install+start only when autolaunch is enabled
+vapor service install [--supervise]     # native ServiceInstaller
+vapor service uninstall [--keep-running]
+vapor service start|stop|restart|status
+vapor service check [--loop]            # one crash-loop supervision tick
+vapor service acknowledge               # clear a crash-loop pause
+vapor timeline [--json]                 # recent daemon activity
 vapor diagnostics [--json]              # per-intent "why is this stuck"
-vapor conflicts list|resolve            # keep-both conflict copies
-vapor support-bundle [--output] [--json]# redacted diagnostics archive
+vapor logs [--tail N]
 vapor doctor [--json]                   # sanity checks, exit 1 on failure
+vapor report [--output DIR] [--json]    # redacted support report
+vapor run                               # run the daemon in the foreground
 vapor version
 ```
+
+Names follow one rule: single-word commands and subcommands, camelCase
+keys and kebab-case values in every `--json` output. A command that acts
+on exactly one profile takes `--profile` and needs it only when several
+profiles exist; a command that reads takes it as a filter and reads every
+profile without it.
 
 ### 3.1 Rules per command
 
@@ -75,13 +80,13 @@ vapor version
 - `service install` — picks the right installer for the host OS
   automatically; `--user` (default) vs `--system` switch. Configures the OS
   restart policy to match `core/lifecycle::CrashLoopGuard`.
-- `service status` — reports `running` / `stopped` / `not_installed` /
-  `crash_loop_paused` (the crash-loop pause is overlaid from durable
-  lifecycle state) plus `label`, `auto_launch`, and a `crash_loop`
+- `service status` — reports `running` / `stopped` / `not-installed` /
+  `crash-loop-paused` (the crash-loop pause is overlaid from durable
+  lifecycle state) plus `label`, `autoLaunch`, and a `crashLoop`
   object with `--json`.
 - `service start` / `restart` — act on the registered service
   definition only. With none registered (auto-launch off, or a host
-  that never ran `service install`) both answer `not_installed` with
+  that never ran `service install`) both answer `not-installed` with
   exit 0 instead of asking the service manager to kick a job it does
   not have; the text form names the command that registers one.
 - `service bootstrap` / `check` / `acknowledge` — the surfaces' shared
@@ -90,14 +95,17 @@ vapor version
   `core/lifecycle` against `<vapor_dir>/state/lifecycle.json`, so
   backoff and pause survive restarts and are shared across surfaces;
   the macOS app shells out to these same subcommands.
-- `auth login <provider>` — runs PKCE in the user's browser with a
-  localhost-loopback redirect; stores tokens via `core/platform/secrets`.
-- `status`, `pause`, `resume`, `flush-now`, `reconcile`, `sync-now` — talk
-  to a running daemon via the IPC channel
+- `auth login` — the profile's provider decides what it does. Google
+  Drive runs PKCE in the user's browser with a localhost-loopback
+  redirect (or reads a token on stdin when there is no terminal); the
+  filesystem provider needs no sign-in and the command says so. Tokens
+  go through `core/platform/secrets`.
+- `status`, `pause`, `resume`, `reconcile`, `timeline`, `diagnostics` —
+  talk to a running daemon via the IPC channel
   (`docs/architecture/ipc-contracts.md`). Exit non-zero with a clear message
-  if no daemon is running; never hang. `sync-now` is the on-demand path
+  if no daemon is running; never hang. `reconcile` is the on-demand path
   past the idle gate: the scan runs under any throttle state but
-  `Suspended`, and `--json` returns the daemon's ack for the app shim.
+  `suspended`, and `--json` returns the daemon's ack for the app shim.
 - `doctor` — reports platform-specific sanity checks: inotify watch limits on
   Linux, Task Scheduler task presence on Windows, LaunchAgent plist presence
   on macOS, `VAPOR_DIR` permissions, daemon binary location + version.

@@ -356,19 +356,14 @@ fn feed_driven_cloud_delete(ctx: &mut Ctx) -> Result<(), Failure> {
     ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
     ctx.wait_exists(&home.cloud.join("feed-delete.txt"), CONVERGE_TIMEOUT)?;
     fs::remove_file(home.cloud.join("feed-delete.txt"))?;
-    // A loaded host throttles the daemon to a slow poll cadence. Nudge an
-    // immediate poll on every probe, the same nudge a user gets from
-    // `vapor flush-now`: the deletion still travels through the live
-    // feed; no reconcile is requested.
-    let cli = ctx.cli();
+    // The deletion travels through the live feed; no reconcile is
+    // requested. The budget covers the slowest poll cadence (throttled)
+    // a loaded host can put the daemon in.
     let local = home.local.join("feed-delete.txt");
     ctx.wait_until(
-        Duration::from_secs(45),
+        Duration::from_secs(90),
         "cloud deletion to propagate through the changes feed",
-        || {
-            cli.flush_now();
-            !local.exists()
-        },
+        || !local.exists(),
     )?;
     ctx.settle(CONVERGE_TIMEOUT)?;
     Ok(())

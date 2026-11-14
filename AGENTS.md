@@ -108,9 +108,9 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 - No DB/hash/network work in callback.
 - No provider I/O on the tick thread: transfers, probes, deletes, the changes poll, reconcile directory listings, and the cloud-root retry all run on worker threads and are harvested by a later tick.
 - All expensive work must be throttle-state gated.
-- Throttle states: `IdleDrain`, `Light`, `Throttled`, `Suspended`.
+- Throttle states: `Idle`, `Light`, `Throttled`, `Suspended`.
 - Under `Suspended`, uploads/hashing stop; only lightweight intent coalescing continues.
-- Reconcile scans are deferred and interruptible; run only when policy permits. The user's own request (`vapor sync-now`, the app's Sync now) is the one exception: it admits the next whole-scope scan under any state but `Suspended`, still within that state's caps and still interruptible, and it is spent when one scan completes.
+- Reconcile scans are deferred and interruptible; run only when policy permits. The user's own request (`vapor reconcile`, the app's Sync now) is the one exception: it admits the next whole-scope scan under any state but `Suspended`, still within that state's caps and still interruptible, and it is spent when one scan completes.
 - Throttle inputs come from the host on macOS (CPU, power source, thermal state, Low Power Mode, memory, keyboard presence). Test harnesses pin neutral inputs with `VAPOR_THROTTLE_INPUTS=static`; never make that the production default.
 
 ## 4) Bidirectional sync safety requirements
@@ -344,7 +344,7 @@ how to read a red run: the `vapor-validate` skill.
 - Runtime directory selection is code-defined and env-overridable only; it is not a user-configurable `vapor.json` field.
 - Runtime directory resolution order is:
   1. `VAPOR_DIR` environment variable (explicit override)
-  2. local dev/test/CI default `./.vapor` when `VAPOR_ENV=dev` (and in test/CI contexts)
+  2. local dev/test/CI default `./.vapor` when `VAPOR_ENV=dev` (the repository scripts set it; nothing else, a `CI` variable included, moves the directory)
   3. normal runtime default `~/.vapor`
 - Repository scripts must default `VAPOR_DIR` to `./.vapor` so local and CI behavior are consistent.
 - Repository scripts should default `VAPOR_ENV` to `dev` (and `prod` for package flow).
@@ -363,7 +363,7 @@ how to read a red run: the `vapor-validate` skill.
 - Swift workflow scripts must sync locale catalogs into `apps/macos/Sources/VaporCore/Resources/locales/*.json` before build/test/package.
 - Logs and internal diagnostics text may remain English-only.
 - Language selection behavior must preserve safe fallback order:
-  1. user `languageCode` selection (default `en`),
+  1. user `language` selection (default `en`),
   2. English (`en`) fallback if that catalog is unavailable.
 - When adding or changing user-facing UI text, contributors must update `en.json` (and any other available catalogs) in the same change set.
 - If a translation key is missing in a non-English catalog, fallback behavior must remain deterministic and resolve to English.

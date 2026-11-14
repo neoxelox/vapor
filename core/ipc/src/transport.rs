@@ -170,7 +170,7 @@ mod unix_impl {
         // not blindly trust whatever sits at the resolved path: under the
         // deterministic temp-dir relocation, a foreign user on a
         // world-writable /tmp could pre-create the socket and impersonate
-        // the daemon (forged status/acks, leaked UpdateExcludes contents).
+        // the daemon (forged status and acknowledgements).
         use std::os::unix::fs::MetadataExt;
         let owner_uid = fs::metadata(socket_path)?.uid();
         verify_socket_owner(socket_path, owner_uid, current_euid())?;

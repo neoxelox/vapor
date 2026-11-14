@@ -212,7 +212,7 @@ at the next tick boundary.
 The user's own trash, for a file Vapor removes on this device. The
 daemon's managed trash under `vapor_dir/trash/<profile>/`
 (`core/daemon/src/trash.rs`) is the safety net that works on every OS;
-this trait is the opt-in (`trash.useSystemTrash`) discoverable
+this trait is the opt-in (`trash.useSystem`) discoverable
 alternative, and the managed trash catches whatever the native bin
 refuses (another volume, no session), so a discard never degrades to an
 unlink.

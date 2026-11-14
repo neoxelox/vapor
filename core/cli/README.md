@@ -9,12 +9,14 @@ Tasks: `docs/tasks/cli.md`.
 
 ## Commands
 
-`run`, `service install|uninstall|bootstrap|start|stop|restart|status|check|acknowledge`,
-`config get|set`, `auth login|logout|status`, `status`, `pause`, `resume`,
-`flush-now`, `reconcile`, `sync-now`, `timeline`, `logs`, `diagnostics`,
-`conflicts list|resolve`, `support-bundle`, `doctor`, `version`. Every
-command that reports state takes `--json`; the shapes are locked by
-assertion tests in each command module. `vapor --help` is the reference.
+`status`, `pause`, `resume`, `reconcile`,
+`decisions list|show|resolve`, `trash list|restore|empty`, `config get|set`,
+`auth login|logout|status`, `service bootstrap|install|uninstall|start|stop|restart|status|check|acknowledge`,
+`timeline`, `diagnostics`, `logs`, `doctor`, `report`, `run`, `version`.
+Every command that reports state takes `--json`: keys are camelCase and
+values kebab-case, the same shape the daemon's IPC status uses. The
+shapes are locked by assertion tests in each command module. `vapor
+--help` is the reference.
 
 ## Install from source
 

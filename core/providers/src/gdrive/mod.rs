@@ -8,7 +8,7 @@
 //!   (`auth.{profile}.gdrive.token`), proactive refresh 60s
 //!   before expiry, `invalid_grant` → `Authentication` (user
 //!   re-consent), one forced-refresh retry on a 401.
-//! - **Root handling**: `ensure_cloud_sync_directory`
+//! - **Root handling**: `ensure_cloud_root`
 //!   resolves or creates the configured folder chain; failures surface
 //!   as actionable errors and the engine blocks sync until it works.
 //! - **Uploads**: multipart for small payloads, resumable
@@ -226,7 +226,7 @@ impl TokenManager {
 
     fn sign_in_hint(&self) -> String {
         format!(
-            "sign in again with `vapor auth login gdrive --profile {}`",
+            "sign in again with `vapor auth login --profile {}`",
             self.config.profile_id
         )
     }
@@ -761,15 +761,15 @@ impl Provider for GoogleDriveProvider {
         HashAlgorithm::Md5
     }
 
-    fn ensure_cloud_sync_directory(&self, cloud_sync_directory: &str) -> Result<(), ProviderError> {
-        let segments = cloud_root_segments(cloud_sync_directory)?;
+    fn ensure_cloud_root(&self, cloud_root: &str) -> Result<(), ProviderError> {
+        let segments = cloud_root_segments(cloud_root)?;
         let mut parent_id = "root".to_string();
         for segment in &segments {
             parent_id = match self.find_child(&parent_id, segment)? {
                 Some(existing) if existing.mime_type == FOLDER_MIME => existing.id,
                 Some(_) => {
                     return Err(ProviderError::permanent(format!(
-                        "cloudSyncDirectory component '{segment}' exists in Drive but is not a folder"
+                        "cloudRoot component '{segment}' exists in Drive but is not a folder"
                     )));
                 }
                 None => self.create_folder(&parent_id, segment)?,
@@ -777,7 +777,7 @@ impl Provider for GoogleDriveProvider {
         }
         logging::info(
             "Google Drive sync root is ready",
-            &[("cloud_sync_directory", cloud_sync_directory.to_string())],
+            &[("cloud_root", cloud_root.to_string())],
         );
         *self
             .root_id
@@ -823,21 +823,21 @@ impl Provider for GoogleDriveProvider {
         Ok(())
     }
 
-    fn root_identity(&self, cloud_sync_directory: &str) -> Result<Option<String>, ProviderError> {
+    fn root_identity(&self, cloud_root: &str) -> Result<Option<String>, ProviderError> {
         // The folder id is the identity: a folder re-created at the
         // same path gets a new id, and a renamed folder keeps its own.
         let mut parent_id = "root".to_string();
-        for segment in cloud_root_segments(cloud_sync_directory)? {
+        for segment in cloud_root_segments(cloud_root)? {
             parent_id = match self.find_child(&parent_id, segment)? {
                 Some(existing) if existing.mime_type == FOLDER_MIME => existing.id,
                 Some(_) => {
                     return Err(ProviderError::permanent(format!(
-                        "cloudSyncDirectory component '{segment}' exists in Drive but is not a folder"
+                        "cloudRoot component '{segment}' exists in Drive but is not a folder"
                     )));
                 }
                 None => {
                     return Err(ProviderError::not_found(format!(
-                        "Google Drive folder {cloud_sync_directory} is missing"
+                        "Google Drive folder {cloud_root} is missing"
                     )));
                 }
             };
@@ -1610,8 +1610,8 @@ impl GdriveDownloadSession {
 }
 
 /// The path components of the configured Drive root.
-fn cloud_root_segments(cloud_sync_directory: &str) -> Result<Vec<&str>, ProviderError> {
-    let segments: Vec<&str> = cloud_sync_directory
+fn cloud_root_segments(cloud_root: &str) -> Result<Vec<&str>, ProviderError> {
+    let segments: Vec<&str> = cloud_root
         .trim()
         .trim_matches('/')
         .split('/')
@@ -1619,7 +1619,7 @@ fn cloud_root_segments(cloud_sync_directory: &str) -> Result<Vec<&str>, Provider
         .collect();
     if segments.is_empty() {
         return Err(ProviderError::permanent(
-            "cloudSyncDirectory must name a folder inside Google Drive (for example \"/Vapor\")",
+            "cloudRoot must name a folder inside Google Drive (for example \"/Vapor\")",
         ));
     }
     Ok(segments)
@@ -1639,7 +1639,7 @@ fn classify_api_failure(response: &HttpResponse) -> ProviderError {
         .map(Duration::from_secs);
     match response.status {
         401 => ProviderError::authentication(
-            "Google Drive rejected the credentials; run `vapor auth login gdrive`",
+            "Google Drive rejected the credentials; run `vapor auth login`",
         ),
         403 => match extract_403_reason(&body_text).as_deref() {
             // Rate/quota limits are transient: back off, do not drop the

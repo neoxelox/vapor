@@ -173,15 +173,15 @@ impl Ctx {
     /// way a user would.
     pub fn configure_scope(&self, home: &Home) -> Result<(), Failure> {
         let cli = self.cli_for(home);
-        cli.config_set("localSyncDirectory", &home.local.to_string_lossy())?;
-        cli.config_set("cloudSyncDirectory", &home.cloud.to_string_lossy())?;
+        cli.config_set("localRoot", &home.local.to_string_lossy())?;
+        cli.config_set("cloudRoot", &home.cloud.to_string_lossy())?;
         // A sandbox is a small computer: two transfers at a time, so
         // the scenarios sharing the host do not each spin up a core's
         // worth of workers. The workgate's own scaling is Tier 1's.
         cli.config_set(
             "resourceLimits",
             &format!(
-                "{{\"maxConcurrentTransfers\": {}}}",
+                "{{\"concurrentTransfers\": {}}}",
                 SANDBOX_CONCURRENT_TRANSFERS
             ),
         )?;
@@ -218,7 +218,7 @@ impl Ctx {
         let index = self.daemons.len() - 1;
         if wait_running {
             let cli = self.cli_for(home);
-            if let Err(error) = cli.wait_run_state("Running", STARTUP_TIMEOUT) {
+            if let Err(error) = cli.wait_run_state("running", STARTUP_TIMEOUT) {
                 let alive = self.daemons[index].is_alive();
                 return Err(Failure::new(format!(
                     "{error} (daemon alive: {alive}; see {})",
@@ -311,13 +311,10 @@ impl Ctx {
         self.drain_home(home, timeout)
     }
 
-    /// Hints a drain and waits for the queue to empty. Only meaningful
-    /// once the intents are known to be enqueued (see `converge_from`
-    /// and `settle`).
+    /// Waits for the queue to empty. Only meaningful once the intents are
+    /// known to be enqueued (see `converge_from` and `settle`).
     pub fn drain_home(&self, home: &Home, timeout: Duration) -> Result<(), Failure> {
-        let cli = self.cli_for(home);
         let db = self.db_for(home);
-        cli.flush_now();
         wait::wait_until(
             timeout,
             &format!(
@@ -344,11 +341,9 @@ impl Ctx {
         timeout: Duration,
     ) -> Result<(), Failure> {
         let db = self.db_for(home);
-        let cli = self.cli_for(home);
         let timeout = timeout.mul_f64(f64::from(wait::deadline_scale_percent()) / 100.0);
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            cli.flush_now();
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             ensure!(
                 !remaining.is_zero(),

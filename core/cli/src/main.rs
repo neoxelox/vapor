@@ -15,9 +15,8 @@ use vapor_cli::commands::service as service_cmd;
 use vapor_cli::{RunOptions, ServiceCommand};
 use vapor_cli::{
     commands::{
-        auth as auth_cmd, config as config_cmd, conflicts as conflicts_cmd,
-        decisions as decisions_cmd, doctor as doctor_cmd, ipc as ipc_cmd, run as run_cmd,
-        trash as trash_cmd,
+        auth as auth_cmd, config as config_cmd, decisions as decisions_cmd, doctor as doctor_cmd,
+        ipc as ipc_cmd, run as run_cmd, trash as trash_cmd,
     },
     resolve_configuration_path,
 };
@@ -28,7 +27,7 @@ use vapor_cli::{
     // Include the git commit so `vapor --version` matches `vapor version`
     // and `vapord --version` (clap prepends the binary name).
     version = vapor_daemon::build_info::VERSION_WITH_COMMIT,
-    about = "Vapor CLI — control plane for the portable Rust runtime",
+    about = "Keep a folder on this device in sync with a folder in the cloud.",
 )]
 struct Cli {
     #[command(subcommand)]
@@ -37,307 +36,297 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run the daemon in-process (foreground).
-    Run {
-        // Reserved/always-on: `vapor run` is always foreground. Hidden so
-        // its presence does not imply a background/daemonize mode exists.
-        // Still parses (the e2e harness passes it).
-        #[arg(long, hide = true)]
-        foreground: bool,
+    /// Show what the daemon is doing and why.
+    Status {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
     },
-    /// Read or write a key in `vapor.json`.
+    /// Pause syncing. Changes are still recorded and sync on resume.
+    Pause {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resume syncing.
+    Resume {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare both folders now and sync the differences, without
+    /// waiting for the device to go idle.
+    Reconcile {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List and answer the questions Vapor asks: conflicts (a file
+    /// changed in more than one place) and irreversible actions it will
+    /// not take on its own. Works with or without a running daemon.
+    Decisions {
+        #[command(subcommand)]
+        action: DecisionsAction,
+    },
+    /// The files Vapor removed from this device, kept for a while so
+    /// they can be restored. Works with or without a running daemon.
+    Trash {
+        #[command(subcommand)]
+        action: TrashAction,
+    },
+    /// Read or change a setting in vapor.json.
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Print version + git commit short.
-    Version,
-    /// Run platform-aware sanity checks.
-    Doctor {
-        /// Emit the report as JSON (`{"checks": [...], "worst_status": ...}`).
-        #[arg(long)]
-        json: bool,
+    /// Sign a profile in to its cloud provider, or out.
+    Auth {
+        #[command(subcommand)]
+        action: AuthAction,
     },
-    /// Manage the platform-native service installation.
+    /// Install, start, stop, and supervise the background daemon.
     Service {
-        /// Install / drive the per-user service definition (default).
+        /// Use the per-user service (the default).
         #[arg(long, conflicts_with = "system")]
         user: bool,
-        /// Reserved for a future system-wide install flow; rejected
-        /// today with an actionable error so scripts that opt in early
-        /// fail loudly instead of being treated as unknown.
+        /// Use a system-wide service (not available yet).
         #[arg(long, conflicts_with = "user")]
         system: bool,
         #[command(subcommand)]
         action: ServiceAction,
     },
-    /// Print live daemon status (queries the IPC server).
-    Status {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Pause the running daemon — stops admitting new work.
-    Pause,
-    /// Resume a paused daemon.
-    Resume,
-    /// Hint the daemon to drain its pending queue as fast as the
-    /// throttle allows.
-    FlushNow,
-    /// Request a fresh whole-scope reconcile.
-    Reconcile,
-    /// Sync now: scan both roots without waiting for an idle moment
-    /// (any throttle state but Suspended) and release deferred work.
-    SyncNow {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Print the diagnostics timeline.
+    /// Show recent daemon activity.
     Timeline {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Per-intent "why stuck" diagnostics from the running daemon.
+    /// List queued and in-flight work, with the reason each item waits.
     Diagnostics {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Tail the daemon log file at `<vapor_dir>/logs/vapord.logs`.
+    /// Print the daemon log.
     Logs {
-        #[arg(long)]
+        /// Print only the last N lines.
+        #[arg(long, value_name = "N")]
         tail: Option<usize>,
     },
-    /// Manage stored authentication tokens.
-    Auth {
-        #[command(subcommand)]
-        action: AuthAction,
-    },
-    /// Export a shareable support bundle: config, logs, and (when the
-    /// daemon is running) live status / diagnostics / timeline.
-    SupportBundle {
-        /// Directory to create the bundle under (defaults to
-        /// `<vapor_dir>/support`).
-        #[arg(long)]
-        output: Option<std::path::PathBuf>,
+    /// Check that this device can run Vapor, and say what to fix.
+    Doctor {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    /// List and resolve keep-both sync conflicts.
-    Conflicts {
-        #[command(subcommand)]
-        action: ConflictsAction,
+    /// Write a support report (settings, logs, and the daemon's live
+    /// state) to share when asking for help.
+    Report {
+        /// Directory to write the report under (default
+        /// `<vapor_dir>/reports`).
+        #[arg(long, value_name = "DIR")]
+        output: Option<std::path::PathBuf>,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
     },
-    /// List and answer the questions the daemon parked (an irreversible
-    /// action on ambiguous evidence). Works with or without a running
-    /// daemon; the daemon applies an answer on its next tick.
-    Decisions {
-        #[command(subcommand)]
-        action: DecisionsAction,
+    /// Run the daemon in this terminal, for a server or for debugging.
+    /// The service starts it on its own otherwise.
+    Run {
+        // Always foreground; hidden so it does not suggest a background
+        // mode. Still parses (the e2e harness passes it).
+        #[arg(long, hide = true)]
+        foreground: bool,
     },
-    /// The files Vapor removed on this device and kept in its trash
-    /// (a deletion that arrived from the cloud, a mirror removal).
-    /// Works with or without a running daemon.
-    Trash {
-        #[command(subcommand)]
-        action: TrashAction,
+    /// Print the version and the git commit.
+    Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum DecisionsAction {
+    /// List the open decisions of every profile.
+    List {
+        /// Include answered decisions.
+        #[arg(long)]
+        all: bool,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one decision with its question, options, and evidence.
+    Show {
+        id: i64,
+        /// The profile the id belongs to; needed only when several
+        /// profiles have a decision with this id.
+        #[arg(long, value_name = "ID")]
+        profile: Option<String>,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Answer a decision. A conflict is resolved at once; anything else
+    /// is applied by the daemon on its next tick, or at its next start.
+    Resolve {
+        id: i64,
+        /// One of the decision's option keys (`show` lists them). For a
+        /// conflict, the file name of the version to keep.
+        #[arg(long, value_name = "OPTION")]
+        choose: String,
+        /// The profile the id belongs to; needed only when several
+        /// profiles have a decision with this id.
+        #[arg(long, value_name = "ID")]
+        profile: Option<String>,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
 #[derive(Subcommand, Debug)]
 enum TrashAction {
-    /// Every kept item of every enabled profile, newest first.
+    /// List what is in the trash, newest first.
     List {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Put one item back at its original path (or beside it, when the
-    /// path is taken again).
+    /// Put an item back where it was, or next to it when that path is
+    /// taken again.
     Restore {
         id: String,
-        /// Profile the id belongs to (needed only when several profiles
-        /// hold the same id).
-        #[arg(long)]
+        /// The profile the id belongs to; needed only when several
+        /// profiles have an item with this id.
+        #[arg(long, value_name = "ID")]
         profile: Option<String>,
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Remove every kept item, for good.
+    /// Delete everything in the trash, for good.
     Empty {
-        #[arg(long)]
+        /// Only this profile's trash (default: every profile).
+        #[arg(long, value_name = "ID")]
         profile: Option<String>,
+        /// Print JSON.
         #[arg(long)]
         json: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum DecisionsAction {
-    /// Open decisions of every enabled profile (`--all` includes
-    /// answered ones).
-    List {
-        #[arg(long)]
-        json: bool,
-        #[arg(long)]
-        all: bool,
-    },
-    /// One decision with its question, options, and evidence.
-    Show {
-        id: i64,
-        /// Profile the id belongs to (needed only when several profiles
-        /// hold the same id).
-        #[arg(long)]
-        profile: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Answer a decision with one of its option keys.
-    Resolve {
-        id: i64,
-        #[arg(long)]
-        choose: String,
-        #[arg(long)]
-        profile: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum ConflictsAction {
-    /// Scan every enabled profile's local root for unresolved
-    /// `~conflict-` copies. Works with or without a running daemon.
-    List {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Resolve one conflict: keep either the canonical file or the
-    /// conflict copy; the discarded version is deleted and the change
-    /// syncs like any other edit.
-    Resolve {
-        /// Path to the `…~conflict-…` copy (as printed by `list`).
-        path: std::path::PathBuf,
-        /// Which version survives under the canonical name:
-        /// 'canonical' or 'copy'.
-        #[arg(long)]
-        keep: String,
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum AuthAction {
-    /// Store a token for `provider`. Omit `--token` (or pass
-    /// `--token -`) to read the token from stdin — except for `gdrive`,
-    /// where omitting `--token` starts the OAuth-PKCE browser flow
-    /// instead. Reading from stdin keeps the secret out of shell
-    /// history and process listings.
-    Login {
-        provider: String,
-        #[arg(long)]
-        token: Option<String>,
-        /// Profile the credential belongs to; defaults to the
-        /// implicit `default` profile.
-        #[arg(long, default_value = "default")]
-        profile: String,
-        /// Run the `gdrive` browser flow even when stdin is not a
-        /// terminal. The app's Sign in button uses this; without it a
-        /// non-interactive login reads the token from stdin.
-        #[arg(long, conflicts_with = "token")]
-        browser: bool,
-    },
-    /// Remove the stored token for `provider`.
-    Logout {
-        provider: String,
-        #[arg(long, default_value = "default")]
-        profile: String,
-    },
-    /// List bound providers for a profile (never reveals the token
-    /// value).
-    Status {
-        #[arg(long, default_value = "default")]
-        profile: String,
     },
 }
 
 #[derive(Subcommand, Debug)]
 enum ConfigAction {
-    /// Print the current value (or empty when unset).
+    /// Print a setting's value, or its default when unset.
     Get { key: String },
-    /// Update one key, preserving every other key in the file.
+    /// Change one setting and keep the rest of the file as it is.
     Set { key: String, value: String },
 }
 
 #[derive(Subcommand, Debug)]
-enum ServiceAction {
-    /// App-startup path: install + start only when autolaunch is
-    /// enabled (a disabled autolaunch is a silent no-op).
-    Bootstrap {
+enum AuthAction {
+    /// Sign a profile in to its provider. Google Drive opens the
+    /// browser; on a host without one, pipe a token on stdin.
+    Login {
+        /// The profile to sign in (default: the only profile).
+        #[arg(long, value_name = "ID")]
+        profile: Option<String>,
+        /// Use this token instead of signing in. `-` reads it from
+        /// stdin, which keeps it out of shell history.
+        #[arg(long, value_name = "TOKEN")]
+        token: Option<String>,
+        /// Open the browser even when stdin is not a terminal. The app's
+        /// Sign in button uses it; without it a login with no terminal
+        /// reads the token from stdin.
+        #[arg(long, conflicts_with = "token")]
+        browser: bool,
+    },
+    /// Remove a profile's stored credentials.
+    Logout {
+        /// The profile to sign out (default: the only profile).
+        #[arg(long, value_name = "ID")]
+        profile: Option<String>,
+    },
+    /// Show which profiles are signed in. Never prints a token.
+    Status {
+        /// Only this profile (default: every profile).
+        #[arg(long, value_name = "ID")]
+        profile: Option<String>,
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Enable autolaunch, install the service definition, and start
-    /// the daemon.
-    Install {
+}
+
+#[derive(Subcommand, Debug)]
+enum ServiceAction {
+    /// Install and start the service when auto-launch is on; do
+    /// nothing when it is off. What the app runs at startup.
+    Bootstrap {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
-        /// Also register the headless supervisor (`vapor service check
-        /// --loop` kept alive by the service manager), for an install
-        /// with no app to restart a crashed daemon.
+    },
+    /// Turn auto-launch on, install the service, and start the daemon.
+    Install {
+        /// Also install a supervisor that restarts a crashed daemon, for
+        /// a device without the app.
         #[arg(long)]
         supervise: bool,
-    },
-    /// Disable autolaunch and remove the service definition. Also
-    /// sends the daemon an explicit stop unless `--keep-running` is
-    /// passed.
-    Uninstall {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
-        /// Skip the explicit stop signal (the "disable autolaunch"
-        /// toggle path). Note: on macOS, launchd tears the job down
-        /// anyway when its service definition is booted out, so the
-        /// daemon still exits; the flag matters on service managers
-        /// that keep a disabled unit running (e.g. systemd).
+    },
+    /// Turn auto-launch off, remove the service, and stop the daemon.
+    Uninstall {
+        /// Leave the daemon running. On macOS launchd stops it anyway
+        /// when the service is removed.
         #[arg(long)]
         keep_running: bool,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
     },
-    /// Start the installed daemon through the service manager.
+    /// Start the installed daemon.
     Start {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Stop the daemon; the service definition stays installed.
+    /// Stop the daemon. The service stays installed.
     Stop {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Stop and start the daemon, which is how a changed `vapor.json`
+    /// Restart the daemon, which is how a restart-required setting
     /// takes effect.
     Restart {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Report whether the service is installed, running, or paused by
-    /// the crash-loop guard.
+    /// Say whether the service is installed and running, or paused
+    /// after repeated crashes.
     Status {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
-    /// One supervision tick: detect an unexpected daemon exit, register
-    /// it with the crash-loop guard, and restart when policy allows.
+    /// Restart the daemon if it exited unexpectedly, within the
+    /// crash-loop limits.
     Check {
-        #[arg(long)]
-        json: bool,
-        /// Keep ticking until a stop signal arrives, printing an
-        /// outcome only when it changes. What the app does every 30
-        /// seconds, for installs without one.
+        /// Keep checking until stopped, printing only changes.
         #[arg(long = "loop")]
         keep_looping: bool,
-        /// Seconds between ticks with `--loop`.
-        #[arg(long)]
+        /// Seconds between checks with `--loop`.
+        #[arg(long, value_name = "SECONDS")]
         interval: Option<u64>,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
     },
-    /// Clear a crash-loop pause so restarts may resume.
+    /// Clear a crash-loop pause so the daemon may be restarted again.
     Acknowledge {
+        /// Print JSON.
         #[arg(long)]
         json: bool,
     },
@@ -420,17 +409,14 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
             dispatch_service(action)
         }
         Command::Status { json } => dispatch_status(json),
-        Command::Pause => dispatch_ack("pause", ipc_cmd::pause()),
-        Command::Resume => dispatch_ack("resume", ipc_cmd::resume()),
-        Command::FlushNow => dispatch_ack("flush-now", ipc_cmd::flush_now()),
-        Command::Reconcile => dispatch_ack("reconcile", ipc_cmd::reconcile()),
-        Command::SyncNow { json } => dispatch_ack_json("sync-now", ipc_cmd::sync_now(), json),
+        Command::Pause { json } => dispatch_ack_json("pause", ipc_cmd::pause(), json),
+        Command::Resume { json } => dispatch_ack_json("resume", ipc_cmd::resume(), json),
+        Command::Reconcile { json } => dispatch_ack_json("reconcile", ipc_cmd::reconcile(), json),
         Command::Timeline { json } => dispatch_timeline(json),
         Command::Diagnostics { json } => dispatch_diagnostics(json),
         Command::Logs { tail } => dispatch_logs(tail),
         Command::Auth { action } => dispatch_auth(action),
-        Command::SupportBundle { output, json } => dispatch_support_bundle(output, json),
-        Command::Conflicts { action } => dispatch_conflicts(action),
+        Command::Report { output, json } => dispatch_report(output, json),
         Command::Decisions { action } => dispatch_decisions(action),
         Command::Trash { action } => dispatch_trash(action),
     }
@@ -479,6 +465,8 @@ fn dispatch_decisions(action: DecisionsAction) -> Result<ExitCode, String> {
                     "{}",
                     serde_json::to_string_pretty(&decision).map_err(|e| e.to_string())?
                 );
+            } else if decision.applied_at_ms.is_some() {
+                println!("Applied {choose} for decision #{id}.");
             } else {
                 println!(
                     "Recorded {choose} for decision #{id}; the daemon applies it on its next tick (or at its next start)."
@@ -534,45 +522,8 @@ fn dispatch_trash(action: TrashAction) -> Result<ExitCode, String> {
     }
 }
 
-fn dispatch_conflicts(action: ConflictsAction) -> Result<ExitCode, String> {
-    match action {
-        ConflictsAction::List { json } => {
-            let loaded = vapor_shared::config::load_from(&resolve_configuration_path());
-            if let Some(issue) = loaded.load_issue {
-                eprintln!("vapor: warning: {issue}");
-            }
-            let report = conflicts_cmd::list_conflicts(&loaded.config);
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
-                );
-            } else {
-                println!("{}", conflicts_cmd::render_list(&report));
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        ConflictsAction::Resolve { path, keep, json } => {
-            let keep = conflicts_cmd::KeepSide::parse(&keep)?;
-            let report = conflicts_cmd::resolve_conflict(&path, keep)?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
-                );
-            } else {
-                println!("{}", conflicts_cmd::render_resolution(&report));
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-    }
-}
-
-fn dispatch_support_bundle(
-    output: Option<std::path::PathBuf>,
-    json: bool,
-) -> Result<ExitCode, String> {
-    use vapor_cli::commands::support;
+fn dispatch_report(output: Option<std::path::PathBuf>, json: bool) -> Result<ExitCode, String> {
+    use vapor_cli::commands::report as support;
 
     // Live captures are best-effort and independent: a daemon that
     // answers one endpoint but fails another still contributes what it
@@ -616,13 +567,13 @@ fn dispatch_support_bundle(
     });
 
     let vapor_dir = vapor_shared::runtime_paths::vapor_directory();
-    let output_root = output.unwrap_or_else(|| vapor_dir.join("support"));
+    let output_root = output.unwrap_or_else(|| vapor_dir.join("reports"));
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .map_err(|_| "system clock is before the Unix epoch".to_string())?;
-    let report = support::collect_support_bundle(&vapor_dir, &output_root, live, timestamp_ms)
-        .map_err(|e| format!("cannot collect support bundle: {e}"))?;
+    let report = support::write_support_report(&vapor_dir, &output_root, live, timestamp_ms)
+        .map_err(|e| format!("cannot write the support report: {e}"))?;
 
     if json {
         println!(
@@ -741,25 +692,33 @@ fn dispatch_logs(tail: Option<usize>) -> Result<ExitCode, String> {
 }
 
 fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
+    let loaded = vapor_shared::config::load_from(&resolve_configuration_path());
+    if let Some(issue) = loaded.load_issue {
+        eprintln!("vapor: warning: {issue}");
+    }
+    let config = loaded.config;
     let (store, fallback_reason) = auth_cmd::build_native_store();
     let persistent = store.is_persistent();
     let fallback_reason = fallback_reason.unwrap_or_default();
     match action {
         AuthAction::Login {
-            provider,
-            token,
             profile,
+            token,
             browser,
         } => {
+            let profile =
+                auth_cmd::select_profile(&config, profile.as_deref()).map_err(|e| e.to_string())?;
+            auth_cmd::require_sign_in(&profile).map_err(|e| e.to_string())?;
             // Google Drive without an explicit --token runs the full
             // OAuth-PKCE browser flow — but only interactively. When stdin
-            // is not a TTY (`echo "$TOKEN" | vapor auth login gdrive`, CI,
+            // is not a TTY (`echo "$TOKEN" | vapor auth login`, CI,
             // automation) fall back to the documented stdin read instead of
             // binding a loopback listener and blocking forever on a browser
             // redirect that will never come. `--browser` is the caller
             // saying a person is at the browser (the app's Sign in button).
             use std::io::IsTerminal;
-            let interactive_gdrive = provider == vapor_shared::constants::provider::GDRIVE
+            let interactive_gdrive = profile.provider_kind
+                == vapor_shared::constants::provider::GDRIVE
                 && token.is_none()
                 && (browser || std::io::stdin().is_terminal());
             let token = if interactive_gdrive {
@@ -767,39 +726,51 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
             } else {
                 resolve_auth_token(token)?
             };
-            auth_cmd::login_into(store.as_ref(), &profile, &provider, &token)
-                .map_err(|e| e.to_string())?;
+            auth_cmd::login_into(store.as_ref(), &profile, &token).map_err(|e| e.to_string())?;
             if persistent {
-                println!("auth login: stored token for {provider} (profile {profile})");
+                println!(
+                    "Signed profile {} in to {}.",
+                    profile.id, profile.provider_kind
+                );
             } else {
                 eprintln!(
                     "vapor: warning: {fallback_reason}; the token was kept in process memory \
                      only and will not survive restart."
                 );
                 println!(
-                    "auth login: stored token for {provider} (profile {profile}, process-local only)"
+                    "Signed profile {} in to {} (in this process only).",
+                    profile.id, profile.provider_kind
                 );
             }
             Ok(ExitCode::SUCCESS)
         }
-        AuthAction::Logout { provider, profile } => {
-            auth_cmd::logout_from(store.as_ref(), &profile, &provider)
-                .map_err(|e| e.to_string())?;
-            println!("auth logout: removed token for {provider} (profile {profile})");
+        AuthAction::Logout { profile } => {
+            let profile =
+                auth_cmd::select_profile(&config, profile.as_deref()).map_err(|e| e.to_string())?;
+            let removed =
+                auth_cmd::logout_from(store.as_ref(), &profile.id).map_err(|e| e.to_string())?;
+            if removed {
+                println!("Signed profile {} out.", profile.id);
+            } else {
+                println!("Profile {} was not signed in.", profile.id);
+            }
             Ok(ExitCode::SUCCESS)
         }
-        AuthAction::Status { profile } => {
-            let entries =
-                auth_cmd::status_from(store.as_ref(), &profile).map_err(|e| e.to_string())?;
+        AuthAction::Status { profile, json } => {
+            let report = auth_cmd::status_from(store.as_ref(), &config, profile.as_deref())
+                .map_err(|e| e.to_string())?;
             if !persistent {
                 eprintln!(
-                    "vapor: note: {fallback_reason}; `bound` states below reflect \
-                     process-local memory only."
+                    "vapor: note: {fallback_reason}; the states below reflect this process only."
                 );
             }
-            for entry in entries {
-                let state = if entry.bound { "bound" } else { "not bound" };
-                println!("{} ({}): {}", entry.provider, entry.profile, state);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("{}", auth_cmd::render_status(&report));
             }
             Ok(ExitCode::SUCCESS)
         }

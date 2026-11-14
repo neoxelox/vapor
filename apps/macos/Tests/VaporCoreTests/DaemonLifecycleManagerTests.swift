@@ -223,12 +223,12 @@ final class RecordingServiceController: LaunchAgentControlling {
   var startResult: DaemonLifecycleActionResult = .started
   var healthOutcome: ServiceHealthOutcome = .running
   var liveStatus = DaemonStatusSnapshot(
-    runState: "Running",
-    throttleState: "IdleDrain",
+    runState: "running",
+    throttleState: "idle",
     throttleReason: "idle and cool",
-    providerName: "filesystem",
-    queueDepth: 0,
-    failedIntents: 0
+    provider: "filesystem",
+    queued: 0,
+    failed: 0
   )
   var statusSnapshot = ServiceStatusSnapshot(
     status: "running",
@@ -285,9 +285,9 @@ final class RecordingServiceController: LaunchAgentControlling {
     operations.append("status")
     return liveStatus
   }
-  func syncNow() throws {}
+  func reconcile() throws {}
 
-  func signIn(provider _: String, profile _: String) throws {}
+  func signIn(profile _: String) throws {}
 }
 
 private struct ThrowingServiceController: LaunchAgentControlling {
@@ -314,9 +314,9 @@ private struct ThrowingServiceController: LaunchAgentControlling {
   func restartDaemon() throws -> DaemonLifecycleActionResult { throw ControllerError() }
 
   func daemonStatus() throws -> DaemonStatusSnapshot { throw ControllerError() }
-  func syncNow() throws { throw ControllerError() }
+  func reconcile() throws { throw ControllerError() }
 
-  func signIn(provider _: String, profile _: String) throws { throw ControllerError() }
+  func signIn(profile _: String) throws { throw ControllerError() }
 }
 
 @Test
