@@ -268,6 +268,245 @@ fn resumable_upload_reverifies_hash_precondition_before_the_final_chunk() {
 }
 
 #[test]
+fn a_resumable_upload_whose_final_answer_has_no_checksum_reports_the_hash_of_its_bytes() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(200, r#"{"files":[]}"#); // resolve absent
+    transport.push_response_with_headers(
+        200,
+        "",
+        vec![(
+            "Location".to_string(),
+            "https://upload.example/session-2".to_string(),
+        )],
+    );
+    // Drive acknowledges only half of the first chunk, so the session
+    // sends the rest of it again: those bytes are hashed one time.
+    let half = SIMPLE_UPLOAD_MAX_BYTES / 2;
+    transport.push_response_with_headers(
+        308,
+        "",
+        vec![("Range".to_string(), format!("bytes=0-{}", half - 1))],
+    );
+    transport.push_response(308, ""); // the rest of the first chunk
+    // What Drive answers when the session was opened without `fields`:
+    // the default set, with no checksum and no modified time.
+    transport.push_response(
+        200,
+        r#"{"kind":"drive#file","id":"big","name":"big.bin","mimeType":"application/octet-stream"}"#,
+    );
+
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let source = scratch.path().join("big.bin");
+    let content: Vec<u8> = (0..(SIMPLE_UPLOAD_MAX_BYTES + CHUNK_GRANULARITY))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    std::fs::write(&source, &content).expect("seed");
+
+    let mut session = provider
+        .begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("big.bin").expect("path"),
+            op_id: "dev-op3".to_string(),
+            precondition: RemotePrecondition::None,
+        })
+        .expect("session");
+    let outcome = loop {
+        match session.step(SIMPLE_UPLOAD_MAX_BYTES).expect("step") {
+            TransferStep::Completed(outcome) => break outcome,
+            TransferStep::Progressed { .. } => {}
+        }
+    };
+    assert_eq!(
+        outcome.content_hash,
+        md5_hex_of_bytes(&content),
+        "an empty hash in the sync index makes the next edit of the file impossible to upload"
+    );
+}
+
+#[test]
+fn a_lookup_binds_a_path_only_to_a_file_the_listing_shows_under_that_name() {
+    // The query can answer for another spelling of the name, and for a
+    // Google Doc, which the listing skips. Neither one is the file at
+    // this path, whatever its id.
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(
+        200,
+        r#"{"files":[
+            {"id":"a-other-case","name":"README.md","mimeType":"text/plain","size":"1","md5Checksum":"upper"},
+            {"id":"b-the-file","name":"readme.md","mimeType":"text/plain","size":"2","md5Checksum":"lower"}
+        ]}"#,
+    );
+    let stat = provider
+        .stat(&RemotePath::new("readme.md").expect("path"))
+        .expect("stat")
+        .expect("present");
+    assert_eq!(stat.content_hash.as_deref(), Some("lower"));
+
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(
+        200,
+        r#"{"files":[
+            {"id":"a-sheet","name":"Budget","mimeType":"application/vnd.google-apps.spreadsheet"},
+            {"id":"b-file","name":"Budget","mimeType":"text/plain","size":"3","md5Checksum":"file"}
+        ]}"#,
+    );
+    let stat = provider
+        .stat(&RemotePath::new("Budget").expect("path"))
+        .expect("stat")
+        .expect("present");
+    assert_eq!(stat.content_hash.as_deref(), Some("file"));
+
+    // Only a Google Doc under the name: nothing is at the path.
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(
+        200,
+        r#"{"files":[
+            {"id":"a-sheet","name":"Budget","mimeType":"application/vnd.google-apps.spreadsheet"}
+        ]}"#,
+    );
+    assert!(
+        provider
+            .stat(&RemotePath::new("Budget").expect("path"))
+            .expect("stat")
+            .is_none()
+    );
+}
+
+#[test]
+fn two_files_with_one_name_give_one_entry_and_the_choice_never_depends_on_the_order() {
+    let listing = |first: &str, second: &str, third: &str| {
+        format!(
+            r#"{{"files":[
+                {{"id":"{first}","name":"report.txt","mimeType":"text/plain","size":"1","md5Checksum":"m-{first}"}},
+                {{"id":"{second}","name":"report.txt","mimeType":"text/plain","size":"2","md5Checksum":"m-{second}"}},
+                {{"id":"{third}","name":"report.txt","mimeType":"text/plain","size":"3","md5Checksum":"m-{third}"}},
+                {{"id":"other","name":"notes.txt","mimeType":"text/plain","size":"4","md5Checksum":"m-other"}}
+            ]}}"#
+        )
+    };
+    for order in [["id-b", "id-c", "id-a"], ["id-c", "id-a", "id-b"]] {
+        let transport = Arc::new(ScriptedHttpTransport::new());
+        let provider = ensured_provider(transport.clone());
+        transport.push_response(200, listing(order[0], order[1], order[2]));
+        let entries = provider.enumerate(&RemotePath::root()).expect("enumerate");
+        let names: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["notes.txt", "report.txt"],
+            "one entry for each name"
+        );
+        let report = entries
+            .iter()
+            .find(|entry| entry.path.as_str() == "report.txt")
+            .expect("report");
+        assert_eq!(
+            report.content_hash.as_deref(),
+            Some("m-id-a"),
+            "the file with the lowest id, whatever order Drive answers in"
+        );
+
+        // A lookup of the path, on a provider that has listed nothing,
+        // finds the same file.
+        let transport = Arc::new(ScriptedHttpTransport::new());
+        let provider = ensured_provider(transport.clone());
+        transport.push_response(200, listing(order[0], order[1], order[2]));
+        let stat = provider
+            .stat(&RemotePath::new("report.txt").expect("path"))
+            .expect("stat")
+            .expect("present");
+        assert_eq!(stat.content_hash.as_deref(), Some("m-id-a"));
+        let lookup = transport.recorded_requests().pop().expect("the lookup");
+        assert!(
+            lookup.url.contains("pageSize=100"),
+            "the lookup reads every file of that name: {}",
+            lookup.url
+        );
+    }
+}
+
+#[test]
+fn a_folder_that_a_request_confirmed_is_not_looked_up_again_until_the_feed_reports_it() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let folder = |id: &str, name: &str| {
+        format!(
+            r#"{{"files":[{{"id":"{id}","name":"{name}","mimeType":"application/vnd.google-apps.folder"}}]}}"#
+        )
+    };
+    transport.push_response(200, folder("id-a", "a"));
+    transport.push_response(200, folder("id-b", "b"));
+    let target = RemotePath::new("a/b/one.txt").expect("path");
+    let before = transport.recorded_requests().len();
+    assert_eq!(provider.ensure_parent_id(&target).expect("first"), "id-b");
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        2,
+        "one lookup for each folder"
+    );
+
+    // The next upload into the same folder asks nothing: the scripted
+    // transport has no answer left, so any request would fail.
+    let sibling = RemotePath::new("a/b/two.txt").expect("path");
+    assert_eq!(provider.ensure_parent_id(&sibling).expect("second"), "id-b");
+    assert_eq!(
+        transport.recorded_requests().len() - before,
+        2,
+        "no request"
+    );
+
+    // The feed reports that folder `a` changed: it and everything under
+    // it are looked up again.
+    provider.evict_path("a");
+    transport.push_response(200, folder("id-a2", "a"));
+    transport.push_response(200, folder("id-b2", "b"));
+    assert_eq!(provider.ensure_parent_id(&sibling).expect("third"), "id-b2");
+}
+
+#[test]
+fn an_upload_that_drive_stored_with_another_checksum_fails_and_is_sent_again() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(200, r#"{"files":[]}"#); // resolve absent
+    transport.push_response_with_headers(
+        200,
+        "",
+        vec![(
+            "Location".to_string(),
+            "https://upload.example/session-9".to_string(),
+        )],
+    );
+    transport.push_response(308, "");
+    // Drive answers with the checksum of other bytes.
+    transport.push_response(200, r#"{"id":"big","md5Checksum":"0123456789abcdef"}"#);
+
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let source = scratch.path().join("big.bin");
+    std::fs::write(
+        &source,
+        vec![7_u8; (SIMPLE_UPLOAD_MAX_BYTES + CHUNK_GRANULARITY) as usize],
+    )
+    .expect("seed");
+    let mut session = provider
+        .begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("big.bin").expect("path"),
+            op_id: "dev-op9".to_string(),
+            precondition: RemotePrecondition::None,
+        })
+        .expect("session");
+    session.step(SIMPLE_UPLOAD_MAX_BYTES).expect("initiate");
+    session.step(SIMPLE_UPLOAD_MAX_BYTES).expect("chunk 1");
+    let error = session
+        .step(u64::MAX)
+        .expect_err("a checksum that differs is not a completed upload");
+    assert_eq!(error.kind, ProviderErrorKind::Transient, "{error:?}");
+}
+
+#[test]
 fn large_upload_is_resumable_with_content_range_chunks() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = ensured_provider(transport.clone());
@@ -281,16 +520,14 @@ fn large_upload_is_resumable_with_content_range_chunks() {
         )],
     );
     transport.push_response(308, ""); // first chunk accepted
-    transport.push_response(200, r#"{"id":"big","md5Checksum":"big-md5"}"#); // final
+    // Two 256KiB-aligned chunks beyond the simple-upload threshold.
+    let payload = vec![7_u8; (SIMPLE_UPLOAD_MAX_BYTES + CHUNK_GRANULARITY) as usize];
+    let sent_md5 = md5_hex_of_bytes(&payload);
+    transport.push_response(200, format!(r#"{{"id":"big","md5Checksum":"{sent_md5}"}}"#)); // final
 
     let scratch = tempfile::TempDir::new().expect("scratch");
     let source = scratch.path().join("big.bin");
-    // Two 256KiB-aligned chunks beyond the simple-upload threshold.
-    std::fs::write(
-        &source,
-        vec![7_u8; (SIMPLE_UPLOAD_MAX_BYTES + CHUNK_GRANULARITY) as usize],
-    )
-    .expect("seed");
+    std::fs::write(&source, &payload).expect("seed");
 
     let mut session = provider
         .begin_upload(UploadRequest {
@@ -316,11 +553,16 @@ fn large_upload_is_resumable_with_content_range_chunks() {
         TransferStep::Completed(outcome) => outcome,
         other => panic!("expected completion, got {other:?}"),
     };
-    assert_eq!(outcome.content_hash, "big-md5");
+    assert_eq!(outcome.content_hash, sent_md5);
 
     let requests = transport.recorded_requests();
     let initiate = &requests[2];
     assert!(initiate.url.contains("uploadType=resumable"));
+    assert!(
+        initiate.url.contains("fields=") && initiate.url.contains("md5Checksum"),
+        "the request that opens the session asks for the checksum: {}",
+        initiate.url
+    );
     let chunk1 = &requests[3];
     assert_eq!(chunk1.url, "https://upload.example/session-1");
     let range = chunk1
@@ -412,6 +654,42 @@ fn download_streams_ranges_and_hashes_with_md5() {
 }
 
 #[test]
+fn a_download_that_does_not_match_drives_checksum_is_thrown_away_and_read_again() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    // Drive describes the file as it was when the download began.
+    let described = md5_hex_of_bytes(b"12345678");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"files":[{{"id":"dl","name":"data.bin","mimeType":"application/octet-stream","size":"8","md5Checksum":"{described}"}}]}}"#
+        ),
+    );
+    // The file is replaced between the two ranges: the head of one
+    // version and the tail of another.
+    transport.push_response(206, "1234");
+    transport.push_response(206, "WXYZ");
+
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let destination = scratch.path().join("data.bin");
+    let mut session = provider
+        .begin_download(DownloadRequest {
+            remote_path: RemotePath::new("data.bin").expect("path"),
+            destination: destination.clone(),
+        })
+        .expect("session");
+    session.step(4).expect("range 1");
+    let error = session
+        .step(4)
+        .expect_err("mixed content must not complete");
+    assert_eq!(error.kind, ProviderErrorKind::Transient);
+    assert!(
+        !destination.exists(),
+        "the mixed payload is not left where an apply would find it"
+    );
+}
+
+#[test]
 fn delete_moves_the_file_to_trash() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = ensured_provider(transport.clone());
@@ -482,6 +760,79 @@ fn changes_baseline_and_increments_map_paths_and_op_ids() {
     assert_eq!(page.changes.len(), 1);
     assert_eq!(page.changes[0].kind, RemoteChangeKind::Removed);
     assert_eq!(page.changes[0].path.as_str(), "changed.txt");
+}
+
+#[test]
+fn a_second_file_under_one_name_never_reads_as_the_file_the_path_names() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let poll = |cursor: &str| match provider.poll_changes(Some(cursor), 100).expect("poll") {
+        ChangesPoll::Page(page) => page.changes,
+        other => panic!("expected page, got {other:?}"),
+    };
+    let change_of = |id: &str, name: &str, hash: &str| {
+        format!(
+            r#"{{"newStartPageToken":"next","changes":[
+                {{"fileId":"{id}","file":{{"id":"{id}","name":"{name}","mimeType":"text/plain",
+                 "size":"3","md5Checksum":"{hash}","parents":["root-folder"]}}}}
+            ]}}"#
+        )
+    };
+    let both = r#"{"files":[
+        {"id":"b-second","name":"n.txt","mimeType":"text/plain","size":"3","md5Checksum":"second"},
+        {"id":"a-kept","name":"n.txt","mimeType":"text/plain","size":"3","md5Checksum":"kept"}
+    ]}"#;
+
+    // Nothing is known about `n.txt` yet, and the file that changed is
+    // the second one of that name. One lookup finds the file the path
+    // names, and the change is not a change of the path.
+    transport.push_response(200, change_of("b-second", "n.txt", "second"));
+    transport.push_response(200, both);
+    assert!(poll("t1").is_empty(), "the second file stays in the cloud");
+
+    // The file the path names changes: that is a change of the path,
+    // and it needs no lookup.
+    transport.push_response(200, change_of("a-kept", "n.txt", "kept-2"));
+    let changes = poll("t2");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].path.as_str(), "n.txt");
+    assert_eq!(changes[0].content_hash.as_deref(), Some("kept-2"));
+
+    // The second file is trashed, then a third one is renamed away from
+    // the name: neither is the removal of `n.txt`.
+    transport.push_response(
+        200,
+        r#"{"newStartPageToken":"next","changes":[{"fileId":"b-second","removed":true}]}"#,
+    );
+    assert!(poll("t3").is_empty(), "the path still names the kept file");
+    transport.push_response(200, change_of("c-third", "n.txt", "third"));
+    assert!(poll("t4").is_empty());
+    transport.push_response(200, change_of("c-third", "other.txt", "third"));
+    transport.push_response(
+        200,
+        r#"{"files":[
+            {"id":"c-third","name":"other.txt","mimeType":"text/plain","size":"3","md5Checksum":"third"}
+        ]}"#,
+    );
+    let changes = poll("t5");
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| (change.path.as_str(), change.kind))
+            .collect::<Vec<_>>(),
+        vec![("other.txt", RemoteChangeKind::CreatedOrModified)],
+        "the rename gives the new name, and no removal of the name the kept file has"
+    );
+
+    // The kept file is trashed: that is the removal of the path.
+    transport.push_response(
+        200,
+        r#"{"newStartPageToken":"next","changes":[{"fileId":"a-kept","removed":true}]}"#,
+    );
+    let changes = poll("t6");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].kind, RemoteChangeKind::Removed);
+    assert_eq!(changes[0].path.as_str(), "n.txt");
 }
 
 #[test]
@@ -777,11 +1128,11 @@ fn classifies_daily_and_storage_quota_403s_distinctly() {
         headers: Vec::new(),
         body: br#"{"error":{"errors":[{"reason":"storageQuotaExceeded"}]}}"#.to_vec(),
     };
-    // Storage-full is surfaced (permanent), not misclassified as a rate
-    // limit that would retry forever.
+    // A full Drive is not a rate limit and not a fault of the file: the
+    // upload waits and is tried again when there is room.
     assert!(matches!(
         classify_api_failure(&storage).kind,
-        ProviderErrorKind::Permanent
+        ProviderErrorKind::StorageFull
     ));
 }
 

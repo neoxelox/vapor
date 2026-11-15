@@ -23,6 +23,9 @@ pub enum RunState {
     Running,
     Paused,
     Error,
+    /// No sync profile exists: the daemon is up, answers status, and
+    /// syncs nothing until the user sets one up.
+    Unconfigured,
 }
 
 impl ThrottleState {
@@ -47,6 +50,7 @@ impl RunState {
             Self::Running => names::RUNNING,
             Self::Paused => names::PAUSED,
             Self::Error => names::ERROR,
+            Self::Unconfigured => names::UNCONFIGURED,
         }
     }
 }
@@ -111,7 +115,7 @@ impl ResourcePressure {
 
 /// One sample of every signal the throttle controller evaluates. Produced
 /// by `core/platform`'s `PlatformMetricsSampler` implementations and
-/// consumed by `core/daemon`'s throttle controller — a single shared type
+/// consumed by `core/daemon`'s throttle controller: a single shared type
 /// so the two layers can never drift structurally.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -123,7 +127,13 @@ pub struct ThrottleInputs {
     pub vapor_cpu_load_percent: u8,
     pub disk_pressure: ResourcePressure,
     pub network_error_rate_percent: u8,
-    pub network_throughput_kbps: Option<u32>,
+    /// The speed of the network link this device is on, as the OS
+    /// reports it for the interface; `None` when the host has no reader
+    /// for it or the interface does not say. It is an upper bound (a
+    /// fast LAN can sit behind a slow uplink) and only the starting
+    /// point of the daemon's own capacity estimate, which its transfers
+    /// then measure.
+    pub link_speed_kbps: Option<u32>,
     pub user_active: bool,
     /// Resident memory of this process; `None` when the host has no
     /// sampler for it. Drives the memory ceiling and the utilization
@@ -143,12 +153,7 @@ impl Default for ThrottleInputs {
             vapor_cpu_load_percent: 2,
             disk_pressure: ResourcePressure::Nominal,
             network_error_rate_percent: 0,
-            // No measurement yet: report None so the bandwidth shaper uses
-            // the assumed-link-capacity fallback (~100 Mbps) rather than a
-            // hard-coded 10 Mbps placeholder that capped every transfer at
-            // ~312 KB/s. A real per-OS throughput measurement, when it
-            // lands, will supply a concrete value here.
-            network_throughput_kbps: None,
+            link_speed_kbps: None,
             user_active: false,
             vapor_memory_bytes: None,
             device_memory_bytes: None,
@@ -202,9 +207,15 @@ pub enum ProviderErrorKind {
     /// The provider's cloud sync root itself is gone or unreachable
     /// (deleted out from under a running daemon, unmounted volume,
     /// remote folder removed). Self-healing: the engine blocks new work,
-    /// re-ensures the root, and reconciles — individual intents must
+    /// re-ensures the root, and reconciles: individual intents must
     /// wait, not fail terminally.
     CloudRootUnavailable,
+    /// The cloud has no room for the upload (the account's storage
+    /// quota, a full disk behind the cloud folder). Nothing is wrong
+    /// with the file: the upload waits and is tried again, and the
+    /// user is told to free space. Downloads and deletions go on, and a
+    /// deletion is what frees the room.
+    StorageFull,
     /// Anything that will keep failing no matter how often we retry.
     Permanent,
 }
@@ -218,6 +229,7 @@ impl ProviderErrorKind {
             Self::PreconditionFailed => "precondition_failed",
             Self::NotFound => "not_found",
             Self::CloudRootUnavailable => "cloud_root_unavailable",
+            Self::StorageFull => "storage_full",
             Self::Permanent => "permanent",
         }
     }
@@ -237,6 +249,9 @@ impl ProviderErrorKind {
             // re-ensures the root, so the intent retries once sync
             // resumes instead of finalizing into failed_intents.
             Self::CloudRootUnavailable => RetryFailureKind::Transient,
+            // The executor waits on this kind itself, with no attempt
+            // spent; a caller that only has the retry class retries.
+            Self::StorageFull => RetryFailureKind::Transient,
             Self::NotFound | Self::Permanent => RetryFailureKind::Permanent,
         }
     }

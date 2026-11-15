@@ -77,6 +77,22 @@ pub fn scenarios() -> Vec<Scenario> {
             run: log_hygiene,
         },
         Scenario {
+            id: "S61",
+            name: "fresh-install-is-unconfigured",
+            proves: "a home with no sync scope starts a daemon that syncs nothing and creates no folder, and status says unconfigured and names the command; setting the two roots, one config set each, starts the profile with no restart",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: fresh_install_is_unconfigured,
+        },
+        Scenario {
+            id: "S63",
+            name: "profiles-command-sets-an-install-up",
+            proves: "vapor profiles add sets a fresh install up with one command and no restart, and refuses when no terminal can ask and a folder is left out; it refuses a cloud folder inside the local folder; remove refuses while the daemon runs, then forgets the sync state and leaves the files on both sides",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: profiles_command_sets_an_install_up,
+        },
+        Scenario {
             id: "S09",
             name: "socket-relocation",
             proves: "an over-budget VAPOR_DIR relocates the IPC socket under the OS temp dir; status and doctor still work",
@@ -91,19 +107,18 @@ fn config_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     ctx.skip_oracle("no daemon runs; the scenario only exercises vapor config");
     let cli = ctx.cli();
     let home = ctx.primary.clone();
-    // Before anything is set, the cloud root default follows the
-    // provider: a folder the daemon can create when a local folder
-    // plays the cloud, the account root folder for a cloud provider.
-    ensure!(
-        cli.config_get("cloudRoot")? == "~/cloud/Vapor",
-        "unset cloudRoot must default to the filesystem provider's folder"
-    );
-    cli.config_set("provider", "gdrive")?;
-    ensure!(
-        cli.config_get("cloudRoot")? == "/Vapor",
-        "unset cloudRoot must default to the account root for a cloud provider"
-    );
-    cli.config_set("provider", "filesystem")?;
+    // Before anything is set, neither root has a value: Vapor syncs
+    // only folders the user chose, whatever the provider.
+    for provider in ["filesystem", "gdrive", "filesystem"] {
+        cli.config_set("provider", provider)?;
+        for root in ["localRoot", "cloudRoot"] {
+            let value = cli.config_get(root)?;
+            ensure!(
+                value.is_empty(),
+                "an unset {root} must have no default under {provider}, got {value:?}"
+            );
+        }
+    }
     ctx.configure_scope(&home)?;
     let local = cli.config_get("localRoot")?;
     ensure!(
@@ -132,6 +147,233 @@ fn config_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
         "config set accepted a non-JSON value for resourceLimits"
     );
     Ok(())
+}
+
+fn fresh_install_is_unconfigured(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let cli = ctx.cli();
+    // No scope is written: the home holds what a fresh install holds.
+    let kind = ctx.paths.daemon_kind;
+    ctx.start_daemon_in(&home, kind, false)?;
+    cli.wait_run_state(
+        vapor_shared::constants::run_state::UNCONFIGURED,
+        crate::scenario::STARTUP_TIMEOUT,
+    )?;
+    let status = cli
+        .status()
+        .ok_or_else(|| Failure::new("status --json did not answer"))?;
+    ensure!(
+        status.run.reason.contains("vapor profiles add"),
+        "status must name the command that sets a profile up: {:?}",
+        status.run.reason
+    );
+    ensure!(
+        status.profiles.is_empty(),
+        "an unconfigured daemon has no profile"
+    );
+    ensure!(
+        !home.local.exists() && !home.cloud.exists(),
+        "an unconfigured daemon creates no sync folder"
+    );
+    let state = home.dir.join("state");
+    let databases: Vec<_> = walk_files(&state)
+        .into_iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "sqlite"))
+        .collect();
+    ensure!(
+        databases.is_empty(),
+        "no profile, so no sync state: {databases:?}"
+    );
+
+    // One root: the profile says what it still needs; still no folder.
+    cli.config_set("localRoot", &home.local.to_string_lossy())?;
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "status to name the root that is not set",
+        || {
+            cli.status().is_some_and(|status| {
+                status
+                    .profiles
+                    .first()
+                    .is_some_and(|profile| profile.run.reason.contains("cloudRoot"))
+            })
+        },
+    )?;
+    ensure!(!home.local.exists(), "half a scope creates no folder");
+    // The daemon says once that the profile waits for its second root.
+    ctx.allow_warning("Suspending a profile that cannot run as configured");
+    ctx.allow_warning("Every profile is suspended by its configuration");
+
+    // The second root: the profile runs, with no restart asked for.
+    cli.config_set("cloudRoot", &home.cloud.to_string_lossy())?;
+    cli.wait_run_state("running", CONVERGE_TIMEOUT)?;
+    let status = cli
+        .status()
+        .ok_or_else(|| Failure::new("status --json did not answer"))?;
+    ensure!(
+        status.restart_required.is_none(),
+        "the first scope must not ask for a restart: {:?}",
+        status.restart_required
+    );
+    ensure!(home.local.is_dir(), "the profile adopted its local root");
+    let mark = ctx.mark();
+    write_file(&home.local.join("first.txt"), "the first file\n")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_same_content(
+        &home.local.join("first.txt"),
+        &home.cloud.join("first.txt"),
+        CONVERGE_TIMEOUT,
+    )?;
+    Ok(())
+}
+
+fn profiles_command_sets_an_install_up(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let cli = ctx.cli();
+    let unconfigured = vapor_shared::constants::run_state::UNCONFIGURED;
+    let kind = ctx.paths.daemon_kind;
+    let daemon = ctx.start_daemon_in(&home, kind, false)?;
+    cli.wait_run_state(unconfigured, crate::scenario::STARTUP_TIMEOUT)?;
+    let listed = cli.json(&["profiles", "list", "--json"])?;
+    ensure!(
+        listed["profiles"] == serde_json::json!([]) && listed["problems"] == serde_json::json!([]),
+        "a fresh install lists no profile and no problem: {listed}"
+    );
+
+    // With no terminal there is nobody to ask for the folders, and a
+    // suggestion that nobody saw is no choice: the command refuses, and
+    // the install stays as it was.
+    let no_folders = cli.run(&["profiles", "add", "--json"])?;
+    ensure!(
+        !no_folders.success() && no_folders.stderr.contains("--local <path> --cloud <path>"),
+        "profiles add with no folders and no terminal must refuse: {}",
+        no_folders.stderr
+    );
+    let listed = cli.json(&["profiles", "list", "--json"])?;
+    ensure!(
+        listed["profiles"] == serde_json::json!([]),
+        "a refused add leaves no profile: {listed}"
+    );
+
+    // One command sets the install up; the running daemon picks it up.
+    let local = home.local.to_string_lossy().into_owned();
+    let cloud = home.cloud.to_string_lossy().into_owned();
+    let added = cli.json(&[
+        "profiles",
+        "add",
+        "--provider",
+        "filesystem",
+        "--local",
+        &local,
+        "--cloud",
+        &cloud,
+        "--json",
+    ])?;
+    ensure!(
+        added["profile"]["id"] == "default" && added["applies"] == "live",
+        "the first profile is the default one and applies live: {added}"
+    );
+    cli.wait_run_state("running", CONVERGE_TIMEOUT)?;
+    let status = cli
+        .status()
+        .ok_or_else(|| Failure::new("status --json did not answer"))?;
+    ensure!(
+        status.restart_required.is_none(),
+        "the first profile must not ask for a restart: {:?}",
+        status.restart_required
+    );
+    let mark = ctx.mark();
+    write_file(&home.local.join("first.txt"), "the first file\n")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_same_content(
+        &home.local.join("first.txt"),
+        &home.cloud.join("first.txt"),
+        CONVERGE_TIMEOUT,
+    )?;
+
+    // A profile the daemon would refuse is refused here, and not written.
+    let second_local = home.dir.join("second");
+    let second_cloud = second_local.join("cloud");
+    let before = fs::read_to_string(home.config_path())?;
+    let overlapping = cli.run(&[
+        "profiles",
+        "add",
+        "--id",
+        "second",
+        "--provider",
+        "filesystem",
+        "--local",
+        &second_local.to_string_lossy(),
+        "--cloud",
+        &second_cloud.to_string_lossy(),
+    ])?;
+    ensure!(
+        !overlapping.success() && overlapping.stderr.contains("invalid sync directories"),
+        "a cloud folder inside the local folder must be refused with the reason: {}",
+        overlapping.combined()
+    );
+    ensure!(
+        fs::read_to_string(home.config_path())? == before,
+        "a refused profile must not change vapor.json"
+    );
+
+    // The daemon holds the profile's state: remove waits for a stop.
+    let refused = cli.run(&["profiles", "remove", "default", "--yes"])?;
+    ensure!(
+        !refused.success() && refused.stderr.contains("vapor service stop"),
+        "remove must refuse while the daemon runs: {}",
+        refused.combined()
+    );
+    ctx.stop_daemon(daemon)?;
+    let removed = cli.json(&["profiles", "remove", "default", "--yes", "--json"])?;
+    ensure!(
+        removed["removed"] == "default" && removed["localRoot"] == local.as_str(),
+        "remove reports the profile and its folders: {removed}"
+    );
+    for root in [&home.local, &home.cloud] {
+        ensure!(
+            root.join("first.txt").is_file(),
+            "removing a profile must leave the files in {}",
+            root.display()
+        );
+    }
+    let databases: Vec<_> = walk_files(&home.dir.join("state"))
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().contains("sqlite"))
+        })
+        .collect();
+    ensure!(
+        databases.is_empty(),
+        "the removed profile's sync state must be gone: {databases:?}"
+    );
+
+    // The install is unconfigured again, and the folders stay as they are.
+    ctx.start_daemon_in(&home, kind, false)?;
+    cli.wait_run_state(unconfigured, crate::scenario::STARTUP_TIMEOUT)?;
+    ensure!(
+        home.local.join("first.txt").is_file() && home.cloud.join("first.txt").is_file(),
+        "a daemon with no profile touches no folder"
+    );
+    Ok(())
+}
+
+/// Every file under `root`, recursively.
+fn walk_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
 }
 
 fn daemon_startup(ctx: &mut Ctx) -> Result<(), Failure> {

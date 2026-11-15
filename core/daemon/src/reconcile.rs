@@ -15,12 +15,6 @@ pub struct ReconcileController {
     slice_budget: Duration,
     running: Option<RunningReconcile>,
     clock: Arc<dyn Clock>,
-    /// The user asked for a scan now (`vapor reconcile`, the app's Sync
-    /// now). While set, admission and the checkpoint accept every
-    /// throttle state but `Suspended`, which still stops everything;
-    /// the slice budget keeps the walk interruptible. Cleared when a
-    /// reconcile completes.
-    on_demand: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -34,7 +28,7 @@ struct RunningReconcile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReconcilePauseReason {
     SliceBudgetExpired,
-    ThrottleNoLongerIdle,
+    ThrottleSuspended,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,7 +70,6 @@ impl ReconcileController {
             slice_budget,
             running: None,
             clock,
-            on_demand: false,
         }
     }
 
@@ -84,19 +77,12 @@ impl ReconcileController {
         self.running.as_ref().map(|running| &running.root)
     }
 
-    /// Admit the next reconcile under any throttle state but
-    /// `Suspended`, until one completes.
-    pub fn request_on_demand(&mut self) {
-        self.on_demand = true;
-    }
-
-    pub fn on_demand(&self) -> bool {
-        self.on_demand
-    }
-
     /// Whether a reconcile may start or keep running under `state`.
-    fn admits(&self, state: ThrottleState) -> bool {
-        state == ThrottleState::Idle || (self.on_demand && state != ThrottleState::Suspended)
+    /// Every state but `Suspended` admits one, at that state's caps: a
+    /// condition that can last for hours (battery power, a user at the
+    /// keyboard, Low Power Mode) slows a scan down and never holds it.
+    pub fn admits(state: ThrottleState) -> bool {
+        state != ThrottleState::Suspended
     }
 
     pub fn release_ready_deferred_reconciles(
@@ -106,20 +92,20 @@ impl ReconcileController {
         throttle_state: ThrottleState,
         now: SystemTime,
     ) -> usize {
-        if throttle_state != ThrottleState::Idle {
+        if !Self::admits(throttle_state) {
             return 0;
         }
 
-        // Already idle: a storm that has gone quiet releases early
-        // instead of waiting out its full deferral — the deferral exists
-        // to avoid competing with the burst and the user, and both are
-        // gone.
-        let ready = maps.take_deferred_reconcile_intents_ready_by(
-            now,
-            Some(std::time::Duration::from_millis(
+        // Idle: a storm that has gone quiet releases early instead of
+        // waiting out its full deferral. The deferral exists to avoid
+        // competing with the burst and the user, and both are gone. In
+        // the other states the deferral runs its length.
+        let quiet_release = (throttle_state == ThrottleState::Idle).then(|| {
+            std::time::Duration::from_millis(
                 vapor_shared::constants::engine::DEFERRED_RECONCILE_IDLE_QUIET_RELEASE_MILLIS,
-            )),
-        );
+            )
+        });
+        let ready = maps.take_deferred_reconcile_intents_ready_by(now, quiet_release);
         for intent in &ready {
             scheduler.upsert_pending_intent_record(intent.clone());
         }
@@ -133,7 +119,7 @@ impl ReconcileController {
         throttle_state: ThrottleState,
         now: SystemTime,
     ) -> Result<Option<PathBuf>, WorkPermitDenied> {
-        if self.running.is_some() || !self.admits(throttle_state) {
+        if self.running.is_some() || !Self::admits(throttle_state) {
             return Ok(None);
         }
 
@@ -141,12 +127,7 @@ impl ReconcileController {
             return Ok(None);
         };
 
-        let permit = if self.on_demand {
-            workgate.try_acquire_on_demand_reconcile()
-        } else {
-            workgate.try_acquire(WorkClass::Reconcile)
-        };
-        let permit = match permit {
+        let permit = match workgate.try_acquire(WorkClass::Reconcile) {
             Ok(permit) => permit,
             Err(error) => {
                 requeue_claimed_reconcile(scheduler, &claimed.path, now);
@@ -179,9 +160,9 @@ impl ReconcileController {
         // rewinds cannot trick the controller into pausing for budget
         // expiry that didn't actually happen on the monotonic axis.
         let slice_elapsed = now_inst.saturating_duration_since(running.slice_started_inst);
-        let admits = self.admits(throttle_state);
+        let admits = Self::admits(throttle_state);
         let reason = if !admits {
-            Some(ReconcilePauseReason::ThrottleNoLongerIdle)
+            Some(ReconcilePauseReason::ThrottleSuspended)
         } else if slice_elapsed >= self.slice_budget {
             Some(ReconcilePauseReason::SliceBudgetExpired)
         } else {
@@ -222,7 +203,6 @@ impl ReconcileController {
         workgate: &mut ThrottleWorkgate,
     ) -> Option<ReconcileCompletion> {
         let running = self.running.take()?;
-        self.on_demand = false;
         release_permit_or_log(workgate, running.permit, "reconcile success");
         let disposition = scheduler.complete_running(&running.root)?;
         let boundary_cleared = matches!(disposition, CompletionDisposition::Removed)
@@ -273,7 +253,7 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     #[test]
-    fn deferred_reconciles_are_released_only_in_idle() {
+    fn deferred_reconciles_are_released_in_every_state_but_suspended() {
         let subtree_root = PathBuf::from("/tmp/vapor-root/project/sub");
         let mut maps = stormed_maps(&subtree_root);
         let mut scheduler = KeyedSupersedingScheduler::default();
@@ -283,18 +263,20 @@ mod tests {
             controller.release_ready_deferred_reconciles(
                 &mut maps,
                 &mut scheduler,
-                ThrottleState::Light,
+                ThrottleState::Suspended,
                 timestamp(32),
             ),
             0
         );
         assert!(scheduler.claim_next_reconcile().is_none());
 
+        // A device on battery releases the folder when its deferral
+        // ends; it does not wait for an idle moment.
         assert_eq!(
             controller.release_ready_deferred_reconciles(
                 &mut maps,
                 &mut scheduler,
-                ThrottleState::Idle,
+                ThrottleState::Light,
                 timestamp(32),
             ),
             1
@@ -304,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn on_demand_admits_under_every_state_but_suspended_until_one_completes() {
+    fn a_scan_starts_in_every_state_but_suspended_and_only_suspended_pauses_it() {
         let root = PathBuf::from("/tmp/vapor-root/project");
         let mut scheduler = KeyedSupersedingScheduler::default();
         scheduler.upsert_intent(
@@ -319,22 +301,6 @@ mod tests {
             clock.clone(),
         );
 
-        // Without the request the throttle holds the scan.
-        for state in [
-            ThrottleState::Light,
-            ThrottleState::Throttled,
-            ThrottleState::Suspended,
-        ] {
-            assert_eq!(
-                controller
-                    .try_start_next(&mut scheduler, &mut workgate, state, timestamp(1))
-                    .expect("gate"),
-                None,
-                "{state:?} must hold a scan nobody asked for"
-            );
-        }
-
-        controller.request_on_demand();
         assert_eq!(
             controller
                 .try_start_next(
@@ -345,7 +311,7 @@ mod tests {
                 )
                 .expect("gate"),
             None,
-            "Suspended stops everything, the user's request included"
+            "Suspended stops everything"
         );
         assert_eq!(
             controller
@@ -356,22 +322,22 @@ mod tests {
                     timestamp(1)
                 )
                 .expect("gate"),
-            Some(root.clone())
+            Some(root.clone()),
+            "a user at the keyboard slows a scan down and does not hold it"
         );
 
-        // A throttle that is merely not idle no longer pauses the walk;
-        // Suspended still does, and the request survives that pause.
+        // A state that is merely not idle does not pause the walk;
+        // Suspended does, and the scan resumes in the next state that
+        // admits it.
         clock.advance(Duration::from_secs(1));
-        assert!(
-            controller
-                .checkpoint(
-                    &mut scheduler,
-                    &mut workgate,
-                    ThrottleState::Throttled,
-                    timestamp(2)
-                )
-                .is_none()
-        );
+        for state in [ThrottleState::Throttled, ThrottleState::Light] {
+            assert!(
+                controller
+                    .checkpoint(&mut scheduler, &mut workgate, state, timestamp(2))
+                    .is_none(),
+                "{state:?} keeps the scan running"
+            );
+        }
         let pause = controller
             .checkpoint(
                 &mut scheduler,
@@ -380,8 +346,7 @@ mod tests {
                 timestamp(3),
             )
             .expect("suspended pauses");
-        assert_eq!(pause.reason, ReconcilePauseReason::ThrottleNoLongerIdle);
-        assert!(controller.on_demand());
+        assert_eq!(pause.reason, ReconcilePauseReason::ThrottleSuspended);
         assert_eq!(
             controller
                 .try_start_next(
@@ -392,18 +357,6 @@ mod tests {
                 )
                 .expect("gate"),
             Some(root.clone())
-        );
-
-        let mut maps = BoundedEventIntentMaps::with_limits(
-            PathBuf::from("/tmp/vapor-root"),
-            EventIntentLimits::new(100, 100),
-        );
-        controller
-            .complete_success(&mut maps, &mut scheduler, &mut workgate)
-            .expect("completion");
-        assert!(
-            !controller.on_demand(),
-            "one completed scan answers the request; the next waits for idle again"
         );
     }
 
@@ -433,7 +386,7 @@ mod tests {
             Some(root.clone())
         );
 
-        // Advance the monotonic clock past the slice budget — this is
+        // Advance the monotonic clock past the slice budget: this is
         // what should make `checkpoint` decide the slice expired.
         clock.advance(Duration::from_secs(2));
         let pause = controller
@@ -454,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn running_reconcile_interrupts_when_throttle_leaves_idle() {
+    fn running_reconcile_interrupts_when_sync_is_suspended() {
         let root = PathBuf::from("/tmp/vapor-root/project");
         let mut scheduler = KeyedSupersedingScheduler::default();
         scheduler.upsert_intent(
@@ -474,23 +427,34 @@ mod tests {
             )
             .expect("start reconcile");
 
+        assert!(
+            controller
+                .checkpoint(
+                    &mut scheduler,
+                    &mut workgate,
+                    ThrottleState::Light,
+                    timestamp(2),
+                )
+                .is_none(),
+            "a state that is only slower keeps the scan running"
+        );
         let pause = controller
             .checkpoint(
                 &mut scheduler,
                 &mut workgate,
-                ThrottleState::Light,
+                ThrottleState::Suspended,
                 timestamp(2),
             )
             .expect("reconcile should interrupt");
 
-        assert_eq!(pause.reason, ReconcilePauseReason::ThrottleNoLongerIdle);
+        assert_eq!(pause.reason, ReconcilePauseReason::ThrottleSuspended);
         assert_eq!(scheduler.pending_count(), 1);
     }
 
     #[test]
     fn checkpoint_slice_budget_uses_monotonic_clock_under_wall_clock_rewind() {
         // Invariant: slice budget elapses on the monotonic axis. A
-        // wall-clock rewind alone must not make `checkpoint` pause —
+        // wall-clock rewind alone must not make `checkpoint` pause,
         // that would have been a false positive under the old
         // SystemTime path. Advancing the monotonic clock past the slice
         // budget is the only thing that should trigger pause.
@@ -530,7 +494,7 @@ mod tests {
             "wall-clock rewind alone must not expire the reconcile slice"
         );
 
-        // Now advance the monotonic clock past the slice budget — pause
+        // Now advance the monotonic clock past the slice budget: pause
         // is finally legitimate.
         clock.advance(Duration::from_secs(2));
         let pause = controller

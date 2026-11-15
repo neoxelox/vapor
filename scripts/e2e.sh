@@ -35,14 +35,20 @@ fi
 subcommand="run"
 args=()
 skip_harness_build=0
+verbatim=0
 for arg in "$@"; do
+  # Everything after `--` belongs to the harness as written.
+  if [[ "$verbatim" -eq 1 ]]; then
+    args+=("$arg")
+    continue
+  fi
   case "$arg" in
     --sandbox) subcommand="sandbox" ;;
     --sandbox-stop) subcommand="sandbox-stop" ;;
     --list) subcommand="list" ;;
     --providers) subcommand="providers" ;;
     --skip-build) skip_harness_build=1; args+=("$arg") ;;
-    --) subcommand="" ;;
+    --) subcommand=""; verbatim=1 ;;
     *) args+=("$arg") ;;
   esac
 done

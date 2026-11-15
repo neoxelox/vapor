@@ -32,7 +32,7 @@ import VaporCore
         return .requiresApproval
       default:
         // register() returned without error but the service is not
-        // enabled — report it rather than pretending the app will
+        // enabled: report it rather than pretending the app will
         // launch at login.
         return .failed("login item status \(service.status.rawValue) after registration")
       }

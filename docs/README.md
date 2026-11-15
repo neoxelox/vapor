@@ -18,7 +18,7 @@ operations context.
 - Plans and tasks are flat and platform-named: one file per deliverable
   surface (`docs/plans/{core,macos,cli}.md`,
   `docs/tasks/{core,macos,cli}.md`).
-- `docs/tasks/README.md` is the **cross-surface roadmap orchestrator** —
+- `docs/tasks/README.md` is the **cross-surface roadmap orchestrator**:
   the "what should be done next" guide when multiple task lists have
   pending items.
 
@@ -27,21 +27,21 @@ operations context.
 Jump to a group's `README.md` for an explanation of its contents and how
 to use them.
 
-- **Product** — direction, scope, status, non-goals:
+- **Product**: direction, scope, status, non-goals:
   `docs/product/README.md`.
-- **Architecture** — system design, contracts, platform abstractions:
+- **Architecture**: system design, contracts, platform abstractions:
   `docs/architecture/README.md`.
-- **Operations** — release, signing, provider auth, logging, incident
+- **Operations**: release, signing, provider auth, logging, incident
   playbooks: `docs/operations/README.md`.
-- **Development** — local runbook, scripts, toolchain baseline:
+- **Development**: local runbook, scripts, toolchain baseline:
   `docs/development/README.md`.
-- **CI** — GitHub Actions workflows and required-check policy:
+- **CI**: GitHub Actions workflows and required-check policy:
   `docs/ci/README.md`.
-- **Performance** — SLOs and benchmark harness:
+- **Performance**: SLOs and benchmark harness:
   `docs/performance/README.md`.
-- **Plans** — per-surface implementation plans (intent):
+- **Plans**, per-surface implementation plans (intent):
   `docs/plans/README.md`.
-- **Tasks** — per-surface task lists and the cross-surface roadmap:
+- **Tasks**, per-surface task lists and the cross-surface roadmap:
   `docs/tasks/README.md`.
 - **Specs**: one dated file per designed feature, with its numbered
   decisions and the reasons behind them: `docs/specs/README.md`.

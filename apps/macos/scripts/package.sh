@@ -2,9 +2,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-APP_NAME="${APP_NAME:-Vapor}"
-EXECUTABLE_NAME="${EXECUTABLE_NAME:-Vapor}"
-BUNDLE_ID="${BUNDLE_ID:-sh.arn.vapor}"
+# The app name, its executable, and the bundle identifier are fixed
+# (AGENTS.md §2.2).
+APP_NAME="Vapor"
+EXECUTABLE_NAME="Vapor"
+BUNDLE_ID="sh.arn.vapor"
 MIN_MACOS="${MIN_MACOS:-26.0}"
 ICON_DOCUMENT="${ICON_DOCUMENT:-assets/macos/Vapor.icon}"
 ICONSET_DIR="${ICONSET_DIR:-assets/macos/Vapor.iconset}"
@@ -272,13 +274,9 @@ rm -rf "$icon_compile_dir"
 
 iconutil -c icns "$ICONSET_DIR" -o "$resources_dir/$icon_name.icns"
 
-if [[ -d "$ROOT_DIR/apps/macos/Resources" ]]; then
-  ditto "$ROOT_DIR/apps/macos/Resources" "$resources_dir"
-fi
-
 # Inside-out signing: the nested daemon binary is signed first with its
 # own invocation, then the app bundle (whose seal covers the already-signed
-# vapord). Apple documents `--deep` as unsuitable for production signing —
+# vapord). Apple documents `--deep` as unsuitable for production signing:
 # it forces one entitlements file onto every nested binary, and the app vs
 # daemon entitlement sets will diverge.
 sign_args_base=(--force)
@@ -307,10 +305,6 @@ codesign "${app_sign_args[@]}" "$app_bundle"
 plutil -lint "$info_plist"
 codesign --verify --deep --verbose=4 "$app_bundle"
 
-if ! spctl -a -vv "$app_bundle"; then
-  echo "[package] Warning: spctl assessment failed for $app_bundle"
-fi
-
 mkdir -p "$DIST_DIR"
 zip_path="$DIST_DIR/$APP_NAME.zip"
 rm -f "$zip_path"
@@ -322,13 +316,34 @@ if [[ -n "$VAPOR_NOTARY_PROFILE" ]]; then
     exit 1
   fi
 
-  notarytool_args=(submit "$zip_path" --keychain-profile "$VAPOR_NOTARY_PROFILE" --wait)
+  notary_auth_args=(--keychain-profile "$VAPOR_NOTARY_PROFILE")
   if [[ -n "$VAPOR_NOTARY_KEYCHAIN" ]]; then
-    notarytool_args+=(--keychain "$VAPOR_NOTARY_KEYCHAIN")
+    notary_auth_args+=(--keychain "$VAPOR_NOTARY_KEYCHAIN")
   fi
 
-  xcrun notarytool "${notarytool_args[@]}"
+  # `notarytool submit --wait` exits 0 when Apple answers "Invalid", so
+  # the answer is read from its output, and a refusal prints Apple's log.
+  notary_output="$(mktemp)"
+  if ! xcrun notarytool submit "$zip_path" "${notary_auth_args[@]}" --wait 2>&1 | tee "$notary_output"; then
+    echo "[package] notarytool submit failed"
+    exit 1
+  fi
+  notary_status="$(sed -n 's/^ *status: *//p' "$notary_output" | tail -n 1)"
+  notary_id="$(sed -n 's/^ *id: *//p' "$notary_output" | tail -n 1)"
+  rm -f "$notary_output"
+  if [[ "$notary_status" != "Accepted" ]]; then
+    echo "[package] Apple did not accept the submission (status: ${notary_status:-unknown})"
+    if [[ -n "$notary_id" ]]; then
+      xcrun notarytool log "$notary_id" "${notary_auth_args[@]}" || true
+    fi
+    exit 1
+  fi
+
   xcrun stapler staple "$app_bundle"
+  # The stapled app is what ships: check the ticket, then ask Gatekeeper
+  # the question a user's Mac asks at first launch.
+  xcrun stapler validate "$app_bundle"
+  spctl -a -t exec -vv "$app_bundle"
 
   rm -f "$zip_path"
   ditto -c -k --keepParent "$app_bundle" "$zip_path"

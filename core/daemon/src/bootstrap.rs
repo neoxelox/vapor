@@ -5,7 +5,7 @@
 //! drift: shutdown signal handlers → singleton lock → configuration →
 //! durable state DB → runtime (with the platform metrics sampler) →
 //! IPC control channel → tick loop. The returned error type is coarse
-//! by design — callers log it and exit non-zero.
+//! by design: callers log it and exit non-zero.
 
 use std::error::Error;
 use std::fmt::{self, Display};
@@ -90,14 +90,36 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
 
     // Persisted configuration reaches the runtime here; no environment
     // variable overrides a key (README Configuration).
+    let load = config::load_default();
+    // The profiles come from what the file says. A file that cannot be
+    // read, or that names no sync scope, gives none: the daemon stays
+    // up, syncs nothing, creates no folder, and status says what to do.
+    let profile_set = crate::profiles::resolve_profile_set(&load);
     let VaporConfigLoadResult {
-        config, load_issue, ..
-    } = config::load_default();
-    if let Some(issue) = load_issue {
-        logging::error(
-            "Preserved unreadable vapor configuration; continuing with defaults",
-            &[("issue", issue)],
+        config,
+        load_issue,
+        unreadable,
+        ..
+    } = load;
+    match (&load_issue, unreadable) {
+        (Some(issue), true) => logging::error(
+            "vapor.json cannot be read; no profile is composed until it is fixed",
+            &[("issue", issue.clone())],
+        ),
+        (Some(issue), false) => logging::warning(
+            "vapor.json has a problem; what Vapor can read of it applies",
+            &[("issue", issue.clone())],
+        ),
+        (None, _) => {}
+    }
+    if profile_set.is_unconfigured() {
+        logging::info(
+            "No sync profile is set up yet; the daemon syncs nothing until `vapor profiles add`",
+            &[],
         );
+    }
+    for problem in &profile_set.problems {
+        logging::error("Configuration problem", &[("problem", problem.clone())]);
     }
 
     // Stable device identifier: persisted at first run, never
@@ -115,12 +137,15 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
             vapor_shared::device_id::derive_device_id()
         }
     };
+    vapor_shared::device_id::use_for_process(&device_id);
 
     // One runtime per enabled profile over a shared workgate and
-    // deduplicated watchers. A configuration without a
-    // `profiles` array runs the single implicit `default` profile on
-    // the legacy state paths.
-    let profiles = crate::profiles::resolve_profiles(&config);
+    // deduplicated watchers. A configuration with roots at the top
+    // level and no `profiles` array runs one profile, `default`.
+    let crate::profiles::ProfileSet {
+        profiles,
+        problems: config_problems,
+    } = profile_set;
     let filter_options = EventPathFilterOptions::from_config(&config);
     let inputs_source = throttle_inputs_source();
     let static_inputs = matches!(inputs_source, ThrottleInputsSource::Static);
@@ -173,12 +198,18 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     // RTT never stalls the tick loop; tests keep the inline mode for
     // deterministic single-threaded ticks.
     runtime.enable_transfer_workers();
+    runtime.set_config_problems(config_problems);
     runtime.watch_config(&config_path, config.clone());
     match &inputs_source {
         ThrottleInputsSource::Static => {
             runtime.set_idle_notifier(Arc::new(vapor_platform::ManualIdleNotifier::new(
                 std::time::Duration::ZERO,
             )));
+            // Static inputs measure nothing, the link included: a
+            // harness gets the same transfer rate on every host.
+            runtime.pin_link_capacity_kbps(
+                vapor_shared::constants::engine::STATIC_INPUTS_LINK_CAPACITY_KBPS,
+            );
         }
         ThrottleInputsSource::File(path) => {
             runtime.set_idle_notifier(Arc::new(crate::metrics::FileIdleNotifier::new(
@@ -307,17 +338,12 @@ fn throttle_inputs_source() -> ThrottleInputsSource {
     {
         return ThrottleInputsSource::File(std::path::PathBuf::from(path));
     }
-    match Ok::<String, ()>(value) {
-        Ok(value) => {
-            logging::warning(
-                "Unknown throttle-input source; reading the host instead",
-                &[
-                    ("env", env::VAPOR_THROTTLE_INPUTS.to_string()),
-                    ("value", value),
-                ],
-            );
-            ThrottleInputsSource::Host
-        }
-        Err(()) => ThrottleInputsSource::Host,
-    }
+    logging::warning(
+        "Unknown throttle-input source; reading the host instead",
+        &[
+            ("env", env::VAPOR_THROTTLE_INPUTS.to_string()),
+            ("value", value),
+        ],
+    );
+    ThrottleInputsSource::Host
 }

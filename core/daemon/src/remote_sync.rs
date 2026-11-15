@@ -6,7 +6,7 @@
 //! and persists the feed cursor. Cursor discipline: the cursor advances
 //! durably only after the page's intents are durably enqueued, so a
 //! crash between the two replays the page and the per-(path, kind)
-//! coalescing absorbs the duplicates — at-least-once, never at-most-once.
+//! coalescing absorbs the duplicates, at-least-once, never at-most-once.
 //!
 //! A `CursorExpired` poll (daemon restart with an in-memory feed, ring
 //! overflow, provider-side expiry) schedules a whole-scope reconcile and
@@ -34,7 +34,7 @@ pub struct RemotePollReport {
     pub observed_changes: usize,
     pub suppressed_echoes: usize,
     /// Remote changes dropped because their local-equivalent path
-    /// matches the ignore rules — ignore filtering is symmetric, so an
+    /// matches the ignore rules: ignore filtering is symmetric, so an
     /// ignored name never syncs in either direction.
     pub ignored_changes: usize,
     pub enqueued_intents: usize,
@@ -373,13 +373,38 @@ impl RemotePoller {
                     // feed (up to 60s under Throttled) would otherwise let a
                     // stale Removed delete a freshly re-uploaded local file.
                     let event_time = change.observed_at;
+                    if sync_mode == SyncMode::PushOnly
+                        && change.kind == RemoteChangeKind::CreatedOrModified
+                        && let Some(folder) = folder_of_other_spelling(&local_target)
+                    {
+                        // Push-only: the cloud names an entry that this
+                        // device stores under another spelling. A
+                        // restore through the cloud's name does nothing,
+                        // because that name is not on this device. The
+                        // walk of the folder removes the cloud's
+                        // spelling and sends the local one again.
+                        batch.push((folder, PendingIntentKind::ReconcileSubtree, event_time));
+                        report.mirror_reverts += 1;
+                        continue;
+                    }
                     if change.kind == RemoteChangeKind::CreatedOrModified
                         && let Some(existing) =
                             crate::name_collision::colliding_local_path(&local_target)
+                        && !is_respelling_of_synced_file(state_db, &existing, &local_target, change)
                     {
                         // The walk materializes the colliding name as a
                         // conflict copy and records the alias; the feed
                         // asks for that walk rather than duplicating it.
+                        // Every change asks: the walk is also what carries
+                        // a later change of that object to its copy. The
+                        // report is made one time for each name.
+                        if let Some(parent) = local_target.parent() {
+                            batch.push((
+                                parent.to_path_buf(),
+                                PendingIntentKind::ReconcileSubtree,
+                                event_time,
+                            ));
+                        }
                         if self.reported_collisions.insert(local_target.clone()) {
                             crate::logging::info(
                                 "Remote change collides with a differently-cased local file; a reconcile will materialize it as a conflict copy",
@@ -390,18 +415,15 @@ impl RemotePoller {
                             );
                             report.name_collisions += 1;
                             self.name_collisions.push((local_target.clone(), existing));
-                            if let Some(parent) = local_target.parent() {
-                                batch.push((
-                                    parent.to_path_buf(),
-                                    PendingIntentKind::ReconcileSubtree,
-                                    event_time,
-                                ));
-                            }
                         }
                         continue;
                     }
                     match change.kind {
                         RemoteChangeKind::CreatedOrModified => {
+                            // The object is there again. A delete the
+                            // daemon made at this path is over, and a
+                            // later removal is someone's real one.
+                            remote_echoes.forget_delete(change.path.as_str());
                             if remote_echoes.matches_write_checked(
                                 change.path.as_str(),
                                 change.op_id.as_deref(),
@@ -456,7 +478,18 @@ impl RemotePoller {
                             if sync_mode == SyncMode::PushOnly {
                                 // A remote deletion of backed-up content is
                                 // divergence too: restore from local.
-                                if local_file_exists(&local_target) {
+                                if let Some(folder) = folder_of_other_spelling(&local_target) {
+                                    // The name that left is one this
+                                    // device spells another way: the
+                                    // walk of the folder restores the
+                                    // local spelling.
+                                    batch.push((
+                                        folder,
+                                        PendingIntentKind::ReconcileSubtree,
+                                        event_time,
+                                    ));
+                                    report.mirror_reverts += 1;
+                                } else if local_file_exists(&local_target) {
                                     batch.push((
                                         local_target,
                                         PendingIntentKind::Upload,
@@ -565,6 +598,60 @@ impl RemotePoller {
 
 /// Whether a regular file exists at `path` (symlinks and directories
 /// do not count as restorable local canonicals).
+/// A cloud object whose name is another spelling of a synced local
+/// file's name, with the size and the modification time that file was
+/// last synced with: the cloud renamed the file and changed only the
+/// spelling. It goes on as an ordinary download, whose planner confirms
+/// the content and renames the local file instead of transferring.
+fn is_respelling_of_synced_file(
+    state_db: &DurableStateDb,
+    existing: &Path,
+    local_target: &Path,
+    change: &vapor_providers::RemoteChange,
+) -> bool {
+    let (Some(size_bytes), Some(modified_at)) = (change.size_bytes, change.modified_at) else {
+        return false;
+    };
+    matches!(state_db.sync_index(local_target), Ok(None))
+        && state_db
+            .sync_index(existing)
+            .ok()
+            .flatten()
+            .is_some_and(|index| index.matches_remote(size_bytes, modified_at))
+}
+
+/// The folder in which `target` and the entry this device stores for
+/// it differ in spelling, when they do: the parent of the highest path
+/// component that is spelled another way.
+fn folder_of_other_spelling(target: &Path) -> Option<PathBuf> {
+    let crate::name_collision::LocalSpelling::Other(stored) =
+        crate::name_collision::local_spelling(target)
+    else {
+        return None;
+    };
+    // From the last component upward, as the spelling check compares.
+    let mut folder = None;
+    let mut current = target;
+    for (wanted, found) in target.components().rev().zip(stored.components().rev()) {
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if wanted != found {
+            match (wanted.as_os_str().to_str(), found.as_os_str().to_str()) {
+                (Some(wanted), Some(found))
+                    if crate::name_collision::fold(wanted)
+                        == crate::name_collision::fold(found) =>
+                {
+                    folder = Some(parent.to_path_buf());
+                }
+                _ => break,
+            }
+        }
+        current = parent;
+    }
+    folder
+}
+
 fn local_file_exists(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|metadata| metadata.is_file())
@@ -796,6 +883,44 @@ mod tests {
     }
 
     #[test]
+    fn each_change_of_a_colliding_cloud_name_asks_for_the_folder_walk() {
+        let mut fixture = Fixture::new();
+        std::fs::write(fixture.local_root.join("Readme.md"), b"local").expect("seed local");
+        if !crate::name_collision::folds_case_at(&fixture.local_root)
+            || std::fs::symlink_metadata(fixture.local_root.join("readme.md")).is_err()
+        {
+            // This volume keeps the two names apart: no collision.
+            return;
+        }
+        fixture.poll(ts(0)); // baseline
+        let change = |fixture: &mut Fixture, at: u64| {
+            std::fs::write(fixture.cloud_root.join("readme.md"), at.to_string()).expect("cloud");
+            fixture.feed.emit(
+                fixture.cloud_root.join("readme.md"),
+                WatchEventKind::Modified,
+                ts(at),
+            );
+            let report = fixture.poll(ts(at + 10));
+            let intent = fixture
+                .state_db
+                .lease_next_ready(ts(at + 20))
+                .expect("lease")
+                .expect("the folder walk is queued");
+            assert_eq!(intent.kind, PendingIntentKind::ReconcileSubtree);
+            assert_eq!(intent.path, fixture.local_root);
+            fixture
+                .state_db
+                .complete_leased(intent.id)
+                .expect("the walk ran");
+            report.name_collisions
+        };
+        assert_eq!(change(&mut fixture, 100), 1, "reported the first time");
+        // The cloud object changes again. Its copy on this device only
+        // follows through another walk of the folder.
+        assert_eq!(change(&mut fixture, 200), 0, "reported one time");
+    }
+
+    #[test]
     fn self_write_echoes_are_suppressed_not_enqueued() {
         let mut fixture = Fixture::new();
         fixture.poll(ts(0)); // baseline
@@ -822,7 +947,7 @@ mod tests {
         // change and suppress via the hash-free op-id path by writing
         // the tag through the provider's store instead: simplest is to
         // verify suppression counting through matches_write directly on
-        // the echo cache — plus the end-to-end variant in the runtime
+        // the echo cache, plus the end-to-end variant in the runtime
         // integration tests where the stores are shared.
         assert!(
             fixture
@@ -870,7 +995,7 @@ mod tests {
         fixture
             .app
             .apply_throttle_inputs(vapor_shared::ThrottleInputs {
-                system_cpu_load_percent: 95,
+                thermal_pressure: vapor_shared::ThermalPressure::Critical,
                 ..vapor_shared::ThrottleInputs::default()
             });
         assert_eq!(

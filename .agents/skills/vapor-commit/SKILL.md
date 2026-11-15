@@ -37,7 +37,7 @@ license: GPL-3.0-only
 ## Before the commit
 
 - Run the `vapor-validate` ladder; the optional pre-commit hook
-  (`./scripts/hooks.sh`) runs lint, test, and build.
+  (`./scripts/hooks.sh`) runs lint and test.
 - Do the `vapor-docs` duties, the `CHANGELOG.md` `Unreleased` line
   included.
 - Read `git status --porcelain --untracked-files=all`. Stage the

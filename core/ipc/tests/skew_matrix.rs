@@ -10,7 +10,6 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use tempfile::TempDir;
 use vapor_ipc::{
@@ -69,6 +68,9 @@ impl ServerHandle {
     }
 }
 
+/// The listener is bound before this returns, and the OS queues a
+/// connection that arrives before the accept loop runs, so a test
+/// connects at once.
 fn spawn_server(service: Arc<StaticService>) -> ServerHandle {
     let temp = TempDir::new().expect("temp");
     let socket_path = temp.path().join("vapord.sock");
@@ -119,8 +121,6 @@ fn handshake_n_n_succeeds_and_status_round_trips() {
         status: Mutex::new(fixture_status()),
     });
     let handle = spawn_server(service);
-    // Tiny sleep so the accept loop is ready before the client connects.
-    thread::sleep(Duration::from_millis(20));
 
     let mut client = Client::connect(&handle.socket_path, "vapor-cli/test").expect("connect");
     let status = client.status().expect("status");
@@ -144,7 +144,6 @@ fn handshake_n_minus_1_follows_the_support_window() {
         status: Mutex::new(fixture_status()),
     });
     let handle = spawn_server(service);
-    thread::sleep(Duration::from_millis(20));
 
     // Hand-roll the handshake to pin the client version below current.
     let mut stream = UnixStream::connect(&handle.socket_path).expect("connect");
@@ -182,7 +181,6 @@ fn handshake_skew_of_two_is_rejected_with_incompatible_version() {
         status: Mutex::new(fixture_status()),
     });
     let handle = spawn_server(service);
-    thread::sleep(Duration::from_millis(20));
 
     let mut stream = UnixStream::connect(&handle.socket_path).expect("connect");
     let (current, _) = daemon_supported_versions();
@@ -221,7 +219,6 @@ fn an_older_build_s_snake_case_hello_is_refused_by_version_not_by_parse() {
         status: Mutex::new(fixture_status()),
     });
     let handle = spawn_server(service);
-    thread::sleep(Duration::from_millis(20));
 
     let mut stream = UnixStream::connect(&handle.socket_path).expect("connect");
     let frame = br#"{"kind":"Hello","payload":{"schema_version":2,"supported_min_version":2,"client_id":"vapor-cli/0.2.0-alpha.3"}}"#;
@@ -251,7 +248,6 @@ fn payload_bounds_oversized_first_frame_drops_connection_cleanly() {
         status: Mutex::new(fixture_status()),
     });
     let handle = spawn_server(service);
-    thread::sleep(Duration::from_millis(20));
 
     let mut stream = UnixStream::connect(&handle.socket_path).expect("connect");
     let bogus_length: u32 = (vapor_shared::constants::ipc::MAX_PAYLOAD_BYTES as u32) + 1;
@@ -287,7 +283,6 @@ fn client_propagates_incompatible_version_as_typed_error() {
         status: Mutex::new(fixture_status()),
     });
     let handle = spawn_server(service);
-    thread::sleep(Duration::from_millis(20));
 
     // Use the `Client::handshake` low-level entry point so we can hand
     // it a stream the test fabricates.

@@ -61,8 +61,8 @@ pub enum ServiceCommand {
     Uninstall {
         /// Skip the explicit stop signal (the "disable autolaunch"
         /// toggle path); default is to send one. On macOS the daemon
-        /// exits regardless — launchd tears the job down when its
-        /// service definition is booted out — so this only controls
+        /// exits regardless: launchd tears the job down when its
+        /// service definition is booted out, so this only controls
         /// whether *we* signal it; it matters on service managers that
         /// keep a disabled unit running (e.g. systemd).
         keep_running: bool,
@@ -141,14 +141,45 @@ pub struct ServiceStatusReport {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ServiceCommandOutcome {
     /// `bootstrap` / `install` / `uninstall` / `start` / `stop` /
-    /// `restart` — a lifecycle action result.
+    /// `restart`: a lifecycle action result.
     Action(DaemonLifecycleActionResult),
-    /// `check` — a supervision-tick outcome.
+    /// `check`: a supervision-tick outcome.
     Health(DaemonHealthCheckOutcome),
-    /// `status` — the full report.
+    /// `status`: the full report.
     Status(ServiceStatusReport),
-    /// `acknowledge` — pause cleared.
+    /// `acknowledge`: pause cleared.
     Acknowledged,
+}
+
+/// What a daemon of this build says about itself in `vapor status`.
+pub fn this_build() -> String {
+    format!("vapord/{}", vapor_daemon::build_info::VERSION)
+}
+
+/// After an install or a bootstrap: stops a running daemon that is
+/// another build than this binary and starts the installed one.
+///
+/// An update replaces the binaries and leaves the service definition
+/// as it was, so the install changes nothing, and a start leaves a
+/// running daemon alone. Without this step the old daemon would serve
+/// the new CLI and app until the next login. `running_build` is what
+/// the running daemon answered (`None` when it gave no answer, which a
+/// daemon that was just started does).
+pub fn replace_daemon_of_another_build(
+    manager: &DaemonLifecycleManager,
+    installer: &dyn ServiceInstaller,
+    running_build: Option<&str>,
+    now: Instant,
+) -> Result<bool, ServiceCommandError> {
+    let Some(running) = running_build else {
+        return Ok(false);
+    };
+    if running == this_build() || installer.status()? != ServiceStatus::Running {
+        return Ok(false);
+    }
+    manager.stop_daemon_for_termination(now)?;
+    manager.start_daemon_if_allowed(now)?;
+    Ok(true)
 }
 
 /// Entry point for the binary's `clap` dispatch. The `manager`,
@@ -203,7 +234,7 @@ pub fn dispatch(
             // The installer can only see the OS service manager; the
             // crash-loop pause lives in the durable lifecycle state.
             // Overlay it so `CrashLoopPaused` is a real, reportable
-            // state — unless the daemon is observably running.
+            // state, unless the daemon is observably running.
             let status = if manager.is_in_crash_loop_pause() && probed != ServiceStatus::Running {
                 ServiceStatus::CrashLoopPaused
             } else {
@@ -242,7 +273,7 @@ fn status_wire_name(status: ServiceStatus) -> &'static str {
 }
 
 /// Stable machine-readable rendering (`--json`). The Swift app shim
-/// parses this; key names and value enums are a versioned contract —
+/// parses this; key names and value enums are a versioned contract:
 /// change them only with a coordinated Swift-side update.
 pub fn render_json(outcome: &ServiceCommandOutcome) -> serde_json::Value {
     use constants::service as names;
@@ -319,7 +350,7 @@ pub fn render_text(outcome: &ServiceCommandOutcome) -> String {
             DaemonLifecycleActionResult::Stopped => "service: daemon stopped".to_string(),
             DaemonLifecycleActionResult::RelaunchDeferred(remaining) => {
                 if *remaining == Duration::MAX {
-                    "service: crash-loop pause active — run `vapor service acknowledge` \
+                    "service: crash-loop pause active; run `vapor service acknowledge` \
                      to allow restarts"
                         .to_string()
                 } else {
@@ -330,7 +361,7 @@ pub fn render_text(outcome: &ServiceCommandOutcome) -> String {
                 }
             }
             DaemonLifecycleActionResult::NotInstalled => {
-                "service: not installed — nothing to start; `vapor service install` \
+                "service: not installed; nothing to start; `vapor service install` \
                  (or Start Vapor at login in the app) registers the background service"
                     .to_string()
             }
@@ -344,14 +375,14 @@ pub fn render_text(outcome: &ServiceCommandOutcome) -> String {
                 "service check: daemon stopped (expected)".to_string()
             }
             DaemonHealthCheckOutcome::RestartedAfterCrash => {
-                "service check: unexpected exit detected — daemon restarted".to_string()
+                "service check: unexpected exit detected; daemon restarted".to_string()
             }
             DaemonHealthCheckOutcome::RestartDeferred(remaining) => format!(
-                "service check: unexpected exit detected — restart deferred {:.1}s",
+                "service check: unexpected exit detected; restart deferred {:.1}s",
                 remaining.as_secs_f64()
             ),
             DaemonHealthCheckOutcome::CrashLoopPaused => {
-                "service check: crash-loop pause active — run `vapor service acknowledge`"
+                "service check: crash-loop pause active; run `vapor service acknowledge`"
                     .to_string()
             }
         },
@@ -364,7 +395,7 @@ pub fn render_text(outcome: &ServiceCommandOutcome) -> String {
             );
             if report.crash_loop.paused {
                 line.push_str(
-                    "\ncrash-loop: paused — run `vapor service acknowledge` to allow restarts",
+                    "\ncrash-loop: paused; run `vapor service acknowledge` to allow restarts",
                 );
             } else if report.crash_loop.consecutive_crashes > 0 {
                 line.push_str(&format!(
@@ -686,6 +717,43 @@ mod tests {
     }
 
     #[test]
+    fn a_running_daemon_of_another_build_is_replaced_and_the_same_build_is_left_alone() {
+        let installer = fake_installer();
+        installer.set_status_for_testing(ServiceStatus::Running);
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+        let now = Instant::now();
+
+        // The same build, and a daemon that gave no answer: nothing.
+        assert!(
+            !replace_daemon_of_another_build(
+                &manager,
+                installer.as_ref(),
+                Some(&this_build()),
+                now
+            )
+            .expect("same build")
+        );
+        assert!(
+            !replace_daemon_of_another_build(&manager, installer.as_ref(), None, now)
+                .expect("no answer")
+        );
+        assert!(installer.operations().is_empty());
+
+        // The build of before an update: stop, then start.
+        assert!(
+            replace_daemon_of_another_build(
+                &manager,
+                installer.as_ref(),
+                Some("vapord/0.0.1-older"),
+                now
+            )
+            .expect("another build")
+        );
+        assert_eq!(installer.operations(), vec!["stop", "start"]);
+    }
+
+    #[test]
     fn the_check_loop_restarts_a_crashed_daemon_and_stops_on_signal() {
         let installer = fake_installer();
         installer.set_status_for_testing(ServiceStatus::Running);
@@ -703,8 +771,14 @@ mod tests {
         installer.set_status_for_testing(ServiceStatus::Stopped);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = stop.clone();
+        let watched = installer.clone();
+        // Stops the loop when it has restarted the daemon. The deadline
+        // only ends a run in which the restart never comes.
         let stopper = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(120));
+            let until = Instant::now() + Duration::from_secs(10);
+            while !watched.operations().contains(&"start") && Instant::now() < until {
+                std::thread::yield_now();
+            }
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
         });
         let last = check_loop(
@@ -879,10 +953,8 @@ mod tests {
 
     #[test]
     fn status_report_carries_the_service_label_not_the_log_file_name() {
-        // Regression: status used to emit DAEMON_LOG_FILE_NAME
-        // ("vapord.log") in the label field, which made
-        // `vapor service status` say `(label: vapord.log)` — wrong.
-        // The label is supposed to be the reverse-DNS service identifier.
+        // The label field holds the reverse-DNS service identifier,
+        // never the log file name that sits next to it in the constants.
         let installer = fake_installer();
         let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
         let manager = DaemonLifecycleManager::new(installer.clone(), settings);
@@ -982,7 +1054,7 @@ mod tests {
         );
     }
 
-    // --- JSON contract (consumed by the macOS app shim; LT-1 style) ---
+    // --- JSON contract (the macOS app shim parses these shapes) ---
 
     fn json_string(outcome: &ServiceCommandOutcome) -> String {
         serde_json::to_string(&render_json(outcome)).expect("serialize")

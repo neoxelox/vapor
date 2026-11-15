@@ -4,13 +4,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Atomically renames `from` onto `to`, failing with
-/// [`io::ErrorKind::AlreadyExists`] when `to` already exists — an
+/// [`io::ErrorKind::AlreadyExists`] when `to` already exists: an
 /// atomic no-clobber commit.
 ///
 /// This must be a *rename*, not a hard-link + unlink pair, wherever the
 /// OS allows: macOS FSEvents tracks file-level events by node, and a
 /// file whose name was created via `link(2)` stays bound to the
-/// original (deleted) temp name — every later external edit or
+/// original (deleted) temp name: every later external edit or
 /// deletion of the visible name is then silently missing from any
 /// watcher, which broke the filesystem provider's changes feed for
 /// uploaded files (observed live: a cloud-side `rm` of an uploaded
@@ -87,7 +87,7 @@ fn atomic_noclobber_rename_impl(from: &Path, to: &Path) -> io::Result<()> {
 
 /// Portable fallback: `link` + `unlink` is atomic no-clobber everywhere
 /// hard links exist, at the cost of node-bound watcher tracking (see
-/// the module docs) — acceptable only where no atomic-rename API is
+/// the module docs): acceptable only where no atomic-rename API is
 /// available.
 #[cfg(not(target_os = "macos"))]
 fn link_based_noclobber(from: &Path, to: &Path) -> io::Result<()> {

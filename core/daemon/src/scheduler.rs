@@ -246,7 +246,7 @@ impl KeyedSupersedingScheduler {
                 .intents
                 .get_mut(&path)
                 .expect("scheduled intent disappeared");
-            // Latest-wins for per-path work — except a pending subtree
+            // Latest-wins for per-path work, except a pending subtree
             // reconcile, which subsumes any per-path action for the same
             // path. Downgrading a reconcile to (say) an Upload would leave
             // the compacted-subtree boundary waiting on a reconcile intent
@@ -316,17 +316,24 @@ impl KeyedSupersedingScheduler {
 /// is decided by ground truth, not event order: real fs-watch backends
 /// (FSEvents especially) coalesce and split per-path flags, so the
 /// *last* event delivered for an unlinked file is frequently a
-/// write-kind — trusting it turned local deletions into upload plans
-/// that no-op'd as "vanished before upload" and never removed the
+/// write-kind. Trusting it would turn a local deletion into an upload
+/// plan that ends as "vanished before upload" and never removes the
 /// remote copy. When the burst carried a removal or rename and the
-/// path is gone at stabilization time (runtime thread — never the
+/// path is gone at stabilization time (runtime thread, never the
 /// callback), the local truth is "deleted" regardless of which
-/// fragment notify delivered last.
+/// fragment notify delivered last. A path the filesystem now stores
+/// under another spelling is gone too, whatever the burst carried: on
+/// a volume that folds names the old spelling still resolves, and
+/// reading that as "still here" would upload the file under a name it
+/// no longer has.
 pub(crate) fn intent_kind_for_stabilized_event(event: &StabilizedEvent) -> PendingIntentKind {
+    use crate::name_collision::LocalSpelling;
     let removal_shaped =
         event.flags.removed || event.flags.renamed || event.last_event_kind == FsEventKind::Removed;
-    if removal_shaped && std::fs::symlink_metadata(&event.path).is_err() {
-        return PendingIntentKind::Delete;
+    match crate::name_collision::local_spelling(&event.path) {
+        LocalSpelling::Other(_) => return PendingIntentKind::Delete,
+        LocalSpelling::Absent if removal_shaped => return PendingIntentKind::Delete,
+        LocalSpelling::Absent | LocalSpelling::Exact => {}
     }
     if event.flags.renamed {
         PendingIntentKind::Rename
@@ -418,7 +425,7 @@ mod tests {
         // Destination side of a rename: the file exists at
         // stabilization, so the rename classification survives a
         // trailing modify fragment. (A rename-flagged path that is
-        // *gone* is the source side and maps to Delete — covered by
+        // *gone* is the source side and maps to Delete: covered by
         // `deletion_is_decided_by_ground_truth_not_event_order`.)
         let temp = tempfile::TempDir::new().expect("temp");
         let path = temp.path().join("renamed.rs");
@@ -537,7 +544,7 @@ mod tests {
     fn pending_reconcile_is_not_downgraded_by_a_later_per_path_event() {
         // A plain fs event on a compacted subtree's root (e.g. a mkdir or
         // attribute change) must not replace the pending reconcile with an
-        // Upload — the compaction boundary is waiting on that reconcile.
+        // Upload: the compaction boundary is waiting on that reconcile.
         let root = PathBuf::from("/tmp/vapor-root/project");
         let mut scheduler = KeyedSupersedingScheduler::default();
 
@@ -667,10 +674,10 @@ mod tests {
 
     #[test]
     fn deletion_is_decided_by_ground_truth_not_event_order() {
-        // The real-watcher shape that used to lose deletions: FSEvents
-        // splits/coalesces per-path flags, so an unlinked file's last
+        // The shape a real watcher delivers: FSEvents splits and
+        // coalesces per-path flags, so an unlinked file's last
         // delivered fragment is often a write-kind. The burst carries
-        // `removed`, the path is gone — the intent must be Delete no
+        // `removed`, the path is gone: the intent must be Delete no
         // matter which fragment arrived last.
         let temp = tempfile::TempDir::new().expect("temp");
         let vanished = temp.path().join("deleted.txt");
@@ -691,7 +698,7 @@ mod tests {
 
         // The inverse race: a Removed fragment arrived last but the
         // file exists again (delete + recreate inside one quiet
-        // window). Ground truth says upload the survivor — the old
+        // window). Ground truth says upload the survivor: the old
         // last-kind rule would have deleted the remote copy.
         let recreated = temp.path().join("recreated.txt");
         std::fs::write(&recreated, b"back again").expect("seed");

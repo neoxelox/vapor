@@ -15,6 +15,8 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "GPL-3.0-only"
+# No crate here goes to crates.io: Vapor ships as binaries.
+publish = false
 version = "0.2.0-alpha.3"
 
 # Shared external dependencies are pinned once here and inherited via
@@ -29,7 +31,7 @@ notify = "=8.2.0"
 md-5 = "=0.10.6"
 sha2 = "=0.10.9"
 unicode-normalization = "=0.1.25"
-rusqlite = "=0.38.0"
+rusqlite = "=0.42.0"
 proptest = "=1.11.0"
 
 [profile.release]
@@ -37,5 +39,9 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 incremental = false
-panic = "abort"
+# Unwinding, not abort: the daemon catches a panic in one profile's tick
+# or in one provider job and suspends that profile. With abort the same
+# panic ends the daemon for every profile, and a panic that repeats on
+# one file ends in a crash loop.
+panic = "unwind"
 strip = "symbols"

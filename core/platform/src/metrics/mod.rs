@@ -199,12 +199,15 @@ mod tests {
     fn native_sampler_reports_real_host_signals() {
         let sampler = NativePlatformMetricsSampler::for_current_host();
         assert!(NativePlatformMetricsSampler::has_native_sampling());
-        let first = sampler.sample();
+        let start = std::time::Instant::now();
+        let first = sampler.sample_at(start);
         assert!(first.system_cpu_load_percent <= 100);
         assert!(first.vapor_cpu_load_percent <= 100);
         assert!(first.device_memory_bytes.is_some_and(|bytes| bytes > 0));
         assert!(first.vapor_memory_bytes.is_some_and(|bytes| bytes > 0));
-        // A second call inside the cache window returns the same reading.
-        assert_eq!(sampler.sample(), first);
+        // A second call inside the sample interval returns the same
+        // reading. The instants are given, so the test does not depend
+        // on how long the host takes between the two calls.
+        assert_eq!(sampler.sample_at(start + Duration::from_millis(10)), first);
     }
 }

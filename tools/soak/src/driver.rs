@@ -39,6 +39,7 @@ const EXPECTED_WARNINGS: &[&str] = &[
     "Kept both versions on download-apply",
     "Remote changed since last sync; preserving it over a local deletion",
     "Mass-deletion guard tripped",
+    "A one-way mode needs the user's confirmation",
     "Cloud root became unavailable",
     "Sync root is missing",
     "Cloud root",
@@ -127,6 +128,8 @@ pub struct Driver {
     sandbox: Sandbox,
     home: Home,
     daemon: Option<Daemon>,
+    /// The one-way mode of this run was confirmed to the daemon.
+    one_way_confirmed: bool,
     cli: Cli,
     db: StateDb,
     health: HealthMonitor,
@@ -248,6 +251,7 @@ impl Driver {
             sandbox,
             home,
             daemon: None,
+            one_way_confirmed: false,
             cli,
             db,
             health: HealthMonitor::new(),
@@ -280,7 +284,7 @@ impl Driver {
         driver.state = RunState::Running;
         driver.write_status(true)?;
         println!(
-            "[soak] run {} — sandbox {}",
+            "[soak] run {}: sandbox {}",
             driver.run_id,
             driver.sandbox.root.display()
         );
@@ -304,6 +308,7 @@ impl Driver {
         )?;
         self.daemon = Some(daemon);
         self.health.reset_process();
+        self.confirm_one_way_mode()?;
         // A daemon started while the cloud root is parked or locked
         // blocks (Error) until the root is usable again.
         let expected = if self.cloud_unavailable() {
@@ -313,6 +318,51 @@ impl Driver {
         };
         self.cli.wait_run_state(expected, STARTUP_TIMEOUT)?;
         Ok(())
+    }
+
+    /// A profile in a one-way mode holds until the user confirms the
+    /// mode. The run chose the mode, so the driver says yes, once: the
+    /// daemon remembers the answer for this mode and these two roots.
+    fn confirm_one_way_mode(&mut self) -> Result<(), Failure> {
+        if self.cfg.mode.authority().is_none() || self.one_way_confirmed {
+            return Ok(());
+        }
+        let started = Instant::now();
+        loop {
+            let open = self
+                .cli
+                .json(&["decisions", "list", "--json"])
+                .ok()
+                .and_then(|report| {
+                    report["decisions"].as_array().and_then(|decisions| {
+                        decisions
+                            .iter()
+                            .find(|decision| {
+                                decision["kind"]
+                                    == vapor_shared::constants::decision::KIND_ONE_WAY_MODE
+                                    && decision["choice"].is_null()
+                            })
+                            .and_then(|decision| decision["id"].as_i64())
+                    })
+                });
+            if let Some(id) = open {
+                self.cli.ok(&[
+                    "decisions",
+                    "resolve",
+                    &id.to_string(),
+                    "--choose",
+                    vapor_shared::constants::decision::OPTION_ENABLE,
+                ])?;
+                self.one_way_confirmed = true;
+                return Ok(());
+            }
+            if started.elapsed() > STARTUP_TIMEOUT {
+                return Err(Failure::new(
+                    "the daemon never asked to confirm the one-way mode",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 
     /// The cloud root cannot take the driver's writes right now: parked
@@ -765,14 +815,27 @@ impl Driver {
                 // daemon applied, a rename in flight); an op that no
                 // longer applies is skipped, not a failure of the run.
                 self.note(format!(
-                    "skipped {} on {}: {error}",
+                    "skipped {} on {}: {}",
                     op.kind(),
-                    side.label()
+                    side.label(),
+                    error.failure
                 ));
                 self.log_event(serde_json::json!({
-                    "side": side.label(), "op": op, "version": version, "skipped": error.message,
+                    "side": side.label(), "op": op, "version": version,
+                    "skipped": error.failure.message,
                 }));
-                self.model.record(side, &op, None);
+                // A restore that failed after its removal (a full disk)
+                // leaves a plain deletion, and the model must say so. A
+                // restore that found no file removed nothing: a file the
+                // daemon lost stays in the model, and the oracle
+                // reports the loss.
+                let recorded = match &op {
+                    Op::Restore { path, .. } if error.removed_its_file => {
+                        Op::Delete { path: path.clone() }
+                    }
+                    _ => op,
+                };
+                self.model.record(side, &recorded, None);
                 return Ok(());
             }
         }

@@ -65,7 +65,39 @@ impl BandwidthShaper {
         granted
     }
 
-    /// Returns `unused` bytes of a prior grant to the bucket — a transfer
+    /// Grants up to `requested` bytes once the bucket holds a useful
+    /// amount, and otherwise says how long until it does. A caller
+    /// that took whatever was there would move a few bytes, come back
+    /// at once, and spin for the whole transfer; with the wait it can
+    /// hold the session until the grant is worth a step. "Useful" is
+    /// `min_useful`, never more than the request or one second of rate.
+    pub fn grant_or_wait(
+        &mut self,
+        requested: u64,
+        min_useful: u64,
+        now: Instant,
+    ) -> Result<u64, std::time::Duration> {
+        let Some(rate) = self.rate_bytes_per_sec else {
+            return Ok(requested);
+        };
+        let elapsed = self
+            .last_refill
+            .map(|last| now.saturating_duration_since(last).as_secs_f64())
+            .unwrap_or(1.0);
+        self.last_refill = Some(now);
+        self.tokens = (self.tokens + elapsed * rate as f64).min(rate as f64);
+
+        let useful = min_useful.min(requested).min(rate).max(1) as f64;
+        if self.tokens < useful {
+            let seconds = (useful - self.tokens) / rate as f64;
+            return Err(std::time::Duration::from_secs_f64(seconds));
+        }
+        let granted = (self.tokens.floor() as u64).min(requested);
+        self.tokens -= granted as f64;
+        Ok(granted)
+    }
+
+    /// Returns `unused` bytes of a prior grant to the bucket: a transfer
     /// step routinely spends less than it was granted (chunk-size
     /// alignment, a short final chunk, or an error that moved zero bytes),
     /// and without a refund the shaper systematically undershoots the
@@ -83,6 +115,40 @@ impl BandwidthShaper {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn a_dry_bucket_says_how_long_until_a_useful_grant() {
+        let mut shaper = BandwidthShaper::with_rate(1_000);
+        let t0 = Instant::now();
+        assert_eq!(shaper.grant_or_wait(10_000, 250, t0), Ok(1_000));
+        // Empty: 250 bytes at 1 000 bytes per second are 250 ms away.
+        let wait = shaper
+            .grant_or_wait(10_000, 250, t0)
+            .expect_err("the bucket is dry");
+        assert!(
+            (240..=260).contains(&wait.as_millis()),
+            "the wait is the time to refill the useful amount, got {wait:?}"
+        );
+        // A few bytes are not a grant.
+        assert!(
+            shaper
+                .grant_or_wait(10_000, 250, t0 + Duration::from_millis(50))
+                .is_err()
+        );
+        let granted = shaper
+            .grant_or_wait(10_000, 250, t0 + Duration::from_millis(300))
+            .expect("refilled past the useful amount");
+        assert!((290..=310).contains(&granted), "got {granted}");
+        // A request smaller than the useful amount is served in full.
+        assert_eq!(
+            shaper.grant_or_wait(20, 250, t0 + Duration::from_millis(320)),
+            Ok(20)
+        );
+        assert_eq!(
+            BandwidthShaper::unlimited().grant_or_wait(5_000, 250, t0),
+            Ok(5_000)
+        );
+    }
 
     #[test]
     fn unlimited_shaper_grants_everything() {

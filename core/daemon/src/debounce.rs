@@ -491,7 +491,7 @@ mod tests {
         assert!(loop_state.run_tick(&mut maps, timestamp(1_000)).is_empty());
 
         // Advance the monotonic clock under the configured tick interval
-        // (250ms). The next tick must skip — `tick_is_due` returns false.
+        // (250ms). The next tick must skip: `tick_is_due` returns false.
         clock.advance(Duration::from_millis(200));
         assert!(loop_state.run_tick(&mut maps, timestamp(1_200)).is_empty());
 
@@ -593,7 +593,7 @@ mod tests {
         // wall-clock rewinds (DST / NTP / `date -s`) cannot make the loop
         // spin extra ticks. We drive the wall clock backwards by a full
         // hour while the monotonic axis stays still and assert that the
-        // next `run_tick` call is *not* prematurely due — i.e., the
+        // next `run_tick` call is *not* prematurely due, i.e., the
         // old SystemTime code path that woke immediately on a
         // negative `duration_since` is gone.
         let watch_root = PathBuf::from("/tmp/vapor-root");

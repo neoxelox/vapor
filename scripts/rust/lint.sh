@@ -13,3 +13,14 @@ MANIFEST="$ROOT_DIR/Cargo.toml"
 
 echo "[rust-lint] cargo clippy for ${MANIFEST}"
 cargo clippy --manifest-path "$MANIFEST" --all-targets --all-features -- -D warnings
+
+# The dependency check (deny.toml): RustSec advisories and yanked
+# crates, licenses, and crate sources. The advisory database comes from
+# the network, so this step needs a connection.
+if ! cargo deny --version >/dev/null 2>&1; then
+  echo "[rust-lint] 'cargo deny' is required but not installed."
+  echo "[rust-lint] Install it with: cargo install cargo-deny --locked"
+  exit 1
+fi
+echo "[rust-lint] cargo deny check for ${MANIFEST}"
+cargo deny --manifest-path "$MANIFEST" check

@@ -1,4 +1,4 @@
-# Distribution Trust Chain — macOS
+# Distribution Trust Chain: macOS
 
 Cross-platform distribution policy lives in
 `docs/operations/distribution-trust-chain.md` (which delegates to this file
@@ -22,8 +22,16 @@ Define release trust requirements for macOS app + daemon distribution.
 1. Build signed artifacts for app (`Vapor`), daemon (`vapord`), and
    CLI (`vapor`).
 2. Validate signatures and entitlements.
-3. Submit for notarization and verify staple status.
-4. Publish only notarization-passing artifacts.
+3. Submit for notarization and read Apple's answer. `notarytool submit
+   --wait` exits 0 for a refused submission, so `package.sh` reads the
+   status, and on anything but `Accepted` it prints the notarization
+   log and fails.
+4. Staple the ticket, then check the stapled app: `stapler validate`,
+   and `spctl -a -t exec`, the question Gatekeeper asks at first
+   launch. Either failure fails the package.
+5. Publish only notarization-passing artifacts.
+
+The app is built for Apple silicon. There is no Intel Mac build.
 
 Implementation requirements:
 

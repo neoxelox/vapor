@@ -9,12 +9,12 @@ use vapor_shared::{constants, logging::sanitize_diagnostic_text, runtime_paths};
 use crate::event_intents::PendingIntentKind;
 use crate::retry::{RetryDecision, RetryFailureKind, RetryPolicy};
 
-const CURRENT_SCHEMA_VERSION: i64 = 6;
-/// The oldest schema version this build can migrate forward in place
-/// (v3 → v4 widened the intent-kind vocabulary; v4 → v5 added the
-/// durable lease-priority column). Anything older predates the
-/// migration chain and fails with `SchemaVersionMismatch`.
-const MIGRATABLE_SCHEMA_VERSION: i64 = 3;
+/// Before GA there is no migration: a database of any other version is
+/// set aside by the daemon and rebuilt from a whole-scope reconcile.
+const CURRENT_SCHEMA_VERSION: i64 = 7;
+/// How long a database that was set aside (corrupt, or of another
+/// schema version) stays on disk for inspection.
+const QUARANTINE_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const STATE_PENDING: &str = "pending";
 const STATE_LEASED: &str = "leased";
 /// An intent parked behind a pending decision: never leased until the
@@ -97,6 +97,31 @@ impl From<rusqlite::Error> for StateDbError {
     }
 }
 
+/// What a decision of the user allows an intent to do.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Approval {
+    #[default]
+    None,
+    /// The guard that held the intent lets it pass. Nothing else
+    /// changes: a deletion still needs its sync index row.
+    Guards,
+    /// The user's answer named this very path (the side of a clash to
+    /// remove). It passes the guards, and for a deletion it stands in
+    /// for the sync index row.
+    NamedPath,
+}
+
+impl Approval {
+    /// The value of the `approved` column.
+    fn stored(self) -> i64 {
+        match self {
+            Approval::None => 0,
+            Approval::Guards => 1,
+            Approval::NamedPath => 2,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableIntentRecord {
     pub id: i64,
@@ -117,6 +142,9 @@ pub struct DurableIntentRecord {
     /// The user approved this intent through a decision; the guards
     /// that hold deletions let it through.
     pub approved: bool,
+    /// The user's answer named this path. For a deletion, the answer
+    /// then stands in for the sync index row that it has not got.
+    pub names_path: bool,
     /// The decision this intent is parked behind, while held.
     pub held_by: Option<i64>,
 }
@@ -157,52 +185,96 @@ impl DurableStateDb {
         Self::open(runtime_paths::sqlite_database_path())
     }
 
-    /// Opens the durable DB with the documented corruption-recovery
-    /// path (AGENTS.md §5): when the file is not a readable SQLite
-    /// database, it is quarantined next to itself
-    /// (`vapor.sqlite.corrupt-<ms>`) and a fresh database takes its
-    /// place. The startup whole-scope reconcile reconstructs intent
-    /// state conservatively; the quarantined file stays on disk for
-    /// support inspection. Version mismatches are NOT recovered this
-    /// way — an incompatible schema is a real error, not corruption.
+    /// The daemon's open. A file that cannot serve as the state
+    /// database is set aside next to itself and a fresh database takes
+    /// its place: a file that is not a readable SQLite database or
+    /// fails the page check (`vapor.sqlite.corrupt-<ms>`), and a
+    /// database of another schema version
+    /// (`vapor.sqlite.schema-v<n>-<ms>`). The startup whole-scope
+    /// reconcile rebuilds the index, and with no index row nothing is
+    /// deleted on either side. Files set aside stay for the retention
+    /// window, then go.
     pub fn open_with_corruption_recovery(
         path: impl AsRef<Path>,
         now: SystemTime,
     ) -> Result<Self, StateDbError> {
         let path = path.as_ref().to_path_buf();
-        match Self::open(&path) {
-            Ok(database) => Ok(database),
-            // Only genuine corruption (unreadable-as-SQLite / structural
-            // corruption) may quarantine the file. Transient failures —
-            // disk full (SQLITE_FULL), I/O errors (SQLITE_IOERR), busy
-            // locks (SQLITE_BUSY), permission problems (SQLITE_PERM) — must
-            // NOT destroy a healthy database full of pending intent state;
-            // they surface as ordinary startup failures so the crash-loop
-            // guard retries instead.
-            Err(StateDbError::Sql(error)) if is_corruption_error(&error) => {
-                let now_ms = system_time_to_millis(now).unwrap_or(0);
-                let quarantine = path.with_extension(format!("sqlite.corrupt-{now_ms}"));
-                crate::logging::error(
-                    "Durable state DB is corrupt; quarantining it and starting fresh",
-                    &[
-                        ("database_path", path.display().to_string()),
-                        ("quarantine_path", quarantine.display().to_string()),
-                        ("error", error.to_string()),
-                    ],
-                );
-                std::fs::rename(&path, &quarantine)?;
-                // WAL/SHM siblings belong to the corrupt database.
-                for suffix in ["-wal", "-shm"] {
-                    let mut sibling = path.clone().into_os_string();
-                    sibling.push(suffix);
-                    let _ = std::fs::remove_file(std::path::PathBuf::from(sibling));
+        prune_quarantined(&path, now);
+        // Only a file that can never serve may be set aside. Transient
+        // failures (disk full, I/O errors, busy locks, permissions)
+        // must not replace a healthy database full of pending intent
+        // state; they surface as ordinary startup failures so the
+        // crash-loop guard retries instead.
+        let reason = match Self::open(&path) {
+            Ok(database) => match database.damaged_pages() {
+                Ok(None) => return Ok(database),
+                Ok(Some(finding)) => QuarantineReason::Corrupt(finding),
+                Err(StateDbError::Sql(error)) if is_corruption_error(&error) => {
+                    QuarantineReason::Corrupt(error.to_string())
                 }
-                Self::open(&path)
+                Err(error) => return Err(error),
+            },
+            Err(StateDbError::Sql(error)) if is_corruption_error(&error) => {
+                QuarantineReason::Corrupt(error.to_string())
             }
-            Err(error) => Err(error),
+            Err(StateDbError::SchemaVersionMismatch { found, .. }) => {
+                QuarantineReason::OtherSchema(found)
+            }
+            Err(error) => return Err(error),
+        };
+        let now_ms = system_time_to_millis(now).unwrap_or(0);
+        let quarantine = match &reason {
+            QuarantineReason::Corrupt(_) => path.with_extension(format!("sqlite.corrupt-{now_ms}")),
+            QuarantineReason::OtherSchema(found) => {
+                path.with_extension(format!("sqlite.schema-v{found}-{now_ms}"))
+            }
+        };
+        let metadata = [
+            ("database_path", path.display().to_string()),
+            ("quarantine_path", quarantine.display().to_string()),
+        ];
+        match &reason {
+            QuarantineReason::Corrupt(finding) => crate::logging::error(
+                "Durable state DB is corrupt; setting it aside and starting fresh",
+                &[
+                    metadata[0].clone(),
+                    metadata[1].clone(),
+                    ("error", finding.clone()),
+                ],
+            ),
+            QuarantineReason::OtherSchema(found) => crate::logging::info(
+                "Durable state DB has another schema version; setting it aside and rebuilding from a whole-scope reconcile",
+                &[
+                    metadata[0].clone(),
+                    metadata[1].clone(),
+                    ("found", found.to_string()),
+                    ("expected", CURRENT_SCHEMA_VERSION.to_string()),
+                ],
+            ),
         }
+        std::fs::rename(&path, &quarantine)?;
+        // WAL/SHM siblings belong to the database that was set aside.
+        for suffix in ["-wal", "-shm"] {
+            let mut sibling = path.clone().into_os_string();
+            sibling.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(sibling));
+        }
+        Self::open(&path)
     }
 
+    /// The first finding of SQLite's page check, or `None` for a sound
+    /// file. Run once per daemon start: a damaged page inside a table
+    /// otherwise fails later, at run time, on every start.
+    fn damaged_pages(&self) -> Result<Option<String>, StateDbError> {
+        let finding: String = self
+            .connection
+            .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+        Ok((finding != "ok").then_some(finding))
+    }
+
+    /// Opens the database for a caller that does not own it (the CLI).
+    /// A database of another schema version is an error here, never
+    /// set aside.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StateDbError> {
         let path = path.as_ref().to_path_buf();
         runtime_paths::ensure_private_file(&path)?;
@@ -210,7 +282,7 @@ impl DurableStateDb {
         let mut connection = Connection::open(&path)?;
         runtime_paths::ensure_private_file(&path)?;
         configure_connection(&connection)?;
-        migrate_schema(&mut connection)?;
+        ensure_schema(&mut connection)?;
 
         Ok(Self { path, connection })
     }
@@ -220,7 +292,7 @@ impl DurableStateDb {
     pub fn open_in_memory() -> Result<Self, StateDbError> {
         let mut connection = Connection::open_in_memory()?;
         configure_connection(&connection)?;
-        migrate_schema(&mut connection)?;
+        ensure_schema(&mut connection)?;
         Ok(Self {
             path: PathBuf::from(":memory:"),
             connection,
@@ -435,6 +507,55 @@ impl DurableStateDb {
         id: i64,
     ) -> Result<Option<DurableFailedIntentRecord>, StateDbError> {
         fetch_failed_intent(&self.connection, id)
+    }
+
+    /// One line for each failed intent (kind, path, error), for the
+    /// message of a test that expects none.
+    #[cfg(test)]
+    pub fn failed_summaries(&self) -> Vec<String> {
+        let Ok(mut statement) = self
+            .connection
+            .prepare("SELECT id FROM failed_intents ORDER BY id")
+        else {
+            return Vec::new();
+        };
+        let ids: Vec<i64> = statement
+            .query_map([], |row| row.get(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        ids.into_iter()
+            .filter_map(|id| self.failed_record(id).ok().flatten())
+            .map(|record| format!("{record:?}"))
+            .collect()
+    }
+
+    /// One line for each queued intent (kind, path, attempts, last
+    /// error), for the message of a test that expects an empty queue.
+    #[cfg(test)]
+    pub fn queued_summaries(&self) -> Vec<String> {
+        let Ok(mut statement) = self
+            .connection
+            .prepare("SELECT id FROM queue_intents ORDER BY id")
+        else {
+            return Vec::new();
+        };
+        let ids: Vec<i64> = statement
+            .query_map([], |row| row.get(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        ids.into_iter()
+            .filter_map(|id| self.intent_record(id).ok().flatten())
+            .map(|record| {
+                format!(
+                    "{:?} {} attempts={} last_error={:?} held_by={:?}",
+                    record.kind,
+                    record.path.display(),
+                    record.attempt_count,
+                    record.last_error,
+                    record.held_by
+                )
+            })
+            .collect()
     }
 
     pub fn lease_next_ready(
@@ -721,7 +842,7 @@ impl DurableStateDb {
     /// Startup recovery: every lease belongs to a dead process, so all of
     /// them are returned to `pending`. Stale leases (older than
     /// [`constants::engine::LEASE_TIMEOUT_MILLIS`]) additionally reset
-    /// `attempt_count` — documented in `data-flow.md` §Local to remote —
+    /// `attempt_count`: documented in `data-flow.md` §Local to remote,
     /// while fresh leases keep their retry history.
     pub fn recover_leased(&mut self, now: SystemTime) -> Result<usize, StateDbError> {
         // Startup: stale leases reset their retry history (a lost process
@@ -739,7 +860,7 @@ impl DurableStateDb {
 
     /// In-run recovery sweep: returns leases older than the lease timeout
     /// to `pending`. Only genuinely orphaned leases (a lost execution)
-    /// should reach this — the executor renews the lease of every intent
+    /// should reach this: the executor renews the lease of every intent
     /// it still holds via [`renew_leases`], so a long transfer or a
     /// Suspended stall no longer trips the sweep. Retry history is kept
     /// (an in-run recovery is not a fresh start).
@@ -921,7 +1042,7 @@ impl DurableStateDb {
     /// against an existing **pending** row with the same `(path, kind)`:
     /// a path that is already queued (including one waiting out a retry
     /// backoff) does not grow a duplicate row. Leased rows do not
-    /// coalesce — work already in flight may have read stale content, so
+    /// coalesce: work already in flight may have read stale content, so
     /// a fresh pending row is the correct "run again after" signal.
     ///
     /// `source` sets the durable lease priority: reconcile-walk backlog
@@ -936,19 +1057,19 @@ impl DurableStateDb {
         intents: &[(PathBuf, PendingIntentKind, SystemTime)],
         source: crate::safeguards::IntentSource,
     ) -> Result<usize, StateDbError> {
-        self.enqueue_intents_coalesced_with(intents, source, false)
+        self.enqueue_intents_coalesced_with(intents, source, Approval::None)
     }
 
-    /// Like [`Self::enqueue_intents_coalesced`], with `approved` set on
-    /// every row it inserts: the intent carries out a decision the user
-    /// made (a restore after `discard`, the merge after a root answer),
-    /// so no guard or planner second-guesses it. A row that already
-    /// existed keeps its own flag.
+    /// Like [`Self::enqueue_intents_coalesced`], with the approval set
+    /// on every row it inserts: the intent carries out a decision the
+    /// user made (a restore after `discard`, the merge after a root
+    /// answer, the side of a clash the user chose to remove). A row
+    /// that already existed keeps its own approval.
     pub fn enqueue_intents_coalesced_with(
         &mut self,
         intents: &[(PathBuf, PendingIntentKind, SystemTime)],
         source: crate::safeguards::IntentSource,
-        approved: bool,
+        approval: Approval,
     ) -> Result<usize, StateDbError> {
         if intents.is_empty() {
             return Ok(0);
@@ -989,10 +1110,10 @@ impl DurableStateDb {
                 *observed_at,
                 source,
             )?;
-            if approved {
+            if approval != Approval::None {
                 transaction.execute(
-                    "UPDATE queue_intents SET approved = 1 WHERE id = ?",
-                    params![id],
+                    "UPDATE queue_intents SET approved = ? WHERE id = ?",
+                    params![approval.stored(), id],
                 )?;
             }
             inserted += 1;
@@ -1067,41 +1188,6 @@ impl SyncIndexEntry {
         indexed_size == size_bytes
             && system_time_to_millis(observed).ok() == system_time_to_millis(indexed).ok()
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TombstoneOrigin {
-    /// The deletion originated locally (propagates to the provider).
-    Local,
-    /// The deletion originated remotely (applied to the local replica).
-    Remote,
-}
-
-impl TombstoneOrigin {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Local => "local",
-            Self::Remote => "remote",
-        }
-    }
-
-    fn from_label(label: &str) -> Result<Self, StateDbError> {
-        match label {
-            "local" => Ok(Self::Local),
-            "remote" => Ok(Self::Remote),
-            other => Err(StateDbError::InvalidStateValue(format!(
-                "invalid tombstone origin '{other}'"
-            ))),
-        }
-    }
-}
-
-/// Durable deletion marker with restart-safe replay semantics.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TombstoneRecord {
-    pub path: PathBuf,
-    pub origin: TombstoneOrigin,
-    pub deleted_at: SystemTime,
 }
 
 impl DurableStateDb {
@@ -1247,77 +1333,148 @@ impl DurableStateDb {
         Ok(entries)
     }
 
+    /// Moves the row of `from` to `to`: the same file under a new
+    /// spelling of its name. A row already at `to` is replaced.
+    pub fn rekey_sync_index(&mut self, from: &Path, to: &Path) -> Result<(), StateDbError> {
+        let (from, to) = (path_to_text(from)?, path_to_text(to)?);
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let moved = transaction
+            .query_row(
+                "SELECT 1 FROM sync_index WHERE path_text = ?",
+                params![from],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if moved {
+            transaction.execute("DELETE FROM sync_index WHERE path_text = ?", params![to])?;
+            transaction.execute(
+                "UPDATE sync_index SET path_text = ? WHERE path_text = ?",
+                params![to, from],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Moves every row under the folder `from` to the same place under
+    /// `to`: the same folder under a new spelling of its name.
+    pub fn rekey_sync_index_under(&mut self, from: &Path, to: &Path) -> Result<(), StateDbError> {
+        let (lower, upper) = rows_under_bounds(from)?;
+        let to = format!("{}{}", path_to_text(to)?, std::path::MAIN_SEPARATOR);
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "DELETE FROM sync_index WHERE path_text IN (
+                 SELECT ?1 || substr(path_text, ?2) FROM sync_index
+                 WHERE path_text >= ?3 AND path_text < ?4)",
+            params![to, lower.chars().count() as i64 + 1, lower, upper],
+        )?;
+        transaction.execute(
+            "UPDATE sync_index SET path_text = ?1 || substr(path_text, ?2)
+             WHERE path_text >= ?3 AND path_text < ?4",
+            params![to, lower.chars().count() as i64 + 1, lower, upper],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Whether any synced file lies under the folder `directory`.
+    pub fn sync_index_has_rows_under(&self, directory: &Path) -> Result<bool, StateDbError> {
+        let (lower, upper) = rows_under_bounds(directory)?;
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT 1 FROM sync_index WHERE path_text >= ? AND path_text < ? LIMIT 1",
+                params![lower, upper],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// The names directly inside `directory` that the sync index holds
+    /// a row for, or rows under. One index seek for each name, however
+    /// many rows lie under it.
+    pub fn sync_index_names_in(
+        &self,
+        directory: &Path,
+    ) -> Result<std::collections::BTreeSet<String>, StateDbError> {
+        let (lower, upper) = rows_under_bounds(directory)?;
+        let mut from_row = self.connection.prepare_cached(
+            "SELECT path_text FROM sync_index
+             WHERE path_text >= ? AND path_text < ? ORDER BY path_text LIMIT 1",
+        )?;
+        let mut after_row = self.connection.prepare_cached(
+            "SELECT path_text FROM sync_index
+             WHERE path_text > ? AND path_text < ? ORDER BY path_text LIMIT 1",
+        )?;
+        let mut names = std::collections::BTreeSet::new();
+        // The next seek starts at `position`, or just past it.
+        let (mut position, mut inclusive) = (lower.clone(), true);
+        loop {
+            let statement = if inclusive {
+                &mut from_row
+            } else {
+                &mut after_row
+            };
+            let found: Option<String> = statement
+                .query_row(params![position, upper], |row| row.get(0))
+                .optional()?;
+            let Some(path) = found else {
+                break;
+            };
+            let below = &path[lower.len()..];
+            match below.split_once(std::path::MAIN_SEPARATOR) {
+                Some((name, _)) => {
+                    // Past every row under this name. A name that only
+                    // starts the same way (`photos.txt` next to
+                    // `photos/`) sorts before the folder's rows and was
+                    // seen already.
+                    position = rows_under_bounds(&directory.join(name))?.1;
+                    inclusive = true;
+                    names.insert(name.to_string());
+                }
+                None => {
+                    names.insert(below.to_string());
+                    position = path;
+                    inclusive = false;
+                }
+            }
+        }
+        Ok(names)
+    }
+
+    /// Removes the row of `path` and every row under it, where the row
+    /// was last written before `before`. Returns the rows removed.
+    pub fn remove_sync_index_tree_written_before(
+        &mut self,
+        path: &Path,
+        before: SystemTime,
+    ) -> Result<usize, StateDbError> {
+        let (lower, upper) = rows_under_bounds(path)?;
+        Ok(self.connection.execute(
+            "DELETE FROM sync_index
+             WHERE (path_text = ?1 OR (path_text >= ?2 AND path_text < ?3))
+               AND updated_at_ms < ?4",
+            params![
+                path_to_text(path)?,
+                lower,
+                upper,
+                system_time_to_millis(before)?
+            ],
+        )?)
+    }
+
     pub fn remove_sync_index(&mut self, path: &Path) -> Result<(), StateDbError> {
         self.connection.execute(
             "DELETE FROM sync_index WHERE path_text = ?",
             params![path_to_text(path)?],
         )?;
         Ok(())
-    }
-
-    /// Records a deletion marker; a later deletion for the same path
-    /// replaces the older one.
-    pub fn record_tombstone(
-        &mut self,
-        path: &Path,
-        origin: TombstoneOrigin,
-        now: SystemTime,
-    ) -> Result<(), StateDbError> {
-        self.connection.execute(
-            "INSERT INTO tombstones (path_text, origin, deleted_at_ms)
-             VALUES (?, ?, ?)
-             ON CONFLICT(path_text) DO UPDATE SET
-                 origin = excluded.origin,
-                 deleted_at_ms = excluded.deleted_at_ms",
-            params![
-                path_to_text(path)?,
-                origin.label(),
-                system_time_to_millis(now)?
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn tombstone(&self, path: &Path) -> Result<Option<TombstoneRecord>, StateDbError> {
-        let path_text = path_to_text(path)?;
-        let row = self
-            .connection
-            .query_row(
-                "SELECT origin, deleted_at_ms FROM tombstones WHERE path_text = ?",
-                params![path_text],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )
-            .optional()?;
-        row.map(|(origin, deleted_at_ms)| {
-            Ok(TombstoneRecord {
-                path: path.to_path_buf(),
-                origin: TombstoneOrigin::from_label(&origin)?,
-                deleted_at: millis_to_system_time(deleted_at_ms)?,
-            })
-        })
-        .transpose()
-    }
-
-    pub fn clear_tombstone(&mut self, path: &Path) -> Result<(), StateDbError> {
-        self.connection.execute(
-            "DELETE FROM tombstones WHERE path_text = ?",
-            params![path_to_text(path)?],
-        )?;
-        Ok(())
-    }
-
-    /// Startup hygiene: drops tombstones past the retention window so
-    /// the table stays bounded.
-    pub fn prune_tombstones(&mut self, now: SystemTime) -> Result<usize, StateDbError> {
-        let now_ms = system_time_to_millis(now)?;
-        let cutoff = now_ms.saturating_sub(
-            i64::try_from(constants::state::TOMBSTONE_RETENTION_MILLIS).unwrap_or(i64::MAX),
-        );
-        let pruned = self.connection.execute(
-            "DELETE FROM tombstones WHERE deleted_at_ms < ?",
-            params![cutoff],
-        )?;
-        Ok(pruned)
     }
 
     /// Prunes terminally-failed intent records: those older than the
@@ -1894,7 +2051,8 @@ impl DurableStateDb {
     ) -> Result<usize, StateDbError> {
         let changed = self.connection.execute(
             "UPDATE queue_intents
-             SET state = ?, available_at_ms = ?, decision_id = NULL, approved = 1
+             SET state = ?, available_at_ms = ?, decision_id = NULL,
+                 approved = MAX(approved, 1)
              WHERE decision_id = ? AND state = ?",
             params![
                 STATE_PENDING,
@@ -2113,13 +2271,13 @@ fn configure_connection(connection: &Connection) -> Result<(), StateDbError> {
     Ok(())
 }
 
-fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
+fn ensure_schema(connection: &mut Connection) -> Result<(), StateDbError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-    // Validate the recorded schema version BEFORE running any DDL: an
-    // old-layout database must fail with the clean `SchemaVersionMismatch`
-    // instead of whatever confusing SQLite error a conflicting
-    // `CREATE TABLE / INDEX` would produce first.
+    // Validate the recorded schema version BEFORE running any DDL: a
+    // database of another layout must fail with the clean
+    // `SchemaVersionMismatch` instead of whatever confusing SQLite
+    // error a conflicting `CREATE TABLE / INDEX` would produce first.
     let schema_meta_exists = transaction
         .query_row(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_meta'",
@@ -2128,28 +2286,14 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
         )
         .optional()?
         .is_some();
-    if schema_meta_exists {
-        match read_schema_version(&transaction)? {
-            Some(CURRENT_SCHEMA_VERSION) | None => {}
-            Some(MIGRATABLE_SCHEMA_VERSION) => {
-                migrate_v3_to_v4(&transaction)?;
-                migrate_v4_to_v5(&transaction)?;
-                migrate_v5_to_v6(&transaction)?;
-            }
-            Some(4) => {
-                migrate_v4_to_v5(&transaction)?;
-                migrate_v5_to_v6(&transaction)?;
-            }
-            Some(5) => {
-                migrate_v5_to_v6(&transaction)?;
-            }
-            Some(found) => {
-                return Err(StateDbError::SchemaVersionMismatch {
-                    found,
-                    expected: CURRENT_SCHEMA_VERSION,
-                });
-            }
-        }
+    if schema_meta_exists
+        && let Some(found) = read_schema_version(&transaction)?
+        && found != CURRENT_SCHEMA_VERSION
+    {
+        return Err(StateDbError::SchemaVersionMismatch {
+            found,
+            expected: CURRENT_SCHEMA_VERSION,
+        });
     }
 
     transaction.execute_batch(
@@ -2236,11 +2380,6 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
              last_op_id TEXT NOT NULL,
              updated_at_ms INTEGER NOT NULL
          );
-         CREATE TABLE IF NOT EXISTS tombstones (
-             path_text TEXT PRIMARY KEY,
-             origin TEXT NOT NULL CHECK(origin IN ('local', 'remote')),
-             deleted_at_ms INTEGER NOT NULL
-         );
          CREATE INDEX IF NOT EXISTS idx_sync_index_content
              ON sync_index(content_hash, size_bytes);
          CREATE INDEX IF NOT EXISTS idx_sync_index_remote_state
@@ -2268,184 +2407,43 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), StateDbError> {
     Ok(())
 }
 
-/// Forward migration v3 → v4: rebuilds the two intent tables with the
-/// widened `kind` CHECK (SQLite cannot alter CHECK constraints in
-/// place) while preserving every row and the AUTOINCREMENT sequence.
-/// Rollback story: v4 rows using the new kinds cannot exist in a v3
-/// database, so rolling back to a v3 build after remote-sourced intents
-/// were enqueued is unsupported — pre-GA policy (AGENTS.md §1.1) with
-/// the change documented in `docs/architecture/state-schema-migrations.md`.
-fn migrate_v3_to_v4(transaction: &rusqlite::Transaction<'_>) -> Result<(), StateDbError> {
-    transaction.execute_batch(
-        "CREATE TABLE queue_intents_v4 (
-             id INTEGER PRIMARY KEY AUTOINCREMENT,
-             path_text TEXT NOT NULL,
-             kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
-             state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
-             enqueued_at_ms INTEGER NOT NULL,
-             available_at_ms INTEGER NOT NULL,
-             leased_at_ms INTEGER,
-             attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
-             last_error TEXT
-         );
-         INSERT INTO queue_intents_v4
-             SELECT id, path_text, kind, state, enqueued_at_ms, available_at_ms,
-                    leased_at_ms, attempt_count, last_error
-             FROM queue_intents;
-         DROP TABLE queue_intents;
-         ALTER TABLE queue_intents_v4 RENAME TO queue_intents;
-         CREATE INDEX IF NOT EXISTS idx_queue_intents_ready
-             ON queue_intents(state, available_at_ms, id);
-         CREATE TABLE failed_intents_v4 (
-             id INTEGER PRIMARY KEY,
-             path_text TEXT NOT NULL,
-             kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
-             failure_kind TEXT NOT NULL CHECK(failure_kind IN ('authentication', 'permanent')),
-             enqueued_at_ms INTEGER NOT NULL,
-             failed_at_ms INTEGER NOT NULL,
-             attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),
-             last_error TEXT NOT NULL
-         );
-         INSERT INTO failed_intents_v4
-             SELECT id, path_text, kind, failure_kind, enqueued_at_ms, failed_at_ms,
-                    attempt_count, last_error
-             FROM failed_intents;
-         DROP TABLE failed_intents;
-         ALTER TABLE failed_intents_v4 RENAME TO failed_intents;
-         -- Restore the AUTOINCREMENT high-water mark. Queue ids double as
-         -- failed_intents primary keys, so a rebuilt sequence derived only
-         -- from the (possibly empty) copied queue rows could hand out an id
-         -- that already lives in failed_intents, colliding on the next
-         -- terminal failure. Seed the sequence above both tables' max ids.
-         DELETE FROM sqlite_sequence WHERE name = 'queue_intents';
-         INSERT INTO sqlite_sequence (name, seq)
-             VALUES ('queue_intents',
-                     MAX(COALESCE((SELECT MAX(id) FROM queue_intents), 0),
-                         COALESCE((SELECT MAX(id) FROM failed_intents), 0)));
-         UPDATE schema_meta SET schema_version = 4 WHERE singleton = 1;",
-    )?;
-    crate::logging::info(
-        "Migrated durable state schema v3 -> v4 (remote-sourced intent kinds)",
-        &[],
-    );
-    Ok(())
+enum QuarantineReason {
+    Corrupt(String),
+    OtherSchema(i64),
 }
 
-/// Forward migration v4 → v5: adds the durable `priority_rank` column
-/// so leasing orders by priority class before FIFO order (a reconcile
-/// backlog can no longer starve fresh edits across lease batches).
-/// Existing file rows backfill to the fresh `Other` rank — their paths
-/// are not reclassified — and reconcile control rows to the first
-/// rank; new enqueues carry exact ranks. Rollback story: a v4 build
-/// ignores the extra column but its ready index no longer matches, so
-/// rollback requires dropping the DB (pre-GA policy, AGENTS.md §1.1).
-fn migrate_v4_to_v5(transaction: &rusqlite::Transaction<'_>) -> Result<(), StateDbError> {
-    transaction.execute_batch(
-        "ALTER TABLE queue_intents
-             ADD COLUMN priority_rank INTEGER NOT NULL DEFAULT 4 CHECK(priority_rank >= 0);
-         UPDATE queue_intents SET priority_rank = 0 WHERE kind = 'reconcile_subtree';
-         DROP INDEX IF EXISTS idx_queue_intents_ready;
-         CREATE INDEX idx_queue_intents_ready
-             ON queue_intents(state, priority_rank, available_at_ms, id);
-         UPDATE schema_meta SET schema_version = 5 WHERE singleton = 1;",
-    )?;
-    crate::logging::info(
-        "Migrated durable state schema v4 -> v5 (durable lease-priority column)",
-        &[],
-    );
-    Ok(())
-}
-
-/// Forward migration v5 → v6: rebuilds `queue_intents` with the `held`
-/// state, a `decision_id`, and a `remote_path_text` (SQLite cannot
-/// alter CHECK constraints in place), and adds the `pending_decisions`
-/// and `name_aliases` tables. Rollback story: a v5 build rejects a
-/// `held` row and knows neither table, so rollback requires dropping
-/// the DB (pre-GA policy, AGENTS.md §1.1).
-fn migrate_v5_to_v6(transaction: &rusqlite::Transaction<'_>) -> Result<(), StateDbError> {
-    transaction.execute_batch(
-        "CREATE TABLE queue_intents_v6 (
-             id INTEGER PRIMARY KEY AUTOINCREMENT,
-             path_text TEXT NOT NULL,
-             kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
-             state TEXT NOT NULL CHECK(state IN ('pending', 'leased', 'held')),
-             priority_rank INTEGER NOT NULL DEFAULT 4 CHECK(priority_rank >= 0),
-             enqueued_at_ms INTEGER NOT NULL,
-             available_at_ms INTEGER NOT NULL,
-             leased_at_ms INTEGER,
-             attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
-             last_error TEXT,
-             decision_id INTEGER,
-             remote_path_text TEXT,
-             approved INTEGER NOT NULL DEFAULT 0
-         );
-         INSERT INTO queue_intents_v6
-             (id, path_text, kind, state, priority_rank, enqueued_at_ms, available_at_ms,
-              leased_at_ms, attempt_count, last_error)
-             SELECT id, path_text, kind, state, priority_rank, enqueued_at_ms, available_at_ms,
-                    leased_at_ms, attempt_count, last_error
-             FROM queue_intents;
-         DROP TABLE queue_intents;
-         ALTER TABLE queue_intents_v6 RENAME TO queue_intents;
-         CREATE INDEX IF NOT EXISTS idx_queue_intents_ready
-             ON queue_intents(state, priority_rank, available_at_ms, id);
-         CREATE INDEX IF NOT EXISTS idx_queue_intents_path
-             ON queue_intents(path_text, kind, state);
-         CREATE INDEX IF NOT EXISTS idx_queue_intents_order
-             ON queue_intents(available_at_ms, id);
-         DELETE FROM sqlite_sequence WHERE name = 'queue_intents';
-         INSERT INTO sqlite_sequence (name, seq)
-             VALUES ('queue_intents',
-                     MAX(COALESCE((SELECT MAX(id) FROM queue_intents), 0),
-                         COALESCE((SELECT MAX(id) FROM failed_intents), 0)));
-         CREATE TABLE IF NOT EXISTS pending_decisions (
-             id INTEGER PRIMARY KEY AUTOINCREMENT,
-             kind TEXT NOT NULL,
-             scope TEXT NOT NULL CHECK(scope IN ('path', 'batch', 'profile')),
-             path_text TEXT,
-             question TEXT NOT NULL,
-             options_json TEXT NOT NULL,
-             evidence_json TEXT NOT NULL,
-             created_at_ms INTEGER NOT NULL,
-             resolved_at_ms INTEGER,
-             choice TEXT,
-             applied_at_ms INTEGER
-         );
-         CREATE INDEX IF NOT EXISTS idx_pending_decisions_open
-             ON pending_decisions(applied_at_ms, kind, path_text);
-         CREATE TABLE IF NOT EXISTS name_aliases (
-             remote_path_text TEXT PRIMARY KEY,
-             local_path_text TEXT NOT NULL,
-             remote_hash TEXT NOT NULL,
-             created_at_ms INTEGER NOT NULL
-         );
-         UPDATE schema_meta SET schema_version = 6 WHERE singleton = 1;",
-    )?;
-    // A database from before the sync index existed reaches this
-    // migration without the table; the base schema creates it in its
-    // v6 shape afterwards. An older table gains the column here.
-    let has_sync_index = transaction.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sync_index'",
-        [],
-        |row| row.get::<_, i64>(0),
-    )? > 0;
-    if has_sync_index {
-        let has_column = transaction
-            .prepare("PRAGMA table_info(sync_index)")?
-            .query_map([], |row| row.get::<_, String>(1))?
-            .filter_map(Result::ok)
-            .any(|name| name == "remote_modified_at_ms");
-        if !has_column {
-            transaction.execute_batch(
-                "ALTER TABLE sync_index ADD COLUMN remote_modified_at_ms INTEGER;",
-            )?;
+/// Removes the databases set aside next to `path` longer ago than the
+/// retention window. The time is the one in the file name.
+fn prune_quarantined(path: &Path, now: SystemTime) {
+    let (Some(directory), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let name = name.to_string_lossy();
+    let Ok(now_ms) = system_time_to_millis(now) else {
+        return;
+    };
+    let cutoff =
+        now_ms.saturating_sub(i64::try_from(QUARANTINE_RETENTION.as_millis()).unwrap_or(i64::MAX));
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        let Some(suffix) = file_name.strip_prefix(&*name) else {
+            continue;
+        };
+        if !(suffix.starts_with(".corrupt-") || suffix.starts_with(".schema-v")) {
+            continue;
+        }
+        let set_aside_at = suffix
+            .rsplit('-')
+            .next()
+            .and_then(|text| text.parse::<i64>().ok());
+        if set_aside_at.is_some_and(|at| at < cutoff) {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
-    crate::logging::info(
-        "Migrated durable state schema v5 -> v6 (decisions, held intents, name aliases, remote mtimes)",
-        &[],
-    );
-    Ok(())
 }
 
 fn read_schema_version(connection: &Connection) -> Result<Option<i64>, StateDbError> {
@@ -2553,6 +2551,7 @@ fn raw_intent_to_record(raw: RawIntentRow) -> Result<DurableIntentRecord, StateD
         last_error: last_error.map(|value| sanitize_persisted_error(&value)),
         remote_path: remote_path_text,
         approved: approved != 0,
+        names_path: approved == Approval::NamedPath.stored(),
         held_by: (state == STATE_HELD).then_some(decision_id).flatten(),
     })
 }
@@ -2640,6 +2639,16 @@ fn path_to_text(path: &Path) -> Result<String, StateDbError> {
     path.to_str()
         .map(|s| s.to_string())
         .ok_or_else(|| StateDbError::NonUtf8Path(path.display().to_string()))
+}
+
+/// The key range that holds every path under `directory`: from the
+/// folder's path plus a separator, up to the same text with the
+/// separator's successor. A range on the primary key, so no scan.
+fn rows_under_bounds(directory: &Path) -> Result<(String, String), StateDbError> {
+    let base = path_to_text(directory)?;
+    let separator = std::path::MAIN_SEPARATOR;
+    let after = char::from_u32(separator as u32 + 1).unwrap_or(separator);
+    Ok((format!("{base}{separator}"), format!("{base}{after}")))
 }
 
 fn path_from_text(text: String) -> PathBuf {
@@ -3443,7 +3452,77 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_schema_version_is_rejected() {
+    fn index_rows_follow_a_file_or_a_folder_to_a_new_spelling() {
+        let mut database = DurableStateDb::open_in_memory().expect("open");
+        let root = PathBuf::from("/tmp/vapor-root");
+        let seed = |database: &mut DurableStateDb, path: &Path| {
+            database
+                .set_sync_index(path, "hash", 1, None, None, "op", timestamp_ms(1))
+                .expect("seed");
+        };
+        seed(&mut database, &root.join("report.txt"));
+        seed(&mut database, &root.join("photos/a.jpg"));
+        seed(&mut database, &root.join("photos/2024/b.jpg"));
+        seed(&mut database, &root.join("photos-old/c.jpg"));
+        seed(&mut database, &root.join("photos.txt"));
+
+        database
+            .rekey_sync_index(&root.join("report.txt"), &root.join("Report.txt"))
+            .expect("rekey");
+        assert!(
+            database
+                .sync_index(&root.join("report.txt"))
+                .expect("read")
+                .is_none()
+        );
+        assert!(
+            database
+                .sync_index(&root.join("Report.txt"))
+                .expect("read")
+                .is_some()
+        );
+
+        assert!(
+            database
+                .sync_index_has_rows_under(&root.join("photos"))
+                .expect("under")
+        );
+        assert!(
+            !database
+                .sync_index_has_rows_under(&root.join("Photos"))
+                .expect("under")
+        );
+        database
+            .rekey_sync_index_under(&root.join("photos"), &root.join("Photos"))
+            .expect("rekey");
+        for moved in ["Photos/a.jpg", "Photos/2024/b.jpg"] {
+            assert!(
+                database
+                    .sync_index(&root.join(moved))
+                    .expect("read")
+                    .is_some(),
+                "{moved}"
+            );
+        }
+        for kept in ["photos-old/c.jpg", "photos.txt"] {
+            assert!(
+                database
+                    .sync_index(&root.join(kept))
+                    .expect("read")
+                    .is_some(),
+                "{kept}"
+            );
+        }
+        assert!(
+            !database
+                .sync_index_has_rows_under(&root.join("photos"))
+                .expect("under")
+        );
+        assert_eq!(database.sync_index_count().expect("count"), 5);
+    }
+
+    #[test]
+    fn a_plain_open_refuses_a_database_of_another_schema_version() {
         let temp_dir = TempDir::new().expect("temp dir");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         if let Some(parent) = database_path.parent() {
@@ -3471,336 +3550,6 @@ mod tests {
                 expected: CURRENT_SCHEMA_VERSION
             }
         ));
-    }
-
-    #[test]
-    fn version_two_database_is_rejected_after_pre_ga_path_text_bump() {
-        // Schema v2 stored paths as `path_bytes BLOB`. The portability
-        // bump moved to `path_text TEXT`. Pre-GA we reject the prior schema
-        // outright per AGENTS.md §1.1; a future GA migration step would
-        // upgrade in place.
-        let temp_dir = TempDir::new().expect("temp dir");
-        let database_path = temp_dir.path().join("state/vapor.sqlite");
-        if let Some(parent) = database_path.parent() {
-            fs::create_dir_all(parent).expect("create parent directory");
-        }
-
-        let connection = Connection::open(&database_path).expect("open sqlite connection");
-        configure_connection(&connection).expect("configure connection");
-        connection
-            .execute_batch(
-                "CREATE TABLE schema_meta (
-                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                     schema_version INTEGER NOT NULL CHECK(schema_version > 0)
-                 );
-                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 2);
-                 CREATE TABLE queue_intents (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     path_bytes BLOB NOT NULL,
-                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
-                     state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
-                     enqueued_at_ms INTEGER NOT NULL,
-                     available_at_ms INTEGER NOT NULL,
-                     leased_at_ms INTEGER,
-                     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
-                     last_error TEXT
-                 );",
-            )
-            .expect("seed version two schema");
-        drop(connection);
-
-        let error = DurableStateDb::open(&database_path)
-            .expect_err("version two schema should be rejected");
-        assert!(matches!(
-            error,
-            StateDbError::SchemaVersionMismatch {
-                found: 2,
-                expected: CURRENT_SCHEMA_VERSION
-            }
-        ));
-    }
-
-    #[test]
-    fn version_one_database_is_rejected_in_pre_ga_state() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let database_path = temp_dir.path().join("state/vapor.sqlite");
-        if let Some(parent) = database_path.parent() {
-            fs::create_dir_all(parent).expect("create parent directory");
-        }
-
-        let connection = Connection::open(&database_path).expect("open sqlite connection");
-        configure_connection(&connection).expect("configure connection");
-        connection
-            .execute_batch(
-                "CREATE TABLE schema_meta (
-                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                     schema_version INTEGER NOT NULL CHECK(schema_version > 0)
-                 );
-                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 1);
-                 CREATE TABLE queue_intents (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     path_bytes BLOB NOT NULL,
-                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
-                     state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
-                     enqueued_at_ms INTEGER NOT NULL,
-                     available_at_ms INTEGER NOT NULL,
-                     leased_at_ms INTEGER,
-                     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
-                     last_error TEXT
-                 );
-                 CREATE INDEX idx_queue_intents_ready ON queue_intents(state, available_at_ms, id);
-                 CREATE TABLE state_entries (
-                     key TEXT PRIMARY KEY,
-                     value TEXT NOT NULL,
-                     updated_at_ms INTEGER NOT NULL
-                 );",
-            )
-            .expect("seed version one schema");
-        drop(connection);
-
-        let error = DurableStateDb::open(&database_path)
-            .expect_err("version one schema should be rejected");
-        assert!(matches!(
-            error,
-            StateDbError::SchemaVersionMismatch {
-                found: 1,
-                expected: CURRENT_SCHEMA_VERSION
-            }
-        ));
-    }
-
-    #[test]
-    fn version_three_database_migrates_in_place_to_current_preserving_rows() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let database_path = temp_dir.path().join("state/vapor.sqlite");
-        if let Some(parent) = database_path.parent() {
-            fs::create_dir_all(parent).expect("create parent directory");
-        }
-
-        let connection = Connection::open(&database_path).expect("open sqlite connection");
-        configure_connection(&connection).expect("configure connection");
-        connection
-            .execute_batch(
-                "CREATE TABLE schema_meta (
-                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                     schema_version INTEGER NOT NULL CHECK(schema_version > 0)
-                 );
-                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 3);
-                 CREATE TABLE queue_intents (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     path_text TEXT NOT NULL,
-                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
-                     state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
-                     enqueued_at_ms INTEGER NOT NULL,
-                     available_at_ms INTEGER NOT NULL,
-                     leased_at_ms INTEGER,
-                     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
-                     last_error TEXT
-                 );
-                 CREATE INDEX idx_queue_intents_ready
-                     ON queue_intents(state, available_at_ms, id);
-                 CREATE TABLE failed_intents (
-                     id INTEGER PRIMARY KEY,
-                     path_text TEXT NOT NULL,
-                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
-                     failure_kind TEXT NOT NULL CHECK(failure_kind IN ('authentication', 'permanent')),
-                     enqueued_at_ms INTEGER NOT NULL,
-                     failed_at_ms INTEGER NOT NULL,
-                     attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),
-                     last_error TEXT NOT NULL
-                 );
-                 CREATE TABLE state_entries (
-                     key TEXT PRIMARY KEY,
-                     value TEXT NOT NULL,
-                     updated_at_ms INTEGER NOT NULL
-                 );
-                 INSERT INTO queue_intents
-                     (path_text, kind, state, enqueued_at_ms, available_at_ms,
-                      leased_at_ms, attempt_count, last_error)
-                     VALUES ('/tmp/vapor-root/preserved.txt', 'upload', 'pending',
-                             100, 100, NULL, 2, 'retry me');",
-            )
-            .expect("seed version three schema");
-        drop(connection);
-
-        let mut migrated = DurableStateDb::open(&database_path)
-            .expect("version three database must migrate forward in place");
-        // The pre-migration row survived with its retry bookkeeping.
-        let preserved = migrated
-            .intent_record(1)
-            .expect("read preserved row")
-            .expect("preserved row exists");
-        assert_eq!(
-            preserved.path,
-            PathBuf::from("/tmp/vapor-root/preserved.txt")
-        );
-        assert_eq!(preserved.attempt_count, 2);
-        // The widened kind vocabulary is accepted post-migration.
-        migrated
-            .enqueue_intent(
-                &PathBuf::from("/tmp/vapor-root/downloaded.txt"),
-                PendingIntentKind::Download,
-                timestamp_ms(200),
-            )
-            .expect("v4 kinds must be storable after migration");
-    }
-
-    #[test]
-    fn version_four_database_migrates_in_place_adding_priority_rank() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let database_path = temp_dir.path().join("state/vapor.sqlite");
-        if let Some(parent) = database_path.parent() {
-            fs::create_dir_all(parent).expect("create parent directory");
-        }
-
-        let connection = Connection::open(&database_path).expect("open sqlite connection");
-        configure_connection(&connection).expect("configure connection");
-        connection
-            .execute_batch(
-                "CREATE TABLE schema_meta (
-                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                     schema_version INTEGER NOT NULL CHECK(schema_version > 0)
-                 );
-                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 4);
-                 CREATE TABLE queue_intents (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     path_text TEXT NOT NULL,
-                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
-                     state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
-                     enqueued_at_ms INTEGER NOT NULL,
-                     available_at_ms INTEGER NOT NULL,
-                     leased_at_ms INTEGER,
-                     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
-                     last_error TEXT
-                 );
-                 CREATE INDEX idx_queue_intents_ready
-                     ON queue_intents(state, available_at_ms, id);
-                 CREATE TABLE failed_intents (
-                     id INTEGER PRIMARY KEY,
-                     path_text TEXT NOT NULL,
-                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
-                     failure_kind TEXT NOT NULL CHECK(failure_kind IN ('authentication', 'permanent')),
-                     enqueued_at_ms INTEGER NOT NULL,
-                     failed_at_ms INTEGER NOT NULL,
-                     attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),
-                     last_error TEXT NOT NULL
-                 );
-                 CREATE TABLE state_entries (
-                     key TEXT PRIMARY KEY,
-                     value TEXT NOT NULL,
-                     updated_at_ms INTEGER NOT NULL
-                 );
-                 INSERT INTO queue_intents
-                     (path_text, kind, state, enqueued_at_ms, available_at_ms,
-                      leased_at_ms, attempt_count, last_error)
-                     VALUES ('/tmp/vapor-root/file.txt', 'upload', 'pending', 100, 100, NULL, 0, NULL),
-                            ('/tmp/vapor-root', 'reconcile_subtree', 'pending', 50, 0, NULL, 0, NULL);",
-            )
-            .expect("seed version four schema");
-        drop(connection);
-
-        let mut migrated = DurableStateDb::open(&database_path)
-            .expect("version four database must migrate forward in place");
-        // Reconcile control rows backfill to the first-leased rank; file
-        // rows to the fresh default — the reconcile leases first.
-        let first = migrated
-            .lease_next_ready(timestamp_ms(200))
-            .expect("lease")
-            .expect("row leased");
-        assert_eq!(first.kind, PendingIntentKind::ReconcileSubtree);
-        assert_eq!(
-            first.priority_rank,
-            crate::safeguards::RECONCILE_INTENT_PRIORITY_RANK
-        );
-    }
-
-    #[test]
-    fn version_five_database_migrates_in_place_adding_decisions_and_held_state() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let database_path = temp_dir.path().join("state/vapor.sqlite");
-        fs::create_dir_all(database_path.parent().unwrap()).expect("parent");
-        let connection = Connection::open(&database_path).expect("open sqlite connection");
-        configure_connection(&connection).expect("configure connection");
-        connection
-            .execute_batch(
-                "CREATE TABLE schema_meta (
-                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                     schema_version INTEGER NOT NULL CHECK(schema_version > 0)
-                 );
-                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 5);
-                 CREATE TABLE queue_intents (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     path_text TEXT NOT NULL,
-                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'download', 'apply_remote_delete', 'reconcile_subtree')),
-                     state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
-                     priority_rank INTEGER NOT NULL DEFAULT 4 CHECK(priority_rank >= 0),
-                     enqueued_at_ms INTEGER NOT NULL,
-                     available_at_ms INTEGER NOT NULL,
-                     leased_at_ms INTEGER,
-                     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
-                     last_error TEXT
-                 );
-                 CREATE TABLE failed_intents (
-                     id INTEGER PRIMARY KEY,
-                     path_text TEXT NOT NULL,
-                     kind TEXT NOT NULL,
-                     failure_kind TEXT NOT NULL,
-                     enqueued_at_ms INTEGER NOT NULL,
-                     failed_at_ms INTEGER NOT NULL,
-                     attempt_count INTEGER NOT NULL,
-                     last_error TEXT NOT NULL
-                 );
-                 CREATE TABLE state_entries (
-                     key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at_ms INTEGER NOT NULL
-                 );
-                 CREATE TABLE sync_index (
-                     path_text TEXT PRIMARY KEY, content_hash TEXT NOT NULL,
-                     size_bytes INTEGER NOT NULL, local_modified_at_ms INTEGER,
-                     last_op_id TEXT NOT NULL, updated_at_ms INTEGER NOT NULL
-                 );
-                 CREATE TABLE tombstones (
-                     path_text TEXT PRIMARY KEY, origin TEXT NOT NULL, deleted_at_ms INTEGER NOT NULL
-                 );
-                 INSERT INTO queue_intents
-                     (path_text, kind, state, priority_rank, enqueued_at_ms, available_at_ms)
-                     VALUES ('/tmp/vapor-root/file.txt', 'upload', 'pending', 3, 100, 100);
-                 ",
-            )
-            .expect("seed version five schema");
-        // The row's text is the spelling this OS stores for the path.
-        connection
-            .execute(
-                "INSERT INTO sync_index
-                     (path_text, content_hash, size_bytes, local_modified_at_ms, last_op_id, updated_at_ms)
-                     VALUES (?, 'abc', 3, 50, 'op-1', 60)",
-                params![path_to_text(Path::new("/tmp/vapor-root/synced.txt")).expect("text")],
-            )
-            .expect("seed the synced row");
-        drop(connection);
-
-        let mut migrated = DurableStateDb::open(&database_path)
-            .expect("version five database must migrate forward in place");
-        assert_eq!(migrated.schema_version().expect("version"), 6);
-        let index = migrated
-            .sync_index(Path::new("/tmp/vapor-root/synced.txt"))
-            .expect("index")
-            .expect("index row survived");
-        assert_eq!(
-            index.remote_modified_at, None,
-            "old rows carry no remote mtime"
-        );
-        assert!(
-            !index.matches_remote(3, timestamp_ms(50)),
-            "an old row never passes the remote quick check"
-        );
-        let leased = migrated
-            .lease_next_ready(timestamp_ms(200))
-            .expect("lease")
-            .expect("row survived");
-        assert_eq!(leased.path, PathBuf::from("/tmp/vapor-root/file.txt"));
-        assert_eq!(leased.remote_path, None);
-        assert!(!leased.approved);
-        assert_eq!(migrated.open_decision_count().expect("count"), 0);
     }
 
     #[test]
@@ -4040,75 +3789,6 @@ mod tests {
     }
 
     #[test]
-    fn migration_from_empty_queue_does_not_reuse_ids_colliding_with_failed_intents() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let database_path = temp_dir.path().join("state/vapor.sqlite");
-        fs::create_dir_all(database_path.parent().unwrap()).expect("parent");
-
-        // A v3 DB whose queue has fully drained but whose failed_intents
-        // still holds id 7: after migration, a reused id 7 would collide on
-        // the next terminal failure.
-        let connection = Connection::open(&database_path).expect("open sqlite connection");
-        configure_connection(&connection).expect("configure connection");
-        connection
-            .execute_batch(
-                "CREATE TABLE schema_meta (
-                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                     schema_version INTEGER NOT NULL CHECK(schema_version > 0)
-                 );
-                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 3);
-                 CREATE TABLE queue_intents (
-                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     path_text TEXT NOT NULL,
-                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
-                     state TEXT NOT NULL CHECK(state IN ('pending', 'leased')),
-                     enqueued_at_ms INTEGER NOT NULL,
-                     available_at_ms INTEGER NOT NULL,
-                     leased_at_ms INTEGER,
-                     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
-                     last_error TEXT
-                 );
-                 INSERT INTO sqlite_sequence (name, seq) VALUES ('queue_intents', 7);
-                 CREATE TABLE failed_intents (
-                     id INTEGER PRIMARY KEY,
-                     path_text TEXT NOT NULL,
-                     kind TEXT NOT NULL CHECK(kind IN ('upload', 'delete', 'rename', 'reconcile_subtree')),
-                     failure_kind TEXT NOT NULL CHECK(failure_kind IN ('authentication', 'permanent')),
-                     enqueued_at_ms INTEGER NOT NULL,
-                     failed_at_ms INTEGER NOT NULL,
-                     attempt_count INTEGER NOT NULL CHECK(attempt_count >= 0),
-                     last_error TEXT NOT NULL
-                 );
-                 INSERT INTO failed_intents
-                     (id, path_text, kind, failure_kind, enqueued_at_ms, failed_at_ms, attempt_count, last_error)
-                     VALUES (7, '/tmp/vapor-root/gone.txt', 'upload', 'permanent', 10, 20, 1, 'boom');
-                 CREATE TABLE state_entries (
-                     key TEXT PRIMARY KEY,
-                     value TEXT NOT NULL,
-                     updated_at_ms INTEGER NOT NULL
-                 );",
-            )
-            .expect("seed v3 schema with a drained queue and a failed id 7");
-        drop(connection);
-
-        let mut migrated = DurableStateDb::open(&database_path).expect("migrate v3->v4");
-        // The next enqueued intent must get an id past the failed row so a
-        // later terminal failure cannot collide on the failed_intents PK.
-        let enqueued = migrated
-            .enqueue_intent(
-                &PathBuf::from("/tmp/vapor-root/new.txt"),
-                PendingIntentKind::Upload,
-                timestamp_ms(100),
-            )
-            .expect("enqueue after migration");
-        assert!(
-            enqueued.id > 7,
-            "reused id {} collides with failed_intents",
-            enqueued.id
-        );
-    }
-
-    #[test]
     fn renew_leases_prevents_the_stale_sweep_from_reclaiming_live_work() {
         let temp_dir = TempDir::new().expect("temp dir");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
@@ -4212,7 +3892,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_mismatch_is_not_treated_as_corruption() {
+    fn the_daemon_sets_a_database_of_another_schema_version_aside_and_starts_fresh() {
         let temp_dir = TempDir::new().expect("temp dir");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         if let Some(parent) = database_path.parent() {
@@ -4226,19 +3906,82 @@ mod tests {
                      singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
                      schema_version INTEGER NOT NULL CHECK(schema_version > 0)
                  );
-                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 99);",
+                 INSERT INTO schema_meta (singleton, schema_version) VALUES (1, 6);",
             )
-            .expect("seed future schema");
+            .expect("seed an older schema");
         drop(connection);
 
-        let error =
+        let fresh =
             DurableStateDb::open_with_corruption_recovery(&database_path, timestamp_ms(1_000))
-                .expect_err("future schema must error, not quarantine");
-        assert!(matches!(error, StateDbError::SchemaVersionMismatch { .. }));
-        assert!(
-            database_path.exists(),
-            "the database must not be quarantined"
+                .expect("another schema version must not stop the daemon");
+        assert_eq!(
+            fresh.schema_version().expect("version"),
+            CURRENT_SCHEMA_VERSION
         );
+        assert_eq!(fresh.queue_depth().expect("depth"), 0);
+        assert!(
+            database_path
+                .with_extension("sqlite.schema-v6-1000")
+                .exists(),
+            "the old database stays next to the new one"
+        );
+    }
+
+    #[test]
+    fn databases_set_aside_are_removed_after_the_retention_window() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        fs::create_dir_all(database_path.parent().unwrap()).expect("parent");
+        let old = database_path.with_extension("sqlite.corrupt-1000");
+        let recent_ms = QUARANTINE_RETENTION.as_millis() as u64;
+        let recent = database_path.with_extension(format!("sqlite.schema-v6-{recent_ms}"));
+        fs::write(&old, b"old").expect("seed");
+        fs::write(&recent, b"recent").expect("seed");
+
+        DurableStateDb::open_with_corruption_recovery(
+            &database_path,
+            timestamp_ms(recent_ms + 2_000),
+        )
+        .expect("open");
+        assert!(!old.exists(), "past the window");
+        assert!(recent.exists(), "inside the window");
+    }
+
+    #[test]
+    fn a_damaged_page_is_found_at_the_daemon_open() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        {
+            let mut database = DurableStateDb::open(&database_path).expect("open");
+            for index in 0..400 {
+                database
+                    .enqueue_intent(
+                        &PathBuf::from(format!("/tmp/vapor-root/file-{index}.txt")),
+                        PendingIntentKind::Upload,
+                        timestamp_ms(1),
+                    )
+                    .expect("enqueue");
+            }
+            database
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .expect("checkpoint");
+        }
+        // Overwrite a page in the middle of the file: the header stays
+        // valid, so the open itself succeeds.
+        let mut bytes = fs::read(&database_path).expect("read");
+        assert!(bytes.len() > 4096 * 4, "the file has pages to damage");
+        let middle = (bytes.len() / 4096 / 2) * 4096;
+        for byte in &mut bytes[middle..middle + 4096] {
+            *byte = 0xA5;
+        }
+        fs::write(&database_path, &bytes).expect("damage");
+
+        let fresh =
+            DurableStateDb::open_with_corruption_recovery(&database_path, timestamp_ms(5_000))
+                .expect("a damaged database is replaced");
+        assert_eq!(fresh.queue_depth().expect("depth"), 0);
+        assert!(database_path.with_extension("sqlite.corrupt-5000").exists());
     }
 
     #[test]

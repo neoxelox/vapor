@@ -72,7 +72,6 @@ assets/source/tools/node_modules/
 .codex
 .opencode
 .cursor
-!.cursor/environment.json
 
 # Agent workspace scratch space (notes handed between agents, never shipped)
 .context/

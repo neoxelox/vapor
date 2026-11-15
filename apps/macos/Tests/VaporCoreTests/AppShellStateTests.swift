@@ -74,6 +74,7 @@ func surfaceStateFollowsTheDaemonStatusWhenRunning() {
     SyncSurfaceState.from(health: .running, status: status(throttle: "suspended", queue: 3))
       == .suspended)
   #expect(SyncSurfaceState.from(health: .running, status: status(run: "paused")) == .paused)
+  #expect(SyncSurfaceState.from(health: .running, status: status(run: "unconfigured")) == .paused)
   #expect(SyncSurfaceState.from(health: .running, status: status(run: "error")) == .error)
   #expect(SyncSurfaceState.from(health: .running, status: status(failed: 2)) == .error)
   // No status while the tick says running: the endpoint did not answer.
@@ -146,8 +147,8 @@ func syncDetailPrefersTheReasonTheUserCanActOn() {
     AppShellState.syncDetail(
       for: .throttled,
       status: status(
-        scan: "waiting", scanDetail: "waiting for an idle moment: user activity is active")
-    ) == "waiting for an idle moment: user activity is active")
+        scan: "waiting", scanDetail: "waiting: thermal pressure is critical")
+    ) == "waiting: thermal pressure is critical")
   #expect(
     AppShellState.syncDetail(
       for: .syncing, status: status(scan: "running", scanDetail: "scanning /Users/alex/Vapor")

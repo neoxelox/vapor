@@ -2,10 +2,10 @@
 
 ## Repository bootstrap
 
-- Rust workspace: root `Cargo.toml` with crates in `core/daemon`, `core/providers`, `core/shared`, `core/ipc`, `core/platform`, `core/lifecycle`, and `core/cli`, plus the development tools under `tools/` (`tools/e2e`, never shipped; see `tools/README.md`).
+- Rust workspace: root `Cargo.toml` with crates in `core/daemon`, `core/providers`, `core/shared`, `core/ipc`, `core/platform`, `core/lifecycle`, and `core/cli`, plus the development tools under `tools/` (`tools/e2e` and `tools/soak`, never shipped; see `tools/README.md`).
 - Daemon binary: `vapord`.
 - CLI binary: `vapor` (`core/cli`).
-- Swift package: `apps/macos/Package.swift` (`Vapor`, `VaporCore`) — macOS-only.
+- Swift package: `apps/macos/Package.swift` (`Vapor`, `VaporCore`); macOS-only.
 - Implementation sequencing references:
   - Runtime + platform + CLI: `docs/tasks/core.md`.
   - macOS app: `docs/tasks/macos.md`.
@@ -23,7 +23,8 @@
 - Sync `assets/` (locale catalogs, brand images) into every app surface: `./scripts/resources.sh`
 - Install git pre-commit hook: `./scripts/hooks.sh` (uninstall: `./scripts/hooks.sh uninstall`)
 - Version helper: `./scripts/version.sh`
-- Release gate (format, lint, Tier 1, and the e2e suite once per provider; the Google Drive leg needs the test account signed in): `./scripts/release.sh`
+- Release gate (format check, lint, Tier 1, and the e2e suite once per provider; the Google Drive leg needs the test account): `./scripts/release.sh`
+- Release body for a version (the changelog section, cut at GitHub's limit): `./scripts/notes.sh <version>`
 - Performance gate (one release-profile soak cell with SLO assertions): `./scripts/perf.sh` (`VAPOR_PERF_SOAK_DURATION`, `VAPOR_PERF_SOAK_SEED`)
 - Soak verification (Tier S): `./scripts/soak.sh` (`--duration`, `--seed`, `--mode`, `--load`, `--faults`, `--throttle`, `--release`, `--status`, `--verify`; see `docs/development/soak-testing.md`)
 - End-to-end verification of the real binaries in disposable sandboxes: `./scripts/e2e.sh` (`--only Sxx`, `--keep`, `--skip-build`, `--json`, `--list`, `--sandbox`, `--sandbox-stop`; see `docs/development/e2e-verification.md`)
@@ -65,18 +66,17 @@ consent screen, and what happens when a sign-in expires.
 ## Pre-commit hook (optional but recommended for agentic workflows)
 
 `./scripts/hooks.sh` installs a git `pre-commit` hook into the local
-clone (worktrees included — the hooks directory is resolved through
-git, so `.git`-as-a-file layouts work). The hook runs the full local
-validation pipeline before any commit is allowed to land:
+clone (worktrees included: the hooks directory is resolved through
+git, so `.git`-as-a-file layouts work). The hook runs two steps
+before a commit lands:
 
-1. `./scripts/lint.sh` — Rust + Swift lint plus `format.sh check`.
-2. `./scripts/test.sh` — Tier 1 test suite for both stacks.
-3. `./scripts/build.sh` — build of every shipping binary.
+1. `./scripts/lint.sh`: Rust + Swift lint, the dependency check, the
+   format check, the locale catalogs, and the em dash check.
+2. `./scripts/test.sh`: Tier 1 test suite for both stacks.
 
-Any failure aborts the commit. This is the same gate the agent's
-feedback loop uses, which is what makes it suitable for autonomous
-contributors: when a commit lands, `lint → test → build` is
-known-green on the working tree.
+Any failure aborts the commit. The hook does no release build and no
+e2e run: e2e is the contributor's step when the change needs it
+(`AGENTS.md` §8.4), and CI builds every binary from a fresh checkout.
 
 Operational notes:
 
@@ -85,19 +85,18 @@ Operational notes:
   after switching machines.
 - If a non-vapor `pre-commit` hook already exists, the installer
   preserves it as `.git/hooks/pre-commit.bak` and refuses to overwrite
-  if a backup is already there — resolve the conflict manually.
+  if a backup is already there: resolve the conflict manually.
 - Remove the hook with `./scripts/hooks.sh uninstall`; it only deletes
   hooks that carry the `vapor-managed-hook` marker, so unrelated hooks
   are left alone.
-- The hook builds **incrementally** (it does not run `clean.sh`), so a
-  commit is fast and — importantly — it never wipes `.vapor`/`dist`,
-  which would destroy a preserved or running e2e sandbox
-  (`e2e.sh --keep`/`--sandbox`). The from-scratch, empty-cache guarantee
-  lives in CI, which checks out fresh and builds cold on every PR; that
-  is the authoritative gate against stale artifacts masking a
-  regression. To force a clean local build, run `./scripts/clean.sh`
-  yourself before committing. Skip the hook with `--no-verify` only with
-  the project owner's explicit approval (see the commit policy in `AGENTS.md` §10).
+- The hook never runs `clean.sh`: that removes `.vapor`, and with it
+  a preserved or running e2e sandbox (`e2e.sh --keep`/`--sandbox`). CI
+  checks out fresh and builds cold on every PR, which is the gate
+  against a stale artifact that hides a regression. Skip the hook with
+  `--no-verify` only with the project owner's explicit approval (see
+  the commit policy in `AGENTS.md` §10).
+- An installed hook is a copy. Run `./scripts/hooks.sh` again after
+  `scripts/hooks.sh` changes.
 
 ## Notes
 
@@ -106,25 +105,26 @@ Operational notes:
 - `VERSION` is the release version source-of-truth; wrapper scripts fail fast when `Cargo.toml` is out of sync with it.
 - `./scripts/version.sh` is the release-prep entrypoint: it requires a clean `main` branch except for `CHANGELOG.md`, then writes `VERSION`, syncs Cargo, creates `release: v...` commit, and creates the matching tag.
 - Override runtime root with `VAPOR_DIR=/path/to/vapor ./scripts/test.sh` (same for build, lint, and format).
-- `Vapor.app` is a single package that ships three executables: `Contents/MacOS/Vapor` (app), `Contents/MacOS/vapord` (daemon), and `Contents/Helpers/vapor` (CLI — it cannot live in `Contents/MacOS/` because the default macOS filesystem is case-insensitive and `vapor` would collide with `Vapor`).
+- `Vapor.app` is a single package that ships three executables: `Contents/MacOS/Vapor` (app), `Contents/MacOS/vapord` (daemon), and `Contents/Helpers/vapor` (CLI; it cannot live in `Contents/MacOS/` because the default macOS filesystem is case-insensitive and `vapor` would collide with `Vapor`).
 - Runtime daemon launch path is always the bundled `vapord`: a sibling of the launching binary, or `../MacOS/vapord` when resolved from the bundled CLI in `Contents/Helpers/`.
 - What the daemon parks for a person to answer lives in the profile state DB and is read and answered with `vapor decisions list|show|resolve <id> --choose <key>`, with or without a daemon; what the daemon removed on this device is listed and restored with `vapor trash list|restore|empty`. Both are the CLI surfaces the app shells drive with `--json`.
 - Daemon lifecycle (install/start/stop/supervision, crash-loop state) is driven through `vapor service` on every surface; `vapor service check` is one supervision tick (`--loop` keeps ticking, which is what `vapor service install --supervise` registers as the kept-alive `sh.arn.vapor.supervisor` job for installs without the app), `vapor service acknowledge` clears a crash-loop pause, and durable crash-loop state lives at `<vapor_dir>/state/lifecycle.json`.
-- Swift lint and format scripts intentionally use `swift format` only.
-- If an Xcode project exists, set `VAPOR_XCODE_SCHEME` to enable `xcodebuild build` in `./scripts/swift/build.sh`.
+- Swift lint and format scripts intentionally use `swift format` only, with `--strict`, so a finding fails the step.
+- `./scripts/lint.sh` needs `cargo deny` (`cargo install cargo-deny --locked`) and a network connection: the dependency check reads the RustSec advisory database. `deny.toml` holds the rules: no crate with an advisory or yanked, only the licenses on its list, only crates.io.
 
 ## Testing discipline
 
-Vapor is coded autonomously. The suite is the feedback loop — it has to
+Vapor is coded autonomously. The suite is the feedback loop: it has to
 be fast, deterministic, and honest. Full policy in `AGENTS.md §9`; full
 taxonomy in `docs/architecture/testing-strategy.md`.
 
 Fast facts for local dev:
 
 - **One command:** `./scripts/test.sh` runs the full Tier 1 suite
-  (Rust + Swift unit/integration/property/snapshot tests plus version
-  consistency checks). Target wall time: under 2 minutes on a
-  contemporary M-series dev machine; under 5 minutes on CI.
+  (Rust + Swift unit/integration/property/shape-lock tests plus the
+  script tests under `scripts/tests/`). It builds first and times only
+  the run: under 2 minutes on a contemporary M-series dev machine;
+  under 5 minutes on CI, where `VAPOR_TEST_MAX_SECONDS` enforces it.
 - **Stack-specific:** `./scripts/rust/test.sh` or
   `./scripts/swift/test.sh` if you want to run just one side.
 - **No network, no `~/.vapor`.** Tests use `tempfile::TempDir` for
@@ -136,7 +136,7 @@ Fast facts for local dev:
   an open task). An intentional schema change updates that test in the
   same change set; CI fails the PR otherwise.
 - **Flaky test?** Fix it or remove it in the same PR. We do not carry
-  flaky tests forward — the agent's feedback loop depends on
+  flaky tests forward: the agent's feedback loop depends on
   determinism.
 - **What not to test:** trivial getters, `Default` impls mirroring
   constants, UI rendering (SwiftUI, menubar, Dock, future GUI
@@ -172,15 +172,19 @@ Fast facts for local dev:
     --tmpfs /work/.vapor:rw,size=2g \
     -e CARGO_TARGET_DIR=/target -e VAPOR_ENV=dev \
     rust:slim sh -c 'apt-get update -qq && apt-get install -y -qq \
-      pkg-config libsqlite3-dev build-essential attr procps >/dev/null && \
-      cargo clippy --workspace --all-targets -- -D warnings && \
-      cargo test --workspace && ./scripts/e2e.sh'
+      pkg-config libsqlite3-dev build-essential attr procps git python3 >/dev/null && \
+      cargo install cargo-deny --locked --root /target/tools && \
+      export PATH="/target/tools/bin:$PATH" && \
+      ./scripts/lint.sh && ./scripts/test.sh && ./scripts/e2e.sh'
   ```
+
+  The first run compiles `cargo-deny` into the target volume; later
+  runs find it there.
 
 ## Release build policy
 
 - A single release mode is used and tuned for performance with safe optimizations.
 - The GitHub release pipeline validates the tag ref first, then runs `lint.yml`, `test.yml`, `perf.yml`, and `soak.yml` in parallel; one `package (<platform>)` job per shipping platform proceeds only with `needs: [preflight, lint, test, perf, soak]`, and `publish` assembles the release from their assets.
 - Stable tag releases provision signing and notarization material on the runner before packaging.
-- Rust release profile uses `opt-level=3`, `lto=fat`, `codegen-units=1`, `panic=abort`, and `strip=symbols`.
+- Rust release profile uses `opt-level=3`, `lto=fat`, `codegen-units=1`, `panic=unwind`, and `strip=symbols`. A panic unwinds so that the daemon can suspend one profile and keep the others running.
 - Swift release build uses whole-module and cross-module optimization flags.

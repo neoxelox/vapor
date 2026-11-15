@@ -35,12 +35,49 @@ pub fn scenarios() -> Vec<Scenario> {
             run: offline_cloud_delete,
         },
         Scenario {
+            id: "S68",
+            name: "left-both-sides-then-put-back",
+            proves: "a file that left both folders while the daemon was down, and that is put back on this device with the same bytes, is uploaded and never moved to the trash",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: left_both_sides_then_put_back,
+        },
+        Scenario {
+            id: "S69",
+            name: "moved-in-folder-keeps-its-rules",
+            proves: "a folder that moves into the sync root with a .gitignore of its own syncs by those rules: the files the rules hide never reach the cloud",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: moved_in_folder_keeps_its_rules,
+        },
+        Scenario {
             id: "S29",
             name: "push-only-mirror",
             proves: "push-only uploads local content, overwrites a divergent cloud edit, and removes a cloud-only file without ever downloading",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
             run: push_only_mirror,
+        },
+        Scenario {
+            id: "S62",
+            name: "one-way-mode-asks-first",
+            proves: "setting pull-only prints what the mode does; the daemon then syncs nothing, in either direction, and status says the mode needs a confirmation; after the decision is answered enable the mirror runs",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: one_way_mode_asks_first,
+        },
+        Scenario {
+            id: "S67",
+            name: "push-only-keeps-its-spelling",
+            proves: "in push-only, a file whose name the cloud respells so that only the case changes gets this device's spelling back in the cloud, with no restart and no reconcile request",
+            needs: &[
+                Need::NativeWatcher,
+                Need::Filesystem,
+                Need::Unix,
+                Need::CaseInsensitiveFs,
+            ],
+            expect: Expect::Pass,
+            run: push_only_keeps_its_spelling,
         },
         Scenario {
             id: "S52",
@@ -236,6 +273,132 @@ fn offline_cloud_delete(ctx: &mut Ctx) -> Result<(), Failure> {
     Ok(())
 }
 
+fn left_both_sides_then_put_back(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let first = start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("keep.txt"), "kept\n")?;
+    write_file(&home.local.join("report.txt"), "the report\n")?;
+    ctx.converge_from(&mark, 2, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("report.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ctx.stop_daemon(first)?;
+    // The file leaves both folders while no daemon watches.
+    fs::remove_file(home.local.join("report.txt"))?;
+    fs::remove_file(home.cloud.join("report.txt"))?;
+    ctx.start_daemon()?;
+    ctx.settle(Duration::from_secs(60))?;
+
+    // The user puts it back from a copy: the same bytes as the last
+    // version that synced. The sync index must not read that as "the
+    // cloud deleted it".
+    write_file(&home.local.join("report.txt"), "the report\n")?;
+    ctx.wait_exists(&home.cloud.join("report.txt"), Duration::from_secs(60))?;
+    ctx.settle(Duration::from_secs(60))?;
+    ensure!(
+        read_string(&home.local.join("report.txt"))? == "the report\n",
+        "the file that was put back stays on this device"
+    );
+    let trash = ctx.cli().json(&["trash", "list", "--json"])?;
+    ensure!(
+        trash["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.is_empty()),
+        "nothing went to the trash: {trash}"
+    );
+    Ok(())
+}
+
+fn moved_in_folder_keeps_its_rules(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    // A project made next to the sync root, then moved in whole: the
+    // watcher reports the folder and nothing for the files under it.
+    let staged = home
+        .local
+        .parent()
+        .ok_or_else(|| Failure::new("the local root has no parent"))?
+        .join("staged-project");
+    write_file(&staged.join(".gitignore"), "secret.env\nbuild-output/\n")?;
+    write_file(&staged.join("secret.env"), "TOKEN=not-for-the-cloud\n")?;
+    write_file(&staged.join("src/main.rs"), "fn main() {}\n")?;
+    write_file(&staged.join("build-output/app.bin"), "binary\n")?;
+    fs::rename(&staged, home.local.join("project"))?;
+
+    ctx.wait_exists(
+        &home.cloud.join("project/src/main.rs"),
+        Duration::from_secs(60),
+    )?;
+    ctx.wait_exists(
+        &home.cloud.join("project/.gitignore"),
+        Duration::from_secs(60),
+    )?;
+    ctx.settle(Duration::from_secs(60))?;
+    ensure!(
+        !home.cloud.join("project/secret.env").exists()
+            && !home.cloud.join("project/build-output").exists(),
+        "what the folder's own rules hide never reaches the cloud"
+    );
+    // The two hidden entries are on this device only, by the rules.
+    ctx.oracle_ignore("secret.env");
+    ctx.oracle_ignore("build-output/");
+    Ok(())
+}
+
+fn one_way_mode_asks_first(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    fs::create_dir_all(&home.local)?;
+    fs::create_dir_all(&home.cloud)?;
+    write_file(&home.local.join("only-here.txt"), "a mirror removes me\n")?;
+    write_file(&home.cloud.join("from-cloud.txt"), "cloud canonical\n")?;
+    ctx.configure_scope(&home)?;
+    let said = ctx.cli().config_set("syncMode", "pull-only")?;
+    ensure!(
+        said.contains("removes files that are only here") && said.contains("vapor decisions list"),
+        "config set must say what pull-only does and that the daemon asks first: {said}"
+    );
+
+    let kind = ctx.paths.daemon_kind;
+    ctx.start_daemon_in(&home, kind, false)?;
+    let cli = ctx.cli();
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "status to say that the mode needs a confirmation",
+        || {
+            cli.status().is_some_and(|status| {
+                status.run.state == "error"
+                    && status
+                        .run
+                        .reason
+                        .contains("pull-only needs your confirmation")
+            })
+        },
+    )?;
+    // Long enough for a startup scan and a mirror removal to happen,
+    // if anything let them.
+    std::thread::sleep(Duration::from_secs(6));
+    ensure!(
+        home.local.join("only-here.txt").exists(),
+        "an unconfirmed mirror removed a local-only file"
+    );
+    ensure!(
+        !home.local.join("from-cloud.txt").exists(),
+        "an unconfirmed profile synced in the safe direction"
+    );
+
+    ctx.confirm_one_way(&home)?;
+    cli.wait_run_state("running", CONVERGE_TIMEOUT)?;
+    ctx.wait_absent(&home.local.join("only-here.txt"), CONVERGE_TIMEOUT)?;
+    ctx.wait_same_content(
+        &home.cloud.join("from-cloud.txt"),
+        &home.local.join("from-cloud.txt"),
+        CONVERGE_TIMEOUT,
+    )?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    Ok(())
+}
+
 fn push_only_mirror(ctx: &mut Ctx) -> Result<(), Failure> {
     let home = ctx.primary.clone();
     fs::create_dir_all(&home.cloud)?;
@@ -249,7 +412,7 @@ fn push_only_mirror(ctx: &mut Ctx) -> Result<(), Failure> {
     write_file(&home.local.join("local-only.txt"), "must upload\n")?;
     ctx.configure_scope(&home)?;
     ctx.cli().config_set("syncMode", "push-only")?;
-    ctx.start_daemon()?;
+    ctx.start_daemon_confirming_one_way()?;
     ctx.wait_exists(&home.cloud.join("local-only.txt"), CONVERGE_TIMEOUT)?;
     ctx.wait_absent(&home.cloud.join("cloud-only.txt"), CONVERGE_TIMEOUT)?;
     ctx.wait_same_content(
@@ -274,11 +437,47 @@ fn push_only_mirror(ctx: &mut Ctx) -> Result<(), Failure> {
     Ok(())
 }
 
+fn push_only_keeps_its_spelling(ctx: &mut Ctx) -> Result<(), Failure> {
+    // The device is the source of truth, and a name's spelling is part
+    // of it. On a folder that folds case the cloud's `Report.txt` and
+    // the local `report.txt` are one name, so nothing here looks
+    // missing: the daemon has to notice the spelling itself.
+    let home = ctx.primary.clone();
+    fs::create_dir_all(&home.cloud)?;
+    fs::create_dir_all(&home.local)?;
+    write_file(&home.local.join("report.txt"), "the local version\n")?;
+    ctx.configure_scope(&home)?;
+    ctx.cli().config_set("syncMode", "push-only")?;
+    ctx.start_daemon_confirming_one_way()?;
+    ctx.wait_exists(&home.cloud.join("report.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    fs::rename(home.cloud.join("report.txt"), home.cloud.join("Report.txt"))?;
+    let cloud = home.cloud.clone();
+    ctx.wait_until(
+        Duration::from_secs(90),
+        "the cloud folder spells the name report.txt again",
+        || crate::scenarios::structure::stored_names(&cloud) == ["report.txt"],
+    )?;
+    ctx.settle(Duration::from_secs(60))?;
+
+    ensure!(
+        read_string(&home.cloud.join("report.txt"))? == "the local version\n",
+        "the cloud file must hold the local content"
+    );
+    ensure!(
+        crate::scenarios::structure::stored_names(&home.local) == ["report.txt"],
+        "push-only must not change the local name: {:?}",
+        crate::scenarios::structure::stored_names(&home.local)
+    );
+    Ok(())
+}
+
 fn push_only_cloud_only_folder(ctx: &mut Ctx) -> Result<(), Failure> {
     // No provider deletes a tree in one call, so a cloud-only folder
     // is only ever removed by expanding it into its entries. The
-    // one-way planner used to send the folder itself, which the
-    // provider refused as non-empty, forever.
+    // folder itself, sent to the provider, is refused as non-empty
+    // for ever.
     let home = ctx.primary.clone();
     fs::create_dir_all(home.cloud.join("stale/deep"))?;
     write_file(&home.cloud.join("stale/one.txt"), "cloud only\n")?;
@@ -287,7 +486,7 @@ fn push_only_cloud_only_folder(ctx: &mut Ctx) -> Result<(), Failure> {
     write_file(&home.local.join("keep.txt"), "local canonical\n")?;
     ctx.configure_scope(&home)?;
     ctx.cli().config_set("syncMode", "push-only")?;
-    ctx.start_daemon()?;
+    ctx.start_daemon_confirming_one_way()?;
     ctx.wait_exists(&home.cloud.join("keep.txt"), CONVERGE_TIMEOUT)?;
     ctx.wait_absent(&home.cloud.join("stale/deep/two.txt"), CONVERGE_TIMEOUT)?;
     ctx.wait_absent(&home.cloud.join("stale/one.txt"), CONVERGE_TIMEOUT)?;
@@ -308,7 +507,7 @@ fn push_only_same_size_divergence(ctx: &mut Ctx) -> Result<(), Failure> {
     write_file(&home.local.join("shared.txt"), "local version\n")?;
     ctx.configure_scope(&home)?;
     ctx.cli().config_set("syncMode", "push-only")?;
-    ctx.start_daemon()?;
+    ctx.start_daemon_confirming_one_way()?;
     ctx.wait_same_content(
         &home.local.join("shared.txt"),
         &home.cloud.join("shared.txt"),

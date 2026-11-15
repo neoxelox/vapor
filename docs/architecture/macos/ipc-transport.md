@@ -25,7 +25,7 @@ transport choice.
   (`vapor_shared::constants::ipc::MAX_SOCKET_PATH_BYTES`, 100 bytes),
   daemon and CLI both resolve
   `<os-temp>/vapor-<fnv1a64(vapor_dir)>/vapord.sock` via
-  `runtime_paths::ipc_socket_location` — deterministic per `vapor_dir`,
+  `runtime_paths::ipc_socket_location`: deterministic per `vapor_dir`,
   collision-free across `vapor_dir`s, stable across separately built
   binaries (FNV-1a, not `DefaultHasher`). The daemon logs the
   relocation at INFO and `vapor doctor` reports it (`ipc-socket`
@@ -51,8 +51,8 @@ When the daemon receives `SIGTERM` (from `launchctl kill TERM` or the
 Swift app's `stopDaemon`), it:
 
 1. Closes the listening socket.
-2. Drains in-flight requests to a clean completion or returns a `Shutting
-   Down` error frame.
+2. Stops serving: a request in flight gets its answer, or its client
+   reads a closed connection. No frame announces the shutdown.
 3. Exits at the next tick boundary.
 
 ## Testing

@@ -286,7 +286,7 @@ func daemonStatusDecodesTheScanStateAndReconcileDrivesTheCLI() throws {
         "throttle": {"state": "throttled", "reason": "user activity is active"},
         "queued": 1,
         "failed": 0,
-        "reconcile": {"state": "waiting", "detail": "waiting for an idle moment: user activity is active"}
+        "reconcile": {"state": "waiting", "detail": "waiting: thermal pressure is critical"}
       }
       """)
   let controller = VaporCLIServiceController(runner: runner)
@@ -294,7 +294,7 @@ func daemonStatusDecodesTheScanStateAndReconcileDrivesTheCLI() throws {
   let snapshot = try controller.daemonStatus()
   #expect(snapshot.scanIsWaiting)
   #expect(!snapshot.scanIsRunning)
-  #expect(snapshot.reconcileDetail == "waiting for an idle moment: user activity is active")
+  #expect(snapshot.reconcileDetail == "waiting: thermal pressure is critical")
 
   runner.standardOutput = #"{"schemaVersion":4,"accepted":true,"note":"reconcile requested"}"#
   try controller.reconcile()

@@ -11,9 +11,13 @@ named-pipe transport, listed with the Windows work in
 ## Transport
 
 - **Default:** Win32 named pipe at
-  `\\.\pipe\vapord-<user-sid>`. Per-user scoping via the SID prevents
-  cross-user reuse on multi-user hosts (matches the macOS / Linux UDS
-  per-user-directory model).
+  `\\.\pipe\vapord-<user-sid>-<dir-hash>`. Per-user scoping via the SID
+  prevents cross-user reuse on multi-user hosts (matches the macOS /
+  Linux UDS per-user-directory model). `<dir-hash>` is the hash of the
+  runtime directory, the one the socket relocation of a deep path
+  already uses on Unix: one daemon serves one runtime directory, and
+  the e2e harness runs many daemons for one user at the same time, so
+  the user alone cannot name the pipe.
 - **Listener creation:** the daemon calls `CreateNamedPipeW` with
   `PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED`,
   `PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT`, and a security
@@ -30,8 +34,9 @@ named-pipe transport, listed with the Windows work in
   the process owner; no inherited ACEs).
 - Clients (`vapor` CLI, future `apps/windows`) discover the pipe by
   composing the same `<user-sid>` they get from
-  `OpenProcessToken` / `GetTokenInformation(TokenUser)`. They do not
-  need access to `<vapor_dir>` to find the pipe.
+  `OpenProcessToken` / `GetTokenInformation(TokenUser)` and the hash of
+  the runtime directory they resolved. They do not need to read
+  anything under `<vapor_dir>` to find the pipe.
 
 ## Framing
 
@@ -50,8 +55,8 @@ When the daemon receives a service-stop request (planned: wiring
 
 1. Calls `DisconnectNamedPipe` on the listening instance to refuse
    further connections.
-2. Drains in-flight requests to a clean completion or returns a
-   `Shutting Down` error frame.
+2. Stops serving: a request in flight gets its answer, or its client
+   reads a closed connection. No frame announces the shutdown.
 3. Exits at the next tick boundary.
 
 ## Testing

@@ -7,7 +7,6 @@ use std::time::{Duration, Instant, SystemTime};
 use vapor_platform::fs_caps::NativeFilesystemCapabilities;
 use vapor_platform::fs_watch::native_watcher_available;
 use vapor_providers::Provider;
-use vapor_providers::filesystem::hash_hex_of_file_with;
 use vapor_providers::tags::OpIdTagStore;
 use vapor_shared::{RunState, constants};
 
@@ -31,9 +30,9 @@ use crate::sync_directories::SyncScope;
 use crate::throttle::ThrottleInputs;
 use crate::{DaemonApp, event_intents::PendingIntentKind};
 
-/// The single implicit profile id used until the multi-profile model
-/// fans the runtime out per profile.
-pub const DEFAULT_PROFILE_ID: &str = "default";
+/// The profile id of a runtime that no profile set names (a runtime on
+/// its own).
+pub const DEFAULT_PROFILE_ID: &str = constants::profile::DEFAULT_PROFILE_ID;
 
 /// Consecutive tick failures tolerated before the runtime loop gives up.
 /// One inconsistent row or transient I/O error is logged and survived;
@@ -121,6 +120,19 @@ enum CloudRootOutcome {
     /// The provider refused the sign-in, so nothing about the root is
     /// known. Carries the provider's message.
     SignInRequired(String),
+}
+
+/// What a runtime does on its own while it is built.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Startup {
+    /// A runtime on its own. It starts a watcher when asked, and it
+    /// probes the cloud root before `build` returns.
+    Standalone { start_watcher: bool },
+    /// One profile of the daemon. The daemon owns the watchers, and the
+    /// first cloud-root probe waits for the first tick, where it runs
+    /// on a worker: a provider that does not answer must not delay the
+    /// daemon's start, and with it the IPC server.
+    DaemonProfile,
 }
 
 #[derive(Clone, Debug)]
@@ -232,7 +244,7 @@ impl From<StateDbError> for DaemonRuntimeError {
 /// Wakes the runtime loop out of its inter-tick sleep. Signaled by the
 /// fs-event callback (via [`NotifyingRecorder`]) and by IPC control
 /// requests so the daemon reacts immediately instead of waiting out the
-/// poll interval — which in turn lets a fully idle daemon sleep at the
+/// poll interval, which in turn lets a fully idle daemon sleep at the
 /// longer [`constants::engine::IDLE_TICK_MILLIS`] cadence.
 #[derive(Debug, Default)]
 pub struct TickWaker {
@@ -282,6 +294,25 @@ impl FsEventRecording for NotifyingRecorder {
     }
 }
 
+/// The retry state of an answer that could not be applied.
+#[derive(Debug)]
+struct DecisionRetry {
+    failures: usize,
+    next_attempt: SystemTime,
+    /// The reason last logged, so the same reason is logged once.
+    last_error: Option<String>,
+}
+
+impl Default for DecisionRetry {
+    fn default() -> Self {
+        Self {
+            failures: 0,
+            next_attempt: SystemTime::UNIX_EPOCH,
+            last_error: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RuntimeTickReport {
     pub released_deferred_reconciles: usize,
@@ -306,6 +337,8 @@ pub struct RuntimeTickReport {
     /// Renames carried out as moves (server-side or local) instead of
     /// transfers.
     pub moves: usize,
+    /// What this tick removed from the cloud, each with the cause.
+    pub cloud_deletes: Vec<(PathBuf, &'static str)>,
     pub started_reconcile_root: Option<PathBuf>,
     pub completed_reconcile_root: Option<PathBuf>,
     pub staged_executor: StagedExecutorSnapshot,
@@ -325,7 +358,7 @@ pub struct DaemonRuntime {
     /// Ignore-rule filter for this scope, shared with the watcher (when
     /// one runs in-process) or with the multi-profile deduplicated
     /// watcher for the same root. Consulted by the reconcile walk and
-    /// the remote-change mapping so ignore rules apply symmetrically —
+    /// the remote-change mapping so ignore rules apply symmetrically:
     /// an ignored name never syncs in either direction.
     path_filter: Option<Arc<crate::fs_events::SharedEventPathFilter>>,
     metrics_sampler: Arc<dyn MetricsSampler>,
@@ -335,6 +368,17 @@ pub struct DaemonRuntime {
     status_publisher: Option<Arc<dyn StatusPublisher>>,
     last_throttle_sample_inst: Option<Instant>,
     last_stale_lease_sweep_inst: Option<Instant>,
+    /// Wall time of the last whole-scope scan (its start counts until
+    /// one completes). Wall time, because a device that sleeps for the
+    /// night is a day older when it wakes and the monotonic clock is
+    /// not. Every start queues a whole-scope scan, so this starts at
+    /// the start.
+    last_whole_scope_scan_at: Option<SystemTime>,
+    /// Why the local root cannot be read, while a walk found it so (a
+    /// privacy permission the user refused, an I/O error). The run
+    /// state carries it until a whole-scope walk reads the root again.
+    local_root_unreadable: Option<String>,
+    local_root_unreadable_this_walk: bool,
     running_reconcile_intent_id: Option<i64>,
     /// Set while a queued reconcile was refused a start because the
     /// throttle is not idle; cleared the moment one starts. Carries
@@ -367,6 +411,9 @@ pub struct DaemonRuntime {
     /// and the status names why, until the root returns or a
     /// `root-replaced` decision is answered.
     root_hold: Option<RootHold>,
+    /// Set while the profile is in a one-way mode that the user did
+    /// not acknowledge yet: the reason for status. Nothing syncs.
+    one_way_hold: Option<String>,
     last_root_check_inst: Option<Instant>,
     /// A watcher signal asked for a whole-scope reconcile; it is
     /// queued once the next root check finds the adopted root in
@@ -376,6 +423,26 @@ pub struct DaemonRuntime {
     /// `false`, no work is leased and the remote feed is not polled;
     /// ingest keeps capturing intent state durably.
     cloud_root_ready: bool,
+    /// The folder at the local root is not the one the watcher was
+    /// started on: the root went away and came back, or the user
+    /// reattached another folder. A watch that follows the folder, not
+    /// the path (inotify), reports nothing from the new one, so the
+    /// owner of the watchers starts them again.
+    local_root_changed: bool,
+    /// The generation of the ignore rules this runtime has reconciled
+    /// for (`SharedEventPathFilter::rules_generation`).
+    seen_rules_generation: u64,
+    /// How many local entries the ignore rules hid from the last
+    /// whole-scope scan that finished. `None` until one has.
+    ignored_paths: Option<u64>,
+    /// The cloud had no room for an upload: the provider's message and
+    /// when it last said so. Uploads wait and come back on their own;
+    /// status says why until an upload gets through again.
+    cloud_full: Option<(String, Instant)>,
+    /// A profile of the daemon has not had the answer of its first
+    /// cloud-root probe yet. That answer is the start of the profile,
+    /// not the end of an outage.
+    first_cloud_probe_pending: bool,
     last_cloud_root_attempt_inst: Option<Instant>,
     /// The provider refused the sign-in. Like an unavailable root it
     /// stops admission and the changes poll while ingest keeps
@@ -386,6 +453,17 @@ pub struct DaemonRuntime {
     /// Survives slice pauses so a large tree converges across slices
     /// instead of restarting from scratch (strict mirror).
     reconcile_walker: Option<crate::reconcile_walk::ReconcileWalker>,
+    /// A whole-scope reconcile was asked for while a whole-scope walk
+    /// was under way. That walk passed some folders before the request,
+    /// so one more runs after it.
+    whole_scope_rescan_wanted: bool,
+    /// Folders that appeared with an ignore file inside, and when. The
+    /// files under them are reported once the rules of that file are in
+    /// force; reported before, a file the rules hide would upload.
+    folders_waiting_for_rules: Vec<(PathBuf, SystemTime)>,
+    /// Folders a reconcile walk left for the same reason: each gets a
+    /// walk of its own when the rules are in.
+    walks_waiting_for_rules: Vec<PathBuf>,
     /// Cumulative strict-mirror observability counters:
     /// one-way modes must never be silent about the data they rewrite.
     mirror_revert_count: u64,
@@ -396,15 +474,13 @@ pub struct DaemonRuntime {
     timeline: Option<Arc<crate::timeline::TimelineBuffer>>,
     /// Daemon-wide resource budget; shared across profiles.
     resource_budget: Arc<Mutex<crate::resource_budget::ResourceBudget>>,
-    /// Daemon-wide bandwidth shaper; shared across profiles.
-    bandwidth_shaper: Arc<Mutex<vapor_providers::BandwidthShaper>>,
-    /// User-idle signal for the idle-boost gates. The native HID bridge
-    /// is a platform follow-up; headless semantics (always idle) apply
-    /// until it lands.
+    /// Daemon-wide bandwidth state (the two buckets and the measured
+    /// link capacity); shared across profiles.
+    bandwidth: Arc<crate::bandwidth::TransferBandwidth>,
+    /// User-idle signal for the idle-boost gates. The daemon shares the
+    /// host's notifier across profiles; a runtime on its own counts as
+    /// always idle.
     idle_notifier: Arc<dyn vapor_platform::IdleNotifier>,
-    /// Auto-tuned per-tick transfer step budget, shared across
-    /// profiles.
-    transfer_step_bytes: Arc<std::sync::atomic::AtomicU64>,
     /// Latest published ceilings + last sampled inputs.
     latest_ceilings: Option<crate::resource_budget::EffectiveCeilings>,
     last_sampled_inputs: Option<ThrottleInputs>,
@@ -422,9 +498,6 @@ pub struct DaemonRuntime {
     /// Timeline capacity captured before the first memory-pressure
     /// squeeze, so the configured limit is restored once pressure clears.
     timeline_default_entries: Option<usize>,
-    /// Heuristic active-coding signal; ORs `user_active` into
-    /// the throttle inputs when code-class files churn rapidly.
-    active_coding: crate::safeguards::ActiveCodingHeuristic,
     /// Mass-deletion guard; holds a deletion burst in either direction
     /// behind a decision.
     mass_change_guard: crate::safeguards::MassChangeGuard,
@@ -435,15 +508,21 @@ pub struct DaemonRuntime {
     /// the profile runtime attaches one; the bare fixtures unlink.
     trash: Option<crate::trash::LocalTrash>,
     last_trash_purge_inst: Option<Instant>,
+    /// The trash purge in flight, if any.
+    trash_purge: Option<crate::provider_jobs::ProviderCall<usize>>,
     last_conflict_sync_inst: Option<Instant>,
     /// Bumped whenever this runtime opens or closes a decision, so the
     /// status publisher knows the open count moved without querying it
     /// on every idle tick.
     decision_changes: u64,
-    /// Flush boost deadline (monotonic). While set and in the
-    /// future, deferred reconciles release immediately regardless of
-    /// the idle gate.
-    flush_boost_until_inst: Option<Instant>,
+    /// Answers that could not be applied, by decision id: how many
+    /// tries failed and when the next one is due. In memory only; a
+    /// restart tries each answer again at once.
+    decision_retries: std::collections::HashMap<i64, DecisionRetry>,
+    /// Deadline of the reconcile boost (monotonic). `vapor reconcile`
+    /// starts it; while it runs, deferred reconciles release at once,
+    /// whatever their not-before time.
+    reconcile_boost_until_inst: Option<Instant>,
 }
 
 impl DaemonRuntime {
@@ -572,6 +651,8 @@ impl DaemonRuntime {
             || report.staged_executor.active_total > 0
             || self.running_reconcile_intent_id.is_some()
             || self.scheduler.pending_count() > 0
+            || !self.folders_waiting_for_rules.is_empty()
+            || !self.walks_waiting_for_rules.is_empty()
         {
             return true;
         }
@@ -604,7 +685,7 @@ impl DaemonRuntime {
     /// Attach a `StatusPublisher` so consumers like the IPC service see
     /// fresh `DaemonStatusSnapshot`s after every tick. Without this, the
     /// IPC `Status` endpoint would return whatever snapshot the
-    /// publisher was constructed with — i.e. it would lie about
+    /// publisher was constructed with, i.e. it would lie about
     /// pause/throttle changes the tick loop made.
     pub fn attach_status_publisher(&mut self, publisher: Arc<dyn StatusPublisher>) {
         // Publish the current state immediately so consumers don't wait
@@ -621,21 +702,26 @@ impl DaemonRuntime {
     ) -> Result<RuntimeTickReport, DaemonRuntimeError> {
         self.apply_pending_control_requests(now)?;
         self.sample_throttle_inputs(now, throttle_inputs);
-        self.reload_path_filter_if_requested();
+        self.queue_whole_scope_scan_when_due(now)?;
+        self.reload_path_filter_if_requested(now)?;
         self.sweep_stale_leases_if_due(now)?;
         self.purge_trash_if_due(now);
         self.retry_cloud_root_if_needed()?;
+        self.clear_cloud_full_if_over(now);
         self.check_roots_if_due(now)?;
         self.apply_resolved_decisions(now)?;
         self.withdraw_holds_left_empty(now)?;
         self.sync_conflict_decisions(now)?;
+        if self.one_way_hold.is_some() {
+            self.release_one_way_hold_if_acknowledged(now)?;
+        }
 
         let (stabilized_events, suppressed_local_echoes, stabilize_mirror_reverts) =
             self.stabilize_events(now);
 
         // Pause semantics ("stops admitting new work"): ingest, debounce,
         // and the durable flush keep running so intent state is never
-        // lost, and work already in flight runs to completion — but no
+        // lost, and work already in flight runs to completion, but no
         // new work is released or leased while paused. An unavailable
         // cloud root blocks the same way. Evaluated *after*
         // stabilization so a mass-delete guard trip stops
@@ -643,6 +729,7 @@ impl DaemonRuntime {
         let paused = self.app.snapshot().run_state == RunState::Paused
             || !self.cloud_root_ready
             || self.root_hold.is_some()
+            || self.one_way_hold.is_some()
             || self.sign_in_hold;
         self.mirror_revert_count += stabilize_mirror_reverts as u64;
         let mut report = RuntimeTickReport {
@@ -699,14 +786,16 @@ impl DaemonRuntime {
             self.mirror_delete_count += report.remote_poll.mirror_deletes as u64;
         }
 
+        // One view of the renames in flight for the whole tick.
+        let mut move_hints = crate::executor::MoveHints::default();
         let staged_report = {
             let mut env = ExecutionEnv {
                 local_root: self.sync_scope.local_root.as_deref(),
                 sync_mode: self.sync_scope.sync_mode,
                 device_id: &self.device_id,
                 hash_algorithm: self.app.provider().content_hash_algorithm(),
-                transfer_step_bytes: &self.transfer_step_bytes,
-                bandwidth: &self.bandwidth_shaper,
+                bandwidth: &self.bandwidth,
+                move_hints: &mut move_hints,
                 tags: &self.tags,
                 local_echoes: &mut self.local_echoes,
                 remote_echoes: &mut self.remote_echoes,
@@ -728,9 +817,17 @@ impl DaemonRuntime {
         report.conflicts += staged_report.conflicts;
         self.conflict_count += staged_report.conflicts as u64;
         report.moves += staged_report.moves;
+        report.cloud_deletes.extend(staged_report.cloud_deletes);
         if staged_report.cloud_root_unavailable > 0 {
             self.mark_cloud_root_unavailable("a provider transfer reported the root missing", now);
         }
+        if staged_report.local_root_suspect {
+            self.last_root_check_inst = None;
+        }
+        if let Some(message) = &staged_report.cloud_storage_full {
+            self.mark_cloud_full(message, now);
+        }
+        self.reconcile_unsyncable_names(&staged_report.unsyncable_names, false, now)?;
         if let Some(message) = &staged_report.authentication_required {
             self.mark_sign_in_required(message, now);
         }
@@ -782,6 +879,58 @@ impl DaemonRuntime {
                         let unsyncable = walker.take_unsyncable_names();
                         let whole_scope = walker.is_whole_scope();
                         let collisions = walker.take_name_collisions();
+                        // A folder that was not read was not compared:
+                        // it is walked again later, sooner than the
+                        // daily whole-scope scan.
+                        let retry_at = now
+                            + Duration::from_secs(
+                                constants::engine::RECONCILE_UNREADABLE_RETRY_SECONDS,
+                            );
+                        let unreadable_dirs = walker.take_unreadable_dirs();
+                        self.walks_waiting_for_rules
+                            .extend(walker.take_dirs_waiting_for_rules());
+                        // The root itself: nothing under it can sync,
+                        // and status has to say why.
+                        if let Some((root, kind)) = unreadable_dirs.iter().find(|(directory, _)| {
+                            self.sync_scope.local_root.as_ref() == Some(directory)
+                        }) {
+                            let reason = if *kind == std::io::ErrorKind::PermissionDenied {
+                                format!(
+                                    "cannot read {}: permission denied; {}",
+                                    root.display(),
+                                    constants::FOLDER_ACCESS_HINT
+                                )
+                            } else {
+                                format!("cannot read {}: {kind}", root.display())
+                            };
+                            if self.app.snapshot().run_state != RunState::Paused {
+                                self.app.set_run_state(RunState::Error, reason.clone());
+                            }
+                            self.local_root_unreadable = Some(reason);
+                            self.local_root_unreadable_this_walk = true;
+                        }
+                        let unreadable: Vec<_> = unreadable_dirs
+                            .into_iter()
+                            .map(|(directory, _)| {
+                                (directory, PendingIntentKind::ReconcileSubtree, retry_at)
+                            })
+                            .collect();
+                        if !unreadable.is_empty() {
+                            self.state_db.enqueue_intents_coalesced(
+                                &unreadable,
+                                crate::safeguards::IntentSource::ReconcileBacklog,
+                            )?;
+                            logging::info(
+                                "Queued another walk of the folders that could not be read",
+                                &[("folders", unreadable.len().to_string())],
+                            );
+                        }
+                        // The walk renamed these to the cloud's spelling;
+                        // the watcher reports the old name leaving.
+                        for (old_spelling, _) in walker.take_respelled() {
+                            self.local_echoes
+                                .record_delete(crate::executor::path_key(&old_spelling), now);
+                        }
                         for path in mismatches {
                             self.open_type_mismatch_decision(&path, now)?;
                         }
@@ -805,13 +954,41 @@ impl DaemonRuntime {
                         // holding the startup barrier up and starving every
                         // non-reconcile intent behind it).
                         if let Some(completed_root) = self.complete_running_reconcile()? {
+                            let ignored = self
+                                .reconcile_walker
+                                .as_mut()
+                                .map(|walker| walker.take_ignored_local_entries());
                             self.reconcile_walker = None;
                             self.state_db.complete_leased(reconcile_intent_id)?;
                             self.running_reconcile_intent_id = None;
                             if self.sync_scope.local_root.as_ref() == Some(&completed_root) {
-                                // The merge flag covers one whole-scope walk.
-                                self.state_db
-                                    .delete_state(constants::state::MERGE_WITHOUT_DELETIONS_KEY)?;
+                                self.last_whole_scope_scan_at = Some(now);
+                                self.ignored_paths = ignored;
+                                // A whole-scope walk that ended without
+                                // reporting the root unreadable read it.
+                                if !std::mem::take(&mut self.local_root_unreadable_this_walk)
+                                    && self.local_root_unreadable.take().is_some()
+                                {
+                                    self.restore_run_state_after_root_recovery(
+                                        "local root is readable again",
+                                    );
+                                }
+                                if std::mem::take(&mut self.whole_scope_rescan_wanted) {
+                                    // The merge flag stays for the walk
+                                    // that follows: the request may be
+                                    // the one that set it.
+                                    self.state_db
+                                        .enqueue_startup_reconcile_intent(&completed_root, now)?;
+                                    logging::info(
+                                        "A whole-scope reconcile was requested while one walked; walking once more",
+                                        &[("root", completed_root.display().to_string())],
+                                    );
+                                } else {
+                                    // The merge flag covers one whole-scope walk.
+                                    self.state_db.delete_state(
+                                        constants::state::MERGE_WITHOUT_DELETIONS_KEY,
+                                    )?;
+                                }
                                 if self.startup_reconstruction_barrier {
                                     self.startup_reconstruction_barrier = false;
                                     self.startup_barrier_expires_inst = None;
@@ -820,7 +997,7 @@ impl DaemonRuntime {
                             report.completed_intents += 1;
                             report.completed_reconcile_root = Some(completed_root);
                         } else {
-                            // The controller lost the running reconcile —
+                            // The controller lost the running reconcile:
                             // abort defensively so the durable intent can
                             // retry instead of wedging leased.
                             self.reconcile_walker = None;
@@ -861,8 +1038,8 @@ impl DaemonRuntime {
                     sync_mode: self.sync_scope.sync_mode,
                     device_id: &self.device_id,
                     hash_algorithm: self.app.provider().content_hash_algorithm(),
-                    transfer_step_bytes: &self.transfer_step_bytes,
-                    bandwidth: &self.bandwidth_shaper,
+                    bandwidth: &self.bandwidth,
+                    move_hints: &mut move_hints,
                     tags: &self.tags,
                     local_echoes: &mut self.local_echoes,
                     remote_echoes: &mut self.remote_echoes,
@@ -889,6 +1066,9 @@ impl DaemonRuntime {
                 report.conflicts += admission_report.conflicts;
                 self.conflict_count += admission_report.conflicts as u64;
                 report.moves += admission_report.moves;
+                report
+                    .cloud_deletes
+                    .extend(admission_report.cloud_deletes.iter().cloned());
                 self.announce_decisions(&admission_report.decisions_opened, now);
                 if let Some(timeline) = &self.timeline {
                     for (wanted, existing) in &admission_report.name_collisions {
@@ -906,6 +1086,13 @@ impl DaemonRuntime {
                         now,
                     );
                 }
+                if admission_report.local_root_suspect {
+                    self.last_root_check_inst = None;
+                }
+                if let Some(message) = &admission_report.cloud_storage_full {
+                    self.mark_cloud_full(message, now);
+                }
+                self.reconcile_unsyncable_names(&admission_report.unsyncable_names, false, now)?;
                 if let Some(message) = &admission_report.authentication_required {
                     self.mark_sign_in_required(message, now);
                 }
@@ -922,14 +1109,59 @@ impl DaemonRuntime {
         Ok(report)
     }
 
-    /// Rebuilds the watcher's path filter when the callback observed an
-    /// ignore-file change. The rebuild (tree walk + glob compilation)
-    /// deliberately runs here on the runtime thread, never in the
-    /// callback.
-    fn reload_path_filter_if_requested(&mut self) {
-        if let Some(path_filter) = &self.path_filter {
-            path_filter.rebuild_if_requested();
+    /// Moves an ignore-rule rebuild forward (an ignore file changed, or
+    /// a rule key in `vapor.json`). The tree walk and the compilation
+    /// run on a worker; the rules in force stay until the new ones are
+    /// in. When the new rules decide a path another way, a whole-scope
+    /// reconcile follows: a file the old rules hid is in scope now, and
+    /// nothing else would notice it until it changes.
+    fn reload_path_filter_if_requested(
+        &mut self,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        let Some(path_filter) = self.path_filter.clone() else {
+            return Ok(());
+        };
+        if path_filter.drive_rebuild(&self.provider_call_mode) {
+            // The rules of the folders that waited for them are in.
+            for (folder, observed_at) in std::mem::take(&mut self.folders_waiting_for_rules) {
+                let reported = self.report_subtree_events(&folder, observed_at);
+                logging::info(
+                    "Reported the children of a directory that appeared with ignore rules of its own",
+                    &[
+                        ("path", folder.display().to_string()),
+                        ("files", reported.to_string()),
+                    ],
+                );
+            }
+            let mut walks = std::mem::take(&mut self.walks_waiting_for_rules);
+            walks.sort();
+            walks.dedup();
+            if !walks.is_empty() {
+                let batch: Vec<_> = walks
+                    .into_iter()
+                    .map(|folder| (folder, PendingIntentKind::ReconcileSubtree, now))
+                    .collect();
+                self.state_db.enqueue_intents_coalesced(
+                    &batch,
+                    crate::safeguards::IntentSource::ReconcileBacklog,
+                )?;
+                logging::info(
+                    "Queued a walk of the folders that waited for their ignore rules",
+                    &[("folders", batch.len().to_string())],
+                );
+            }
         }
+        let generation = path_filter.rules_generation();
+        if generation != self.seen_rules_generation {
+            self.seen_rules_generation = generation;
+            logging::info(
+                "The ignore rules changed; a whole-scope reconcile syncs what they freed",
+                &[],
+            );
+            self.enqueue_startup_reconstruction_reconcile(now)?;
+        }
+        Ok(())
     }
 
     /// Keeps one `conflict` decision per conflicted file, listing every
@@ -1066,6 +1298,23 @@ impl DaemonRuntime {
     /// then on a slow cadence. A directory scan of the trash, cheap at
     /// the cadence and only while the daemon is otherwise ticking.
     fn purge_trash_if_due(&mut self, now: SystemTime) {
+        if let Some(purged) = self.trash_purge.as_mut().and_then(|call| call.take()) {
+            self.trash_purge = None;
+            match purged {
+                Ok(0) => {}
+                Ok(purged) => logging::info(
+                    "Purged expired trash entries",
+                    &[
+                        ("profile_id", self.profile_id.clone()),
+                        ("purged", purged.to_string()),
+                    ],
+                ),
+                Err(panic) => logging::warning(
+                    "The trash purge failed; it runs again at the next interval",
+                    &[("error", panic)],
+                ),
+            }
+        }
         let Some(trash) = &self.trash else {
             return;
         };
@@ -1075,20 +1324,17 @@ impl DaemonRuntime {
             .last_trash_purge_inst
             .map(|last| now_inst.saturating_duration_since(last) >= interval)
             .unwrap_or(true);
-        if !due {
+        if !due || self.trash_purge.is_some() {
             return;
         }
         self.last_trash_purge_inst = Some(now_inst);
-        let purged = trash.purge_expired(now);
-        if purged > 0 {
-            logging::info(
-                "Purged expired trash entries",
-                &[
-                    ("profile_id", self.profile_id.clone()),
-                    ("purged", purged.to_string()),
-                ],
-            );
-        }
+        // Removing a discarded tree is disk work that grows with the
+        // tree: it runs on a worker, and a later tick logs the count.
+        self.trash_purge = Some(crate::provider_jobs::ProviderCall::start(
+            &self.provider_call_mode,
+            "trash-purge",
+            trash.purge_job(now),
+        ));
     }
 
     /// Periodic in-run recovery of leases that exceeded the lease
@@ -1161,8 +1407,8 @@ impl DaemonRuntime {
     }
 
     /// Replaces this runtime's filter with a shared per-root instance so
-    /// profiles watching the same directory — and the deduplicated
-    /// watcher feeding them — reload ignore-rule changes together.
+    /// profiles watching the same directory, and the deduplicated
+    /// watcher feeding them: reload ignore-rule changes together.
     pub(crate) fn adopt_shared_path_filter(
         &mut self,
         path_filter: Arc<crate::fs_events::SharedEventPathFilter>,
@@ -1171,7 +1417,7 @@ impl DaemonRuntime {
     }
 
     /// Whether any queued or in-flight work justifies the fast tick
-    /// cadence — the multi-profile loop aggregates this across
+    /// cadence: the multi-profile loop aggregates this across
     /// profiles.
     pub(crate) fn profile_has_pending_work(&self, report: &RuntimeTickReport) -> bool {
         self.has_pending_work(report)
@@ -1211,7 +1457,7 @@ impl DaemonRuntime {
             app,
             metrics_sampler,
             clock,
-            start_watcher,
+            Startup::Standalone { start_watcher },
         )
     }
 
@@ -1225,21 +1471,14 @@ impl DaemonRuntime {
         mut app: DaemonApp,
         metrics_sampler: Arc<dyn MetricsSampler>,
         clock: SharedClock,
-        start_watcher: bool,
+        startup: Startup,
     ) -> Result<Self, DaemonRuntimeError> {
+        let start_watcher = startup
+            == Startup::Standalone {
+                start_watcher: true,
+            };
         let now = clock.now_system();
         let recovered_count = state_db.recover_leased(now)?;
-        match state_db.prune_tombstones(now) {
-            Ok(pruned) if pruned > 0 => logging::info(
-                "Pruned tombstones past the retention window",
-                &[("pruned", pruned.to_string())],
-            ),
-            Ok(_) => {}
-            Err(error) => logging::warning(
-                "Tombstone pruning failed; continuing",
-                &[("error", error.to_string())],
-            ),
-        }
         match state_db.prune_failed_intents(now) {
             Ok(pruned) if pruned > 0 => logging::info(
                 "Pruned terminally-failed intents past the retention window / cap",
@@ -1266,7 +1505,7 @@ impl DaemonRuntime {
             );
         }
 
-        let device_id = vapor_shared::device_id::derive_device_id();
+        let device_id = vapor_shared::device_id::for_process();
         let mut local_replacement: Option<Option<String>> = None;
         if let Some(local_root) = sync_scope.local_root.as_deref() {
             match crate::root_identity::check_local_root(
@@ -1292,12 +1531,20 @@ impl DaemonRuntime {
             .take()
             .map(normalize_watch_root)
             .transpose()?;
+        if let Some(local_root) = sync_scope.local_root.as_deref() {
+            vapor_shared::paths::note_sync_root(local_root);
+        }
 
         // The cloud root: adopted on first contact, checked against the
-        // recorded identity afterwards. Synchronous only here, at
-        // startup; every later probe runs on a worker. A runtime with
+        // recorded identity afterwards. A runtime on its own probes it
+        // here; a profile of the daemon leaves the first probe to the
+        // first tick, on a worker like every later one. A runtime with
         // no local root (a parked profile) never touches the cloud.
-        let cloud_outcome = if sync_scope.local_root.is_some() {
+        let first_cloud_probe_pending =
+            startup == Startup::DaemonProfile && sync_scope.local_root.is_some();
+        let cloud_outcome = if first_cloud_probe_pending {
+            CloudRootOutcome::Unreachable("not probed yet".to_string())
+        } else if sync_scope.local_root.is_some() {
             probe_cloud_root(
                 app.provider_handle(),
                 sync_scope.cloud_root.as_str(),
@@ -1384,7 +1631,12 @@ impl DaemonRuntime {
             None
         };
 
-        if !cloud_root_ready {
+        if first_cloud_probe_pending {
+            app.set_run_state(
+                RunState::Starting,
+                format!("checking the cloud folder {}", sync_scope.cloud_root),
+            );
+        } else if !cloud_root_ready {
             app.set_run_state(
                 RunState::Error,
                 format!(
@@ -1431,6 +1683,9 @@ impl DaemonRuntime {
             status_publisher: None,
             last_throttle_sample_inst: None,
             last_stale_lease_sweep_inst: None,
+            last_whole_scope_scan_at: None,
+            local_root_unreadable: None,
+            local_root_unreadable_this_walk: false,
             running_reconcile_intent_id: None,
             reconcile_wait_reason: None,
             startup_reconstruction_barrier: false,
@@ -1453,14 +1708,23 @@ impl DaemonRuntime {
             provider_call_mode: crate::provider_jobs::ProviderCallMode::Inline,
             cloud_root_call: None,
             root_hold: None,
+            one_way_hold: None,
             last_root_check_inst: None,
             reconcile_after_root_check: false,
             profile_id: DEFAULT_PROFILE_ID.to_string(),
             timeline_default_entries: None,
             cloud_root_ready,
+            local_root_changed: false,
+            seen_rules_generation: 0,
+            ignored_paths: None,
+            cloud_full: None,
+            first_cloud_probe_pending,
             last_cloud_root_attempt_inst: None,
             sign_in_hold: false,
             reconcile_walker: None,
+            whole_scope_rescan_wanted: false,
+            folders_waiting_for_rules: Vec::new(),
+            walks_waiting_for_rules: Vec::new(),
             mirror_revert_count: 0,
             mirror_delete_count: 0,
             conflict_count: 0,
@@ -1470,24 +1734,22 @@ impl DaemonRuntime {
                     &vapor_shared::config::VaporConfig::default(),
                 ),
             ))),
-            bandwidth_shaper: Arc::new(Mutex::new(vapor_providers::BandwidthShaper::unlimited())),
+            bandwidth: Arc::default(),
             idle_notifier: Arc::new(vapor_platform::AlwaysIdleNotifier),
-            transfer_step_bytes: Arc::new(std::sync::atomic::AtomicU64::new(
-                constants::engine::TRANSFER_STAGE_STEP_BYTES,
-            )),
             latest_ceilings: None,
             last_sampled_inputs: None,
             last_timeline_run_state: None,
             last_timeline_throttle: None,
-            device_id: vapor_shared::device_id::derive_device_id(),
-            active_coding: crate::safeguards::ActiveCodingHeuristic::default(),
+            device_id,
             mass_change_guard: crate::safeguards::MassChangeGuard::default(),
             mass_delete_settings: crate::safeguards::MassDeleteGuardSettings::default(),
             trash: None,
             last_trash_purge_inst: None,
+            trash_purge: None,
             last_conflict_sync_inst: None,
             decision_changes: 0,
-            flush_boost_until_inst: None,
+            decision_retries: std::collections::HashMap::new(),
+            reconcile_boost_until_inst: None,
         };
         if let Some(found) = local_replacement {
             runtime.hold_for_replaced_root(crate::root_identity::RootSide::Local, found, now)?;
@@ -1498,10 +1760,17 @@ impl DaemonRuntime {
         } else if let Some(message) = startup_sign_in_hold {
             runtime.mark_sign_in_required(&message, now);
         }
-        if !cloud_root_ready {
+        runtime.hold_until_one_way_is_acknowledged(now)?;
+        if !cloud_root_ready && !first_cloud_probe_pending {
             runtime.last_cloud_root_attempt_inst = Some(runtime.clock.now());
         }
         Ok(runtime)
+    }
+
+    /// Whether the folder at the local root changed since the last
+    /// call; the caller that owns the watchers starts them again.
+    pub(crate) fn take_local_root_changed(&mut self) -> bool {
+        std::mem::take(&mut self.local_root_changed)
     }
 
     /// Wires the shared daemon activity timeline in.
@@ -1564,14 +1833,18 @@ impl DaemonRuntime {
     pub fn attach_resource_management(
         &mut self,
         budget: Arc<Mutex<crate::resource_budget::ResourceBudget>>,
-        shaper: Arc<Mutex<vapor_providers::BandwidthShaper>>,
-        transfer_step_bytes: Arc<std::sync::atomic::AtomicU64>,
+        bandwidth: Arc<crate::bandwidth::TransferBandwidth>,
         idle_notifier: Arc<dyn vapor_platform::IdleNotifier>,
     ) {
         self.resource_budget = budget;
-        self.bandwidth_shaper = shaper;
-        self.transfer_step_bytes = transfer_step_bytes;
+        self.bandwidth = bandwidth;
         self.idle_notifier = idle_notifier;
+    }
+
+    /// Fixes the link capacity instead of measuring it (the static
+    /// throttle inputs of the test harnesses).
+    pub fn pin_link_capacity_kbps(&mut self, kbps: u32) {
+        self.bandwidth.pin_capacity_kbps(kbps);
     }
 
     pub fn set_idle_notifier(&mut self, idle_notifier: Arc<dyn vapor_platform::IdleNotifier>) {
@@ -1583,13 +1856,12 @@ impl DaemonRuntime {
     pub fn resources_status(&self) -> Option<vapor_ipc::ResourcesStatus> {
         let ceilings = self.latest_ceilings.as_ref()?;
         let inputs = self.last_sampled_inputs.as_ref();
-        let bandwidth_rate_kbps = self
-            .bandwidth_shaper
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .rate()
-            .map(|bytes_per_sec| bytes_per_sec * 8 / 1_000)
-            .unwrap_or(0);
+        let now_inst = self.clock.now();
+        let capacity_kbps = |direction| {
+            self.bandwidth
+                .capacity_bytes_per_second(direction, now_inst)
+                .map(|bytes_per_second| bytes_per_second * 8 / 1_000)
+        };
         Some(vapor_ipc::ResourcesStatus {
             cpu: vapor_ipc::Ceiling {
                 limit_percent: ceilings.cpu_percent,
@@ -1603,7 +1875,11 @@ impl DaemonRuntime {
             },
             bandwidth: vapor_ipc::BandwidthCeiling {
                 limit_percent: ceilings.bandwidth_percent,
-                used_kbps: bandwidth_rate_kbps,
+                used_kbps: self.bandwidth.used_kbps(now_inst),
+                upload_capacity_kbps: capacity_kbps(crate::bandwidth::TransferDirection::Upload),
+                download_capacity_kbps: capacity_kbps(
+                    crate::bandwidth::TransferDirection::Download,
+                ),
             },
             idle_boost: vapor_ipc::StateReason {
                 state: ceilings.boost_state.to_string(),
@@ -1802,6 +2078,23 @@ impl DaemonRuntime {
                 now,
             );
         }
+        if let Some((path, cause)) = report.cloud_deletes.first() {
+            let others = report.cloud_deletes.len() - 1;
+            let message = if others == 0 {
+                format!("removed {} from the cloud: {cause}", path.display())
+            } else {
+                format!(
+                    "removed {} and {others} more path(s) from the cloud: {cause}",
+                    path.display()
+                )
+            };
+            timeline.push(
+                constants::timeline::KIND_CLOUD_DELETE,
+                profile_id,
+                message,
+                now,
+            );
+        }
         if let Some(root) = &report.completed_reconcile_root {
             timeline.push(
                 constants::timeline::KIND_RECONCILE,
@@ -1820,8 +2113,8 @@ impl DaemonRuntime {
         }
     }
 
-    /// Overrides the device identifier (the bootstrap passes the value
-    /// persisted in `vapor.json`; a later task forbids silent regeneration).
+    /// Sets the device identifier. The daemon passes the value that
+    /// `vapor.json` holds, which is written one time and kept.
     pub fn set_device_id(&mut self, device_id: impl Into<String>) {
         self.device_id = device_id.into();
     }
@@ -1864,6 +2157,66 @@ impl DaemonRuntime {
     /// expired or revoked token, no token at all). Admission and the
     /// changes poll stop; the root check keeps probing, and the first
     /// probe that gets through releases the hold.
+    /// The cloud had no room for an upload. The first time, the user is
+    /// told (a WARNING, the timeline, the run reason); each later
+    /// failure only keeps the state alive.
+    fn mark_cloud_full(&mut self, message: &str, now: SystemTime) {
+        let newly_full = self.cloud_full.is_none();
+        self.cloud_full = Some((message.to_string(), self.clock.now()));
+        if !newly_full {
+            return;
+        }
+        logging::warning(
+            "The cloud has no room; uploads wait and are tried again later",
+            &[
+                ("profile_id", self.profile_id.clone()),
+                ("provider", self.app.provider_name().to_string()),
+                ("error", message.to_string()),
+                (
+                    "retry_in_seconds",
+                    constants::engine::CLOUD_FULL_RETRY_SECONDS.to_string(),
+                ),
+            ],
+        );
+        if let Some(timeline) = &self.timeline {
+            timeline.push(
+                constants::timeline::KIND_CLOUD_FULL,
+                self.profile_id.clone(),
+                format!("The cloud has no room: uploads wait. {message}"),
+                now,
+            );
+        }
+        self.restore_run_state_after_root_recovery("the cloud is full");
+    }
+
+    /// Ends the cloud-full state when the uploads that waited have had
+    /// their next try and none of them said "full" again.
+    fn clear_cloud_full_if_over(&mut self, now: SystemTime) {
+        let Some((_, last_said)) = &self.cloud_full else {
+            return;
+        };
+        let quiet_for = self.clock.now().saturating_duration_since(*last_said);
+        // One retry interval, and time for the retried uploads to run.
+        let over = Duration::from_secs(constants::engine::CLOUD_FULL_RETRY_SECONDS + 60);
+        if quiet_for < over {
+            return;
+        }
+        self.cloud_full = None;
+        logging::info(
+            "Uploads get through again; the cloud has room",
+            &[("profile_id", self.profile_id.clone())],
+        );
+        if let Some(timeline) = &self.timeline {
+            timeline.push(
+                constants::timeline::KIND_CLOUD_FULL,
+                self.profile_id.clone(),
+                "The cloud has room again; uploads resume",
+                now,
+            );
+        }
+        self.restore_run_state_after_root_recovery("the cloud has room again");
+    }
+
     fn mark_sign_in_required(&mut self, message: &str, now: SystemTime) {
         if self.sign_in_hold {
             return;
@@ -1922,6 +2275,12 @@ impl DaemonRuntime {
         true
     }
 
+    /// How many entries on this device the ignore rules keep out of
+    /// sync, as the last whole-scope scan counted them.
+    pub fn ignored_paths(&self) -> Option<u64> {
+        self.ignored_paths
+    }
+
     /// Cumulative keep-both conflict copies created since daemon start.
     pub fn conflict_count(&self) -> u64 {
         self.conflict_count
@@ -1951,12 +2310,12 @@ impl DaemonRuntime {
 
     /// Retries ensuring the provider-side sync root while it is
     /// unavailable. Between attempts, sync work stays blocked
-    /// and intents accumulate durably — never dropped.
+    /// and intents accumulate durably, never dropped.
     /// Flips the daemon into the blocked cloud-root state when the root
     /// vanishes *mid-run* (deleted, unmounted, remote folder removed).
     /// Admission stops on the next tick (`paused` derives from
     /// `cloud_root_ready`), the periodic ensure-retry recreates the root,
-    /// and recovery schedules a whole-scope reconcile — the same
+    /// and recovery schedules a whole-scope reconcile: the same
     /// self-healing path a missing root takes at startup.
     fn mark_cloud_root_unavailable(&mut self, reason: &str, now: SystemTime) {
         if !self.cloud_root_ready {
@@ -2012,6 +2371,7 @@ impl DaemonRuntime {
             return Ok(());
         };
         let now = self.clock.now_system();
+        let first_probe = std::mem::take(&mut self.first_cloud_probe_pending);
         match outcome {
             CloudRootOutcome::Ready { adopted } => {
                 if let Some(identity) = adopted
@@ -2030,6 +2390,13 @@ impl DaemonRuntime {
                 self.cloud_root_ready = true;
                 self.release_sign_in_hold(now);
                 self.release_root_hold(crate::root_identity::RootSide::Cloud, now);
+                if first_probe {
+                    // The profile's start, not the end of an outage:
+                    // the queue holds what the last run left, and the
+                    // startup reconcile is queued already.
+                    self.restore_run_state_after_root_recovery("cloud root ready");
+                    return Ok(());
+                }
                 if let Err(error) = self.forget_the_outage() {
                     logging::warning(
                         "Could not drop the deletions queued during the outage",
@@ -2038,9 +2405,9 @@ impl DaemonRuntime {
                 }
                 // A recovered root may have drifted while unreachable: a
                 // whole-scope reconcile converges it. The two-way walk
-                // only deletes locally behind a remote-origin tombstone,
-                // so a root that came back emptier re-uploads instead of
-                // mirroring the emptiness back.
+                // applies a cloud deletion here only to a file the sync
+                // index vouches for, and the mass-delete guard holds a
+                // burst of them.
                 if let Err(error) = self.enqueue_startup_reconstruction_reconcile(now) {
                     logging::warning(
                         "Could not schedule the post-recovery whole-scope reconcile",
@@ -2063,10 +2430,15 @@ impl DaemonRuntime {
             CloudRootOutcome::Missing => {
                 self.hold_for_missing_root(crate::root_identity::RootSide::Cloud, now)?;
             }
-            CloudRootOutcome::Unreachable(message) => logging::debug(
-                "Cloud root probe failed; retrying at the ensure cadence",
-                &[("error", message)],
-            ),
+            CloudRootOutcome::Unreachable(message) => {
+                logging::debug(
+                    "Cloud root probe failed; retrying at the ensure cadence",
+                    &[("error", message)],
+                );
+                if first_probe {
+                    self.restore_run_state_after_root_recovery("cloud root checked");
+                }
+            }
             CloudRootOutcome::SignInRequired(message) => self.mark_sign_in_required(&message, now),
         }
         Ok(())
@@ -2144,6 +2516,10 @@ impl DaemonRuntime {
             self.app.set_run_state(RunState::Error, reason);
             return;
         }
+        if let Some(reason) = self.one_way_hold.clone() {
+            self.app.set_run_state(RunState::Error, reason);
+            return;
+        }
         if !self.cloud_root_ready {
             self.app.set_run_state(
                 RunState::Error,
@@ -2157,6 +2533,16 @@ impl DaemonRuntime {
         if self.app.snapshot().run_state == RunState::Paused {
             return;
         }
+        if let Some(reason) = self.local_root_unreadable.clone() {
+            self.app.set_run_state(RunState::Error, reason);
+            return;
+        }
+        if let Some((message, _)) = &self.cloud_full {
+            // Downloads and deletions go on; the state says what waits.
+            self.app
+                .set_run_state(RunState::Error, format!("uploads wait: {message}"));
+            return;
+        }
         match self.sync_scope.local_root.as_ref() {
             Some(path) => self.app.set_run_state(
                 RunState::Running,
@@ -2166,6 +2552,174 @@ impl DaemonRuntime {
                 .app
                 .set_run_state(RunState::Paused, "no local root configured"),
         }
+    }
+
+    /// A one-way mode overwrites and removes on one side. It runs only
+    /// after the user acknowledged that for this mode and this pair of
+    /// roots; until then the profile holds behind a decision and syncs
+    /// nothing. A decision left from another mode or another pair of
+    /// roots is withdrawn.
+    fn hold_until_one_way_is_acknowledged(
+        &mut self,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        use crate::one_way;
+        let mode = self.sync_scope.sync_mode;
+        let Some(local_root) = self.sync_scope.local_root.clone() else {
+            return Ok(());
+        };
+        let cloud_root = self.sync_scope.cloud_root.clone();
+        let wanted = one_way::fingerprint(mode, &local_root, &cloud_root);
+        let open = self
+            .state_db
+            .open_decision(one_way::DECISION_KIND, Some(&local_root))?;
+        let asks_for_this_mirror = |decision: &crate::state_db::DecisionRecord| {
+            decision.evidence["fingerprint"].as_str() == Some(wanted.as_str())
+        };
+        if let Some(stale) = open.as_ref().filter(|decision| {
+            mode == vapor_shared::SyncMode::TwoWay || !asks_for_this_mirror(decision)
+        }) {
+            self.withdraw_decision(stale.id, now)?;
+        }
+        if mode == vapor_shared::SyncMode::TwoWay {
+            // A confirmation is for the mirror that ran. A profile that
+            // synced both ways since then holds changes the user made
+            // on both sides, so a return to the mirror asks again.
+            self.state_db
+                .delete_state(constants::state::ONE_WAY_ACKNOWLEDGED_KEY)?;
+            return Ok(());
+        }
+        if one_way::acknowledged(&self.state_db, mode, &local_root, &cloud_root)? {
+            // Confirmed on another surface while this question was open.
+            if let Some(answered) = open.filter(asks_for_this_mirror) {
+                self.withdraw_decision(answered.id, now)?;
+            }
+            return Ok(());
+        }
+        let decision_id = match open.filter(asks_for_this_mirror) {
+            Some(decision) => decision.id,
+            None => {
+                let id = self.state_db.create_decision(
+                    one_way::DECISION_KIND,
+                    crate::state_db::DecisionScope::Profile,
+                    Some(&local_root),
+                    &one_way::question(mode, &local_root, &cloud_root),
+                    &one_way::options(mode),
+                    &serde_json::json!({
+                        "mode": mode.as_config_value(),
+                        "localRoot": local_root.display().to_string(),
+                        "cloudRoot": cloud_root,
+                        "fingerprint": wanted,
+                    }),
+                    now,
+                )?;
+                logging::warning(
+                    "A one-way mode needs the user's confirmation; holding the profile behind a decision",
+                    &[
+                        ("sync_mode", mode.as_config_value().to_string()),
+                        ("decision_id", id.to_string()),
+                    ],
+                );
+                self.announce_decisions(&[id], now);
+                id
+            }
+        };
+        let reason = format!(
+            "{} needs your confirmation before it runs: it overwrites and removes files; \
+             answer decision #{decision_id} (vapor decisions list)",
+            mode.as_config_value()
+        );
+        if self.app.snapshot().run_state != RunState::Paused {
+            self.app.set_run_state(RunState::Error, reason.clone());
+        }
+        self.one_way_hold = Some(reason);
+        Ok(())
+    }
+
+    /// Lets a held one-way profile run when the confirmation arrived
+    /// from another surface: `vapor profiles add` on a terminal asks the
+    /// question itself and records the answer in the state database,
+    /// and the daemon can compose the profile before that write lands.
+    fn release_one_way_hold_if_acknowledged(
+        &mut self,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        use crate::one_way;
+        let mode = self.sync_scope.sync_mode;
+        let Some(local_root) = self.sync_scope.local_root.clone() else {
+            return Ok(());
+        };
+        let cloud_root = self.sync_scope.cloud_root.clone();
+        if !one_way::acknowledged(&self.state_db, mode, &local_root, &cloud_root)? {
+            return Ok(());
+        }
+        if let Some(open) = self
+            .state_db
+            .open_decision(one_way::DECISION_KIND, Some(&local_root))?
+        {
+            self.withdraw_decision(open.id, now)?;
+        }
+        self.one_way_hold = None;
+        self.restore_run_state_after_root_recovery("one-way mode confirmed");
+        logging::info(
+            "One-way mode was confirmed on another surface; the profile runs as a strict mirror",
+            &[("sync_mode", mode.as_config_value().to_string())],
+        );
+        Ok(())
+    }
+
+    /// Applies an `enable` answer: records the acknowledgement for the
+    /// mirror the question was about and lets the profile run.
+    fn enable_one_way_mode(
+        &mut self,
+        decision: &crate::state_db::DecisionRecord,
+        now: SystemTime,
+    ) -> Result<String, String> {
+        use crate::one_way;
+        let mode = self.sync_scope.sync_mode;
+        let local_root = self
+            .sync_scope
+            .local_root
+            .clone()
+            .ok_or_else(|| "the profile has no local root".to_string())?;
+        let cloud_root = self.sync_scope.cloud_root.clone();
+        if decision.evidence["fingerprint"].as_str()
+            != Some(one_way::fingerprint(mode, &local_root, &cloud_root).as_str())
+        {
+            // The answer is about a mirror this profile no longer is.
+            return Ok("ignored: the profile's mode or roots changed since the question".into());
+        }
+        one_way::acknowledge(&mut self.state_db, mode, &local_root, &cloud_root, now)
+            .map_err(|error| error.to_string())?;
+        self.one_way_hold = None;
+        self.restore_run_state_after_root_recovery("one-way mode confirmed");
+        logging::info(
+            "One-way mode confirmed by the user; the profile runs as a strict mirror",
+            &[("sync_mode", mode.as_config_value().to_string())],
+        );
+        Ok(format!(
+            "enabled: {} runs for these two folders",
+            mode.as_config_value()
+        ))
+    }
+
+    /// Records the acknowledgement of this profile's one-way mode, the
+    /// way an `enable` answer does.
+    #[cfg(test)]
+    pub(crate) fn acknowledge_one_way_mode(&mut self, now: SystemTime) {
+        let open = self
+            .state_db
+            .open_decision(
+                crate::one_way::DECISION_KIND,
+                self.sync_scope.local_root.as_deref(),
+            )
+            .expect("read decision")
+            .expect("a one-way profile asks before it runs");
+        self.state_db
+            .resolve_decision(open.id, crate::one_way::OPTION_ENABLE, now)
+            .expect("answer");
+        self.apply_resolved_decisions(now).expect("apply");
+        assert!(self.one_way_hold.is_none(), "the answer releases the hold");
     }
 
     /// Opens (or finds) the `root-replaced` decision for `side` and holds
@@ -2402,6 +2956,7 @@ impl DaemonRuntime {
             }
         }
         self.root_hold = None;
+        self.local_root_changed |= side == crate::root_identity::RootSide::Local;
         logging::info(
             "Sync root is back; releasing the profile",
             &[("side", side.label().to_string())],
@@ -2509,24 +3064,19 @@ impl DaemonRuntime {
             ),
             None => (None, false),
         };
-        // `vapor reconcile` is the user's own request: a scan the
-        // throttle may not hold back (Suspended aside), plus the boost
-        // that releases deferred work, so what the scan finds moves at
-        // once.
+        // `vapor reconcile` is the user's own request: a whole-scope
+        // scan now, plus the boost that releases deferred work, so what
+        // the scan finds moves at once.
         if reconcile_request {
-            self.app.request_on_demand_reconcile();
             if let Some(timeline) = &self.timeline {
                 timeline.push(
                     constants::timeline::KIND_RECONCILE,
                     self.profile_id.as_str(),
-                    "reconcile requested by the user: the scan runs under any throttle state but suspended",
+                    "reconcile requested by the user",
                     now,
                 );
             }
-            logging::info(
-                "Reconcile requested by the user; the scan will not wait for an idle moment",
-                &[],
-            );
+            logging::info("Reconcile requested by the user", &[]);
         }
 
         if let Some(pause) = pause_request {
@@ -2534,29 +3084,15 @@ impl DaemonRuntime {
                 self.app
                     .set_run_state(RunState::Paused, "user paused via vapor pause");
             } else {
-                // Re-derive the run state from what can actually admit
-                // work: resuming while the cloud root is unavailable must
-                // not report Running (which would mask the real blocker),
-                // since the tick loop still leases nothing.
-                if let Some(reason) = self.sign_in_reason() {
-                    self.app.set_run_state(RunState::Error, reason);
-                } else if !self.cloud_root_ready {
-                    self.app.set_run_state(
-                        RunState::Error,
-                        format!(
-                            "cloud root {} is unavailable; sync work is blocked until it can be ensured",
-                            self.sync_scope.cloud_root
-                        ),
-                    );
-                } else {
-                    let reason = match self.sync_scope.local_root.as_ref() {
-                        Some(path) => {
-                            format!("user resumed via vapor resume; watching {}", path.display())
-                        }
-                        None => "user resumed via vapor resume".to_string(),
-                    };
-                    self.app.set_run_state(RunState::Running, reason);
-                }
+                // The pause ends. The state then says what still stops
+                // work, if anything does: a sign-in, a question about a
+                // root or about a one-way mode, a cloud root that is not
+                // there, a full cloud. Reporting Running over one of
+                // those would hide the real blocker, since the tick loop
+                // still leases nothing.
+                self.app
+                    .set_run_state(RunState::Running, "user resumed via vapor resume");
+                self.restore_run_state_after_root_recovery("user resumed via vapor resume");
             }
         }
         if reconcile_request {
@@ -2564,7 +3100,7 @@ impl DaemonRuntime {
             // device-impact invariants hold; deferred reconciles release
             // at once and the cloud feed polls on the next tick.
             let window = Duration::from_secs(constants::engine::RECONCILE_BOOST_SECONDS);
-            self.flush_boost_until_inst = Some(self.clock.now() + window);
+            self.reconcile_boost_until_inst = Some(self.clock.now() + window);
             self.remote_poller.request_immediate_poll();
             logging::info(
                 "Reconcile boost activated",
@@ -2581,13 +3117,6 @@ impl DaemonRuntime {
     }
 
     fn sample_throttle_inputs(&mut self, now: SystemTime, inputs: ThrottleInputs) {
-        // Active-coding heuristic: rapid code-class churn means
-        // the user is working even when no permissioned HID signal is
-        // available. Strictly additive — it can only raise caution.
-        let mut inputs = inputs;
-        if !inputs.user_active && self.active_coding.is_active(now) {
-            inputs.user_active = true;
-        }
         // Sampling cadence uses the monotonic clock so wall-clock rewinds
         // cannot force an extra sample (or skip one). The injected clock
         // makes that property test-checkable.
@@ -2597,6 +3126,20 @@ impl DaemonRuntime {
             .map(|last| now_inst.saturating_duration_since(last) >= self.throttle_sample_interval)
             .unwrap_or(true);
         if should_sample {
+            let slower_direction_kbps = [
+                crate::bandwidth::TransferDirection::Upload,
+                crate::bandwidth::TransferDirection::Download,
+            ]
+            .into_iter()
+            .filter_map(|direction| {
+                self.bandwidth
+                    .capacity_bytes_per_second(direction, now_inst)
+            })
+            .min()
+            .map(|bytes_per_second| {
+                u32::try_from(bytes_per_second * 8 / 1_000).unwrap_or(u32::MAX)
+            });
+            self.app.set_link_capacity_kbps(slower_direction_kbps);
             self.app.apply_throttle_inputs(inputs);
             self.last_throttle_sample_inst = Some(now_inst);
             // Loop-prevention TTL sweeps share the 1s sampling cadence
@@ -2616,15 +3159,12 @@ impl DaemonRuntime {
                 .tick(throttle_state, &inputs, idle_for, now_inst);
             self.app
                 .apply_resource_cpu_ceiling(ceilings.cpu_percent, now);
-            let capacity_kbps = inputs
-                .network_throughput_kbps
-                .unwrap_or(constants::engine::ASSUMED_LINK_CAPACITY_KBPS);
-            let rate_bytes_per_sec =
-                u64::from(capacity_kbps) * 1_000 / 8 * u64::from(ceilings.bandwidth_percent) / 100;
-            self.bandwidth_shaper
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .set_rate(Some(rate_bytes_per_sec.max(1)));
+            // The ceiling is a share of what the link carries, and the
+            // link is measured: the OS figure is only where the
+            // estimate starts.
+            self.bandwidth.set_os_reported_kbps(inputs.link_speed_kbps);
+            self.bandwidth
+                .apply_ceiling(ceilings.bandwidth_percent, now_inst);
             self.apply_memory_ceiling(ceilings.memory_percent, &inputs);
             self.latest_ceilings = Some(ceilings);
             self.last_sampled_inputs = Some(inputs);
@@ -2632,35 +3172,27 @@ impl DaemonRuntime {
     }
 
     /// Memory-ceiling reactions. The ceiling is a share of device
-    /// memory; when the host reports the daemon's resident size the
-    /// comparison is against that share, and the bounded caches trim
-    /// toward their documented floors while the process sits over it,
-    /// restoring once it is clearly under (hysteresis at half the
-    /// budget). The same trim also fires when the cache population
-    /// alone outgrows an entry budget derived from the ceiling, which is
-    /// the only signal on hosts without a memory sampler. Floors are
-    /// enforced by the caches themselves, so loop prevention and
-    /// observability never degrade below their guarantees.
+    /// memory, compared with the resident size the host reports for
+    /// the daemon. While the process sits over its share the bounded
+    /// caches trim toward their documented floors; they are restored
+    /// once it is clearly under (hysteresis at half the share). The
+    /// caches are bounded by their own capacity, so a host without a
+    /// memory sampler gets no trim: a count of cache entries says
+    /// nothing about memory, and a bulk transfer, which fills the echo
+    /// caches, is when an evicted echo costs a planning pass with a
+    /// hash and a remote probe.
     fn apply_memory_ceiling(&mut self, memory_percent: u8, inputs: &ThrottleInputs) {
-        const ENTRIES_PER_MEMORY_PERCENT: usize = 400;
-        let budget_entries = usize::from(memory_percent) * ENTRIES_PER_MEMORY_PERCENT;
-        let usage = self.local_echoes.len()
-            + self.remote_echoes.len()
-            + self
-                .timeline
-                .as_ref()
-                .map(|timeline| timeline.len())
-                .unwrap_or(0);
-        let (over_bytes, under_bytes) =
-            match (inputs.vapor_memory_bytes, inputs.device_memory_bytes) {
-                (Some(resident), Some(device)) if device > 0 => {
-                    let budget = device / 100 * u64::from(memory_percent);
-                    (resident > budget, resident < budget / 2)
-                }
-                _ => (false, true),
-            };
+        let (Some(resident), Some(device)) =
+            (inputs.vapor_memory_bytes, inputs.device_memory_bytes)
+        else {
+            return;
+        };
+        if device == 0 {
+            return;
+        }
+        let share = device / 100 * u64::from(memory_percent);
 
-        if usage > budget_entries || over_bytes {
+        if resident > share {
             let squeezed_ttl =
                 Duration::from_millis(vapor_shared::constants::self_write_cache::MIN_TTL_MILLIS);
             let squeezed_entries = vapor_shared::constants::self_write_cache::MIN_ENTRIES;
@@ -2671,11 +3203,12 @@ impl DaemonRuntime {
                 // Capture the configured capacity once so it can be
                 // restored when pressure clears (without it, a single
                 // transient squeeze permanently shrank the timeline).
-                self.timeline_default_entries
+                let configured = *self
+                    .timeline_default_entries
                     .get_or_insert(timeline.max_entries());
-                timeline.set_max_entries(budget_entries / 4);
+                timeline.set_max_entries(configured / 4);
             }
-        } else if usage < budget_entries / 2 && under_bytes {
+        } else if resident < share / 2 {
             let default_ttl = Duration::from_millis(
                 vapor_shared::constants::self_write_cache::DEFAULT_TTL_MILLIS,
             );
@@ -2698,6 +3231,18 @@ impl DaemonRuntime {
             return Ok(());
         };
 
+        // The queue holds one whole-scope reconcile at a time, so a
+        // request made while one walks joins it. The walk already
+        // compared some folders, and the request is for a scan from
+        // now: a rule that changed, events that were dropped, the
+        // user's own `vapor reconcile`.
+        if self
+            .reconcile_walker
+            .as_ref()
+            .is_some_and(|walker| walker.is_whole_scope())
+        {
+            self.whole_scope_rescan_wanted = true;
+        }
         self.state_db
             .enqueue_startup_reconcile_intent(local_root, now)?;
         self.startup_reconstruction_barrier = true;
@@ -2717,6 +3262,45 @@ impl DaemonRuntime {
         Ok(())
     }
 
+    /// Events can be lost: a watcher that dropped some, a folder the
+    /// walk could not read, a provider feed with a gap. A daemon that
+    /// runs for weeks would carry each such miss until its next
+    /// restart. One whole-scope scan a day bounds that. The scan is the
+    /// quick check, so an unchanged tree costs one listing a folder.
+    /// It waits while the throttle admits no scan.
+    fn queue_whole_scope_scan_when_due(
+        &mut self,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        let Some(local_root) = self.sync_scope.local_root.clone() else {
+            return Ok(());
+        };
+        let Some(last) = self.last_whole_scope_scan_at else {
+            self.last_whole_scope_scan_at = Some(now);
+            return Ok(());
+        };
+        let interval =
+            Duration::from_secs(constants::engine::WHOLE_SCOPE_RECONCILE_INTERVAL_SECONDS);
+        // A wall clock that went back says nothing about the age.
+        let due = now
+            .duration_since(last)
+            .map(|age| age >= interval)
+            .unwrap_or(false);
+        if !due || !self.app.reconcile_admissible() {
+            return Ok(());
+        }
+        self.state_db.enqueue_intents_coalesced(
+            &[(local_root.clone(), PendingIntentKind::ReconcileSubtree, now)],
+            crate::safeguards::IntentSource::ReconcileBacklog,
+        )?;
+        self.last_whole_scope_scan_at = Some(now);
+        logging::info(
+            "Queued the daily whole-scope reconcile",
+            &[("root", local_root.display().to_string())],
+        );
+        Ok(())
+    }
+
     fn evaluate_startup_barrier(&mut self, _now: SystemTime) {
         if !self.startup_reconstruction_barrier {
             return;
@@ -2732,7 +3316,7 @@ impl DaemonRuntime {
 
         self.startup_reconstruction_barrier = false;
         self.startup_barrier_expires_inst = None;
-        logging::warning(
+        logging::info(
             "Cleared startup reconstruction barrier after deadline; allowing non-reconcile work to proceed",
             &[(
                 "barrier_deadline_ms",
@@ -2746,12 +3330,11 @@ impl DaemonRuntime {
             return 0;
         };
 
-        // Flush boost: while boosted, deferred reconciles
-        // release immediately, bypassing both their not-before times
-        // and the Idle gate. Execution still answers to the
-        // throttle ladder — this only moves work from "deferred" to
-        // "queued".
-        if self.flush_boost_active() {
+        // The reconcile boost: while it runs, deferred reconciles
+        // release at once, whatever their not-before time. Execution
+        // still answers to the throttle ladder; the boost only moves
+        // work from "deferred" to "queued".
+        if self.reconcile_boost_active() {
             let scheduler = &mut self.scheduler;
             return recorder.with_mut_state(|maps| {
                 let released = maps.take_all_deferred_reconcile_intents();
@@ -2767,8 +3350,8 @@ impl DaemonRuntime {
         recorder.with_mut_state(|maps| app.release_ready_deferred_reconciles(maps, scheduler, now))
     }
 
-    fn flush_boost_active(&self) -> bool {
-        self.flush_boost_until_inst
+    fn reconcile_boost_active(&self) -> bool {
+        self.reconcile_boost_until_inst
             .map(|until| self.clock.now() < until)
             .unwrap_or(false)
     }
@@ -2807,7 +3390,6 @@ impl DaemonRuntime {
         } else {
             self.debounce.run_tick_for_recorder(&recorder, now)
         };
-        let hash_algorithm = self.app.provider().content_hash_algorithm();
         let mut accepted = 0;
         let mut suppressed = 0;
         let mut mirror_reverts = 0;
@@ -2822,13 +3404,7 @@ impl DaemonRuntime {
                 );
                 continue;
             }
-            if is_local_self_write_echo(
-                &mut self.local_echoes,
-                &self.tags,
-                &event,
-                hash_algorithm,
-                now,
-            ) {
+            if is_local_self_write_echo(&mut self.local_echoes, &event, now) {
                 suppressed += 1;
                 logging::debug(
                     "Suppressed stabilized event as a self-write echo",
@@ -2836,10 +3412,6 @@ impl DaemonRuntime {
                 );
                 continue;
             }
-            // Safeguard taps (post-echo-suppression, so the engine's own
-            // applied writes never count as user activity or deletions).
-            self.active_coding
-                .record_stabilized(event.debounce_class, now);
             // The deletion guard lives in the executor, at the moment a
             // deletion would become irreversible, so it sees both
             // directions and never counts a no-op.
@@ -2928,13 +3500,32 @@ impl DaemonRuntime {
         (accepted, suppressed, mirror_reverts)
     }
 
-    /// Walks a directory that just appeared and records one `Created`
-    /// event per regular file underneath it, pruning ignored names the
-    /// way the watcher bridge would. Stops at
-    /// `SYNTHESIZED_SUBTREE_EVENT_CAP` files and leaves a subtree
-    /// reconcile marker for the rest. Returns the number of files
-    /// reported.
+    /// Reports the files under a directory that just appeared, as the
+    /// events the watcher would have delivered for them. A directory
+    /// that brings an ignore file with it (a project folder moved in)
+    /// waits: its rules are not in force yet, and the watcher bridge,
+    /// which asks for the reload when it sees an ignore file change,
+    /// never saw this one. The reload is asked for here, and the files
+    /// are reported when it is in. Returns the number of files
+    /// reported now.
     fn synthesize_subtree_events(&mut self, directory: &Path, observed_at: SystemTime) -> usize {
+        if let Some(filter) = self.path_filter.clone()
+            && may_hold_an_ignore_file(directory, &filter)
+        {
+            filter.request_reload();
+            self.folders_waiting_for_rules
+                .push((directory.to_path_buf(), observed_at));
+            return 0;
+        }
+        self.report_subtree_events(directory, observed_at)
+    }
+
+    /// Walks a directory and records one `Created` event per regular
+    /// file underneath it, pruning ignored names the way the watcher
+    /// bridge would. Stops at `SYNTHESIZED_SUBTREE_EVENT_CAP` files and
+    /// leaves a subtree reconcile marker for the rest. Returns the
+    /// number of files reported.
+    fn report_subtree_events(&mut self, directory: &Path, observed_at: SystemTime) -> usize {
         let Some(recorder) = self.recorder.clone() else {
             return 0;
         };
@@ -3153,7 +3744,16 @@ impl DaemonRuntime {
     /// that held them, and marks the decision applied.
     fn apply_resolved_decisions(&mut self, now: SystemTime) -> Result<(), DaemonRuntimeError> {
         let resolved = self.state_db.resolved_unapplied_decisions()?;
+        self.decision_retries
+            .retain(|id, _| resolved.iter().any(|decision| decision.id == *id));
         for decision in resolved {
+            if self
+                .decision_retries
+                .get(&decision.id)
+                .is_some_and(|retry| now < retry.next_attempt)
+            {
+                continue;
+            }
             let choice = decision.choice.clone().unwrap_or_default();
             let summary = match (decision.kind.as_str(), choice.as_str()) {
                 (constants::decision::KIND_MASS_DELETE, constants::decision::OPTION_APPLY) => {
@@ -3178,7 +3778,7 @@ impl DaemonRuntime {
                     let enqueued = self.state_db.enqueue_intents_coalesced_with(
                         &restores,
                         crate::safeguards::IntentSource::Fresh,
-                        true,
+                        crate::state_db::Approval::Guards,
                     )?;
                     self.mass_change_guard.reset();
                     format!(
@@ -3189,10 +3789,7 @@ impl DaemonRuntime {
                     match self.apply_type_mismatch(&decision, choice, now) {
                         Ok(summary) => summary,
                         Err(message) => {
-                            logging::warning(
-                                "Could not apply the type-mismatch answer; will retry",
-                                &[("decision_id", decision.id.to_string()), ("error", message)],
-                            );
+                            self.retry_decision_later(&decision, message, now);
                             continue;
                         }
                     }
@@ -3205,18 +3802,22 @@ impl DaemonRuntime {
                     match self.reattach_root(&decision, now) {
                         Ok(summary) => summary,
                         Err(message) => {
-                            // Left answered-but-unapplied: the next tick
-                            // tries again, and the log says why.
-                            logging::warning(
-                                "Could not reattach the sync root; will retry",
-                                &[("decision_id", decision.id.to_string()), ("error", message)],
-                            );
+                            self.retry_decision_later(&decision, message, now);
                             continue;
                         }
                     }
                 }
                 (crate::unsyncable::DECISION_KIND, crate::unsyncable::OPTION_SKIP) => {
                     "skipped: the file stays on this device only".to_string()
+                }
+                (crate::one_way::DECISION_KIND, crate::one_way::OPTION_ENABLE) => {
+                    match self.enable_one_way_mode(&decision, now) {
+                        Ok(summary) => summary,
+                        Err(message) => {
+                            self.retry_decision_later(&decision, message, now);
+                            continue;
+                        }
+                    }
                 }
                 (constants::decision::KIND_CONFLICT, _) => {
                     // `vapor decisions resolve` applies a conflict answer
@@ -3243,17 +3844,12 @@ impl DaemonRuntime {
                     // A kind this runtime does not know how to apply is
                     // left answered-but-unapplied for a build that does;
                     // it is reported, never silently consumed.
-                    logging::warning(
-                        "Answered decision has no applier in this build",
-                        &[
-                            ("decision_id", decision.id.to_string()),
-                            ("kind", kind.to_string()),
-                            ("choice", choice.to_string()),
-                        ],
-                    );
+                    let message = format!("this build has no applier for {kind} / {choice}");
+                    self.retry_decision_later(&decision, message, now);
                     continue;
                 }
             };
+            self.decision_retries.remove(&decision.id);
             self.state_db.mark_decision_applied(decision.id, now)?;
             logging::info(
                 "Applied a resolved decision",
@@ -3274,6 +3870,36 @@ impl DaemonRuntime {
             }
         }
         Ok(())
+    }
+
+    /// Leaves an answer that could not be applied for a later try. The
+    /// first failure is a WARNING with the reason; the tries after it
+    /// say nothing until the reason changes, so an answer that stays
+    /// unappliable costs one log line and one try per wait.
+    fn retry_decision_later(
+        &mut self,
+        decision: &crate::state_db::DecisionRecord,
+        error: String,
+        now: SystemTime,
+    ) {
+        let waits = constants::decision::APPLY_RETRY_SECONDS;
+        let retry = self.decision_retries.entry(decision.id).or_default();
+        let wait = Duration::from_secs(waits[retry.failures.min(waits.len() - 1)]);
+        retry.failures += 1;
+        retry.next_attempt = now + wait;
+        if retry.last_error.as_deref() != Some(error.as_str()) {
+            logging::warning(
+                "Could not apply an answered decision; it is tried again later",
+                &[
+                    ("decision_id", decision.id.to_string()),
+                    ("kind", decision.kind.clone()),
+                    ("choice", decision.choice.clone().unwrap_or_default()),
+                    ("error", error.clone()),
+                    ("retry_in_seconds", wait.as_secs().to_string()),
+                ],
+            );
+            retry.last_error = Some(error);
+        }
     }
 
     /// A path that is a file on one side and a directory on the other
@@ -3303,12 +3929,16 @@ impl DaemonRuntime {
             return Ok(());
         }
         let local_is_dir = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+        let trash_enabled = self
+            .trash
+            .as_ref()
+            .is_some_and(|trash| trash.settings().enabled);
         let id = self.state_db.create_decision(
             DECISION_KIND,
             crate::state_db::DecisionScope::Path,
             Some(path),
-            &question(path, local_is_dir),
-            &options(local_is_dir),
+            &question(path, local_is_dir, trash_enabled),
+            &options(local_is_dir, trash_enabled),
             &serde_json::json!({
                 "local": if local_is_dir { "directory" } else { "file" },
                 "cloud": if local_is_dir { "file" } else { "directory" },
@@ -3353,20 +3983,33 @@ impl DaemonRuntime {
                         .unwrap_or(0),
                     |candidate| candidate.exists(),
                 );
-                std::fs::rename(&path, &copy)
-                    .map_err(|error| format!("cannot rename {} aside: {error}", path.display()))?;
-                self.local_echoes
-                    .record_delete(crate::executor::path_key(&path), now);
-                self.state_db
-                    .enqueue_intents_coalesced(
-                        &[(copy.clone(), PendingIntentKind::Upload, now)],
-                        crate::safeguards::IntentSource::Fresh,
-                    )
-                    .map_err(|error| error.to_string())?;
-                format!(
-                    "kept both: the local side moved to {}; the cloud side comes down under the original name",
-                    copy.display()
-                )
+                match std::fs::rename(&path, &copy) {
+                    Ok(()) => {
+                        self.local_echoes
+                            .record_delete(crate::executor::path_key(&path), now);
+                        self.state_db
+                            .enqueue_intents_coalesced(
+                                &[(copy.clone(), PendingIntentKind::Upload, now)],
+                                crate::safeguards::IntentSource::Fresh,
+                            )
+                            .map_err(|error| error.to_string())?;
+                        format!(
+                            "kept both: the local side moved to {}; the cloud side comes down under the original name",
+                            copy.display()
+                        )
+                    }
+                    // The local side is not at the path any more: an
+                    // earlier try moved it and failed after that, or the
+                    // user moved it. The reconcile below uploads a copy
+                    // that is there and brings the cloud side down.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        "kept both: the local side is not at the path any more; the cloud side comes down under the original name"
+                            .to_string()
+                    }
+                    Err(error) => {
+                        return Err(format!("cannot rename {} aside: {error}", path.display()));
+                    }
+                }
             }
             OPTION_PREFER_CLOUD => {
                 let trash = self
@@ -3389,10 +4032,13 @@ impl DaemonRuntime {
                 // deletes); a local file then uploads through the
                 // reconcile below, and a local directory through the
                 // subtree reconcile the completed delete enqueues.
+                // Approved: the cloud side was never synced here, so
+                // no index row vouches for it; the answer does.
                 self.state_db
-                    .enqueue_intents_coalesced(
+                    .enqueue_intents_coalesced_with(
                         &[(path.clone(), PendingIntentKind::Delete, now)],
                         crate::safeguards::IntentSource::Fresh,
+                        crate::state_db::Approval::NamedPath,
                     )
                     .map_err(|error| error.to_string())?;
                 "preferred the local side: the cloud side is being removed; the local side goes up"
@@ -3472,6 +4118,7 @@ impl DaemonRuntime {
         self.forget_the_outage()
             .map_err(|error| error.to_string())?;
         self.root_hold = None;
+        self.local_root_changed |= side == RootSide::Local;
         self.enqueue_startup_reconstruction_reconcile(now)
             .map_err(|error| format!("{error:?}"))?;
         self.restore_run_state_after_root_recovery("sync root reattached");
@@ -3572,24 +4219,65 @@ impl DaemonRuntime {
             return Ok(started_intent_ids);
         }
 
+        // Only `Suspended` refuses a scan. Leasing one to refuse it
+        // costs two database writes each tick for as long as the state
+        // holds, so a scan that cannot start is left in the queue, and
+        // the barrier that waits for it holds nothing: its caps are
+        // zero for every other kind of work too.
+        let next_ready = self.state_db.peek_next_ready_kind(now)?;
+        // Work is about to start on what the local root holds. A root
+        // that was swapped since the last periodic check (a volume
+        // unmounted, a folder put in its place) holds nothing the
+        // profile synced: its files would read as deleted, and its own
+        // files as changes. The root is read now, and a root that is
+        // not the adopted one holds the profile before anything is
+        // leased.
+        if next_ready.is_some()
+            && let Some(root) = self.sync_scope.local_root.as_deref()
+            && self.root_hold.is_none()
+            && !crate::root_identity::local_root_is_adopted(&self.state_db, root)
+        {
+            self.last_root_check_inst = None;
+            self.check_roots_if_due(now)?;
+            if self.root_hold.is_some() {
+                return Ok(started_intent_ids);
+            }
+        }
+        let next_is_reconcile = next_ready
+            .map(|kind| kind == PendingIntentKind::ReconcileSubtree)
+            .unwrap_or(false);
+        if !self.app.reconcile_admissible() {
+            if next_is_reconcile || self.startup_reconstruction_barrier {
+                let throttle_reason = self
+                    .app
+                    .throttle_decision()
+                    .map(|decision| decision.reason.clone())
+                    .filter(|reason| !reason.is_empty())
+                    .unwrap_or_else(|| "sync is suspended".to_string());
+                self.reconcile_wait_reason = Some(format!("waiting: {throttle_reason}"));
+            }
+            if self.startup_reconstruction_barrier {
+                return Ok(started_intent_ids);
+            }
+        }
+
         let batch_limit = if self.startup_reconstruction_barrier {
             1
         } else {
             let workgate = self.app.workgate_snapshot();
-            let next_is_reconcile = self
-                .state_db
-                .peek_next_ready_kind(now)?
-                .map(|kind| kind == PendingIntentKind::ReconcileSubtree)
-                .unwrap_or(false);
             self.staged_executor
                 .admission_capacity(workgate)
                 .min(workgate.available_planner_workers())
-                + usize::from(self.running_reconcile_intent_id.is_none() && next_is_reconcile)
+                + usize::from(
+                    self.running_reconcile_intent_id.is_none()
+                        && next_is_reconcile
+                        && self.app.reconcile_admissible(),
+                )
         };
 
         // `lease_ready_batch` marks every returned row leased up front, so
         // any early `break` below must hand the unprocessed remainder back
-        // to the pending state — an abandoned leased row would sit invisible
+        // to the pending state: an abandoned leased row would sit invisible
         // until the stale-lease sweep.
         let mut leased_batch = self
             .state_db
@@ -3618,19 +4306,13 @@ impl DaemonRuntime {
                             continue;
                         }
                         Ok(None) => {
+                            // Another scan holds the slot, or the state
+                            // turned `Suspended` since the peek.
                             self.scheduler.discard_pending(&intent.path);
-                            let throttle_reason = self
-                                .app
-                                .throttle_decision()
-                                .map(|decision| decision.reason.clone())
-                                .filter(|reason| !reason.is_empty())
-                                .unwrap_or_else(|| "the throttle is not idle".to_string());
-                            self.reconcile_wait_reason =
-                                Some(format!("waiting for an idle moment: {throttle_reason}"));
                             self.requeue_runtime_intent(
                                 intent.id,
                                 now + blocked_intent_requeue_delay(),
-                                "waiting for idle reconcile slot",
+                                "waiting for the reconcile slot",
                             )?;
                             report.requeued_intents += 1;
                             if self.startup_reconstruction_barrier {
@@ -3674,7 +4356,7 @@ impl DaemonRuntime {
                             // Per-path serialization blocks only this
                             // intent (an execution is in flight for the
                             // same path); the rest of the batch keeps
-                            // admitting — breaking here would pin every
+                            // admitting: breaking here would pin every
                             // later-id intent behind one long transfer.
                             self.requeue_runtime_intent(
                                 intent_id,
@@ -3786,7 +4468,7 @@ impl DaemonRuntime {
 
     /// Forces this runtime into the blocking `Error` run state with a
     /// reason (used by the multi-profile shell to surface a profile that
-    /// cannot run — e.g. an invalid provider — without performing any sync
+    /// cannot run, e.g. an invalid provider, without performing any sync
     /// work for it).
     pub fn set_error_state(&mut self, reason: impl Into<String>) {
         self.app.set_run_state(RunState::Error, reason.into());
@@ -3825,7 +4507,7 @@ impl DaemonRuntime {
             .state_db
             .requeue_leased(intent_id, available_at, Some(last_error))?
         {
-            // The row vanished or changed state underneath us — an
+            // The row vanished or changed state underneath us: an
             // inconsistency worth loud logging, but not worth failing the
             // tick (and, transitively, the daemon) over one intent.
             logging::warning(
@@ -3838,6 +4520,47 @@ impl DaemonRuntime {
         }
         Ok(())
     }
+}
+
+/// Whether an ignore file whose rules are not in force lies under
+/// `directory`, in a place the rules in force do not hide. The look is
+/// bounded, because it runs on the tick thread: a tree with more
+/// entries than one report covers counts as "may hold one", and waits
+/// for a reload of the rules, which walks it on a worker.
+fn may_hold_an_ignore_file(
+    directory: &Path,
+    filter: &crate::fs_events::SharedEventPathFilter,
+) -> bool {
+    let mut budget = constants::engine::SYNTHESIZED_SUBTREE_EVENT_CAP;
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if budget == 0 {
+                return true;
+            }
+            budget -= 1;
+            let path = entry.path();
+            if filter.should_ignore(&path) {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => pending.push(path),
+                Ok(kind) if kind.is_file() && filter.is_ignore_file(&path) => {
+                    let state = entry
+                        .metadata()
+                        .map(|metadata| (metadata.modified().ok(), metadata.len()));
+                    if !state.is_ok_and(|state| filter.covers(&path, state)) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 /// Timeline text for a remote name that would alias a local file.
@@ -3861,57 +4584,43 @@ fn blocked_intent_requeue_delay() -> Duration {
 /// stabilized local event is an echo of a write/delete the daemon itself
 /// performed while applying remote changes.
 ///
-/// Removals correlate by path + recency. Writes correlate by op-id tag
-/// first; the content-hash fallback runs only when a live write record
-/// exists for the path and the observed size matches the recorded size,
-/// so the fallback never hashes a file that obviously diverged.
+/// Removals correlate by path + recency, and by the state of the path:
+/// a path that is gone matches a delete record whatever kind the
+/// watcher delivered last. FSEvents reports the daemon's own renames
+/// and trash moves as `Renamed`, and a file written seconds before
+/// ends its burst with `Modified`. Writes correlate by the size and
+/// the modification time of the file as the daemon applied it.
 fn is_local_self_write_echo(
     local_echoes: &mut SelfWriteCache,
-    tags: &OpIdTagStore,
     event: &crate::debounce::StabilizedEvent,
-    algorithm: vapor_providers::HashAlgorithm,
     now: SystemTime,
 ) -> bool {
     let key = event.path.to_string_lossy();
-    if event.last_event_kind == FsEventKind::Removed {
+    // Gone, or stored under another spelling now: this name left.
+    if !crate::name_collision::exactly_present(&event.path) {
         return local_echoes.matches_delete(&key, now);
     }
+    let Ok(metadata) = std::fs::symlink_metadata(&event.path) else {
+        return local_echoes.matches_delete(&key, now);
+    };
 
-    // Write echoes correlate by the file's *current* content, never by
-    // the op-id tag alone: the tag survives later writes, so a tag-only
-    // match would keep suppressing genuine user edits for the record's
-    // whole TTL after a download-apply (an edit made right after a
-    // download would silently never upload). The size gate keeps the
-    // hash off every obviously-diverged file; the record always carries
-    // both (the executor records size + hash on apply).
+    // The path is here. A delete the daemon made at it is over: what
+    // is here now came after, and its removal will be a real one.
+    local_echoes.forget_delete(&key);
+
+    // A write echo is the file exactly as the daemon applied it: the
+    // size and the modification time the apply recorded. The op-id tag
+    // alone is not that evidence: it survives later writes, so a
+    // tag-only match would suppress a user's edit for the record's
+    // whole lifetime. Nothing is read from the file: this runs on the
+    // tick thread, in every throttle state, for every downloaded file.
     if !local_echoes.has_write_record(&key, now) {
         return false;
     }
-    let Ok(metadata) = std::fs::symlink_metadata(&event.path) else {
-        return false;
-    };
     if !metadata.is_file() {
         return false;
     }
-    if let Some(expected_size) = local_echoes.expected_write_size(&key, now)
-        && expected_size != metadata.len()
-    {
-        return false;
-    }
-    // Large files: correlate by the op-id tag rather than a full-file
-    // hash. Hashing a multi-GB downloaded file inline here would stall
-    // debounce release, remote polling, and executor advancement — and
-    // would run even under Suspended (stabilization precedes the throttle
-    // gate), violating "under Suspended, hashing stops". The size gate
-    // above already rejects the common divergent-edit case.
-    if metadata.len() > constants::engine::HASH_STAGE_STEP_BYTES {
-        let op_id = tags.read_op_id(&event.path);
-        return local_echoes.matches_write(&key, op_id.as_deref(), None, now);
-    }
-    let Ok(content_hash) = hash_hex_of_file_with(&event.path, algorithm) else {
-        return false;
-    };
-    local_echoes.matches_write(&key, None, Some(&content_hash), now)
+    local_echoes.matches_write_state(&key, metadata.len(), metadata.modified().ok(), now)
 }
 
 /// Resident size as a whole-number share of device memory, rounded up so
@@ -4047,6 +4756,22 @@ mod tests {
             leased.path,
             runtime.sync_scope().local_root.clone().unwrap()
         );
+
+        // The second start finds the adopted root through the link.
+        drop(runtime);
+        let state_db = DurableStateDb::open(&database_path).expect("reopen durable state db");
+        let runtime = DaemonRuntime::start(
+            test_sync_scope(&symlink_watch_root),
+            state_db,
+            inert_stub_provider(),
+        )
+        .expect("a root that is a link is present on the second start");
+        assert_eq!(
+            runtime.sync_scope().local_root,
+            Some(
+                vapor_shared::paths::canonicalize(&real_watch_root).expect("canonical watch root"),
+            )
+        );
     }
 
     #[test]
@@ -4150,7 +4875,7 @@ mod tests {
             .clone()
             .expect("runtime watch root");
         // Real payload on disk: the pipeline hashes and uploads actual
-        // bytes — no simulator.
+        // bytes, no simulator.
         let local_file = runtime_watch_root.join("src/main.rs");
         std::fs::create_dir_all(local_file.parent().unwrap()).expect("dirs");
         std::fs::write(&local_file, b"fn main() {}\n").expect("seed local file");
@@ -4302,7 +5027,7 @@ mod tests {
         assert!(report.started_staged_intents >= 4);
         // Gross-regression guard-rail (Tier 1), not an SLO. One tick that
         // durably enqueues 150 intents performs 150 SQLite writes, which is
-        // fsync-bound and slow on cold-cache CI runners — Windows disk I/O in
+        // fsync-bound and slow on cold-cache CI runners: Windows disk I/O in
         // particular measured ~3s. The bound is deliberately generous so it
         // only trips on an order-of-magnitude regression, never on runner
         // variance; precise timing lives in the Tier-2 perf suite.
@@ -4314,7 +5039,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_reconcile_flow_is_idle_biased_and_completes_across_ticks() {
+    fn runtime_reconcile_flow_waits_out_suspension_and_completes_across_ticks() {
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
@@ -4356,7 +5081,7 @@ mod tests {
             .tick_with_inputs(
                 timestamp_ms(31_000),
                 ThrottleInputs {
-                    user_active: true,
+                    thermal_pressure: crate::throttle::ThermalPressure::Critical,
                     ..ThrottleInputs::default()
                 },
             )
@@ -4405,6 +5130,36 @@ mod tests {
         feed: vapor_providers::filesystem::ManualFeedHandle,
         clock: Arc<crate::clock::ManualClock>,
         now_ms: u64,
+        /// The local tree as the stand-in watcher last saw it; `None`
+        /// while the test records every event by hand.
+        watched_tree: Option<LocalTreeState>,
+    }
+
+    /// Path to (is a directory, size, modification time).
+    type LocalTreeState = std::collections::BTreeMap<PathBuf, (bool, u64, Option<SystemTime>)>;
+
+    fn local_tree_state(root: &std::path::Path) -> LocalTreeState {
+        let mut state = LocalTreeState::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if metadata.is_dir() {
+                    pending.push(path.clone());
+                }
+                state.insert(
+                    path,
+                    (metadata.is_dir(), metadata.len(), metadata.modified().ok()),
+                );
+            }
+        }
+        state
     }
 
     impl BidirectionalFixture {
@@ -4412,7 +5167,64 @@ mod tests {
             Self::new_with_mode(vapor_shared::SyncMode::TwoWay)
         }
 
+        /// Turns on the stand-in watcher: before and after each tick
+        /// the local tree is compared with what was last seen, and
+        /// each difference is delivered the way FSEvents delivers it.
+        /// That covers the writes the daemon makes itself (a rename
+        /// to a conflict copy, a move to the trash, a download put in
+        /// place), which a test that records events by hand leaves
+        /// out. A path that went away arrives as `Renamed`, because
+        /// the daemon renames and never unlinks; a path that appeared
+        /// or changed arrives as `Renamed` then `Modified`, the order
+        /// a file written seconds before ends its burst in.
+        fn watching_the_local_tree(mut self) -> Self {
+            self.watched_tree = Some(local_tree_state(&self.watch_root));
+            self
+        }
+
+        fn deliver_local_tree_changes(&mut self) {
+            let Some(seen) = self.watched_tree.take() else {
+                return;
+            };
+            let current = local_tree_state(&self.watch_root);
+            // The watcher bridge drops what the ignore rules hide, and
+            // that covers Vapor's own files: on a host with no extended
+            // attributes the op-id tag of a file is a side-file next to
+            // it.
+            let filter = self.runtime.path_filter.clone();
+            let hidden = |path: &std::path::Path| {
+                filter
+                    .as_ref()
+                    .is_some_and(|filter| filter.should_ignore(path))
+            };
+            for path in seen
+                .keys()
+                .filter(|path| !current.contains_key(*path) && !hidden(path))
+            {
+                self.record_local_event(path, FsEventKind::Renamed, self.now_ms);
+            }
+            for (path, state) in &current {
+                if seen.get(path) != Some(state) && !state.0 && !hidden(path) {
+                    self.record_local_event(path, FsEventKind::Renamed, self.now_ms);
+                    self.record_local_event(path, FsEventKind::Modified, self.now_ms);
+                }
+            }
+            self.watched_tree = Some(current);
+        }
+
+        /// A fixture in `sync_mode`. A one-way mode is confirmed the
+        /// way the user confirms it, so the profile runs.
         fn new_with_mode(sync_mode: vapor_shared::SyncMode) -> Self {
+            let mut fixture = Self::unconfirmed_with_mode(sync_mode);
+            if sync_mode != vapor_shared::SyncMode::TwoWay {
+                fixture.runtime.acknowledge_one_way_mode(timestamp_ms(0));
+            }
+            fixture
+        }
+
+        /// A fixture in `sync_mode` as the daemon composes it: a
+        /// one-way mode still waits for the user.
+        fn unconfirmed_with_mode(sync_mode: vapor_shared::SyncMode) -> Self {
             Self::new_with_provider(sync_mode, |provider| Box::new(provider))
         }
 
@@ -4422,9 +5234,46 @@ mod tests {
             let handle = flag.clone();
             let fixture =
                 Self::new_with_provider(vapor_shared::SyncMode::TwoWay, move |provider| {
-                    Box::new(SigningOutProvider {
+                    Box::new(SwitchedProvider {
                         inner: provider,
                         signed_out: flag,
+                        downloads_fail: Arc::default(),
+                        cloud_full: Arc::default(),
+                    })
+                });
+            (fixture, handle)
+        }
+
+        /// A fixture whose downloads fail with a transient error while
+        /// the returned switch is on: a download that takes longer
+        /// than the debounce window.
+        /// A fixture whose provider refuses uploads, the way a full
+        /// cloud does, while the returned switch is set.
+        fn new_with_cloud_full_switch() -> (Self, Arc<std::sync::atomic::AtomicBool>) {
+            let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let handle = flag.clone();
+            let fixture =
+                Self::new_with_provider(vapor_shared::SyncMode::TwoWay, move |provider| {
+                    Box::new(SwitchedProvider {
+                        inner: provider,
+                        signed_out: Arc::default(),
+                        downloads_fail: Arc::default(),
+                        cloud_full: flag,
+                    })
+                });
+            (fixture, handle)
+        }
+
+        fn new_with_download_switch() -> (Self, Arc<std::sync::atomic::AtomicBool>) {
+            let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let handle = flag.clone();
+            let fixture =
+                Self::new_with_provider(vapor_shared::SyncMode::TwoWay, move |provider| {
+                    Box::new(SwitchedProvider {
+                        inner: provider,
+                        signed_out: Arc::default(),
+                        downloads_fail: flag,
+                        cloud_full: Arc::default(),
                     })
                 });
             (fixture, handle)
@@ -4477,16 +5326,22 @@ mod tests {
                 feed,
                 clock,
                 now_ms: 0,
+                watched_tree: None,
             }
         }
 
         /// One tick, advancing both clocks by `advance_ms`.
         fn tick(&mut self, advance_ms: u64) -> RuntimeTickReport {
+            // What changed since the last tick was seen back then.
+            self.deliver_local_tree_changes();
             self.clock.advance(Duration::from_millis(advance_ms));
             self.now_ms += advance_ms;
-            self.runtime
+            let report = self
+                .runtime
                 .tick_with_inputs(timestamp_ms(self.now_ms), ThrottleInputs::default())
-                .expect("runtime tick")
+                .expect("runtime tick");
+            self.deliver_local_tree_changes();
+            report
         }
 
         /// Ticks until the durable queue drains and the executor goes
@@ -4519,14 +5374,19 @@ mod tests {
         }
     }
 
-    /// The filesystem provider behind a sign-in switch: while signed
-    /// out every call fails the way an expired or revoked token does.
-    struct SigningOutProvider {
+    /// The filesystem provider behind two switches. While signed out
+    /// every call fails the way an expired or revoked token does.
+    /// While downloads fail, each download start fails the way a
+    /// dropped connection does.
+    struct SwitchedProvider {
         inner: vapor_providers::FilesystemProvider,
         signed_out: Arc<std::sync::atomic::AtomicBool>,
+        downloads_fail: Arc<std::sync::atomic::AtomicBool>,
+        /// While set, each upload is refused the way a full cloud does.
+        cloud_full: Arc<std::sync::atomic::AtomicBool>,
     }
 
-    impl SigningOutProvider {
+    impl SwitchedProvider {
         fn gate(&self) -> Result<(), vapor_providers::ProviderError> {
             if self.signed_out.load(std::sync::atomic::Ordering::SeqCst) {
                 Err(vapor_providers::ProviderError::authentication(
@@ -4538,7 +5398,7 @@ mod tests {
         }
     }
 
-    impl Provider for SigningOutProvider {
+    impl Provider for SwitchedProvider {
         fn name(&self) -> &'static str {
             self.inner.name()
         }
@@ -4594,6 +5454,11 @@ mod tests {
         ) -> Result<Box<dyn vapor_providers::TransferSession>, vapor_providers::ProviderError>
         {
             self.gate()?;
+            if self.cloud_full.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(vapor_providers::ProviderError::storage_full(
+                    "the cloud storage is full; free space, then uploads resume",
+                ));
+            }
             self.inner.begin_upload(request)
         }
         fn begin_download(
@@ -4602,6 +5467,14 @@ mod tests {
         ) -> Result<Box<dyn vapor_providers::TransferSession>, vapor_providers::ProviderError>
         {
             self.gate()?;
+            if self
+                .downloads_fail
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(vapor_providers::ProviderError::transient(
+                    "the connection dropped",
+                ));
+            }
             self.inner.begin_download(request)
         }
         fn delete(
@@ -4727,7 +5600,7 @@ mod tests {
     #[test]
     fn cloud_deletion_of_a_previously_uploaded_file_propagates_locally() {
         // Field-testing repro: local create A (uploads), cloud create B
-        // (downloads), local delete B (propagates up), cloud delete A —
+        // (downloads), local delete B (propagates up), cloud delete A:
         // the final removal must propagate down. Every feed event the
         // real cloud-root watcher would emit is reproduced, including
         // the echoes of Vapor's own provider writes.
@@ -5084,7 +5957,7 @@ mod tests {
         assert!(remote_file.exists(), "upload must land remotely");
 
         // The remote watcher would now observe our own write: emit that
-        // echo through the feed. Loop prevention must suppress it — no
+        // echo through the feed. Loop prevention must suppress it, no
         // new intents, no re-download.
         fixture
             .feed
@@ -5099,14 +5972,44 @@ mod tests {
     }
 
     #[test]
+    fn a_cloud_deletion_is_named_in_the_timeline_with_its_cause() {
+        let mut fixture = BidirectionalFixture::new();
+        let timeline = crate::timeline::TimelineBuffer::new(64);
+        fixture.runtime.attach_timeline(timeline.clone());
+        fixture.tick(6_000); // baseline
+        let local_file = fixture.watch_root.join("old-plan.txt");
+        std::fs::write(&local_file, b"payload").expect("seed local");
+        fixture.record_local_event(&local_file, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(12);
+        std::fs::remove_file(&local_file).expect("local delete");
+        fixture.record_local_event(&local_file, FsEventKind::Removed, fixture.now_ms);
+        fixture.converge(12);
+        assert!(!fixture.cloud_root.join("old-plan.txt").exists());
+
+        let entries = timeline.snapshot(None);
+        let entry = entries
+            .iter()
+            .find(|entry| entry.kind == constants::timeline::KIND_CLOUD_DELETE)
+            .expect("the cloud deletion has a timeline entry");
+        assert!(entry.message.contains("old-plan.txt"), "{}", entry.message);
+        assert!(
+            entry.message.contains("it was deleted on this device"),
+            "{}",
+            entry.message
+        );
+    }
+
+    #[test]
     fn remote_delete_echo_is_suppressed_after_local_delete_propagates() {
         let mut fixture = BidirectionalFixture::new();
         fixture.tick(6_000); // baseline
 
-        // Seed both sides, then delete locally and propagate.
+        // Sync a file, then delete it locally and propagate.
         let local_file = fixture.watch_root.join("shared.txt");
-        std::fs::write(fixture.cloud_root.join("shared.txt"), b"payload").expect("seed remote");
         std::fs::write(&local_file, b"payload").expect("seed local");
+        fixture.record_local_event(&local_file, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(12);
+        assert!(fixture.cloud_root.join("shared.txt").exists());
         std::fs::remove_file(&local_file).expect("local delete");
         fixture.record_local_event(&local_file, FsEventKind::Removed, fixture.now_ms);
         let completed = fixture.converge(12);
@@ -5121,6 +6024,51 @@ mod tests {
         let report = fixture.tick(6_000);
         assert_eq!(report.remote_poll.suppressed_echoes, 1);
         assert_eq!(report.remote_poll.enqueued_intents, 0);
+    }
+
+    #[test]
+    fn a_file_made_again_after_the_daemons_delete_can_be_deleted_by_the_user() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let cloud_file = fixture.cloud_root.join("again.txt");
+        let local_file = fixture.watch_root.join("again.txt");
+        std::fs::write(&cloud_file, b"first").expect("seed remote");
+        fixture
+            .feed
+            .emit_created(cloud_file.clone(), timestamp_ms(fixture.now_ms));
+        fixture.converge(12);
+        assert!(local_file.exists(), "download must land first");
+
+        // The cloud deletes the file; the daemon removes the local copy
+        // and remembers that delete as its own for 30 s.
+        std::fs::remove_file(&cloud_file).expect("cloud delete");
+        fixture
+            .feed
+            .emit_removed(cloud_file.clone(), timestamp_ms(fixture.now_ms));
+        fixture.converge(12);
+        assert!(!local_file.exists(), "the local copy is removed");
+        let deleted_at_ms = fixture.now_ms;
+
+        // Inside those 30 s the user makes the file again, and it syncs.
+        std::fs::write(&local_file, b"second").expect("made again");
+        fixture.record_local_event(&local_file, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(2);
+        assert_eq!(std::fs::read(&cloud_file).expect("uploaded"), b"second");
+
+        // Then the user deletes it. That delete is the user's, not an
+        // echo of the daemon's: it must reach the cloud.
+        std::fs::remove_file(&local_file).expect("user delete");
+        fixture.record_local_event(&local_file, FsEventKind::Removed, fixture.now_ms);
+        fixture.converge(2);
+        assert!(
+            fixture.now_ms - deleted_at_ms
+                < vapor_shared::constants::self_write_cache::DEFAULT_TTL_MILLIS,
+            "the test stays inside the life of the daemon's delete record"
+        );
+        assert!(
+            !cloud_file.exists(),
+            "the user's delete was dropped as an echo of the daemon's earlier one"
+        );
     }
 
     #[test]
@@ -5140,7 +6088,7 @@ mod tests {
         assert!(local_target.exists());
 
         // The local watcher would now observe the daemon's own apply:
-        // record that echo. It must be suppressed before the scheduler —
+        // record that echo. It must be suppressed before the scheduler,
         // no upload back to the cloud.
         fixture.record_local_event(&local_target, FsEventKind::Created, fixture.now_ms);
         let mut suppressed = 0;
@@ -5381,6 +6329,61 @@ mod tests {
     }
 
     #[test]
+    fn push_only_puts_back_a_spelling_that_the_cloud_changed() {
+        // The cloud renames `report.txt` to `Report.txt`. On a volume
+        // that folds case the two are one name, so a restore through
+        // the cloud's spelling finds nothing to send, and the upload of
+        // the local spelling is refused while the other one is there.
+        let mut fixture = BidirectionalFixture::new_with_mode(vapor_shared::SyncMode::PushOnly);
+        // Past the startup scan: from here on only the watcher and the
+        // feed report changes.
+        for _ in 0..20 {
+            fixture.tick(6_000);
+        }
+        std::fs::write(fixture.watch_root.join("report.txt"), b"canonical").expect("local file");
+        fixture.record_local_event(
+            &fixture.watch_root.join("report.txt"),
+            FsEventKind::Created,
+            fixture.now_ms,
+        );
+        fixture.converge(16);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["report.txt"]);
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+
+        std::fs::rename(
+            fixture.cloud_root.join("report.txt"),
+            fixture.cloud_root.join("Report.txt"),
+        )
+        .expect("cloud rename");
+        // What a watcher on a volume that folds case reports: both
+        // spellings, and each resolves to the one file that is there.
+        fixture.feed.emit_modified(
+            fixture.cloud_root.join("report.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        fixture.feed.emit_created(
+            fixture.cloud_root.join("Report.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        for _ in 0..30 {
+            fixture.tick(1_000);
+        }
+        fixture.converge(24);
+
+        assert_eq!(names_in(&fixture.cloud_root), vec!["report.txt"]);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("report.txt")).expect("cloud"),
+            b"canonical"
+        );
+        assert_eq!(names_in(&fixture.watch_root), vec!["report.txt"]);
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0
+        );
+    }
+
+    #[test]
     fn push_only_propagates_local_deletions_to_the_cloud() {
         let mut fixture = BidirectionalFixture::new_with_mode(vapor_shared::SyncMode::PushOnly);
         std::fs::write(fixture.cloud_root.join("gone.txt"), b"x").expect("seed remote");
@@ -5469,6 +6472,7 @@ mod tests {
             false,
         )
         .expect("runtime");
+        runtime.acknowledge_one_way_mode(timestamp_ms(0));
 
         let mut completed = 0;
         for tick_index in 0..8 {
@@ -5518,58 +6522,29 @@ mod tests {
         names
     }
 
-    #[test]
-    fn reconcile_runs_the_waiting_startup_scan_under_user_activity() {
-        // The manual-test shape: both roots hold a different `alex.txt`
-        // written while no daemon watched, the daemon starts, and the
-        // user keeps typing. The startup scan must say it is waiting
-        // and why; a reconcile request must run it anyway and keep both.
+    /// Both roots hold a different `alex.txt` written while no daemon
+    /// watched; the startup scan is queued the way the composed daemon
+    /// queues it at start.
+    fn fixture_with_offline_divergence() -> BidirectionalFixture {
         let mut fixture = BidirectionalFixture::new();
         std::fs::write(fixture.watch_root.join("alex.txt"), b"local").expect("seed local");
         std::fs::write(fixture.cloud_root.join("alex.txt"), b"cloud").expect("seed cloud");
-        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
-        fixture.runtime.attach_control(control.clone());
-        // The fixture builds watcher-less; the composed daemon queues
-        // this scan at start.
         fixture
             .runtime
             .schedule_startup_reconcile(timestamp_ms(fixture.now_ms))
             .expect("startup scan");
+        fixture
+    }
 
-        let active = || ThrottleInputs {
-            user_active: true,
-            ..ThrottleInputs::default()
-        };
-        for _ in 0..5 {
-            fixture.clock.advance(Duration::from_secs(6));
-            fixture.now_ms += 6_000;
-            let report = fixture
-                .runtime
-                .tick_with_inputs(timestamp_ms(fixture.now_ms), active())
-                .expect("tick");
-            assert!(report.started_reconcile_root.is_none());
-        }
-        match fixture.runtime.reconcile_status() {
-            ReconcileStatus::Waiting { reason } => assert_eq!(
-                reason, "waiting for an idle moment: user activity is active",
-                "status must name what the scan waits for"
-            ),
-            other => panic!("the startup scan must report itself as waiting: {other:?}"),
-        }
-        assert_eq!(
-            std::fs::read(fixture.watch_root.join("alex.txt")).expect("local"),
-            b"local",
-            "nothing may move while the scan waits"
-        );
-
-        control.request_reconcile();
-        let mut converged = false;
+    /// Ticks under `inputs` until the divergence is a keep-both copy
+    /// on both sides and the queue is empty.
+    fn keeps_both_under(fixture: &mut BidirectionalFixture, inputs: ThrottleInputs) -> bool {
         for _ in 0..40 {
             fixture.clock.advance(Duration::from_secs(6));
             fixture.now_ms += 6_000;
             fixture
                 .runtime
-                .tick_with_inputs(timestamp_ms(fixture.now_ms), active())
+                .tick_with_inputs(timestamp_ms(fixture.now_ms), inputs)
                 .expect("tick");
             let local = files_in(&fixture.watch_root);
             let cloud = files_in(&fixture.cloud_root);
@@ -5577,27 +6552,257 @@ mod tests {
                 && local.iter().any(|name| name.starts_with("alex~conflict-"))
                 && cloud.iter().any(|name| name.starts_with("alex~conflict-"))
             {
-                converged = true;
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn the_startup_scan_runs_under_each_condition_that_can_last() {
+        // A device on battery, a user at the keyboard, Low Power Mode:
+        // each can hold for hours. Sync gets slower. It does not stop.
+        let conditions: [(&str, ThrottleInputs, vapor_shared::ThrottleState); 3] = [
+            (
+                "a user at the keyboard",
+                ThrottleInputs {
+                    user_active: true,
+                    ..ThrottleInputs::default()
+                },
+                vapor_shared::ThrottleState::Throttled,
+            ),
+            (
+                "battery power",
+                ThrottleInputs {
+                    on_battery: true,
+                    ..ThrottleInputs::default()
+                },
+                vapor_shared::ThrottleState::Light,
+            ),
+            (
+                "Low Power Mode",
+                ThrottleInputs {
+                    low_power_mode: true,
+                    on_battery: true,
+                    ..ThrottleInputs::default()
+                },
+                vapor_shared::ThrottleState::Throttled,
+            ),
+        ];
+        for (name, inputs, state) in conditions {
+            let mut fixture = fixture_with_offline_divergence();
+            assert!(
+                keeps_both_under(&mut fixture, inputs),
+                "the scan must run under {name}; local {:?} cloud {:?}",
+                files_in(&fixture.watch_root),
+                files_in(&fixture.cloud_root)
+            );
+            assert_eq!(
+                fixture.runtime.app.snapshot().throttle_state,
+                state,
+                "{name}"
+            );
+            assert_eq!(fixture.runtime.reconcile_status(), ReconcileStatus::Idle);
+        }
+    }
+
+    #[test]
+    fn the_memory_ceiling_reacts_to_measured_memory_and_not_to_cache_population() {
+        let mut fixture = BidirectionalFixture::new();
+        let timeline = crate::timeline::TimelineBuffer::new(256);
+        fixture.runtime.attach_timeline(timeline.clone());
+        let device = 16_u64 * 1024 * 1024 * 1024;
+        let sample = |fixture: &mut BidirectionalFixture, resident: Option<u64>| {
+            fixture.clock.advance(Duration::from_secs(2));
+            fixture.now_ms += 2_000;
+            fixture
+                .runtime
+                .tick_with_inputs(
+                    timestamp_ms(fixture.now_ms),
+                    ThrottleInputs {
+                        vapor_memory_bytes: resident,
+                        device_memory_bytes: resident.map(|_| device),
+                        ..ThrottleInputs::default()
+                    },
+                )
+                .expect("tick");
+        };
+
+        // A bulk of synced files fills the echo caches. With no memory
+        // reading nothing is trimmed, whatever the caches hold.
+        seed_synced_files(&mut fixture, 40);
+        sample(&mut fixture, None);
+        assert_eq!(timeline.max_entries(), 256);
+
+        // Far over any share the ceiling can be: the caches trim.
+        sample(&mut fixture, Some(device / 2));
+        assert_eq!(timeline.max_entries(), 64);
+        // Clearly under: restored.
+        sample(&mut fixture, Some(device / 1_000));
+        assert_eq!(timeline.max_entries(), 256);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_local_root_that_cannot_be_read_is_a_run_reason_until_it_can() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let root = fixture.watch_root.clone();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).expect("lock");
+        if std::fs::read_dir(&root).is_ok() {
+            // Running as a user that permissions do not stop.
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).ok();
+            return;
+        }
+        fixture
+            .runtime
+            .schedule_startup_reconcile(timestamp_ms(fixture.now_ms))
+            .expect("scan");
+        for _ in 0..4 {
+            fixture.tick(6_000);
+        }
+        let snapshot = fixture.runtime.app.snapshot().clone();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("unlock");
+        assert_eq!(snapshot.run_state, RunState::Error);
+        assert!(
+            snapshot.reason.contains("permission denied")
+                && snapshot.reason.contains("Privacy & Security"),
+            "the reason names the cause and where to allow it: {:?}",
+            snapshot.reason
+        );
+
+        // The folder can be read again: the walk that the runtime queued
+        // for it clears the reason.
+        for _ in 0..200 {
+            fixture.tick(60_000);
+            if fixture.runtime.app.snapshot().run_state == RunState::Running {
                 break;
             }
         }
+        assert_eq!(fixture.runtime.app.snapshot().run_state, RunState::Running);
+    }
+
+    #[test]
+    fn a_reconcile_requested_while_one_walks_gets_a_walk_of_its_own() {
+        let mut fixture = BidirectionalFixture::new();
+        // More folders than one slice of the walk compares.
+        let folders = constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE + 16;
+        for index in 0..folders {
+            std::fs::create_dir(fixture.watch_root.join(format!("folder-{index:03}")))
+                .expect("folder");
+        }
+        fixture
+            .runtime
+            .schedule_startup_reconcile(timestamp_ms(fixture.now_ms))
+            .expect("startup scan");
+        // A walker that outlives a tick has folders left to compare.
+        for _ in 0..10 {
+            if fixture.runtime.reconcile_walker.is_some() {
+                break;
+            }
+            fixture.tick(1_000);
+        }
         assert!(
-            converged,
-            "reconcile must run the scan under user activity and keep both versions; local {:?} cloud {:?}",
-            files_in(&fixture.watch_root),
-            files_in(&fixture.cloud_root)
+            fixture.runtime.reconcile_walker.is_some(),
+            "the walk is under way"
         );
-        assert_eq!(fixture.runtime.reconcile_status(), ReconcileStatus::Idle);
+
+        // A file appears in the root, which the walk compared first,
+        // and no watcher event tells of it. The user asks for a
+        // reconcile.
+        std::fs::write(
+            fixture.watch_root.join("late.txt"),
+            b"after the root was compared",
+        )
+        .expect("late file");
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+        control.request_reconcile();
+
+        fixture.converge(40);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("late.txt")).expect("uploaded"),
+            b"after the root was compared",
+            "the walk that was under way had passed the root; the request got a walk of its own"
+        );
+    }
+
+    #[test]
+    fn a_running_daemon_scans_the_whole_scope_once_a_day() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000); // baseline: the day starts here
+        // A file put in the cloud with no feed event, the way a lost
+        // event leaves it: nothing tells the daemon about it.
+        std::fs::write(fixture.cloud_root.join("missed.txt"), b"nobody said").expect("seed");
+        for _ in 0..20 {
+            fixture.tick(60 * 60 * 1_000);
+        }
         assert!(
-            !fixture.runtime.app().on_demand_reconcile_pending(),
-            "the request is spent once the scan completes"
+            !fixture.watch_root.join("missed.txt").exists(),
+            "inside the day nothing looks"
         );
+
+        for _ in 0..5 {
+            fixture.tick(60 * 60 * 1_000);
+        }
+        fixture.converge(12);
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("missed.txt")).expect("found by the daily scan"),
+            b"nobody said"
+        );
+
+        // One scan a day, not one a tick: the next one is a day away.
+        std::fs::write(fixture.cloud_root.join("later.txt"), b"later").expect("seed");
+        for _ in 0..6 {
+            fixture.tick(60 * 60 * 1_000);
+        }
+        assert!(!fixture.watch_root.join("later.txt").exists());
+    }
+
+    #[test]
+    fn critical_thermal_pressure_holds_the_startup_scan_and_says_why() {
+        let mut fixture = fixture_with_offline_divergence();
+        let critical = ThrottleInputs {
+            thermal_pressure: crate::throttle::ThermalPressure::Critical,
+            ..ThrottleInputs::default()
+        };
+        let mut database_writes = 0;
+        for _ in 0..5 {
+            fixture.clock.advance(Duration::from_secs(6));
+            fixture.now_ms += 6_000;
+            let report = fixture
+                .runtime
+                .tick_with_inputs(timestamp_ms(fixture.now_ms), critical)
+                .expect("tick");
+            assert!(report.started_reconcile_root.is_none());
+            database_writes += report.leased_intents + report.requeued_intents;
+        }
+        assert_eq!(
+            database_writes, 0,
+            "a scan that cannot start is not leased and handed back on every tick"
+        );
+        match fixture.runtime.reconcile_status() {
+            ReconcileStatus::Waiting { reason } => assert_eq!(
+                reason, "waiting: thermal pressure is critical",
+                "status must name what the scan waits for"
+            ),
+            other => panic!("the startup scan must report itself as waiting: {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("alex.txt")).expect("local"),
+            b"local",
+            "nothing may move while sync is suspended"
+        );
+
+        // The device cools down: the scan runs with no request.
+        assert!(keeps_both_under(&mut fixture, ThrottleInputs::default()));
     }
 
     #[test]
     fn concurrent_edit_conflict_keeps_both_versions_on_both_sides() {
         // Simultaneous local + foreign remote edits of a synced
-        // file resolve as keep-both — the remote canonical lands at the
+        // file resolve as keep-both: the remote canonical lands at the
         // original path, the local edit survives as a conflict copy, and
         // the copy propagates to the cloud.
         let mut fixture = BidirectionalFixture::new();
@@ -5647,6 +6852,94 @@ mod tests {
             b"v2 local edit"
         );
         assert!(fixture.runtime.conflict_count() >= 1);
+    }
+
+    #[test]
+    fn a_slow_download_after_a_conflict_keeps_the_winning_version_in_the_cloud() {
+        // The daemon renames the local edit to a conflict copy and
+        // queues the download of the cloud version. While that
+        // download is still failing, the watcher reports the rename;
+        // the original path is gone at stabilization. Nothing may read
+        // that as a deletion of the cloud file.
+        let (fixture, downloads_fail) = BidirectionalFixture::new_with_download_switch();
+        let mut fixture = fixture.watching_the_local_tree();
+        fixture.tick(6_000); // baseline
+
+        let local_file = fixture.watch_root.join("doc.txt");
+        std::fs::write(&local_file, b"v1 shared").expect("seed local");
+        fixture.converge(12);
+        assert!(fixture.cloud_root.join("doc.txt").exists());
+
+        downloads_fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        foreign_remote_edit(&fixture, "doc.txt", b"v2 from another device");
+        std::fs::write(&local_file, b"v2 local edit").expect("local edit");
+        // Longer than the debounce window, the settle window, and a
+        // few retries of the download.
+        for _ in 0..40 {
+            fixture.tick(1_000);
+        }
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("doc.txt")).expect("cloud canonical"),
+            b"v2 from another device",
+            "the version that won the conflict stays in the cloud"
+        );
+
+        downloads_fail.store(false, std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..12 {
+            fixture.tick(60_000);
+        }
+        assert_eq!(
+            std::fs::read(&local_file).expect("canonical"),
+            b"v2 from another device"
+        );
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("doc.txt")).expect("cloud canonical"),
+            b"v2 from another device"
+        );
+        let conflict_name = files_in(&fixture.watch_root)
+            .into_iter()
+            .find(|name| name.contains("~conflict-"))
+            .expect("a conflict copy must exist locally");
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join(&conflict_name)).expect("cloud conflict copy"),
+            b"v2 local edit"
+        );
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0
+        );
+    }
+
+    #[test]
+    fn a_file_removed_and_put_back_within_seconds_stays_in_the_cloud() {
+        let mut fixture = BidirectionalFixture::new().watching_the_local_tree();
+        fixture.tick(6_000); // baseline
+
+        let local_file = fixture.watch_root.join("notes.txt");
+        std::fs::write(&local_file, b"keep me").expect("seed local");
+        fixture.converge(12);
+        assert!(fixture.cloud_root.join("notes.txt").exists());
+
+        // Out of the folder for longer than the debounce window, back
+        // before the settle window of the delete ends.
+        let outside = fixture._temp.path().join("notes.txt.elsewhere");
+        std::fs::rename(&local_file, &outside).expect("move out");
+        for _ in 0..3 {
+            fixture.tick(1_000);
+        }
+        std::fs::rename(&outside, &local_file).expect("move back");
+        for _ in 0..30 {
+            fixture.tick(1_000);
+        }
+        fixture.converge(12);
+
+        assert_eq!(std::fs::read(&local_file).expect("local"), b"keep me");
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("notes.txt")).expect("cloud copy stays"),
+            b"keep me"
+        );
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
     }
 
     fn conflict_questions(fixture: &BidirectionalFixture) -> Vec<crate::state_db::DecisionRecord> {
@@ -5786,7 +7079,7 @@ mod tests {
 
     #[test]
     fn delete_modify_race_resolves_for_the_modification() {
-        // A remote deletion racing a local modification loses —
+        // A remote deletion racing a local modification loses:
         // data preservation wins over deletion, deterministically, in
         // both intent orderings.
         let mut fixture = BidirectionalFixture::new();
@@ -5975,7 +7268,7 @@ mod tests {
             "op-id must land in a side-file when xattr is unsupported"
         );
 
-        // The feed echo of our own upload must still be suppressed —
+        // The feed echo of our own upload must still be suppressed:
         // correlated through the side-file, not xattr.
         feed.emit_created(cloud_root.join("side-file-mode.txt"), timestamp_ms(now_ms));
         let report = tick_once(&mut runtime, &clock, &mut now_ms, 6_000);
@@ -6031,17 +7324,17 @@ mod tests {
 
     #[test]
     fn bandwidth_ceiling_holds_transfers_until_tokens_refill() {
-        // With a tiny measured link capacity the shaper
-        // grants almost nothing per second, so an upload holds at its
-        // checkpoint; restoring capacity lets it complete.
+        // With a tiny link capacity the bucket grants almost nothing
+        // each second, so an upload holds at its checkpoint; a link
+        // that carries more lets it complete. The capacity is pinned,
+        // so no probe step runs past the bucket.
         let mut fixture = BidirectionalFixture::new();
         fixture.tick(6_000); // baseline (default inputs)
 
-        let starved_inputs = ThrottleInputs {
-            network_throughput_kbps: Some(1), // ~31 bytes/s at 25%
-            ..ThrottleInputs::default()
-        };
-        // Sample the starved inputs so the shaper rate collapses.
+        // About 31 bytes each second at the default 25%.
+        fixture.runtime.pin_link_capacity_kbps(1);
+        let starved_inputs = ThrottleInputs::default();
+        // Sample once so the bucket takes the new rate.
         fixture.clock.advance(Duration::from_millis(6_000));
         fixture.now_ms += 6_000;
         fixture
@@ -6068,7 +7361,8 @@ mod tests {
         assert_eq!(completed, 0, "starved bandwidth must hold the upload");
         assert!(!fixture.cloud_root.join("starved.bin").exists());
 
-        // Capacity restored: the transfer completes.
+        // A link that carries more: the transfer completes.
+        fixture.runtime.pin_link_capacity_kbps(100_000);
         let restored = ThrottleInputs::default();
         for _ in 0..12 {
             fixture.clock.advance(Duration::from_millis(6_000));
@@ -6165,9 +7459,9 @@ mod tests {
 
         // First daemon: lease the intent into flight, then "crash"
         // (drop) before completing it. The lease is taken directly on
-        // the durable DB — exactly the state a daemon that died between
-        // leasing and completing leaves behind. (A ticking runtime can
-        // no longer model this window: stage chaining completes a small
+        // the durable DB: exactly the state a daemon that died between
+        // leasing and completing leaves behind. (A ticking runtime
+        // cannot model this window: stage chaining completes a small
         // upload within its lease tick.)
         {
             let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
@@ -6180,7 +7474,7 @@ mod tests {
                 .expect("intent leased");
             assert_eq!(leased.path, local_file);
             assert_eq!(state_db.leased_depth().expect("leased"), 1);
-            // Dropped here with the lease still open — simulated crash.
+            // Dropped here with the lease still open: simulated crash.
         }
 
         // Second daemon on the same durable state: startup recovery
@@ -6641,6 +7935,194 @@ mod tests {
         assert!(open.is_empty(), "{open:?}");
     }
 
+    #[test]
+    fn a_daemon_profile_starts_before_the_provider_answers_and_keeps_its_queue() {
+        let temp = TempDir::new().expect("temp dir");
+        let watch_root = temp.path().join("watch");
+        let cloud_root = temp.path().join("cloud");
+        std::fs::create_dir_all(&watch_root).expect("watch root");
+        std::fs::create_dir_all(&cloud_root).expect("cloud root");
+        let cloud_root = vapor_shared::paths::canonicalize(&cloud_root).expect("canonical");
+        // What the last run left in the queue.
+        let mut state_db =
+            DurableStateDb::open(temp.path().join("state/vapor.sqlite")).expect("state db");
+        state_db
+            .enqueue_intents_coalesced(
+                &[(
+                    watch_root.join("removed-last-run.txt"),
+                    PendingIntentKind::Delete,
+                    timestamp_ms(1),
+                )],
+                crate::safeguards::IntentSource::Fresh,
+            )
+            .expect("enqueue");
+        // A provider that refuses every call: a probe made while the
+        // runtime is built would leave it held for a sign-in.
+        let signed_out = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let caps: Arc<dyn vapor_platform::fs_caps::FilesystemCapabilities> =
+            Arc::new(vapor_platform::fs_caps::NativeFilesystemCapabilities::for_current_host());
+        let (provider, _feed) =
+            vapor_providers::FilesystemProvider::with_manual_feed(&cloud_root, caps)
+                .expect("provider");
+        let clock = Arc::new(crate::clock::ManualClock::at_now());
+        let app = DaemonApp::new_with_clock(
+            Box::new(SwitchedProvider {
+                inner: provider,
+                signed_out: signed_out.clone(),
+                downloads_fail: Arc::default(),
+                cloud_full: Arc::default(),
+            }),
+            clock.clone(),
+        );
+        let mut runtime = DaemonRuntime::build_with_app(
+            SyncScope {
+                local_root: Some(watch_root.clone()),
+                cloud_root: cloud_root.to_string_lossy().into_owned(),
+                sync_mode: vapor_shared::SyncMode::TwoWay,
+            },
+            EventPathFilterOptions::default(),
+            state_db,
+            app,
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            Startup::DaemonProfile,
+        )
+        .expect("runtime");
+        let snapshot = runtime.app.snapshot();
+        assert_eq!(snapshot.run_state, RunState::Starting, "{snapshot:?}");
+        assert!(
+            snapshot.reason.contains("checking the cloud folder"),
+            "no provider call was made while building: {snapshot:?}"
+        );
+        assert!(!runtime.sign_in_hold);
+
+        // The first tick probes. Nothing is leased under a critical
+        // thermal state, so the queue shows what the probe did to it.
+        signed_out.store(false, std::sync::atomic::Ordering::SeqCst);
+        runtime
+            .tick_with_inputs(
+                timestamp_ms(1_000),
+                ThrottleInputs {
+                    thermal_pressure: crate::throttle::ThermalPressure::Critical,
+                    ..ThrottleInputs::default()
+                },
+            )
+            .expect("tick");
+        assert!(runtime.cloud_root_ready, "the first tick adopted the root");
+        assert!(
+            !runtime
+                .state_db
+                .queued_paths_of_kind(PendingIntentKind::Delete)
+                .expect("queue")
+                .is_empty(),
+            "the first answer is the profile's start, not the end of an outage: \
+             the deletion from the last run stays queued"
+        );
+        runtime.tick(timestamp_ms(2_000)).expect("tick");
+        assert_eq!(runtime.app.snapshot().run_state, RunState::Running);
+    }
+
+    #[test]
+    fn keep_both_still_applies_when_the_local_side_already_moved() {
+        let fixture = OfflineFixture::new();
+        let local = mismatched_pair(&fixture, false);
+        let runtime = fixture.run(&[]);
+        let decision = open_mismatch(&runtime);
+        drop(runtime);
+        {
+            let mut db = DurableStateDb::open(&fixture.database_path).expect("open");
+            db.resolve_decision(decision.id, "keep-both", timestamp_ms(1))
+                .expect("resolve");
+        }
+        // What an earlier try leaves when it fails after its rename: the
+        // local side under another name, and nothing at the path.
+        let moved = fixture.watch_root.join("notes-moved");
+        std::fs::rename(&local, &moved).expect("move aside");
+
+        let runtime = fixture.run(&[]);
+        assert!(
+            runtime
+                .state_db()
+                .decisions(false)
+                .expect("open")
+                .is_empty(),
+            "the answer applied instead of failing on the rename for ever"
+        );
+        assert_eq!(std::fs::read(&moved).expect("moved"), b"the local file");
+        assert!(fixture.cloud_root.join("notes-moved").is_file());
+        assert!(local.is_dir(), "the cloud directory came down");
+    }
+
+    #[test]
+    fn an_answer_that_cannot_be_applied_is_tried_again_after_a_wait_and_logged_once() {
+        let fixture = OfflineFixture::new();
+        let mut runtime = fixture.run(&[]);
+        // A question of a kind this build has no applier for, answered.
+        let id = runtime
+            .state_db
+            .create_decision(
+                "a-kind-from-a-newer-build",
+                crate::state_db::DecisionScope::Profile,
+                None,
+                "A question a newer build asked",
+                &[crate::state_db::DecisionOption {
+                    key: "go".to_string(),
+                    label: "Go".to_string(),
+                }],
+                &serde_json::json!({}),
+                timestamp_ms(1),
+            )
+            .expect("create");
+        runtime
+            .state_db
+            .resolve_decision(id, "go", timestamp_ms(2))
+            .expect("resolve");
+        let start = timestamp_ms(10_000);
+        let tries = |runtime: &DaemonRuntime| {
+            runtime
+                .decision_retries
+                .get(&id)
+                .map(|retry| retry.failures)
+                .unwrap_or(0)
+        };
+
+        runtime.apply_resolved_decisions(start).expect("apply");
+        assert_eq!(tries(&runtime), 1);
+        // The ticks inside the wait do not try, so they log nothing.
+        for offset_ms in [100, 1_000, 4_900] {
+            runtime
+                .apply_resolved_decisions(start + Duration::from_millis(offset_ms))
+                .expect("apply");
+        }
+        assert_eq!(tries(&runtime), 1, "one try per wait, not one per tick");
+        let waits = constants::decision::APPLY_RETRY_SECONDS;
+        runtime
+            .apply_resolved_decisions(start + Duration::from_secs(waits[0]))
+            .expect("apply");
+        assert_eq!(tries(&runtime), 2);
+        runtime
+            .apply_resolved_decisions(start + Duration::from_secs(waits[0] + waits[1] - 1))
+            .expect("apply");
+        assert_eq!(tries(&runtime), 2, "the second wait is longer");
+        assert!(
+            runtime
+                .state_db()
+                .decision(id)
+                .expect("read")
+                .expect("decision")
+                .applied_at
+                .is_none(),
+            "the answer stays recorded and unapplied"
+        );
+
+        // The question is asked again: its retry state goes with the answer.
+        runtime.state_db.reopen_decision(id).expect("reopen");
+        runtime
+            .apply_resolved_decisions(start + Duration::from_secs(3_600))
+            .expect("apply");
+        assert!(runtime.decision_retries.is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_name_that_cannot_be_synced_is_asked_about_once_and_withdrawn_when_renamed() {
@@ -6937,10 +8419,8 @@ mod tests {
 
     #[test]
     fn paused_daemon_stops_admitting_new_work_and_resume_restores_it() {
-        // Regression for the "pause is cosmetic" bug: `vapor pause` used
-        // to flip the status string while the runtime kept leasing and
-        // executing. Paused now means: ingest keeps capturing intents,
-        // but nothing new is leased until resume.
+        // A pause is more than the status string: ingest keeps
+        // capturing intents, and nothing new is leased until resume.
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
@@ -7010,10 +8490,10 @@ mod tests {
 
     #[test]
     fn checkpoint_paused_reconcile_does_not_duplicate_durable_rows() {
-        // Regression: a checkpoint-paused reconcile is tracked both as a
-        // requeued durable row and as a pending scheduler intent; the
-        // flush used to insert a fresh durable row for the scheduler copy
-        // on every pause, multiplying whole-subtree reconciles.
+        // A checkpoint-paused reconcile is tracked both as a requeued
+        // durable row and as a pending scheduler intent. The flush must
+        // coalesce the two: a fresh durable row for the scheduler copy
+        // on every pause would multiply whole-subtree reconciles.
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
@@ -7078,13 +8558,13 @@ mod tests {
         assert!(started.started_reconcile_root.is_some());
         assert_eq!(runtime.state_db().queue_depth().expect("depth"), 1);
 
-        // Tick 2 (user becomes active): the reconcile checkpoint-pauses.
+        // Tick 2 (the device is about to overheat): the reconcile checkpoint-pauses.
         clock.advance(Duration::from_secs(1));
         let paused = runtime
             .tick_with_inputs(
                 timestamp_ms(2_000),
                 ThrottleInputs {
-                    user_active: true,
+                    thermal_pressure: crate::throttle::ThermalPressure::Critical,
                     ..ThrottleInputs::default()
                 },
             )
@@ -7092,15 +8572,15 @@ mod tests {
         assert_eq!(paused.requeued_intents, 1, "report: {paused:?}");
         assert_eq!(runtime.state_db().queue_depth().expect("depth"), 1);
 
-        // Ticks 3..6 (still active): every pause cycle used to add one
-        // duplicate durable row; coalescing must keep the depth at 1.
+        // Ticks 3..6 (still suspended): coalescing keeps the depth at 1
+        // through every pause cycle.
         for step in 1..=4u64 {
             clock.advance(Duration::from_secs(1));
             runtime
                 .tick_with_inputs(
                     timestamp_ms(2_000 + step * 1_000),
                     ThrottleInputs {
-                        user_active: true,
+                        thermal_pressure: crate::throttle::ThermalPressure::Critical,
                         ..ThrottleInputs::default()
                     },
                 )
@@ -7157,7 +8637,7 @@ mod tests {
     fn tick_with_default_static_sampler_picks_idle() {
         // Sanity check: with no overrides, the default static sampler
         // mirrors `ThrottleInputs::default()` so the engine starts in
-        // Idle — the existing behavior the clock plumbing must preserve.
+        // Idle: the existing behavior the clock plumbing must preserve.
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
@@ -7185,10 +8665,9 @@ mod tests {
 
     #[test]
     fn attached_status_publisher_receives_fresh_snapshot_each_tick() {
-        // Regression test for the status-stuck bug: without the
-        // publisher hook, `vapor status` would always return the boot
-        // snapshot. We attach a recording publisher and assert the run
-        // state actually flips through it after a pause request.
+        // Without the publisher hook, `vapor status` would return the
+        // boot snapshot for ever. A recording publisher shows the run
+        // state flip through it after a pause request.
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         std::fs::create_dir_all(&watch_root).expect("create watch root");
@@ -7290,7 +8769,7 @@ mod tests {
         // The e2e S10 shape: a file appears in the cloud root without a
         // feed event (external write) and the user runs `vapor
         // reconcile`. The scheduled download must complete and the queue
-        // drain — nothing may wedge leased.
+        // drain: nothing may wedge leased.
         let mut fixture = BidirectionalFixture::new();
         let control = Arc::new(crate::runtime_control::RuntimeControl::new());
         fixture.runtime.attach_control(control.clone());
@@ -7325,8 +8804,8 @@ mod tests {
     fn ignored_names_never_cross_sides_or_manufacture_conflicts() {
         // The `.DS_Store` shape from manual testing: Finder writes
         // divergent metadata into both the watched root and the cloud
-        // mirror. Ignore rules must hold in *both* directions — through
-        // the changes feed and through a requested reconcile — so the
+        // mirror. Ignore rules must hold in *both* directions, through
+        // the changes feed and through a requested reconcile, so the
         // divergence never downloads, never uploads, and never produces
         // a keep-both conflict copy.
         let mut fixture = BidirectionalFixture::new();
@@ -7382,9 +8861,9 @@ mod tests {
     fn local_deletion_propagates_even_when_a_write_fragment_arrives_last() {
         // Real fs-watch backends split one unlink into several
         // fragments and the write-kind one can land last (FSEvents flag
-        // coalescing). The delete must still reach the cloud — this
-        // exact shape used to become an Upload plan that no-op'd as
-        // "vanished before upload", leaving the remote copy immortal.
+        // coalescing). The delete must still reach the cloud: read as
+        // an upload, it would end as "vanished before upload" and leave
+        // the remote copy there for ever.
         let mut fixture = BidirectionalFixture::new();
         std::fs::write(fixture.watch_root.join("doomed.txt"), b"payload").expect("seed");
         fixture.record_local_event(
@@ -7405,7 +8884,7 @@ mod tests {
             fixture.now_ms,
         );
         // The trailing write-kind fragment notify delivers after the
-        // unlink — the part that used to flip the intent to Upload.
+        // unlink: the part that must not flip the intent to Upload.
         fixture.record_local_event(
             &fixture.watch_root.join("doomed.txt"),
             FsEventKind::Modified,
@@ -7466,6 +8945,46 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_that_moves_in_with_an_ignore_file_syncs_by_the_rules_of_that_file() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        // A project made elsewhere, then moved in: the watcher reports
+        // the folder, and nothing for the files under it.
+        let staged = fixture
+            .watch_root
+            .parent()
+            .expect("parent")
+            .join("staged-project");
+        std::fs::create_dir_all(staged.join("src")).expect("dirs");
+        std::fs::write(staged.join(".gitignore"), "secret.env\nbuild-output/\n").expect("rules");
+        std::fs::write(staged.join("secret.env"), b"TOKEN=not-for-the-cloud").expect("secret");
+        std::fs::write(staged.join("src/main.rs"), b"fn main() {}").expect("source");
+        std::fs::create_dir_all(staged.join("build-output")).expect("dirs");
+        std::fs::write(staged.join("build-output/app.bin"), b"binary").expect("output");
+        let project = fixture.watch_root.join("project");
+        std::fs::rename(&staged, &project).expect("move in");
+        fixture.record_local_event(&project, FsEventKind::Created, fixture.now_ms);
+        // The folder's event, the reload of the rules, then the events
+        // of its files, each with a quiet window of its own.
+        for _ in 0..4 {
+            fixture.tick(6_000);
+        }
+        fixture.converge(24);
+
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("project/src/main.rs")).expect("source"),
+            b"fn main() {}"
+        );
+        assert!(fixture.cloud_root.join("project/.gitignore").is_file());
+        assert!(
+            !fixture.cloud_root.join("project/secret.env").exists()
+                && !fixture.cloud_root.join("project/build-output").exists(),
+            "what the folder's own rules hide never reaches the cloud: {:?}",
+            files_in(&fixture.cloud_root)
+        );
+    }
+
+    #[test]
     fn shutdown_flush_persists_events_still_inside_their_debounce_window() {
         // A write reported by the watcher moments before SIGTERM has not
         // stabilized yet. The shutdown flush must turn it into a durable
@@ -7508,7 +9027,7 @@ mod tests {
     fn editing_a_file_last_synced_from_an_external_write_uploads_without_conflict() {
         // Real-provider everyday shape: an external writer changes the
         // cloud file (no op-id tag), we download it, then the user edits
-        // locally. The upload must overwrite — the index hash proves the
+        // locally. The upload must overwrite: the index hash proves the
         // remote is exactly what we synced from. This used to
         // manufacture a keep-both copy on every such round-trip.
         let mut fixture = BidirectionalFixture::new();
@@ -7552,6 +9071,479 @@ mod tests {
         }
     }
 
+    // ---- A one-way mode asks before it runs ----
+
+    #[test]
+    fn a_one_way_profile_syncs_nothing_until_the_user_confirms_the_mode() {
+        let mut fixture =
+            BidirectionalFixture::unconfirmed_with_mode(vapor_shared::SyncMode::PullOnly);
+        let local_only = fixture.watch_root.join("only-here.txt");
+        std::fs::write(&local_only, b"a pull-only mirror removes this").expect("seed local");
+        std::fs::write(fixture.cloud_root.join("from-cloud.txt"), b"cloud").expect("seed cloud");
+        fixture
+            .runtime
+            .schedule_startup_reconcile(timestamp_ms(fixture.now_ms))
+            .expect("startup scan");
+        for _ in 0..10 {
+            fixture.tick(6_000);
+        }
+        assert!(local_only.exists(), "nothing is removed before the answer");
+        assert!(
+            !fixture.watch_root.join("from-cloud.txt").exists(),
+            "nothing syncs before the answer, the safe direction included"
+        );
+        let snapshot = fixture.runtime.app.snapshot().clone();
+        assert_eq!(snapshot.run_state, RunState::Error);
+        assert!(
+            snapshot
+                .reason
+                .contains("pull-only needs your confirmation")
+                && snapshot.reason.contains("vapor decisions list"),
+            "{:?}",
+            snapshot.reason
+        );
+
+        // A pause and a resume do not hide the question behind "running".
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+        control.request_pause();
+        fixture.tick(1_000);
+        assert_eq!(fixture.runtime.app.snapshot().run_state, RunState::Paused);
+        control.request_resume();
+        fixture.tick(1_000);
+        let resumed = fixture.runtime.app.snapshot().clone();
+        assert_eq!(resumed.run_state, RunState::Error);
+        assert!(
+            resumed.reason.contains("pull-only needs your confirmation"),
+            "{:?}",
+            resumed.reason
+        );
+        assert!(local_only.exists());
+        let decision = fixture
+            .runtime
+            .state_db()
+            .decisions(false)
+            .expect("decisions")
+            .into_iter()
+            .find(|decision| decision.kind == constants::decision::KIND_ONE_WAY_MODE)
+            .expect("the question is a decision");
+        assert!(
+            decision
+                .question
+                .contains("removes each file that is only on this device")
+        );
+        assert_eq!(decision.options.len(), 1);
+        assert_eq!(decision.options[0].key, constants::decision::OPTION_ENABLE);
+
+        fixture
+            .runtime
+            .acknowledge_one_way_mode(timestamp_ms(fixture.now_ms));
+        fixture.converge(20);
+        assert!(!local_only.exists(), "confirmed: the mirror removes it");
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("from-cloud.txt")).expect("mirrored"),
+            b"cloud"
+        );
+        assert_eq!(fixture.runtime.app.snapshot().run_state, RunState::Running);
+    }
+
+    #[test]
+    fn a_confirmation_holds_for_one_mode_and_one_pair_of_roots() {
+        let temp = TempDir::new().expect("temp dir");
+        let watch_root = temp.path().join("watch");
+        let cloud_root = temp.path().join("cloud");
+        let other_cloud = temp.path().join("other-cloud");
+        for directory in [&watch_root, &cloud_root, &other_cloud] {
+            std::fs::create_dir_all(directory).expect("dir");
+        }
+        let database_path = temp.path().join("state/vapor.sqlite");
+        let start = |mode: vapor_shared::SyncMode, cloud: &std::path::Path| {
+            DaemonRuntime::build(
+                SyncScope {
+                    local_root: Some(watch_root.clone()),
+                    cloud_root: cloud.to_string_lossy().into_owned(),
+                    sync_mode: mode,
+                },
+                EventPathFilterOptions::default(),
+                DurableStateDb::open(&database_path).expect("open durable state db"),
+                Box::new(vapor_providers::FilesystemProvider::new()),
+                Arc::new(StaticMetricsSampler::default()),
+                Arc::new(crate::clock::ManualClock::at_now()),
+                false,
+            )
+            .expect("runtime")
+        };
+        let open_questions = |runtime: &DaemonRuntime| {
+            runtime
+                .state_db()
+                .decisions(false)
+                .expect("decisions")
+                .into_iter()
+                .filter(|decision| {
+                    decision.kind == constants::decision::KIND_ONE_WAY_MODE && decision.is_open()
+                })
+                .count()
+        };
+
+        let mut first = start(vapor_shared::SyncMode::PushOnly, &cloud_root);
+        assert_eq!(open_questions(&first), 1);
+        first.acknowledge_one_way_mode(timestamp_ms(1));
+        drop(first);
+
+        // The same mirror on the next start: no question.
+        let again = start(vapor_shared::SyncMode::PushOnly, &cloud_root);
+        assert!(again.one_way_hold.is_none());
+        assert_eq!(open_questions(&again), 0);
+        drop(again);
+
+        // Another cloud folder is another mirror, and so is the other
+        // mode: each one asks.
+        let moved = start(vapor_shared::SyncMode::PushOnly, &other_cloud);
+        assert!(moved.one_way_hold.is_some());
+        assert_eq!(open_questions(&moved), 1);
+        drop(moved);
+        let flipped = start(vapor_shared::SyncMode::PullOnly, &cloud_root);
+        assert!(flipped.one_way_hold.is_some());
+        assert_eq!(
+            open_questions(&flipped),
+            1,
+            "the question about the other mirror is withdrawn, not left open"
+        );
+        drop(flipped);
+
+        // Back to two-way: nothing to confirm, and no question stays.
+        let two_way = start(vapor_shared::SyncMode::TwoWay, &cloud_root);
+        assert!(two_way.one_way_hold.is_none());
+        assert_eq!(open_questions(&two_way), 0);
+        drop(two_way);
+
+        // The first mirror again, after the profile ran both ways: the
+        // old confirmation does not cover what changed since.
+        let back = start(vapor_shared::SyncMode::PushOnly, &cloud_root);
+        assert!(back.one_way_hold.is_some());
+        assert_eq!(open_questions(&back), 1);
+    }
+
+    #[test]
+    fn a_confirmation_from_another_surface_releases_a_held_mirror() {
+        let temp = TempDir::new().expect("temp dir");
+        let watch_root = temp.path().join("watch");
+        let cloud_root = temp.path().join("cloud");
+        for directory in [&watch_root, &cloud_root] {
+            std::fs::create_dir_all(directory).expect("dir");
+        }
+        let database_path = temp.path().join("state/vapor.sqlite");
+        let start = || {
+            DaemonRuntime::build(
+                SyncScope {
+                    local_root: Some(watch_root.clone()),
+                    cloud_root: cloud_root.to_string_lossy().into_owned(),
+                    sync_mode: vapor_shared::SyncMode::PullOnly,
+                },
+                EventPathFilterOptions::default(),
+                DurableStateDb::open(&database_path).expect("open durable state db"),
+                Box::new(vapor_providers::FilesystemProvider::new()),
+                Arc::new(StaticMetricsSampler::default()),
+                Arc::new(crate::clock::ManualClock::at_now()),
+                false,
+            )
+            .expect("runtime")
+        };
+        let open_questions = |runtime: &DaemonRuntime| {
+            runtime
+                .state_db()
+                .decisions(false)
+                .expect("decisions")
+                .into_iter()
+                .filter(|decision| {
+                    decision.kind == constants::decision::KIND_ONE_WAY_MODE && decision.is_open()
+                })
+                .count()
+        };
+        // What `vapor profiles add` does on a terminal after a yes: it
+        // writes the confirmation through a connection of its own.
+        let confirm_elsewhere = |runtime: &DaemonRuntime| {
+            let scope = runtime.sync_scope.clone();
+            let mut other = DurableStateDb::open(&database_path).expect("second connection");
+            crate::one_way::acknowledge(
+                &mut other,
+                scope.sync_mode,
+                scope.local_root.as_deref().expect("local root"),
+                &scope.cloud_root,
+                timestamp_ms(1),
+            )
+            .expect("confirm");
+        };
+
+        // The daemon composed the profile before the confirmation
+        // landed: it asks, then finds the confirmation and runs.
+        let mut held = start();
+        assert!(held.one_way_hold.is_some());
+        assert_eq!(open_questions(&held), 1);
+        confirm_elsewhere(&held);
+        held.tick(timestamp_ms(2)).expect("tick");
+        assert!(held.one_way_hold.is_none());
+        assert_eq!(open_questions(&held), 0);
+        assert_eq!(held.app.snapshot().run_state, RunState::Running);
+        drop(held);
+
+        // A question left open by a daemon that stopped before the
+        // confirmation landed is withdrawn at the next start.
+        let mut other = DurableStateDb::open(&database_path).expect("second connection");
+        other
+            .delete_state(constants::state::ONE_WAY_ACKNOWLEDGED_KEY)
+            .expect("forget");
+        drop(other);
+        let asks = start();
+        assert_eq!(open_questions(&asks), 1);
+        confirm_elsewhere(&asks);
+        drop(asks);
+        let runs = start();
+        assert!(runs.one_way_hold.is_none());
+        assert_eq!(open_questions(&runs), 0);
+    }
+
+    // ---- A change in only the spelling of a name ----
+
+    /// The user-visible names in a folder, as the filesystem spells them.
+    fn names_in(directory: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(directory)
+            .expect("list")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| !name.starts_with(".vapor"))
+            .filter(|name| !name.ends_with(".vapor-meta.json"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_local_rename_that_changes_only_the_case_moves_the_cloud_object() {
+        let mut fixture = BidirectionalFixture::new().watching_the_local_tree();
+        fixture.tick(6_000); // baseline
+        std::fs::write(fixture.watch_root.join("report.txt"), b"quarterly").expect("seed");
+        fixture.converge(12);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["report.txt"]);
+
+        std::fs::rename(
+            fixture.watch_root.join("report.txt"),
+            fixture.watch_root.join("Report.txt"),
+        )
+        .expect("rename");
+        for _ in 0..30 {
+            fixture.tick(1_000);
+        }
+        fixture.converge(12);
+
+        assert_eq!(names_in(&fixture.watch_root), vec!["Report.txt"]);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["Report.txt"]);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("Report.txt")).expect("cloud"),
+            b"quarterly"
+        );
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0
+        );
+        assert_eq!(fixture.runtime.conflict_count(), 0);
+    }
+
+    #[test]
+    fn a_cloud_rename_that_changes_only_the_case_renames_the_local_file() {
+        let mut fixture = BidirectionalFixture::new().watching_the_local_tree();
+        fixture.tick(6_000); // baseline
+        std::fs::write(fixture.watch_root.join("notes.txt"), b"minutes").expect("seed");
+        fixture.converge(12);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["notes.txt"]);
+
+        std::fs::rename(
+            fixture.cloud_root.join("notes.txt"),
+            fixture.cloud_root.join("Notes.txt"),
+        )
+        .expect("cloud rename");
+        fixture.feed.emit_removed(
+            fixture.cloud_root.join("notes.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        fixture.feed.emit_created(
+            fixture.cloud_root.join("Notes.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        for _ in 0..30 {
+            fixture.tick(1_000);
+        }
+        fixture.converge(12);
+
+        assert_eq!(names_in(&fixture.cloud_root), vec!["Notes.txt"]);
+        assert_eq!(names_in(&fixture.watch_root), vec!["Notes.txt"]);
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("Notes.txt")).expect("local"),
+            b"minutes"
+        );
+        assert_eq!(
+            fixture.runtime.state_db().queue_depth().expect("depth"),
+            0,
+            "{:?}",
+            fixture.runtime.state_db().queued_summaries()
+        );
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0,
+            "{:?}",
+            fixture.runtime.state_db().failed_summaries()
+        );
+        assert_eq!(fixture.runtime.conflict_count(), 0);
+    }
+
+    #[test]
+    fn a_local_folder_rename_that_changes_only_the_case_reaches_the_cloud() {
+        let mut fixture = BidirectionalFixture::new().watching_the_local_tree();
+        fixture.tick(6_000); // baseline
+        std::fs::create_dir(fixture.watch_root.join("photos")).expect("dir");
+        std::fs::write(fixture.watch_root.join("photos/a.jpg"), b"first").expect("seed");
+        std::fs::write(fixture.watch_root.join("photos/b.jpg"), b"second").expect("seed");
+        fixture.converge(12);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["photos"]);
+
+        std::fs::rename(
+            fixture.watch_root.join("photos"),
+            fixture.watch_root.join("Photos"),
+        )
+        .expect("rename");
+        for _ in 0..40 {
+            fixture.tick(1_000);
+        }
+        fixture.converge(24);
+
+        assert_eq!(names_in(&fixture.watch_root), vec!["Photos"]);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["Photos"]);
+        assert_eq!(
+            names_in(&fixture.cloud_root.join("Photos")),
+            vec!["a.jpg", "b.jpg"]
+        );
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0
+        );
+    }
+
+    /// Syncs `name` through one offline run and returns the fixture.
+    fn offline_fixture_with_synced(name: &str, body: &[u8]) -> OfflineFixture {
+        let fixture = OfflineFixture::new();
+        std::fs::write(fixture.watch_root.join(name), body).expect("seed");
+        drop(fixture.run(&[]));
+        assert_eq!(names_in(&fixture.cloud_root), vec![name.to_string()]);
+        fixture
+    }
+
+    #[test]
+    fn a_spelling_changed_on_this_device_while_stopped_is_carried_to_the_cloud() {
+        let fixture = offline_fixture_with_synced("report.txt", b"quarterly");
+        std::fs::rename(
+            fixture.watch_root.join("report.txt"),
+            fixture.watch_root.join("Report.txt"),
+        )
+        .expect("rename");
+
+        let runtime = fixture.run(&[]);
+        assert_eq!(names_in(&fixture.watch_root), vec!["Report.txt"]);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["Report.txt"]);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("Report.txt")).expect("cloud"),
+            b"quarterly"
+        );
+        assert!(runtime.trash().expect("trash").list().is_empty());
+        assert_eq!(runtime.state_db().failed_depth().expect("failed"), 0);
+    }
+
+    #[test]
+    fn a_spelling_changed_in_the_cloud_while_stopped_is_carried_to_this_device() {
+        let fixture = offline_fixture_with_synced("notes.txt", b"minutes");
+        std::fs::rename(
+            fixture.cloud_root.join("notes.txt"),
+            fixture.cloud_root.join("Notes.txt"),
+        )
+        .expect("cloud rename");
+
+        let runtime = fixture.run(&[]);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["Notes.txt"]);
+        assert_eq!(names_in(&fixture.watch_root), vec!["Notes.txt"]);
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("Notes.txt")).expect("local"),
+            b"minutes"
+        );
+        assert!(runtime.trash().expect("trash").list().is_empty());
+        assert_eq!(runtime.state_db().failed_depth().expect("failed"), 0);
+    }
+
+    #[test]
+    fn when_both_sides_changed_the_spelling_the_cloud_spelling_stays() {
+        let fixture = offline_fixture_with_synced("draft.txt", b"chapter one");
+        if std::fs::symlink_metadata(fixture.watch_root.join("DRAFT.TXT")).is_err() {
+            // A volume that keeps spellings apart sees two plain
+            // renames to two names; there is no one name to settle.
+            return;
+        }
+        std::fs::rename(
+            fixture.watch_root.join("draft.txt"),
+            fixture.watch_root.join("DRAFT.txt"),
+        )
+        .expect("local rename");
+        std::fs::rename(
+            fixture.cloud_root.join("draft.txt"),
+            fixture.cloud_root.join("Draft.txt"),
+        )
+        .expect("cloud rename");
+
+        let runtime = fixture.run(&[]);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["Draft.txt"]);
+        assert_eq!(names_in(&fixture.watch_root), vec!["Draft.txt"]);
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("Draft.txt")).expect("local"),
+            b"chapter one"
+        );
+        assert!(runtime.trash().expect("trash").list().is_empty());
+        assert_eq!(runtime.conflict_count(), 0);
+        assert_eq!(runtime.state_db().failed_depth().expect("failed"), 0);
+    }
+
+    #[test]
+    fn a_folder_spelling_changed_in_the_cloud_while_stopped_renames_the_local_folder() {
+        let fixture = OfflineFixture::new();
+        std::fs::create_dir(fixture.watch_root.join("photos")).expect("dir");
+        std::fs::write(fixture.watch_root.join("photos/a.jpg"), b"first").expect("seed");
+        drop(fixture.run(&[]));
+        std::fs::rename(
+            fixture.cloud_root.join("photos"),
+            fixture.cloud_root.join("Photos"),
+        )
+        .expect("cloud rename");
+
+        let runtime = fixture.run(&[]);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["Photos"]);
+        if crate::name_collision::folds_case_at(&fixture.watch_root) {
+            // One folder under two spellings: the local one is renamed.
+            assert_eq!(names_in(&fixture.watch_root), vec!["Photos"]);
+        } else {
+            // Two different names on this volume: the file moves to the
+            // new folder, and the old folder holds no file.
+            assert!(names_in(&fixture.watch_root).contains(&"Photos".to_string()));
+            assert!(!fixture.watch_root.join("photos/a.jpg").exists());
+        }
+        assert_eq!(names_in(&fixture.watch_root.join("Photos")), vec!["a.jpg"]);
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("Photos/a.jpg")).expect("local"),
+            b"first"
+        );
+        assert_eq!(runtime.state_db().failed_depth().expect("failed"), 0);
+        if crate::name_collision::folds_case_at(&fixture.watch_root) {
+            assert!(runtime.trash().expect("trash").list().is_empty());
+        }
+    }
+
     // ---- Optional advanced safeguards ----
 
     /// Seeds `count` synced files (uploaded, indexed) so a deletion
@@ -7578,6 +9570,84 @@ mod tests {
             "every seeded file must be indexed"
         );
         paths
+    }
+
+    #[test]
+    fn applying_a_deletion_burst_keeps_a_cloud_file_this_device_never_saw() {
+        // Another device added a file to a folder that the user then
+        // deletes here. The deletion of that cloud entry is queued with
+        // the others, and the guard holds the burst before it is
+        // planned. The user answers `apply`. The answer is about what
+        // the user deleted: the file this device never compared has no
+        // index row, and it stays.
+        let mut fixture = BidirectionalFixture::new();
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        let paths = seed_synced_files(&mut fixture, 40);
+        for path in &paths[..12] {
+            std::fs::remove_file(path).expect("unlink");
+            fixture.record_local_event(path, FsEventKind::Removed, fixture.now_ms);
+        }
+        fixture.converge(30);
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision("mass-delete", None)
+            .expect("query")
+            .expect("twelve of forty files is a burst");
+
+        // The deletion of the entry this device never saw, held with
+        // the burst while it is still unplanned.
+        let unseen_cloud = fixture.cloud_root.join("d0/from-another-device.txt");
+        let unseen_local = fixture.watch_root.join("d0/from-another-device.txt");
+        std::fs::write(&unseen_cloud, b"added elsewhere").expect("cloud-only file");
+        let now = timestamp_ms(fixture.now_ms);
+        fixture
+            .runtime
+            .state_db_mut()
+            .enqueue_intents_coalesced(
+                &[(unseen_local.clone(), PendingIntentKind::Delete, now)],
+                crate::safeguards::IntentSource::Fresh,
+            )
+            .expect("enqueue");
+        fixture
+            .runtime
+            .state_db_mut()
+            .hold_pending_of_kind(PendingIntentKind::Delete, decision.id)
+            .expect("hold");
+
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "apply", now)
+            .expect("resolve");
+        fixture.converge(60);
+
+        assert!(
+            !fixture.cloud_root.join("d0/f0.txt").exists(),
+            "the deletions the user made went through"
+        );
+        assert_eq!(
+            std::fs::read(&unseen_cloud).expect("the unseen file stays in the cloud"),
+            b"added elsewhere"
+        );
+        assert_eq!(
+            std::fs::read(&unseen_local).expect("and comes down to this device"),
+            b"added elsewhere"
+        );
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0,
+            "{:?}",
+            fixture.runtime.state_db().failed_summaries()
+        );
     }
 
     #[test]
@@ -8218,6 +10288,261 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_an_ignore_rule_change_frees_syncs_without_a_restart() {
+        let mut fixture = BidirectionalFixture::new();
+        let filter = fixture
+            .runtime
+            .path_filter
+            .clone()
+            .expect("the fixture has a path filter");
+        // Two files that no event announced; a rule hides one of them.
+        std::fs::write(fixture.watch_root.join(".vaporignore"), "draft.txt\n").expect("rules");
+        std::fs::write(fixture.watch_root.join("draft.txt"), b"not ready").expect("draft");
+        std::fs::write(fixture.watch_root.join("plain.txt"), b"plain").expect("plain");
+        // The watcher saw the rules file change.
+        filter.request_reload();
+        fixture.converge(24);
+        assert!(
+            fixture.cloud_root.join("plain.txt").is_file(),
+            "the new rules decide another way, so a whole-scope reconcile ran"
+        );
+        assert!(!fixture.cloud_root.join("draft.txt").exists(), "hidden");
+
+        // The rule goes. Nothing touches the draft, and no restart and
+        // no `vapor reconcile` follows.
+        std::fs::write(fixture.watch_root.join(".vaporignore"), "").expect("rules");
+        filter.request_reload();
+        fixture.converge(24);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("draft.txt")).expect("the freed file synced"),
+            b"not ready"
+        );
+
+        // A reload that changes nothing queues no reconcile.
+        let generation = filter.rules_generation();
+        filter.request_reload();
+        fixture.tick(6_000);
+        assert_eq!(filter.rules_generation(), generation);
+    }
+
+    #[test]
+    fn a_full_cloud_makes_uploads_wait_and_they_go_up_when_there_is_room() {
+        let (mut fixture, cloud_full) = BidirectionalFixture::new_with_cloud_full_switch();
+        fixture.tick(6_000);
+        cloud_full.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let local = fixture.watch_root.join("report.txt");
+        std::fs::write(&local, b"waits for room").expect("local file");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(4);
+        assert!(!fixture.cloud_root.join("report.txt").exists());
+        let snapshot = fixture.runtime.app().snapshot();
+        assert_eq!(snapshot.run_state, RunState::Error, "{snapshot:?}");
+        assert!(snapshot.reason.contains("uploads wait"), "{snapshot:?}");
+        // The upload is queued, not failed, and no attempt was spent.
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0
+        );
+        let queued = fixture
+            .runtime
+            .state_db()
+            .list_queue_intents(4)
+            .expect("queue");
+        assert_eq!(queued.len(), 1, "{queued:?}");
+        assert_eq!(queued[0].attempt_count, 0);
+
+        // A download does not wait for room in the cloud.
+        std::fs::write(fixture.cloud_root.join("inbound.txt"), b"inbound").expect("cloud file");
+        fixture.feed.emit_created(
+            fixture.cloud_root.join("inbound.txt"),
+            timestamp_ms(fixture.now_ms),
+        );
+        fixture.converge(4);
+        assert!(fixture.watch_root.join("inbound.txt").is_file());
+
+        // Someone frees space. The upload comes back on its own.
+        cloud_full.store(false, std::sync::atomic::Ordering::SeqCst);
+        fixture.tick(constants::engine::CLOUD_FULL_RETRY_SECONDS * 1_000 + 1_000);
+        fixture.converge(4);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("report.txt")).expect("uploaded"),
+            b"waits for room"
+        );
+        fixture.tick(120_000);
+        let snapshot = fixture.runtime.app().snapshot();
+        assert_eq!(snapshot.run_state, RunState::Running, "{snapshot:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_with_a_backslash_is_asked_about_one_time_and_never_fails() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let file = fixture.watch_root.join("report\\2025.txt");
+        let folder = fixture.watch_root.join("old\\archive");
+        std::fs::write(&file, b"a backslash in the name").expect("file");
+        std::fs::create_dir_all(&folder).expect("folder");
+        std::fs::write(folder.join("inside.txt"), b"inside").expect("inside");
+        std::fs::write(fixture.watch_root.join("plain.txt"), b"plain").expect("plain");
+
+        // The watcher reports the file, and a whole-scope scan follows.
+        fixture.record_local_event(&file, FsEventKind::Created, fixture.now_ms);
+        fixture
+            .runtime
+            .enqueue_startup_reconstruction_reconcile(timestamp_ms(fixture.now_ms))
+            .expect("queue a whole-scope scan");
+        fixture.converge(24);
+
+        assert!(fixture.cloud_root.join("plain.txt").is_file());
+        assert_eq!(
+            std::fs::read_dir(&fixture.cloud_root)
+                .expect("cloud")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains('\\'))
+                .count(),
+            0,
+            "no name with a backslash reaches the cloud"
+        );
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0,
+            "a name that cannot sync is not a failed intent"
+        );
+        let mut asked: Vec<PathBuf> = fixture
+            .runtime
+            .state_db()
+            .decisions(true)
+            .expect("decisions")
+            .into_iter()
+            .filter(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+            .filter_map(|decision| decision.path)
+            .collect();
+        asked.sort();
+        let mut expected = vec![file.clone(), folder.clone()];
+        expected.sort();
+        assert_eq!(asked, expected, "the file and the folder, each one time");
+
+        // Renamed: the next scan withdraws the question and the file syncs.
+        std::fs::rename(&file, fixture.watch_root.join("report-2025.txt")).expect("rename");
+        fixture
+            .runtime
+            .enqueue_startup_reconstruction_reconcile(timestamp_ms(fixture.now_ms))
+            .expect("queue a whole-scope scan");
+        fixture.converge(24);
+        assert!(fixture.cloud_root.join("report-2025.txt").is_file());
+        let open: Vec<PathBuf> = fixture
+            .runtime
+            .state_db()
+            .decisions(false)
+            .expect("decisions")
+            .into_iter()
+            .filter(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+            .filter_map(|decision| decision.path)
+            .collect();
+        assert_eq!(open, vec![folder]);
+    }
+
+    #[test]
+    fn a_whole_scope_scan_counts_what_the_ignore_rules_hide() {
+        let mut fixture = BidirectionalFixture::new();
+        assert_eq!(
+            fixture.runtime.ignored_paths(),
+            None,
+            "no scan has finished"
+        );
+        // `build/` and `*.log` are default rules. A folder counts one
+        // time, whatever it holds.
+        for file in [
+            "build/a.o",
+            "build/deep/b.o",
+            "notes/today.log",
+            "notes/plan.txt",
+        ] {
+            let path = fixture.watch_root.join(file);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(path, b"x").expect("seed");
+        }
+        fixture
+            .runtime
+            .enqueue_startup_reconstruction_reconcile(timestamp_ms(fixture.now_ms))
+            .expect("queue a whole-scope scan");
+        fixture.converge(24);
+        assert!(fixture.cloud_root.join("notes/plan.txt").is_file());
+        assert_eq!(fixture.runtime.ignored_paths(), Some(2));
+    }
+
+    #[test]
+    fn a_local_root_that_comes_back_asks_for_new_watchers_one_time() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        assert!(!fixture.runtime.take_local_root_changed());
+
+        // The root goes away (a volume unplugged) and comes back as the
+        // same folder under the same path.
+        let parked = fixture._temp.path().join("parked");
+        std::fs::rename(&fixture.watch_root, &parked).expect("unplug");
+        for _ in 0..12 {
+            fixture.tick(6_000);
+        }
+        assert_eq!(fixture.runtime.app().snapshot().run_state, RunState::Error);
+        assert!(!fixture.runtime.take_local_root_changed(), "still away");
+
+        std::fs::rename(&parked, &fixture.watch_root).expect("plug back in");
+        for _ in 0..12 {
+            fixture.tick(6_000);
+        }
+        assert_eq!(
+            fixture.runtime.app().snapshot().run_state,
+            RunState::Running
+        );
+        assert!(
+            fixture.runtime.take_local_root_changed(),
+            "a watch that follows the old folder reports nothing from this one"
+        );
+        assert!(!fixture.runtime.take_local_root_changed(), "asked one time");
+    }
+
+    #[test]
+    fn a_file_gone_from_a_swapped_root_is_never_deleted_from_the_cloud() {
+        // The watcher can report the files of a root that was swapped
+        // before it reports the root, or without reporting the root at
+        // all. The periodic root check is seconds away. Nothing may be
+        // deleted in that window.
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let kept = fixture.watch_root.join("kept.txt");
+        std::fs::write(&kept, b"kept").expect("seed");
+        fixture.record_local_event(&kept, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(12);
+        assert!(fixture.cloud_root.join("kept.txt").is_file());
+
+        let parked = fixture._temp.path().join("parked");
+        std::fs::rename(&fixture.watch_root, &parked).expect("swap out");
+        std::fs::create_dir_all(&fixture.watch_root).expect("empty replacement");
+        // Only the file's own event arrives.
+        fixture.record_local_event(&kept, FsEventKind::Removed, fixture.now_ms);
+        for _ in 0..12 {
+            fixture.tick(1_000);
+        }
+        assert!(
+            fixture.cloud_root.join("kept.txt").is_file(),
+            "a file that is gone because the root was swapped was deleted from the cloud"
+        );
+        assert!(
+            fixture
+                .runtime
+                .state_db()
+                .decisions(false)
+                .expect("decisions")
+                .iter()
+                .any(|decision| decision.kind == crate::root_identity::DECISION_KIND),
+            "the replaced root is put to the user"
+        );
+        assert_eq!(fixture.runtime.app().snapshot().run_state, RunState::Error);
+    }
+
+    #[test]
     fn a_repeated_create_event_for_a_synced_file_never_rewrites_the_cloud_copy() {
         // FSEvents can report a directory's creation after the file
         // events inside it; the runtime then reports the directory's
@@ -8353,33 +10678,6 @@ mod tests {
         assert!(
             fixture.runtime.app.snapshot().reason.contains("cloud root"),
             "the real blocker must remain visible in the reason"
-        );
-    }
-
-    #[test]
-    fn code_file_churn_trips_active_coding_heuristic_into_user_active_throttle() {
-        let mut fixture = BidirectionalFixture::new();
-        fixture.tick(6_000);
-        assert_eq!(
-            fixture.runtime.app.snapshot().throttle_state,
-            vapor_shared::ThrottleState::Idle,
-            "quiet defaults sample as idle"
-        );
-
-        // Rapid code-class churn: threshold-many stabilized .rs events.
-        for index in 0..constants::engine::ACTIVE_CODING_EVENT_THRESHOLD {
-            let path = fixture.watch_root.join(format!("src/module-{index}.rs"));
-            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
-            std::fs::write(&path, b"fn main() {}").expect("seed code file");
-            fixture.record_local_event(&path, FsEventKind::Modified, fixture.now_ms);
-        }
-        fixture.tick(6_000); // stabilize → heuristic records the churn
-        fixture.tick(2_000); // next sample sees the heuristic signal
-
-        assert_eq!(
-            fixture.runtime.app.snapshot().throttle_state,
-            vapor_shared::ThrottleState::Throttled,
-            "active-coding heuristic must sample as user-active"
         );
     }
 

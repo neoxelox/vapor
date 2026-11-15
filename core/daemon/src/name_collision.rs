@@ -16,57 +16,156 @@
 //! to the same key only counts when the filesystem resolves the target
 //! onto it.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The existing local file `target` would alias, if any.
+pub use vapor_shared::paths::StoredSpelling as LocalSpelling;
+
+/// How the local filesystem spells the entry that `path` resolves to.
+pub fn local_spelling(path: &Path) -> LocalSpelling {
+    vapor_shared::paths::stored_spelling(path)
+}
+
+/// Whether `path` is on this device under exactly this spelling.
+pub fn exactly_present(path: &Path) -> bool {
+    local_spelling(path) == LocalSpelling::Exact
+}
+
+/// The existing local file `target` would alias, if any: the entry is
+/// there under another spelling of its own name. A parent folder that
+/// is spelled differently is not an alias of the file.
 pub fn colliding_local_path(target: &Path) -> Option<PathBuf> {
-    let parent = target.parent()?;
-    let wanted = target.file_name()?.to_str()?;
-    let entries = fs::read_dir(parent).ok()?;
-    let mut sibling = None;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if name == wanted {
-            // The exact spelling exists: no collision.
-            return None;
+    match local_spelling(target) {
+        LocalSpelling::Other(stored) if stored.file_name() != target.file_name() => {
+            Some(target.with_file_name(stored.file_name()?))
         }
-        if sibling.is_none() && fold(name) == fold(wanted) {
-            sibling = Some(entry.path());
-        }
+        _ => None,
     }
-    let sibling = sibling?;
-    // On a volume that keeps both spellings apart the target simply
-    // does not exist and both can coexist.
-    fs::symlink_metadata(target).ok().map(|_| sibling)
 }
 
-/// The key two colliding names share: composed (NFC) and case-folded,
-/// so `Readme.md` and `readme.md` fold together, and so do the two
-/// spellings of `café`.
+/// The key two colliding names share.
 pub fn fold(name: &str) -> String {
-    use unicode_normalization::UnicodeNormalization;
-    name.nfc().flat_map(char::to_lowercase).collect()
+    vapor_shared::paths::fold_name(name)
 }
 
-/// Whether the local filesystem of this host treats differently-cased
-/// spellings as one name. Answered per host today; a per-volume probe
-/// would refine it for a sync root on a case-sensitive volume.
-pub fn local_filesystem_folds_case() -> bool {
+/// Whether the volume that holds `directory` treats differently-cased
+/// spellings as one name. The volume answers where the OS can say (a
+/// case-sensitive volume on macOS holds `Readme.md` and `readme.md`
+/// side by side); the host default answers otherwise, and for a
+/// directory that is not there yet.
+pub fn folds_case_at(directory: &Path) -> bool {
     use vapor_platform::fs_caps::{
         CaseSensitivity, FilesystemCapabilities, NativeFilesystemCapabilities,
     };
-    NativeFilesystemCapabilities::for_current_host().case_sensitivity()
+    NativeFilesystemCapabilities::for_current_host().case_sensitivity_at(directory)
         == CaseSensitivity::Insensitive
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn the_stored_spelling_is_reported_where_the_volume_folds_names() {
+        let dir = TempDir::new().expect("dir");
+        let root = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        fs::create_dir(root.join("Photos")).expect("dir");
+        let stored = root.join("Photos/Report.txt");
+        fs::write(&stored, b"x").expect("seed");
+
+        assert_eq!(local_spelling(&stored), LocalSpelling::Exact);
+        assert_eq!(
+            local_spelling(&root.join("Photos/missing.txt")),
+            LocalSpelling::Absent
+        );
+        for other in [
+            "Photos/report.txt",
+            "photos/Report.txt",
+            "PHOTOS/REPORT.TXT",
+        ] {
+            let other = root.join(other);
+            // A volume that keeps the spellings apart has no such entry.
+            let expected = if fs::symlink_metadata(&other).is_ok() {
+                LocalSpelling::Other(stored.clone())
+            } else {
+                LocalSpelling::Absent
+            };
+            assert_eq!(local_spelling(&other), expected, "{}", other.display());
+        }
+    }
+
+    #[test]
+    fn a_respelled_folder_above_the_sync_root_says_nothing_about_a_file_below_it() {
+        let dir = TempDir::new().expect("dir");
+        let base = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        let root = base.join("vapor");
+        fs::create_dir(&root).expect("dir");
+        fs::create_dir(root.join("Photos")).expect("dir");
+        fs::write(root.join("Photos/a.txt"), b"x").expect("seed");
+        vapor_shared::paths::note_sync_root(&root);
+
+        fs::rename(&root, base.join("Vapor")).expect("respell");
+        if fs::symlink_metadata(&root).is_err() {
+            // This volume keeps the two spellings apart: the root moved.
+            return;
+        }
+        assert_eq!(
+            local_spelling(&root.join("Photos/a.txt")),
+            LocalSpelling::Exact
+        );
+        // Below the root a spelling still counts, and the stored path
+        // keeps the root as the process holds it.
+        for other in ["Photos/A.txt", "photos/a.txt"] {
+            assert_eq!(
+                local_spelling(&root.join(other)),
+                LocalSpelling::Other(root.join("Photos/a.txt")),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_the_volume_folds_by_a_rule_of_its_own_is_another_spelling() {
+        let dir = TempDir::new().expect("dir");
+        let root = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        // A final sigma and a capital sigma fold together on a volume
+        // that folds by the full Unicode rules; a lowercase of each
+        // character does not make them equal.
+        let stored = root.join("\u{03bf}\u{03b4}\u{03bf}\u{03c2}.txt");
+        fs::write(&stored, b"x").expect("seed");
+        let other = root.join("\u{039f}\u{0394}\u{039f}\u{03a3}.txt");
+        if fs::symlink_metadata(&other).is_err() {
+            // This volume keeps the two names apart.
+            return;
+        }
+        assert_eq!(local_spelling(&other), LocalSpelling::Other(stored));
+    }
+
+    #[test]
+    fn a_folder_spelled_differently_is_not_an_alias_of_the_file() {
+        let dir = TempDir::new().expect("dir");
+        let root = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        fs::create_dir(root.join("Photos")).expect("dir");
+        fs::write(root.join("Photos/a.jpg"), b"x").expect("seed");
+        assert_eq!(colliding_local_path(&root.join("photos/a.jpg")), None);
+    }
+
+    #[test]
+    fn a_symlinked_parent_does_not_read_as_another_spelling() {
+        let dir = TempDir::new().expect("dir");
+        let root = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        fs::create_dir(root.join("real")).expect("dir");
+        fs::write(root.join("real/a.txt"), b"x").expect("seed");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("real"), root.join("link")).expect("symlink");
+            assert_eq!(
+                local_spelling(&root.join("link/a.txt")),
+                LocalSpelling::Exact
+            );
+        }
+    }
 
     #[test]
     fn exact_spelling_present_is_not_a_collision() {
@@ -85,8 +184,9 @@ mod tests {
     #[test]
     fn a_differently_normalized_sibling_collides_only_where_the_volume_aliases_it() {
         let dir = TempDir::new().expect("dir");
-        let composed = dir.path().join("caf\u{e9}.txt");
-        let decomposed = dir.path().join("cafe\u{301}.txt");
+        let root = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        let composed = root.join("caf\u{e9}.txt");
+        let decomposed = root.join("cafe\u{301}.txt");
         fs::write(&composed, b"x").expect("seed");
         // APFS resolves either spelling onto the same file; ext4 keeps
         // them apart, and then both may exist.
@@ -102,9 +202,10 @@ mod tests {
     #[test]
     fn differently_cased_sibling_collides_only_where_the_volume_aliases_it() {
         let dir = TempDir::new().expect("dir");
-        let existing = dir.path().join("Readme.md");
+        let root = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        let existing = root.join("Readme.md");
         fs::write(&existing, b"x").expect("seed");
-        let target = dir.path().join("readme.md");
+        let target = root.join("readme.md");
         let expected = if fs::symlink_metadata(&target).is_ok() {
             Some(existing)
         } else {

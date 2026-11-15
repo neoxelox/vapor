@@ -12,16 +12,16 @@ Tasks: `docs/tasks/core.md`.
 
 ## What lives here
 
-- `CrashLoopGuard` — pure-logic backoff policy. `baseDelay=2s`,
+- `CrashLoopGuard`: pure-logic backoff policy. `baseDelay=2s`,
   `maxDelay=120s`, `maxConsecutiveFailuresBeforePause=5`,
-  `failureWindow=600s` by default; matches the Swift implementation
-  one-to-one.
-- `AutoLaunchSettingStore` — trait + JSON-file impl that reads / writes
+  `failureWindow=600s` by default. It is the only implementation:
+  the app has none of its own.
+- `AutoLaunchSettingStore`: trait + JSON-file impl that reads / writes
   the `autoLaunch` key in `vapor.json`. Atomic-on-disk via
   temp-file-then-rename so the Swift `VaporConfigurationStore` and the
   Rust CLI can share one file.
-- `DaemonLifecycleManager` — orchestrator. Public surface mirrors the
-  Swift class (`bootstrap_if_needed`, `set_auto_launch_enabled`,
+- `DaemonLifecycleManager`: orchestrator (`bootstrap_if_needed`,
+  `set_auto_launch_enabled`,
   `register_unexpected_daemon_exit`, `start_daemon_if_allowed`,
   `stop_daemon_for_termination`, `acknowledge_crash_loop_pause`).
 

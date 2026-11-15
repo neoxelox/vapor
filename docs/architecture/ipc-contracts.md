@@ -6,10 +6,10 @@ Vapor app (`apps/macos`, future `apps/windows`, future `apps/linux`) or CLI
 
 The *transport* is platform-specific and covered by:
 
-- `docs/architecture/macos/ipc-transport.md` — macOS (Unix domain socket;
+- `docs/architecture/macos/ipc-transport.md`: macOS (Unix domain socket;
   optional NSXPC wrapping).
-- `docs/architecture/windows/ipc-transport.md` — Windows (named pipe).
-- `docs/architecture/linux/ipc-transport.md` — Linux (Unix domain socket).
+- `docs/architecture/windows/ipc-transport.md`: Windows (named pipe).
+- `docs/architecture/linux/ipc-transport.md`: Linux (Unix domain socket).
 
 The contracts defined in this document are transport-agnostic: the same
 schema, handshake, and skew matrix apply to every transport. The wire
@@ -18,96 +18,31 @@ request/response envelopes are Vapor-specific tagged enums
 (`{"kind": …, "payload": …}` / `{"outcome": …, "value": …}`), not
 JSON-RPC.
 
-Historical note: this document was previously titled "XPC Contracts". The
-contract surface has always been wire-agnostic; renaming it removes the
-macOS-only connotation.
-
 ## Contract versioning rules
 
-Every request and response payload carries an explicit `schemaVersion: u32`
-field at the top level. Keys are camelCase and every value that names a
+The handshake (`hello`, its ack) and every data payload (the ack of
+a control request, status, diagnostics, timeline) carry an explicit
+`schemaVersion: u32` field at the top level. A bare method call and an
+error body carry none: the handshake already agreed the protocol. Keys are camelCase and every value that names a
 state or a choice is kebab-case (`run: {state: "running"}`,
 `throttle: {state: "idle"}`), the same shape `vapor … --json` prints;
 the values come from the vocabulary modules in
 `core/shared/src/constants.rs`. The concrete version handshake and skew tolerance
 rules below are pre-GA; backward-compat guarantees tighten at GA.
 
-### Schema history
+### Versions
 
 Source of truth: `core/shared/src/constants.rs::ipc`
 (`SCHEMA_VERSION_CURRENT`, `SCHEMA_VERSION_MIN_SUPPORTED`) and the payload types in
-`core/ipc/src/protocol.rs`.
+`core/ipc/src/protocol.rs`. The current version is 4 and the floor is 4:
+no build speaks an older shape. `CHANGELOG.md` records what each version
+changed.
 
-- **v1** (the baseline): `Hello`/`HelloAck`, `Status`, `Pause`,
-  `Resume`, `FlushNow`, `Reconcile`, `Timeline`, `Logs` seam.
-- **v2** (additive over v1; every new field is serde-defaulted so a
-  v1 peer's frames still parse):
-  `StatusResponse` gains sync-scope/provider/sync-mode fields, per-profile
-  summaries (`ProfileStatus`), effective resource ceilings + idle-boost
-  state (`ResourceBudgetStatus`), and cumulative conflict/mirror counters;
-  new `Diagnostics` method returns per-intent "why stuck" rows
-  (`DiagnosticsResponse` / `IntentDiagnostic`); new `SetAutoLaunch` and
-  `UpdateExcludes` control methods persist config through the daemon; and
-  `TimelineEntry` carries `profile_id`.
-- **v2, later additions** (still additive, serde-defaulted):
-  `StatusResponse.decisions_pending` and `ProfileStatus.decisions_pending`
-  count the open decisions (`data-flow.md` §Decisions). The decisions
-  themselves are not served over IPC: `vapor decisions` reads and answers
-  them in the profile state DB directly, so the app can list and answer
-  them with the daemon stopped. `StatusResponse.conflicts_unresolved` and
-  `ProfileStatus.conflicts_unresolved` count the keep-both conflict
-  copies the user has not resolved (the copies in the sync index plus
-  the ones queued for their first upload), so a surface can flag them
-  without walking the tree; unlike the cumulative `conflicts` counter it
-  returns to zero on resolution (`conflict-resolution.md` §Notify).
-  `StatusResponse.reconcile_state` / `reconcile_detail` (and the same
-  pair on `ProfileStatus`) say what the whole-scope scan is doing:
-  `idle`, `waiting` (queued, held by the throttle; the detail names
-  what it waits for, such as `waiting for an idle moment: user activity
-  is active`), or `running` (the detail names the root). The daemon-wide
-  pair is the most active profile's. New method `SyncNow`: the user's
-  on-demand sync, a whole-scope reconcile admitted under any throttle
-  state but `Suspended` plus the flush boost; answers with an `Ack`, and
-  a daemon that predates it answers `unsupported` like every unknown
-  control method (`data-flow.md` §Throttle states).
-  `ProfileStatus.sign_in_required` is `true` while the provider refuses
-  that profile's sign-in and the profile is on hold; the way out is
-  `vapor auth login <provider_name> --profile <id>`
-  (`operations/provider-auth-operations.md` §Failure behavior). A
-  daemon that predates it sends nothing, which reads as `false`.
-- **v3** — the naming pass, a breaking
-  change. Every key became camelCase (`schemaVersion`, `runState`,
-  `queueDepth`, `profileId`) and every state value kebab-case
-  (`running`, `idle`, diagnostics stages such as
-  `waiting-to-upload`, actions such as `cloud-delete`); `ProfileStatus`
-  `display_name` became `name` and `provider_name` became `provider`,
-  on `StatusResponse` too. `FlushNow` and `SyncNow` are gone: `Reconcile`
-  now carries the on-demand semantics `SyncNow` had (a scan admitted
-  under any throttle state but `suspended`, plus the boost that releases
-  deferred work). `sign_in_required` is `signInRequired`, and the way
-  out it names is `vapor auth login --profile <id>`, since the profile
-  decides the provider. A v2 peer would read v3 frames as defaults, so
-  the floor moved to 3 and the handshake refuses it.
-- **v4** (current; min supported v4) — the status regrouped into one
-  word per key. `run`, `throttle`, and `idleBoost` are `{state,
-  reason}` objects and `reconcile` is `{state, detail}`; `queueDepth`,
-  `failedIntents`, and `decisionsPending` became `queued`, `failed`, and
-  `decisions` (conflicts now count as decisions, so `conflictsUnresolved`
-  and the cumulative `conflicts` counter are gone); the mirror counters
-  sit in `mirror {reverts, deletes}`; `resourceBudget` became `resources`
-  with `cpu` / `memory` `{limitPercent, usedPercent}` and `bandwidth`
-  `{limitPercent, usedKbps}`; `configRestartRequired` became
-  `restartRequired` and `daemonId` became `daemon`. The daemon-wide
-  `run.reason` is the daemon's own pick (a suspension first, otherwise the
-  first profile in that state that gives one), so apps no longer compute
-  it. A profile row's `suspendedReason` folded into `run.reason` plus
-  `suspended: true`. `loopPreventionSuppressions` moved to diagnostics as
-  `suppressedEchoes`, whose rows lost the word intent: `items` of `{id,
-  profileId, path, action, stage, elapsedMs, attempts, error, reason}`
-  plus `droppedEvents`. The throttle state `idle-drain` is `idle`. The
-  `SetAutoLaunch` and `UpdateExcludes` methods are gone: nothing called
-  them, and `vapor.json` has one set of writers (`vapor config set`, the
-  app, `vapor service`), which the daemon reloads.
+A field added inside a version is optional, so a peer of the same
+version that predates it reads the frame. Version 4 has these:
+`resources.bandwidth.uploadCapacityKbps` and `downloadCapacityKbps`,
+`ignoredPaths` on a profile row, `truncated` on the timeline answer,
+and the run state `unconfigured`.
 
 ### Handshake
 
@@ -117,10 +52,10 @@ Source of truth: `core/shared/src/constants.rs::ipc`
   `HelloAck { schemaVersion, supportedMinVersion, serverId }`.
 - If `app_schema_version < daemon.supported_min_version` or
   `daemon_schema_version < app.supported_min_version`, the handshake fails
-  with `IncompatibleVersion { peerVersion, requiredMin, localVersion }`. Both sides log
-  a structured diagnostic (`ipc.handshake.incompatible` with both versions)
-  and the app surfaces an actionable "Please update Vapor" state. The
-  daemon does not accept further requests from that session.
+  with `IncompatibleVersion { peerVersion, requiredMin, localVersion }`. The
+  daemon logs "Refused an IPC client" at INFO with the client's name and
+  both versions, and the client surfaces an actionable "update Vapor"
+  state. The daemon does not accept further requests from that session.
 - If both sides are within their supported window, the session proceeds. No
   per-request version negotiation is required after the handshake.
 
@@ -130,8 +65,8 @@ Source of truth: `core/shared/src/constants.rs::ipc`
   Daemon-N receiving a request serialized by app-(N-1) may see fewer fields
   than the current N schema defines; missing fields take type-specific
   defaults: numeric = `0`, boolean = `false`, string = `""`, optional =
-  `None`, array = `[]`. Unknown fields added by a newer peer are logged at
-  debug level (`ipc.unknown_field` with the field name) and discarded.
+  `None`, array = `[]`. Unknown fields added by a newer peer are
+  discarded.
 - **Response field omission is symmetric.** App-(N-1) receiving a response
   from daemon-N applies the same defaulting rules for fields it does not
   know about.
@@ -142,14 +77,11 @@ Source of truth: `core/shared/src/constants.rs::ipc`
 
 ### Removal policy
 
-- Removing a field requires a two-step migration: first mark the field
-  `deprecated = true` in the schema and ignore it on the receiving side
-  while still accepting it on the sending side; second, at the next
-  `schema_version` bump, remove it and raise `supported_min_version` to the
-  bump point.
-- Pre-GA exception: the project owner may fast-track field removals without
-  the two-step migration when both app and daemon ship in the same release
-  artifact. The release notes must call out the breaking shape change.
+- Removing a field, or changing its type or meaning, needs a
+  `schemaVersion` bump and a floor (`supportedMinVersion`) at the bump.
+- Before GA the app, the CLI, and the daemon ship in one artifact, so a
+  removal ships in one step. The release notes call out the breaking
+  shape change.
 
 ### App/daemon skew matrix
 
@@ -173,8 +105,11 @@ Concretely:
   oversized declaration is answered with the `PayloadTooLarge` error
   response (carrying the declared size) before any allocation or
   deserialization attempt, then the session is closed.
-- Streamed endpoints (diagnostics timeline, activity events) use chunked
-  frames; each frame is bounded independently.
+- Every answer is one frame. The timeline answer keeps the newest
+  entries that fit the frame and sets `truncated: true` when it left
+  older ones out; `timelineLimit` (at most 10 000) bounds the buffer
+  itself. The diagnostics answer is bounded the same way and has its
+  own `truncated`.
 - Server-side connection hygiene: at most
   `MAX_CONCURRENT_CONNECTIONS` concurrent sessions are served (excess
   connections are dropped at accept), and a session idle longer than
@@ -203,7 +138,7 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
   "resources": {
     "cpu": { "limitPercent": 15, "usedPercent": 2 },
     "memory": { "limitPercent": 10, "usedPercent": 1 },
-    "bandwidth": { "limitPercent": 25, "usedKbps": 0 },
+    "bandwidth": { "limitPercent": 25, "usedKbps": 0, "uploadCapacityKbps": 40000, "downloadCapacityKbps": 300000 },
     "idleBoost": { "state": "off", "reason": "user idle for 12s of the required 300s" }
   },
   "profiles": [
@@ -213,12 +148,17 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
       "reconcile": { "state": "idle", "detail": "" },
       "queued": 0, "failed": 0, "decisions": 1,
       "mirror": { "reverts": 0, "deletes": 0 },
-      "suspended": false, "signInRequired": false
+      "suspended": false, "signInRequired": false, "ignoredPaths": 214
     }
   ]
 }
 ```
 
+- `run.state` is one of `starting`, `running`, `paused`, `error`, and
+  `unconfigured`. `unconfigured` means the daemon is up and has no
+  usable profile: it syncs nothing, creates no folder, and `run.reason`
+  says what to fix. `starting` covers a profile's first check of its
+  cloud folder, which runs on a worker so the socket answers at once.
 - The daemon-wide `run.state` is the most severe profile's; `run.reason`
   is the daemon's pick (a suspended profile names itself first,
   otherwise the first profile in that state that gives a reason). A
@@ -229,27 +169,52 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
   (`conflict-resolution.md`).
 - `suspended: true` means the profile is not syncing: it was stopped by
   its configuration or by repeated failures, or its local root is
-  missing and Vapor waits for it (`run.reason` says which).
+  missing and Vapor waits for it (`run.reason` says which). A profile
+  that could not be composed at all is listed the same way.
   `signInRequired` means the provider refused its sign-in.
+- `reconcile.state` is `idle`, `waiting` (a scan is queued; `detail`
+  says what it waits for), or `running` (`detail` names the root).
+- `resources.bandwidth.usedKbps` is the measured rate of the last
+  seconds. The two capacities are what the daemon measured for each
+  direction of the link, and are absent before the first measure.
+- `ignoredPaths` is the number of local paths the ignore rules kept out
+  of the last whole-scope scan, absent before the first scan.
+  `vapor ignored` lists them.
 - The daemon-wide `provider` is the configured provider of the profile
   whose state is reported, and `throttle` comes from a profile that is
   running, never from a suspended one's stand-in.
 
 ### Provider / auth
 
-- Auth state, token-refresh health, provider capability flags, last auth
-  error classification (per profile).
+- `signInRequired` on a profile row is the auth state the daemon
+  serves. `vapor auth status` reads the secret store itself, so it
+  answers with the daemon stopped.
 
 ### Lifecycle
 
-- Auto-launch enabled state, last launch result, crash-loop pause state,
-  daemon uptime, startup-reconstruction-barrier state.
+- Not served over IPC. `vapor service status --json` reads the
+  auto-launch setting, the service state, and the crash-loop state
+  from `core/lifecycle`, with the daemon running or not.
 
 ### Controls
 
-- `Pause` / `Resume`, `Reconcile` (the user's on-demand scan). Settings
-  are not an IPC control: `vapor config set`, the app, and `vapor
-  service` write `vapor.json`, and the daemon reloads it.
+- `Pause` / `Resume`, `Reconcile` (the user's on-demand scan). Each
+  answers with an `Ack`. Settings are not an IPC control: `vapor config
+  set`, the app, and `vapor service` write `vapor.json`, and the daemon
+  reloads it.
+- A `Call` that names a method the daemon does not know is answered
+  with the `MethodNotFound` error and the name.
+
+### Timeline
+
+- `Timeline` returns the bounded activity buffer: `entries` of
+  `{timestampMs, kind, message, profileId}`, newest last, and
+  `truncated`.
+- `kind` is one of `run-state`, `throttle`, `profile`, `config`,
+  `decision`, `conflict`, `collision`, `mirror`, `cloud-delete` (a file
+  Vapor removed in the cloud, with the cause), `failure`, `reconcile`,
+  `feed`, `cloud-root`, `sign-in`, and `cloud-full`
+  (`constants::timeline`).
 
 ### Diagnostics (per item of work)
 
@@ -261,27 +226,27 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
   decision #4"). This is the data source for the "why is this stuck"
   surface.
 - `action` says what the item does (`constants::intent::ACTION_*`):
-  - `upload` / `download` — content moving to or from the cloud.
-  - `rename` — a local rename carried to the cloud.
-  - `local-delete` — a delete made on this device, carried to the cloud.
-  - `cloud-delete` — a delete made in the cloud, applied on this device.
-  - `reconcile` — a subtree the reconcile walk still has to compare.
+  - `upload` / `download`: content moving to or from the cloud.
+  - `rename`: a local rename carried to the cloud.
+  - `local-delete`: a delete made on this device, carried to the cloud.
+  - `cloud-delete`: a delete made in the cloud, applied on this device.
+  - `reconcile`: a subtree the reconcile walk still has to compare.
 - `stage` says where it is (`constants::intent::STAGE_*`). Three values
   describe the durable queue, the rest mirror the staged executor:
-  - `queued` — in the durable queue, waiting to be leased.
-  - `retrying` — hit a transient or rate-limited failure and waits out
+  - `queued`, in the durable queue, waiting to be leased.
+  - `retrying`: hit a transient or rate-limited failure and waits out
     its backoff; it reads `queued` again once the backoff elapses.
-  - `held` — parked behind an open decision; the blocker names the
+  - `held`: parked behind an open decision; the blocker names the
     decision number. Not leased until the decision is answered.
-  - `planning` — leased and in the planner.
-  - `waiting-to-hash` — planned, waiting for a hash permit (workgate cap
+  - `planning`: leased and in the planner.
+  - `waiting-to-hash`: planned, waiting for a hash permit (workgate cap
     exhausted, or the throttle disallows hashing).
-  - `hashing` — being hashed.
-  - `waiting-to-upload` — hashed (or needing no hash), waiting for an
+  - `hashing`: being hashed.
+  - `waiting-to-upload`: hashed (or needing no hash), waiting for an
     upload permit.
-  - `uploading` — being uploaded.
-  - `waiting-to-download` — a cloud change waiting for a download permit.
-  - `downloading` — being downloaded.
+  - `uploading`: being uploaded.
+  - `waiting-to-download`: a cloud change waiting for a download permit.
+  - `downloading`: being downloaded.
 - Diagnostics also expose `suppressedEchoes` (the daemon's own writes
   seen again and skipped, loop prevention at work) and the
   `BoundedFsEventRecorder` drop count as `droppedEvents`, so users can
@@ -300,10 +265,10 @@ The IPC implementation must include:
 - Field omission: request serialized without an N-only field is handled by
   daemon-N without error and uses default values.
 - Unknown field: request carrying a synthetic `futureField` is handled
-  without error and logged at debug level.
+  without error.
 - Payload bounds: a `payload_bytes` value above the cap is rejected before
   deserialization.
-- Stream frame bounds: a single oversized timeline frame is rejected
-  without tearing down the stream.
+- Timeline bound: an answer that would pass the frame cap keeps its
+  newest entries and sets `truncated`.
 - Transport matrix: the same test cases run on every supported transport
   (UDS on macOS/Linux, named pipe on Windows).

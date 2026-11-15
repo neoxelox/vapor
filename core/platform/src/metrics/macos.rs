@@ -135,6 +135,7 @@ impl NativePlatformMetricsSampler {
         }
         inputs.vapor_memory_bytes = resident_bytes();
         inputs.device_memory_bytes = self.device_memory_bytes;
+        inputs.link_speed_kbps = link_speed_kbps();
         inputs.user_active = self.idle.has_gui_session()
             && self.idle.idle_for()
                 < Duration::from_millis(constants::engine::USER_ACTIVE_INPUT_WINDOW_MILLIS);
@@ -144,13 +145,14 @@ impl NativePlatformMetricsSampler {
     }
 }
 
-impl PlatformMetricsSampler for NativePlatformMetricsSampler {
-    fn sample(&self) -> ThrottleInputs {
+impl NativePlatformMetricsSampler {
+    /// The reading at `now`: a new one when the sample interval has
+    /// passed since the last, the cached one otherwise.
+    pub(super) fn sample_at(&self, now: Instant) -> ThrottleInputs {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let now = Instant::now();
         let interval = Duration::from_millis(constants::engine::THROTTLE_SAMPLE_INTERVAL_MILLIS);
         let due = state
             .sampled_at
@@ -159,6 +161,12 @@ impl PlatformMetricsSampler for NativePlatformMetricsSampler {
             self.refresh(&mut state, now);
         }
         state.inputs
+    }
+}
+
+impl PlatformMetricsSampler for NativePlatformMetricsSampler {
+    fn sample(&self) -> ThrottleInputs {
+        self.sample_at(Instant::now())
     }
 }
 
@@ -195,6 +203,68 @@ fn timeval(value: libc::timeval) -> Duration {
     let secs = u64::try_from(value.tv_sec).unwrap_or(0);
     let micros = u64::try_from(value.tv_usec).unwrap_or(0);
     Duration::from_secs(secs) + Duration::from_micros(micros)
+}
+
+/// The speed of the fastest network interface that is up and has an
+/// address, in kbit/s, from the interface statistics the kernel keeps
+/// (`if_data.ifi_baudrate`). Tunnels, bridges, and peer-to-peer
+/// interfaces are skipped: their figure is nominal. `None` when no
+/// interface reports one.
+fn link_speed_kbps() -> Option<u32> {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::ffi::CStr;
+
+    let mut list: *mut libc::ifaddrs = ptr::null_mut();
+    // SAFETY: `list` is a valid out-pointer; on success the kernel
+    // hands back a list that stays valid until `freeifaddrs`.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return None;
+    }
+    let mut addressed: BTreeSet<String> = BTreeSet::new();
+    let mut baud: BTreeMap<String, u64> = BTreeMap::new();
+    let mut cursor = list;
+    while !cursor.is_null() {
+        // SAFETY: `cursor` is a non-null node of the list `getifaddrs`
+        // returned, which is not freed until after the loop.
+        let entry = unsafe { &*cursor };
+        cursor = entry.ifa_next;
+        let up = libc::IFF_UP as u32 | libc::IFF_RUNNING as u32;
+        if entry.ifa_flags & up != up
+            || entry.ifa_flags & libc::IFF_LOOPBACK as u32 != 0
+            || entry.ifa_flags & libc::IFF_POINTOPOINT as u32 != 0
+            || entry.ifa_addr.is_null()
+            || entry.ifa_name.is_null()
+        {
+            continue;
+        }
+        // SAFETY: `ifa_name` is a NUL-terminated string owned by the
+        // list, checked non-null above.
+        let name = unsafe { CStr::from_ptr(entry.ifa_name) }
+            .to_string_lossy()
+            .into_owned();
+        if !name.starts_with("en") {
+            continue;
+        }
+        // SAFETY: `ifa_addr` is non-null and points at a `sockaddr`
+        // whose family field is always readable.
+        let family = i32::from(unsafe { (*entry.ifa_addr).sa_family });
+        if family == libc::AF_INET || family == libc::AF_INET6 {
+            addressed.insert(name);
+        } else if family == libc::AF_LINK && !entry.ifa_data.is_null() {
+            // SAFETY: for an `AF_LINK` entry the kernel points
+            // `ifa_data` at this interface's `if_data`.
+            let data = unsafe { &*(entry.ifa_data as *const libc::if_data) };
+            baud.insert(name, u64::from(data.ifi_baudrate));
+        }
+    }
+    // SAFETY: `list` came from a successful `getifaddrs` and no
+    // reference into it outlives this call.
+    unsafe { libc::freeifaddrs(list) };
+
+    baud.into_iter()
+        .filter(|(name, bits_per_second)| addressed.contains(name) && *bits_per_second > 0)
+        .map(|(_, bits_per_second)| u32::try_from(bits_per_second / 1_000).unwrap_or(u32::MAX))
+        .max()
 }
 
 fn resident_bytes() -> Option<u64> {
@@ -282,5 +352,22 @@ fn thermal_pressure(raw: isize) -> ThermalPressure {
         1 => ThermalPressure::Fair,
         2 => ThermalPressure::Serious,
         _ => ThermalPressure::Critical,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_link_speed_is_absent_or_a_plausible_figure() {
+        // A host with no network, a virtual machine, or an interface
+        // that reports nothing gives `None`; that is a valid answer.
+        if let Some(kbps) = link_speed_kbps() {
+            eprintln!("link speed reported by the OS: {kbps} kbit/s");
+            assert!(kbps >= 100, "at least 100 kbit/s, got {kbps}");
+        } else {
+            eprintln!("the OS reports no link speed");
+        }
     }
 }

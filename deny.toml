@@ -1,0 +1,41 @@
+# cargo-deny configuration. `scripts/rust/lint.sh` runs `cargo deny check`
+# against it on every target the workspace builds for.
+
+[graph]
+all-features = true
+
+# A crate with a RustSec advisory, or one that its author yanked, fails
+# the check. An advisory that does not apply to Vapor goes into `ignore`
+# with the reason next to it.
+[advisories]
+yanked = "deny"
+ignore = []
+
+# Vapor is GPL-3.0-only. Each license below can ship inside a GPL-3.0
+# binary. A dependency under any other license fails the check until
+# someone reads that license and adds it here on purpose.
+[licenses]
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "GPL-3.0-only",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+# Two versions of one crate cost build time, not safety, and the
+# transitive graph decides them. A `*` version requirement is refused
+# everywhere but between the workspace's own crates.
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+# Every crate comes from crates.io.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

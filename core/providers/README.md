@@ -18,17 +18,20 @@ engine talks to the trait and to `ProviderCapabilities`; nothing in
   tokens in the platform `SecretStore`, resumable uploads, ranged
   downloads verified by MD5, and the Drive changes feed with cursor
   re-baselining. Operations: `docs/operations/provider-auth-operations.md`.
+- `SuspendedProvider` refuses every call. It is not selectable from
+  configuration; the daemon gives it to a profile that cannot run, so
+  nothing that profile queued can read as done.
 - `FilesystemStubProvider` is inert: every write succeeds as a no-op and
-  every read is empty. It is not selectable from configuration; the
-  daemon uses it for a suspended profile, and tests use it to compose a
-  pipeline without a backend (`inert_stub_provider()`).
+  every read is empty. Tests use it to compose a pipeline without a
+  backend (`inert_stub_provider()`); it is never the provider of a
+  profile of the daemon.
 - `select_provider_for_profile` maps the configured kind to a provider
   and returns an error for unknown kinds, which suspends that profile.
 
 Every provider maps its failures onto the shared taxonomy in
 `core/shared` (`Transient`, `RateLimited`, `Authentication`,
-`PreconditionFailed`, `NotFound`, `Permanent`), so retry policy never
-parses error strings.
+`PreconditionFailed`, `NotFound`, `CloudRootUnavailable`, `StorageFull`,
+`Permanent`), so retry policy never parses error strings.
 
 ## Testing
 

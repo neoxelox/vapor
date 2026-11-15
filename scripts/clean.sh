@@ -4,11 +4,33 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # A manual e2e sandbox leaves its daemon running on purpose; stop it
-# before its home disappears from under it.
+# before its home disappears from under it. The pid file can outlive
+# its daemon, and the OS can give the number to another process: to the
+# installed daemon too, whose name is the same. The signal goes only to
+# a `vapor` or `vapord` that runs from this repository's build.
+ROOT_DIR_PHYSICAL="$(cd "$ROOT_DIR" && pwd -P)"
+is_repository_daemon() {
+  local command root inside
+  command="$(ps -p "$1" -o args= 2>/dev/null || true)"
+  for root in "$ROOT_DIR" "$ROOT_DIR_PHYSICAL"; do
+    [[ "$command" == "$root"/* ]] || continue
+    inside="${command#"$root"/}"
+    inside="${inside%% *}"
+    case "${inside##*/}" in
+      vapord|vapor) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 for pid_file in "$ROOT_DIR"/.vapor/e2e/*/daemon.pid; do
   [[ -f "$pid_file" ]] || continue
   pid="$(tr -d '[:space:]' < "$pid_file")"
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+  [[ "$pid" =~ ^[0-9]+$ ]] || continue
+  if ! is_repository_daemon "$pid"; then
+    continue
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
     echo "[clean] stopping sandbox daemon pid $pid"
     kill -TERM "$pid" 2>/dev/null || true
     for _ in $(seq 1 40); do

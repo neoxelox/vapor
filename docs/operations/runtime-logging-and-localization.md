@@ -37,11 +37,42 @@ Runtime directory is not a `vapor.json` option and is resolved by precedence:
   - `VAPOR_ENV=dev` -> `debug`
   - `VAPOR_ENV=prod` (or unset) -> `info`
 
+## The support report
+
+`vapor report` copies `vapor.json`, the logs, and the daemon's live
+state into `vapor_dir/reports/` (the five newest stay). The logs hold
+no credential, and they do hold the user's folder and file names, so by
+default the report replaces every name by a stable code
+(`core/cli/src/commands/redact.rs`). One name gives one code in every
+file of every report, so a maintainer can still follow one file through
+the logs.
+
+- The report is read twice. The first pass learns the names: every
+  component of every path it finds. The second pass replaces the sync
+  roots, the home directory, and the device id by a tag
+  (`<local-root:default>`), the whole value of each field that holds a
+  path or a name, each word with a path separator in it, each learned
+  name where it stands alone in a sentence (a question that names a
+  file), and each ignore rule that is not one Vapor ships with.
+- What a maintainer needs stays readable: a count (`2/2`), a byte
+  range, a rate (`kbit/s`), the build of the daemon (`vapord/<version>`),
+  and the host and the fixed words of a URL. The rest of a URL's path
+  becomes a code and its query goes.
+- What can remain: a name that stands alone in a sentence when it is
+  one plain lowercase word (`notes`), which cannot be told from the
+  sentence's own words, or when no path in the report holds it. The
+  manifest and the command's own output say so, and the user reads the
+  report before sharing it.
+- `--keep-paths` writes the names as they are, for a report that is
+  not shared in public. The manifest says which of the two it is.
+- The redaction of drive-letter and backslash paths is open work for
+  the Windows surface (`docs/tasks/core.md`).
+
 ## UI localization
 
 - Source-of-truth user-facing app copy catalogs live at `assets/locales/*.json`.
 - Swift build/test/package scripts sync those catalogs into `apps/macos/Sources/VaporCore/Resources/locales/*.json` before bundling.
 - Current catalog set includes `en.json` (English).
 - Language selection comes from persisted `language` (default `en`), and Vapor falls back to English if that catalog is unavailable.
-- If a requested language catalog is unavailable, Vapor falls back to English.
+- `./scripts/lint.sh` checks that every catalog parses as JSON.
 - Logs remain English-only by design.

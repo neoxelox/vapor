@@ -30,6 +30,22 @@ pub fn scenarios() -> Vec<Scenario> {
             run: observability,
         },
         Scenario {
+            id: "S65",
+            name: "report-hides-names",
+            proves: "vapor report replaces every folder path and file name by a code in the config, the logs, and the live state, and says so; --keep-paths keeps them and says that the report is not for a public issue",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: report_hides_names,
+        },
+        Scenario {
+            id: "S66",
+            name: "ignored-paths-are-shown",
+            proves: "vapor status counts the paths that the ignore rules keep out of sync, and vapor ignored lists each one with its rule, a folder one time and never a file that only shares a folder rule's name",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: ignored_paths_are_shown,
+        },
+        Scenario {
             id: "S15",
             name: "conflict-decisions",
             proves: "every version of a file edited in three places is one conflict decision naming each device, decisions resolve --choose <file> keeps that version at once and trashes the others, the resolution syncs, and the question closes",
@@ -39,11 +55,11 @@ pub fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             id: "S51",
-            name: "reconcile-under-user-activity",
-            proves: "a startup scan held by the throttle says so in status; vapor reconcile runs it under user activity and an offline divergence resolves as a keep-both copy",
+            name: "sync-under-lasting-conditions",
+            proves: "with a user at the keyboard, on battery, and Low Power Mode on, the startup scan runs with no request and an offline divergence resolves as a keep-both copy; under critical thermal pressure a new file waits and status says why; it uploads when the pressure clears",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
-            run: reconcile_under_user_activity,
+            run: sync_under_lasting_conditions,
         },
         Scenario {
             id: "S18",
@@ -116,6 +132,183 @@ fn observability(ctx: &mut Ctx) -> Result<(), Failure> {
         );
     }
     let _ = home;
+    Ok(())
+}
+
+/// Every text file of a report, joined.
+fn report_text(report_dir: &std::path::Path) -> Result<String, Failure> {
+    let mut text = String::new();
+    let mut pending = vec![report_dir.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                text.push_str(&String::from_utf8_lossy(&fs::read(&path)?));
+                text.push('\n');
+            }
+        }
+    }
+    Ok(text)
+}
+
+fn report_hides_names(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let cli = ctx.cli();
+    // Names that appear nowhere else, one of them with spaces.
+    let mark = ctx.mark();
+    write_file(
+        &home.local.join("Quarterly Plans/zebra budget draft.txt"),
+        "figures\n",
+    )?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(
+        &home.cloud.join("Quarterly Plans/zebra budget draft.txt"),
+        CONVERGE_TIMEOUT,
+    )?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    // The reports are judged by a name that the daemon's log holds. The
+    // log lines that name the file come a moment after the transfer
+    // (the cloud feed's own event, the second look at the file), so the
+    // scenario waits for one: a report written before it would hold no
+    // name to hide, and none to keep.
+    let daemon_log = home.daemon_log();
+    ctx.wait_until(CONVERGE_TIMEOUT, "the daemon log to name the file", || {
+        read_string(&daemon_log).is_ok_and(|log| log.contains("zebra budget draft.txt"))
+    })?;
+    let sandbox_name = ctx
+        .sandbox
+        .root
+        .parent()
+        .and_then(|run| run.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let write_report =
+        |extra: &[&str], into: &str| -> Result<(serde_json::Value, String, String), Failure> {
+            let output_dir = ctx.sandbox.root.join(into);
+            let output = output_dir.to_string_lossy().into_owned();
+            let mut args = vec!["report", "--output", output.as_str()];
+            args.extend_from_slice(extra);
+            let human = cli.ok(&args)?;
+            let report_dir = fs::read_dir(&output_dir)?
+                .flatten()
+                .map(|entry| entry.path())
+                .next()
+                .ok_or_else(|| Failure::new("support report directory missing"))?;
+            let manifest: serde_json::Value =
+                serde_json::from_str(&read_string(&report_dir.join("manifest.json"))?)
+                    .map_err(|error| Failure::new(format!("manifest is not JSON: {error}")))?;
+            Ok((manifest, report_text(&report_dir)?, human))
+        };
+
+    let (manifest, text, human) = write_report(&[], "reports-redacted")?;
+    ensure!(
+        manifest["pathsRedacted"] == true,
+        "the manifest must say that paths were redacted: {manifest}"
+    );
+    for name in [
+        "zebra",
+        "budget",
+        "Quarterly",
+        "Plans",
+        sandbox_name.as_str(),
+    ] {
+        ensure!(
+            !text.contains(name),
+            "the report still holds the name {name:?}"
+        );
+    }
+    ensure!(
+        text.contains("<local-root:default>") && text.contains("p-"),
+        "the report must show where a path stood"
+    );
+    ensure!(
+        human.contains("read the report before you share it"),
+        "the command must say on the terminal what the report can still hold: {human}"
+    );
+
+    let (manifest, text, human) = write_report(&["--keep-paths"], "reports-kept")?;
+    ensure!(
+        manifest["pathsRedacted"] == false && text.contains("zebra budget draft.txt"),
+        "--keep-paths must keep the names"
+    );
+    ensure!(
+        human.contains("public issue"),
+        "the command must warn about a report with names in it: {human}"
+    );
+    Ok(())
+}
+
+fn ignored_paths_are_shown(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    ctx.configure_scope(&home)?;
+    // `build/` and `*.log` are default rules.
+    write_file(&home.local.join("build/out/app.o"), "object\n")?;
+    write_file(&home.local.join("build/out/lib.o"), "object\n")?;
+    write_file(&home.local.join("notes/today.log"), "log\n")?;
+    write_file(&home.local.join("notes/build"), "a file named build\n")?;
+    write_file(&home.local.join("notes/plan.txt"), "plan\n")?;
+    ctx.start_daemon()?;
+    let cli = ctx.cli();
+    ctx.wait_exists(&home.cloud.join("notes/plan.txt"), CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("notes/build"), CONVERGE_TIMEOUT)?;
+
+    // The startup scan counted what the rules hid.
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "status to count the ignored paths",
+        || {
+            cli.json(&["status", "--json"])
+                .is_ok_and(|status| status["profiles"][0]["ignoredPaths"] == 2)
+        },
+    )?;
+    let text = cli.ok(&["status"])?;
+    ensure!(
+        text.contains("Ignored: 2 path(s)") && text.contains("vapor ignored"),
+        "status must say how many paths are ignored and how to list them: {text}"
+    );
+
+    let listed = cli.json(&["ignored", "--json"])?;
+    let mut entries: Vec<(String, String, String)> = listed["entries"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|entry| {
+            (
+                entry["path"].as_str().unwrap_or_default().to_string(),
+                entry["kind"].as_str().unwrap_or_default().to_string(),
+                entry["rule"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    entries.sort();
+    let expected = vec![
+        (
+            home.local.join("build").to_string_lossy().into_owned(),
+            "folder".to_string(),
+            "build/".to_string(),
+        ),
+        (
+            home.local
+                .join("notes/today.log")
+                .to_string_lossy()
+                .into_owned(),
+            "file".to_string(),
+            "*.log".to_string(),
+        ),
+    ];
+    ensure!(
+        entries == expected,
+        "vapor ignored must list the folder one time and the log file, each with its rule: {listed}"
+    );
+    ensure!(
+        !home.cloud.join("build").exists() && !home.cloud.join("notes/today.log").exists(),
+        "what the list names is what did not sync"
+    );
     Ok(())
 }
 
@@ -269,17 +462,28 @@ fn open_conflicts(cli: &crate::cli::Cli) -> Option<Vec<serde_json::Value>> {
     )
 }
 
-fn reconcile_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
-    // Throttle inputs from a file that says the user is typing, so the
-    // daemon sits in Throttled and the startup scan waits (the shape a
-    // developer machine produces with the host sampler).
+/// Writes the throttle inputs the daemon reads on its next sample.
+fn write_throttle_inputs(
+    path: &std::path::Path,
+    inputs: vapor_shared::ThrottleInputs,
+) -> Result<(), Failure> {
+    let document = serde_json::json!({ "inputs": inputs, "idle_seconds": 0 });
+    fs::write(path, serde_json::to_string_pretty(&document)?)?;
+    Ok(())
+}
+
+fn sync_under_lasting_conditions(ctx: &mut Ctx) -> Result<(), Failure> {
+    // Throttle inputs from a file: a user who types, on battery, with
+    // Low Power Mode on. Each of the three can hold for hours, so none
+    // of them may stop sync.
     let inputs_path = ctx.sandbox.root.join("throttle-inputs.json");
-    let inputs = vapor_shared::ThrottleInputs {
+    let lasting = vapor_shared::ThrottleInputs {
         user_active: true,
+        on_battery: true,
+        low_power_mode: true,
         ..vapor_shared::ThrottleInputs::default()
     };
-    let document = serde_json::json!({ "inputs": inputs, "idle_seconds": 0 });
-    fs::write(&inputs_path, serde_json::to_string_pretty(&document)?)?;
+    write_throttle_inputs(&inputs_path, lasting)?;
     let mut home = ctx.primary.clone();
     home.extra_env.insert(
         constants::env::VAPOR_THROTTLE_INPUTS.to_string(),
@@ -301,14 +505,14 @@ fn reconcile_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
     ctx.start_daemon_in(&home, kind, true)?;
     let cli = ctx.cli_for(&home);
 
+    // Nobody asks for a reconcile: the startup scan runs at the
+    // Throttled caps.
     ctx.wait_until(
         CONVERGE_TIMEOUT,
-        "status to report the startup scan waiting on the throttle",
-        || {
-            cli.status()
-                .is_some_and(|status| status.reconcile.state == "waiting")
-        },
+        "the offline divergence to resolve as a keep-both copy on both sides",
+        || conflict_copy_exists(&home.local, "alex") && conflict_copy_exists(&home.cloud, "alex"),
     )?;
+    ctx.settle_home(&home, crate::scenario::SETTLE_QUIET, CONVERGE_TIMEOUT)?;
     let status = cli
         .status()
         .ok_or_else(|| Failure::new("status did not answer"))?;
@@ -317,25 +521,6 @@ fn reconcile_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
         "the file inputs must hold the daemon at Throttled, got {}",
         status.throttle.state
     );
-    ensure!(
-        status.reconcile.detail.contains("user activity is active"),
-        "the waiting scan must name what it waits for: {:?}",
-        status.reconcile.detail
-    );
-    ensure!(
-        read_string(&home.local.join("alex.txt"))? == "local\n"
-            && read_string(&home.cloud.join("alex.txt"))? == "cloud\n",
-        "nothing may move while the scan waits"
-    );
-
-    // The user asks for it: the scan runs although the user is active.
-    cli.ok(&["reconcile", "--json"])?;
-    ctx.wait_until(
-        CONVERGE_TIMEOUT,
-        "the offline divergence to resolve as a keep-both copy on both sides",
-        || conflict_copy_exists(&home.local, "alex") && conflict_copy_exists(&home.cloud, "alex"),
-    )?;
-    ctx.settle(CONVERGE_TIMEOUT)?;
     for root in [&home.local, &home.cloud] {
         let mut payloads: Vec<String> = fs::read_dir(root)?
             .flatten()
@@ -354,15 +539,51 @@ fn reconcile_under_user_activity(ctx: &mut Ctx) -> Result<(), Failure> {
             root.display()
         );
     }
-    ctx.wait_until(
-        CONVERGE_TIMEOUT,
-        "status to count the copy as a decision and stop reporting a wait",
-        || {
-            cli.status()
-                .is_some_and(|status| status.reconcile.state != "waiting" && status.decisions >= 1)
+
+    // A device about to overheat is the one condition that stops sync.
+    write_throttle_inputs(
+        &inputs_path,
+        vapor_shared::ThrottleInputs {
+            thermal_pressure: vapor_shared::ThermalPressure::Critical,
+            ..lasting
         },
     )?;
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "status to report the suspended state",
+        || {
+            cli.status()
+                .is_some_and(|status| status.throttle.state == "suspended")
+        },
+    )?;
+    write_file(&home.local.join("while-hot.txt"), "waits\n")?;
+    std::thread::sleep(Duration::from_secs(8));
+    ensure!(
+        !home.cloud.join("while-hot.txt").exists(),
+        "nothing uploads while sync is suspended"
+    );
+    let status = cli
+        .status()
+        .ok_or_else(|| Failure::new("status did not answer"))?;
+    ensure!(
+        status
+            .throttle
+            .reason
+            .contains("thermal pressure is critical"),
+        "status must say why sync is stopped: {:?}",
+        status.throttle.reason
+    );
+
+    // It cools down: the file goes up with no request.
+    write_throttle_inputs(&inputs_path, lasting)?;
+    ctx.wait_same_content(
+        &home.local.join("while-hot.txt"),
+        &home.cloud.join("while-hot.txt"),
+        CONVERGE_TIMEOUT,
+    )?;
+    ctx.settle_home(&home, crate::scenario::SETTLE_QUIET, CONVERGE_TIMEOUT)?;
     ctx.allow_warning("Resolved concurrent divergence by keeping both versions");
+    ctx.allow_warning("Updated throttle state");
     Ok(())
 }
 
@@ -432,7 +653,7 @@ fn misconfigured_daemon(ctx: &mut Ctx) -> Result<(), Failure> {
         "daemon log does not say it is serving status only"
     );
     ctx.allow_error("Profile has an invalid provider; suspending it until the config is fixed");
-    ctx.allow_error("Every profile is suspended by its configuration; serving status only");
+    ctx.allow_warning("Every profile is suspended by its configuration; serving status only");
     ctx.set_oracle(OracleMode::Skip("no sync scope was composed".to_string()));
     Ok(())
 }

@@ -42,8 +42,10 @@ learns why Vapor works the way it does.
 
 ## Documents
 
-None yet. Each spec gets a row here in the change that adds it. The
-status lives in the spec file only.
+Each spec gets a row here in the change that adds it. The status lives
+in the spec file only. A decision made before 2026-11-14 gets a spec
+when its area is next changed; there is no backfill.
 
 | Spec | What it decides |
 |---|---|
+| `2026-11-14-full-review.md` | What the full review of the repository changed: when a deletion propagates, how a change of spelling syncs, that a throttle state slows sync and does not stop it, measured CPU and bandwidth ceilings, no folder before the user chose, the one-way warning as a decision, no state migrations before GA, ignore-rule semantics, the redacted report, and the release rules. Also the choices that still wait for the owner. |

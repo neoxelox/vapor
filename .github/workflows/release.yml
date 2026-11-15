@@ -174,23 +174,8 @@ jobs:
         with:
           cache: false
 
-      - name: Cache Rust dependencies
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache SwiftPM dependencies
-        if: matrix.platform == 'macos'
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: apps/macos/.build
-          key: ${{ runner.os }}-spm-release-${{ hashFiles('**/Package.resolved') }}
+      # No build cache here. A job that signs builds from a clean tree,
+      # and a cache saved on a tag is visible to that tag alone.
 
       # The Google Drive OAuth client is compiled into vapor and vapord
       # from these two secrets. Google treats an installed app's client
@@ -425,28 +410,16 @@ jobs:
           mv "$RUNNER_TEMP/Checksums.txt" dist/Checksums.txt
           cat dist/Checksums.txt
 
+      # scripts/notes.sh keeps the body under GitHub's limit: a section
+      # that is too long is cut and points at the changelog of the tag.
       - name: Extract release notes from changelog
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
 
-          version = os.environ['RELEASE_VERSION']
-          text = Path('CHANGELOG.md').read_text(encoding='utf-8')
-          pattern = re.compile(
-              rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|\Z)",
-              re.MULTILINE | re.DOTALL,
-          )
-          match = pattern.search(text)
-          if not match:
-            raise SystemExit(f'[release] could not extract changelog notes for [{version}]')
-
-          body = match.group(1).strip()
-          note = f"## Release {version}\n\n{body}\n"
-          Path(os.environ['RUNNER_TEMP'], 'release-notes.md').write_text(note, encoding='utf-8')
-          PY
+          ./scripts/notes.sh "$RELEASE_VERSION" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$TAG_NAME/CHANGELOG.md" \
+            > "$RUNNER_TEMP/release-notes.md"
+          wc -c "$RUNNER_TEMP/release-notes.md"
 
       - name: Create or update GitHub Release
         env:
@@ -461,13 +434,16 @@ jobs:
           fi
 
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            # A published release is what users read and downloaded.
+            # Its notes may be edited by hand, and its assets have known
+            # checksums. Only a draft is rewritten.
             is_draft=$(gh release view "$TAG_NAME" --json isDraft --jq .isDraft)
-            draft_flag=()
-            if [[ "$is_draft" == "true" ]]; then
-              draft_flag=(--draft)
+            if [[ "$is_draft" != "true" ]]; then
+              echo "[release] $TAG_NAME is published; its notes and its assets are not replaced. Correct it with a new tag."
+              exit 1
             fi
             gh release edit "$TAG_NAME" \
-              "${draft_flag[@]}" \
+              --draft \
               "${prerelease_reconcile[@]}" \
               --notes-file "$RUNNER_TEMP/release-notes.md"
           else
@@ -487,5 +463,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+
+          # Users may hold the files and the checksums of a published
+          # release, so only a draft has its assets replaced.
+          is_draft=$(gh release view "$TAG_NAME" --json isDraft --jq .isDraft)
+          if [[ "$is_draft" != "true" ]]; then
+            echo "[release] $TAG_NAME is published; its assets are not replaced. Correct it with a new tag."
+            exit 1
+          fi
 
           gh release upload "$TAG_NAME" dist/* --clobber

@@ -19,8 +19,8 @@ func loadCreatesDefaultConfigurationAndRuntimeDirectories() throws {
   #expect(configuration.autoLaunch == true)
   #expect(configuration.useGitignore == true)
   #expect(configuration.useVaporignore == true)
-  #expect(configuration.localRoot == VaporConfiguration.defaultLocalRoot)
-  #expect(configuration.cloudRoot == nil, "the provider's default is the daemon's call")
+  #expect(configuration.localRoot == nil, "a root exists only when the user set it")
+  #expect(configuration.cloudRoot == nil)
   #expect(configuration.preIgnoreRules == VaporConfiguration.defaultPreIgnoreRules)
   #expect(configuration.postIgnoreRules == VaporConfiguration.defaultPostIgnoreRules)
   #expect(configuration.language == VaporConfiguration.defaultLanguage)
@@ -32,6 +32,12 @@ func loadCreatesDefaultConfigurationAndRuntimeDirectories() throws {
     fileManager.fileExists(atPath: VaporPaths.logsDirectoryURL(vaporDirectoryURL: rootURL).path))
   #expect(
     fileManager.fileExists(atPath: VaporPaths.stateDirectoryURL(vaporDirectoryURL: rootURL).path))
+  // One root with no other is half a profile, which the daemon reads
+  // as an error. The file the app seeds holds neither.
+  let seeded = try String(
+    contentsOf: VaporPaths.configurationFileURL(vaporDirectoryURL: rootURL), encoding: .utf8)
+  #expect(!seeded.contains("localRoot"))
+  #expect(!seeded.contains("cloudRoot"))
 
   try fileManager.removeItem(at: rootURL)
 }

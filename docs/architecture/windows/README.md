@@ -20,6 +20,6 @@ Windows.
 
 ## Documents
 
-- `ipc-transport.md` — Windows-specific IPC transport: named pipe at
+- `ipc-transport.md`: Windows-specific IPC transport: named pipe at
   `\\.\pipe\vapord-<user-sid>`, security descriptor, framing,
   shutdown semantics, test harness.

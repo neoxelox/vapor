@@ -29,6 +29,9 @@ export VAPOR_ENV="dev"
 unset VAPOR_DIR
 
 SOAK_BIN="${CARGO_TARGET_DIR:-$ROOT_DIR/target}/debug/vapor-soak"
+if [[ "$(uname -s 2>/dev/null || echo unknown)" == MINGW* || "$(uname -s 2>/dev/null || echo unknown)" == MSYS* ]]; then
+  SOAK_BIN="$SOAK_BIN.exe"
+fi
 
 subcommand="run"
 args=()

@@ -16,7 +16,7 @@ use vapor_cli::{RunOptions, ServiceCommand};
 use vapor_cli::{
     commands::{
         auth as auth_cmd, config as config_cmd, decisions as decisions_cmd, doctor as doctor_cmd,
-        ipc as ipc_cmd, run as run_cmd, trash as trash_cmd,
+        ipc as ipc_cmd, profiles as profiles_cmd, run as run_cmd, trash as trash_cmd,
     },
     resolve_configuration_path,
 };
@@ -74,6 +74,23 @@ enum Command {
         #[command(subcommand)]
         action: TrashAction,
     },
+    /// Set up, list, and remove sync profiles. A profile is one folder
+    /// on this device kept in sync with one folder in the cloud.
+    Profiles {
+        #[command(subcommand)]
+        action: ProfilesAction,
+    },
+    /// List the files and folders on this device that the ignore rules
+    /// keep out of sync, each with its rule. Works with or without a
+    /// running daemon.
+    Ignored {
+        /// Only this profile (default: every profile).
+        #[arg(long, value_name = "ID")]
+        profile: Option<String>,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Read or change a setting in vapor.json.
     Config {
         #[command(subcommand)]
@@ -84,14 +101,9 @@ enum Command {
         #[command(subcommand)]
         action: AuthAction,
     },
-    /// Install, start, stop, and supervise the background daemon.
+    /// Install, start, stop, and supervise the background daemon, as a
+    /// service of this user.
     Service {
-        /// Use the per-user service (the default).
-        #[arg(long, conflicts_with = "system")]
-        user: bool,
-        /// Use a system-wide service (not available yet).
-        #[arg(long, conflicts_with = "user")]
-        system: bool,
         #[command(subcommand)]
         action: ServiceAction,
     },
@@ -123,9 +135,13 @@ enum Command {
     /// state) to share when asking for help.
     Report {
         /// Directory to write the report under (default
-        /// `<vapor_dir>/reports`).
+        /// `<vapor_dir>/reports`, which keeps the five newest).
         #[arg(long, value_name = "DIR")]
         output: Option<std::path::PathBuf>,
+        /// Keep folder paths and file names as they are. Without this
+        /// the report replaces each name by a code, so it can be shared.
+        #[arg(long)]
+        keep_paths: bool,
         /// Print JSON.
         #[arg(long)]
         json: bool,
@@ -202,12 +218,70 @@ enum TrashAction {
         #[arg(long)]
         json: bool,
     },
-    /// Delete everything in the trash, for good.
+    /// Delete everything in the trash, for good. Asks first on a
+    /// terminal; anywhere else it needs `--yes`.
     Empty {
         /// Only this profile's trash (default: every profile).
         #[arg(long, value_name = "ID")]
         profile: Option<String>,
+        /// Do not ask for a confirmation.
+        #[arg(long)]
+        yes: bool,
+        /// Print JSON. Needs `--yes`.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ProfilesAction {
+    /// List the profiles, with what stops one from running.
+    List {
         /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a profile. With no option on a terminal it asks for each
+    /// value; an option that is left out takes the suggested value. The
+    /// first profile needs no id.
+    Add {
+        /// A short name for the profile: lowercase letters, digits,
+        /// `-` and `_`. Needed from the second profile on.
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
+        /// The name the surfaces show (default: the id).
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// The cloud provider: `filesystem` or `gdrive`.
+        #[arg(long, value_name = "PROVIDER")]
+        provider: Option<String>,
+        /// The folder on this device. Needed when no terminal can ask
+        /// for it (there the suggestion is `~/Vapor`).
+        #[arg(long, value_name = "PATH")]
+        local: Option<String>,
+        /// The folder in the cloud. Needed when no terminal can ask
+        /// for it (there the suggestion is `/Vapor` on Google Drive,
+        /// `~/cloud/Vapor` for the filesystem provider).
+        #[arg(long, value_name = "PATH")]
+        cloud: Option<String>,
+        /// `two-way` (the default), `pull-only`, or `push-only`. A
+        /// one-way mode overwrites and removes files on one side, and
+        /// needs a confirmation before it runs.
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
+        /// Print JSON. Never asks a question.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a profile: Vapor stops syncing its folders and forgets
+    /// its sync state and its sign-in. The files on both sides stay.
+    /// The daemon must be stopped.
+    Remove {
+        id: String,
+        /// Do not ask for a confirmation.
+        #[arg(long)]
+        yes: bool,
+        /// Print JSON. Needs `--yes`.
         #[arg(long)]
         json: bool,
     },
@@ -229,9 +303,10 @@ enum AuthAction {
         /// The profile to sign in (default: the only profile).
         #[arg(long, value_name = "ID")]
         profile: Option<String>,
-        /// Use this token instead of signing in. `-` reads it from
-        /// stdin, which keeps it out of shell history.
-        #[arg(long, value_name = "TOKEN")]
+        /// Read a token from stdin instead of signing in: `--token -`.
+        /// A token is never taken from the command line, where the
+        /// process list and the shell history would show it.
+        #[arg(long, value_name = "-")]
         token: Option<String>,
         /// Open the browser even when stdin is not a terminal. The app's
         /// Sign in button uses it; without it a login with no terminal
@@ -374,7 +449,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
                 }
                 ConfigAction::Set { key, value } => {
                     config_cmd::set(&path, &key, &value).map_err(|e| e.to_string())?;
-                    println!("{}", config_cmd::apply_hint(&key));
+                    println!("{}", config_cmd::apply_hint(&key, &value));
                     Ok(ExitCode::SUCCESS)
                 }
             }
@@ -395,19 +470,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
                 _ => Ok(ExitCode::SUCCESS),
             }
         }
-        Command::Service {
-            user: _,
-            system,
-            action,
-        } => {
-            if system {
-                return Err("--system service install is not implemented yet; \
-                     pass --user (default) for the per-user LaunchAgent / systemd / Task \
-                     Scheduler entry"
-                    .to_string());
-            }
-            dispatch_service(action)
-        }
+        Command::Service { action } => dispatch_service(action),
         Command::Status { json } => dispatch_status(json),
         Command::Pause { json } => dispatch_ack_json("pause", ipc_cmd::pause(), json),
         Command::Resume { json } => dispatch_ack_json("resume", ipc_cmd::resume(), json),
@@ -416,9 +479,145 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
         Command::Diagnostics { json } => dispatch_diagnostics(json),
         Command::Logs { tail } => dispatch_logs(tail),
         Command::Auth { action } => dispatch_auth(action),
-        Command::Report { output, json } => dispatch_report(output, json),
+        Command::Report {
+            output,
+            keep_paths,
+            json,
+        } => dispatch_report(output, keep_paths, json),
         Command::Decisions { action } => dispatch_decisions(action),
         Command::Trash { action } => dispatch_trash(action),
+        Command::Profiles { action } => dispatch_profiles(action),
+        Command::Ignored { profile, json } => {
+            use vapor_cli::commands::ignored;
+            let loaded = vapor_shared::config::load_from(&resolve_configuration_path());
+            if let Some(issue) = loaded.load_issue {
+                eprintln!("vapor: warning: {issue}");
+            }
+            let report =
+                ignored::list_ignored(&loaded.config, profile.as_deref(), ignored::LIST_LIMIT)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+                );
+            } else {
+                println!("{}", ignored::render(&report));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn dispatch_profiles(action: ProfilesAction) -> Result<ExitCode, String> {
+    use std::io::IsTerminal;
+    let path = resolve_configuration_path();
+    let print_json = |value: serde_json::Value| -> Result<(), String> {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?
+        );
+        Ok(())
+    };
+    match action {
+        ProfilesAction::List { json } => {
+            let report = profiles_cmd::list(&path);
+            if json {
+                print_json(serde_json::to_value(&report).map_err(|e| e.to_string())?)?;
+            } else {
+                print!("{}", report.render_text());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProfilesAction::Add {
+            id,
+            name,
+            provider,
+            local,
+            cloud,
+            mode,
+            json,
+        } => {
+            let mut request = profiles_cmd::AddRequest {
+                id,
+                name,
+                provider,
+                local,
+                cloud,
+                mode,
+            };
+            // A person at a terminal is asked; a script, the app, and
+            // `--json` never are.
+            let interactive =
+                !json && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+            let mut prompter = profiles_cmd::TerminalPrompter;
+            if interactive {
+                let taken = profiles_cmd::profile_ids(&path);
+                request = profiles_cmd::ask_for_missing(request, &taken, &mut prompter)
+                    .map_err(|e| e.to_string())?;
+            }
+            let outcome = profiles_cmd::add(
+                &path,
+                &profiles_cmd::ProfileStorage::of_this_install(),
+                &request,
+                interactive.then_some(&mut prompter as &mut dyn profiles_cmd::Prompter),
+                std::time::SystemTime::now(),
+            )
+            .map_err(|e| e.to_string())?;
+            if json {
+                print_json(serde_json::to_value(&outcome).map_err(|e| e.to_string())?)?;
+            } else {
+                print!("{}", outcome.render_text());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProfilesAction::Remove { id, yes, json } => {
+            let interactive = !json && std::io::stdin().is_terminal();
+            if !yes && !interactive {
+                return Err(
+                    "removing a profile needs a confirmation; pass --yes to give it".to_string(),
+                );
+            }
+            // A daemon holds the lock of its runtime directory for its
+            // whole life, whether or not it answers on the socket. The
+            // lock stays held here until the removal is over, so no
+            // daemon starts in the middle of it.
+            let daemon_lock =
+                vapor_daemon::singleton::SingletonLock::acquire_for_current_vapor_dir();
+            let daemon_running = match &daemon_lock {
+                Ok(_) => false,
+                Err(vapor_daemon::singleton::SingletonLockError::AlreadyRunning(_)) => true,
+                Err(error) => {
+                    return Err(format!("cannot tell whether a daemon is running: {error}"));
+                }
+            };
+            let open_secrets = || -> std::sync::Arc<dyn vapor_platform::SecretStore> {
+                std::sync::Arc::from(auth_cmd::build_native_store().0)
+            };
+            let mut confirm = |profile: &profiles_cmd::ProfileRow| {
+                if yes {
+                    return Ok(true);
+                }
+                profiles_cmd::Prompter::confirm(
+                    &mut profiles_cmd::TerminalPrompter,
+                    &profiles_cmd::remove_question(profile),
+                )
+            };
+            let outcome = profiles_cmd::remove(
+                &path,
+                &profiles_cmd::ProfileStorage::of_this_install(),
+                &id,
+                daemon_running,
+                &open_secrets,
+                &mut confirm,
+            )
+            .map_err(|e| e.to_string())?;
+            if json {
+                print_json(serde_json::to_value(&outcome).map_err(|e| e.to_string())?)?;
+            } else {
+                print!("{}", outcome.render_text());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -482,9 +681,10 @@ fn dispatch_trash(action: TrashAction) -> Result<ExitCode, String> {
     if let Some(issue) = loaded.load_issue {
         eprintln!("vapor: warning: {issue}");
     }
+    let trash_root = vapor_shared::runtime_paths::trash_directory();
     match action {
         TrashAction::List { json } => {
-            let report = trash_cmd::list_trash(&loaded.config);
+            let report = trash_cmd::list_trash(&loaded.config, &trash_root);
             if json {
                 println!(
                     "{}",
@@ -496,7 +696,7 @@ fn dispatch_trash(action: TrashAction) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
         TrashAction::Restore { id, profile, json } => {
-            let report = trash_cmd::restore(&loaded.config, &id, profile.as_deref())?;
+            let report = trash_cmd::restore(&loaded.config, &trash_root, &id, profile.as_deref())?;
             if json {
                 println!(
                     "{}",
@@ -507,8 +707,35 @@ fn dispatch_trash(action: TrashAction) -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        TrashAction::Empty { profile, json } => {
-            let report = trash_cmd::empty(&loaded.config, profile.as_deref());
+        TrashAction::Empty { profile, yes, json } => {
+            // The trash can be the last copy of a file. Emptying it is
+            // the one command here that cannot be undone, so it never
+            // runs on a guess: a person confirms, or the caller says yes.
+            if !yes {
+                use std::io::IsTerminal;
+                if json || !std::io::stdin().is_terminal() {
+                    return Err(
+                        "emptying the trash deletes its files for good; pass --yes to confirm"
+                            .to_string(),
+                    );
+                }
+                let (count, size) =
+                    trash_cmd::empty_preview(&loaded.config, &trash_root, profile.as_deref());
+                if count == 0 {
+                    println!("The trash is empty.");
+                    return Ok(ExitCode::SUCCESS);
+                }
+                let confirmed = profiles_cmd::Prompter::confirm(
+                    &mut profiles_cmd::TerminalPrompter,
+                    &trash_cmd::empty_question(count, size),
+                )
+                .map_err(|e| e.to_string())?;
+                if !confirmed {
+                    println!("Nothing was removed.");
+                    return Ok(ExitCode::SUCCESS);
+                }
+            }
+            let report = trash_cmd::empty(&loaded.config, &trash_root, profile.as_deref());
             if json {
                 println!(
                     "{}",
@@ -522,7 +749,11 @@ fn dispatch_trash(action: TrashAction) -> Result<ExitCode, String> {
     }
 }
 
-fn dispatch_report(output: Option<std::path::PathBuf>, json: bool) -> Result<ExitCode, String> {
+fn dispatch_report(
+    output: Option<std::path::PathBuf>,
+    keep_paths: bool,
+    json: bool,
+) -> Result<ExitCode, String> {
     use vapor_cli::commands::report as support;
 
     // Live captures are best-effort and independent: a daemon that
@@ -567,13 +798,24 @@ fn dispatch_report(output: Option<std::path::PathBuf>, json: bool) -> Result<Exi
     });
 
     let vapor_dir = vapor_shared::runtime_paths::vapor_directory();
-    let output_root = output.unwrap_or_else(|| vapor_dir.join("reports"));
+    let default_root = vapor_dir.join(vapor_shared::constants::runtime::REPORTS_DIRECTORY_NAME);
+    let output_root = output.unwrap_or_else(|| default_root.clone());
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .map_err(|_| "system clock is before the Unix epoch".to_string())?;
-    let report = support::write_support_report(&vapor_dir, &output_root, live, timestamp_ms)
+    let paths = if keep_paths {
+        support::Paths::Keep
+    } else {
+        support::Paths::Redact
+    };
+    let report = support::write_support_report(&vapor_dir, &output_root, live, timestamp_ms, paths)
         .map_err(|e| format!("cannot write the support report: {e}"))?;
+    // Only the directory Vapor owns is pruned; one the user named is
+    // theirs to keep in order.
+    if output_root == default_root {
+        support::prune_old_reports(&default_root);
+    }
 
     if json {
         println!(
@@ -627,7 +869,7 @@ fn dispatch_ack(
         println!("{command}: ok ({})", ack.note);
         Ok(ExitCode::SUCCESS)
     } else {
-        eprintln!("{command}: not accepted — {}", ack.note);
+        eprintln!("{command}: not accepted; {}", ack.note);
         Ok(ExitCode::from(1))
     }
 }
@@ -640,11 +882,11 @@ fn dispatch_timeline(json: bool) -> Result<ExitCode, String> {
     } else if timeline.entries.is_empty() {
         println!("(no timeline events recorded yet)");
     } else {
+        if timeline.truncated {
+            println!("(older events are left out: the timeline is too long for one answer)");
+        }
         for entry in &timeline.entries {
-            println!(
-                "[{}] {} — {}",
-                entry.timestamp_ms, entry.kind, entry.message
-            );
+            println!("[{}] {}: {}", entry.timestamp_ms, entry.kind, entry.message);
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -709,8 +951,8 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
             let profile =
                 auth_cmd::select_profile(&config, profile.as_deref()).map_err(|e| e.to_string())?;
             auth_cmd::require_sign_in(&profile).map_err(|e| e.to_string())?;
-            // Google Drive without an explicit --token runs the full
-            // OAuth-PKCE browser flow — but only interactively. When stdin
+            // Google Drive without `--token -` runs the full
+            // OAuth-PKCE browser flow, but only interactively. When stdin
             // is not a TTY (`echo "$TOKEN" | vapor auth login`, CI,
             // automation) fall back to the documented stdin read instead of
             // binding a loopback listener and blocking forever on a browser
@@ -777,42 +1019,35 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
     }
 }
 
-/// Resolves the login token: an explicit `--token VALUE` is used
-/// verbatim (with a hygiene warning, since argv leaks into shell history
-/// and `ps` output); `--token -` or no flag reads one line from stdin.
+/// Reads the login token from stdin: one line, with `--token -` or with
+/// no flag when stdin is not a terminal. A value given to `--token` is
+/// refused and never stored: an argument is visible in the process list
+/// and stays in the shell history.
 fn resolve_auth_token(token: Option<String>) -> Result<String, String> {
-    match token.as_deref() {
-        Some("-") | None => {
-            use std::io::BufRead;
-            if token.is_none() {
-                eprintln!("vapor: reading token from stdin (end with newline / EOF)");
-            }
-            let mut line = String::new();
-            std::io::stdin()
-                .lock()
-                .read_line(&mut line)
-                .map_err(|error| format!("failed to read token from stdin: {error}"))?;
-            let token = line.trim();
-            if token.is_empty() {
-                return Err("no token provided on stdin".to_string());
-            }
-            Ok(token.to_string())
-        }
-        Some(value) => {
-            // Trim and reject empty like the stdin path: an explicit
-            // `--token ""` (or unset `$TOKEN`) otherwise stores a useless
-            // empty credential that reports as "bound but broken".
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                return Err("no token provided".to_string());
-            }
-            eprintln!(
-                "vapor: warning: passing --token on the command line exposes the secret to \
-                 shell history and process listings; prefer piping it via stdin (`--token -`)."
-            );
-            Ok(trimmed.to_string())
-        }
+    if let Some(value) = token.as_deref()
+        && value != "-"
+    {
+        return Err(
+            "a token on the command line is visible in the process list and the shell \
+             history; pipe it on stdin instead: `<command that prints the token> | vapor auth \
+             login --token -`"
+                .to_string(),
+        );
     }
+    use std::io::BufRead;
+    if token.is_none() {
+        eprintln!("vapor: reading token from stdin (end with newline / EOF)");
+    }
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|error| format!("failed to read token from stdin: {error}"))?;
+    let token = line.trim();
+    if token.is_empty() {
+        return Err("no token provided on stdin".to_string());
+    }
+    Ok(token.to_string())
 }
 
 fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
@@ -873,6 +1108,24 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
         let mut outcome =
             service_cmd::dispatch(command, &manager, installer.as_ref(), Instant::now())
                 .map_err(|e| e.to_string())?;
+        if matches!(command, ServiceCommand::Bootstrap | ServiceCommand::Install) {
+            // A daemon that refuses the handshake speaks another IPC
+            // version, so it is another build too.
+            let running_build = match ipc_cmd::status() {
+                Ok(status) => Some(status.daemon),
+                Err(vapor_cli::commands::IpcCliError::Client(
+                    vapor_ipc::ClientError::IncompatibleVersion(_),
+                )) => Some("another IPC version".to_string()),
+                Err(_) => None,
+            };
+            service_cmd::replace_daemon_of_another_build(
+                &manager,
+                installer.as_ref(),
+                running_build.as_deref(),
+                Instant::now(),
+            )
+            .map_err(|e| e.to_string())?;
+        }
         match &mut outcome {
             service_cmd::ServiceCommandOutcome::Status(report) => {
                 report.supervisor_installed = vapor_platform::ServiceInstaller::status(&supervisor)

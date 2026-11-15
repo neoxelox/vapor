@@ -47,7 +47,7 @@ Release invariants:
 - Before invoking `./scripts/version.sh`, the worktree must be clean except for `CHANGELOG.md`.
 - The platform's GitHub Environment (`release-macos`; `release-windows` /
   `release-linux` when those surfaces ship) exists, and its protections were
-  applied **before** its secrets were added — see "GitHub release environment
+  applied **before** its secrets were added, see "GitHub release environment
   setup" below.
 - Signing follows the tag, on every platform: a stable tag needs the
   platform's full signing material and refuses to package without it; a
@@ -83,7 +83,7 @@ Release invariants:
 ## GitHub release environment setup
 
 Every shipping platform gets its own environment holding only its release
-secrets — `release-macos` today, `release-windows` and `release-linux` when
+secrets: `release-macos` today, `release-windows` and `release-linux` when
 those surfaces ship. The steps below apply to **each** of them. Rule:
 `AGENTS.md` §7.1.
 
@@ -102,7 +102,7 @@ is inherited from an already-configured platform.
 ### Required protections
 
 1. **Restrict which refs may deploy.** Use a custom deployment policy with a
-   single **tag** rule, `v*`, and **no branch rule** — so only a release tag
+   single **tag** rule, `v*`, and **no branch rule**, so only a release tag
    can reach the signing secrets, and no branch can.
 
    This is enforced by repository settings on purpose. The workflow already
@@ -115,7 +115,7 @@ is inherited from an already-configured platform.
    act rather than an automatic consequence of pushing a tag.
 
 3. **Leave `can_admins_bypass` at `true`** only while a single maintainer
-   holds admin — the gate is on the same person who would bypass it, and it
+   holds admin: the gate is on the same person who would bypass it, and it
    preserves an escape hatch during a release incident. Set it to `false`
    as soon as a second admin exists.
 
@@ -155,13 +155,13 @@ gh api repos/neoxelox/vapor/environments/release-macos/deployment-branch-policie
 
 ### Current status
 
-- `release-macos` — fully protected: `v*` tag-only deployment policy,
+- `release-macos`: fully protected: `v*` tag-only deployment policy,
   `neoxelox` as required reviewer, `prevent_self_review: false`, no wait
   timer, `can_admins_bypass: true`. Configured before any secret was
   added. No Apple secret is configured yet; the Google Drive OAuth
   client (`VAPOR_GDRIVE_CLIENT_ID`, `VAPOR_GDRIVE_CLIENT_SECRET`) is the
   first pair to go in.
-- `release-windows` / `release-linux` — created 2026-09-16 with the
+- `release-windows` / `release-linux`: created 2026-09-16 with the
   identical protection (`v*` tag rule, `neoxelox` as required reviewer,
   `prevent_self_review: false`, no wait timer, `can_admins_bypass: true`),
   so the gate is in place before either platform's secrets exist. No
@@ -179,7 +179,7 @@ With the reviewer gate active, a release no longer runs straight through:
 pushing the tag runs preflight, lint, test, perf, and soak, then **pauses** for
 approval in the Actions UI before the platform's `package` job starts and
 signing material is imported. A release that looks stuck at that point is waiting on
-a human, not broken. This has not been exercised yet — the environment was
+a human, not broken. This has not been exercised yet: the environment was
 created after the last release ran, so the next tagged release is the first
 one it gates.
 
@@ -203,28 +203,30 @@ one it gates.
    - Start from a clean `main` that is up to date with `origin/main`.
      Every non-release change is already there, merged through its
      pull request.
-   - Set the target version with `./scripts/version.sh`:
-     - Show current version: `./scripts/version.sh current`
-     - Set an exact stable version: `./scripts/version.sh set 0.2.0`
-     - Bump the stable base version: `./scripts/version.sh bump patch|minor|major`
-     - Set an exact prerelease: `./scripts/version.sh set 0.2.0-rc.1`
-     - Bump the current prerelease: `./scripts/version.sh prerelease rc|beta|alpha`
-     - Convert the current prerelease to its stable release: `./scripts/version.sh release`
-    - Update `CHANGELOG.md`:
-      - Move items from `Unreleased` into a new `## [<VERSION>] - YYYY-MM-DD` section.
-      - Keep sections concise and user-impact focused.
-    - Ensure docs and CI references are current.
+   - Choose the target version. `./scripts/version.sh current` prints
+     the current one. Do not run any other `version.sh` command yet:
+     each of them commits and tags at once (step 3).
+   - Update `CHANGELOG.md`:
+     - Move items from `Unreleased` into a new `## [<VERSION>] - YYYY-MM-DD` section.
+     - Keep the section short: one line for each change a user can
+       notice. GitHub refuses a release body over 125 000 characters;
+       the workflow cuts a longer section at a line end and links the
+       changelog, so a long section costs the reader, not the release.
+   - Ensure docs and CI references are current.
 
 2. Validate before tagging
-   - Run the release gate: `./scripts/release.sh`. It runs
-     `format`, `lint`, `test`, and the e2e suite once per provider the
-     harness knows (`./scripts/e2e.sh --providers`). The Google Drive
-     leg runs only here, never in CI: it needs the dedicated test
-     account signed in (`vapor auth login`) and
-     `VAPOR_GDRIVE_CLIENT_ID` in the environment or in `.env`, and a
-     missing leg fails the gate. The harness builds its binaries
-     without a client, so the leg's daemon takes it from the
-     environment at run time.
+   - Run the release gate: `./scripts/release.sh`. It runs the
+     format check (it changes no file), `lint`, `test`, and the e2e
+     suite once per provider the harness knows (`./scripts/e2e.sh
+     --providers`). The Google Drive leg runs only here, never in CI:
+     it needs the dedicated test account and `VAPOR_GDRIVE_CLIENT_ID`
+     in the environment or in `.env`, and a missing leg fails the
+     gate. The harness builds its binaries without a client, so the
+     leg's daemon takes it from the environment at run time. A sandbox
+     has its own runtime directory and so its own secret scope: it
+     does not see a sign-in made anywhere else. How the test account's
+     token reaches each sandbox is part of the open Drive-leg work
+     (`docs/development/e2e-verification.md` §Provider modes).
    - If the gate finds a bug, stop the release. Fix it in a pull
      request, merge it, update `main`, and run the gate again. No fix
      is committed on `main` directly: the release push carries the
@@ -233,7 +235,15 @@ one it gates.
    - Optionally run local package rehearsal: `./scripts/build.sh package`.
 
 3. Run release preparation
-   - Run the appropriate `./scripts/version.sh ...` command.
+   - Run one `./scripts/version.sh` command:
+     - An exact version, stable or prerelease: `./scripts/version.sh set 0.2.0`, `./scripts/version.sh set 0.3.0-rc.1`
+     - The next prerelease of the current track, or the first of a later track: `./scripts/version.sh prerelease alpha|beta|rc`
+     - The stable release of the current prerelease: `./scripts/version.sh release`
+     - The next stable version from a stable one: `./scripts/version.sh bump patch|minor|major`
+   - The script refuses a version that does not sort above the current
+     one. It also refuses `prerelease` on a stable version (name the
+     next version with `set`) and `bump` on a prerelease (use `release`
+     or `set`), because each would skip or go below a version.
    - The script validates the clean-worktree rule and matching `CHANGELOG.md` entry.
    - The script updates `VERSION`, syncs `Cargo.toml`, refreshes `Cargo.lock`, creates commit `release: v$(cat VERSION)`, creates tag `v$(cat VERSION)`, and prints the push command.
 
@@ -247,10 +257,10 @@ one it gates.
      - `package (<platform>)` runs once per shipping platform (`macos` on `macos-latest` under the `release-macos` environment today; Windows and Linux entries join the matrix when those surfaces ship, each under its own environment) and declares `needs: [preflight, lint, test, perf, soak]`, so packaging does not begin unless ref validation and all four gates pass.
      - The macOS entry imports the Developer ID certificate into a temporary keychain and creates the `notarytool` profile on-runner when signing/notarization is configured, verifies the imported keychain actually contains `VAPOR_SIGN_IDENTITY` before packaging begins, and passes the temporary keychain path into packaging so `notarytool submit` resolves the stored profile explicitly.
      - Every entry runs `./scripts/build.sh package`, validates its own artifact structure, and uploads its assets as the `release-<platform>` workflow artifact.
-     - `publish` (on `ubuntu-latest`, the only job with `contents: write`) downloads every platform's assets into `dist/`, writes one `Checksums.txt` with a SHA-256 line per asset, extracts the release notes from the changelog, and creates/updates the GitHub Release, uploading assets with deterministic replacement (`--clobber`).
+     - `publish` (on `ubuntu-latest`, the only job with `contents: write`) downloads every platform's assets into `dist/`, writes one `Checksums.txt` with a SHA-256 line per asset, builds the release body with `scripts/notes.sh` (one line on what the Mac app runs on, then the changelog section of the tag, cut at GitHub's limit with a link to the changelog when it is longer), and creates or updates the GitHub Release. Assets are uploaded with replacement (`--clobber`) while the release is a draft. The job refuses to replace the assets of a published release.
 
 6. Publish policy
-   - Stable releases are created as drafts for operator verification before publishing.
+   - Every release is created as a draft for operator verification before publishing.
    - Prerelease tags are marked prerelease in GitHub Release metadata.
 
 7. Post-run verification
@@ -288,7 +298,7 @@ into the environment, then the matrix entry, then the trust chain doc.
    without material. Do not gate on the tag anywhere else.
 3. **Install the material**, gated on the platform and on `enabled`:
    the EV certificate into the runner's certificate store on Windows
-   (Azure Key Vault or a USB HSM per `AGENTS.md` §7.3), the GPG key into
+   (Azure Key Vault or a USB HSM per `docs/plans/core.md` §6), the GPG key into
    a throwaway keyring on Linux. Export whatever the packaging script
    needs through `GITHUB_ENV`, as the macOS step does with the keychain
    path.
@@ -317,8 +327,12 @@ are in, since a prerelease signs when the material is present.
 
 - Reruns are allowed for the same tag.
 - Rerun the existing tag workflow from GitHub Actions; do not create a manual release run from a branch ref.
-- Asset uploads use replacement semantics (`gh release upload --clobber`).
-- Existing release object is reused and edited in place when present.
+- Asset uploads use replacement semantics (`gh release upload --clobber`)
+  while the release is a draft. A rerun on a published release fails
+  before it changes the notes or the assets: users may hold the
+  published files and their checksums, and the owner may have edited
+  the notes, so a published release is corrected with a new tag.
+- A draft release object is reused and edited in place when present.
 - If rerun still fails, follow `docs/operations/release-incident-playbook.md`.
 
 ## Rollback and corrective release policy

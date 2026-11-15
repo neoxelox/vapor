@@ -3,11 +3,10 @@
 //! Cloud providers perform their network I/O through this seam so the
 //! whole provider stack is testable offline (`AGENTS.md §9.1`: never
 //! contact the real Internet in tests). Production uses the
-//! `ureq`-backed [`NativeHttpTransport`]; tests script a
-//! [`ScriptedHttpTransport`].
+//! `ureq`-backed [`NativeHttpTransport`]; this crate's tests script a
+//! `ScriptedHttpTransport`.
 
-use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use vapor_shared::constants;
@@ -18,13 +17,14 @@ pub struct HttpRequest {
     pub url: String,
     /// Header names are matched case-insensitively by transports.
     pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+    /// Shared, so a request that is sent again is not copied.
+    pub body: std::sync::Arc<Vec<u8>>,
 }
 
 impl std::fmt::Debug for HttpRequest {
     // Manual impl so a stray `{request:?}` (error path, panic payload)
     // cannot leak an `Authorization: Bearer <token>` header or an OAuth
-    // secret in the body — the logging redaction layer would not catch a
+    // secret in the body: the logging redaction layer would not catch a
     // Debug payload on stderr.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let headers: Vec<(&str, &str)> = self
@@ -68,7 +68,7 @@ impl HttpResponse {
 }
 
 /// Transport-level failure (DNS, TCP, TLS, timeouts). HTTP error
-/// statuses are NOT transport errors — they come back as responses so
+/// statuses are NOT transport errors: they come back as responses so
 /// providers can classify them.
 #[derive(Debug)]
 pub struct HttpTransportError {
@@ -117,7 +117,7 @@ impl HttpTransport for NativeHttpTransport {
         };
         let response = match result {
             Ok(response) => response,
-            // ureq returns HTTP >= 400 as Error::Status — surface those
+            // ureq returns HTTP >= 400 as Error::Status: surface those
             // as responses, not transport failures.
             Err(ureq::Error::Status(_code, response)) => response,
             Err(ureq::Error::Transport(transport)) => {
@@ -164,71 +164,84 @@ impl HttpTransport for NativeHttpTransport {
     }
 }
 
-/// Scripted transport for tests: responses are consumed in order, and
-/// every request is recorded for assertions.
-#[derive(Default)]
-pub struct ScriptedHttpTransport {
-    responses: Mutex<VecDeque<Result<HttpResponse, String>>>,
-    requests: Mutex<Vec<HttpRequest>>,
-}
+#[cfg(test)]
+pub use scripted::ScriptedHttpTransport;
 
-impl ScriptedHttpTransport {
-    pub fn new() -> Self {
-        Self::default()
+/// The scripted transport, a test double: compiled for this crate's
+/// tests only, so the shipped library carries no fake.
+#[cfg(test)]
+mod scripted {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use super::{HttpRequest, HttpResponse, HttpTransport, HttpTransportError};
+
+    /// Scripted transport for tests: responses are consumed in order, and
+    /// every request is recorded for assertions.
+    #[derive(Default)]
+    pub struct ScriptedHttpTransport {
+        responses: Mutex<VecDeque<Result<HttpResponse, String>>>,
+        requests: Mutex<Vec<HttpRequest>>,
     }
 
-    pub fn push_response(&self, status: u16, body: impl Into<Vec<u8>>) {
-        self.push_response_with_headers(status, body, Vec::new());
+    impl ScriptedHttpTransport {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn push_response(&self, status: u16, body: impl Into<Vec<u8>>) {
+            self.push_response_with_headers(status, body, Vec::new());
+        }
+
+        pub fn push_response_with_headers(
+            &self,
+            status: u16,
+            body: impl Into<Vec<u8>>,
+            headers: Vec<(String, String)>,
+        ) {
+            self.responses
+                .lock()
+                .expect("scripted transport mutex")
+                .push_back(Ok(HttpResponse {
+                    status,
+                    headers,
+                    body: body.into(),
+                }));
+        }
+
+        pub fn push_transport_error(&self, message: impl Into<String>) {
+            self.responses
+                .lock()
+                .expect("scripted transport mutex")
+                .push_back(Err(message.into()));
+        }
+
+        pub fn recorded_requests(&self) -> Vec<HttpRequest> {
+            self.requests
+                .lock()
+                .expect("scripted transport mutex")
+                .clone()
+        }
     }
 
-    pub fn push_response_with_headers(
-        &self,
-        status: u16,
-        body: impl Into<Vec<u8>>,
-        headers: Vec<(String, String)>,
-    ) {
-        self.responses
-            .lock()
-            .expect("scripted transport mutex")
-            .push_back(Ok(HttpResponse {
-                status,
-                headers,
-                body: body.into(),
-            }));
-    }
-
-    pub fn push_transport_error(&self, message: impl Into<String>) {
-        self.responses
-            .lock()
-            .expect("scripted transport mutex")
-            .push_back(Err(message.into()));
-    }
-
-    pub fn recorded_requests(&self) -> Vec<HttpRequest> {
-        self.requests
-            .lock()
-            .expect("scripted transport mutex")
-            .clone()
-    }
-}
-
-impl HttpTransport for ScriptedHttpTransport {
-    fn execute(&self, request: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
-        self.requests
-            .lock()
-            .expect("scripted transport mutex")
-            .push(request);
-        match self
-            .responses
-            .lock()
-            .expect("scripted transport mutex")
-            .pop_front()
-        {
-            Some(Ok(response)) => Ok(response),
-            Some(Err(message)) => Err(HttpTransportError { message }),
-            None => Err(HttpTransportError {
-                message: "scripted transport ran out of responses".to_string(),
-            }),
+    impl HttpTransport for ScriptedHttpTransport {
+        fn execute(&self, request: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
+            self.requests
+                .lock()
+                .expect("scripted transport mutex")
+                .push(request);
+            match self
+                .responses
+                .lock()
+                .expect("scripted transport mutex")
+                .pop_front()
+            {
+                Some(Ok(response)) => Ok(response),
+                Some(Err(message)) => Err(HttpTransportError { message }),
+                None => Err(HttpTransportError {
+                    message: "scripted transport ran out of responses".to_string(),
+                }),
+            }
         }
     }
 }

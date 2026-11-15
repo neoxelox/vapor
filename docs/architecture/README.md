@@ -26,61 +26,62 @@ across platforms, start with `platform-abstractions.md`.
 
 ## Common documents
 
-- `system-overview.md` — component map (`core/daemon`, `core/providers`,
-  `core/shared`, `core/platform`, `core/lifecycle`, `core/cli`,
-  and the app surfaces under `apps/*`), boundary rules, and the planned
-  implementation sequence.
-- `data-flow.md` — local→remote and remote→local pipelines, throttle
+- `system-overview.md`: component map (`core/daemon`, `core/providers`,
+  `core/shared`, `core/ipc`, `core/platform`, `core/lifecycle`,
+  `core/cli`, the app surfaces under `apps/*`, and the tools under
+  `tools/*`) and the boundary rules.
+- `data-flow.md`: local→remote and remote→local pipelines, throttle
   discipline, fs-watch callback rules, self-write-cache / loop-prevention
   design, multi-profile watch coordination, conflict handling,
   control/observability surface.
-- `provider-onboarding.md` — how to add a new cloud backend: the
+- `provider-onboarding.md`: how to add a new cloud backend: the
   `Provider` trait contract, capability flags, the injectable
   `HttpTransport` seam, auth/secret-store rules, the contract-suite
   gate for selectability, and the engine invariants a provider must
   respect. Read before touching `core/providers`.
-- `sync-modes.md` — sync directionality (`syncMode`): `two-way` (default),
+- `sync-modes.md`: sync directionality (`syncMode`): `two-way` (default),
   `pull-only`, and `push-only` strict-mirror one-way modes; per-profile
-  resolution, interaction with the keep-both conflict policy, safety
-  requirements for the destructive one-way paths, config surface, and the
-  pull-only → two-way → push-only build order.
-- `conflict-resolution.md` — what happens *after* a keep-both conflict
+  resolution, interaction with the keep-both conflict policy, the
+  data-loss warning that holds a one-way profile until it is answered,
+  what can and cannot be undone, and the config surface.
+- `conflict-resolution.md`: what happens *after* a keep-both conflict
   copy exists: who keeps the name, the files as the durable record
   (never the capped timeline), the one `conflict` decision per file
   that lists every version through `vapor decisions`, the notify → list
   → resolve lifecycle, and the per-surface responsibility table. Creation mechanics stay in
   `data-flow.md §Conflict handling`.
-- `ipc-contracts.md` — transport-agnostic contract surface between apps
+- `ipc-contracts.md`: transport-agnostic contract surface between apps
   (macOS, future Windows/Linux, `vapor` CLI) and the `vapord` daemon.
   Versioning, handshake, skew-matrix, field-omission tolerance, payload
   bounds, diagnostics surface. Transport specifics live per-platform.
-- `platform-abstractions.md` — authoritative trait catalog for
+- `platform-abstractions.md`: authoritative trait catalog for
   `core/platform`. `FsWatcher`, `ServiceInstaller`, `SecretStore`,
   `PlatformMetricsSampler`, `IdleNotifier`, `FilesystemCapabilities`,
-  `ProcessSupervisor`; per-OS native-API mapping; parity matrix; how to
-  add a new platform.
-- `testing-strategy.md` — authoritative test taxonomy and discipline.
-  Unit / integration / property / platform-trait contract / concurrency
-  / snapshot / fuzz / guard-rail timing tests; what we deliberately do
-  NOT test (UI rendering, TTY interaction, trivial restatements of
-  code); per-surface scope (core heavy, apps logic-only, CLI no TTY);
-  CI tier model and budget. Read before writing or reviewing a test.
-- `state-schema-migrations.md` — durable queue/state schema versioning,
-  at-least-once intent semantics, startup recovery, corruption detection
-  rules.
-- `compatibility-and-upgrades.md` — version compatibility across app,
+  `ProcessSupervisor`, `TrashBin`; per-OS native-API mapping; parity
+  matrix; how to add a new platform.
+- `testing-strategy.md`: authoritative test taxonomy and discipline.
+  Unit / integration / property / platform-trait contract / shape-lock
+  / guard-rail timing tests; what we deliberately do NOT test (UI
+  rendering, TTY interaction, trivial restatements of code);
+  per-surface scope (core heavy, apps logic-only, CLI no TTY); CI tier
+  model and budget. Read before writing or reviewing a test.
+- `state-schema-migrations.md`: the durable queue/state schema, the
+  no-migration rule before GA (a database of another version is set
+  aside and rebuilt by a reconcile), startup recovery, and what happens
+  to a damaged file.
+- `compatibility-and-upgrades.md`: version compatibility across app,
   daemon, shared contracts, and durable schema; supported skew; upgrade
   and rollback flow.
 
 ## Per-platform subdirectories
 
-- `macos/` — macOS-specific architecture: app lifecycle semantics
+- `macos/`: macOS-specific architecture: app lifecycle semantics
   (`Window` scene, menubar, Dock, `SMAppService`), and the macOS IPC
   transport (Unix domain socket, optional NSXPC wrapping).
-- `windows/` — Windows-specific architecture (transport choice
+- `windows/`: Windows-specific architecture (transport choice
   documented now; the native trait implementations are optional work,
   see `docs/tasks/README.md`).
-- `linux/` — Linux-specific architecture (transport choice; the
+- `linux/`: Linux-specific architecture (transport choice; the
   native trait impls are in, the app and release lane are still to
   come).
 

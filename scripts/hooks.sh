@@ -48,17 +48,16 @@ cat >"$PRE_COMMIT_HOOK" <<'HOOK'
 #!/usr/bin/env bash
 # vapor-managed-hook: pre-commit
 #
-# Installed by scripts/hooks.sh. Runs the full local validation pipeline
-# before every commit so agentic contributors and humans share one bar:
-# lint -> test -> build. Any failure aborts the commit.
+# Installed by scripts/hooks.sh. Runs lint, then the Tier 1 suite, before
+# every commit; a failure aborts the commit. The release build and the
+# e2e suite are not part of a commit: the contributor runs e2e when the
+# change needs it (AGENTS.md §8.4), and CI builds from a fresh checkout.
 #
-# Builds incrementally: the from-scratch, empty-cache guarantee lives in
-# CI (fresh checkout on every PR), so the hook stays fast. It also no
-# longer wipes runtime state — a `clean.sh` here would delete `.vapor`,
-# destroying a preserved or running e2e sandbox.
+# The hook never runs clean.sh, which removes `.vapor` and with it a
+# preserved or running e2e sandbox.
 #
-# Re-run scripts/hooks.sh install to refresh after updates; remove via
-# scripts/hooks.sh uninstall.
+# Run scripts/hooks.sh install again after this file changes; remove
+# the hook with scripts/hooks.sh uninstall.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -70,12 +69,9 @@ echo "Linting source files..."
 echo "Running test suite..."
 "$REPO_ROOT/scripts/test.sh"
 
-echo "Building release binaries..."
-"$REPO_ROOT/scripts/build.sh"
-
 echo "All checks passed."
 HOOK
 
 chmod +x "$PRE_COMMIT_HOOK"
 echo "[hooks] installed pre-commit hook at $PRE_COMMIT_HOOK"
-echo "[hooks] runs: lint -> test -> build"
+echo "[hooks] runs: lint -> test"

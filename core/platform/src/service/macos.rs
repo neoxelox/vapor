@@ -1,15 +1,13 @@
 //! macOS `ServiceInstaller` implementation.
 //!
-//! Ports the LaunchAgent installer logic from
-//! `apps/macos/Sources/VaporCore/LaunchAgentController.swift` into Rust.
-//! Uses `launchctl` via `std::process::Command` per the policy in
-//! `docs/operations/macos/launchagent-policy.md`. Plist serialization is
-//! emitted as a known-good XML template (the schema is fixed, so a hand-
-//! rolled writer keeps the dep set tiny).
+//! Drives `launchctl` through `std::process::Command` per the policy in
+//! `docs/operations/macos/launchagent-policy.md`. The plist is written
+//! from a fixed XML template (the schema is fixed, so a hand-rolled
+//! writer keeps the dependency set small).
 //!
-//! Consumed by `core/lifecycle::DaemonLifecycleManager`; the macOS
-//! Swift app delegates to it through the bundled `vapor` CLI, so this is
-//! the single writer of the LaunchAgent definition.
+//! Consumed by `core/lifecycle::DaemonLifecycleManager`; the macOS app
+//! reaches it through the bundled `vapor` CLI, so this is the single
+//! writer of the LaunchAgent definition.
 
 use std::fs;
 use std::io::Write;
@@ -97,12 +95,8 @@ impl NativeServiceInstaller {
         Ok(())
     }
 
-    fn write_plist(&self) -> Result<(), ServiceInstallError> {
-        if let Some(parent) = self.plist_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| ServiceInstallError::Backend(Box::new(error)))?;
-        }
-
+    /// The LaunchAgent definition as XML.
+    fn render_plist(&self) -> String {
         let mut buffer = String::new();
         buffer.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         buffer.push_str(
@@ -154,12 +148,37 @@ impl NativeServiceInstaller {
         }
 
         buffer.push_str("</dict>\n</plist>\n");
+        buffer
+    }
 
+    fn write_plist(&self, contents: &str) -> Result<(), ServiceInstallError> {
+        if let Some(parent) = self.plist_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| ServiceInstallError::Backend(Box::new(error)))?;
+        }
         let mut file = fs::File::create(&self.plist_path)
             .map_err(|error| ServiceInstallError::Backend(Box::new(error)))?;
-        file.write_all(buffer.as_bytes())
+        file.write_all(contents.as_bytes())
             .map_err(|error| ServiceInstallError::Backend(Box::new(error)))?;
         Ok(())
+    }
+
+    /// Whether launchd knows the job. A plist on disk is not enough: a
+    /// job that was booted out, or whose bootstrap failed, has its file
+    /// and is not loaded.
+    fn is_loaded(&self) -> bool {
+        Command::new("/bin/launchctl")
+            .args(["print", &self.service_target()])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    fn bootstrap(&self) -> Result<(), ServiceInstallError> {
+        self.run_launchctl(&[
+            "bootstrap",
+            &self.domain_target(),
+            &self.plist_path.display().to_string(),
+        ])
     }
 
     /// Runs launchctl with captured stdio. Capturing matters twice
@@ -192,7 +211,16 @@ impl NativeServiceInstaller {
 impl ServiceInstaller for NativeServiceInstaller {
     fn install_and_enable(&self) -> Result<(), ServiceInstallError> {
         self.validate_executable()?;
-        self.write_plist()?;
+        let definition = self.render_plist();
+        // The same definition, already loaded: nothing to install. The
+        // boot-out and boot-in below would stop a healthy daemon and
+        // let `RunAtLoad` start it again, at every app start.
+        let unchanged =
+            fs::read_to_string(&self.plist_path).is_ok_and(|current| current == definition);
+        if unchanged && self.is_loaded() {
+            return Ok(());
+        }
+        self.write_plist(&definition)?;
         // bootout is best-effort: the service may not be loaded yet.
         let _ = self.run_launchctl(&[
             "bootout",
@@ -200,11 +228,7 @@ impl ServiceInstaller for NativeServiceInstaller {
             &self.plist_path.display().to_string(),
         ]);
         self.run_launchctl(&["enable", &self.service_target()])?;
-        self.run_launchctl(&[
-            "bootstrap",
-            &self.domain_target(),
-            &self.plist_path.display().to_string(),
-        ])
+        self.bootstrap()
     }
 
     fn disable_and_uninstall(&self) -> Result<(), ServiceInstallError> {
@@ -222,23 +246,45 @@ impl ServiceInstaller for NativeServiceInstaller {
     }
 
     fn start_daemon(&self) -> Result<(), ServiceInstallError> {
-        self.run_launchctl(&["kickstart", "-k", &self.service_target()])
+        // `kickstart` cannot start a job that launchd does not know.
+        // Loading it starts it too (`RunAtLoad`).
+        if !self.is_loaded() {
+            return self.bootstrap();
+        }
+        // No `-k`: that flag stops a running instance first, so a start
+        // of a daemon that runs would be a restart.
+        self.run_launchctl(&["kickstart", &self.service_target()])
     }
 
     fn stop_daemon(&self) -> Result<(), ServiceInstallError> {
         // SIGTERM via launchctl. A kill failure is only benign if the
         // service is in fact no longer running (already stopped, never
-        // loaded); if it still reports Running — or the state cannot be
-        // confirmed — the failure is real and must surface rather than be
+        // loaded); if it still reports Running, or the state cannot be
+        // confirmed: the failure is real and must surface rather than be
         // reported to the caller (and the user's Quit flow) as a stop.
-        match self.run_launchctl(&["kill", "TERM", &self.service_target()]) {
-            Ok(()) => Ok(()),
-            Err(kill_error) => match self.status() {
+        if let Err(kill_error) = self.run_launchctl(&["kill", "TERM", &self.service_target()]) {
+            return match self.status() {
                 Ok(ServiceStatus::Running) => Err(kill_error),
                 Ok(_) => Ok(()),
                 Err(_) => Err(kill_error),
-            },
+            };
         }
+        // The signal is sent; the daemon is stopped when its process is
+        // gone. A start that follows at once (a restart) must not find
+        // the old instance still there and take it for the new one.
+        let deadline = std::time::Instant::now() + STOP_WAIT;
+        while std::time::Instant::now() < deadline {
+            if !matches!(self.status(), Ok(ServiceStatus::Running)) {
+                return Ok(());
+            }
+            std::thread::sleep(STOP_POLL);
+        }
+        Err(ServiceInstallError::Backend(Box::new(
+            std::io::Error::other(format!(
+                "the daemon did not stop within {} s of SIGTERM",
+                STOP_WAIT.as_secs()
+            )),
+        )))
     }
 
     fn status(&self) -> Result<ServiceStatus, ServiceInstallError> {
@@ -260,6 +306,11 @@ impl ServiceInstaller for NativeServiceInstaller {
         }
     }
 }
+
+/// How long a stop waits for the daemon's process to go, and how often
+/// it looks. The daemon's own shutdown takes well under a second.
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn current_uid() -> u32 {
     // SAFETY: `getuid` is documented as never failing and has no side
@@ -341,7 +392,9 @@ mod tests {
             plist_path.clone(),
             501,
         );
-        installer.write_plist().expect("write plist");
+        installer
+            .write_plist(&installer.render_plist())
+            .expect("write plist");
         let contents = fs::read_to_string(&plist_path).expect("read plist");
         assert!(contents.contains("<key>KeepAlive</key>\n  <true/>"));
         assert!(contents.contains("<string>--loop</string>"));
@@ -366,7 +419,9 @@ mod tests {
             501,
         );
 
-        installer.write_plist().expect("write plist");
+        installer
+            .write_plist(&installer.render_plist())
+            .expect("write plist");
         let contents = fs::read_to_string(&plist_path).expect("read plist");
 
         assert!(contents.contains("<key>Label</key>"));

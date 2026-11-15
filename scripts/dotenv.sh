@@ -22,10 +22,22 @@ vapor_load_build_env() {
     [[ -n "$line" ]] || continue
     value="${line#*=}"
     value="${value%$'\r'}"
-    value="${value#\"}"
-    value="${value%\"}"
-    value="${value#\'}"
-    value="${value%\'}"
+    # A quoted value ends at its closing quote. A bare value ends before
+    # a comment (` # ...`) and carries no trailing space.
+    case "$value" in
+      \"*)
+        value="${value#\"}"
+        value="${value%%\"*}"
+        ;;
+      \'*)
+        value="${value#\'}"
+        value="${value%%\'*}"
+        ;;
+      *)
+        value="${value%%[[:space:]]#*}"
+        value="${value%"${value##*[![:space:]]}"}"
+        ;;
+    esac
     [[ -n "$value" ]] && export "$key=$value"
   done
   return 0

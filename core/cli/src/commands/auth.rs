@@ -10,7 +10,7 @@ use std::fmt::{self, Display};
 
 use serde::Serialize;
 use vapor_daemon::profiles::{ResolvedProfile, resolve_profiles};
-use vapor_platform::{InMemorySecretStore, NativeSecretStore, SecretStore, SecretStoreError};
+use vapor_platform::{InMemorySecretStore, SecretStore, SecretStoreError};
 use vapor_shared::config::VaporConfig;
 use vapor_shared::constants;
 
@@ -23,6 +23,8 @@ pub enum AuthError {
     },
     /// Several profiles exist and none was named.
     AmbiguousProfile(Vec<String>),
+    /// No profile exists yet: there is nothing to sign in for.
+    NoProfile,
     /// The profile's provider has nothing to sign in to.
     NoSignIn {
         profile: String,
@@ -38,6 +40,10 @@ impl Display for AuthError {
                 f,
                 "no profile '{requested}' (profiles: {})",
                 known.join(", ")
+            ),
+            Self::NoProfile => write!(
+                f,
+                "no sync profile yet; set one up with `vapor profiles add`"
             ),
             Self::AmbiguousProfile(known) => write!(
                 f,
@@ -97,6 +103,7 @@ pub fn select_profile(
             }),
         None => match profiles.as_slice() {
             [only] => Ok(only.clone()),
+            [] => Err(AuthError::NoProfile),
             _ => Err(AuthError::AmbiguousProfile(ids())),
         },
     }
@@ -125,14 +132,22 @@ pub fn login_into(
     Ok(())
 }
 
+/// The names the store holds. The store answers this from the items'
+/// attributes: no secret is read, so no keychain dialog opens.
+fn stored_names(store: &dyn SecretStore) -> Result<Vec<String>, AuthError> {
+    Ok(store.list()?)
+}
+
 /// Removes every credential the profile holds, for any provider, so a
 /// profile that switched providers leaves nothing behind. Returns whether
-/// anything was removed.
+/// anything was removed. A credential that is there and cannot be
+/// removed is an error, never "was not signed in".
 pub fn logout_from(store: &dyn SecretStore, profile_id: &str) -> Result<bool, AuthError> {
+    let stored = stored_names(store)?;
     let mut removed = false;
     for provider in constants::provider::ALL {
         let name = key(profile_id, provider);
-        if store.get(&name).is_err() {
+        if !stored.contains(&name) {
             continue;
         }
         match store.delete(&name) {
@@ -169,12 +184,22 @@ pub fn status_from(
         Some(id) => vec![select_profile(config, Some(id))?],
         None => resolve_profiles(config),
     };
+    // Whether a credential is stored, and never the credential: the
+    // store is asked for names only.
+    let stored = if profiles
+        .iter()
+        .any(|profile| needs_sign_in(&profile.provider_kind))
+    {
+        stored_names(store)?
+    } else {
+        Vec::new()
+    };
     let entries = profiles
         .into_iter()
         .map(|profile| {
             let state = if !needs_sign_in(&profile.provider_kind) {
                 constants::auth::STATE_NOT_NEEDED
-            } else if store.get(&key(&profile.id, &profile.provider_kind)).is_ok() {
+            } else if stored.contains(&key(&profile.id, &profile.provider_kind)) {
                 constants::auth::STATE_SIGNED_IN
             } else {
                 constants::auth::STATE_SIGNED_OUT
@@ -204,8 +229,8 @@ pub fn render_status(report: &AuthStatusReport) -> String {
 /// in-process [`InMemorySecretStore`] and returns why, so the caller
 /// can warn the user with the way out.
 pub fn build_native_store() -> (Box<dyn SecretStore>, Option<String>) {
-    match NativeSecretStore::for_current_user() {
-        Ok(store) => (Box::new(store), None),
+    match vapor_platform::open_store(vapor_platform::SecretAccess::Interactive) {
+        Ok(store) => (store, None),
         Err(error) => (
             Box::new(InMemorySecretStore::new()),
             Some(error.to_string()),
@@ -214,7 +239,7 @@ pub fn build_native_store() -> (Box<dyn SecretStore>, Option<String>) {
 }
 
 /// Interactive OAuth-PKCE login for Google Drive: a loopback
-/// redirect listener plus the system browser. Blocking by design — the
+/// redirect listener plus the system browser. Blocking by design: the
 /// CLI waits for the consent hop. Returns the stored-token JSON that
 /// goes into the secret store.
 pub fn run_gdrive_pkce_flow() -> Result<String, String> {
@@ -426,11 +451,27 @@ mod tests {
         }
     }
 
+    /// The implicit profile: the two top-level roots, set.
+    fn configured_default() -> VaporConfig {
+        VaporConfig {
+            local_root: Some("/tmp/vapor-auth-test/local".to_string()),
+            cloud_root: Some("/tmp/vapor-auth-test/cloud".to_string()),
+            ..VaporConfig::default()
+        }
+    }
+
     #[test]
     fn the_only_profile_is_selected_without_a_flag() {
-        let config = VaporConfig::default();
+        let config = configured_default();
         let profile = select_profile(&config, None).expect("single profile");
         assert_eq!(profile.id, constants::profile::DEFAULT_PROFILE_ID);
+    }
+
+    #[test]
+    fn an_install_with_no_profile_is_told_how_to_add_one() {
+        let error = select_profile(&VaporConfig::default(), None).expect_err("no profile");
+        assert!(matches!(error, AuthError::NoProfile));
+        assert!(error.to_string().contains("vapor profiles add"));
     }
 
     #[test]
@@ -492,7 +533,7 @@ mod tests {
     #[test]
     fn a_provider_without_sign_in_refuses_login() {
         let store = InMemorySecretStore::new();
-        let profile = select_profile(&VaporConfig::default(), None).expect("default");
+        let profile = select_profile(&configured_default(), None).expect("default");
         let error = login_into(&store, &profile, "x").expect_err("filesystem needs no sign-in");
         assert!(matches!(error, AuthError::NoSignIn { .. }));
     }
@@ -516,6 +557,54 @@ mod tests {
             .map(|entry| entry.profile_id.as_str())
             .collect();
         assert_eq!(signed_in, vec!["home"]);
+    }
+
+    /// A store that holds credentials and refuses to give or remove
+    /// them, the way a keychain does when it would have to ask.
+    struct Guarded {
+        inner: InMemorySecretStore,
+        refuse_delete: bool,
+    }
+
+    impl SecretStore for Guarded {
+        fn get(&self, name: &str) -> Result<String, SecretStoreError> {
+            panic!("the secret {name} was read; status and logout ask for names only")
+        }
+        fn set(&self, name: &str, value: &str) -> Result<(), SecretStoreError> {
+            self.inner.set(name, value)
+        }
+        fn delete(&self, name: &str) -> Result<(), SecretStoreError> {
+            if self.refuse_delete {
+                return Err(SecretStoreError::Backend("the keychain refused".into()));
+            }
+            self.inner.delete(name)
+        }
+        fn list(&self) -> Result<Vec<String>, SecretStoreError> {
+            self.inner.list()
+        }
+    }
+
+    #[test]
+    fn status_and_logout_never_read_a_secret_and_a_refused_logout_is_an_error() {
+        let config = config_with(&[("work", "gdrive")]);
+        let work = select_profile(&config, Some("work")).expect("work");
+        let mut store = Guarded {
+            inner: InMemorySecretStore::new(),
+            refuse_delete: true,
+        };
+        login_into(&store, &work, "ya29.test").expect("login");
+
+        let report = status_from(&store, &config, None).expect("status");
+        assert_eq!(report.profiles[0].state, constants::auth::STATE_SIGNED_IN);
+
+        // The credential is there and cannot be removed: that is not
+        // "was not signed in".
+        let refused = logout_from(&store, "work").expect_err("the store refused");
+        assert!(refused.to_string().contains("refused"), "{refused}");
+        store.refuse_delete = false;
+        assert!(logout_from(&store, "work").expect("logout"));
+        let report = status_from(&store, &config, None).expect("status");
+        assert_eq!(report.profiles[0].state, constants::auth::STATE_SIGNED_OUT);
     }
 
     #[test]

@@ -15,21 +15,27 @@ form; the runbook wins on any disagreement.
 
 1. On `main`, up to date with `origin/main`, and clean except
    `CHANGELOG.md` (`scripts/version.sh` refuses otherwise).
-2. `CHANGELOG.md` `Unreleased` holds every line for the release; the
-   script rolls them into the versioned section.
-3. `./scripts/release.sh` green on the commit being released:
-   format, lint, Tier 1, and the e2e suite once per provider. The
+2. `CHANGELOG.md` holds a `## [<version>] - YYYY-MM-DD` section with
+   the lines of the release. A person moves them there from
+   `Unreleased`; the script only checks that the section exists and
+   stops with "CHANGELOG.md missing section" when it does not.
+3. `./scripts/release.sh` green on the commit being released: the
+   format check, lint, Tier 1, and the e2e suite once per provider. The
    Google Drive leg runs only here, by hand, with the dedicated test
-   account signed in and `VAPOR_GDRIVE_CLIENT_ID` set (exported or in
-   `.env`); it never runs in CI and never against a personal account.
+   account and `VAPOR_GDRIVE_CLIENT_ID` set (exported or in `.env`); it
+   never runs in CI and never against a personal account.
    A red gate stops the release: the fix goes through a pull request
    (`vapor-pr`), and the release starts again from the merged `main`.
-4. The release environment is protected before any secret is added:
+4. The target version sorts above the current one. `version.sh` refuses
+   anything else, `prerelease` on a stable version (use `set
+   <version>-rc.1`), and `bump` on a prerelease (use `release` or
+   `set`).
+5. The release environment is protected before any secret is added:
    one `v*` tag rule and no branch rule, a required reviewer, and
    `can_admins_bypass` set to `false` once a second admin exists. New
    environments are created unprotected and nothing warns you. Check
    with the `gh api` commands in the runbook.
-5. A stable tag needs `VAPOR_GDRIVE_CLIENT_ID` and
+6. A stable tag needs `VAPOR_GDRIVE_CLIENT_ID` and
    `VAPOR_GDRIVE_CLIENT_SECRET` in the platform's release environment:
    the package job compiles them into the binaries and refuses a stable
    tag without them. A prerelease without them ships without Google
@@ -77,6 +83,8 @@ recipe in `docs/operations/release-process.md`.
 
 ## Reruns and failures
 
-Reruns for the same tag are allowed and idempotent (a published release
-is never demoted back to draft). Anything else goes through the incident
-playbook.
+A rerun for the same tag is allowed while the release is a draft: it
+rewrites the notes and replaces the assets. A rerun on a published
+release fails before it changes anything, because users hold its files
+and its checksums; a published release is corrected with a new tag.
+Anything else goes through the incident playbook.

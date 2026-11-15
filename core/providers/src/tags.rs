@@ -180,7 +180,7 @@ impl OpIdTagStore {
         // Stage inside the reserved internal namespace (TEMP_FILE_PREFIX) so
         // a crash between write and rename leaves an orphan that stays
         // hidden from sync by the filter's unconditional internal-artifact
-        // check — not a `*.tmp` name that relies on a user-editable rule.
+        // check, not a `*.tmp` name that relies on a user-editable rule.
         let staged_name = side_file
             .file_name()
             .and_then(|name| name.to_str())
@@ -205,7 +205,7 @@ impl OpIdTagStore {
         }
     }
 
-    /// Whether a real, non-metadata file occupies `path` — i.e. it exists
+    /// Whether a real, non-metadata file occupies `path`, i.e. it exists
     /// but is not one of our side-file payloads.
     fn collides_with_user_file(path: &Path) -> bool {
         fs::symlink_metadata(path).is_ok() && !Self::is_owned_side_file(path)

@@ -1,8 +1,6 @@
 //! Contract lock for the crash-loop backoff schedule.
 //!
-//! Originally the Rust half of a Rust↔Swift parity pair; the Swift
-//! `CrashLoopGuard` was retired, so this file is now
-//! the single contract every surface inherits through the `vapor
+//! The single contract every surface inherits through the `vapor
 //! service` CLI. The canonical schedule is documented in
 //! `docs/operations/macos/launchagent-policy.md`: with the default
 //! policy, crash 1 restarts immediately and backoff starts at crash 2
@@ -81,7 +79,7 @@ fn crashes_outside_failure_window_reset_the_schedule() {
         guard.register_crash(t0 + Duration::from_secs(1)),
         CrashLoopDecision::NoDelay
     );
-    // 20 seconds later — both prior crashes fell out of the 10 s window,
+    // 20 seconds later, both prior crashes fell out of the 10 s window,
     // so the count restarts and the crash is free again.
     assert_eq!(
         guard.register_crash(t0 + Duration::from_secs(20)),

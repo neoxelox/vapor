@@ -16,7 +16,7 @@ Vapor is an invisible-first cloud sync app that stays out of your way. It keeps 
 
 Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/vapor/releases) page.
 
-- **macOS**: install the `Vapor` app bundle (`Vapor.zip`) from the latest release assets.
+- **macOS**: install the `Vapor` app (from `Vapor.zip`) from the latest release assets.
 - **Windows / Linux**: planned. The CLI (`vapor`) would ship for Windows and Linux before the GUI apps do.
 - **CLI (`vapor`)**: ships inside the app, at `Vapor.app/Contents/Helpers/vapor`. Link it onto your `PATH` to use it from a terminal. Standalone downloads are planned.
 
@@ -24,59 +24,53 @@ Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/v
 
 Available now:
 
-- 🔁 Two-way sync between a local folder and a cloud folder. Changes are picked up within seconds while you work.
-- 🧠 Nothing is lost. Every change is written to disk before it moves, so a crash, a reboot, or a dropped connection resumes where it stopped.
-- 🛡 Edits never silently overwrite each other. When several devices change the same file before it syncs, Vapor keeps every version.
-- 🧭 Each conflicted file becomes one question that lists every version and whose edit it is. Pick the one to keep, from any device, and the others go to the trash; or settle it in the Finder.
-- ❓ When the evidence is ambiguous, Vapor holds only the files in question, asks you a plain question with a short list of answers, and keeps the question until you answer it, from the terminal or the app.
-- 🗑️ Nothing Vapor removes from your device is gone: it waits in a trash you can list and restore from, for as long as you choose.
-- 🔌 An unplugged drive, or an empty folder where your sync folder used to be, never turns into deletions on the other side. Vapor waits for the folder, and asks before it merges anything.
-- ✂️ Renaming or moving a file, on either side, moves it on the other side too. No re-upload, no re-download.
-- 🔤 Two cloud files whose names differ only in case both reach a device that cannot tell them apart: the second arrives as a copy tied to its own cloud file, and neither is overwritten.
-- 🔂 Your own uploads never bounce back as new changes, so two devices cannot ping-pong a file forever.
-- 🔀 Pick a direction per folder. Full two-way, or a one-way mirror for read-only backups and copies.
-- 🧩 Run several sync profiles at once. One folder can flow to two clouds, or separate setups stay isolated.
-- 📦 Downloads land whole or not at all, and big uploads are chunked so a pause does not restart them.
-- ⏳ Retries back off on their own and respect provider rate limits, so a bad hour of connectivity fixes itself.
-- 🪶 Heavy work waits while your device is busy, protecting battery and thermals.
-- ⚙️ Hard caps on the share of CPU, memory, and network Vapor may use, so streaming and browsing always have room.
-- 🌙 When the device sits idle, Vapor speeds up. It backs off the moment you return.
-- 🌩 A burst of thousands of file changes is absorbed instead of turned into thousands of uploads.
-- 🛟 A sudden mass deletion, from this device or from the cloud, is held and put to you as a question before it can reach the other side; everything else keeps syncing.
-- 🧹 Ignore rules, including your existing gitignore files, keep build output and junk out of the sync.
-- ♻️ Settings apply while it runs. Ceilings, ignore rules, and safeguards change without a restart, and Vapor tells you when one is needed.
-- 🚀 Starts at login, restarts itself after a crash, and stops retrying when something is really broken instead of looping.
-- ⏯️ Pause, resume, and sync on demand. Changes made while paused sync when you resume, and `vapor reconcile` (Sync now in the app) compares both folders without waiting for an idle moment.
-- 📈 Status with a reason, queue depth, a live activity timeline, per-file "why is this stuck", and a one-command support report.
-- ⌨️ A full command line for scripts and servers. Everything the app does, the terminal does too, including a headless supervisor that restarts a crashed sync where no app is running.
-- 🔐 Sign-in tokens live in the system keychain, logs never contain secrets, and nothing leaves your device except the files you chose to sync.
-- 🔑 An expired or revoked cloud sign-in puts sync on hold instead of failing it. Your changes wait in the queue, one click in the app signs you back in, and sync picks up where it stopped.
-- 🔕 Lives in the menu bar. No windows unless you ask for one.
-- 🟠 The menu bar mark turns orange only when Vapor needs you: a sign-in to renew, a question to answer, a conflict to settle, a setting that wants a restart, a sync that stopped on an error.
+- 🔁 **Two-way sync.** A local folder and a cloud folder stay in step, usually within seconds.
+- 🧠 **Crash-safe queue.** Every change is saved to disk before it moves, so a crash or a reboot loses nothing.
+- 🛡 **Keep-both conflicts.** When two devices edit the same file, every version is kept and you pick the one to keep.
+- ❓ **Decisions.** When Vapor is not sure, it holds only those files and asks you a plain question.
+- 🛟 **Mass-delete guard.** A sudden burst of deletions waits for your yes before it reaches the other side.
+- 🔌 **Unplug-safe.** An unplugged drive or a swapped sync folder never turns into deletions.
+- 🗑️ **Trash.** Everything Vapor removes on your device waits in a trash you can restore from.
+- ✂️ **Move detection.** A rename or a move syncs as a move, never as a new upload.
+- 🔤 **Case-safe names.** Two files that differ only in capitals never overwrite each other.
+- 🔂 **Loop prevention.** Vapor's own writes never bounce back as new changes.
+- ⏮️ **Offline catch-up.** Edits, renames, and deletions made while Vapor was off sync at the next start.
+- 🔀 **Sync modes.** Two-way, or a one-way mirror for backups, which runs only after you confirm it.
+- 🧩 **Profiles.** Nothing syncs until you add a folder pair with `vapor profiles add`, and several can run at once.
+- 📦 **Resilient transfers.** Downloads land whole, big uploads resume, and retries back off and respect rate limits.
+- 🪶 **Adaptive throttle.** Sync slows down on battery or while you work, and pauses only if the device overheats.
+- 🌙 **Idle boost.** Sync speeds up while the device sits idle and backs off the moment you return.
+- ⚙️ **Resource ceilings.** You cap the share of CPU, memory, and bandwidth, and Vapor measures itself against it.
+- 🌩 **Storm control.** A burst of thousands of changes becomes one scan, not thousands of uploads.
+- 🧹 **Ignore rules.** Your `.gitignore` files work as they are, and `vapor ignored` shows what they hold back.
+- ♻️ **Live settings.** Ceilings, ignore rules, and safeguards apply while Vapor runs, with no restart.
+- 🚀 **Always on.** It starts at login, restarts after a crash, and stops retrying when something is really broken.
+- ⏯️ **Pause, resume, Sync now.** Changes wait while paused, and Sync now compares both folders right away.
+- 📈 **Explains itself.** Status with a reason, a live timeline, and a support report with your file names hidden.
+- ⌨️ **Full command line.** Everything the app does, `vapor` does too, for scripts and for servers with no app.
+- 🔐 **Private by design.** Tokens stay in the system keychain, logs hold no secrets, and only your files leave the device.
+- 🔑 **Sign-in hold.** An expired cloud sign-in puts sync on hold, and signing in again resumes it where it stopped.
+- 🔕 **Menu bar app.** No window unless you ask, and the mark turns orange only when Vapor needs you.
 
 In flight and coming next:
 
-- 🪟 A diagnostics window in the Mac app with throttle reason, queue, open questions, and timeline, plus live pause and resume controls.
-- 🚪 A first-run setup that asks which provider and which folders to use before creating anything.
-- 🔔 A notification when Vapor has a question for you, conflicts included.
-- 🖥️ Windows and Linux apps on the same runtime as the Mac app.
-- 📥 Standalone command-line downloads for every OS, with Docker and systemd recipes.
-- 🧾 Signed and notarized releases, verified on a clean machine every cycle.
+- 🪟 **Diagnostics window.** Throttle reason, queue, open questions, and timeline in the Mac app.
+- 🚪 **First-run setup.** The Mac app asks for the cloud and the two folders, in place of the terminal command.
+- 🔔 **Notifications.** A system notification when Vapor has a question for you.
+- 🖥️ **Windows and Linux apps.** The same runtime as the Mac app.
+- 📥 **Standalone CLI downloads.** For every OS, with Docker and systemd recipes.
+- 🧾 **Signed releases.** Signed and notarized, and verified on a clean machine every cycle.
 
 ## Providers
 
 Available now:
 
-- [File System](https://github.com/neoxelox/vapor/tree/main/core/providers/src/filesystem) — any locally mounted folder (external drives, network mounts, another directory).
-- [Google Drive](https://workspace.google.com/products/drive/) — sign in with `vapor auth login`, or Sign In in the app.
+- [File System](https://github.com/neoxelox/vapor/tree/main/core/providers/src/filesystem): any locally mounted folder (external drives, network mounts, another directory).
+- [Google Drive](https://workspace.google.com/products/drive/): sign in with `vapor auth login`, or Sign In in the app.
 
 In flight and coming next:
 
 - More cloud providers as demand surfaces (the provider system is pluggable; see `docs/architecture/provider-onboarding.md`).
-
-## Benchmarks
-
-> TBD
 
 ## Commands
 
@@ -87,16 +81,20 @@ In flight and coming next:
 | `vapor status` | `--json` | Shows what sync is doing and why: run state, throttle, queue, open questions. |
 | `vapor pause` | `--json` | Pauses sync. Changes are still recorded and sync on resume. |
 | `vapor resume` | `--json` | Resumes sync. |
-| `vapor reconcile` | `--json` | Compares both folders now and syncs the differences, without waiting for the device to go idle. |
+| `vapor reconcile` | `--json` | Compares both folders now and syncs the differences. |
+| `vapor profiles list` | `--json` | Lists the sync profiles: the folders, the cloud, the direction. |
+| `vapor profiles add` | `--id <id>`, `--name <name>`, `--provider <provider>`, `--local <path>`, `--cloud <path>`, `--mode <mode>`, `--json` | Adds a profile. On a terminal it asks for what you leave out; a script has to give `--local` and `--cloud`. The first one is the setup of a fresh install and starts syncing at once. |
+| `vapor profiles remove <id>` | `--yes`, `--json` | Stops syncing a profile and forgets its sync state and sign-in. The files on both sides stay. Needs the daemon stopped. |
+| `vapor ignored` | `--profile <id>`, `--json` | Lists what the ignore rules keep out of sync, with the rule that hides each path. |
 | `vapor decisions list` | `--all`, `--json` | Lists the questions waiting for you: conflicts, and actions Vapor will not take on its own. `--all` adds the answered ones. |
 | `vapor decisions show <id>` | `--profile <id>`, `--json` | Shows one question with its options and evidence. |
 | `vapor decisions resolve <id>` | `--choose <option>`, `--profile <id>`, `--json` | Answers a question. For a conflict, the option is the file name of the version to keep. |
 | `vapor trash list` | `--json` | Lists what Vapor removed from this device, newest first. |
 | `vapor trash restore <id>` | `--profile <id>`, `--json` | Puts an item back where it was. |
-| `vapor trash empty` | `--profile <id>`, `--json` | Deletes everything in the trash, for good. |
+| `vapor trash empty` | `--profile <id>`, `--yes`, `--json` | Deletes everything in the trash, for good. Asks first on a terminal; `--yes` skips the question. |
 | `vapor config get <key>` | | Prints a setting, or its default when unset. |
 | `vapor config set <key> <value>` | | Changes one setting and says when it takes effect. |
-| `vapor auth login` | `--profile <id>`, `--browser`, `--token <token>` | Signs a profile in to its cloud. |
+| `vapor auth login` | `--profile <id>`, `--browser`, `--token -` | Signs a profile in to its cloud. `--token -` reads a token from stdin; a token is never taken as an argument. |
 | `vapor auth logout` | `--profile <id>` | Removes a profile's stored sign-in. |
 | `vapor auth status` | `--profile <id>`, `--json` | Shows which profiles are signed in. |
 | `vapor service install` | `--supervise`, `--json` | Starts Vapor at login and starts it now. `--supervise` adds a supervisor that restarts a crashed daemon where no app runs. |
@@ -110,11 +108,9 @@ In flight and coming next:
 | `vapor diagnostics` | `--json` | Lists queued and in-flight work, with the reason each item waits. |
 | `vapor logs` | `--tail <lines>` | Prints the daemon log. |
 | `vapor doctor` | `--json` | Checks that this device can run Vapor and says what to fix. |
-| `vapor report` | `--output <dir>`, `--json` | Writes a support report: settings, logs, and the daemon's live state. |
+| `vapor report` | `--output <dir>`, `--keep-paths`, `--json` | Writes a support report: settings, logs, and the daemon's live state, with file and folder names replaced by codes. `--keep-paths` keeps the names, for a report that stays with you. |
 | `vapor run` | | Runs the daemon in this terminal, for a server or for debugging. |
 | `vapor version` | | Prints the version and the git commit. |
-
-`vapor service` takes `--user` (the default, a per-user service) before the subcommand; `--system` is reserved for a system-wide service and not available yet.
 
 ## Configuration
 
@@ -126,20 +122,20 @@ The Applies column says when a change takes effect: **live** within a few second
 | --- | --- | --- | --- |
 | `autoLaunch` | `true` | app | Start Vapor at login. `vapor service install` and `uninstall` set it. |
 | `provider` | `"filesystem"` | restart | The cloud: `filesystem` (a local folder) or `gdrive` (Google Drive). |
-| `syncMode` | `"two-way"` | restart | The direction: `two-way`, `pull-only` (a read-only local mirror), or `push-only` (a read-only cloud backup). |
-| `localRoot` | `"~/Vapor"` | restart | The folder on this device. |
-| `cloudRoot` | `"~/cloud/Vapor"` with `filesystem`, `"/Vapor"` otherwise | restart | The folder in the cloud. |
-| `useGitignore` | `true` | live | Honour `.gitignore` files under the local root. |
-| `useVaporignore` | `true` | live | Honour `.vaporignore` files under the local root. |
-| `preIgnoreRules` | a built-in list | live | Ignore rules applied before the ignore files, one `.gitignore` rule per entry. |
-| `postIgnoreRules` | `[]` | live | Ignore rules applied after the ignore files; `!rule` here wins over everything. |
-| `timelineLimit` | `1000` | live | How many entries `vapor timeline` keeps. |
+| `syncMode` | `"two-way"` | restart | The direction: `two-way`, `pull-only` (a read-only local mirror), or `push-only` (a read-only cloud backup). A one-way mode waits for your confirmation (`vapor decisions`). |
+| `localRoot` | none: you choose it | restart | The folder on this device. Nothing syncs until both folders are set. |
+| `cloudRoot` | none: you choose it | restart | The folder in the cloud. |
+| `useGitignore` | `true` | live | Honour `.gitignore` files under the local root. [Ignore rules](docs/product/ignore-rules.md). |
+| `useVaporignore` | `true` | live | Honour `.vaporignore` files under the local root. [Ignore rules](docs/product/ignore-rules.md). |
+| `preIgnoreRules` | a built-in list | live | Rules applied before the ignore files, one `.gitignore` rule per entry. [Ignore rules](docs/product/ignore-rules.md). |
+| `postIgnoreRules` | `[]` | live | Rules applied after the ignore files; `!rule` here wins over everything. [Ignore rules](docs/product/ignore-rules.md). |
+| `timelineLimit` | `1000` | live | How many entries `vapor timeline` keeps, at most `10000`. |
 | `language` | `"en"` | app | The app's language. |
-| `deviceId` | derived from the hostname | restart | This device's name in conflict copies. Written once on the first run. |
+| `deviceId` | the host name plus four random characters | restart | This device's name in conflict copies. Written once on the first run. |
 | `profiles` | none: one profile named `default` | restart | Several sync pairs at once, each with its own state. See below. |
 | `resourceLimits.cpuPercent` | `15` | live | CPU ceiling, as a share of the whole device. |
 | `resourceLimits.memoryPercent` | `10` | live | Memory ceiling, as a share of physical memory. |
-| `resourceLimits.bandwidthPercent` | `25` | live | Network ceiling, as a share of measured bandwidth. |
+| `resourceLimits.bandwidthPercent` | `25` | live | Network ceiling, as a share of what the link carries, which Vapor measures. |
 | `resourceLimits.concurrentTransfers` | automatic | live | Parallel uploads and parallel downloads, `1` to `16`. |
 | `idleBoost.enabled` | `true` | live | Raise the ceilings while the device is idle. |
 | `idleBoost.minIdleSeconds` | `300` | live | Seconds without keyboard or pointer input before boosting. |
@@ -157,7 +153,7 @@ The Applies column says when a change takes effect: **live** within a few second
 | `trash.retentionDays` | `7` | live | Days an item stays in the trash. |
 | `trash.useSystem` | `false` | live | Try the system trash (the Finder's Trash) first. |
 
-Each `profiles` entry has an `id` and optionally `name`, `enabled`, `provider`, `localRoot`, `cloudRoot`, `syncMode`, `resourceLimits`, and `idleBoost`; unset fields inherit the top-level value, and a profile's limits can only be stricter than the top-level ones.
+Each `profiles` entry has an `id` and optionally `name`, `enabled`, `provider`, `localRoot`, `cloudRoot`, `syncMode`, `resourceLimits`, and `idleBoost`; unset fields inherit the top-level value, and a profile's limits can only be stricter than the top-level ones. `vapor profiles add` writes an entry for you; on a terminal it suggests `~/Vapor` and `/Vapor` for the two folders. The first profile starts without a restart.
 
 ### Environment variables
 
@@ -173,27 +169,19 @@ Each `profiles` entry has an `id` and optionally `name`, `enabled`, `provider`, 
 
 The build, release, and test variables are in `.env.example`.
 
-### Ignore rules
-
-- Filesystem callback filtering applies before event metadata is recorded.
-- Ignore rules are symmetric: a name that matches them never syncs in either direction — it is skipped by local ingest, by the remote changes feed, and by reconcile comparison on both sides — so an ignored file (for example `.DS_Store`) can never be pulled down from the cloud or produce a conflict copy.
-- Rule precedence (lowest to highest): `preIgnoreRules` -> `.gitignore` (when enabled, recursive per-directory) -> `.vaporignore` (when enabled, recursive per-directory) -> `postIgnoreRules`.
-- `.vaporignore` supports glob-like rules and `!` unignore rules.
-- `preIgnoreRules` default content covers common low-signal, regenerable paths across programming ecosystems: dependency/module directories (`node_modules/`, `vendor/`, `Pods/`, …), build outputs (`dist/`, `build/`, `out/`, `target/`, `_build/`, …), tool caches (`__pycache__/`, `.gradle/`, `.terraform/`, `.cache/`, …), and OS/editor junk (`.DS_Store`, swap/tmp/partial files, logs, what an OS keeps at the root of a volume such as `.fseventsd/`, `.Spotlight-V100/`, `System Volume Information/`). Repositories (`.git/`) and dotenv files are deliberately NOT ignored — they sync like any other content. Independently of every rule, a directory named `.vapor` never syncs, with everything under it: it is Vapor's own runtime state or a volume's trash, wherever it sits.
-
 ## Development
 
 This project is intentionally vibe-coded while still following strict reliability, safety, and low-impact engineering rules.
 
 Structure:
 
-- `core/daemon`: Rust daemon runtime (`vapord`) — the portable sync engine.
+- `core/daemon`: Rust daemon runtime (`vapord`); the portable sync engine.
 - `core/providers`: Rust cloud provider integrations.
 - `core/shared`: shared contracts/constants/config loader used across the workspace.
 - `core/ipc`: framed JSON IPC channel between the daemon and every surface.
-- `core/platform`: traits + per-OS native implementations for fs-watch, service install, secrets, metrics sampling, idle detection, filesystem capabilities, and process supervision.
+- `core/platform`: traits + per-OS native implementations for fs-watch, service install, secrets, metrics sampling, idle detection, filesystem capabilities, process supervision, and the system trash.
 - `core/lifecycle`: daemon lifecycle manager and crash-loop guard consumed by every app surface.
-- `core/cli`: the `vapor` CLI — headless-first control plane usable on every supported OS.
+- `core/cli`: the `vapor` CLI; headless-first control plane usable on every supported OS.
 - `apps/macos`: SwiftUI macOS app (`Vapor`).
 - `apps/windows` (planned): Windows app surface consuming `core/*`.
 - `apps/linux` (planned): Linux app surface consuming `core/*`.
@@ -206,45 +194,22 @@ See `.env.example` for the available `VAPOR_*` environment variables used by app
 
 ### Scripts
 
-- Build both stacks (release): `./scripts/build.sh`
-- Build + package macOS app bundle: `./scripts/build.sh package`
-- Clean build/dist artifacts: `./scripts/clean.sh`
-- Lint both stacks: `./scripts/lint.sh`
+Every workflow goes through a script under `scripts/`, never a raw `cargo` or `swift` command. The ones you run on every change, in this order:
+
 - Format both stacks: `./scripts/format.sh`
-- Format check both stacks (included in lint): `./scripts/format.sh check`
+- Lint both stacks: `./scripts/lint.sh` (needs `cargo install cargo-deny --locked` and a connection: it checks the dependencies against the RustSec advisories)
 - Test both stacks: `./scripts/test.sh`
-- End-to-end verification in disposable repo-local sandboxes: `./scripts/e2e.sh` (one scenario: `--only Sxx`; manual sandbox: `--sandbox`; see `docs/development/e2e-verification.md`)
-- Sync `assets/` (locale catalogs, brand images) into every app surface: `./scripts/resources.sh`
-- Install git pre-commit hook (lint → test → build): `./scripts/hooks.sh`
-- Remove the installed pre-commit hook: `./scripts/hooks.sh uninstall`
-- Version helper: `./scripts/version.sh`
-- Soak, hours of file churn on both sides with a no-loss check after every phase: `./scripts/soak.sh` (see `docs/development/soak-testing.md`)
-- Performance gate, one soak cell with the SLO checks: `./scripts/perf.sh` (`VAPOR_PERF_SOAK_DURATION`, default `12m`; `VAPOR_PERF_SOAK_SEED`, default `11`)
-- Release gate, run by hand before a version bump (format, lint, tests, and the e2e suite once per provider): `./scripts/release.sh`
+- End-to-end verification in disposable repo-local sandboxes, for a change a user could observe: `./scripts/e2e.sh` (one scenario: `--only Sxx`; manual sandbox: `--sandbox`)
 
-Stack-specific helpers:
-
-- Rust lint: `./scripts/rust/lint.sh`
-- Rust format: `./scripts/rust/format.sh check`
-- Rust tests: `./scripts/rust/test.sh`
-- Rust build: `./scripts/rust/build.sh`
-- Swift lint: `./scripts/swift/lint.sh`
-- Swift format: `./scripts/swift/format.sh check`
-- Swift tests: `./scripts/swift/test.sh`
-- Swift build: `./scripts/swift/build.sh`
-- Swift resource sync: `./scripts/swift/resources.sh`
-- macOS app packaging: `apps/macos/scripts/package.sh`
+The full list (build, package, clean, the pre-commit hook, the soak, the performance gate, the release gate, the version helper, the per-stack helpers) is in `docs/development/runbook.md`.
 
 ### Releases
 
-Releases are cut from a clean `main`: run the release gate (`./scripts/release.sh`), then `./scripts/version.sh` (`set` / `bump patch|minor|major` / `prerelease` / `release`), which validates the worktree, updates `VERSION`, syncs Cargo metadata, and creates the release commit plus matching `v$(cat VERSION)` tag. Pushing them together (`git push origin main --follow-tags`) runs the gated pipeline that builds, packages, and drafts the GitHub Release. A stable tag ships only signed artifacts; a prerelease (`-alpha`, `-beta`, `-rc`) ships unsigned when no signing material is configured. Full runbook: `docs/operations/release-process.md`.
+Releases are cut from a clean `main`: run the release gate (`./scripts/release.sh`), then `./scripts/version.sh` (`set` / `bump patch|minor|major` / `prerelease` / `release`), which refuses a version that does not sort above the current one, validates the worktree, updates `VERSION`, syncs Cargo metadata, and creates the release commit plus matching `v$(cat VERSION)` tag. Pushing them together (`git push origin main --follow-tags`) runs the gated pipeline that builds, packages, and drafts the GitHub Release. A stable tag ships only signed artifacts; a prerelease (`-alpha`, `-beta`, `-rc`) ships unsigned when no signing material is configured. Full runbook: `docs/operations/release-process.md`.
 
 ## Agents
 
-Use `docs/README.md` as the entrypoint index for agent work. Every
-documentation group has a `README.md` that is the starting point for
-that group — always enter at the group README, not at an individual
-file.
+Use `docs/README.md` as the entrypoint index for agent work. Every documentation group has a `README.md` that is the starting point for that group: always enter at the group README, not at an individual file.
 
 - Product direction, status, goals: `docs/product/README.md`
 - Architecture, system boundaries, platform abstractions, IPC contracts: `docs/architecture/README.md`
@@ -261,9 +226,9 @@ file.
 
 Feel free to contribute to this project : ) .
 
-Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the validation workflow, and what a good pull request looks like — then [AGENTS.md](AGENTS.md) for the full operating rules. Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the validation workflow, and what a good pull request looks like, then [AGENTS.md](AGENTS.md) for the full operating rules. Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-Found a security problem? Please report it privately — see [SECURITY.md](SECURITY.md).
+Found a security problem? Please report it privately, see [SECURITY.md](SECURITY.md).
 
 ## License
 

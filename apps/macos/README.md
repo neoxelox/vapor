@@ -14,7 +14,7 @@ Responsibilities:
 
 Current implementation notes:
 
-- Daemon lifecycle is delegated to the Rust core: the app invokes the bundled `vapor` CLI (`Contents/Helpers/vapor`), and all lifecycle policy — autolaunch persistence, crash-loop backoff and pause, supervision — lives in `core/lifecycle` behind `vapor service`.
+- Daemon lifecycle is delegated to the Rust core: the app invokes the bundled `vapor` CLI (`Contents/Helpers/vapor`), and all lifecycle policy (autolaunch persistence, crash-loop backoff and pause, supervision) lives in `core/lifecycle` behind `vapor service`.
 - `VaporCore` includes `DaemonLifecycleManager` as a thin facade over the `LaunchAgentControlling` seam: it owns only serialization (one lifecycle operation at a time) and login-item registration; zero lifecycle policy lives in Swift.
 - `VaporCore` includes `VaporCLIServiceController`, the default `LaunchAgentControlling` implementation: it runs `vapor service <cmd> --json` as a subprocess and decodes the stable JSON contract rendered by `core/cli/src/commands/service.rs`.
 - `VaporCore` includes `DaemonHealthMonitor`, a 30-second timer (`VaporConstants.Daemon.healthTickIntervalSeconds`) that runs `vapor service check` each tick so unexpected daemon exits are detected and routed through the Rust crash-loop guard.
@@ -25,21 +25,21 @@ Current implementation notes:
 - The LaunchAgent plist and `launchctl` interaction are owned by the Rust `NativeServiceInstaller` (`core/platform`), reached through `vapor service`; no Swift code writes the plist.
 - `AppShellViewModel` uses lifecycle defaults backed by `VaporCLIServiceController` and `SMAppService.mainApp` integration to restore Vapor at login in menubar-only mode.
 - The Settings window covers `autoLaunch` (Start at login), `useGitignore`, `useVaporignore`, `preIgnoreRules`, `postIgnoreRules` (one rule per line in the editor, a list in the file), and `language`, persisted in `vapor.json`; every other key is set with `vapor config set` or in the file. The running daemon applies ignore toggles and rules within a few seconds; roots, provider and profile changes need a restart, which the daemon reports in status and the app offers as "Restart sync" (the LaunchAgent environment carries only `VAPOR_DIR` and `VAPOR_ENV`; no environment variable overrides a `vapor.json` key).
-- Daemon startup ensures the configured local sync root exists on the device and the cloud root exists provider-side (creating either when missing) before normal sync flow.
+- The daemon creates a sync folder only on a profile's first contact with it, and a profile exists only when the user set its two folders. With no usable profile the daemon stays up and reports the run state `unconfigured`; the app shows that as paused, with the daemon's reason, until the first-run flow exists (`docs/tasks/macos.md`). `vapor profiles add` from the bundled CLI sets the first profile up.
 - The 30-second health tick also reads `vapor status --json` when the daemon is running, so the Dashboard and menu bar show the daemon's real state (idle, syncing, throttled, suspended, paused, stopped, error) with its throttle reason, instead of a static label.
 - The menu bar mark has two faces. AppKit tints the template mark for the menu bar appearance; while `AppShellState.needsUserAction` holds (a profile that needs a new sign-in to its provider, a parked question, an unresolved conflict, a crash-loop pause, a blocked login item, a restart-required setting, an unreadable config file, or the Error state the status text labels "Action required") the app shows the same mark filled with the brand colour (`VaporConstants.Brand`, Aerospace International Orange) as a non-template image, and the menu names the waiting questions and conflicts with the CLI commands that answer them. `MenuBarIcon.attention(from:)` rasterises that face once per scale from the template at launch.
-- Under Error or Paused the status detail is the daemon's own run-state reason (`run.reason` in `vapor status --json`, which the daemon picks: a suspension first, otherwise the first profile in that state that gives one), such as a cloud root it cannot ensure, in place of the throttle reason. While the whole-scope scan is held by the throttle or running, the detail is the scan's own line (`reconcile.detail` from `vapor status --json`), so a machine in use says "waiting for an idle moment: user activity is active" instead of looking stuck. `AppShellState.syncDetail(for:status:)` is the one place that ranks the three.
-- `Sync now`, in the menu and on the Dashboard, runs `vapor reconcile --json`: the scan is admitted under any throttle state but `suspended` and deferred work is released. The button keeps the label Sync now; `reconcile` is the command behind it. The Dashboard adds a one-line hint while a scan is waiting. The control is shown only while the daemon answers status.
+- Under Error or Paused the status detail is the daemon's own run-state reason (`run.reason` in `vapor status --json`, which the daemon picks: a suspension first, otherwise the first profile in that state that gives one), such as a cloud root it cannot ensure, in place of the throttle reason. While the whole-scope scan waits or runs, the detail is the scan's own line (`reconcile.detail` from `vapor status --json`), so a device that is too hot to scan says so instead of looking stuck. `AppShellState.syncDetail(for:status:)` is the one place that ranks the three.
+- `Sync now`, in the menu and on the Dashboard, runs `vapor reconcile --json`: a whole-scope scan is queued at once and deferred work is released. The button keeps the label Sync now; `reconcile` is the command behind it. The Dashboard adds a one-line hint while a scan is waiting. The control is shown only while the daemon answers status.
 - A profile whose provider refused the sign-in (`signInRequired` on its `vapor status --json` row) shows a notice on the Dashboard and in the menu: that Vapor needs to sign in to the provider again, that the queued changes wait, and a `Sign In…` button. The button runs `vapor auth login --profile <id> --browser` from the bundled CLI on its own queue, since the browser consent can take minutes and supervision keeps ticking meanwhile; the label reads "Finish signing in in your browser…" and the button stays disabled until the CLI returns. The daemon notices the new sign-in within a root check and the next health tick clears the notice, so the surface never claims success before the daemon agrees. The ellipsis follows the HIG rule for a button that needs more input before the action completes; the input happens in the browser, where Google's consent page belongs.
 - `Restart sync` acts on the registered LaunchAgent only. With Start Vapor at login off there is none; the control is disabled with a hint, and a `not-installed` answer from `vapor service restart` leaves the surface at Stopped rather than Error.
-- The app never writes `cloudRoot` unless the user set one: the daemon resolves the unset key to the provider's default, which differs between a local folder playing the cloud and a real cloud provider.
+- The app never writes `cloudRoot` unless the user set one. Neither root has a default: the suggestion for each provider comes from `vapor profiles add`.
 - Settings/config surface includes `language`, which defaults UI copy to English and falls back to English again if a requested catalog is unavailable.
-- Malformed `vapor.json` is preserved in place and surfaced as an actionable app diagnostic; Vapor uses in-memory defaults until the file is fixed or replaced.
+- Malformed `vapor.json` is preserved in place and surfaced as an actionable app diagnostic. The app shows in-memory defaults for the settings it edits, and the daemon syncs nothing until the file is fixed or replaced.
 - Runtime/config/log/state paths now use restrictive local permissions, and app logging shares the same centralized redaction rules used for sensitive metadata.
 - Startup performs daemon lifecycle bootstrap asynchronously so app window launch stays responsive.
 - Menubar provides only real lifecycle controls: `Open Vapor` restores Dock/window surface, auto-launch toggle updates persisted state, and `Quit Vapor` requests daemon stop before app termination.
 - Distribution artifacts are produced by `apps/macos/scripts/package.sh` (source of truth for app packaging, signing, and optional notarization).
-- `Vapor.app` bundles three executables — `Contents/MacOS/Vapor` (app), `Contents/MacOS/vapord` (daemon), and `Contents/Helpers/vapor` (CLI); `package.sh` builds, copies, signs, and asserts all three. The CLI lives in `Contents/Helpers/` because the default macOS filesystem is case-insensitive, so `vapor` cannot sit next to `Vapor`; the CLI resolves `vapord` first as a sibling, then at `../MacOS/vapord`.
+- `Vapor.app` bundles three executables: `Contents/MacOS/Vapor` (app), `Contents/MacOS/vapord` (daemon), and `Contents/Helpers/vapor` (CLI); `package.sh` builds, copies, signs, and asserts all three. The CLI lives in `Contents/Helpers/` because the default macOS filesystem is case-insensitive, so `vapor` cannot sit next to `Vapor`; the CLI resolves `vapord` first as a sibling, then at `../MacOS/vapord`.
 - Bundle identifier baseline is `sh.arn.vapor`.
 - The app icon has two sources, both documented in `assets/README.md`: `package.sh` compiles the Icon Composer document `assets/macos/Vapor.icon/` with `actool` into `Contents/Resources/Assets.car` (what macOS 26 renders, with `CFBundleIconName` in the Info.plist) and packs `assets/macos/Vapor.iconset/` into `Vapor.icns` with `iconutil` as the flat fallback behind `CFBundleIconFile`. The same `actool` call compiles `assets/macos/Vapor.xcassets/`, whose `AccentColor` set is the brand orange, and the Info.plist names it in `NSAccentColorName`, so the packaged app's controls take the brand colour whenever the user's system accent is the default multicolour (a user who picked another accent keeps theirs, as the HIG expects). The menu bar status item shows the template mark from `assets/macos/menubar/`, tinted by AppKit for the current appearance.
 
@@ -70,7 +70,7 @@ transitions, view-model state mapping, localization fallback, logger
 redaction, paths, bundle layout are all covered in
 `apps/macos/Tests/VaporCoreTests/` and `Tests/VaporAppTests/`. **No
 SwiftUI view rendering tests, no menubar layout tests, no Dock
-transition tests, no keyboard-focus tests** — UI correctness is
+transition tests, no keyboard-focus tests**: UI correctness is
 verified by the project owner manually. Policy: `AGENTS.md §9`; full
 rationale: `docs/architecture/testing-strategy.md`.
 
@@ -103,9 +103,10 @@ rationale: `docs/architecture/testing-strategy.md`.
 - Set signing identity: `VAPOR_SIGN_IDENTITY="Developer ID Application: ..."`
 - Package: `VAPOR_SIGN_IDENTITY="Developer ID Application: ..." apps/macos/scripts/package.sh`
 
-Optional entitlements:
+Optional entitlements (the repository ships no entitlements file: the
+app needs none today):
 
-- `VAPOR_ENTITLEMENTS=apps/macos/Entitlements.plist`
+- `VAPOR_ENTITLEMENTS=<path to a plist>`
 
 ## Notarized distribution
 

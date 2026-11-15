@@ -1,7 +1,9 @@
 //! The `unsyncable-name` decision: a local file whose name cannot be
-//! carried to the other side, so it never syncs. Today that is a name
-//! that is not valid UTF-8 (possible on Linux; macOS refuses to create
-//! one). Nothing is at stake but the user's awareness, so the question
+//! carried to the other side, so it never syncs. That is a name that
+//! is not valid UTF-8 (possible on Linux; macOS refuses to create one)
+//! and a name with a backslash in it (macOS allows one; the sync path
+//! model keeps `\` for the Windows separator and refuses it in a
+//! name). Nothing is at stake but the user's awareness, so the question
 //! has one answer, `skip`, which stops the asking; the fix is a rename,
 //! after which the walk finds the name gone and withdraws the
 //! question. Design: `docs/architecture/data-flow.md` §Decisions.
@@ -23,6 +25,15 @@ pub struct UnsyncableName {
 }
 
 impl UnsyncableName {
+    /// A name with a backslash in it.
+    pub fn backslash(path: &Path) -> Self {
+        Self {
+            shown_path: path.to_path_buf(),
+            reason: "its name has a backslash in it, which the sync path model cannot carry"
+                .to_string(),
+        }
+    }
+
     pub fn not_utf8(path: &Path) -> Self {
         Self {
             shown_path: PathBuf::from(path.to_string_lossy().into_owned()),

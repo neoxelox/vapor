@@ -49,10 +49,15 @@ pub mod runtime {
     pub const VAPOR_DIRECTORY_NAME: &str = ".vapor";
     pub const LOGS_DIRECTORY_NAME: &str = "logs";
     pub const STATE_DIRECTORY_NAME: &str = "state";
+    /// Under the state directory: one directory per named profile.
+    pub const PROFILES_DIRECTORY_NAME: &str = "profiles";
     /// The managed trash: `vapor_dir/trash/<profile>/<entry>/`, one
     /// directory per discarded item holding the payload under its
-    /// original name and a `meta.json` next to it.
+    /// original name and a `meta.json` next to it. A payload that has
+    /// that name itself is kept as `<name>~payload`.
     pub const TRASH_DIRECTORY_NAME: &str = "trash";
+    /// Where `vapor report` writes by default: `vapor_dir/reports/`.
+    pub const REPORTS_DIRECTORY_NAME: &str = "reports";
     pub const TRASH_ENTRY_META_FILE_NAME: &str = "meta.json";
     pub const CONFIGURATION_FILE_NAME: &str = "vapor.json";
     pub const SQLITE_DATABASE_FILE_NAME: &str = "vapor.sqlite";
@@ -93,14 +98,11 @@ pub mod state {
     /// and on a cadence so a replaced root is never mirrored blindly.
     pub const LOCAL_ROOT_IDENTITY_KEY: &str = "root_identity.local";
     pub const CLOUD_ROOT_IDENTITY_KEY: &str = "root_identity.cloud";
+    /// The one-way mode and the pair of roots the user acknowledged.
+    pub const ONE_WAY_ACKNOWLEDGED_KEY: &str = "one_way.acknowledged";
     /// Set by a `reattach` answer: the next whole-scope reconcile merges
     /// the two roots without propagating any deletion.
     pub const MERGE_WITHOUT_DELETIONS_KEY: &str = "reconcile.merge_without_deletions";
-    /// Tombstones older than this are pruned at daemon startup: after a
-    /// month, a divergent replica reconciles through content comparison
-    /// anyway, and unbounded tombstone growth would violate the memory
-    /// and storage bounds.
-    pub const TOMBSTONE_RETENTION_MILLIS: u64 = 30 * 24 * 60 * 60 * 1_000;
     /// Terminally-failed intent records older than this are pruned at
     /// daemon startup: a single auth outage can finalize thousands of
     /// rows, and the diagnostics surface only needs recent failures.
@@ -212,16 +214,24 @@ pub mod config {
     /// Default values for the config keys whose defaults are not already
     /// hosted by another constants module (`filtering::*` owns the
     /// directory + ignore-rule defaults). Mirrored by the Swift
-    /// `VaporConstants.Defaults` per AGENTS.md §8.6 — the Rust side is
+    /// `VaporConstants.Defaults` per AGENTS.md §8.6: the Rust side is
     /// the source of truth.
     pub const DEFAULT_AUTO_LAUNCH: bool = true;
     pub const DEFAULT_USE_GITIGNORE: bool = true;
     pub const DEFAULT_USE_VAPORIGNORE: bool = true;
     pub const DEFAULT_LANGUAGE: &str = "en";
     pub const DEFAULT_TIMELINE_LIMIT: i64 = 1_000;
+    /// The most timeline entries the daemon keeps. The whole timeline
+    /// answers `vapor timeline` in one IPC frame, and a frame has a
+    /// size limit: a larger buffer could not be read back.
+    pub const MAX_TIMELINE_LIMIT: i64 = 10_000;
 }
 
 pub mod provider {
+    /// Bytes one transfer step moves unless the provider chooses its
+    /// own chunk size. The engine checks the throttle gates and the
+    /// bandwidth bucket between two steps.
+    pub const TRANSFER_STEP_BYTES: u64 = 8 * 1024 * 1024;
     /// Accepted `provider` config values. `filesystem` is the pre-GA
     /// default; when selected, `cloudRoot` is
     /// reinterpreted as an absolute local directory that plays the role
@@ -266,13 +276,10 @@ pub mod provider {
     /// feed. A cursor older than the ring floor reports `CursorExpired`,
     /// which forces a reconcile instead of silently missing changes.
     pub const CHANGES_FEED_RING_MAX_EVENTS: usize = 8_192;
-    /// Profile id used by profile-agnostic provider selection calls.
-    pub const DEFAULT_PROFILE_FALLBACK: &str = "default";
     /// Per-socket read/write timeout for the native HTTP transport. A
     /// black-holed connection (Wi-Fi switch, dropped NAT flow) must not
-    /// wedge the synchronous provider stack — and therefore the tick loop
-    /// — forever; a stalled read surfaces as a transient error the retry
-    /// machinery handles.
+    /// hold a provider worker for ever: a stalled read surfaces as a
+    /// transient error the retry machinery handles.
     pub const HTTP_SOCKET_TIMEOUT_SECONDS: u64 = 120;
     /// Connect timeout for the native HTTP transport.
     pub const HTTP_CONNECT_TIMEOUT_SECONDS: u64 = 30;
@@ -440,6 +447,11 @@ pub mod trash {
     pub const DEFAULT_USE_SYSTEM: bool = false;
     /// How often a running daemon looks for expired entries.
     pub const PURGE_INTERVAL_SECONDS: u64 = 1_800;
+    /// An entry with its `meta.json` and no payload is what a discard
+    /// leaves when it is cut off between its two steps. It is removed
+    /// once it is this old, so a discard in flight is never taken for
+    /// one.
+    pub const ENTRY_WITHOUT_PAYLOAD_SECONDS: u64 = 3_600;
     /// Why an item is in the trash; recorded in `meta.json` and shown by
     /// `vapor trash list`. A `*-delete` name says where the delete came
     /// from: a delete made in the cloud, or a mirror removing what its
@@ -472,17 +484,20 @@ pub mod run_state {
     pub const RUNNING: &str = "running";
     pub const PAUSED: &str = "paused";
     pub const ERROR: &str = "error";
+    /// No sync profile exists yet: the daemon is up and syncs nothing.
+    pub const UNCONFIGURED: &str = "unconfigured";
 }
 
 pub mod throttle_state {
     /// The device is idle: queued work drains at full width.
     pub const IDLE: &str = "idle";
-    /// Some load or a user at the keyboard: reduced width.
+    /// Some load, battery power, or mild heat: reduced width.
     pub const LIGHT: &str = "light";
-    /// Heavy load, battery, heat, or an active user: one transfer at a
-    /// time, no reconcile scans.
+    /// Heavy load, a user at the keyboard, serious heat, Low Power
+    /// Mode, or an almost full disk: the narrowest width that still
+    /// syncs. Scans run.
     pub const THROTTLED: &str = "throttled";
-    /// Critical pressure: uploads and hashing stop; changes are still
+    /// Critical heat: transfers and hashing stop; changes are still
     /// recorded.
     pub const SUSPENDED: &str = "suspended";
 }
@@ -540,11 +555,21 @@ pub mod decision {
     pub const KIND_ROOT_REPLACED: &str = "root-replaced";
     /// A file on one side is a folder on the other.
     pub const KIND_TYPE_MISMATCH: &str = "type-mismatch";
-    /// A local name the cloud cannot store (not valid UTF-8).
+    /// A local name that cannot be a sync path (not valid UTF-8, or
+    /// with a backslash in it).
     pub const KIND_UNSYNCABLE_NAME: &str = "unsyncable-name";
     /// A file changed in more than one place before the changes synced;
     /// Vapor kept every version, and one has to stay.
     pub const KIND_CONFLICT: &str = "conflict";
+    /// A profile is set to a one-way mode, which overwrites and removes
+    /// on one side; it holds until the user says yes to that.
+    pub const KIND_ONE_WAY_MODE: &str = "one-way-mode";
+
+    /// An answer that the daemon could not apply is tried again after
+    /// these waits; the last one repeats. The cause is outside the
+    /// daemon (a file it cannot move, a provider it cannot reach), so a
+    /// try on every tick only fills the log.
+    pub const APPLY_RETRY_SECONDS: [u64; 3] = [5, 60, 10 * 60];
 
     /// `mass-delete`: let the deletes through, or put the files back.
     pub const OPTION_APPLY: &str = "apply";
@@ -562,6 +587,8 @@ pub mod decision {
     pub const OPTION_PREFER_CLOUD: &str = "prefer-cloud";
     /// `unsyncable-name`: leave the file out of sync.
     pub const OPTION_SKIP: &str = "skip";
+    /// `one-way-mode`: run the mirror for this mode and these two roots.
+    pub const OPTION_ENABLE: &str = "enable";
     // A `conflict` has one option per version, keyed by the version's
     // file name, so it has no fixed option keys.
 
@@ -601,6 +628,8 @@ pub mod timeline {
     /// differently-cased local file.
     pub const KIND_COLLISION: &str = "collision";
     pub const KIND_MIRROR: &str = "mirror";
+    /// Vapor removed a file or a folder from the cloud.
+    pub const KIND_CLOUD_DELETE: &str = "cloud-delete";
     /// Work that failed for good (retries exhausted or a permanent error).
     pub const KIND_FAILURE: &str = "failure";
     pub const KIND_RECONCILE: &str = "reconcile";
@@ -610,6 +639,8 @@ pub mod timeline {
     /// A profile's provider refused the sign-in, or a new sign-in ended
     /// the hold.
     pub const KIND_SIGN_IN: &str = "sign-in";
+    /// The cloud has no room for an upload; uploads wait.
+    pub const KIND_CLOUD_FULL: &str = "cloud-full";
 }
 
 /// A profile's sign-in state (`vapor auth status`).
@@ -621,8 +652,21 @@ pub mod auth {
 }
 
 /// `vapor doctor` check names and outcomes.
+/// What to tell a user whose sync folder the OS will not let Vapor
+/// read. macOS asks for consent before a background process reads
+/// Documents, Desktop, Downloads, iCloud Drive, or a removable or
+/// network volume; a refusal reads as "permission denied" on every
+/// file under the folder.
+pub const FOLDER_ACCESS_HINT: &str = "on macOS, allow Vapor to read the folder in System Settings > \
+     Privacy & Security > Files and Folders (or Full Disk Access)";
+
 pub mod doctor {
     pub const CHECK_VAPOR_DIR: &str = "vapor-dir";
+    /// The profile set as a whole: none yet, or what stops the file
+    /// from giving one.
+    pub const CHECK_PROFILES: &str = "profiles";
+    /// One check for each profile, named `profile:<id>`.
+    pub const CHECK_PROFILE_PREFIX: &str = "profile:";
     pub const CHECK_IPC_SOCKET: &str = "ipc-socket";
     pub const CHECK_VAPORD_BINARY: &str = "vapord-binary";
     pub const CHECK_SECRET_STORE: &str = "secret-store";
@@ -648,6 +692,19 @@ pub mod service {
     /// unexpected daemon exits and route them through the crash-loop
     /// guard. Mirrored by the Swift constants file per AGENTS.md §8.6.
     pub const HEALTH_TICK_INTERVAL_SECONDS: u64 = 30;
+    /// The crash-loop policy. Crashes inside the window count together.
+    /// The first restarts at once; from the second on, the restart
+    /// waits a delay that doubles from the base up to the maximum; the
+    /// fifth pauses restarts until the user acknowledges.
+    pub const CRASH_LOOP_WINDOW_SECONDS: u64 = 600;
+    pub const CRASH_LOOP_BASE_DELAY_SECONDS: u64 = 2;
+    pub const CRASH_LOOP_MAX_DELAY_SECONDS: u64 = 120;
+    pub const CRASH_LOOP_FREE_RESTARTS: u32 = 1;
+    pub const CRASH_LOOP_PAUSE_AFTER_CRASHES: u32 = 5;
+    /// How long after a stop request a daemon that still runs counts as
+    /// "on its way out". A worker inside a network call can hold the
+    /// exit for as long as its socket timeout.
+    pub const STOP_GRACE_SECONDS: u64 = 180;
     /// The headless supervisor: a second service definition that runs
     /// `vapor service check --loop` where no app surface does, so a
     /// CLI-only install still restarts a crashed daemon under the
@@ -746,14 +803,17 @@ pub mod self_write_cache {
 pub mod filtering {
     pub const GIT_IGNORE_FILE_NAME: &str = ".gitignore";
     pub const VAPOR_IGNORE_FILE_NAME: &str = ".vaporignore";
-    /// Internal artifact patterns the engine must always ignore on the
-    /// local side, independent of user-configurable ignore rules:
-    /// in-flight atomic-write temp files and op-id side-files. Loop
-    /// prevention depends on these never becoming intents, so they are
-    /// enforced in the path filter itself rather than the editable
-    /// rule set.
-    pub const INTERNAL_IGNORE_FILE_PREFIXES: &[&str] = &[".vapor-tmp-", ".vapor-root"];
-    pub const INTERNAL_IGNORE_FILE_SUFFIXES: &[&str] = &[".vapor-meta.json"];
+    /// Internal artifacts the engine must always ignore on the local
+    /// side, independent of user-configurable ignore rules: in-flight
+    /// atomic-write temp files, op-id side-files, and the root marker.
+    /// Loop prevention depends on these never becoming intents, so they
+    /// are enforced in the path filter itself rather than the editable
+    /// rule set. The names come from the provider constants, which
+    /// define them. The marker is matched as a whole name: a user file
+    /// named `.vapor-roots.txt` syncs.
+    pub const INTERNAL_IGNORE_FILE_PREFIXES: &[&str] = &[super::provider::TEMP_FILE_PREFIX];
+    pub const INTERNAL_IGNORE_FILE_SUFFIXES: &[&str] = &[super::provider::OP_ID_SIDE_FILE_SUFFIX];
+    pub const INTERNAL_IGNORE_FILE_NAMES: &[&str] = &[super::provider::ROOT_MARKER_FILE_NAME];
     /// Directory names that are Vapor's own state wherever they sit
     /// and never sync, with everything under them: the runtime
     /// directory (`~/.vapor`, a `VAPOR_DIR` inside a sync root, a dev
@@ -761,19 +821,21 @@ pub mod filtering {
     /// trash a sync root's volume carries at `<volume root>/.vapor/trash/`.
     /// Matched as a whole name only, so `.vaporignore` still syncs.
     pub const INTERNAL_IGNORE_DIRECTORY_NAMES: &[&str] = &[".vapor"];
+    /// The local root that setup offers (`vapor profiles add`, the
+    /// app's first run). A suggestion: no profile exists until the user
+    /// accepts or changes it.
     pub const DEFAULT_LOCAL_ROOT: &str = "~/Vapor";
-    /// The cloud root a remote provider uses when `cloudRoot`
-    /// is unset: a folder at the account root.
+    /// The cloud root that setup offers for a remote provider: a
+    /// folder at the account root.
     pub const DEFAULT_CLOUD_ROOT: &str = "/Vapor";
-    /// The cloud root the filesystem provider uses when
-    /// `cloudRoot` is unset. It plays the cloud role from a
-    /// local folder, so the default is a folder under the home
-    /// directory that the daemon can create; a path at the filesystem
-    /// root would never be writable on a stock macOS install.
+    /// The cloud root that setup offers for the filesystem provider.
+    /// It plays the cloud role from a local folder, so the suggestion
+    /// is a folder under the home directory that the daemon can
+    /// create; a path at the filesystem root would never be writable
+    /// on a stock macOS install.
     pub const DEFAULT_FILESYSTEM_CLOUD_ROOT: &str = "~/cloud/Vapor";
 
-    /// The cloud root that applies when `cloudRoot` is unset,
-    /// by provider kind.
+    /// The cloud root that setup offers, by provider kind.
     pub fn default_cloud_root(provider_kind: &str) -> &'static str {
         if provider_kind.trim() == super::provider::FILESYSTEM {
             DEFAULT_FILESYSTEM_CLOUD_ROOT
@@ -783,11 +845,11 @@ pub mod filtering {
     }
     /// Baseline low-signal exclusions applied before discovered ignore
     /// files: OS junk, editor temp/partial files, and the common
-    /// build / cache / dependency directories across ecosystems —
+    /// build / cache / dependency directories across ecosystems:
     /// regenerable machine output that would dominate sync traffic.
     /// Deliberately NOT ignored: `.git/` (repositories sync whole) and
     /// dotenv files (a personal sync root is exactly where a backup of
-    /// local secrets belongs — project owner decision, 2026-07-13).
+    /// local secrets belongs: project owner decision, 2026-07-13).
     pub const DEFAULT_PRE_IGNORE_RULES: &[&str] = &[
         // OS junk
         ".DS_Store",
@@ -892,7 +954,7 @@ pub mod engine {
     pub const KEY_CONFIG_DEBOUNCE_WINDOW_MILLIS: u64 = 900;
     pub const CODE_TEXT_DEBOUNCE_WINDOW_MILLIS: u64 = 1_200;
     pub const LOCKFILE_DEBOUNCE_WINDOW_MILLIS: u64 = 2_500;
-    /// Office documents, PDFs, and images — the files ordinary users care
+    /// Office documents, PDFs, and images: the files ordinary users care
     /// about most. Their atomic-save patterns settle within 1–2s, and the
     /// per-path coalescing map absorbs multi-event bursts, so they need
     /// nowhere near the conservative `Other` window.
@@ -920,20 +982,31 @@ pub mod engine {
     /// per second is the cost of settings that apply without a restart.
     pub const CONFIG_RELOAD_POLL_MILLIS: u64 = 1_000;
     pub const STARTUP_RECONSTRUCTION_BARRIER_DEADLINE_MILLIS: u64 = 60_000;
+    /// A profile that the runtime suspended (a panic, repeated tick
+    /// errors) is composed again after these waits; the last one
+    /// repeats. A full disk or a locked database clears on its own, and
+    /// a profile that stays suspended until a manual restart would not
+    /// find out.
+    pub const SUSPENDED_PROFILE_RETRY_SECONDS: [u64; 3] = [60, 5 * 60, 30 * 60];
+    /// A folder the walk could not read (a permission, a transient I/O
+    /// error) is walked again after this long.
+    pub const RECONCILE_UNREADABLE_RETRY_SECONDS: u64 = 15 * 60;
+    /// A running daemon scans the whole scope again this long after the
+    /// last whole-scope scan, so a change that no event reported is
+    /// found within a day and not at the next restart.
+    pub const WHOLE_SCOPE_RECONCILE_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
     pub const LEASE_TIMEOUT_MILLIS: u64 = 15 * 60 * 1_000;
     pub const LIGHT_SYSTEM_CPU_PERCENT: u8 = 35;
     pub const THROTTLED_SYSTEM_CPU_PERCENT: u8 = 60;
-    pub const SUSPENDED_SYSTEM_CPU_PERCENT: u8 = 85;
-    pub const LIGHT_VAPOR_CPU_PERCENT: u8 = 8;
-    pub const THROTTLED_VAPOR_CPU_PERCENT: u8 = 15;
-    pub const SUSPENDED_VAPOR_CPU_PERCENT: u8 = 25;
     pub const LIGHT_NETWORK_ERROR_RATE_PERCENT: u8 = 10;
     pub const THROTTLED_NETWORK_ERROR_RATE_PERCENT: u8 = 25;
-    pub const LIGHT_NETWORK_THROUGHPUT_KBPS: u32 = 512;
-    pub const THROTTLED_NETWORK_THROUGHPUT_KBPS: u32 = 128;
+    /// A link that carries this little (in its slower direction) is
+    /// a slow link: fewer transfers at a time.
+    pub const LIGHT_LINK_CAPACITY_KBPS: u32 = 512;
+    pub const THROTTLED_LINK_CAPACITY_KBPS: u32 = 128;
     /// Idle concurrency tier bounds. The effective tier derives
     /// from the machine's available parallelism (half the cores),
-    /// clamped into `[MIN, MAX]` — a 16-core desktop drains faster than
+    /// clamped into `[MIN, MAX]`: a 16-core desktop drains faster than
     /// a 2-core laptop without oversubscribing either. Light/Throttled
     /// tiers stay fixed: they bound device impact while the user is
     /// active, where core count is not the limit that matters.
@@ -954,12 +1027,6 @@ pub mod engine {
     /// Bounds the per-tick CPU/read cost of the hash stage while still
     /// hashing large files at a useful rate (8 MiB * 4 Hz = 32 MiB/s).
     pub const HASH_STAGE_STEP_BYTES: u64 = 8 * 1024 * 1024;
-    /// Byte budget one upload/download transfer step may consume before
-    /// re-checking the throttle gates and bandwidth shaper — the
-    /// interruptibility granularity of a transfer session. The shaper
-    /// lowers the effective budget further when a user bandwidth
-    /// ceiling applies.
-    pub const TRANSFER_STAGE_STEP_BYTES: u64 = 8 * 1024 * 1024;
     /// Bounds on worker threads running blocking provider I/O (probes,
     /// transfer sessions, remote deletes) off the runtime tick thread.
     /// The effective cap is twice the Idle concurrency tier,
@@ -983,6 +1050,10 @@ pub mod engine {
     /// How often a running daemon re-checks both sync roots (present,
     /// and carrying the identity the profile adopted).
     pub const ROOT_CHECK_INTERVAL_SECONDS: u64 = 15;
+    /// An upload that the cloud had no room for is tried again after
+    /// this long. Freeing space takes a person, so a faster retry only
+    /// spends requests.
+    pub const CLOUD_FULL_RETRY_SECONDS: u64 = 15 * 60;
     /// After a path-scoped decision is applied, the reconcile walk gives
     /// the answer this long to land before it may ask about the same
     /// path again.
@@ -1009,28 +1080,36 @@ pub mod engine {
     /// wall-clock deadline caps the cost when the provider's enumerate is
     /// a slow network call.
     pub const RECONCILE_DIRS_PER_SLICE_IDLE: usize = 64;
-    /// Assumed link capacity when the platform sampler reports no
-    /// measured throughput; the bandwidth ceiling applies against this
-    /// until a real measurement exists.
-    pub const ASSUMED_LINK_CAPACITY_KBPS: u32 = 100_000;
-    /// Auto-tuning cadence: one small change per cycle within
-    /// the documented 60-120s window.
-    pub const AUTO_TUNE_INTERVAL_SECONDS: u64 = 90;
+    /// The link capacity the daemon uses under
+    /// `VAPOR_THROTTLE_INPUTS=static`, where nothing is measured: the
+    /// test harnesses need the same transfer rate on every host. A
+    /// production daemon measures its link and never uses this.
+    pub const STATIC_INPUTS_LINK_CAPACITY_KBPS: u32 = 100_000;
+    /// The link capacity is the highest rate that a transfer step
+    /// with no limiter on it reached inside this window. An estimate
+    /// older than this gets one probe.
+    pub const LINK_CAPACITY_WINDOW_SECONDS: u64 = 5 * 60;
+    /// A transfer step measures the link only when it moved at least
+    /// this much over at least this long; anything smaller is timer
+    /// noise and request overhead.
+    pub const LINK_CAPACITY_SAMPLE_MIN_BYTES: u64 = 128 * 1024;
+    pub const LINK_CAPACITY_SAMPLE_MIN_MILLIS: u64 = 10;
+    /// Measurements kept for each direction.
+    pub const LINK_CAPACITY_SAMPLES_MAX: usize = 64;
+    /// The least the one step that runs without the limiter moves
+    /// when the estimate is old. On a link measured faster, the probe
+    /// moves about one second's worth, so the round trip to the
+    /// provider is a small part of what it times.
+    pub const LINK_CAPACITY_PROBE_BYTES: u64 = 1024 * 1024;
+    /// `vapor status` reports the bandwidth the daemon used over this
+    /// many seconds.
+    pub const BANDWIDTH_USAGE_WINDOW_SECONDS: u64 = 5;
     /// Fallback cadence for re-publishing the IPC status snapshot while
     /// idle. Busy ticks, control requests, and per-profile state flips
     /// publish immediately; this heartbeat only bounds the staleness of
     /// anything those triggers miss, so a fully idle daemon runs the
     /// snapshot's per-profile SQL at this cadence instead of every tick.
     pub const STATUS_REPUBLISH_HEARTBEAT_SECONDS: u64 = 10;
-    /// Auto-tuned transfer step budget bounds, as multiples of
-    /// `TRANSFER_STAGE_STEP_BYTES` expressed in percent (50% .. 200%).
-    pub const AUTO_TUNE_MIN_STEP_PERCENT: u64 = 50;
-    pub const AUTO_TUNE_MAX_STEP_PERCENT: u64 = 200;
-    /// Active-coding heuristic: this many stabilized code-file
-    /// events inside the window treat the user as actively working even
-    /// when no HID signal is available.
-    pub const ACTIVE_CODING_WINDOW_SECONDS: u64 = 60;
-    pub const ACTIVE_CODING_EVENT_THRESHOLD: usize = 5;
     /// After `vapor reconcile` the runtime releases deferred work
     /// eagerly for this long, so what the scan finds moves at once.
     pub const RECONCILE_BOOST_SECONDS: u64 = 30;
@@ -1039,8 +1118,8 @@ pub mod engine {
     pub const RETRY_MAX_DELAY_MILLIS: u64 = 900_000;
     /// Ceiling for a server-supplied `Retry-After`: a bogus or absurd
     /// header (garbage seconds, a mistaken epoch timestamp) is clamped to
-    /// this so it cannot overflow time arithmetic or park an intent — and
-    /// the persisted global rate-limit slowdown — for months. One hour is
+    /// this so it cannot overflow time arithmetic or park an intent, and
+    /// the persisted global rate-limit slowdown, for months. One hour is
     /// well past any legitimate provider backoff.
     pub const RETRY_AFTER_CEILING_MILLIS: u64 = 3_600_000;
     pub const RETRY_JITTER_PERCENT: u8 = 20;
@@ -1087,7 +1166,7 @@ pub mod engine {
     pub const MIN_DWELL_THROTTLED_SECONDS: u64 = 5;
     /// Minimum dwell time before the throttle controller may exit
     /// `Suspended`. Shorter than the lower-pressure tiers because
-    /// `Suspended` is the safest state — staying suspended for an extra
+    /// `Suspended` is the safest state: staying suspended for an extra
     /// second is never harmful, but exiting too aggressively could mask
     /// real pressure.
     pub const MIN_DWELL_SUSPENDED_SECONDS: u64 = 1;

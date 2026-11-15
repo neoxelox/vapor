@@ -23,7 +23,7 @@ pub mod build_info {
     include!(concat!(env!("OUT_DIR"), "/vapor_build_info.rs"));
 }
 
-pub mod auto_tune;
+pub mod bandwidth;
 pub mod bootstrap;
 pub mod clock;
 pub mod config_reload;
@@ -38,6 +38,7 @@ pub mod logging;
 pub mod metrics;
 pub mod multi_runtime;
 pub mod name_collision;
+pub mod one_way;
 pub mod path_filter;
 pub mod profiles;
 pub(crate) mod provider_jobs;
@@ -85,6 +86,11 @@ pub struct DaemonApp {
     /// coordination`); a single-profile daemon simply owns the only
     /// clone.
     workgate: Arc<Mutex<ThrottleWorkgate>>,
+    /// Holds the daemon's own CPU under the ceiling by measurement.
+    cpu_regulator: crate::throttle::CpuRegulator,
+    /// The last poll permission that was logged, so the line is
+    /// written when the answer changes and not on every tick.
+    logged_poll_permission: std::cell::Cell<Option<bool>>,
 }
 
 impl Default for DaemonApp {
@@ -143,13 +149,15 @@ impl DaemonApp {
             concurrent_transfers: None,
             reconcile_controller: ReconcileController::with_clock(clock),
             workgate,
+            cpu_regulator: crate::throttle::CpuRegulator::default(),
+            logged_poll_permission: std::cell::Cell::new(None),
         }
     }
 
     /// Applies the effective CPU ceiling from the resource budget
     ///: concurrency caps scale proportionally to the ceiling
     /// relative to the default `resourceLimits.cpuPercent`. Interacts
-    /// with throttle caps via MIN semantics — a `Suspended` zero cap
+    /// with throttle caps via MIN semantics: a `Suspended` zero cap
     /// stays zero under any ceiling, and lowering the ceiling lowers
     /// caps for in-flight admission immediately (running work yields at
     /// its next slice checkpoint).
@@ -192,7 +200,7 @@ impl DaemonApp {
 
     /// The injected provider. The staged executor and the remote poller
     /// drive uploads / downloads / deletes / change polls through this
-    /// trait boundary — engine code never names a concrete provider.
+    /// trait boundary: engine code never names a concrete provider.
     /// Shared handle for provider calls that run on another thread.
     pub fn provider_handle(&self) -> Arc<dyn Provider> {
         self.provider.clone()
@@ -258,10 +266,63 @@ impl DaemonApp {
     }
 
     pub fn apply_throttle_inputs(&mut self, inputs: ThrottleInputs) -> ThrottleDecision {
+        // The CPU ceiling is a measured limit: regulate first, so the
+        // controller knows whether regulation still has room.
+        let ceiling = self.cpu_ceiling_percent();
+        let widest_cap = self.widest_unregulated_cap(SystemTime::now());
+        let before = self.cpu_regulator;
+        self.cpu_regulator
+            .observe(inputs.vapor_cpu_load_percent, ceiling, widest_cap);
+        let beyond_regulation =
+            inputs.vapor_cpu_load_percent > ceiling && self.cpu_regulator.exhausted(widest_cap);
+        self.throttle_controller
+            .set_vapor_cpu_ceiling_exceeded(beyond_regulation.then_some(ceiling));
+        if before != self.cpu_regulator {
+            logging::debug(
+                "Adjusted concurrency to hold the CPU ceiling",
+                &[
+                    (
+                        "vapor_cpu_percent",
+                        inputs.vapor_cpu_load_percent.to_string(),
+                    ),
+                    ("ceiling_percent", ceiling.to_string()),
+                    (
+                        "workers_removed",
+                        self.cpu_regulator.steps_down().to_string(),
+                    ),
+                ],
+            );
+        }
+
         let decision = self.throttle_controller.evaluate(inputs);
-        self.set_throttle_state(decision.state, decision.reason.clone());
+        let caps_changed = self
+            .last_throttle_decision
+            .as_ref()
+            .is_none_or(|last| last.caps != decision.caps);
         self.last_throttle_decision = Some(decision.clone());
+        self.set_throttle_state(decision.state, decision.reason.clone());
+        if caps_changed || before != self.cpu_regulator {
+            self.refresh_workgate_caps(SystemTime::now());
+        }
         decision
+    }
+
+    /// The CPU share the daemon holds itself to: the resource budget's
+    /// effective ceiling (idle boost included), or the default.
+    fn cpu_ceiling_percent(&self) -> u8 {
+        self.resource_cpu_ceiling_percent
+            .unwrap_or(vapor_shared::constants::resource_limits::DEFAULT_CPU_PERCENT)
+    }
+
+    /// What the link carries in its slower direction, as the daemon
+    /// knows it now; the throttle is gentler on a slow link.
+    pub fn set_link_capacity_kbps(&mut self, kbps: Option<u32>) {
+        self.throttle_controller.set_link_capacity_kbps(kbps);
+    }
+
+    /// How many workers the CPU regulator has taken from each cap.
+    pub fn cpu_regulation_steps(&self) -> usize {
+        self.cpu_regulator.steps_down()
     }
 
     pub fn throttle_caps(&self) -> ThrottleCaps {
@@ -334,14 +395,9 @@ impl DaemonApp {
         self.reconcile_controller.running_root().cloned()
     }
 
-    /// The user asked for a scan now: the next reconcile is admitted
-    /// under any throttle state but `Suspended`.
-    pub fn request_on_demand_reconcile(&mut self) {
-        self.reconcile_controller.request_on_demand();
-    }
-
-    pub fn on_demand_reconcile_pending(&self) -> bool {
-        self.reconcile_controller.on_demand()
+    /// Whether the current throttle state lets a reconcile start.
+    pub fn reconcile_admissible(&self) -> bool {
+        ReconcileController::admits(self.snapshot.throttle_state)
     }
 
     /// Aborts the running reconcile after a comparison-walk failure.
@@ -413,22 +469,24 @@ impl DaemonApp {
 
     pub fn remote_poll_allowed(&self) -> bool {
         let allowed = self.provider.poll_allowed(self.snapshot.throttle_state);
-        logging::debug(
-            "Evaluated remote polling permission",
-            &[
-                (
-                    "throttle_state",
-                    format!("{:?}", self.snapshot.throttle_state),
-                ),
-                ("allowed", allowed.to_string()),
-            ],
-        );
+        if self.logged_poll_permission.replace(Some(allowed)) != Some(allowed) {
+            logging::debug(
+                "Remote polling permission changed",
+                &[
+                    (
+                        "throttle_state",
+                        format!("{:?}", self.snapshot.throttle_state),
+                    ),
+                    ("allowed", allowed.to_string()),
+                ],
+            );
+        }
         allowed
     }
 
     /// Ensures the provider-side sync root exists. Returns the
     /// actionable error when it cannot; the runtime blocks regular sync
-    /// work until a later attempt succeeds — intents keep
+    /// work until a later attempt succeeds: intents keep
     /// accumulating durably, they are never dropped.
     pub fn ensure_cloud_root(
         &self,
@@ -456,12 +514,37 @@ impl DaemonApp {
         }
     }
 
+    /// The caps of the current state. The last decision carries what
+    /// the inputs added to them (a full disk holds downloads).
     fn base_throttle_caps(&self) -> ThrottleCaps {
-        self.throttle_controller
-            .caps_for(self.snapshot.throttle_state)
+        match &self.last_throttle_decision {
+            Some(decision) if decision.state == self.snapshot.throttle_state => decision.caps,
+            _ => self
+                .throttle_controller
+                .caps_for(self.snapshot.throttle_state),
+        }
+    }
+
+    /// The largest concurrency cap before the CPU regulator applies.
+    fn widest_unregulated_cap(&self, now: SystemTime) -> usize {
+        let caps = self.unregulated_throttle_caps(now);
+        caps.planner_workers
+            .max(caps.hash_workers)
+            .max(caps.upload_concurrency)
+            .max(caps.download_concurrency)
     }
 
     fn effective_throttle_caps(&self, now: SystemTime) -> ThrottleCaps {
+        let mut caps = self.unregulated_throttle_caps(now);
+        caps.planner_workers = self.cpu_regulator.apply(caps.planner_workers);
+        caps.hash_workers = self.cpu_regulator.apply(caps.hash_workers);
+        caps.read_tokens = self.cpu_regulator.apply(caps.read_tokens);
+        caps.upload_concurrency = self.cpu_regulator.apply(caps.upload_concurrency);
+        caps.download_concurrency = self.cpu_regulator.apply(caps.download_concurrency);
+        caps
+    }
+
+    fn unregulated_throttle_caps(&self, now: SystemTime) -> ThrottleCaps {
         let mut caps = self.base_throttle_caps();
         let is_idle = self.snapshot.throttle_state == vapor_shared::ThrottleState::Idle;
         if let Some(ceiling) = self.resource_cpu_ceiling_percent {
@@ -475,7 +558,7 @@ impl DaemonApp {
                 }
                 let scaled = (((cap as f64) * scale).round() as usize).max(1);
                 // Ceilings only ever *lower* what the throttle ladder
-                // allows — except under Idle, where idle boost is
+                // allows, except under Idle, where idle boost is
                 // defined. Outside Idle a raised base budget must not
                 // lift the Light/Throttled tiers above their compiled
                 // values (that would defeat the throttle ladder in exactly
@@ -499,12 +582,15 @@ impl DaemonApp {
                 caps.download_concurrency = caps.download_concurrency.min(ceiling);
             }
         }
-        // Apply the rate-limit slowdown AFTER scaling so the ceiling factor
-        // cannot multiply the clamp back up: a 50% idle-boost ceiling
-        // otherwise turned the intended upload_concurrency of 1 into ~3
-        // for the whole 429 slowdown window.
+        // The rate-limit slowdown: the provider asked for fewer requests,
+        // and it counts every kind of request against one quota, so
+        // each lane that calls the provider (uploads, downloads, the
+        // planner's probes) narrows to one. Applied after scaling, so
+        // no ceiling factor multiplies the clamp back up.
         if self.retry_slowdown_active(now) {
             caps.upload_concurrency = caps.upload_concurrency.min(1);
+            caps.download_concurrency = caps.download_concurrency.min(1);
+            caps.planner_workers = caps.planner_workers.min(1);
         }
         caps
     }
@@ -570,7 +656,7 @@ mod tests {
         // A throttle-imposed zero (Suspended) stays zero under any
         // explicit ceiling.
         app.apply_throttle_inputs(ThrottleInputs {
-            system_cpu_load_percent: 95,
+            thermal_pressure: crate::throttle::ThermalPressure::Critical,
             ..ThrottleInputs::default()
         });
         let suspended = app.workgate_snapshot().caps;
@@ -610,8 +696,56 @@ mod tests {
         let caps = app.throttle_caps();
         assert_eq!(caps.planner_workers, 1);
         assert_eq!(caps.upload_concurrency, 1);
-        assert!(!caps.allow_reconcile);
+        assert!(caps.allow_reconcile);
         assert_eq!(app.workgate_snapshot().caps, caps);
+    }
+
+    #[test]
+    fn own_cpu_above_the_ceiling_takes_workers_before_the_state_changes() {
+        let mut app = DaemonApp::default();
+        app.apply_throttle_inputs(ThrottleInputs::default());
+        let full = app.workgate_snapshot().caps;
+        let widest = full
+            .planner_workers
+            .max(full.hash_workers)
+            .max(full.upload_concurrency)
+            .max(full.download_concurrency);
+        let ceiling = vapor_shared::constants::resource_limits::DEFAULT_CPU_PERCENT;
+        let busy = ThrottleInputs {
+            vapor_cpu_load_percent: ceiling + 20,
+            ..ThrottleInputs::default()
+        };
+
+        // One sample above the ceiling: one worker less, same state.
+        let decision = app.apply_throttle_inputs(busy);
+        assert_eq!(decision.state, ThrottleState::Idle);
+        let caps = app.workgate_snapshot().caps;
+        assert_eq!(caps.upload_concurrency, full.upload_concurrency - 1);
+        assert_eq!(caps.planner_workers, full.planner_workers - 1);
+        assert_eq!(app.cpu_regulation_steps(), 1);
+
+        // Still above with every cap at one: only then the state steps
+        // down, and the reason names the ceiling.
+        let mut decision = decision;
+        for _ in 0..widest {
+            decision = app.apply_throttle_inputs(busy);
+        }
+        let caps = app.workgate_snapshot().caps;
+        assert_eq!(caps.upload_concurrency, 1);
+        assert_eq!(caps.planner_workers, 1);
+        assert_eq!(decision.state, ThrottleState::Throttled);
+        assert_eq!(
+            decision.reason,
+            format!(
+                "Vapor CPU load is {}%, above its ceiling of {ceiling}%",
+                ceiling + 20
+            )
+        );
+
+        // Clearly below the ceiling: the workers come back one a sample.
+        let before = app.cpu_regulation_steps();
+        app.apply_throttle_inputs(ThrottleInputs::default());
+        assert_eq!(app.cpu_regulation_steps(), before - 1);
     }
 
     #[test]
@@ -641,7 +775,7 @@ mod tests {
     fn suspended_workgate_blocks_uploads_and_hashing() {
         let mut app = DaemonApp::default();
         app.apply_throttle_inputs(ThrottleInputs {
-            low_power_mode: true,
+            thermal_pressure: crate::throttle::ThermalPressure::Critical,
             ..ThrottleInputs::default()
         });
 
@@ -676,14 +810,18 @@ mod tests {
     }
 
     #[test]
-    fn rate_limited_retry_clamps_upload_concurrency_until_slowdown_expires() {
+    fn a_rate_limit_narrows_every_provider_lane_until_the_slowdown_expires() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let database_path = temp_dir.path().join("state/vapor.sqlite");
         let mut state_db = DurableStateDb::open(&database_path).expect("open durable state db");
         let mut app = DaemonApp::default();
         let path = PathBuf::from("/tmp/vapor-root/project/file.txt");
         let now = SystemTime::now();
-        let baseline_upload_concurrency = app.throttle_caps().upload_concurrency;
+        let baseline = app.throttle_caps();
+        assert!(
+            baseline.download_concurrency > 1 && baseline.planner_workers > 1,
+            "the baseline has width to lose: {baseline:?}"
+        );
 
         let queued = state_db
             .enqueue_intent(&path, crate::event_intents::PendingIntentKind::Upload, now)
@@ -710,15 +848,33 @@ mod tests {
             app.retry_slowdown_until(),
             scheduled.decision.slowdown_until
         );
-        assert_eq!(app.throttle_caps().upload_concurrency, 1);
+        let slowed = app.throttle_caps();
+        assert_eq!(
+            (
+                slowed.upload_concurrency,
+                slowed.download_concurrency,
+                slowed.planner_workers
+            ),
+            (1, 1, 1),
+            "the provider counts uploads, downloads, and probes against one quota"
+        );
 
         app.refresh_workgate_caps(
             scheduled.decision.available_at.unwrap() + Duration::from_secs(1),
         );
         assert!(app.retry_slowdown_until().is_none());
+        let restored = app.throttle_caps();
         assert_eq!(
-            app.throttle_caps().upload_concurrency,
-            baseline_upload_concurrency
+            (
+                restored.upload_concurrency,
+                restored.download_concurrency,
+                restored.planner_workers
+            ),
+            (
+                baseline.upload_concurrency,
+                baseline.download_concurrency,
+                baseline.planner_workers
+            )
         );
     }
 
@@ -813,13 +969,13 @@ mod tests {
     }
 
     #[test]
-    fn app_reconcile_flow_stays_idle_biased_and_clears_boundary_on_success() {
+    fn app_reconcile_flow_waits_out_suspension_and_clears_boundary_on_success() {
         let subtree_root = PathBuf::from("/tmp/vapor-root/project/sub");
         let mut maps = stormed_maps(&subtree_root);
         let mut scheduler = KeyedSupersedingScheduler::default();
         let mut app = DaemonApp::default();
 
-        app.set_throttle_state(ThrottleState::Light, "foreground work");
+        app.set_throttle_state(ThrottleState::Suspended, "about to overheat");
         assert_eq!(
             app.release_ready_deferred_reconciles(&mut maps, &mut scheduler, timestamp(32)),
             0
@@ -830,7 +986,7 @@ mod tests {
                 .is_none()
         );
 
-        app.set_throttle_state(ThrottleState::Idle, "idle drain");
+        app.set_throttle_state(ThrottleState::Light, "on battery");
         assert_eq!(
             app.release_ready_deferred_reconciles(&mut maps, &mut scheduler, timestamp(32)),
             1
@@ -860,13 +1016,19 @@ mod tests {
         app.try_start_reconcile(&mut scheduler, timestamp(32))
             .expect("start reconcile");
         app.set_throttle_state(ThrottleState::Light, "load spike");
+        assert!(
+            app.checkpoint_reconcile(&mut scheduler, timestamp(33))
+                .is_none(),
+            "a slower state keeps the scan running"
+        );
+        app.set_throttle_state(ThrottleState::Suspended, "about to overheat");
 
         let pause = app
             .checkpoint_reconcile(&mut scheduler, timestamp(33))
             .expect("reconcile should pause");
         assert_eq!(
             pause.reason,
-            crate::reconcile::ReconcilePauseReason::ThrottleNoLongerIdle
+            crate::reconcile::ReconcilePauseReason::ThrottleSuspended
         );
         assert_eq!(scheduler.pending_count(), 1);
     }

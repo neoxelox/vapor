@@ -2,7 +2,7 @@
 
 How keep-both conflicts become visible and how they get resolved, across
 every surface. The *creation* mechanics (suffix template, determinism,
-tombstone interaction) live in `data-flow.md §Conflict handling`; this
+a deletion against a change) live in `data-flow.md §Conflict handling`; this
 document owns everything that happens after a conflict copy exists.
 
 ## Who keeps the name
@@ -42,6 +42,8 @@ and the files themselves are the durable conflict record:
   recovers the original name, the device, the divergence timestamp, and
   the collision sequence, and rejects user files that merely contain the
   marker text (the timestamp segment must be a 12+ digit epoch-ms value).
+  A name that holds the marker twice (a copy of a copy) is read at its
+  last marker.
 
 What the user answers is a decision, the same kind of question as a held
 mass delete or a missing root (`data-flow.md` §Decisions), so every

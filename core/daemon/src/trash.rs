@@ -262,32 +262,15 @@ impl LocalTrash {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "item".to_string());
-        let id = format!(
-            "{}-{:04}",
-            millis(now),
-            self.sequence.fetch_add(1, Ordering::Relaxed) % 10_000
-        );
-        let entry_dir = self.location_for(path).join(&id);
-        vapor_shared::runtime_paths::ensure_private_directory(&entry_dir)?;
-        let destination = entry_dir.join(&file_name);
-        match fs::rename(path, &destination) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
-                // Another volume: copy, then remove. A copy that fails
-                // leaves the original untouched.
-                copy_any(path, &destination)?;
-                remove_any(path)?;
-            }
-            Err(error) => {
-                let _ = fs::remove_dir(&entry_dir);
-                return Err(error);
-            }
-        }
+        let (id, entry_dir) = self.new_entry_dir(&self.location_for(path), now)?;
+        // The metadata goes in first. An entry cut off after this step
+        // is listed by nothing and purged like any other; the reverse
+        // order would leave a payload that nothing names.
         let entry = TrashEntry {
             id: id.clone(),
             profile_id: self.profile_id.clone(),
             original_path: path.to_path_buf(),
-            file_name,
+            file_name: file_name.clone(),
             kind: if metadata.is_dir() {
                 "directory".to_string()
             } else {
@@ -296,21 +279,90 @@ impl LocalTrash {
             reason: reason.to_string(),
             discarded_at_ms: millis(now),
             size_bytes: if metadata.is_dir() {
-                tree_size(&destination)
+                tree_size(path)
             } else {
                 metadata.len()
             },
         };
-        let meta = serde_json::to_vec_pretty(&entry).map_err(io::Error::other)?;
-        fs::write(
-            entry_dir.join(constants::runtime::TRASH_ENTRY_META_FILE_NAME),
-            meta,
-        )?;
-        Ok(Disposition::Managed(id))
+        let moved = serde_json::to_vec_pretty(&entry)
+            .map_err(io::Error::other)
+            .and_then(|meta| {
+                fs::write(
+                    entry_dir.join(constants::runtime::TRASH_ENTRY_META_FILE_NAME),
+                    meta,
+                )
+            })
+            .map_err(MoveError::NothingMoved)
+            .and_then(|()| {
+                let destination = payload_path(&entry_dir, &file_name);
+                match fs::rename(path, &destination) {
+                    Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+                        copy_then_remove(path, &destination)
+                    }
+                    result => result.map_err(MoveError::NothingMoved),
+                }
+            });
+        match moved {
+            Ok(()) => Ok(Disposition::Managed(id)),
+            Err(MoveError::NothingMoved(error)) => {
+                // The item is still whole at its path: the entry
+                // describes nothing.
+                let _ = fs::remove_dir_all(&entry_dir);
+                Err(error)
+            }
+            Err(MoveError::CopiedNotRemoved(error)) => {
+                // The entry holds the whole item, and a part of the
+                // original may be gone. The entry stays: it is the only
+                // complete copy. The discard still failed, so the
+                // caller tries again and what is left goes to an entry
+                // of its own.
+                crate::logging::warning(
+                    "Copied an item to the trash but could not remove the original; the copy stays in the trash",
+                    &[
+                        ("path", path.display().to_string()),
+                        ("trash_entry", id),
+                        ("error", error.to_string()),
+                    ],
+                );
+                Err(error)
+            }
+        }
+    }
+
+    /// Makes the directory of a new entry in `location` and returns its
+    /// id. The id is the time and a counter that starts at zero in each
+    /// process, so two processes (or one that restarts within a
+    /// millisecond's reach) can draw the same one: the directory is
+    /// made with a call that fails when it exists, and the next id is
+    /// tried.
+    fn new_entry_dir(&self, location: &Path, now: SystemTime) -> io::Result<(String, PathBuf)> {
+        // Made when it is missing. A location that is there keeps the
+        // mode it has: one that its owner made read-only refuses the
+        // entry, and the discard fails with the item still in place.
+        if !location.is_dir() {
+            vapor_shared::runtime_paths::ensure_private_directory(location)?;
+        }
+        loop {
+            let id = format!(
+                "{}-{:04}",
+                millis(now),
+                self.sequence.fetch_add(1, Ordering::Relaxed) % 10_000
+            );
+            let entry_dir = location.join(&id);
+            match fs::create_dir(&entry_dir) {
+                Ok(()) => {
+                    vapor_shared::runtime_paths::ensure_private_directory(&entry_dir)?;
+                    return Ok((id, entry_dir));
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Every entry in every location, newest first. An entry directory
-    /// without a readable `meta.json` is skipped, never deleted.
+    /// without a readable `meta.json`, or without its payload, is not
+    /// listed.
     pub fn list(&self) -> Vec<TrashEntry> {
         let mut found: Vec<TrashEntry> = self
             .locations()
@@ -348,8 +400,7 @@ impl LocalTrash {
     }
 
     fn read_entry(&self, entry_dir: &Path) -> Option<TrashEntry> {
-        let meta = fs::read(entry_dir.join(constants::runtime::TRASH_ENTRY_META_FILE_NAME)).ok()?;
-        serde_json::from_slice(&meta).ok()
+        read_entry(entry_dir).filter(|entry| has_payload(entry_dir, entry))
     }
 
     /// Puts an entry back at its original path, or next to it under
@@ -362,7 +413,7 @@ impl LocalTrash {
         let entry = self.read_entry(&entry_dir).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("no trash entry {id}"))
         })?;
-        let payload = entry_dir.join(&entry.file_name);
+        let payload = payload_path(&entry_dir, &entry.file_name);
         if fs::symlink_metadata(&payload).is_err() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -391,15 +442,21 @@ impl LocalTrash {
     /// Removes the entries discarded before `now - retention`. Returns
     /// how many were purged.
     pub fn purge_expired(&self, now: SystemTime) -> usize {
-        let cutoff = now.checked_sub(self.settings.retention);
-        let mut purged = 0;
-        for entry in self.list() {
-            let expired = cutoff.is_some_and(|cutoff| entry.discarded_at() < cutoff);
-            if expired && self.remove_entry(&entry.id) {
-                purged += 1;
-            }
+        self.purge_job(now)()
+    }
+
+    /// [`Self::purge_expired`] as a job that owns what it needs, so the
+    /// daemon runs it on a worker: removing a discarded tree is disk
+    /// work that grows with the tree.
+    pub fn purge_job(&self, now: SystemTime) -> impl FnOnce() -> usize + Send + 'static {
+        let locations = self.locations();
+        let retention = self.settings.retention;
+        move || {
+            locations
+                .iter()
+                .map(|location| purge_location(location, retention, now))
+                .sum()
         }
-        purged
     }
 
     /// Removes every entry. Returns how many were removed.
@@ -414,6 +471,106 @@ impl LocalTrash {
         self.entry_dir(id)
             .is_some_and(|entry_dir| fs::remove_dir_all(entry_dir).is_ok())
     }
+}
+
+/// A purge of the home trash of every profile that is not in
+/// `running`, as a job that owns what it needs. A profile that is
+/// disabled, or that left `vapor.json`, has no runtime to purge its
+/// trash; without this its discarded files would stay for ever. The
+/// retention is the same one, counted from each discard.
+pub fn purge_other_profiles_job(
+    trash_root: PathBuf,
+    running: Vec<String>,
+    retention: Duration,
+    now: SystemTime,
+) -> impl FnOnce() -> usize + Send + 'static {
+    move || {
+        let Ok(profiles) = fs::read_dir(&trash_root) else {
+            return 0;
+        };
+        profiles
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| !running.iter().any(|id| id == name))
+            })
+            .map(|entry| purge_location(&entry.path(), retention, now))
+            .sum()
+    }
+}
+
+fn read_entry(entry_dir: &Path) -> Option<TrashEntry> {
+    let meta = fs::read(entry_dir.join(constants::runtime::TRASH_ENTRY_META_FILE_NAME)).ok()?;
+    serde_json::from_slice(&meta).ok()
+}
+
+fn has_payload(entry_dir: &Path, entry: &TrashEntry) -> bool {
+    fs::symlink_metadata(payload_path(entry_dir, &entry.file_name)).is_ok()
+}
+
+/// Where an entry keeps the item it holds: under the item's own name,
+/// next to the metadata file. An item that has the metadata file's name
+/// (in any spelling the volume folds onto it) would replace that file,
+/// so it is kept under a name that no metadata file has.
+fn payload_path(entry_dir: &Path, file_name: &str) -> PathBuf {
+    let meta = constants::runtime::TRASH_ENTRY_META_FILE_NAME;
+    if vapor_shared::paths::fold_name(file_name) == vapor_shared::paths::fold_name(meta) {
+        entry_dir.join(format!("{file_name}~payload"))
+    } else {
+        entry_dir.join(file_name)
+    }
+}
+
+/// How a move into the trash failed.
+enum MoveError {
+    /// The item is whole at its original path.
+    NothingMoved(io::Error),
+    /// The entry holds a complete copy, and the original could not be
+    /// removed, or only a part of it was.
+    CopiedNotRemoved(io::Error),
+}
+
+/// Moves `path` to `destination` on another volume: a copy, then the
+/// removal of the original. A copy that fails leaves the original
+/// untouched.
+fn copy_then_remove(path: &Path, destination: &Path) -> Result<(), MoveError> {
+    copy_any(path, destination).map_err(MoveError::NothingMoved)?;
+    remove_any(path).map_err(MoveError::CopiedNotRemoved)
+}
+
+/// Removes what has expired in one trash location. An entry expires by
+/// the time in its `meta.json`. A directory with no readable metadata
+/// expires by its own modification time, so it does not stay for ever.
+/// An entry that never got its payload goes after a short wait.
+fn purge_location(location: &Path, retention: Duration, now: SystemTime) -> usize {
+    let Ok(entries) = fs::read_dir(location) else {
+        return 0;
+    };
+    let age = |since: SystemTime| now.duration_since(since).unwrap_or_default();
+    let without_payload = Duration::from_secs(constants::trash::ENTRY_WITHOUT_PAYLOAD_SECONDS);
+    let mut purged = 0;
+    for entry_dir in entries.flatten().map(|entry| entry.path()) {
+        let Ok(metadata) = fs::symlink_metadata(&entry_dir) else {
+            continue;
+        };
+        if !metadata.is_dir() {
+            continue;
+        }
+        let expired = match read_entry(&entry_dir) {
+            Some(entry) if has_payload(&entry_dir, &entry) => age(entry.discarded_at()) > retention,
+            Some(entry) => age(entry.discarded_at()) > without_payload.min(retention),
+            None => metadata
+                .modified()
+                .is_ok_and(|modified| age(modified) > retention),
+        };
+        if expired && fs::remove_dir_all(&entry_dir).is_ok() {
+            purged += 1;
+        }
+    }
+    purged
 }
 
 fn restored_beside(original: &Path, id: &str) -> PathBuf {
@@ -518,6 +675,200 @@ mod tests {
         assert_eq!(landed, file);
         assert_eq!(fs::read(&file).expect("restored"), b"keep me");
         assert!(trash.list().is_empty(), "a restored entry leaves the trash");
+    }
+
+    #[test]
+    fn two_discards_with_one_id_never_share_an_entry() {
+        let temp = TempDir::new().expect("temp");
+        // Two processes over one trash: each counts from zero, and the
+        // clock gives both the same millisecond.
+        let first = managed(&temp);
+        let second = managed(&temp);
+        let root = temp.path().join("root");
+        fs::create_dir_all(root.join("a")).expect("root");
+        fs::create_dir_all(root.join("b")).expect("root");
+        fs::write(root.join("a/notes.txt"), b"from a").expect("seed");
+        fs::write(root.join("b/notes.txt"), b"from b").expect("seed");
+
+        let Disposition::Managed(one) = first
+            .discard(&root.join("a/notes.txt"), "cloud-delete", at(100))
+            .expect("discard")
+        else {
+            panic!("managed");
+        };
+        let Disposition::Managed(two) = second
+            .discard(&root.join("b/notes.txt"), "cloud-delete", at(100))
+            .expect("discard")
+        else {
+            panic!("managed");
+        };
+        assert_ne!(one, two, "the second discard took the next id");
+        let listed = first.list();
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        first.restore(&one).expect("restore");
+        first.restore(&two).expect("restore");
+        assert_eq!(fs::read(root.join("a/notes.txt")).expect("a"), b"from a");
+        assert_eq!(fs::read(root.join("b/notes.txt")).expect("b"), b"from b");
+    }
+
+    #[test]
+    fn the_trash_of_a_profile_that_does_not_run_is_purged_by_the_same_retention() {
+        let temp = TempDir::new().expect("temp");
+        let trash_root = temp.path().join("trash");
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).expect("root");
+        let retention = Duration::from_secs(3_600);
+        let discard = |profile: &str, name: &str, at_seconds: u64| {
+            let file = root.join(name);
+            fs::write(&file, b"x").expect("seed");
+            LocalTrash::new(
+                profile,
+                trash_root.join(profile),
+                TrashSettings {
+                    enabled: true,
+                    retention,
+                    use_system: false,
+                },
+                Arc::new(vapor_platform::InMemoryTrashBin::unsupported()),
+            )
+            .discard(&file, "cloud-delete", at(at_seconds))
+            .expect("discard");
+        };
+        discard("running", "a.txt", 100);
+        discard("removed", "old.txt", 100);
+        discard("removed", "recent.txt", 100 + 3_000);
+
+        let purge = purge_other_profiles_job(
+            trash_root.clone(),
+            vec!["running".to_string()],
+            retention,
+            at(100 + 3_601),
+        );
+        assert_eq!(purge(), 1, "only what is past the retention goes");
+        let left = |profile: &str| {
+            fs::read_dir(trash_root.join(profile))
+                .map(|entries| entries.count())
+                .unwrap_or(0)
+        };
+        assert_eq!(left("removed"), 1, "the recent entry stays");
+        assert_eq!(left("running"), 1, "a running profile purges its own trash");
+    }
+
+    #[test]
+    fn a_file_named_like_the_metadata_file_is_listed_and_restored() {
+        let temp = TempDir::new().expect("temp");
+        let trash = managed(&temp);
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).expect("root");
+        for name in ["meta.json", "META.JSON"] {
+            let file = root.join(name);
+            fs::write(&file, b"the user's own file").expect("seed");
+            let Disposition::Managed(id) = trash
+                .discard(&file, "cloud-delete", at(100))
+                .expect("discard")
+            else {
+                panic!("the managed trash holds it");
+            };
+            let listed = trash.list();
+            assert_eq!(listed.len(), 1, "{name}: the entry reads as an entry");
+            assert_eq!(listed[0].file_name, name);
+            assert_eq!(trash.restore(&id).expect("restore"), file);
+            assert_eq!(fs::read(&file).expect("read"), b"the user's own file");
+            fs::remove_file(&file).expect("reset");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_whose_original_cannot_be_removed_keeps_the_copy() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().expect("temp");
+        let folder = temp.path().join("root/album");
+        fs::create_dir_all(folder.join("locked")).expect("dirs");
+        fs::write(folder.join("a.jpg"), b"a").expect("seed");
+        fs::write(folder.join("locked/b.jpg"), b"b").expect("seed");
+        // The folder can be read, so the copy is whole. Nothing can be
+        // removed from `locked`, so the removal stops part way.
+        fs::set_permissions(folder.join("locked"), fs::Permissions::from_mode(0o555))
+            .expect("lock");
+        let destination = temp.path().join("entry/album");
+        fs::create_dir_all(destination.parent().unwrap()).expect("entry");
+
+        let moved = copy_then_remove(&folder, &destination);
+        fs::set_permissions(folder.join("locked"), fs::Permissions::from_mode(0o755)).ok();
+        if moved.is_ok() {
+            // Running as a user that permissions do not stop.
+            return;
+        }
+        assert!(matches!(moved, Err(MoveError::CopiedNotRemoved(_))));
+        assert_eq!(fs::read(destination.join("a.jpg")).expect("copy"), b"a");
+        assert_eq!(
+            fs::read(destination.join("locked/b.jpg")).expect("copy"),
+            b"b",
+            "the copy is whole, whatever is left of the original"
+        );
+    }
+
+    #[test]
+    fn a_discard_that_cannot_move_the_item_leaves_no_entry() {
+        let temp = TempDir::new().expect("temp");
+        let trash = managed(&temp);
+        // Nothing is at the path any more when the move runs.
+        let gone = temp.path().join("root/gone.txt");
+        assert!(trash.discard(&gone, "cloud-delete", at(100)).is_err());
+        assert!(trash.list().is_empty());
+        let leftovers = fs::read_dir(trash.root())
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(leftovers, 0, "no entry directory stays behind");
+    }
+
+    #[test]
+    fn what_a_cut_off_discard_leaves_is_not_listed_and_does_not_stay_for_ever() {
+        let temp = TempDir::new().expect("temp");
+        let trash = managed(&temp);
+        let file = temp.path().join("root/kept.txt");
+        fs::create_dir_all(file.parent().unwrap()).expect("root");
+        fs::write(&file, b"kept").expect("seed");
+        let Disposition::Managed(kept) = trash
+            .discard(&file, "cloud-delete", at(10_000))
+            .expect("discard")
+        else {
+            panic!("managed");
+        };
+
+        // The metadata of a discard that was cut off before its move.
+        let cut_off = trash.root().join("10000000-9999");
+        fs::create_dir_all(&cut_off).expect("entry");
+        let meta = TrashEntry {
+            id: "10000000-9999".to_string(),
+            profile_id: "default".to_string(),
+            original_path: temp.path().join("root/never-moved.txt"),
+            file_name: "never-moved.txt".to_string(),
+            kind: "file".to_string(),
+            reason: "cloud-delete".to_string(),
+            discarded_at_ms: 10_000_000,
+            size_bytes: 3,
+        };
+        fs::write(
+            cut_off.join(constants::runtime::TRASH_ENTRY_META_FILE_NAME),
+            serde_json::to_vec(&meta).expect("meta"),
+        )
+        .expect("write meta");
+
+        let ids: Vec<String> = trash.list().into_iter().map(|entry| entry.id).collect();
+        assert_eq!(
+            ids,
+            vec![kept.clone()],
+            "an entry with no payload is not listed"
+        );
+        // A discard in flight looks the same for a moment: it is left
+        // alone until it is old enough.
+        assert_eq!(trash.purge_expired(at(10_000 + 60)), 0);
+        assert!(cut_off.exists());
+        let later = at(10_000 + constants::trash::ENTRY_WITHOUT_PAYLOAD_SECONDS + 1);
+        assert_eq!(trash.purge_expired(later), 2, "retention is one hour here");
+        assert!(!cut_off.exists());
     }
 
     #[test]

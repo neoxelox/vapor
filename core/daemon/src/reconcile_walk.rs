@@ -2,8 +2,8 @@
 //!
 //! Reconcile compares the local tree with the provider's remote tree
 //! and enqueues the durable intents that make the two converge under
-//! the scope's [`SyncMode`]. The walk is deliberately incremental — a
-//! bounded number of directories per checkpoint — so the reconcile
+//! the scope's [`SyncMode`]. The walk is deliberately incremental: a
+//! bounded number of directories per checkpoint, so the reconcile
 //! controller's slice/throttle discipline (`AGENTS.md §3`) applies to
 //! real comparison work: the runtime holds the walker across slice
 //! pauses and resumes where it left off.
@@ -64,6 +64,9 @@ pub struct WalkStats {
     pub mirror_deletes: usize,
     /// Strict-mirror overwrites scheduled by this walk.
     pub mirror_reverts: usize,
+    /// Entries on this device that an ignore rule kept out of the walk:
+    /// a file, or a folder with everything under it, counted one time.
+    pub ignored_local_entries: u64,
 }
 
 /// One local/remote entry pair keyed by name inside a directory.
@@ -86,6 +89,9 @@ struct LocalEntry {
 struct PendingEnumeration {
     directory: PathBuf,
     call: ProviderCall<Result<Vec<RemoteEntry>, ProviderError>>,
+    /// When the listing was asked for. A sync index row written after
+    /// this is newer than what the listing shows.
+    requested_at: SystemTime,
 }
 
 pub struct ReconcileWalker {
@@ -104,11 +110,23 @@ pub struct ReconcileWalker {
     /// local file (`(wanted local path, existing local path)`); left
     /// untouched on both sides and surfaced on the timeline.
     name_collisions: Vec<(PathBuf, PathBuf)>,
+    /// Local entries this walk renamed to the cloud's spelling of
+    /// their name, as (old path, new path).
+    respelled: Vec<(PathBuf, PathBuf)>,
+    /// Folders this walk skipped because it could not read them. A
+    /// folder that was not compared is not converged; the runtime
+    /// walks each again later.
+    unreadable_dirs: Vec<(PathBuf, std::io::ErrorKind)>,
+    /// Folders that hold an ignore file whose rules are not in force
+    /// yet. They were not compared: with the old rules, a file that the
+    /// new ones hide would upload. A reload was asked for, and the
+    /// runtime walks them again when it lands.
+    dirs_waiting_for_rules: Vec<PathBuf>,
     /// Ignore rules, applied symmetrically: local entries and remote
     /// entries (via their local-equivalent path) that match never
     /// produce intents and are never descended into. Without this the
     /// walk would pull ignored names (`.DS_Store`, `node_modules/`)
-    /// down from the cloud side — and manufacture keep-both conflicts
+    /// down from the cloud side, and manufacture keep-both conflicts
     /// against local counterparts the watcher rightly never uploaded.
     path_filter: Option<Arc<SharedEventPathFilter>>,
     pending_dirs: VecDeque<PathBuf>,
@@ -136,6 +154,9 @@ impl ReconcileWalker {
             type_mismatches: Vec::new(),
             unsyncable_names: Vec::new(),
             name_collisions: Vec::new(),
+            respelled: Vec::new(),
+            unreadable_dirs: Vec::new(),
+            dirs_waiting_for_rules: Vec::new(),
             pending_dirs: VecDeque::from([subtree_root.to_path_buf()]),
             stats: WalkStats::default(),
             merge_without_deletions: false,
@@ -198,10 +219,13 @@ impl ReconcileWalker {
         Ok(())
     }
 
-    fn ignores(&self, local_path: &Path) -> bool {
+    /// Whether the ignore rules take the entry at `local_path` out of
+    /// scope. The walk knows what it just listed, so it says whether
+    /// the entry is a folder: a folder rule hides folders only.
+    fn ignores(&self, local_path: &Path, is_folder: bool) -> bool {
         self.path_filter
             .as_ref()
-            .map(|filter| filter.should_ignore(local_path))
+            .map(|filter| filter.should_ignore_kind(local_path, is_folder))
             .unwrap_or(false)
     }
 
@@ -232,6 +256,263 @@ impl ReconcileWalker {
 
     pub fn take_name_collisions(&mut self) -> Vec<(PathBuf, PathBuf)> {
         std::mem::take(&mut self.name_collisions)
+    }
+
+    pub fn take_respelled(&mut self) -> Vec<(PathBuf, PathBuf)> {
+        std::mem::take(&mut self.respelled)
+    }
+
+    pub fn take_unreadable_dirs(&mut self) -> Vec<(PathBuf, std::io::ErrorKind)> {
+        std::mem::take(&mut self.unreadable_dirs)
+    }
+
+    /// The folders this walk left for the reload of the ignore rules.
+    pub fn take_dirs_waiting_for_rules(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.dirs_waiting_for_rules)
+    }
+
+    /// A local file is set aside under a temp name for the moment a
+    /// download takes its place, on the thread that also runs this
+    /// walk. One that the walk finds was left by a crash or a failed
+    /// apply, and it may hold an edit that exists nowhere else. It
+    /// comes back as a conflict copy and uploads like one. Bytes that
+    /// equal the file now at the original name are dropped instead.
+    fn recover_set_aside_file(
+        &mut self,
+        state_db: &mut DurableStateDb,
+        aside: &Path,
+        original_name: Option<&str>,
+        now: SystemTime,
+    ) -> Result<(), WalkError> {
+        let Ok(metadata) = fs::symlink_metadata(aside) else {
+            return Ok(());
+        };
+        if !metadata.is_file() {
+            return Ok(());
+        }
+        let original = aside.with_file_name(original_name.unwrap_or("recovered-file"));
+        let same_as_original = original_name.is_some()
+            && metadata.len() <= vapor_shared::constants::engine::HASH_STAGE_STEP_BYTES
+            && fs::symlink_metadata(&original)
+                .is_ok_and(|current| current.is_file() && current.len() == metadata.len())
+            && matches!(
+                (
+                    vapor_providers::filesystem::hash_hex_of_file(aside),
+                    vapor_providers::filesystem::hash_hex_of_file(&original),
+                ),
+                (Ok(left), Ok(right)) if left == right
+            );
+        if same_as_original {
+            let _ = fs::remove_file(aside);
+            return Ok(());
+        }
+        let millis = now
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let copy =
+            crate::conflict::conflict_copy_path(&original, &self.device_id, millis, |path| {
+                path.exists() || crate::name_collision::colliding_local_path(path).is_some()
+            });
+        if let Err(error) = fs::rename(aside, &copy) {
+            crate::logging::warning(
+                "Could not recover a local file that was set aside before a crash",
+                &[
+                    ("path", aside.display().to_string()),
+                    ("error", error.to_string()),
+                ],
+            );
+            return Ok(());
+        }
+        state_db.enqueue_intents_coalesced(
+            &[(copy.clone(), PendingIntentKind::Upload, now)],
+            crate::safeguards::IntentSource::Fresh,
+        )?;
+        crate::logging::info(
+            "Recovered a local file that was set aside before a crash as a conflict copy",
+            &[("conflict_copy", copy.display().to_string())],
+        );
+        Ok(())
+    }
+
+    /// One name, two spellings. On a filesystem that folds names, a
+    /// local-only entry and a cloud-only entry that fold together are
+    /// one file (or folder) whose name changed spelling on one side:
+    /// a rename, carried to the other side as a move. It is never two
+    /// files that collide, and never a deletion.
+    ///
+    /// The sync index says which side made the change: its rows carry
+    /// the spelling that was last synced. Rows under the cloud's
+    /// spelling and none under the local one mean this device renamed
+    /// the entry, and the cloud follows through the upload route's
+    /// move detection. In every other case the cloud's spelling stays
+    /// and the local entry is renamed to it here: the cloud renamed
+    /// it, both sides did, or the pair was never synced.
+    ///
+    /// Two cloud entries that fold together are left to the collision
+    /// path, and so is a pair of different kinds.
+    fn settle_spellings(
+        &mut self,
+        sync_mode: SyncMode,
+        state_db: &mut DurableStateDb,
+        directory: &Path,
+        pairs: &mut BTreeMap<String, EntryPair>,
+        batch: &mut Vec<(PathBuf, PendingIntentKind, SystemTime)>,
+        now: SystemTime,
+    ) -> Result<(), WalkError> {
+        let mut by_fold: BTreeMap<String, (Vec<String>, Vec<String>)> = BTreeMap::new();
+        for (name, pair) in pairs.iter() {
+            let group = by_fold
+                .entry(crate::name_collision::fold(name))
+                .or_default();
+            match (pair.local.is_some(), pair.remote.is_some()) {
+                (true, false) => group.0.push(name.clone()),
+                (false, true) => group.1.push(name.clone()),
+                // A pair under one spelling makes any other spelling
+                // of the name a second object.
+                _ => group.1.push(String::new()),
+            }
+        }
+        for (local_names, remote_names) in by_fold.into_values() {
+            let ([local_name], [remote_name]) = (local_names.as_slice(), remote_names.as_slice())
+            else {
+                continue;
+            };
+            if remote_name.is_empty() {
+                continue;
+            }
+            let local_path = directory.join(local_name);
+            let cloud_spelled = directory.join(remote_name);
+            // A filesystem that keeps the spellings apart holds two
+            // entries; they are what they look like.
+            if crate::name_collision::colliding_local_path(&cloud_spelled).as_deref()
+                != Some(local_path.as_path())
+            {
+                continue;
+            }
+            let (Some(local), Some(remote)) = (
+                pairs.get(local_name).and_then(|pair| pair.local.as_ref()),
+                pairs.get(remote_name).and_then(|pair| pair.remote.as_ref()),
+            ) else {
+                continue;
+            };
+            let is_dir = local.is_dir;
+            if is_dir != (remote.kind == RemoteEntryKind::Directory) {
+                continue;
+            }
+            let (synced_as_cloud_spells, synced_as_local_spells) = if is_dir {
+                (
+                    state_db.sync_index_has_rows_under(&cloud_spelled)?,
+                    state_db.sync_index_has_rows_under(&local_path)?,
+                )
+            } else {
+                (
+                    state_db.sync_index(&cloud_spelled)?.is_some(),
+                    state_db.sync_index(&local_path)?.is_some(),
+                )
+            };
+            let this_device_renamed = match sync_mode {
+                SyncMode::PushOnly => true,
+                SyncMode::PullOnly => false,
+                SyncMode::TwoWay => {
+                    synced_as_cloud_spells
+                        && !synced_as_local_spells
+                        && !self.merge_without_deletions
+                }
+            };
+            if this_device_renamed {
+                // What the watcher delivers for a live rename: the old
+                // name leaves, the new one arrives. The upload of the
+                // new name finds the old row and moves the cloud
+                // object; a folder goes child by child.
+                crate::logging::info(
+                    "A name changed spelling on this device; carrying the rename to the cloud",
+                    &[
+                        ("from", cloud_spelled.display().to_string()),
+                        ("to", local_path.display().to_string()),
+                    ],
+                );
+                batch.push((cloud_spelled, PendingIntentKind::Delete, now));
+                pairs.remove(remote_name);
+                if !is_dir {
+                    batch.push((local_path, PendingIntentKind::Rename, now));
+                    pairs.remove(local_name);
+                }
+                continue;
+            }
+            if let Err(error) = fs::rename(&local_path, &cloud_spelled) {
+                crate::logging::warning(
+                    "Could not rename a local entry to the cloud's spelling of its name",
+                    &[
+                        ("from", local_path.display().to_string()),
+                        ("to", cloud_spelled.display().to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                continue;
+            }
+            if is_dir {
+                state_db.rekey_sync_index_under(&local_path, &cloud_spelled)?;
+            } else {
+                state_db.rekey_sync_index(&local_path, &cloud_spelled)?;
+            }
+            crate::logging::info(
+                "Renamed a local entry to the cloud's spelling of its name",
+                &[
+                    ("from", local_path.display().to_string()),
+                    ("to", cloud_spelled.display().to_string()),
+                ],
+            );
+            if let Some(mut local) = pairs.remove(local_name).and_then(|pair| pair.local) {
+                local.path = cloud_spelled.clone();
+                pairs.entry(remote_name.clone()).or_default().local = Some(local);
+            }
+            self.respelled.push((local_path, cloud_spelled));
+        }
+        Ok(())
+    }
+
+    /// Removes the sync index rows of names that neither side holds any
+    /// more: a file that left both sides while no daemon watched, or
+    /// the old spelling of a name that both sides respelled. Such a row
+    /// would later vouch for a deletion that never happened: the file
+    /// put back on this device would read as "deleted in the cloud" and
+    /// go to the trash. With no row, the file is new and is kept.
+    ///
+    /// A row written after the cloud listing was asked for stays: the
+    /// listing is older than the transfer that wrote it.
+    fn forget_names_that_left_both_sides(
+        &mut self,
+        state_db: &mut DurableStateDb,
+        directory: &Path,
+        listed: &std::collections::BTreeSet<String>,
+        pairs: &BTreeMap<String, EntryPair>,
+        listed_at: SystemTime,
+    ) -> Result<(), WalkError> {
+        let mut removed = 0usize;
+        for name in state_db.sync_index_names_in(directory)? {
+            if listed.contains(&name) || pairs.contains_key(&name) {
+                continue;
+            }
+            removed += state_db
+                .remove_sync_index_tree_written_before(&directory.join(&name), listed_at)?;
+        }
+        if removed > 0 {
+            crate::logging::info(
+                "Forgot the sync index rows of names that left both sides",
+                &[
+                    ("directory", directory.display().to_string()),
+                    ("rows", removed.to_string()),
+                ],
+            );
+        }
+        Ok(())
+    }
+
+    /// The entries on this device that an ignore rule hid from this
+    /// walk so far; the count starts again from zero.
+    pub fn take_ignored_local_entries(&mut self) -> u64 {
+        std::mem::take(&mut self.stats.ignored_local_entries)
     }
 
     pub fn take_mirror_deltas(&mut self) -> (usize, usize) {
@@ -284,7 +565,11 @@ impl ReconcileWalker {
                 let provider = provider.clone();
                 let call =
                     ProviderCall::start(mode, "enumerate", move || provider.enumerate(&remote_dir));
-                self.pending_enumeration = Some(PendingEnumeration { directory, call });
+                self.pending_enumeration = Some(PendingEnumeration {
+                    directory,
+                    call,
+                    requested_at: now,
+                });
             }
             let pending = self
                 .pending_enumeration
@@ -295,11 +580,11 @@ impl ReconcileWalker {
                 // progress until it lands.
                 return Ok(false);
             };
-            let directory = self
-                .pending_enumeration
-                .take()
-                .expect("pending listing")
-                .directory;
+            let PendingEnumeration {
+                directory,
+                requested_at,
+                ..
+            } = self.pending_enumeration.take().expect("pending listing");
             let remote_entries = match result {
                 Ok(Ok(entries)) => entries,
                 Ok(Err(error)) if error.kind == ProviderErrorKind::NotFound => Vec::new(),
@@ -310,7 +595,14 @@ impl ReconcileWalker {
                     ))));
                 }
             };
-            self.compare_directory(sync_mode, state_db, &directory, remote_entries, now)?;
+            self.compare_directory(
+                sync_mode,
+                state_db,
+                &directory,
+                remote_entries,
+                requested_at,
+                now,
+            )?;
             self.stats.directories_compared += 1;
             if !should_continue() {
                 return Ok(self.pending_dirs.is_empty());
@@ -325,6 +617,7 @@ impl ReconcileWalker {
         state_db: &mut DurableStateDb,
         directory: &Path,
         remote_entries: Vec<RemoteEntry>,
+        listed_at: SystemTime,
         now: SystemTime,
     ) -> Result<(), WalkError> {
         let mut pairs: BTreeMap<String, EntryPair> = BTreeMap::new();
@@ -340,7 +633,20 @@ impl ReconcileWalker {
                             .push(crate::unsyncable::UnsyncableName::not_utf8(&entry.path()));
                         continue;
                     };
+                    if name.contains('\\') {
+                        // A name the remote path model refuses. Asked
+                        // about one time, like a name that is not UTF-8;
+                        // a folder is not entered, so nothing under it
+                        // logs a warning on every pass.
+                        self.unsyncable_names
+                            .push(crate::unsyncable::UnsyncableName::backslash(&entry.path()));
+                        continue;
+                    }
                     if vapor_providers::filesystem::is_internal_file_name(&name) {
+                        if let Some(original) = crate::conflict::set_aside_original_name(&name) {
+                            self.recover_set_aside_file(state_db, &entry.path(), original, now)?;
+                            continue;
+                        }
                         // Reap orphaned download-staging temps from unclean
                         // crashes as we pass over them; in-flight (young)
                         // temps are left alone.
@@ -351,17 +657,45 @@ impl ReconcileWalker {
                         );
                         continue;
                     }
-                    if self.ignores(&entry.path()) {
+                    // An ignore file whose rules are not in force (it
+                    // came with a folder that moved in, or changed with
+                    // no watcher event): this folder is compared when
+                    // they are.
+                    if let Some(filter) = &self.path_filter
+                        && filter.is_ignore_file(&entry.path())
+                        && let Ok(metadata) = entry.metadata()
+                        && metadata.is_file()
+                        && !filter.covers_or_requests(
+                            &entry.path(),
+                            (metadata.modified().ok(), metadata.len()),
+                        )
+                    {
+                        crate::logging::info(
+                            "A folder holds an ignore file whose rules are not loaded; comparing it after the reload",
+                            &[("directory", directory.display().to_string())],
+                        );
+                        self.dirs_waiting_for_rules.push(directory.to_path_buf());
+                        return Ok(());
+                    }
+                    // A link is not followed: it counts as what it is,
+                    // never as the folder it points at.
+                    let is_folder = entry.file_type().is_ok_and(|kind| kind.is_dir());
+                    if self.ignores(&entry.path(), is_folder) {
+                        if self.path_filter.as_ref().is_some_and(|filter| {
+                            filter.is_ignored_by_rule(&entry.path(), is_folder)
+                        }) {
+                            self.stats.ignored_local_entries += 1;
+                        }
                         continue;
                     }
                     let metadata = match entry.path().symlink_metadata() {
                         Ok(metadata) => metadata,
-                        // The entry was just listed, so it exists — a stat
+                        // The entry was just listed, so it exists: a stat
                         // failure is transient (permission, EIO). Never let
                         // it read as "locally absent": that would drive a
                         // strict-mirror remote delete of content that is
-                        // still present. Abandon this directory; a later
-                        // reconcile retries it.
+                        // still present. Abandon this directory; it is
+                        // walked again later.
                         Err(error) => {
                             crate::logging::warning(
                                 "Reconcile walk cannot stat a local entry; deferring the directory",
@@ -370,12 +704,14 @@ impl ReconcileWalker {
                                     ("error", error.to_string()),
                                 ],
                             );
+                            self.unreadable_dirs
+                                .push((directory.to_path_buf(), error.kind()));
                             return Ok(());
                         }
                     };
                     // Regular files and directories only: symlinks,
                     // FIFOs, sockets, and device nodes are outside the
-                    // sync contract (the executor refuses them too —
+                    // sync contract (the executor refuses them too:
                     // hashing a FIFO would block forever).
                     if !metadata.is_file() && !metadata.is_dir() {
                         continue;
@@ -403,6 +739,8 @@ impl ReconcileWalker {
                         ("error", error.to_string()),
                     ],
                 );
+                self.unreadable_dirs
+                    .push((directory.to_path_buf(), error.kind()));
                 return Ok(());
             }
         }
@@ -418,11 +756,17 @@ impl ReconcileWalker {
             let name = aliases.get(&name).cloned().unwrap_or(name);
             // Remote entries are judged by the local path they would
             // converge onto, so one rule set governs both directions.
-            if self.ignores(&directory.join(&name)) {
+            let is_folder = entry.kind == vapor_providers::RemoteEntryKind::Directory;
+            if self.ignores(&directory.join(&name), is_folder) {
                 continue;
             }
             pairs.entry(name).or_default().remote = Some(entry);
         }
+
+        let mut batch: Vec<(PathBuf, PendingIntentKind, SystemTime)> = Vec::new();
+        let listed: std::collections::BTreeSet<String> = pairs.keys().cloned().collect();
+        self.settle_spellings(sync_mode, state_db, directory, &mut pairs, &mut batch, now)?;
+        self.forget_names_that_left_both_sides(state_db, directory, &listed, &pairs, listed_at)?;
 
         // Remote-only names that differ only by case cannot all
         // materialize on a case-insensitive local filesystem. The
@@ -430,7 +774,7 @@ impl ReconcileWalker {
         // same verdict a later walk would reach once the first exists.
         let mut skipped_aliases: std::collections::BTreeSet<String> =
             std::collections::BTreeSet::new();
-        if crate::name_collision::local_filesystem_folds_case() {
+        if crate::name_collision::folds_case_at(directory) {
             let mut by_fold: BTreeMap<String, Vec<String>> = BTreeMap::new();
             for (name, pair) in &pairs {
                 if pair.local.is_none() && pair.remote.is_some() {
@@ -457,7 +801,6 @@ impl ReconcileWalker {
             }
         }
 
-        let mut batch: Vec<(PathBuf, PendingIntentKind, SystemTime)> = Vec::new();
         for (name, pair) in pairs {
             if skipped_aliases.contains(&name) {
                 continue;
@@ -474,6 +817,16 @@ impl ReconcileWalker {
                             || remote_touched_since_last_sync(state_db, &local_path, &remote)?;
                         if diverged {
                             match sync_mode {
+                                SyncMode::TwoWay
+                                    if only_the_cloud_changed(state_db, &local_path, &local)? =>
+                                {
+                                    // The index vouches for the local
+                                    // file, so the change is the cloud's:
+                                    // it comes down. The upload planner
+                                    // would reach the same answer after a
+                                    // full hash of the unchanged file.
+                                    batch.push((local_path, PendingIntentKind::Download, now));
+                                }
                                 SyncMode::TwoWay => {
                                     // Divergence in two-way routes through
                                     // the upload planner, where the
@@ -548,14 +901,12 @@ impl ReconcileWalker {
                             self.pending_dirs.push_back(local.path);
                         } else if sync_mode == SyncMode::TwoWay
                             && !self.merge_without_deletions
-                            && (remote_deletion_wins(state_db, &local_path, local.modified_at)
-                                || deleted_in_cloud_while_away(state_db, &local_path, &local)?)
+                            && deleted_in_cloud_while_away(state_db, &local_path, &local)?
                         {
                             // A deletion to finish, not a file to
-                            // resurrect: either a remote-origin tombstone
-                            // the local copy predates, or a synced file the
-                            // cloud no longer has while the local copy is
-                            // exactly what was last synced (the cloud side
+                            // resurrect: a synced file the cloud no
+                            // longer has while the local copy is exactly
+                            // what was last synced (the cloud side
                             // deleted it while no daemon was running).
                             // The executor's own guard and the
                             // mass-delete guard still get their say.
@@ -566,13 +917,25 @@ impl ReconcileWalker {
                     }
                     SyncMode::PullOnly => {
                         // Strict mirror: local-only content does not
-                        // exist at the source of truth — remove it,
+                        // exist at the source of truth: remove it,
                         // recursively for directories.
                         batch.push((local_path, PendingIntentKind::ApplyRemoteDelete, now));
                         self.stats.mirror_deletes += 1;
                     }
                 },
                 (None, Some(remote)) => {
+                    // A file this device synced under exactly this
+                    // spelling and no longer has was renamed or deleted
+                    // here; the entry that now answers for the name
+                    // under another spelling is not a collision.
+                    if sync_mode == SyncMode::TwoWay
+                        && !self.merge_without_deletions
+                        && remote.kind == RemoteEntryKind::File
+                        && deleted_here_while_away(state_db, &local_path, &remote)?
+                    {
+                        batch.push((local_path, PendingIntentKind::Delete, now));
+                        continue;
+                    }
                     if let Some(existing) = crate::name_collision::colliding_local_path(&local_path)
                     {
                         self.materialize_colliding_remote(
@@ -594,22 +957,13 @@ impl ReconcileWalker {
                             RemoteEntryKind::File => {
                                 if sync_mode == SyncMode::TwoWay
                                     && !self.merge_without_deletions
-                                    && (local_deletion_wins(
-                                        state_db,
-                                        &local_path,
-                                        remote.modified_at,
-                                    ) || deleted_here_while_away(
-                                        state_db,
-                                        &local_path,
-                                        &remote,
-                                    )?)
+                                    && deleted_here_while_away(state_db, &local_path, &remote)?
                                 {
-                                    // The mirror image: a local-origin
-                                    // tombstone the remote copy predates,
-                                    // or a synced file this device no
-                                    // longer has while the cloud copy is
-                                    // exactly what was last synced (deleted
-                                    // here while no daemon was running).
+                                    // The mirror image: a synced file
+                                    // this device no longer has while the
+                                    // cloud copy is exactly what was last
+                                    // synced (deleted here while no daemon
+                                    // was running).
                                     batch.push((local_path, PendingIntentKind::Delete, now));
                                 } else {
                                     batch.push((local_path, PendingIntentKind::Download, now));
@@ -618,7 +972,7 @@ impl ReconcileWalker {
                         },
                         SyncMode::PushOnly => {
                             // Strict mirror: cloud-only content does not
-                            // exist at the local source of truth — remove it.
+                            // exist at the local source of truth: remove it.
                             // A directory expands into per-entry deletes in
                             // the executor; no provider deletes a tree.
                             batch.push((local_path, PendingIntentKind::Delete, now));
@@ -637,7 +991,11 @@ impl ReconcileWalker {
             self.stats.intents_enqueued += state_db.enqueue_intents_coalesced_with(
                 &batch,
                 crate::safeguards::IntentSource::ReconcileBacklog,
-                self.merge_without_deletions,
+                if self.merge_without_deletions {
+                    crate::state_db::Approval::Guards
+                } else {
+                    crate::state_db::Approval::None
+                },
             )?;
         }
         Ok(())
@@ -664,6 +1022,20 @@ fn touched_since_last_sync(
     })
 }
 
+/// The index has a row that records the local file's modification
+/// time, and the file is still exactly that: positive evidence that
+/// this device did not change it, so a divergence is the cloud's.
+fn only_the_cloud_changed(
+    state_db: &DurableStateDb,
+    local_path: &Path,
+    local: &LocalEntry,
+) -> Result<bool, WalkError> {
+    Ok(state_db.sync_index(local_path)?.is_some_and(|index| {
+        index.local_modified_at.is_some()
+            && index.matches_local(local.size_bytes, local.modified_at)
+    }))
+}
+
 /// The cloud-side twin of [`touched_since_last_sync`]: a remote edit
 /// that kept the byte count is only visible through the remote mtime
 /// the index recorded at the last transfer. A row without one (written
@@ -687,6 +1059,9 @@ fn remote_touched_since_last_sync(
 /// exactly what was last synced: the cloud side deleted it while no
 /// daemon was watching. A local copy that changed since, or a pair the
 /// index cannot vouch for (no row, no recorded mtime), keeps the file.
+/// The index row is the only evidence of a deletion. A modification
+/// time is set by the user's tools (a copy that keeps times, a restore
+/// from a backup), so it never says which event came first.
 fn deleted_in_cloud_while_away(
     state_db: &DurableStateDb,
     local_path: &Path,
@@ -716,44 +1091,6 @@ fn deleted_here_while_away(
         }
         None => false,
     })
-}
-
-/// Whether a remote-origin tombstone should win over a surviving local
-/// file: the deletion wins only when the local copy was not modified
-/// after the deletion ("data preservation wins over deletion" — a newer
-/// local edit uploads instead).
-fn remote_deletion_wins(
-    state_db: &DurableStateDb,
-    local_path: &Path,
-    local_modified_at: Option<SystemTime>,
-) -> bool {
-    match state_db.tombstone(local_path) {
-        Ok(Some(tombstone)) if tombstone.origin == crate::state_db::TombstoneOrigin::Remote => {
-            // An unreadable mtime cannot prove the file predates the
-            // deletion; keeping data wins over honouring the tombstone.
-            match local_modified_at {
-                Some(modified_at) => modified_at <= tombstone.deleted_at,
-                None => false,
-            }
-        }
-        _ => false,
-    }
-}
-
-/// Whether a local-origin tombstone should win over a surviving remote
-/// file: symmetric to [`remote_deletion_wins`] — a remote copy modified
-/// after our deletion re-downloads instead.
-fn local_deletion_wins(
-    state_db: &DurableStateDb,
-    local_path: &Path,
-    remote_modified_at: SystemTime,
-) -> bool {
-    match state_db.tombstone(local_path) {
-        Ok(Some(tombstone)) if tombstone.origin == crate::state_db::TombstoneOrigin::Local => {
-            remote_modified_at <= tombstone.deleted_at
-        }
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -830,6 +1167,75 @@ mod tests {
 
     fn ts(ms: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_750_000_000_000 + ms)
+    }
+
+    #[test]
+    fn the_walk_forgets_the_rows_of_names_that_left_both_sides() {
+        let mut fixture = Fixture::new();
+        let root = fixture.local_root.clone();
+        let earlier = ts(0) - std::time::Duration::from_secs(60);
+        let seed = |fixture: &mut Fixture, path: &Path, at: SystemTime| {
+            fixture
+                .state_db
+                .set_sync_index(path, "hash", 1, None, None, "op", at)
+                .expect("index");
+        };
+        // Present on both sides, and present on one side only.
+        for name in ["both.txt", "local.txt", "cloud.txt", "photos/kept.jpg"] {
+            seed(&mut fixture, &root.join(name), earlier);
+        }
+        std::fs::create_dir_all(root.join("photos")).expect("dir");
+        std::fs::create_dir_all(fixture.cloud_root.join("photos")).expect("dir");
+        for (side, name) in [
+            (&root, "both.txt"),
+            (&fixture.cloud_root.clone(), "both.txt"),
+            (&root, "local.txt"),
+            (&fixture.cloud_root.clone(), "cloud.txt"),
+            (&root, "photos/kept.jpg"),
+            (&fixture.cloud_root.clone(), "photos/kept.jpg"),
+        ] {
+            std::fs::write(side.join(name), b"x").expect("seed");
+        }
+        // On neither side: a file, a folder's files, a name that starts
+        // like a folder that stays, and a file inside that folder.
+        let gone = [
+            "gone.txt",
+            "old/a.txt",
+            "old/deeper/b.txt",
+            "photos.txt",
+            "photos/gone.jpg",
+        ];
+        for name in gone {
+            seed(&mut fixture, &root.join(name), earlier);
+        }
+        // A transfer that finished after the listing was asked for.
+        seed(&mut fixture, &root.join("just-synced.txt"), ts(5));
+
+        fixture.run_walk(SyncMode::TwoWay);
+
+        for name in gone {
+            assert_eq!(
+                fixture.state_db.sync_index(&root.join(name)).expect("read"),
+                None,
+                "{name}"
+            );
+        }
+        for name in [
+            "both.txt",
+            "local.txt",
+            "cloud.txt",
+            "photos/kept.jpg",
+            "just-synced.txt",
+        ] {
+            assert!(
+                fixture
+                    .state_db
+                    .sync_index(&root.join(name))
+                    .expect("read")
+                    .is_some(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -922,109 +1328,179 @@ mod tests {
     }
 
     #[test]
-    fn local_tombstone_replays_the_deletion_when_remote_is_unchanged() {
-        // Restart-safe replay: we deleted locally, the propagation
-        // was lost, and the remote copy has not changed since — the
-        // reconcile finishes the deletion instead of resurrecting it.
+    fn a_file_set_aside_before_a_crash_comes_back_as_a_conflict_copy() {
         let mut fixture = Fixture::new();
-        let remote_file = fixture.cloud_root.join("deleted-here.txt");
-        std::fs::write(&remote_file, b"old remote copy").expect("seed remote");
-
-        // Tombstone is NEWER than the remote copy's mtime.
-        fixture
-            .state_db
-            .record_tombstone(
-                &fixture.local_root.join("deleted-here.txt"),
-                crate::state_db::TombstoneOrigin::Local,
-                SystemTime::now() + std::time::Duration::from_secs(60),
-            )
-            .expect("tombstone");
+        let original = fixture.local_root.join("plan.md");
+        // The crash came after the first rename: the edit sits under
+        // the temp name, last changed long ago, and nothing is at the
+        // original name.
+        let aside = crate::conflict::aside_path(&original, "dev-1-1");
+        std::fs::write(&aside, b"an edit that exists nowhere else").expect("seed");
+        let long_ago = SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3_600);
+        std::fs::File::options()
+            .write(true)
+            .open(&aside)
+            .and_then(|file| file.set_modified(long_ago))
+            .expect("old mtime");
+        // A second one whose bytes equal the file that took its place.
+        let replaced = fixture.local_root.join("same.md");
+        std::fs::write(&replaced, b"identical").expect("seed");
+        let identical_aside = crate::conflict::aside_path(&replaced, "dev-1-2");
+        std::fs::write(&identical_aside, b"identical").expect("seed");
 
         fixture.run_walk(SyncMode::TwoWay);
-        let kinds = fixture.queued_kinds();
+
+        assert!(!aside.exists(), "the temp name is gone");
+        assert!(!identical_aside.exists(), "identical bytes are dropped");
+        let copy = std::fs::read_dir(&fixture.local_root)
+            .expect("list")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("plan~conflict-") && name.ends_with(".md"))
+            })
+            .expect("the edit came back under a conflict name");
         assert_eq!(
-            kinds,
-            vec![(
-                fixture.local_root.join("deleted-here.txt"),
-                PendingIntentKind::Delete
-            )],
-            "the walk must finish propagating the deletion"
+            std::fs::read(&copy).expect("copy"),
+            b"an edit that exists nowhere else"
+        );
+        let queued = fixture.queued_kinds();
+        assert!(
+            queued.contains(&(copy.clone(), PendingIntentKind::Upload)),
+            "the copy uploads: {queued:?}"
         );
     }
 
     #[test]
-    fn remote_recreation_after_local_tombstone_downloads_again() {
-        // The remote copy is newer than our deletion: it was recreated
-        // or edited after we deleted — data preservation wins.
+    fn a_change_made_only_in_the_cloud_is_queued_as_a_download() {
         let mut fixture = Fixture::new();
-        std::fs::write(fixture.cloud_root.join("recreated.txt"), b"newer").expect("seed remote");
-
+        let local = fixture.local_root.join("report.txt");
+        std::fs::write(&local, b"version one").expect("seed local");
+        let metadata = std::fs::symlink_metadata(&local).expect("stat");
         fixture
             .state_db
-            .record_tombstone(
-                &fixture.local_root.join("recreated.txt"),
-                crate::state_db::TombstoneOrigin::Local,
-                SystemTime::now() - std::time::Duration::from_secs(3_600),
+            .set_sync_index(
+                &local,
+                "hash-of-version-one",
+                metadata.len(),
+                metadata.modified().ok(),
+                Some(ts(0)),
+                "op",
+                ts(0),
             )
-            .expect("tombstone");
+            .expect("index");
+        std::fs::write(
+            fixture.cloud_root.join("report.txt"),
+            b"version two, longer",
+        )
+        .expect("cloud edit");
 
         fixture.run_walk(SyncMode::TwoWay);
-        let kinds = fixture.queued_kinds();
         assert_eq!(
-            kinds,
+            fixture.queued_kinds(),
+            vec![(local.clone(), PendingIntentKind::Download)],
+            "the unchanged local file is not sent through the upload planner"
+        );
+
+        // A local file the index cannot vouch for still goes to the
+        // planner, where the conflict policy decides.
+        std::fs::write(&local, b"edited here too!!").expect("local edit");
+        fixture.run_walk(SyncMode::TwoWay);
+        assert_eq!(
+            fixture.queued_kinds(),
+            vec![(local, PendingIntentKind::Upload)]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_the_walk_cannot_read_is_reported_for_a_later_walk() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut fixture = Fixture::new();
+        let locked = fixture.local_root.join("locked");
+        std::fs::create_dir(&locked).expect("dir");
+        std::fs::write(locked.join("inside.txt"), b"x").expect("seed");
+        std::fs::create_dir_all(fixture.cloud_root.join("locked")).expect("cloud dir");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("lock");
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running as a user that permissions do not stop.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).ok();
+            return;
+        }
+
+        let mut walker = ReconcileWalker::new(&fixture.local_root, &fixture.local_root, None);
+        for _ in 0..64 {
+            if walker
+                .process(
+                    fixture.provider.clone(),
+                    &ProviderCallMode::Inline,
+                    SyncMode::TwoWay,
+                    &mut fixture.state_db,
+                    8,
+                    ts(0),
+                    &|| true,
+                )
+                .expect("walk step")
+            {
+                break;
+            }
+        }
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("unlock");
+        assert_eq!(
+            walker.take_unreadable_dirs(),
+            vec![(locked, std::io::ErrorKind::PermissionDenied)]
+        );
+        assert!(
+            fixture.queued_kinds().is_empty(),
+            "nothing under a folder that was not read is touched"
+        );
+    }
+
+    #[test]
+    fn a_cloud_file_with_no_index_row_downloads_whatever_its_age() {
+        // Deleted here once, then put back in the cloud by a tool that
+        // keeps modification times: the file is old, and it is still a
+        // file this device never compared. It comes down.
+        let mut fixture = Fixture::new();
+        let remote_file = fixture.cloud_root.join("put-back.txt");
+        std::fs::write(&remote_file, b"an older copy").expect("seed remote");
+        let long_ago = SystemTime::now() - std::time::Duration::from_secs(90 * 24 * 3_600);
+        std::fs::File::options()
+            .write(true)
+            .open(&remote_file)
+            .and_then(|file| file.set_modified(long_ago))
+            .expect("old mtime");
+
+        fixture.run_walk(SyncMode::TwoWay);
+        assert_eq!(
+            fixture.queued_kinds(),
             vec![(
-                fixture.local_root.join("recreated.txt"),
+                fixture.local_root.join("put-back.txt"),
                 PendingIntentKind::Download
             )]
         );
     }
 
     #[test]
-    fn remote_tombstone_replays_the_local_removal_when_local_is_unchanged() {
+    fn a_local_file_with_no_index_row_uploads_whatever_its_age() {
+        // The mirror image: deleted in the cloud once, then restored
+        // here from a backup with its old modification time.
         let mut fixture = Fixture::new();
-        let local_file = fixture.local_root.join("deleted-there.txt");
-        std::fs::write(&local_file, b"stale local copy").expect("seed local");
-
-        fixture
-            .state_db
-            .record_tombstone(
-                &local_file,
-                crate::state_db::TombstoneOrigin::Remote,
-                SystemTime::now() + std::time::Duration::from_secs(60),
-            )
-            .expect("tombstone");
+        let local_file = fixture.local_root.join("restored.txt");
+        std::fs::write(&local_file, b"restored from a backup").expect("seed local");
+        let long_ago = SystemTime::now() - std::time::Duration::from_secs(90 * 24 * 3_600);
+        std::fs::File::options()
+            .write(true)
+            .open(&local_file)
+            .and_then(|file| file.set_modified(long_ago))
+            .expect("old mtime");
 
         fixture.run_walk(SyncMode::TwoWay);
-        let kinds = fixture.queued_kinds();
         assert_eq!(
-            kinds,
-            vec![(local_file, PendingIntentKind::ApplyRemoteDelete)],
-            "the walk must finish applying the remote deletion"
-        );
-    }
-
-    #[test]
-    fn local_edit_after_remote_tombstone_uploads_instead_of_deleting() {
-        let mut fixture = Fixture::new();
-        let local_file = fixture.local_root.join("revived.txt");
-        std::fs::write(&local_file, b"edited after the deletion").expect("seed local");
-
-        // Tombstone predates the local file's mtime.
-        fixture
-            .state_db
-            .record_tombstone(
-                &local_file,
-                crate::state_db::TombstoneOrigin::Remote,
-                SystemTime::now() - std::time::Duration::from_secs(3_600),
-            )
-            .expect("tombstone");
-
-        fixture.run_walk(SyncMode::TwoWay);
-        let kinds = fixture.queued_kinds();
-        assert_eq!(
-            kinds,
-            vec![(local_file, PendingIntentKind::Upload)],
-            "data preservation must win over the stale deletion"
+            fixture.queued_kinds(),
+            vec![(local_file, PendingIntentKind::Upload)]
         );
     }
 
@@ -1330,6 +1806,73 @@ mod tests {
                 PendingIntentKind::Download
             )],
             "only the non-ignored file may produce an intent"
+        );
+    }
+
+    #[test]
+    fn a_folder_with_an_ignore_file_that_is_not_loaded_waits_for_the_reload() {
+        let mut fixture = Fixture::new();
+        let filter = Arc::new(crate::fs_events::SharedEventPathFilter::new(
+            &fixture.local_root,
+            crate::path_filter::EventPathFilterOptions::default(),
+        ));
+        // After the rules were built, a project arrives with rules of
+        // its own, and no watcher event tells of it.
+        let project = fixture.local_root.join("project");
+        std::fs::create_dir_all(project.join("src")).expect("dirs");
+        std::fs::write(project.join(".gitignore"), "secret.env\n").expect("rules");
+        std::fs::write(project.join("secret.env"), b"TOKEN").expect("secret");
+        std::fs::write(project.join("src/main.rs"), b"fn main() {}").expect("source");
+        std::fs::write(fixture.local_root.join("plain.txt"), b"plain").expect("plain");
+
+        let walk = |fixture: &mut Fixture| {
+            let mut walker = ReconcileWalker::new(
+                &fixture.local_root,
+                &fixture.local_root,
+                Some(filter.clone()),
+            );
+            for _ in 0..64 {
+                if walker
+                    .process(
+                        fixture.provider.clone(),
+                        &ProviderCallMode::Inline,
+                        SyncMode::TwoWay,
+                        &mut fixture.state_db,
+                        8,
+                        ts(0),
+                        &|| true,
+                    )
+                    .expect("walk step")
+                {
+                    break;
+                }
+            }
+            walker.take_dirs_waiting_for_rules()
+        };
+
+        // The folder is left alone, with everything under it, and a
+        // reload is asked for. The rest of the tree is compared.
+        assert_eq!(walk(&mut fixture), vec![project.clone()]);
+        assert_eq!(
+            fixture.queued_kinds(),
+            vec![(
+                fixture.local_root.join("plain.txt"),
+                PendingIntentKind::Upload
+            )]
+        );
+
+        // With the rules in, the folder is compared by them.
+        assert!(filter.rebuild_if_requested(), "the walk asked for a reload");
+        assert!(walk(&mut fixture).is_empty());
+        let queued = fixture.queued_kinds();
+        assert!(
+            queued.contains(&(project.join("src/main.rs"), PendingIntentKind::Upload))
+                && queued.contains(&(project.join(".gitignore"), PendingIntentKind::Upload)),
+            "{queued:?}"
+        );
+        assert!(
+            !queued.iter().any(|(path, _)| path.ends_with("secret.env")),
+            "{queued:?}"
         );
     }
 

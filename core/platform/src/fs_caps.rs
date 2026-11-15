@@ -28,6 +28,15 @@ pub trait FilesystemCapabilities: Send + Sync {
     /// conflict-path derivation must respect this.
     fn case_sensitivity(&self) -> CaseSensitivity;
 
+    /// Case sensitivity of the volume that holds `path`, which must
+    /// exist. The host default answers for the volumes an OS formats by
+    /// default; a case-sensitive volume on macOS and a case-folding
+    /// one elsewhere answer for themselves where the OS can say. When
+    /// it cannot, the host default stands.
+    fn case_sensitivity_at(&self, _path: &Path) -> CaseSensitivity {
+        self.case_sensitivity()
+    }
+
     /// Reads a metadata tag from `path`. `Ok(None)` when the tag is
     /// absent; `Err` when the filesystem cannot answer (unsupported,
     /// permission, missing file).
@@ -44,7 +53,7 @@ pub trait FilesystemCapabilities: Send + Sync {
 }
 
 /// In-memory `FilesystemCapabilities` for tests. Defaults: xattr
-/// supported, case-sensitive — matches the typical Linux ext4 / xfs
+/// supported, case-sensitive: matches the typical Linux ext4 / xfs
 /// default. Tests override either toggle to assert per-OS behavior;
 /// flipping `supports_xattr` off makes every tag write fail with
 /// `Unsupported` so side-file fallback paths are exercisable.
@@ -142,7 +151,7 @@ fn unsupported_tag_error() -> io::Error {
 
 /// Native `FilesystemCapabilities`. Compile-time default for the
 /// current host, with the Unix xattr bridge live; the Windows ADS
-/// bridge is not implemented yet — until then Windows reports no
+/// bridge is not implemented yet, until then Windows reports no
 /// xattr support and every tag call returns `Unsupported`, which routes
 /// callers onto the side-file fallback.
 ///
@@ -209,6 +218,11 @@ impl FilesystemCapabilities for NativeFilesystemCapabilities {
         self.case_sensitivity
     }
 
+    #[cfg(target_os = "macos")]
+    fn case_sensitivity_at(&self, path: &Path) -> CaseSensitivity {
+        volume_case_sensitivity(path).unwrap_or(self.case_sensitivity)
+    }
+
     #[cfg(unix)]
     fn read_tag(&self, path: &Path, name: &str) -> io::Result<Option<String>> {
         match xattr::get(path, native_tag_name(name).as_ref()) {
@@ -229,7 +243,7 @@ impl FilesystemCapabilities for NativeFilesystemCapabilities {
     fn remove_tag(&self, path: &Path, name: &str) -> io::Result<()> {
         match xattr::remove(path, native_tag_name(name).as_ref()) {
             Ok(()) => Ok(()),
-            // Removing an absent tag is convergence, not failure —
+            // Removing an absent tag is convergence, not failure,
             // including on filesystems that cannot hold tags at all
             // (there is definitionally nothing to remove).
             Err(error) if error.raw_os_error() == Some(NO_ATTR_ERRNO) => Ok(()),
@@ -255,8 +269,26 @@ impl FilesystemCapabilities for NativeFilesystemCapabilities {
     }
 }
 
+/// What the volume of `path` says about case, through `pathconf`.
+/// `None` when the call fails (the path is gone, the filesystem does
+/// not answer).
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn volume_case_sensitivity(path: &Path) -> Option<CaseSensitivity> {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: `c_path` is a NUL-terminated string that outlives the
+    // call, and `pathconf` only reads it.
+    let answer = unsafe { libc::pathconf(c_path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
+    match answer {
+        0 => Some(CaseSensitivity::Insensitive),
+        1 => Some(CaseSensitivity::Sensitive),
+        _ => None,
+    }
+}
+
 /// Linux user-space extended attributes require the `user.` namespace
-/// prefix — an un-namespaced name is rejected by the kernel with
+/// prefix: an un-namespaced name is rejected by the kernel with
 /// `EOPNOTSUPP` regardless of filesystem support. macOS accepts
 /// arbitrary reverse-DNS names directly. The trait-level tag name stays
 /// portable (`sh.arn.vapor.op-id`); the prefix is a Linux storage
@@ -281,6 +313,36 @@ const NO_ATTR_ERRNO: i32 = 61;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_volume_answers_for_its_own_case_sensitivity() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        std::fs::write(temp.path().join("Name.txt"), b"x").expect("seed");
+        // What the volume does: the other spelling reaches the file, or
+        // it does not.
+        let folds = temp.path().join("name.txt").exists();
+        let native = NativeFilesystemCapabilities::for_current_host();
+        let answered = native.case_sensitivity_at(temp.path());
+        if cfg!(target_os = "macos") {
+            let expected = if folds {
+                CaseSensitivity::Insensitive
+            } else {
+                CaseSensitivity::Sensitive
+            };
+            assert_eq!(answered, expected, "the probe reads the volume");
+        } else {
+            assert_eq!(
+                answered,
+                native.case_sensitivity(),
+                "the host default stands"
+            );
+        }
+        // A path that is gone gets the host default, never a guess.
+        assert_eq!(
+            native.case_sensitivity_at(&temp.path().join("missing/deeper")),
+            native.case_sensitivity()
+        );
+    }
 
     #[test]
     fn in_memory_caps_default_matches_typical_linux_ext4() {

@@ -252,7 +252,7 @@ fn token_request(
                 "Content-Type".to_string(),
                 "application/x-www-form-urlencoded".to_string(),
             )],
-            body: form.into_bytes(),
+            body: form.into_bytes().into(),
         })
         .map_err(|error| {
             ProviderError::transient(format!("token endpoint unreachable: {}", error.message))
@@ -267,17 +267,26 @@ fn token_request(
     if let Some(error) = parsed.error {
         logging::warning(
             "OAuth token request rejected",
-            &[("oauth_error", error.clone())],
+            &[("error_code", error.clone())],
         );
         let description = parsed.error_description.unwrap_or_default();
-        return Err(if error == "invalid_grant" || error == "invalid_client" {
-            ProviderError::authentication(format!(
-                "authorization is no longer valid ({error}): {description}; run `vapor auth login`"
-            ))
-        } else if response.status >= 500 {
-            ProviderError::transient(format!("token endpoint failed: {error}"))
-        } else {
-            ProviderError::authentication(format!("token request rejected: {error}"))
+        // Only an answer about the grant or the client means the sign-in
+        // is gone. A server that is busy or limits the rate says so with
+        // a 4xx too (`temporarily_unavailable`, `slow_down`), and a new
+        // sign-in would not help: the request is tried again.
+        return Err(match error.as_str() {
+            "invalid_grant" | "invalid_client" | "unauthorized_client" => {
+                ProviderError::authentication(format!(
+                    "authorization is no longer valid ({error}): {description}; run `vapor auth login`"
+                ))
+            }
+            "temporarily_unavailable" | "server_error" | "slow_down" | "rate_limit_exceeded" => {
+                ProviderError::transient(format!("token endpoint is busy: {error}"))
+            }
+            _ if response.status >= 500 || response.status == 429 => {
+                ProviderError::transient(format!("token endpoint failed: {error}"))
+            }
+            _ => ProviderError::authentication(format!("token request rejected: {error}")),
         });
     }
     if parsed.access_token.is_empty() {
@@ -394,7 +403,7 @@ mod tests {
 
         // The request used the form grant.
         let requests = transport.recorded_requests();
-        let body = String::from_utf8(requests[0].body.clone()).expect("utf8");
+        let body = String::from_utf8(requests[0].body.to_vec()).expect("utf8");
         assert!(body.contains("grant_type=authorization_code"));
         assert!(body.contains("code_verifier=verifier"));
     }
@@ -407,6 +416,31 @@ mod tests {
             .expect_err("invalid grant must fail");
         assert_eq!(error.kind, ProviderErrorKind::Authentication);
         assert!(error.message.contains("vapor auth login"));
+    }
+
+    #[test]
+    fn a_busy_token_endpoint_is_tried_again_and_is_not_a_lost_sign_in() {
+        for (status, body) in [
+            (400, r#"{"error":"temporarily_unavailable"}"#),
+            (429, r#"{"error":"rate_limit_exceeded"}"#),
+            (400, r#"{"error":"slow_down"}"#),
+            (503, r#"{"error":"server_error"}"#),
+        ] {
+            let transport = ScriptedHttpTransport::new();
+            transport.push_response(status, body);
+            let error = refresh_tokens(&transport, "client", None, "1//rt", 0)
+                .expect_err("the endpoint refused");
+            assert_eq!(
+                error.kind,
+                ProviderErrorKind::Transient,
+                "{body}: a new sign-in would not help"
+            );
+        }
+        // An answer about the client is a lost sign-in.
+        let transport = ScriptedHttpTransport::new();
+        transport.push_response(401, r#"{"error":"unauthorized_client"}"#);
+        let error = refresh_tokens(&transport, "client", None, "1//rt", 0).expect_err("refused");
+        assert_eq!(error.kind, ProviderErrorKind::Authentication);
     }
 
     #[test]

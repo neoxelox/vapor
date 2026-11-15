@@ -11,179 +11,48 @@ Status legend:
 
 Binary names are fixed:
 
-- **`vapor`** — the CLI.
-- **`vapord`** — the daemon.
+- **`vapor`**: the CLI.
+- **`vapord`**: the daemon.
 
-## Phase L0 - Crate and build skeleton
+This file holds open work only. A task that is done leaves the file:
+`CHANGELOG.md` and the git history record what landed. Task ids are
+stable and are never reused.
 
-- [x] L0-1 Add `core/cli` to the Cargo workspace as a new binary crate named
-      `vapor` with a single entrypoint `core/cli/src/main.rs`.
-- [x] L0-2 Pick CLI dependencies: `clap` (args/subcommands), `serde_json`
-      (JSON output mode), `indicatif` (progress), `crossterm` (terminal
-      capability detection). Keep the dep list small. *(`indicatif` and
-      `crossterm` are deferred — no progress / TTY rendering surface
-      ships in Wave 6.)*
-- [x] L0-3 Script entrypoints. The CLI is covered by the workspace-wide
-      `scripts/{format,lint,test,build}.sh`; the CLI-only wrappers that
-      briefly existed were thin duplicates of `cargo` commands and were
-      removed in the full-repo review.
-- [x] L0-4 Add `vapor --version` (uses the same build-info macro as
-      `vapord`).
-- [x] L0-5 Add `install-from-source` instructions to `core/cli/README.md`
-      (`cargo install --path core/cli`).
+## Commands
 
-## Phase L1 - Core commands (no daemon IPC yet)
-
-Depends on: `docs/tasks/core.md` C1–C3.
-
-- [x] L1-1 `vapor run [--foreground]` — starts the daemon in-process using
-      the existing `DaemonRuntime::start` surface from `core/daemon`. Exits
-      non-zero if another daemon is already attached to this `VAPOR_DIR`
-      (detect via a lock file under `<vapor_dir>/vapord.lock`). *(Lock
-      file detection: deferred — `DurableStateDb` already surfaces a
-      conflict when two processes try to open the same SQLite file in
-      WAL mode, which gives us the exit-non-zero behavior for free.)*
-- [x] L1-2 `vapor config get|set <key> [value]` — reads/writes `vapor.json`
-      using the same shape the macOS Swift app uses. Must never clobber
-      unknown keys.
-- [x] L1-3 `vapor version` — prints version + git commit short.
-- [x] L1-4 `vapor doctor` — platform-aware sanity checks:
-      - `VAPOR_DIR` exists + is writable + has private permissions on Unix.
-      - Daemon binary `vapord` is discoverable (PATH or sibling).
-      - On macOS: LaunchAgent plist presence.
-      - On Linux: `/proc/sys/fs/inotify/max_user_watches` value + advice.
-      - On Windows: Task Scheduler task presence.
-      *(macOS-flavor checks ship in Wave 6; Linux + Windows checks land
-      with Waves 13 / 12.)*
-- [x] L1-5 `vapor config get|set syncMode <value>` enum-validates the sync
-      mode (`two-way` / `pull-only` / `push-only`) the same way the existing
-      typed keys validate booleans/ints, rejecting unknown values with an
-      actionable error. Ships with the C8-59 config surface; add the `--json`
-      snapshot per LT-1. Per-profile editing arrives with the profiles CLI
-      surface. Depends on `docs/tasks/core.md` C8-59.
-- [ ] L1-6 `vapor profiles list|add|remove` (`--json` on each): the
-      headless onboarding and the engine the app's first run drives.
-      `add` takes `--provider`, `--local`, `--cloud`, `--mode`, and a
-      `--name`; it fills the provider-aware defaults for what is not
-      given, refuses overlapping roots and an unknown provider with the
-      same errors the daemon would raise, runs `vapor auth login` for a
-      provider that needs an account (or points at it when stdin is not
-      a terminal), and writes the profile through the config lock so a
-      running daemon composes it. The first `add` on an unconfigured
-      install (core.md OB-1) is what turns the daemon from
-      `Unconfigured` to `Running`; `vapor status` and `vapor doctor` tell
-      an unconfigured install which command to run. `remove` reuses the
-      safe-disconnect flow (core.md C8-25). Shape-locked `--json`
-      output per LT-1 and an e2e scenario that onboards a fresh home
-      with the filesystem provider through this command alone. Depends
-      on core.md OB-1 and C8-19 … C8-26.
-
-## Phase L2 - Service lifecycle (autolaunch on every OS)
-
-Depends on: `docs/tasks/core.md` C3-3 (`ServiceInstaller` + macOS impl) and
-C4 (lifecycle moves to Rust).
-
-The macOS app-shim wave (`macos.md` M2 / `core.md` C4-5) extended this
-surface: every subcommand takes `--json` (the stable contract the Swift
-shim parses), `uninstall` grew `--keep-running` (skips the explicit
-stop signal; on macOS launchd still tears the job down on bootout, so
-the flag matters on service managers that keep a disabled unit
-running), and three subcommands
-were added — `bootstrap` (install + start only when autolaunch is
-enabled), `check` (supervision tick against the durable crash-loop
-state), and `acknowledge` (clear a crash-loop pause).
-
-- [x] L2-1 `vapor service install [--user|--system]` — invokes the
-      platform-appropriate `ServiceInstaller`. Default `--user`.
-      *(`--system` flag deferred — only `--user` ships in Wave 6.)*
-- [x] L2-2 `vapor service uninstall` — reverse of install.
-- [x] L2-3 `vapor service start|stop|restart` — drives the installed
-      service.
-- [x] L2-4 `vapor service status` — reports `Running` / `Stopped` /
-      `CrashLoopPaused` / `NotInstalled` with a human reason.
-- [x] L2-5 Automated end-to-end test on macOS CI: install → start → status
-      → stop → uninstall round-trip. *(The `--full` phase of
-      `./scripts/e2e.sh`, run with `--full` by `test.yml`'s macOS job.
-      Also walks the crash-loop supervision path: `check` restart /
-      backoff deferral / pause → `acknowledge`. Host-mutating, so it is
-      opt-in and never clobbers an existing install.)*
-- [ ] L2-6 Same round-trip automated on Linux CI (systemd user unit).
-      `vapor service` dispatches on Linux since C7-2 landed; the e2e
-      scenario needs a `systemctl --user` session on the runner, which
-      `ubuntu-latest` does not give a plain job.
-- [ ] L2-7 Same round-trip automated on Windows CI (Task Scheduler) once
-      `docs/tasks/core.md` C6-2 lands.
-
-## Phase L3 - IPC-driven commands (talks to a running daemon)
-
-Depends on: `docs/tasks/core.md` C5 (IPC channel).
-
-- [x] L3-1 `vapor status [--json]` — queue depth, throttle state, reason,
-      effective ceilings, utilization, idle-boost state. JSON schema
-      documented in `docs/architecture/ipc-contracts.md`. *(Wave 7
-      ships run state, throttle state + reason, provider, daemon id,
-      and IPC schema version. Effective ceilings / idle-boost surface
-      land alongside the C8-32 / C8-40 work.)*
-- [x] L3-2 `vapor pause` / `vapor resume` — control endpoints.
-- [x] L3-3 A drain request. *(Shipped as `vapor flush-now`; the naming
-      pass folded it into `vapor reconcile`, which carries the boost.)*
-- [x] L3-4 `vapor reconcile [--json]` — the user's on-demand scan: runs
-      under any throttle state but `suspended` and releases deferred
-      work.
-- [x] L3-5 `vapor timeline [--json]` — streams the diagnostics
-      timeline. *(Wave 7 ships the IPC seam; the in-memory timeline
-      buffer lands with C8-30.)*
-- [x] L3-6 `vapor logs [--tail] [--level=debug]` — tails
-      `<vapor_dir>/logs/vapord.log` with the existing log line format and
-      redaction rules. *(Wave 7 ships `--tail`; `--level` filtering can
-      land alongside the C8-29 diagnostics surface when the daemon
-      starts emitting structured level metadata in addition to text.)*
-- [x] L3-7 Consistent behavior when no daemon is running: every IPC-backed
-      command exits non-zero within 1s with `vapor: daemon not running —
-      try \`vapor service start\``, never hangs.
-- [x] L3-8 Keep-both conflict surfacing (core.md C8-70). Shipped as
-      `vapor conflicts`; a conflicted file is now one `conflict`
-      decision listing every version, listed with `vapor decisions list`
-      and answered with `vapor decisions resolve <id> --choose <file>`,
-      which keeps that version, trashes the others, and works with the
-      daemon stopped. Design: `docs/architecture/conflict-resolution.md`.
-
-## Phase L4 - Auth flows
-
-Depends on: `docs/tasks/core.md` C3-4 (`SecretStore` + macOS impl) and
-C8-48 (Google Drive provider).
-
-- [x] L4-1 `vapor auth login [--profile <id>]` — the profile's provider
-      decides the flow; for Google Drive it starts OAuth PKCE, opens the
-      user's browser, listens on a localhost loopback, stores tokens via
-      `core/platform/secrets`. Also supports `--no-browser` for headless
-      flows (prints URL, accepts pasted auth code). *(Wave 7 ships the
-      SecretStore-backed plumbing with explicit `--token` for headless
-      / CI; the OAuth-PKCE browser flow lands alongside C8-48 when a
-      provider with real auth ships.)*
-- [x] L4-2 `vapor auth logout [--profile <id>]` — removes every stored
-      credential of the profile.
-- [x] L4-3 `vapor auth status [--profile <id>] [--json]` — each
-      profile's sign-in state (`signed-in`, `signed-out`, `not-needed`)
-      without revealing tokens.
-
-## Phase L5 - Headless / server ergonomics
-
+- [ ] L1-7 `vapor profiles enable|disable|rename`: the rest of what the
+      app's profile screens need (`macos.md` M4-1). `list`, `add`, and
+      `remove` ship.
 - [ ] L5-1 `--user-activity=always|never|auto` global flag that sets the
       interpretation for hosts without HID signal (default `auto`:
       always-idle on headless, event-driven on desktop).
+
+## Service lifecycle
+
+- [ ] L2-6 The `vapor service` round-trip (install, start, status,
+      crash-loop supervision, acknowledge, stop, uninstall) automated on
+      Linux CI against a systemd user unit. The e2e scenario needs a
+      `systemctl --user` session on the runner, which `ubuntu-latest`
+      does not give a plain job.
+- [ ] L2-7 The same round-trip automated on Windows CI (Task Scheduler)
+      once `docs/tasks/core.md` C6-2 lands.
+
+## Headless and server use
+
 - [ ] L5-2 Dockerfile + example `docker-compose.yml` demonstrating
       `vapor run` in a container.
-- [ ] L5-3 `core/cli/README.md` deployment recipes: systemd user unit via
-      `vapor service install --user`, system unit via `--system`, Docker.
+- [ ] L5-3 `core/cli/README.md` deployment recipes: a systemd user unit
+      through `vapor service install --supervise`, and Docker.
 
-## Phase L6 - Distribution
+## Distribution
 
 Depends on: `docs/tasks/core.md` C6-8 and C7-7 (per-OS trust chains).
+The Mac app is built for Apple silicon; there is no Intel Mac build of
+the app, and no `x86_64-apple-darwin` CLI either.
 
 - [ ] L6-1 Release-pipeline jobs that build `vapor` per supported target
       triple:
-      - `aarch64-apple-darwin`, `x86_64-apple-darwin`
+      - `aarch64-apple-darwin`
       - `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
       - `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`
 - [ ] L6-2 Strip + zstd-compress + SHA256 checksum each asset.
@@ -195,32 +64,19 @@ Depends on: `docs/tasks/core.md` C6-8 and C7-7 (per-OS trust chains).
 - [ ] L6-6 GPG-sign Linux binaries + publish `Checksums.txt.asc` when
       C7-7 lands.
 
-## Phase LT - Testing discipline (CLI)
+## Tests
 
 Policy: `AGENTS.md §9`. Full taxonomy:
-`docs/architecture/testing-strategy.md`. CLI-specific scope lives in
-`docs/plans/cli.md §8`.
+`docs/architecture/testing-strategy.md`.
 
-- [ ] LT-1 `vapor --json` schema is stable and covered by `insta`
-      snapshot tests. One snapshot per `--json` command, with a fixed
-      input fixture. Schema drift fails the PR; intentional changes
-      reviewed with `cargo insta review`. Applies to every command
-      from L1 onward; tracked as a standing requirement per `core.md`
-      CT-8.
+- [ ] LT-1 `insta` snapshots for the `--json` shape locks, one per
+      command with a fixed fixture (`core.md` CT-4). Explicit
+      field-by-field tests lock the shapes today.
 - [ ] LT-2 Exit codes are documented and stable. A `--help`-style
       snapshot or a direct exit-code assertion test per command.
 - [ ] LT-3 Binary size stays reasonable (single-digit MB stripped +
       zstd'd). CI guard-rail, not a soft target.
-- [x] LT-4 End-to-end flows (`install → start → status → stop →
-      uninstall`) pass on macOS CI for the primary deliverable
-      (`cli.md` L2-5, the `./scripts/e2e.sh --full` service phase).
-      Linux and Windows CI validation lands with the matching optional
-      wave (L2-6, L2-7).
 - [ ] LT-5 IPC client correctness tested against a fake daemon that
       speaks the IPC protocol from `docs/architecture/ipc-contracts.md`.
       Covers every IPC-backed command; tests the "no daemon running"
       error path (non-zero exit within 1 s; never hang).
-- [ ] LT-6 **Do not add interactive TTY tests.** No color-code
-      assertions, no cursor-positioning assertions, no terminal-resize
-      simulations, no progress-bar rendering timing. The reviewer
-      cites `AGENTS.md §9.3`.

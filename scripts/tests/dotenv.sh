@@ -38,6 +38,15 @@ got="$(run_case env -u VAPOR_DIR VAPOR_GDRIVE_CLIENT_ID=from-ci)"
 [[ "$got" == "from-ci|GOCSPX-fixture|" ]] ||
   fail "an exported value wins over the file: got '$got'"
 
+cat >"$fixture/.env" <<'DOTENV'
+VAPOR_GDRIVE_CLIENT_ID=123-abc.apps.googleusercontent.com   # the test client
+VAPOR_GDRIVE_CLIENT_SECRET="GOCSPX-with#hash" # quoted, so the hash stays
+DOTENV
+
+got="$(run_case env -u VAPOR_DIR)"
+[[ "$got" == "123-abc.apps.googleusercontent.com|GOCSPX-with#hash|" ]] ||
+  fail "a trailing comment is not part of the value: got '$got'"
+
 rm "$fixture/.env"
 got="$(run_case env -u VAPOR_DIR)"
 [[ "$got" == "||" ]] || fail "no .env is a no-op: got '$got'"

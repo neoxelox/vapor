@@ -52,9 +52,11 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
   public var autoLaunch: Bool
   public var useGitignore: Bool
   public var useVaporignore: Bool
-  public var localRoot: String
-  /// The cloud root, or `nil` while the file leaves it to the provider's
-  /// default (the daemon resolves that; the app never writes one).
+  /// The two roots of the profile the top-level keys describe, or
+  /// `nil` while the user has not set them. Neither has a default: a
+  /// profile exists only when the user chose both, so the app never
+  /// writes a root it did not read.
+  public var localRoot: String?
   public var cloudRoot: String?
   /// Ignore rules in `.gitignore` syntax, one rule per entry.
   public var preIgnoreRules: [String]
@@ -91,7 +93,6 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     return VaporConstants.Provider.defaultKind
   }
 
-  public static let defaultLocalRoot = VaporConstants.Defaults.localRoot
   public static let defaultPreIgnoreRules = VaporConstants.Defaults.preIgnoreRules
   public static let defaultPostIgnoreRules = VaporConstants.Defaults.postIgnoreRules
   public static let defaultLanguage = VaporConstants.Defaults.language
@@ -114,7 +115,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     autoLaunch: Bool = VaporConstants.Defaults.autoLaunch,
     useGitignore: Bool = VaporConstants.Defaults.useGitignore,
     useVaporignore: Bool = VaporConstants.Defaults.useVaporignore,
-    localRoot: String = defaultLocalRoot,
+    localRoot: String? = nil,
     cloudRoot: String? = nil,
     preIgnoreRules: [String] = defaultPreIgnoreRules,
     postIgnoreRules: [String] = defaultPostIgnoreRules,
@@ -180,7 +181,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
       autoLaunch: value(.autoLaunch) ?? VaporConstants.Defaults.autoLaunch,
       useGitignore: value(.useGitignore) ?? VaporConstants.Defaults.useGitignore,
       useVaporignore: value(.useVaporignore) ?? VaporConstants.Defaults.useVaporignore,
-      localRoot: value(.localRoot) ?? Self.defaultLocalRoot,
+      localRoot: value(.localRoot),
       cloudRoot: value(.cloudRoot),
       preIgnoreRules: value(.preIgnoreRules) ?? Self.defaultPreIgnoreRules,
       postIgnoreRules: value(.postIgnoreRules) ?? Self.defaultPostIgnoreRules,
@@ -197,7 +198,7 @@ public struct VaporConfiguration: Codable, Equatable, Sendable {
     try container.encode(autoLaunch, forKey: .autoLaunch)
     try container.encode(useGitignore, forKey: .useGitignore)
     try container.encode(useVaporignore, forKey: .useVaporignore)
-    try container.encode(localRoot, forKey: .localRoot)
+    try container.encodeIfPresent(localRoot, forKey: .localRoot)
     try container.encodeIfPresent(cloudRoot, forKey: .cloudRoot)
     try container.encode(preIgnoreRules, forKey: .preIgnoreRules)
     try container.encode(postIgnoreRules, forKey: .postIgnoreRules)

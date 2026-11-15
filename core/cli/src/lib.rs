@@ -1,4 +1,4 @@
-//! `vapor` CLI — headless-first control plane that consumes the
+//! `vapor` CLI: headless-first control plane that consumes the
 //! portable Rust runtime.
 //!
 //! The library half exposes the per-command logic so unit tests can

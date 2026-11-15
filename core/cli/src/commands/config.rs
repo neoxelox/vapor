@@ -2,8 +2,8 @@
 //!
 //! Reads / writes user-facing keys in `<vapor_dir>/vapor.json`. The
 //! shape matches the macOS Swift `VaporConfigurationStore` so both
-//! surfaces share one file. Unknown keys are preserved on every write
-//! — the CLI only touches the key it was asked to
+//! surfaces share one file. Unknown keys are preserved on every write:
+//! the CLI only touches the key it was asked to
 //! touch.
 
 use std::error::Error;
@@ -55,7 +55,8 @@ impl From<io::Error> for ConfigError {
 
 /// Result of a `get`: the persisted value, or the compiled default
 /// when the key has never been persisted. `None` for keys with no
-/// default (`deviceId` before the daemon's first run,
+/// default (the two sync roots until the user sets them, `deviceId`
+/// before the daemon's first run,
 /// `resourceLimits.concurrentTransfers` while automatic). A dotted key
 /// (`resourceLimits.cpuPercent`) reads one field of a group.
 pub fn get(path: &Path, key: &str) -> Result<Option<String>, ConfigError> {
@@ -63,17 +64,6 @@ pub fn get(path: &Path, key: &str) -> Result<Option<String>, ConfigError> {
     let document = read_or_empty_object(path)?;
     if let Some(value) = lookup(&document, &segments).filter(|value| !value.is_null()) {
         return Ok(Some(format_json_scalar(value)));
-    }
-    // The cloud root's default depends on the provider the same file
-    // selects, so it is resolved here rather than read off the struct.
-    if key == constants::config::KEY_CLOUD_ROOT {
-        let provider = document
-            .get(constants::config::KEY_PROVIDER)
-            .and_then(Value::as_str)
-            .unwrap_or(constants::provider::DEFAULT);
-        return Ok(Some(
-            constants::filtering::default_cloud_root(provider).to_string(),
-        ));
     }
     let defaults = serde_json::to_value(vapor_shared::config::VaporConfig::default())
         .map_err(|error| ConfigError::Parse(error.to_string()))?;
@@ -89,16 +79,46 @@ fn lookup<'a>(document: &'a Value, segments: &[&str]) -> Option<&'a Value> {
 }
 
 /// One line telling the user when the value takes effect, from the
-/// same key classes the daemon's live reload uses.
-pub fn apply_hint(key: &str) -> String {
+/// same key classes the daemon's live reload uses. A one-way sync mode
+/// adds what it does to the other side and that the daemon asks before
+/// it runs.
+pub fn apply_hint(key: &str, value: &str) -> String {
     let top = key.split('.').next().unwrap_or(key);
-    if constants::config::LIVE_RELOAD_KEYS.contains(&top) {
+    let mut hint = if constants::config::LIVE_RELOAD_KEYS.contains(&top) {
         format!("{key} saved; a running daemon applies it within a few seconds")
     } else if constants::config::RESTART_REQUIRED_KEYS.contains(&top) {
         format!("{key} saved; restart the daemon to apply it (vapor service restart)")
     } else {
         format!("{key} saved")
+    };
+    if let Some(warning) = one_way_warning(key, value) {
+        hint.push('\n');
+        hint.push_str(&warning);
     }
+    hint
+}
+
+/// What a one-way `syncMode` does, for the command that sets it. The
+/// mode does not run on this alone: the daemon holds the profile behind
+/// a decision until the user confirms.
+pub fn one_way_warning(key: &str, value: &str) -> Option<String> {
+    if key != constants::config::KEY_SYNC_MODE {
+        return None;
+    }
+    let effect = match vapor_shared::SyncMode::from_config_value(value)? {
+        vapor_shared::SyncMode::TwoWay => return None,
+        vapor_shared::SyncMode::PullOnly => {
+            "pull-only makes this device an exact copy of the cloud: it overwrites files that \
+             differ here and removes files that are only here"
+        }
+        vapor_shared::SyncMode::PushOnly => {
+            "push-only makes the cloud an exact copy of this device: it overwrites files that \
+             differ in the cloud and removes files that are only in the cloud"
+        }
+    };
+    Some(format!(
+        "Warning: {effect}. The profile syncs nothing until you confirm: vapor decisions list"
+    ))
 }
 
 /// Updates one key in place and keeps every other key, so the Swift
@@ -229,10 +249,18 @@ fn parse_value_for_key(key: &str, raw: &str) -> Result<Value, ConfigError> {
         })?;
         // The daemon silently ignores non-positive limits (keeps the
         // default), so storing one would leave config and behavior in
-        // permanent disagreement — reject it here.
+        // permanent disagreement: reject it here.
         if parsed < 1 {
             return Err(ConfigError::Parse(format!(
                 "'{key}' must be a positive integer, got {parsed}"
+            )));
+        }
+        // The daemon keeps at most this many: the timeline is read back
+        // in one IPC frame.
+        if parsed > constants::config::MAX_TIMELINE_LIMIT {
+            return Err(ConfigError::Parse(format!(
+                "'{key}' is at most {}, got {parsed}",
+                constants::config::MAX_TIMELINE_LIMIT
             )));
         }
         return Ok(Value::Number(parsed.into()));
@@ -313,7 +341,7 @@ fn parse_json_value<T: serde::de::DeserializeOwned>(
     Ok(value)
 }
 
-/// Enum-typed keys reject unknown values with the accepted list —
+/// Enum-typed keys reject unknown values with the accepted list,
 /// especially load-bearing for `syncMode`, whose one-way values are
 /// destructive and must never be a typo away.
 fn parse_enum_value(key: &str, raw: &str, accepted: &[&str]) -> Result<Value, ConfigError> {
@@ -362,17 +390,31 @@ mod tests {
     }
 
     #[test]
-    fn get_renders_the_cloud_root_default_for_the_selected_provider() {
+    fn setting_a_one_way_mode_says_what_it_does_and_that_the_daemon_asks_first() {
+        let pull = apply_hint("syncMode", "pull-only");
+        assert!(pull.contains("restart the daemon"), "{pull}");
+        assert!(pull.contains("removes files that are only here"), "{pull}");
+        assert!(pull.contains("vapor decisions list"), "{pull}");
+        let push = apply_hint("syncMode", "push-only");
+        assert!(
+            push.contains("removes files that are only in the cloud"),
+            "{push}"
+        );
+        assert!(!apply_hint("syncMode", "two-way").contains("Warning"));
+        assert!(!apply_hint("provider", "pull-only").contains("Warning"));
+    }
+
+    #[test]
+    fn the_sync_roots_have_no_default_until_they_are_set() {
         let temp = TempDir::new().expect("temp");
         let path = config_path(&temp);
-        assert_eq!(
-            get(&path, "cloudRoot").expect("get"),
-            Some(constants::filtering::DEFAULT_FILESYSTEM_CLOUD_ROOT.to_string())
-        );
+        assert_eq!(get(&path, "localRoot").expect("get"), None);
+        assert_eq!(get(&path, "cloudRoot").expect("get"), None);
         set(&path, "provider", "gdrive").expect("set provider");
         assert_eq!(
             get(&path, "cloudRoot").expect("get"),
-            Some(constants::filtering::DEFAULT_CLOUD_ROOT.to_string())
+            None,
+            "a provider does not choose a folder for the user"
         );
         set(&path, "cloudRoot", "/Work").expect("set root");
         assert_eq!(
@@ -495,7 +537,7 @@ mod tests {
             set(&path, "resourceLimits.boostCpuPercent", "10"),
             Err(ConfigError::UnknownKey(_))
         ));
-        assert!(apply_hint("resourceLimits.cpuPercent").contains("within a few seconds"));
+        assert!(apply_hint("resourceLimits.cpuPercent", "5").contains("within a few seconds"));
     }
 
     #[test]
@@ -579,6 +621,11 @@ mod tests {
         let temp = TempDir::new().expect("temp");
         let path = config_path(&temp);
         set(&path, "timelineLimit", "500").expect("positive accepted");
+        let too_large = set(&path, "timelineLimit", "10001").expect_err("over the maximum");
+        assert!(
+            too_large.to_string().contains("at most 10000"),
+            "{too_large}"
+        );
         for bad in ["0", "-100"] {
             let error = set(&path, "timelineLimit", bad).expect_err("non-positive rejected");
             assert!(matches!(error, ConfigError::Parse(_)), "got {error:?}");

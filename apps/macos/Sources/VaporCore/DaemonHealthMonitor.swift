@@ -4,7 +4,7 @@ import Foundation
 ///
 /// The app owns only the *timer*; each tick delegates to
 /// `DaemonLifecycleManager.checkDaemonHealth()`, which runs
-/// `vapor service check` — detection of unexpected daemon exits, crash
+/// `vapor service check`: detection of unexpected daemon exits, crash
 /// registration, backoff, and restart policy all execute in the Rust
 /// lifecycle core against durable state. When the daemon is running the
 /// tick also reads `vapor status --json`, so the UI can show what the
@@ -65,7 +65,7 @@ public final class DaemonHealthMonitor: @unchecked Sendable {
   }
 
   /// One supervision tick. Returns the outcome, or `nil` when the check
-  /// itself failed (e.g. the CLI could not be spawned) — a failed tick
+  /// itself failed (e.g. the CLI could not be spawned): a failed tick
   /// is logged and retried on the next interval, never fatal.
   @discardableResult
   public func performHealthCheck() -> ServiceHealthOutcome? {

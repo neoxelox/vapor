@@ -5,7 +5,7 @@ public enum VaporBundleLayout {
   public static let daemonExecutableName = "vapord"
   public static let cliExecutableName = "vapor"
   public static let executablesDirectoryRelativePath = "Contents/MacOS"
-  /// The `vapor` CLI cannot live in `Contents/MacOS/` — the default
+  /// The `vapor` CLI cannot live in `Contents/MacOS/`: the default
   /// macOS filesystem is case-insensitive, so `vapor` would collide
   /// with the `Vapor` app executable. It ships in `Contents/Helpers/`
   /// (the conventional home for bundled helper tools) instead.

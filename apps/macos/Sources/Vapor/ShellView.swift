@@ -57,7 +57,7 @@ struct ShellView: View {
 
   /// Shown when macOS blocks the login item: the toggle alone would
   /// claim "starts at login" while the app never launches. Follows the
-  /// HIG guidance pattern — a short explanation plus a direct path to
+  /// HIG guidance pattern: a short explanation plus a direct path to
   /// the System Settings pane that resolves it.
   @ViewBuilder
   private var loginItemApprovalHint: some View {
@@ -247,7 +247,7 @@ struct SettingsView: View {
 
   /// Shown when macOS blocks the login item: the toggle alone would
   /// claim "starts at login" while the app never launches. Follows the
-  /// HIG guidance pattern — a short explanation plus a direct path to
+  /// HIG guidance pattern: a short explanation plus a direct path to
   /// the System Settings pane that resolves it.
   @ViewBuilder
   private var loginItemApprovalHint: some View {

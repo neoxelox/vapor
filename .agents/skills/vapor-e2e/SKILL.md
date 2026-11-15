@@ -1,6 +1,6 @@
 ---
 name: vapor-e2e
-description: Runs Vapor's Tier E2E verification (the real `vapor` and `vapord` binaries, black-box through the CLI, one disposable sandbox per scenario under the repo-local `.vapor/e2e/`) through the `tools/e2e` harness, as the scripted suite, a single scenario, or a manual sandbox with a live daemon; and adds a scenario for new behaviour. Use after a feature or fix that changes daemon- or CLI-observable behaviour once `./scripts/test.sh` passes and before committing; to watch a feature work or reproduce a bug in the real product; or when a scenario must be written or a known gap flipped. Runs on the host it is built on (macOS today; daemon scenarios skip elsewhere until the native traits ship).
+description: Runs Vapor's Tier E2E verification (the real `vapor` and `vapord` binaries, black-box through the CLI, one disposable sandbox per scenario under the repo-local `.vapor/e2e/`) through the `tools/e2e` harness, as the scripted suite, a single scenario, or a manual sandbox with a live daemon; and adds a scenario for new behaviour. Use after a feature or fix that changes daemon- or CLI-observable behaviour once `./scripts/test.sh` passes and before committing; to watch a feature work or reproduce a bug in the real product; or when a scenario must be written or a known gap flipped. Runs on the host it is built on: macOS and Linux run the daemon scenarios, and Windows skips them until its native traits ship.
 license: GPL-3.0-only
 ---
 
@@ -36,7 +36,11 @@ Full process doc: `docs/development/e2e-verification.md`. Policy:
 ## Safety rules (absolute)
 
 - Everything happens inside `<repo>/.vapor/e2e/`. Never touch
-  `~/.vapor`.
+  `~/.vapor`. The harness points `HOME` at the sandbox for every
+  process it starts, and a sandbox has its own secret scope, so a
+  scenario cannot reach the real home or the real sign-in. A check
+  against older binaries that the harness did not start has no such
+  guard: never run one outside a sandbox.
 - Never pass `--full` on a developer machine: it installs a real
   LaunchAgent (the `R01` round-trip) and is for disposable CI runners.
   It refuses when a `sh.arn.vapor.daemon` LaunchAgent exists.
@@ -151,7 +155,9 @@ Things the product does on purpose that a scenario must account for:
 
 - The filesystem provider plays the cloud; the Google Drive mode waits
   on credentials and the Drive-side operations (`docs/tasks/core.md`).
-- Linux and Windows: the harness builds and runs `S01` on their CI
-  jobs; daemon scenarios skip until the native traits ship.
+- Windows: the harness builds and runs `S01` on its CI job; daemon
+  scenarios skip until the native traits ship. Linux runs them.
+- A scenario that needs a volume that folds case skips by name on one
+  that does not.
 - Long runs, random fault injection, and the no-loss model checker are
   the soak tier's job, not this one's.

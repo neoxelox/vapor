@@ -23,5 +23,7 @@ if ! swift format --help >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[swift-lint] swift format lint --recursive $SWIFT_DIR"
-swift format lint --recursive "$SWIFT_DIR"
+# --strict: without it the command prints each finding as a warning and
+# exits 0, so the step could not fail.
+echo "[swift-lint] swift format lint --strict --recursive $SWIFT_DIR"
+swift format lint --strict --recursive "$SWIFT_DIR"

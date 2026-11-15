@@ -308,8 +308,8 @@ impl BoundedEventIntentMaps {
     }
 
     /// Releases every deferred reconcile regardless of its not-before
-    /// time. Flush boost: an explicit `vapor flush` pulls
-    /// deferred work forward instead of waiting out the defer window.
+    /// time. The user's `vapor reconcile` pulls deferred work forward
+    /// instead of waiting out the defer window.
     pub fn take_all_deferred_reconcile_intents(&mut self) -> Vec<PendingIntentRecord> {
         let roots: Vec<PathBuf> = self.deferred_reconciles.keys().cloned().collect();
         let mut intents = Vec::with_capacity(roots.len());
@@ -727,7 +727,7 @@ impl BoundedEventIntentMaps {
 
     /// Records that the bounded ingest buffer dropped `dropped_count` raw
     /// fs events before they reached these maps. The dropped changes are
-    /// unknown, so the only safe repair is a whole-scope reconcile —
+    /// unknown, so the only safe repair is a whole-scope reconcile:
     /// scheduled deferred (storm discipline) since overflow implies the
     /// engine is already saturated.
     pub fn record_ingest_overflow(&mut self, dropped_count: usize, now: SystemTime) {
@@ -1292,7 +1292,7 @@ mod tests {
         ));
         assert_eq!(maps.deferred_reconcile_count(), 1);
 
-        // Flush boost: released well before the 30s not-before.
+        // The reconcile boost: released well before the 30 s not-before.
         let released = maps.take_all_deferred_reconcile_intents();
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].path, subtree_root);
@@ -1607,7 +1607,7 @@ mod tests {
             .first_detected_at;
 
         // A subtree that never goes quiet keeps pushing available_at
-        // forward — but only up to the max-deferral cap.
+        // forward, but only up to the max-deferral cap.
         for second in 3..3_000 {
             maps.record_event(fs_event(
                 subtree_root.join("a.txt"),

@@ -130,7 +130,7 @@ impl RemotePath {
 
     /// Appends exactly one path segment. A `segment` that itself contains
     /// a separator (`/` or `\`) is rejected rather than silently expanded
-    /// into multiple levels — a Drive object legally named `a/b` must not
+    /// into multiple levels: a Drive object legally named `a/b` must not
     /// become the nested path `a` → `b`.
     pub fn join(&self, segment: &str) -> Result<Self, RemotePathError> {
         if segment.contains('/') {

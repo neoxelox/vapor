@@ -1,12 +1,11 @@
-//! `CrashLoopGuard` — pure-logic crash-loop backoff policy.
+//! `CrashLoopGuard`: pure-logic crash-loop backoff policy.
 //!
-//! This is the only implementation: the Swift copy was retired, and
-//! every surface consumes this guard through the `vapor
-//! service` CLI. Defaults: `base_delay = 2s`, `max_delay = 120s`,
+//! This is the only implementation: every surface consumes this guard
+//! through the `vapor service` CLI. Defaults: `base_delay = 2s`, `max_delay = 120s`,
 //! `delay_starts_after_failures = 1`,
 //! `max_consecutive_failures_before_pause = 5`, `failure_window = 600s`.
 //!
-//! The canonical schedule with the default policy — the contract locked
+//! The canonical schedule with the default policy: the contract locked
 //! in by `core/lifecycle/tests/crash_loop_parity.rs`, per
 //! `docs/operations/macos/launchagent-policy.md`:
 //!
@@ -60,20 +59,20 @@ impl CrashLoopPolicy {
 
 impl Default for CrashLoopPolicy {
     fn default() -> Self {
-        // Defaults match Swift's `CrashLoopPolicy.default` 1:1.
+        use vapor_shared::constants::service as policy;
         Self::new(
-            Duration::from_secs(600),
-            Duration::from_secs(2),
-            Duration::from_secs(120),
-            1,
-            5,
+            Duration::from_secs(policy::CRASH_LOOP_WINDOW_SECONDS),
+            Duration::from_secs(policy::CRASH_LOOP_BASE_DELAY_SECONDS),
+            Duration::from_secs(policy::CRASH_LOOP_MAX_DELAY_SECONDS),
+            policy::CRASH_LOOP_FREE_RESTARTS,
+            policy::CRASH_LOOP_PAUSE_AFTER_CRASHES,
         )
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CrashLoopDecision {
-    /// First crash within the window — restart immediately.
+    /// First crash within the window: restart immediately.
     NoDelay,
     /// Wait at least `Duration` before the next restart attempt.
     Backoff(Duration),
@@ -104,9 +103,9 @@ impl CrashLoopGuard {
     /// `last_crash_elapsed` is how long before `now` the most recent
     /// crash happened. Reconstruction replays `consecutive_crashes`
     /// registrations at that moment, so the backoff deadline and pause
-    /// flag are derived by the same code path that produced them
-    /// originally. All persisted crashes collapse onto the last crash
-    /// instant — they age out of the failure window together, which is
+    /// flag are derived by the same code path that produced them at
+    /// the time. All persisted crashes collapse onto the last crash
+    /// instant: they age out of the failure window together, which is
     /// the conservative direction: a restart never shortens a backoff
     /// that was already in force.
     pub fn restore(
@@ -146,7 +145,7 @@ impl CrashLoopGuard {
     }
 
     /// Records a crash at `now` and returns the resulting backoff
-    /// decision. Mirrors `CrashLoopGuard.registerCrash(at:)` in Swift.
+    /// decision.
     pub fn register_crash(&mut self, now: Instant) -> CrashLoopDecision {
         self.prune_failures(now);
         self.failure_moments.push(now);
@@ -189,8 +188,7 @@ impl CrashLoopGuard {
         }
     }
 
-    /// User-driven exit from the paused state. Mirrors
-    /// `acknowledgeAndResume()` in Swift.
+    /// User-driven exit from the paused state.
     pub fn acknowledge_and_resume(&mut self) {
         self.paused_indefinitely = false;
         self.failure_moments.clear();
@@ -240,10 +238,10 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_matches_swift_baseline() {
-        // Verbatim port: the retired Swift `CrashLoopPolicy.default` was
-        // (600 s, 2 s, 120 s, 1, 5). Drift here means surfaces would
-        // disagree on backoff, so guard the constants explicitly.
+    fn the_default_policy_is_the_documented_one() {
+        // (600 s, 2 s, 120 s, 1, 5), as the LaunchAgent policy document
+        // states it. Every surface shows these numbers, so a drift here
+        // makes the surfaces and the document disagree.
         let policy = CrashLoopPolicy::default();
         assert_eq!(policy.failure_window, Duration::from_secs(600));
         assert_eq!(policy.base_delay, Duration::from_secs(2));
@@ -311,8 +309,7 @@ mod tests {
         let decision = guard.register_crash(t0 + Duration::from_secs(2));
         assert_eq!(decision, CrashLoopDecision::Paused);
         assert!(guard.is_paused_indefinitely());
-        // While paused, `remaining_delay` is `Duration::MAX` (the Rust
-        // analogue of Swift's `.infinity`).
+        // While paused, `remaining_delay` is `Duration::MAX`: no end.
         assert_eq!(
             guard.remaining_delay(t0 + Duration::from_secs(3_600)),
             Duration::MAX
@@ -358,7 +355,7 @@ mod tests {
             guard.register_crash(t0 + Duration::from_secs(1)),
             CrashLoopDecision::NoDelay
         );
-        // 20 seconds later — both prior crashes are outside the 10 s
+        // 20 seconds later, both prior crashes are outside the 10 s
         // window. The new crash starts the count fresh.
         assert_eq!(
             guard.register_crash(t0 + Duration::from_secs(20)),

@@ -28,11 +28,17 @@ Full checklist with acceptance criteria:
   cursor, or `CursorExpired`; the engine persists the cursor only after
   the page's intents are durable and re-baselines on expiry. Never
   return an empty cursor as "no change".
+- **Capabilities.** Two flags, both honest: `supports_remote_changes_feed`
+  and `supports_server_side_move`. Write preconditions are not a flag:
+  every backend honours them.
 - **Transfers.** `begin_upload` / `begin_download` return a
   `TransferSession`; each `step(max_bytes)` moves a bounded budget and
-  reports `Progressed` or `Completed`. A step that moves zero bytes on a
-  non-empty range must fail as transient, not report progress. Uploads
-  honour `RemotePrecondition` (keep-both safety).
+  reports `Progressed` or `Completed`. The session names its own step
+  size (`step_bytes`) and what is left when it knows (`remaining_bytes`).
+  A step that moves zero bytes on a non-empty range must fail as
+  transient, not report progress. Uploads honour `RemotePrecondition`
+  (keep-both safety). A completed upload reports the hash of the bytes
+  the backend stored, checked against the hash of what was sent.
 - **Root identity and moves.** `root_identity` reports a stable
   identity for the cloud root (a marker file the provider writes at
   `adopt_root`, or the backend's folder id) and never creates the root;
@@ -44,11 +50,14 @@ Full checklist with acceptance criteria:
   mtime when the backend has one.
 - **Errors.** Map every failure to `ProviderErrorKind` (`Transient`,
   `RateLimited { retry_after }`, `Authentication`, `PreconditionFailed`,
-  `NotFound`, `Permanent`). The retry policy never parses messages.
-  Authentication errors name the command the user must run.
-- **Secrets.** Tokens only through `vapor_platform::SecretStore`, keyed
+  `NotFound`, `CloudRootUnavailable`, `StorageFull`, `Permanent`). The
+  retry policy never parses messages. Authentication errors name the
+  command the user must run. `StorageFull` is "the cloud has no room":
+  uploads wait and downloads go on.
+- **Secrets.** Tokens only through `vapor_platform::SecretStore`, opened
+  with `open_store` so the runtime directory's scope applies, keyed
   `auth.<profile>.<provider>.token`; never in `vapor.json`, the state DB,
-  logs, or support reports.
+  logs, support reports, or a command line.
 - **Threads.** Provider calls run on worker threads; a provider must be
   `Send + Sync` and must not hold locks across network calls.
 
@@ -61,13 +70,15 @@ Full checklist with acceptance criteria:
   network.
 - Add the provider to `core/providers/tests/provider_contract.rs` when
   it can run against an in-memory backend.
-- e2e stays on the filesystem provider; a live-account tier is a
-  separate, explicitly gated future.
+- e2e stays on the filesystem provider by default. `./scripts/e2e.sh
+  --provider gdrive` is a leg of the release gate, run by hand with a
+  dedicated test account, never by an agent on its own
+  (`AGENTS.md` §9.8).
 
 ## Docs and surfaces
 
 - `provider::ALL` in `core/shared/src/constants.rs` and the Swift
   `Provider` mirror, so `provider = "<kind>"` validates and displays.
 - `select_provider_for_profile` in `core/providers/src/lib.rs`.
-- Root `README.md` **Cloud Providers** row; `core/providers/README.md`;
+- Root `README.md` **Providers** row; `core/providers/README.md`;
   the onboarding and auth-operations docs; `CHANGELOG.md`.

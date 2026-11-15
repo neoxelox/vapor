@@ -108,7 +108,7 @@ impl StormDetector {
         // per-directory counts at the root would compact the *entire*
         // sync scope for any moderately parallel workload (600 events
         // anywhere in the tree within 2 s), while whole-root compaction
-        // is exactly what the separate — and much higher — global
+        // is exactly what the separate (and much higher) global
         // pending threshold governs.
         if let Some(start) = path.parent() {
             for ancestor in start.ancestors() {
@@ -188,7 +188,7 @@ impl StormDetector {
     /// of on every event: per-event pruning made a burst quadratic in the
     /// number of active directories (every event iterated every window).
     /// Individual windows still self-prune on each `observe`, so the
-    /// thresholds themselves never see stale entries — this pass only
+    /// thresholds themselves never see stale entries: this pass only
     /// reclaims memory for directories that went quiet.
     fn maybe_prune_inactive_windows(&mut self, observed_at: SystemTime) {
         let due = match self.last_global_prune {
@@ -214,7 +214,7 @@ impl StormDetector {
 /// One stable 64-bit fingerprint per event path: the unique-path
 /// windows count fingerprints instead of storing full `PathBuf` clones
 /// per ancestor level. A hash collision merely undercounts unique paths
-/// by one — harmless for a storm heuristic.
+/// by one: harmless for a storm heuristic.
 fn hash_path(path: &Path) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     path.hash(&mut hasher);
@@ -429,10 +429,10 @@ mod tests {
 
     #[test]
     fn spread_out_events_across_subdirectories_do_not_compact_the_watch_root() {
-        // A parallel build touching a few files in many unrelated
-        // directories used to roll up into the watch-root window and
-        // compact the whole scope. The per-directory thresholds now apply
-        // strictly below the root.
+        // A parallel build touches a few files in many unrelated
+        // directories. The per-directory thresholds apply strictly
+        // below the root, so that spread never rolls up into the
+        // watch-root window and compacts the whole scope.
         let watch_root = PathBuf::from("/tmp/vapor-root");
         let mut detector = StormDetector::with_thresholds(
             watch_root.clone(),

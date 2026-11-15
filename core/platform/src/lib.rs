@@ -48,7 +48,10 @@ pub use metrics::{
     StaticPlatformMetricsSampler, ThrottleInputs,
 };
 pub use process::{NativeProcessSupervisor, NoopProcessSupervisor, ProcessSupervisor};
-pub use secrets::{InMemorySecretStore, NativeSecretStore, SecretStore, SecretStoreError};
+pub use secrets::{
+    InMemorySecretStore, NativeSecretStore, ScopedSecretStore, SecretAccess, SecretStore,
+    SecretStoreError, open_store,
+};
 pub use service::{
     InMemoryServiceInstaller, NativeServiceInstaller, ServiceDescriptor, ServiceInstallError,
     ServiceInstaller, ServiceStatus,

@@ -5,7 +5,7 @@
 //! mirror actions, reconcile completions, feed-cursor expiry) and the
 //! IPC `Timeline` endpoint reads a snapshot. The buffer is bounded by
 //! the `timelineLimit` config key (default 1000): when full, the
-//! oldest entries fall off — diagnostics favor recency.
+//! oldest entries fall off: diagnostics favor recency.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -54,7 +54,8 @@ impl TimelineBuffer {
         let max_entries = usize::try_from(limit)
             .ok()
             .filter(|value| *value > 0)
-            .unwrap_or(constants::config::DEFAULT_TIMELINE_LIMIT as usize);
+            .unwrap_or(constants::config::DEFAULT_TIMELINE_LIMIT as usize)
+            .min(constants::config::MAX_TIMELINE_LIMIT as usize);
         Self::new(max_entries)
     }
 
@@ -95,7 +96,7 @@ impl TimelineBuffer {
     /// floor keeps the timeline useful even when squeezed.
     pub fn set_max_entries(&self, max_entries: usize) {
         let mut inner = self.lock();
-        inner.max_entries = max_entries.clamp(64, usize::MAX);
+        inner.max_entries = max_entries.clamp(64, constants::config::MAX_TIMELINE_LIMIT as usize);
         while inner.entries.len() > inner.max_entries {
             inner.entries.pop_front();
         }

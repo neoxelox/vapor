@@ -13,7 +13,7 @@ macOS-specific signing, notarization, and `launchd` policy are recorded.
 - **Changing LaunchAgent behavior or touching the crash-loop contract?**
   `launchagent-policy.md` is the authoritative policy; any code change
   must stay aligned with it. Crash-loop policy itself lives in
-  `core/lifecycle` — this doc describes how macOS is expected to
+  `core/lifecycle`: this doc describes how macOS is expected to
   interact with that policy via `launchd`.
 - **Debugging an unclean daemon exit?** `launchagent-policy.md` §
   Validation lists the scenarios and expected behavior
@@ -21,10 +21,10 @@ macOS-specific signing, notarization, and `launchd` policy are recorded.
 
 ## Documents
 
-- `launchagent-policy.md` — `launchd` plist policy for the `vapord`
+- `launchagent-policy.md`: `launchd` plist policy for the `vapord`
   per-user LaunchAgent (`sh.arn.vapor.daemon`), interaction contract
   with the Rust-backed `CrashLoopGuard`, and the validation scenarios.
-- `distribution-trust-chain.md` — required controls for macOS release
+- `distribution-trust-chain.md`: required controls for macOS release
   artifacts: code signing (Developer ID), hardened runtime,
   notarization, entitlement review; `release-macos` GitHub Environment
   secret policy.

@@ -9,7 +9,7 @@ triggers them, and which ones gate a release.
 - **Adding a new workflow or modifying an existing one?** Read
   `overview.md` first for the trigger policy and toolchain defaults.
 - **Touching branch protection or renaming a matrix leg?** Use
-  `required-checks.md` — it records the live `main` ruleset (the nine
+  `required-checks.md`: it records the live `main` ruleset (the nine
   required checks, bypass policy, and the command to recreate it) and
   which gates are release-only.
 - **Running the same validation locally?** Every CI workflow runs the
@@ -18,38 +18,41 @@ triggers them, and which ones gate a release.
 
 ## Documents
 
-- `overview.md` — workflow catalog (`lint.yml`, `test.yml`, `build.yml`,
+- `overview.md`: workflow catalog (`lint.yml`, `test.yml`, `build.yml`,
   `perf.yml`, `soak.yml`, `release.yml`), triggers (`pull_request`,
   `push` to `main`, `workflow_call`, `workflow_dispatch`, `v*` tags),
   toolchain defaults (`macos-latest`,
   latest-stable Xcode/Swift, stable Rust), pinned CI action versions,
   dependency caching strategy.
-- `required-checks.md` — the `main` ruleset (`lint`, `test`, and
+- `required-checks.md`: the `main` ruleset (`lint`, `test`, and
   `build` × macOS/Linux/Windows required on `main`; `perf` and `soak`
   release-only), how to inspect and recreate it, the squash-only merge
   method, workflow-to-script mapping, local-parity command set.
 
 ## Test tier model
 
-Testing runs in three tiers. Authoritative definition:
+Testing runs in four tiers. Authoritative definition:
 `docs/architecture/testing-strategy.md §CI tier execution`.
 
-- **Tier 1** — `lint.yml` + `test.yml` + `build.yml` (runs on every PR;
-  required checks on `main` via the `main` ruleset). Unit + integration + platform-trait contract +
-  property + snapshot + guard-rail timing tests. **Budget: under
-  5 minutes per OS on CI.** If a change pushes this past the budget,
-  split slow tests out to Tier 2 or make them faster.
-- **Tier 2** — `perf.yml` (release gate, invoked by `release.yml`, and
-  `workflow_dispatch` for a run by hand; no schedule). Performance SLO
-  tests, long-running property cases (higher case counts), fuzz
-  corpora, `loom`-backed concurrency tests. **Not a PR gate.**
-- **Tier S** — `soak.yml` (release gate, invoked by `release.yml`, and
+- **Tier 1**: `./scripts/test.sh` in `test.yml` (runs on every PR; a
+  required check on `main` via the `main` ruleset, next to `lint.yml`
+  and `build.yml`). Unit + integration + platform-trait contract +
+  property + shape-lock + guard-rail timing tests. **Budget: under
+  5 minutes per OS on CI for the run; the script builds first and
+  does not count the compiler.** If a change pushes this past the
+  budget, split slow tests out to Tier 2 or make them faster.
+- **Tier 2**: `perf.yml` (release gate, invoked by `release.yml`, and
+  `workflow_dispatch` for a run by hand; no schedule). One soak cell
+  against the release profile with the SLO checks on its report. Long
+  property cases, fuzz targets, and `loom` tests are open work and
+  join this tier when they exist. **Not a PR gate.**
+- **Tier S**: `soak.yml` (release gate, invoked by `release.yml`, and
   `workflow_dispatch` for a run by hand; no schedule). Five soak cells
   across sync modes, loads, faults, and throttle walks, on macOS and
   Linux (the disk-full cell on macOS only), each 45 minutes of seeded
   churn against the real binaries with the no-loss oracle after every
   phase. **Not a PR gate.**
-- **Tier E2E** — `./scripts/e2e.sh` at the end of every `test.yml`
+- **Tier E2E**: `./scripts/e2e.sh` at the end of every `test.yml`
   job, `--full` on the macOS one (every PR; part of the required
   `test` check). Black-box run of the real `vapor` + `vapord` binaries
   in a sandbox under the repo-local `.vapor/e2e/`: the daemon
@@ -82,5 +85,5 @@ pipeline's `package` job is a matrix too, one entry per shipping
 platform, each under its own protected GitHub Environment
 (`release-macos` in the matrix today; `release-windows` and
 `release-linux` exist with the same protection and join when those
-surfaces ship), feeding one `publish` job — see
+surfaces ship), feeding one `publish` job, see
 `docs/operations/release-process.md`.

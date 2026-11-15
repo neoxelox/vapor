@@ -4,8 +4,8 @@
 //!
 //! - **Per-profile isolation**: each profile owns its `DaemonRuntime`
 //!   (debounce, scheduler, executor, echo caches) and its own durable
-//!   state DB (`state/profiles/<id>/vapor.sqlite`; the implicit
-//!   `default` profile keeps the legacy path).
+//!   state DB (`state/profiles/<id>/vapor.sqlite`; the `default`
+//!   profile's sits in `state/` itself).
 //! - **Deduplicated watches**: one fs watcher per distinct
 //!   canonical local root; the raw callback fans events out into each
 //!   matching profile's bounded ingest recorder, tagged implicitly by
@@ -16,11 +16,9 @@
 //!   multiply the daemon's device impact.
 //! - **Blast-radius containment**: each profile ticks under a
 //!   panic catcher and its own consecutive-error budget; a failed
-//!   profile suspends only its own queue. (With the release profile's
-//!   `panic = "abort"` a panic still ends the process — there the
-//!   process-level crash-loop guard takes over; the catcher gives
-//!   containment in dev/test builds and against `Err` returns
-//!   everywhere.)
+//!   profile suspends only its own queue and is composed again with
+//!   a backoff. Release builds unwind on panic, so the catcher holds
+//!   there too.
 
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -95,6 +93,35 @@ struct ProfileSlot {
     /// The local root this profile waits for. The slot is a placeholder
     /// composed again when the folder returns or is re-created.
     missing_root: Option<PathBuf>,
+    /// Set when the runtime suspended the profile: when to compose it
+    /// again, and how many times that was tried.
+    runtime_retry: Option<RuntimeRetry>,
+    /// Set on a profile that was composed again after a suspension,
+    /// until it ran without a failure for the wait it had reached. A
+    /// profile that composes and then fails the same way would
+    /// otherwise start from the shortest wait every time, and each
+    /// attempt opens a database and builds a filter on the tick thread.
+    relapse: Option<Relapse>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RuntimeRetry {
+    attempts: usize,
+    at: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Relapse {
+    /// The attempts the next suspension starts from.
+    attempts: usize,
+    /// From here on the profile counts as healthy again.
+    forgiven_at: Instant,
+}
+
+/// The wait before the next attempt to compose a suspended profile.
+fn suspended_profile_retry_delay(attempts: usize) -> Duration {
+    let waits = constants::engine::SUSPENDED_PROFILE_RETRY_SECONDS;
+    Duration::from_secs(waits[attempts.min(waits.len() - 1)])
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -122,7 +149,6 @@ pub struct MultiProfileRuntime {
     external_control: Option<Arc<RuntimeControl>>,
     status_publisher: Option<Arc<dyn StatusPublisher>>,
     timeline: Arc<crate::timeline::TimelineBuffer>,
-    auto_tuner: crate::auto_tune::AutoTuner,
     clock: SharedClock,
     tick_interval: Duration,
     idle_tick_interval: Duration,
@@ -130,7 +156,11 @@ pub struct MultiProfileRuntime {
     /// mismatch marks the published snapshot stale.
     last_published_slot_states: Vec<SlotStateFingerprint>,
     last_status_publish_inst: Option<Instant>,
-    /// Whether the previous tick reported pending work — publishes one
+    /// When the trash of the profiles that do not run was last purged,
+    /// and the purge in flight.
+    last_other_trash_purge_inst: Option<Instant>,
+    other_trash_purge: Option<crate::provider_jobs::ProviderCall<usize>>,
+    /// Whether the previous tick reported pending work: publishes one
     /// trailing snapshot after work quiets so final counts land.
     last_any_pending_work: bool,
     /// Daemon-wide resource budget shared by every profile runtime; kept
@@ -149,6 +179,14 @@ pub struct MultiProfileRuntime {
     composer: SlotComposer,
     watchers_enabled: bool,
     last_missing_root_check_inst: Option<Instant>,
+    /// Provider I/O runs on worker threads; a profile composed later
+    /// gets the same.
+    transfer_workers: bool,
+    /// The user paused the daemon and did not resume it yet.
+    paused_by_user: bool,
+    /// What stops `vapor.json` from giving the profiles it means to,
+    /// for the status of a daemon with no profile.
+    config_problems: Vec<String>,
 }
 
 /// The cheap observable state of one profile: enough to detect that a
@@ -216,15 +254,43 @@ impl MultiProfileRuntime {
     /// bootstrap calls this once after composition; tests keep the
     /// deterministic inline mode by not calling it.
     pub fn enable_transfer_workers(&mut self) {
+        self.transfer_workers = true;
         let waker = self.tick_waker.clone();
         for slot in &mut self.slots {
             slot.runtime.enable_transfer_workers(Some(waker.clone()));
         }
     }
 
+    /// What stops the configuration from giving its profiles; shown in
+    /// status when the daemon has none.
+    pub fn set_config_problems(&mut self, problems: Vec<String>) {
+        self.config_problems = problems;
+    }
+
+    /// Gives a profile composed while the daemon runs what the ones
+    /// composed at start got from the bootstrap.
+    fn finish_late_slot(&self, slot: &mut ProfileSlot) {
+        if self.transfer_workers && slot.failed.is_none() {
+            slot.runtime
+                .enable_transfer_workers(Some(self.tick_waker.clone()));
+        }
+        // `vapor pause` is for the whole daemon. A profile that joins
+        // while it holds starts paused, like the ones that were there.
+        if self.paused_by_user {
+            slot.control.request_pause();
+        }
+    }
+
+    /// Fixes the link capacity for every profile instead of measuring
+    /// it. The daemon uses it to honour `VAPOR_THROTTLE_INPUTS=static`.
+    pub fn pin_link_capacity_kbps(&mut self, kbps: u32) {
+        self.composer.shared_bandwidth.pin_capacity_kbps(kbps);
+    }
+
     /// Replaces the idle source every profile runtime consults for idle
     /// boost. The daemon uses it to honour `VAPOR_THROTTLE_INPUTS=static`.
     pub fn set_idle_notifier(&mut self, notifier: Arc<dyn vapor_platform::IdleNotifier>) {
+        self.composer.idle_notifier = notifier.clone();
         for slot in &mut self.slots {
             slot.runtime.set_idle_notifier(notifier.clone());
         }
@@ -273,15 +339,12 @@ impl MultiProfileRuntime {
             initial_caps(initial_state),
         )));
         // Daemon-wide resource management: one budget,
-        // one bandwidth shaper, one tuned step knob for every profile.
+        // one bandwidth shaper for every profile.
         let concurrent_transfers = budget_config.concurrent_transfers;
         let shared_budget = Arc::new(Mutex::new(crate::resource_budget::ResourceBudget::new(
             budget_config,
         )));
-        let shared_shaper = Arc::new(Mutex::new(vapor_providers::BandwidthShaper::unlimited()));
-        let shared_step = Arc::new(std::sync::atomic::AtomicU64::new(
-            constants::engine::TRANSFER_STAGE_STEP_BYTES,
-        ));
+        let shared_bandwidth = Arc::new(crate::bandwidth::TransferBandwidth::default());
         let idle_notifier: Arc<dyn vapor_platform::IdleNotifier> =
             Arc::new(vapor_platform::NativeIdleNotifier::for_current_host());
 
@@ -294,8 +357,7 @@ impl MultiProfileRuntime {
             shared_workgate,
             timeline: timeline.clone(),
             shared_budget: shared_budget.clone(),
-            shared_shaper,
-            shared_step: shared_step.clone(),
+            shared_bandwidth,
             idle_notifier,
             concurrent_transfers,
             mass_delete_settings,
@@ -304,9 +366,7 @@ impl MultiProfileRuntime {
         };
         let mut slots = Vec::new();
         for profile in profiles.into_iter().filter(|profile| profile.enabled) {
-            if let Some(slot) = compose_slot(&mut composer, profile, now) {
-                slots.push(slot);
-            }
+            slots.push(compose_slot(&mut composer, profile, now));
         }
 
         let watchers = if start_watchers {
@@ -322,12 +382,13 @@ impl MultiProfileRuntime {
             external_control: None,
             status_publisher: None,
             timeline,
-            auto_tuner: crate::auto_tune::AutoTuner::new(shared_step),
             clock,
             tick_interval: Duration::from_millis(constants::engine::DEBOUNCE_TICK_MILLIS),
             idle_tick_interval: Duration::from_millis(constants::engine::IDLE_TICK_MILLIS),
             last_published_slot_states: Vec::new(),
             last_status_publish_inst: None,
+            last_other_trash_purge_inst: None,
+            other_trash_purge: None,
             last_any_pending_work: false,
             shared_budget,
             config_reloader: None,
@@ -337,6 +398,9 @@ impl MultiProfileRuntime {
             composer,
             watchers_enabled: start_watchers,
             last_missing_root_check_inst: None,
+            transfer_workers: false,
+            paused_by_user: false,
+            config_problems: Vec::new(),
         })
     }
 
@@ -362,34 +426,27 @@ impl MultiProfileRuntime {
                 continue;
             };
             let profile = self.slots[index].profile.clone();
-            let recreate = self.recreate_answered(&profile.id, &root, now);
-            if recreate {
-                if let Err(error) = std::fs::create_dir_all(&root) {
+            // `recreate` answered: the re-created folder becomes the
+            // root, with a fresh marker and a merge that deletes
+            // nothing. The merge flag goes first and the decision is
+            // marked applied last, and the first failure stops the
+            // attempt: a folder re-created without the flag would be
+            // read as "everything was deleted" by the next walk.
+            let recreate = match self.recreate_local_root(&profile.id, &root, now) {
+                Ok(recreated) => recreated,
+                Err(error) => {
                     logging::warning(
-                        "Could not re-create the local root",
+                        "Could not re-create the local root; trying again later",
                         &[
                             ("profile_id", profile.id.clone()),
                             ("path", root.display().to_string()),
-                            ("error", error.to_string()),
+                            ("error", error),
                         ],
                     );
                     continue;
                 }
-                // The re-created folder becomes the root: a fresh
-                // marker, and a merge that deletes nothing.
-                if let Ok(mut state_db) =
-                    DurableStateDb::open(self.composer.database_path(&profile.id))
-                {
-                    let _ = crate::root_identity::reattach_local(
-                        &mut state_db,
-                        &root,
-                        &self.composer.device_id,
-                        now,
-                    );
-                    let _ =
-                        state_db.set_state(constants::state::MERGE_WITHOUT_DELETIONS_KEY, "1", now);
-                }
-            } else if !root.is_dir() {
+            };
+            if !recreate && !root.is_dir() {
                 continue;
             }
             logging::info(
@@ -400,9 +457,8 @@ impl MultiProfileRuntime {
                     ("recreated", recreate.to_string()),
                 ],
             );
-            let Some(mut slot) = compose_slot(&mut self.composer, profile.clone(), now) else {
-                continue;
-            };
+            let mut slot = compose_slot(&mut self.composer, profile.clone(), now);
+            self.finish_late_slot(&mut slot);
             if slot.missing_root.is_none() {
                 if let Ok(mut state_db) =
                     DurableStateDb::open(self.composer.database_path(&profile.id))
@@ -431,36 +487,124 @@ impl MultiProfileRuntime {
         }
     }
 
-    /// Whether the profile's `root-missing` decision for `root` was
-    /// answered `recreate` and not yet applied; marks it applied.
-    fn recreate_answered(&self, profile_id: &str, root: &Path, now: SystemTime) -> bool {
-        let Ok(mut state_db) = DurableStateDb::open(self.composer.database_path(profile_id)) else {
-            return false;
+    /// Applies a `recreate` answer to the profile's `root-missing`
+    /// decision for `root`, when there is one that was not applied yet.
+    /// `Ok(true)` when the folder was re-created.
+    fn recreate_local_root(
+        &self,
+        profile_id: &str,
+        root: &Path,
+        now: SystemTime,
+    ) -> Result<bool, String> {
+        let mut state_db = DurableStateDb::open(self.composer.database_path(profile_id))
+            .map_err(|error| format!("cannot open the state database: {error}"))?;
+        let answered = state_db
+            .resolved_unapplied_decisions()
+            .map_err(|error| format!("cannot read the decisions: {error}"))?
+            .into_iter()
+            .find(|decision| {
+                decision.kind == crate::root_identity::MISSING_DECISION_KIND
+                    && decision.path.as_deref() == Some(root)
+                    && decision.choice.as_deref() == Some(crate::root_identity::OPTION_RECREATE)
+            });
+        let Some(decision) = answered else {
+            return Ok(false);
         };
-        let Ok(resolved) = state_db.resolved_unapplied_decisions() else {
-            return false;
-        };
-        let answered = resolved.into_iter().find(|decision| {
-            decision.kind == crate::root_identity::MISSING_DECISION_KIND
-                && decision.path.as_deref() == Some(root)
-                && decision.choice.as_deref() == Some(crate::root_identity::OPTION_RECREATE)
-        });
-        match answered {
-            Some(decision) => {
-                let _ = state_db.mark_decision_applied(decision.id, now);
-                self.timeline.push(
-                    constants::timeline::KIND_DECISION,
-                    profile_id.to_string(),
-                    format!(
-                        "Decision {} (root-missing) recreate: re-creating {} and merging without deletions",
-                        decision.id,
-                        root.display()
-                    ),
-                    now,
-                );
-                true
+        state_db
+            .set_state(constants::state::MERGE_WITHOUT_DELETIONS_KEY, "1", now)
+            .map_err(|error| format!("cannot set the merge flag: {error}"))?;
+        std::fs::create_dir_all(root)
+            .map_err(|error| format!("cannot create the folder: {error}"))?;
+        crate::root_identity::reattach_local(&mut state_db, root, &self.composer.device_id, now)
+            .map_err(|error| format!("cannot record the new root: {error}"))?;
+        state_db
+            .mark_decision_applied(decision.id, now)
+            .map_err(|error| format!("cannot mark the decision applied: {error}"))?;
+        self.timeline.push(
+            constants::timeline::KIND_DECISION,
+            profile_id.to_string(),
+            format!(
+                "Decision {} (root-missing) recreate: re-created {} and merging without deletions",
+                decision.id,
+                root.display()
+            ),
+            now,
+        );
+        Ok(true)
+    }
+
+    /// Composes again each profile that the runtime suspended, when its
+    /// wait is over. A profile that fails again waits longer.
+    fn retry_suspended_profiles(&mut self, now: SystemTime) {
+        let now_inst = self.clock.now();
+        let mut recomposed = false;
+        for index in 0..self.slots.len() {
+            let Some(retry) = self.slots[index].runtime_retry else {
+                continue;
+            };
+            if now_inst < retry.at {
+                continue;
             }
-            None => false,
+            let profile = self.slots[index].profile.clone();
+            let mut slot = compose_slot(&mut self.composer, profile.clone(), now);
+            self.finish_late_slot(&mut slot);
+            match slot {
+                // Running again, or parked on a missing root, which has
+                // its own way back.
+                slot if slot.failed.is_none() || slot.missing_root.is_some() => {
+                    logging::info(
+                        "Composed a suspended profile again",
+                        &[
+                            ("profile_id", profile.id.clone()),
+                            ("attempt", (retry.attempts + 1).to_string()),
+                        ],
+                    );
+                    self.timeline.push(
+                        constants::timeline::KIND_PROFILE,
+                        profile.id.clone(),
+                        "profile composed again after a runtime failure",
+                        now,
+                    );
+                    let attempts = retry.attempts + 1;
+                    self.slots[index] = slot;
+                    self.slots[index].relapse = Some(Relapse {
+                        attempts,
+                        forgiven_at: now_inst + suspended_profile_retry_delay(attempts),
+                    });
+                    recomposed = true;
+                }
+                still_failing => {
+                    let attempts = retry.attempts + 1;
+                    let wait = suspended_profile_retry_delay(attempts);
+                    if let Some(reason) = still_failing.failed {
+                        self.slots[index].failed = Some(reason);
+                    }
+                    self.slots[index].runtime_retry = Some(RuntimeRetry {
+                        attempts,
+                        at: now_inst + wait,
+                    });
+                    logging::warning(
+                        "A suspended profile could not be composed again",
+                        &[
+                            ("profile_id", profile.id.clone()),
+                            ("attempt", attempts.to_string()),
+                            ("next_attempt_in_seconds", wait.as_secs().to_string()),
+                        ],
+                    );
+                }
+            }
+        }
+        if recomposed {
+            self.last_published_slot_states.clear();
+            if self.watchers_enabled {
+                // New watchers for every live profile before the old
+                // ones go: the old ones feed the recorder of the
+                // runtime that was replaced. The overlap gives a few
+                // duplicate events, which coalesce; a gap would lose
+                // some.
+                let watchers = start_deduplicated_watchers(&mut self.slots, &self.tick_waker);
+                self._watchers = watchers;
+            }
         }
     }
 
@@ -495,6 +639,9 @@ impl MultiProfileRuntime {
         {
             let budget = crate::resource_budget::EffectiveBudgetConfig::resolve(&config);
             let ceiling = budget.concurrent_transfers;
+            // A profile composed later starts from the settings that
+            // hold now, not from the ones the daemon started with.
+            self.composer.concurrent_transfers = ceiling;
             self.shared_budget
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -527,6 +674,7 @@ impl MultiProfileRuntime {
             )
         }) {
             let options = EventPathFilterOptions::from_config(&config);
+            self.composer.filter_options = options.clone();
             let mut seen: Vec<*const crate::fs_events::SharedEventPathFilter> = Vec::new();
             for slot in &self.slots {
                 if let Some(filter) = slot.runtime.shared_path_filter() {
@@ -554,7 +702,47 @@ impl MultiProfileRuntime {
                 self.clock.now_system(),
             );
         }
-        for key in change.restart {
+        // The first sync scope composes without a restart: no profile
+        // runs yet (there is none, or each one is waiting for the
+        // configuration to be completed), so there is nothing to
+        // reshape.
+        let scope_keys = [
+            keys::KEY_PROFILES,
+            keys::KEY_LOCAL_ROOT,
+            keys::KEY_CLOUD_ROOT,
+            keys::KEY_PROVIDER,
+            keys::KEY_SYNC_MODE,
+        ];
+        let mut restart = change.restart;
+        let nothing_runs = self.slots.iter().all(|slot| slot.profile.invalid.is_some());
+        if nothing_runs && restart.iter().any(|key| scope_keys.contains(key)) {
+            let set = crate::profiles::resolve_profile_set_from(&config);
+            self.config_problems = set.problems;
+            self.slots.clear();
+            let now = self.clock.now_system();
+            for profile in set.profiles.into_iter().filter(|profile| profile.enabled) {
+                logging::info(
+                    "Composing a profile from the new configuration",
+                    &[("profile_id", profile.id.clone())],
+                );
+                self.timeline.push(
+                    constants::timeline::KIND_PROFILE,
+                    profile.id.clone(),
+                    "profile composed from the new configuration",
+                    now,
+                );
+                let mut slot = compose_slot(&mut self.composer, profile, now);
+                self.finish_late_slot(&mut slot);
+                self.slots.push(slot);
+            }
+            if self.watchers_enabled {
+                let watchers = start_deduplicated_watchers(&mut self.slots, &self.tick_waker);
+                self._watchers = watchers;
+            }
+            restart.retain(|key| !scope_keys.contains(key));
+            self.last_published_slot_states.clear();
+        }
+        for key in restart {
             if !self.restart_required.contains(&key) {
                 self.restart_required.push(key);
             }
@@ -620,26 +808,93 @@ impl MultiProfileRuntime {
             .map(|slot| &mut slot.runtime)
     }
 
+    /// Purges the trash of every profile that has no runtime to do it:
+    /// one that is disabled, one that is suspended, one that left
+    /// `vapor.json`. Same cadence and same retention as a running
+    /// profile's own purge, on a worker.
+    fn purge_other_trash_if_due(&mut self, now: SystemTime) {
+        if let Some(purged) = self.other_trash_purge.as_mut().and_then(|call| call.take()) {
+            self.other_trash_purge = None;
+            match purged {
+                Ok(0) => {}
+                Ok(purged) => logging::info(
+                    "Purged expired trash entries of profiles that do not run",
+                    &[("purged", purged.to_string())],
+                ),
+                Err(panic) => logging::warning(
+                    "The trash purge failed; it runs again at the next interval",
+                    &[("error", panic)],
+                ),
+            }
+        }
+        let settings = self.composer.trash_settings;
+        if !settings.enabled || self.other_trash_purge.is_some() {
+            return;
+        }
+        let now_inst = self.clock.now();
+        let interval = Duration::from_secs(constants::trash::PURGE_INTERVAL_SECONDS);
+        let due = self
+            .last_other_trash_purge_inst
+            .map(|last| now_inst.saturating_duration_since(last) >= interval)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.last_other_trash_purge_inst = Some(now_inst);
+        let running: Vec<String> = self
+            .slots
+            .iter()
+            .filter(|slot| slot.failed.is_none())
+            .map(|slot| slot.profile.id.clone())
+            .collect();
+        let mode = if self.transfer_workers {
+            crate::provider_jobs::ProviderCallMode::Threaded {
+                waker: Some(self.tick_waker.clone()),
+            }
+        } else {
+            crate::provider_jobs::ProviderCallMode::Inline
+        };
+        self.other_trash_purge = Some(crate::provider_jobs::ProviderCall::start(
+            &mode,
+            "trash-purge",
+            crate::trash::purge_other_profiles_job(
+                self.composer.trash_directory(),
+                running,
+                settings.retention,
+                now,
+            ),
+        ));
+    }
+
     /// Ticks every live profile once. Panics and repeated errors
     /// suspend only the offending profile.
     pub fn tick_all(&mut self, now: SystemTime) -> MultiTickReport {
         let control_forwarded = self.forward_external_control();
         self.apply_config_changes(self.clock.now());
         self.retry_missing_roots_if_due(now);
+        self.retry_suspended_profiles(now);
+        self.purge_other_trash_if_due(now);
 
         let mut report = MultiTickReport::default();
-        let mut completed_this_tick: u64 = 0;
+        let now_inst = self.clock.now();
         for slot in &mut self.slots {
             if slot.failed.is_some() {
                 report.failed_profiles += 1;
                 continue;
             }
+            // The wait a profile starts from when it is suspended now.
+            let attempts = slot.relapse.map_or(0, |relapse| relapse.attempts);
             let outcome = catch_unwind(AssertUnwindSafe(|| slot.runtime.tick(now)));
             match outcome {
                 Ok(Ok(tick_report)) => {
                     slot.consecutive_tick_errors = 0;
+                    if slot
+                        .relapse
+                        .is_some_and(|relapse| now_inst >= relapse.forgiven_at)
+                    {
+                        slot.relapse = None;
+                    }
                     report.ticked_profiles += 1;
-                    completed_this_tick += tick_report.completed_intents as u64;
                     report.any_pending_work |= slot.runtime.profile_has_pending_work(&tick_report);
                 }
                 Ok(Err(error)) => {
@@ -663,6 +918,10 @@ impl MultiProfileRuntime {
                             now,
                         );
                         suspend_profile(slot, format!("repeated tick failures: {error:?}"), now);
+                        slot.runtime_retry = Some(RuntimeRetry {
+                            attempts,
+                            at: now_inst + suspended_profile_retry_delay(attempts),
+                        });
                         report.failed_profiles += 1;
                     }
                 }
@@ -675,38 +934,33 @@ impl MultiProfileRuntime {
                         now,
                     );
                     suspend_profile(slot, format!("panicked: {reason}"), now);
+                    slot.runtime_retry = Some(RuntimeRetry {
+                        attempts,
+                        at: now_inst + suspended_profile_retry_delay(attempts),
+                    });
                     report.failed_profiles += 1;
                 }
             }
         }
 
-        // Auto-tuning: one small change per cycle, driven by
-        // aggregate rate-limit + queue-depth + drain-rate signals,
-        // bounded by the ceilings via the bandwidth shaper.
-        // Suspended slots are excluded from the tuning signal: their
-        // never-draining queue and stale state would skew the tuner, and
-        // reading a half-mutated post-panic runtime here (outside the
-        // catch_unwind) is a containment hazard.
-        // The SQL-backed depth signal is gathered only when a tuning
-        // cycle is actually due (~every 90s), not on every idle tick.
-        self.auto_tuner.record_completions(completed_this_tick);
-        let now_inst = self.clock.now();
-        if self.auto_tuner.cycle_due(now_inst) {
-            let rate_limited = self
-                .slots
-                .iter()
-                .filter(|slot| slot.failed.is_none())
-                .any(|slot| slot.runtime.app().retry_slowdown_until().is_some());
-            let total_queue_depth: u64 = self
-                .slots
-                .iter()
-                .filter(|slot| slot.failed.is_none())
-                .map(|slot| slot.runtime.state_db().queue_depth().unwrap_or(0) as u64)
-                .sum();
-            self.auto_tuner
-                .evaluate(rate_limited, total_queue_depth, now_inst);
+        // A local root that came back, or that the user reattached, is
+        // a folder the running watch may not follow: a watch on the
+        // folder itself (inotify) stays with the old one. New watchers
+        // start before the old ones go, so no event falls in between.
+        let mut local_root_changed = false;
+        for slot in &mut self.slots {
+            local_root_changed |= slot.runtime.take_local_root_changed();
+        }
+        if local_root_changed && self.watchers_enabled {
+            logging::info(
+                "A local root is back; starting the filesystem watchers again",
+                &[],
+            );
+            let watchers = start_deduplicated_watchers(&mut self.slots, &self.tick_waker);
+            self._watchers = watchers;
         }
 
+        let now_inst = self.clock.now();
         // Publish a fresh status snapshot only when something observable
         // could have changed: building one runs per-profile SQL (depths,
         // failed counts, diagnostics rows), which a fully idle daemon
@@ -743,9 +997,8 @@ impl MultiProfileRuntime {
         report
     }
 
-    /// Runs the multi-profile tick loop until shutdown. Exits with an
-    /// error only when EVERY profile has failed — a single broken
-    /// profile never takes the daemon down.
+    /// Runs the multi-profile tick loop until shutdown. A broken profile
+    /// never takes the daemon down, and neither do all of them.
     pub fn run_forever(&mut self) -> Result<(), DaemonRuntimeError> {
         // Let a shutdown signal wake the loop out of its idle sleep so
         // `vapor stop` / SIGTERM exits promptly instead of waiting out a
@@ -755,24 +1008,26 @@ impl MultiProfileRuntime {
         while !is_shutdown_requested() {
             let report = self.tick_all(self.clock.now_system());
             match self.all_suspended() {
-                // Every profile died at runtime: exit and let the service
-                // manager and the crash-loop guard decide about restarts.
-                Some(AllSuspended::AtRuntime) => {
-                    logging::error("Every profile has failed; exiting the daemon", &[]);
-                    return Err(DaemonRuntimeError::StateDb(
-                        crate::state_db::StateDbError::InvalidStateValue(
-                            "all profiles suspended".to_string(),
-                        ),
-                    ));
+                // Every profile is suspended by a runtime failure. Each
+                // is composed again with a backoff, so the daemon stays
+                // up: an exit would hand a failure that clears on its
+                // own (a full disk, a locked database) to the crash-loop
+                // guard, which gives up after a few restarts.
+                Some(AllSuspended::AtRuntime) if !reported_all_suspended => {
+                    reported_all_suspended = true;
+                    logging::error(
+                        "Every profile is suspended after a runtime failure; each is tried again with a backoff",
+                        &[],
+                    );
                 }
                 // Every profile is misconfigured: exiting would only feed
                 // the crash-loop guard and hide the reason. Stay up on the
                 // idle cadence so `vapor status` can name what to fix.
                 Some(AllSuspended::AtComposition) if !reported_all_suspended => {
                     reported_all_suspended = true;
-                    logging::error(
+                    logging::warning(
                         "Every profile is suspended by its configuration; serving status \
-                         only until the configuration is fixed and the daemon restarted",
+                         only until the configuration is fixed",
                         &[],
                     );
                 }
@@ -786,7 +1041,7 @@ impl MultiProfileRuntime {
                         &[],
                     );
                 }
-                Some(AllSuspended::AtComposition | AllSuspended::WaitingForRoots) | None => {}
+                Some(_) | None => {}
             }
             if reported_all_suspended && self.all_suspended().is_none() {
                 reported_all_suspended = false;
@@ -851,6 +1106,9 @@ impl MultiProfileRuntime {
         };
         let pause = external.take_pause_request();
         let reconcile = external.take_reconcile_request();
+        if let Some(pause) = pause {
+            self.paused_by_user = pause;
+        }
         for slot in &self.slots {
             match pause {
                 Some(true) => slot.control.request_pause(),
@@ -884,12 +1142,22 @@ impl MultiProfileRuntime {
             }
         }
         let Some(worst) = worst else {
+            // No profile: the daemon is up and syncs nothing. Either
+            // nothing is set up yet, or the file has something to fix.
+            let (run_state, run_reason) = if self.config_problems.is_empty() {
+                (
+                    RunState::Unconfigured,
+                    "no sync profile yet; set one up with `vapor profiles add`".to_string(),
+                )
+            } else {
+                (RunState::Error, self.config_problems.join("; "))
+            };
             return DaemonStatusSnapshot {
-                run_state: RunState::Error.wire_name().to_string(),
-                run_reason: "no enabled profiles".to_string(),
-                throttle_state: ThrottleState::Suspended,
+                run_state: run_state.wire_name().to_string(),
+                run_reason,
+                throttle_state: ThrottleState::Idle,
                 provider: "none".to_string(),
-                throttle_reason: "no enabled profiles".to_string(),
+                throttle_reason: "no sync profile to throttle".to_string(),
                 ..DaemonStatusSnapshot::default()
             };
         };
@@ -956,6 +1224,7 @@ impl MultiProfileRuntime {
                 mirror: vapor_ipc::MirrorCounts { reverts, deletes },
                 suspended: slot.failed.is_some(),
                 sign_in_required: slot.runtime.sign_in_required(),
+                ignored_paths: slot.runtime.ignored_paths(),
             });
             daemon_reconcile = daemon_reconcile.more_active(reconcile);
             snapshot.queued += queued;
@@ -1018,6 +1287,8 @@ fn run_state_rank(state: RunState) -> i32 {
         RunState::Starting => 1,
         RunState::Paused => 2,
         RunState::Error => 3,
+        // A profile is never unconfigured; the daemon with no profile is.
+        RunState::Unconfigured => 0,
     }
 }
 
@@ -1068,8 +1339,7 @@ struct SlotComposer {
     shared_workgate: Arc<Mutex<ThrottleWorkgate>>,
     timeline: Arc<crate::timeline::TimelineBuffer>,
     shared_budget: Arc<Mutex<crate::resource_budget::ResourceBudget>>,
-    shared_shaper: Arc<Mutex<vapor_providers::BandwidthShaper>>,
-    shared_step: Arc<std::sync::atomic::AtomicU64>,
+    shared_bandwidth: Arc<crate::bandwidth::TransferBandwidth>,
     idle_notifier: Arc<dyn vapor_platform::IdleNotifier>,
     concurrent_transfers: Option<usize>,
     mass_delete_settings: crate::safeguards::MassDeleteGuardSettings,
@@ -1082,19 +1352,22 @@ struct SlotComposer {
 }
 
 impl SlotComposer {
-    fn trash_root(&self, profile_id: &str) -> PathBuf {
+    /// The directory that holds one trash per profile.
+    fn trash_directory(&self) -> PathBuf {
         match &self.state_root {
-            Some(root) => root
-                .join(constants::runtime::TRASH_DIRECTORY_NAME)
-                .join(profile_id),
-            None => vapor_shared::runtime_paths::profile_trash_directory(profile_id),
+            Some(root) => root.join(constants::runtime::TRASH_DIRECTORY_NAME),
+            None => vapor_shared::runtime_paths::trash_directory(),
         }
+    }
+
+    fn trash_root(&self, profile_id: &str) -> PathBuf {
+        self.trash_directory().join(profile_id)
     }
 
     fn database_path(&self, profile_id: &str) -> PathBuf {
         match &self.state_root {
             Some(root) => root
-                .join("profiles")
+                .join(constants::runtime::PROFILES_DIRECTORY_NAME)
                 .join(profile_id)
                 .join(constants::runtime::SQLITE_DATABASE_FILE_NAME),
             None => vapor_shared::runtime_paths::profile_database_path(profile_id),
@@ -1102,29 +1375,43 @@ impl SlotComposer {
     }
 }
 
-/// Composes one profile's slot. `None` skips the profile (its state DB
-/// could not be opened); a profile whose local root is missing comes
-/// back as a placeholder slot that waits for the root.
+/// Composes one profile's slot. Every profile gets one: a profile that
+/// cannot run (its state DB does not open, its scope is not valid)
+/// comes back suspended with the reason, and a profile whose local
+/// root is missing comes back as a placeholder that waits for the root.
 fn compose_slot(
     composer: &mut SlotComposer,
     profile: ResolvedProfile,
     now: SystemTime,
-) -> Option<ProfileSlot> {
+) -> ProfileSlot {
+    // A profile that cannot run as it is written is still a profile:
+    // it stands in status with its reason, and syncs nothing.
+    if let Some(reason) = profile.invalid.clone() {
+        logging::warning(
+            "Suspending a profile that cannot run as configured",
+            &[
+                ("profile_id", profile.id.clone()),
+                ("reason", reason.clone()),
+            ],
+        );
+        return suspended_placeholder(composer, profile, reason);
+    }
     let database_path = composer.database_path(&profile.id);
-    // Per-profile startup failures degrade to skipping that
-    // profile, never aborting the whole daemon (which would stop
-    // every healthy profile and feed the crash-loop guard).
+    // Per-profile startup failures suspend that profile, never the
+    // whole daemon (which would stop every healthy profile and feed
+    // the crash-loop guard).
     let state_db = match DurableStateDb::open_with_corruption_recovery(&database_path, now) {
         Ok(state_db) => state_db,
         Err(error) => {
             logging::error(
-                "Skipping profile whose durable state DB could not be opened",
+                "Suspending profile whose durable state DB could not be opened",
                 &[
                     ("profile_id", profile.id.clone()),
                     ("error", error.to_string()),
                 ],
             );
-            return None;
+            let reason = format!("the state database cannot be opened: {error}");
+            return suspended_placeholder(composer, profile, reason);
         }
     };
     // Overlapping roots on a filesystem-backed profile feed the
@@ -1148,7 +1435,7 @@ fn compose_slot(
     // the stub reports empty enumerations, so a startup reconcile
     // on a pull-only profile would classify the whole local root as
     // local-only and strict-mirror-delete it. Suspend the profile
-    // instead — it surfaces in status but performs zero sync work.
+    // instead: it surfaces in status but performs zero sync work.
     // Overlapping roots suspend the same way (the inert stub
     // performs no filesystem work).
     let (provider, provider_failure) = if let Some(reason) = overlap_failure {
@@ -1159,7 +1446,7 @@ fn compose_slot(
                 ("reason", reason.clone()),
             ],
         );
-        (vapor_providers::inert_stub_provider(), Some(reason))
+        (vapor_providers::suspended_provider(), Some(reason))
     } else {
         match vapor_providers::select_provider_for_profile(&profile.provider_kind, &profile.id) {
             Ok(provider) => (provider, None),
@@ -1175,7 +1462,7 @@ fn compose_slot(
                         ("reason", reason.clone()),
                     ],
                 );
-                (vapor_providers::inert_stub_provider(), Some(reason))
+                (vapor_providers::suspended_provider(), Some(reason))
             }
         }
     };
@@ -1191,7 +1478,7 @@ fn compose_slot(
         app,
         composer.metrics_sampler.clone(),
         composer.clock.clone(),
-        false, // watchers are deduplicated at this level
+        crate::runtime::Startup::DaemonProfile,
     ) {
         Ok(runtime) => runtime,
         Err(DaemonRuntimeError::LocalRootMissing(root)) => {
@@ -1206,17 +1493,18 @@ fn compose_slot(
                     ("path", root.display().to_string()),
                 ],
             );
-            return Some(missing_root_placeholder(composer, profile, root, now));
+            return missing_root_placeholder(composer, profile, root, now);
         }
         Err(error) => {
             logging::error(
-                "Skipping profile that could not be composed at startup",
+                "Suspending profile that could not be composed",
                 &[
                     ("profile_id", profile.id.clone()),
                     ("error", format!("{error:?}")),
                 ],
             );
-            return None;
+            let reason = format!("the profile could not be composed: {error:?}");
+            return suspended_placeholder(composer, profile, reason);
         }
     };
     if let Some(built_filter) = runtime.shared_path_filter() {
@@ -1247,8 +1535,7 @@ fn compose_slot(
     runtime.attach_timeline(composer.timeline.clone());
     runtime.attach_resource_management(
         composer.shared_budget.clone(),
-        composer.shared_shaper.clone(),
-        composer.shared_step.clone(),
+        composer.shared_bandwidth.clone(),
         composer.idle_notifier.clone(),
     );
     // A suspended-at-composition profile never schedules a reconcile
@@ -1272,7 +1559,7 @@ fn compose_slot(
     }
     let control = Arc::new(RuntimeControl::new());
     runtime.attach_control(control.clone());
-    Some(ProfileSlot {
+    ProfileSlot {
         profile,
         runtime,
         control,
@@ -1280,7 +1567,60 @@ fn compose_slot(
         failed_at_composition: failed.is_some(),
         failed,
         missing_root: None,
-    })
+        runtime_retry: None,
+        relapse: None,
+    }
+}
+
+/// A slot for a profile that cannot be composed: an inert runtime on
+/// the stub provider with a state DB in memory. It never ticks; it
+/// carries the reason into status.
+fn suspended_placeholder(
+    composer: &mut SlotComposer,
+    profile: ResolvedProfile,
+    reason: String,
+) -> ProfileSlot {
+    let mut runtime = inert_runtime(composer, &profile);
+    runtime.set_device_id(composer.device_id.as_str());
+    runtime.set_profile_id(profile.id.clone());
+    runtime.attach_timeline(composer.timeline.clone());
+    runtime.set_error_state(reason.clone());
+    let control = Arc::new(RuntimeControl::new());
+    runtime.attach_control(control.clone());
+    ProfileSlot {
+        profile,
+        runtime,
+        control,
+        consecutive_tick_errors: 0,
+        failed_at_composition: true,
+        failed: Some(reason),
+        missing_root: None,
+        runtime_retry: None,
+        relapse: None,
+    }
+}
+
+/// A runtime with no roots, the stub provider, and a state DB in
+/// memory: it holds a slot's place and does no work.
+fn inert_runtime(composer: &SlotComposer, profile: &ResolvedProfile) -> DaemonRuntime {
+    let app = DaemonApp::new_with_shared_workgate(
+        vapor_providers::suspended_provider(),
+        composer.clock.clone(),
+        composer.shared_workgate.clone(),
+    );
+    DaemonRuntime::build_with_app(
+        SyncScope {
+            local_root: None,
+            ..profile.scope.clone()
+        },
+        composer.filter_options.clone(),
+        DurableStateDb::open_in_memory().expect("in-memory state DB"),
+        app,
+        composer.metrics_sampler.clone(),
+        composer.clock.clone(),
+        crate::runtime::Startup::DaemonProfile,
+    )
+    .expect("an inert runtime with no roots always builds")
 }
 
 /// A slot for a profile whose adopted local root is not there: an
@@ -1347,7 +1687,7 @@ fn missing_root_placeholder(
         ..profile.scope.clone()
     };
     let app = DaemonApp::new_with_shared_workgate(
-        vapor_providers::inert_stub_provider(),
+        vapor_providers::suspended_provider(),
         composer.clock.clone(),
         composer.shared_workgate.clone(),
     );
@@ -1359,33 +1699,14 @@ fn missing_root_placeholder(
             app,
             composer.metrics_sampler.clone(),
             composer.clock.clone(),
-            false,
+            crate::runtime::Startup::DaemonProfile,
         )
         .ok()
     }) {
         Some(runtime) => runtime,
-        None => {
-            // Even the inert runtime could not be built (the state DB is
-            // unreadable): the slot still parks with its reason.
-            let app = DaemonApp::new_with_shared_workgate(
-                vapor_providers::inert_stub_provider(),
-                composer.clock.clone(),
-                composer.shared_workgate.clone(),
-            );
-            DaemonRuntime::build_with_app(
-                SyncScope {
-                    local_root: None,
-                    ..profile.scope.clone()
-                },
-                composer.filter_options.clone(),
-                DurableStateDb::open_in_memory().expect("in-memory state DB"),
-                app,
-                composer.metrics_sampler.clone(),
-                composer.clock.clone(),
-                false,
-            )
-            .expect("an inert runtime with no roots always builds")
-        }
+        // The state DB is unreadable: the slot still parks with its
+        // reason.
+        None => inert_runtime(composer, &profile),
     };
     runtime.set_device_id(composer.device_id.as_str());
     runtime.set_profile_id(profile.id.clone());
@@ -1401,6 +1722,8 @@ fn missing_root_placeholder(
         failed_at_composition: true,
         failed: Some(reason),
         missing_root: Some(root),
+        runtime_retry: None,
+        relapse: None,
     }
 }
 
@@ -1414,7 +1737,7 @@ fn start_deduplicated_watchers(
         profile_ids: Vec<String>,
     }
     let mut by_root: BTreeMap<PathBuf, RootGroup> = BTreeMap::new();
-    // (profile_id, reason) for profiles whose watcher could not start — a
+    // (profile_id, reason) for profiles whose watcher could not start: a
     // watcher failure suspends only the affected profiles, never the whole
     // daemon.
     let mut suspend: Vec<(String, String)> = Vec::new();
@@ -1565,6 +1888,7 @@ mod tests {
                         sync_mode: *mode,
                     },
                     enabled: true,
+                    invalid: None,
                 });
             }
 
@@ -1588,7 +1912,15 @@ mod tests {
             // instead the fixture drives remote changes through real
             // files + the per-profile provider's native feed being off;
             // remote propagation tests use the feed handles below.
-            for (id, _, _) in specs {
+            for (id, mode, _) in specs {
+                // A one-way profile is confirmed the way the user
+                // confirms it, so it runs.
+                if *mode != SyncMode::TwoWay {
+                    multi
+                        .runtime_for(id)
+                        .expect("runtime")
+                        .acknowledge_one_way_mode(timestamp_ms(0));
+                }
                 let cloud = cloud_roots.get(*id).expect("cloud root").clone();
                 let caps: Arc<dyn vapor_platform::fs_caps::FilesystemCapabilities> = Arc::new(
                     vapor_platform::fs_caps::NativeFilesystemCapabilities::for_current_host(),
@@ -1665,6 +1997,7 @@ mod tests {
                 sync_mode: SyncMode::TwoWay,
             },
             enabled: true,
+            invalid: None,
         };
         let start = |clock: Arc<ManualClock>| {
             MultiProfileRuntime::start_with_state_root(
@@ -1981,6 +2314,7 @@ mod tests {
                     sync_mode: SyncMode::TwoWay,
                 },
                 enabled: true,
+                invalid: None,
             },
             ResolvedProfile {
                 id: "good".to_string(),
@@ -1992,6 +2326,7 @@ mod tests {
                     sync_mode: SyncMode::TwoWay,
                 },
                 enabled: true,
+                invalid: None,
             },
         ];
 
@@ -2071,6 +2406,7 @@ mod tests {
                     sync_mode: SyncMode::PullOnly,
                 },
                 enabled: true,
+                invalid: None,
             },
             ResolvedProfile {
                 id: "good".to_string(),
@@ -2082,6 +2418,7 @@ mod tests {
                     sync_mode: SyncMode::TwoWay,
                 },
                 enabled: true,
+                invalid: None,
             },
         ];
 
@@ -2107,7 +2444,7 @@ mod tests {
             clock.advance(Duration::from_millis(6_000));
             multi.tick_all(timestamp_ms(now_ms));
         }
-        // The suspended profile performed zero sync work — its local file
+        // The suspended profile performed zero sync work: its local file
         // is intact.
         assert!(
             bad_local.join("keep.txt").exists(),
@@ -2180,6 +2517,250 @@ mod tests {
         }
     }
 
+    /// A daemon composed from the configuration at `config_path`, the
+    /// way the bootstrap composes it.
+    fn daemon_from_config(
+        temp: &TempDir,
+        config_path: &Path,
+        clock: Arc<ManualClock>,
+    ) -> MultiProfileRuntime {
+        let load = vapor_shared::config::load_from(config_path);
+        let set = crate::profiles::resolve_profile_set(&load);
+        let mut multi = MultiProfileRuntime::start_with_state_root(
+            set.profiles,
+            EventPathFilterOptions::default(),
+            Arc::new(StaticMetricsSampler::default()),
+            clock,
+            "testdev",
+            false,
+            Some(temp.path().join("state")),
+            crate::resource_budget::EffectiveBudgetConfig::resolve(&load.config),
+            crate::safeguards::MassDeleteGuardSettings::default(),
+        )
+        .expect("multi runtime");
+        multi.set_config_problems(set.problems);
+        multi.watch_config(config_path, load.config);
+        multi
+    }
+
+    /// Rewrites the configuration with a modification time the
+    /// reloader sees as new.
+    fn rewrite_config(config_path: &Path, contents: &str, seconds_later: u64) {
+        std::fs::write(config_path, contents).expect("edit config");
+        let later = SystemTime::now() + Duration::from_secs(seconds_later);
+        std::fs::File::options()
+            .write(true)
+            .open(config_path)
+            .and_then(|file| file.set_modified(later))
+            .expect("advance mtime");
+    }
+
+    #[test]
+    fn an_install_with_no_sync_scope_syncs_nothing_creates_nothing_and_says_so() {
+        use crate::clock::Clock as _;
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        let config_path = temp.path().join("vapor.json");
+        // No file at all, then a file that sets everything but a scope.
+        for contents in [
+            None,
+            Some("{\"provider\": \"filesystem\", \"syncMode\": \"two-way\"}\n"),
+        ] {
+            if let Some(contents) = contents {
+                std::fs::write(&config_path, contents).expect("seed config");
+            }
+            let mut multi = daemon_from_config(&temp, &config_path, clock.clone());
+            multi.tick_all(clock.now_system());
+            assert_eq!(multi.failed_profile_count(), 0);
+            assert_eq!(
+                multi.all_suspended(),
+                None,
+                "nothing failed; nothing is set up"
+            );
+            let status = multi.aggregate_status(clock.now_system());
+            assert_eq!(status.run_state, constants::run_state::UNCONFIGURED);
+            assert!(
+                status.run_reason.contains("vapor profiles add"),
+                "status names the command that sets a profile up: {:?}",
+                status.run_reason
+            );
+            assert!(status.profiles.is_empty());
+        }
+        let created: Vec<_> = std::fs::read_dir(temp.path())
+            .expect("list")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "vapor.json")
+            .collect();
+        assert!(
+            created.is_empty(),
+            "no folder, no state, no marker for a scope nobody chose: {created:?}"
+        );
+    }
+
+    #[test]
+    fn a_configuration_that_cannot_be_read_runs_no_profile_and_names_the_problem() {
+        use crate::clock::Clock as _;
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        let config_path = temp.path().join("vapor.json");
+        std::fs::write(&config_path, "{ \"localRoot\": ").expect("seed broken config");
+
+        let mut multi = daemon_from_config(&temp, &config_path, clock.clone());
+        multi.tick_all(clock.now_system());
+        let status = multi.aggregate_status(clock.now_system());
+        assert_eq!(status.run_state, constants::run_state::ERROR);
+        assert!(
+            status.run_reason.starts_with("vapor.json cannot be read"),
+            "{:?}",
+            status.run_reason
+        );
+        assert!(
+            status.profiles.is_empty(),
+            "the default profile must not run in its place"
+        );
+    }
+
+    #[test]
+    fn a_profile_that_cannot_run_as_written_is_listed_suspended_with_its_reason() {
+        use crate::clock::Clock as _;
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        let local = temp.path().join("local");
+        let cloud = temp.path().join("cloud");
+        let config_path = temp.path().join("vapor.json");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({
+                "profiles": [
+                    { "id": "typo", "localRoot": local, "cloudRoot": cloud,
+                      "syncMode": "pull_only" },
+                    { "id": "half", "localRoot": temp.path().join("other") },
+                ]
+            })
+            .to_string(),
+        )
+        .expect("seed config");
+
+        let mut multi = daemon_from_config(&temp, &config_path, clock.clone());
+        multi.tick_all(clock.now_system());
+        assert_eq!(multi.failed_profile_count(), 2);
+        let status = multi.aggregate_status(clock.now_system());
+        let reason_of = |id: &str| {
+            let row = status
+                .profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .unwrap_or_else(|| panic!("profile {id} is listed"));
+            assert!(row.suspended, "{id}");
+            row.run.reason.clone()
+        };
+        assert!(
+            reason_of("typo").contains("\"pull_only\""),
+            "{}",
+            reason_of("typo")
+        );
+        assert_eq!(reason_of("half"), "`cloudRoot` is not set");
+        assert!(
+            !local.exists() && !cloud.exists(),
+            "a profile that cannot run creates no folder"
+        );
+    }
+
+    #[test]
+    fn the_first_sync_scope_composes_without_a_restart() {
+        use crate::clock::Clock as _;
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        let local = temp.path().join("local");
+        let config_path = temp.path().join("vapor.json");
+        std::fs::write(&config_path, "{}\n").expect("seed config");
+        let mut multi = daemon_from_config(&temp, &config_path, clock.clone());
+        multi.tick_all(clock.now_system());
+        assert_eq!(
+            multi.aggregate_status(clock.now_system()).run_state,
+            constants::run_state::UNCONFIGURED
+        );
+
+        // One root: a profile that names what is missing, still no folder.
+        rewrite_config(
+            &config_path,
+            &serde_json::json!({ "localRoot": local }).to_string(),
+            5,
+        );
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        let status = multi.aggregate_status(clock.now_system());
+        assert_eq!(status.profiles.len(), 1);
+        assert_eq!(status.profiles[0].run.reason, "`cloudRoot` is not set");
+        assert!(!local.exists());
+        assert!(multi.restart_required().is_empty());
+
+        // The second root, one `config set` later: the profile runs,
+        // still with no restart.
+        let cloud = temp.path().join("cloud");
+        rewrite_config(
+            &config_path,
+            &serde_json::json!({ "localRoot": local, "cloudRoot": cloud }).to_string(),
+            10,
+        );
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        assert_eq!(multi.failed_profile_count(), 0);
+        assert!(multi.restart_required().is_empty());
+        assert!(local.is_dir(), "the profile adopted its local root");
+
+        // A profile that runs is reshaped only by a restart.
+        rewrite_config(
+            &config_path,
+            &serde_json::json!({ "localRoot": local, "cloudRoot": temp.path().join("other") })
+                .to_string(),
+            15,
+        );
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        assert_eq!(multi.restart_required(), &["cloudRoot"]);
+    }
+
+    #[test]
+    fn both_roots_set_on_an_unconfigured_daemon_start_the_profile() {
+        use crate::clock::Clock as _;
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        let local = temp.path().join("local");
+        let cloud = temp.path().join("cloud");
+        let config_path = temp.path().join("vapor.json");
+        let mut multi = daemon_from_config(&temp, &config_path, clock.clone());
+        multi.tick_all(clock.now_system());
+
+        rewrite_config(
+            &config_path,
+            &serde_json::json!({ "localRoot": local, "cloudRoot": cloud }).to_string(),
+            5,
+        );
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        assert_eq!(multi.failed_profile_count(), 0);
+        assert!(
+            multi.restart_required().is_empty(),
+            "the first scope needs no restart"
+        );
+        assert!(local.is_dir(), "the profile adopted its local root");
+        std::fs::write(local.join("first.txt"), b"hello").expect("seed");
+        for _ in 0..40 {
+            clock.advance(Duration::from_secs(6));
+            clock.advance_system(Duration::from_secs(6));
+            multi.tick_all(clock.now_system());
+            if cloud.join("first.txt").exists() {
+                break;
+            }
+        }
+        assert!(
+            cloud.join("first.txt").exists(),
+            "the startup scan of the new profile uploads what is there"
+        );
+    }
+
     #[test]
     fn a_live_config_change_applies_mid_work_and_a_restart_key_is_reported() {
         let temp = TempDir::new().expect("temp dir");
@@ -2222,6 +2803,7 @@ mod tests {
                 sync_mode: SyncMode::TwoWay,
             },
             enabled: true,
+            invalid: None,
         }];
         let applied = vapor_shared::config::VaporConfig::default();
         let mut multi = MultiProfileRuntime::start_with_state_root(
@@ -2243,7 +2825,8 @@ mod tests {
         // A live key: the ceiling drops without touching the queue.
         std::fs::write(
             &config_path,
-            "{\"resourceLimits\": {\"cpuPercent\": 7}, \"provider\": \"gdrive\"}\n",
+            "{\"resourceLimits\": {\"cpuPercent\": 7, \"concurrentTransfers\": 3}, \
+             \"postIgnoreRules\": [\"*.late\"], \"provider\": \"gdrive\"}\n",
         )
         .expect("edit config");
         let later = std::fs::metadata(&config_path)
@@ -2270,6 +2853,13 @@ mod tests {
                 .cpu_percent,
             7,
             "resourceLimits applies live"
+        );
+        // A profile composed after this change starts from the settings
+        // that hold now.
+        assert_eq!(multi.composer.concurrent_transfers, Some(3));
+        assert_eq!(
+            multi.composer.filter_options.post_user_rules,
+            vec!["*.late".to_string()]
         );
         assert_eq!(multi.restart_required(), &["provider"]);
         let status = multi.aggregate_status(clock.now_system());
@@ -2315,6 +2905,7 @@ mod tests {
                 sync_mode: SyncMode::TwoWay,
             },
             enabled: true,
+            invalid: None,
         }];
         let mut multi = MultiProfileRuntime::start_with_state_root(
             profiles,
@@ -2402,9 +2993,143 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_that_the_runtime_suspended_is_composed_again_after_its_wait() {
+        let mut fixture = MultiFixture::new(&[("only", SyncMode::TwoWay, false)]);
+        fixture.tick(6_000);
+        fixture
+            .multi
+            .runtime_for("only")
+            .expect("runtime")
+            .replace_provider_for_testing(Box::new(PanickingProvider));
+        fixture.tick(6_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 1);
+        assert_eq!(
+            fixture.multi.all_suspended(),
+            Some(AllSuspended::AtRuntime),
+            "the daemon stays up with its one profile suspended"
+        );
+
+        // Inside the first wait the profile stays suspended.
+        fixture.tick(30_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 1);
+
+        // The wait is over: the profile is composed again from its
+        // configuration and syncs.
+        fixture.tick(31_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0);
+        assert_eq!(fixture.multi.all_suspended(), None);
+        let local = fixture.local_roots["only"].clone();
+        std::fs::write(local.join("after-the-failure.txt"), b"back").expect("seed");
+        fixture.record_local_event(
+            "only",
+            &local.join("after-the-failure.txt"),
+            WatchEventKind::Created,
+        );
+        fixture.converge(16);
+        assert!(
+            fixture.cloud_roots["only"]
+                .join("after-the-failure.txt")
+                .exists(),
+            "the profile syncs again"
+        );
+    }
+
+    #[test]
+    fn a_profile_composed_while_the_daemon_is_paused_starts_paused() {
+        let mut fixture = MultiFixture::new(&[("only", SyncMode::TwoWay, false)]);
+        let control = Arc::new(RuntimeControl::new());
+        fixture.multi.attach_control(control.clone());
+        fixture.tick(6_000);
+        fixture
+            .multi
+            .runtime_for("only")
+            .expect("runtime")
+            .replace_provider_for_testing(Box::new(PanickingProvider));
+        fixture.tick(6_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 1);
+
+        // The user pauses the daemon while the profile is suspended.
+        control.request_pause();
+        fixture.tick(6_000);
+
+        // The profile is composed again: it joins a paused daemon.
+        let local = fixture.local_roots["only"].clone();
+        std::fs::write(local.join("waits.txt"), b"paused").expect("seed");
+        fixture.tick(61_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0, "composed again");
+        fixture.converge(8);
+        assert_eq!(
+            fixture
+                .multi
+                .runtime_for("only")
+                .expect("runtime")
+                .app()
+                .snapshot()
+                .run_state,
+            RunState::Paused
+        );
+        assert!(
+            !fixture.cloud_roots["only"].join("waits.txt").exists(),
+            "a paused daemon admits no work, in a profile that joined late too"
+        );
+
+        control.request_resume();
+        fixture.converge(16);
+        assert!(fixture.cloud_roots["only"].join("waits.txt").exists());
+    }
+
+    #[test]
+    fn a_profile_that_composes_and_fails_again_waits_longer_each_time() {
+        let mut fixture = MultiFixture::new(&[("only", SyncMode::TwoWay, false)]);
+        fixture.tick(6_000);
+        let fail = |fixture: &mut MultiFixture| {
+            fixture
+                .multi
+                .runtime_for("only")
+                .expect("runtime")
+                .replace_provider_for_testing(Box::new(PanickingProvider));
+            fixture.tick(6_000);
+            assert_eq!(fixture.multi.failed_profile_count(), 1);
+        };
+
+        // The first suspension waits the shortest time.
+        fail(&mut fixture);
+        fixture.tick(61_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0, "composed again");
+
+        // It fails again at once. The wait is the next one, not the
+        // shortest one again.
+        fail(&mut fixture);
+        fixture.tick(61_000);
+        assert_eq!(
+            fixture.multi.failed_profile_count(),
+            1,
+            "one minute is not enough the second time"
+        );
+        fixture.tick(240_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0);
+
+        // A profile that then runs for as long as the wait it reached
+        // starts from the shortest wait when it fails much later.
+        fixture.tick(1_800_000);
+        fixture.tick(6_000);
+        fail(&mut fixture);
+        fixture.tick(61_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0);
+    }
+
+    #[test]
+    fn the_wait_before_a_suspended_profile_is_tried_again_grows_to_thirty_minutes() {
+        let waits: Vec<u64> = (0..5)
+            .map(|attempts| suspended_profile_retry_delay(attempts).as_secs())
+            .collect();
+        assert_eq!(waits, vec![60, 300, 1_800, 1_800, 1_800]);
+    }
+
+    #[test]
     fn shared_workgate_caps_bound_total_in_flight_work_across_profiles() {
         // Budget isolation: two busy profiles share ONE daemon-
-        // level workgate — combined admissions never exceed the caps a
+        // level workgate: combined admissions never exceed the caps a
         // single profile would get.
         let mut fixture = MultiFixture::new(&[
             ("busy-a", SyncMode::TwoWay, false),

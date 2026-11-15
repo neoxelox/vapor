@@ -157,7 +157,7 @@ fn forward_event(
 
     // A paired rename carries `[from, to]` paths; splitting it into a
     // Removed(from) + Created(to) pair keeps both sides independently
-    // actionable — a bare "Renamed" for a path that no longer exists
+    // actionable: a bare "Renamed" for a path that no longer exists
     // cannot be acted on.
     let is_paired_rename = matches!(
         event.kind,

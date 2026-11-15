@@ -12,7 +12,7 @@ Scope:
 - Settings and policy models.
 - Compatibility metadata.
 - Shared Rust logging primitives used by the daemon, providers, and the
-  CLI — with sensitive-value redaction.
+  CLI, with sensitive-value redaction.
 - Runtime path resolution (`vapor_dir` + subdirectories for logs/state),
   the cross-process config lock, and the one atomic private writer every
   `vapor.json` writer uses.
@@ -26,5 +26,5 @@ Pre-GA, contracts change freely when the change is documented in the
 same change set (`AGENTS.md §1.1`).
 
 Testing: logging redaction, runtime-path resolution, and log-level
-parsing are unit-tested. Constants are not tested individually — they
+parsing are unit-tested. Constants are not tested individually: they
 are data. Policy: `docs/architecture/testing-strategy.md`.

@@ -11,22 +11,29 @@ Tasks: `docs/tasks/core.md`.
 
 ## Module layout
 
-- `fs_watch` — recursive filesystem watcher (FSEvents on macOS;
+- `fs_watch`: recursive filesystem watcher (FSEvents on macOS;
   ReadDirectoryChangesW on Windows; inotify / fanotify on Linux).
-- `service` — install / start / stop the daemon as a platform-native
+- `service`: install / start / stop the daemon as a platform-native
   background service (LaunchAgent on macOS; Task Scheduler / SCM on
   Windows; systemd on Linux).
-- `secrets` — per-provider OAuth tokens and other credentials. Keychain
-  Services on macOS (shipped); Credential Manager on Windows and
-  libsecret / age-encrypted file on Linux (stubs).
-- `metrics` — `PlatformMetricsSampler` returning fresh `ThrottleInputs`
+- `secrets`, per-provider OAuth tokens and other credentials. Keychain
+  Services on macOS (shipped); on Linux the Secret Service of the
+  desktop session, or the external command named by
+  `VAPOR_SECRETS_COMMAND` on a headless host, never a plain file;
+  Credential Manager on Windows (a stub).
+- `metrics`: `PlatformMetricsSampler` returning fresh `ThrottleInputs`
   once per throttle interval (host CPU, power, thermal, memory and user
-  presence on macOS; static defaults on Linux and Windows).
-- `idle` — user-idle duration source (HID idle clock on macOS; zero on
-  Linux and Windows so idle boost stays off there).
-- `fs_caps` — filesystem capabilities (xattr / ADS support, case
+  presence on macOS; `/proc` and `/sys` on Linux; static defaults on
+  Windows).
+- `idle`: user-idle duration source (HID idle clock on macOS; on Linux
+  a host with no graphical session counts as idle and one with a
+  session reads zero, so idle boost stays off there; zero on Windows).
+- `trash`: the user's own trash (`TrashBin`: the Finder trash on
+  macOS, the XDG trash on Linux), which the daemon's trash uses when
+  `trash.useSystem` is on.
+- `fs_caps`: filesystem capabilities (xattr / ADS support, case
   sensitivity).
-- `process` — graceful-shutdown signal handler registration.
+- `process`: graceful-shutdown signal handler registration.
 
 Each module exports the trait, an `InMemory*` test fake that compiles on
 every OS, and a `Native*` per-OS implementation selected at compile time
@@ -46,7 +53,7 @@ Three reasons, in order:
    tests run on any host without touching OS APIs.
 3. **Native-optimal implementations.** When a portable wrapper crate
    leaves performance on the table, the per-OS module replaces it with a
-   direct native call behind the same trait — no engine changes needed.
+   direct native call behind the same trait, no engine changes needed.
 
 ## Adding a new trait
 
@@ -63,6 +70,6 @@ Three reasons, in order:
 ## Adding a new OS
 
 Open `docs/architecture/platform-abstractions.md` §"Adding a new
-platform" and follow the checklist — every trait module needs an
+platform" and follow the checklist: every trait module needs an
 `<os>.rs` sibling, the parity tests must pass, and the Cargo CI matrix
 needs the new target triple.

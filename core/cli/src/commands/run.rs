@@ -1,4 +1,4 @@
-//! `vapor run [--foreground]` — start the daemon in-process.
+//! `vapor run [--foreground]`: start the daemon in-process.
 //!
 //! Delegates to `vapor_daemon::bootstrap::run_daemon`, the same
 //! composition the `vapord` binary uses (singleton lock → configuration
@@ -14,7 +14,7 @@ use vapor_daemon::bootstrap::{self, BootstrapError};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RunOptions {
-    /// The `--foreground` flag is currently a no-op marker — the daemon
+    /// The `--foreground` flag is currently a no-op marker: the daemon
     /// always runs in-process here. Reserved for the day we add a true
     /// `--background` mode that double-forks.
     pub foreground: bool,

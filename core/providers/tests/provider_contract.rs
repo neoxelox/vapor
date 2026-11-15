@@ -8,10 +8,10 @@
 //! - the same provider on a filesystem WITHOUT xattr support (the
 //!   side-file constraint mode of FAT/network mounts),
 //! - an in-memory mock with object-store-style constraints (no op-id
-//!   tags, no changes feed — the S3/R2-shaped capability profile).
+//!   tags, no changes feed: the S3/R2-shaped capability profile).
 //!
 //! Capability honesty is the core rule: a provider must implement what
-//! it advertises and error loudly on what it does not — never silently
+//! it advertises and error loudly on what it does not, never silently
 //! no-op.
 
 use std::collections::BTreeMap;
@@ -32,6 +32,10 @@ use vapor_shared::ProviderErrorKind;
 struct ProviderUnderTest {
     name: &'static str,
     provider: Box<dyn Provider>,
+    /// Whether this provider stores the engine's op-id tag on an object
+    /// and gives it back. An entry of one that does not reads `None`,
+    /// and the engine then tells its own writes by their hash.
+    stores_op_ids: bool,
     _sandbox: Option<tempfile::TempDir>,
 }
 
@@ -44,6 +48,7 @@ fn providers_under_test() -> Vec<ProviderUnderTest> {
     providers.push(ProviderUnderTest {
         name: "filesystem",
         provider: Box::new(FilesystemProvider::with_root(&cloud).expect("provider")),
+        stores_op_ids: true,
         _sandbox: Some(sandbox),
     });
 
@@ -61,12 +66,14 @@ fn providers_under_test() -> Vec<ProviderUnderTest> {
     providers.push(ProviderUnderTest {
         name: "filesystem-no-xattr",
         provider: Box::new(provider),
+        stores_op_ids: true,
         _sandbox: Some(sandbox),
     });
 
     providers.push(ProviderUnderTest {
         name: "object-store-mock",
         provider: Box::new(MockObjectStoreProvider::new()),
+        stores_op_ids: false,
         _sandbox: None,
     });
 
@@ -128,9 +135,9 @@ fn contract_upload_stat_download_delete_round_trip() {
         assert_eq!(entry.kind, RemoteEntryKind::File, "{name}");
         assert_eq!(entry.size_bytes, 16, "{name}");
 
-        // Op-id honesty: advertised tags must echo back; unadvertised
-        // tags must read as None.
-        if provider.capabilities().supports_op_id_tags {
+        // Op-id honesty: a provider that stores tags gives the tag
+        // back; one that does not reads `None`, never a made-up value.
+        if under_test.stores_op_ids {
             assert_eq!(
                 entry.op_id.as_deref(),
                 Some("op-docs/contract.txt"),
@@ -184,12 +191,11 @@ fn contract_upload_stat_download_delete_round_trip() {
 }
 
 #[test]
-fn contract_write_preconditions_are_honored_when_advertised() {
+fn contract_write_preconditions_are_honored() {
+    // Every provider honours them: the engine guards each overwrite with
+    // one, and a provider that ignored it would overwrite in silence.
     for under_test in providers_under_test() {
         let provider = under_test.provider.as_ref();
-        if !provider.capabilities().supports_write_preconditions {
-            continue;
-        }
         let scratch = tempfile::TempDir::new().expect("scratch");
         let name = under_test.name;
 
@@ -335,10 +341,7 @@ impl Provider for MockObjectStoreProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
             supports_remote_changes_feed: false,
-            supports_write_preconditions: true,
-            supports_op_id_tags: false,
             supports_server_side_move: false,
-            supports_content_hashes_in_metadata: true,
         }
     }
 

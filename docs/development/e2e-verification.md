@@ -81,7 +81,10 @@ machine or CI:
 
 - Everything lives under the repo-local `.vapor/e2e/` sandbox.
   `./scripts/clean.sh` removes all residue and stops any manual
-  sandbox daemon first. Never touch `~/.vapor`.
+  sandbox daemon first. It signals a process only when that process is
+  a `vapor` or `vapord` that runs from this repository's build: a pid
+  file can outlive its daemon, and the number can go to the installed
+  daemon. Never touch `~/.vapor`.
 - Never install host services: no `vapor service install`, no
   LaunchAgent or launchd mutation, no login items. (`vapor doctor`
   reads host state; that is fine.)
@@ -89,6 +92,13 @@ machine or CI:
   packaged apps). Runtime behavior is verified through the CLI.
 - No network. The filesystem provider is the default; the Google Drive
   mode is opt-in and needs credentials (below).
+- The user's home is not the real one. Every process a scenario starts
+  gets `HOME` (and `USERPROFILE`) set to `<sandbox>/user`, and the
+  `XDG_*_HOME` variables removed, so a `~` in a path, a default folder,
+  a marker file, the user's trash, or a service unit lands inside the
+  sandbox. The check of the binaries before a run is pinned the same
+  way. Only a Google Drive run and the `--full` launchd scenario keep
+  the real home, because the browser sign-in and `launchd` need it.
 - A failed scenario preserves its sandbox and prints diagnostics for
   every daemon it started; a green run deletes its sandboxes (keep them
   with `--keep`). Any non-zero exit preserves.
@@ -167,11 +177,11 @@ timers, so one per core leaves the host far from saturated.
 Output is one line per scenario:
 
 ```
-[e2e] PASS S03 — local writes become durable intents and drain; the cloud root matches byte for byte (1.9s)
-[e2e] SKIP R01 — needs full: run with --full to include it
-[e2e] KNOWN-GAP S99 — the assertion the scenario cannot meet yet, quoted (5.0s)
-[e2e] FAIL S16 — timed out after 30s waiting for: .../cloud/Vapor/gone.txt to be removed (30.1s)
-[e2e] OK — 49 passed, 0 failed, 2 skipped, 0 known gaps, 0 unexpected passes (93.6s)
+[e2e] PASS S03: local writes become durable intents and drain; the cloud root matches byte for byte (1.9s)
+[e2e] SKIP R01: needs full: run with --full to include it
+[e2e] KNOWN-GAP S99: the assertion the scenario cannot meet yet, quoted (5.0s)
+[e2e] FAIL S16: timed out after 30s waiting for: .../cloud/Vapor/gone.txt to be removed (30.1s)
+[e2e] OK: 49 passed, 0 failed, 2 skipped, 0 known gaps, 0 unexpected passes (93.6s)
 [e2e] report: .../.vapor/e2e/run-711543-14708/e2e-result.json
 ```
 
@@ -252,19 +262,22 @@ covers this; `vapor doctor` explains it when active).
 directory and scenarios write to it directly to play "another device".
 The harness builds `vapor` and `vapord` without a Google Drive OAuth
 client and refuses a filesystem run over binaries that carry one
-(`vapor doctor` reports it). Tokens live in the login keychain rather
-than under the sandbox's `VAPOR_DIR`, so a daemon with a built-in
-client and a `gdrive` profile would find the developer's own sign-in.
-S21 and S55 use `gdrive` profiles for that reason with no client or a
-placeholder one, and S55 names a profile no real sign-in uses, so
-neither reaches the network.
+(`vapor doctor` reports it). A sandbox cannot reach the developer's
+sign-in: secrets are scoped to the runtime directory that stored them
+(`docs/operations/provider-auth-operations.md`), and each sandbox has
+its own. The missing client is the second guard. S21 and S55 use
+`gdrive` profiles with no client or a placeholder one, so neither
+reaches the network.
 
 `--provider gdrive` runs the same catalog against a real Google Drive
 with real credentials. It is a release-gate leg, run by hand on the
 maintainer's machine by `./scripts/release.sh` before a version
-bump, with a dedicated test account signed in and
-`VAPOR_GDRIVE_CLIENT_ID` set; it never runs in CI, never on an
-ordinary change, and never against a personal account. It is wired in
+bump, with a dedicated test account and `VAPOR_GDRIVE_CLIENT_ID` set;
+it never runs in CI, never on an ordinary change, and never against a
+personal account. Because of the secret scope, the leg has to put the
+test account's token into each sandbox (`vapor auth login --token -`
+against the sandbox's runtime directory); that step is part of the
+open work below. It is wired in
 the harness and every scenario that manipulates the cloud root
 directly declares `filesystem-provider` and skips under it; the
 Drive-side operations (a `CloudSide` the harness performs through the
@@ -333,11 +346,25 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S48 | renaming a synced file in the cloud renames the local file in place (same inode, no download) and leaves nothing in the trash |
 | S49 | a sync root that is a whole volume of its own gets its trash at `<volume>/.vapor/trash/`: a cloud deletion is a rename on that volume (same inode, no copy onto the runtime directory's volume), `vapor trash list` shows it, restore puts it back, and the `.vapor` directory inside the root never syncs (needs a disk image) |
 | S50 | a local file whose name is not valid UTF-8 opens an `unsyncable-name` decision, never reaches the cloud, and the question is withdrawn once the file is renamed; `skip` stops the asking (needs a filesystem that accepts such a name: Linux) |
-| S51 | a startup scan held by the throttle says so in status; `vapor reconcile` runs it under user activity and an offline divergence resolves as a keep-both copy |
+| S51 | with a user at the keyboard, on battery, and Low Power Mode on, the startup scan runs with no request and an offline divergence resolves as a keep-both copy; under critical thermal pressure a new file waits and status says why; it uploads when the pressure clears |
 | S52 | push-only removes a cloud-only folder and everything under it, one entry at a time, and never leaves the delete retrying |
 | S53 | pull-only restores a synced folder removed on this device without leaving the folder's own event as a download that never completes, and removes a local-only folder file by file |
 | S54 | an append made in place on the cloud object, which keeps Vapor's op-id tag, reaches this device as the canonical file and is neither dropped as an echo nor turned into a conflict copy |
 | S55 | a `gdrive` profile with no stored sign-in holds its queue instead of failing it, and `vapor status` names the profile and the command that ends the hold (needs a secret store) |
+| S56 | renaming a synced file on this device so that only the case of its name changes moves the cloud object to the new spelling (same inode), with no conflict copy, no deletion, and nothing in the trash (needs a volume that folds case) |
+| S57 | renaming a synced file in the cloud so that only the case of its name changes renames the local file to the new spelling (same inode), with no conflict copy, no deletion, and nothing in the trash (needs a volume that folds case) |
+| S58 | a synced file moved out of the folder and moved back a few seconds later stays in the cloud |
+| S59 | an upload that waits for bandwidth leaves the daemon near idle: well under half a core while the transfer is held |
+| S60 | after a keep-both conflict whose download outlasts the debounce window, the version that won stays in the cloud and both versions end on both sides |
+| S61 | a home with no sync scope starts a daemon that syncs nothing and creates no folder, and status says unconfigured and names the command; setting the two roots, one config set each, starts the profile with no restart |
+| S62 | setting pull-only prints what the mode does; the daemon then syncs nothing, in either direction, and status says the mode needs a confirmation; after the decision is answered enable the mirror runs |
+| S63 | vapor profiles add sets a fresh install up with one command and no restart, and refuses when no terminal can ask and a folder is left out; it refuses a cloud folder inside the local folder; remove refuses while the daemon runs, then forgets the sync state and leaves the files on both sides |
+| S64 | a folder rule hides a folder and not a file of that name; a negation under an excluded folder stays excluded for the watcher as it does for the walk; a file that a rule change frees syncs with no restart and no reconcile request |
+| S65 | vapor report replaces every folder path and file name by a code in the config, the logs, and the live state, and says so; --keep-paths keeps them and says that the report is not for a public issue |
+| S66 | vapor status counts the paths that the ignore rules keep out of sync, and vapor ignored lists each one with its rule, a folder one time and never a file that only shares a folder rule's name |
+| S67 | in push-only, a file whose name the cloud respells so that only the case changes gets this device's spelling back in the cloud, with no restart and no reconcile request (needs a volume that folds case) |
+| S68 | a file that left both folders while the daemon was down, and that is put back on this device with the same bytes, is uploaded and never moved to the trash |
+| S69 | a folder that moves into the sync root with a .gitignore of its own syncs by those rules: the files the rules hide never reach the cloud |
 | R01 | install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd, then the headless supervisor (`install --supervise`) restarting a killed daemon on its own (`--full`) |
 
 ## Extending the harness

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime};
 /// Source of monotonic and wall-clock time for the daemon runtime.
 ///
 /// Production wires [`SystemClock`]. Tests substitute [`ManualClock`] to
-/// drive `Instant` and `SystemTime` independently — useful for asserting
+/// drive `Instant` and `SystemTime` independently: useful for asserting
 /// that elapsed-time checks ignore wall-clock rewinds.
 pub trait Clock: Send + Sync + std::fmt::Debug {
     /// Monotonic clock reading. Used for elapsed-time decisions.
@@ -77,7 +77,7 @@ impl ManualClock {
     }
 
     /// Advance the monotonic axis by `delta`. The wall clock is not
-    /// touched — callers stage rewinds via [`set_system`].
+    /// touched: callers stage rewinds via [`set_system`].
     pub fn advance(&self, delta: Duration) {
         let mut inner = self.inner.lock().expect("ManualClock poisoned");
         inner.instant += delta;

@@ -10,7 +10,7 @@
 //!
 //! The ring is in-memory by design: a daemon restart (or a ring
 //! overflow) invalidates old cursors, and [`ChangesPoll::CursorExpired`]
-//! tells the engine to run a whole-scope reconcile and re-baseline —
+//! tells the engine to run a whole-scope reconcile and re-baseline:
 //! the same convergence path a real cloud provider needs when its
 //! server-side cursor expires.
 
@@ -143,7 +143,7 @@ impl ChangesFeed {
             return Ok(());
         }
         // The feed re-derives change kinds by stat, so a lost event only
-        // delays convergence until the next reconcile — but a watcher
+        // delays convergence until the next reconcile, but a watcher
         // backend error should still be visible in the logs.
         let on_error = std::sync::Arc::new(|description: &str| {
             logging::warning(
@@ -354,9 +354,25 @@ fn normalize_watch_event(
     if is_internal_file_name(name) {
         return None;
     }
-    let remote_path = RemotePath::from_local(root, &event.path)?;
+    let mut remote_path = RemotePath::from_local(root, &event.path)?;
     if super::has_internal_segment(&remote_path) {
         return None;
+    }
+    // A volume that folds names answers for every spelling of one. The
+    // change is about the object the folder stores, so it carries the
+    // stored spelling: after a rename that changes only the case, the
+    // event for the old name must not read as a change of an object
+    // that is not there.
+    if let vapor_shared::paths::StoredSpelling::Other(stored) =
+        vapor_shared::paths::stored_spelling(&event.path)
+    {
+        let depth = remote_path.as_str().split('/').count();
+        let stored_tail: Vec<_> = stored.components().rev().take(depth).collect();
+        let respelled = stored_tail
+            .into_iter()
+            .rev()
+            .fold(root.to_path_buf(), |path, component| path.join(component));
+        remote_path = RemotePath::from_local(root, &respelled)?;
     }
 
     match fs::symlink_metadata(&event.path) {
@@ -392,7 +408,7 @@ fn normalize_watch_event(
             })
         }
         // A transient stat failure (EACCES during a permission change,
-        // EIO on a network mount) must not silently drop the change — the
+        // EIO on a network mount) must not silently drop the change: the
         // event is already consumed from the watch channel, so dropping it
         // loses the change until the next reconcile (which has no periodic
         // cadence). Emit optimistically; the engine re-stats before acting.
@@ -489,6 +505,35 @@ mod tests {
         );
         assert_eq!(page.changes.len(), 1);
         assert_eq!(page.changes[0].kind, RemoteChangeKind::Removed);
+    }
+
+    #[test]
+    fn an_event_for_another_spelling_reports_the_name_the_folder_stores() {
+        let (dir, feed, handle, tags) = feed_fixture();
+        let root = dir.path();
+        let baseline = expect_page(feed.poll(root, &tags, None, 100).expect("baseline"));
+
+        std::fs::create_dir(root.join("Docs")).expect("folder");
+        std::fs::write(root.join("Docs/Report.txt"), b"quarterly").expect("file");
+        // A watcher reports the spelling the writer used, which is not
+        // always the one the folder keeps.
+        handle.emit_modified(root.join("docs/report.txt"), ts(10));
+        let page = expect_page(
+            feed.poll(root, &tags, Some(&baseline.next_cursor), 100)
+                .expect("poll"),
+        );
+
+        assert_eq!(page.changes.len(), 1);
+        let folds_case = root.join("docs/report.txt").exists();
+        if folds_case {
+            assert_eq!(page.changes[0].path.as_str(), "Docs/Report.txt");
+            assert_eq!(page.changes[0].kind, RemoteChangeKind::CreatedOrModified);
+            assert_eq!(page.changes[0].size_bytes, Some(9));
+        } else {
+            // A volume that keeps the spellings apart holds no such file.
+            assert_eq!(page.changes[0].path.as_str(), "docs/report.txt");
+            assert_eq!(page.changes[0].kind, RemoteChangeKind::Removed);
+        }
     }
 
     #[test]

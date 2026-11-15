@@ -24,21 +24,21 @@ workspace.
 
 ## Documents
 
-- `runbook.md` — repository bootstrap (workspace layout, binary names,
-  planned crates), local script entry points for build / test / lint /
+- `runbook.md`: repository bootstrap (workspace layout, binary names,
+  crates and tools), local script entry points for build / test / lint /
   format / perf, stack-specific helpers (Rust and Swift), runtime-path
   defaults (`VAPOR_DIR=./.vapor` for dev/test), and release-build
   policy knobs (Rust release profile, Swift optimization flags).
-- `toolchain-baseline.md` — known-good local reference toolchain (macOS
+- `toolchain-baseline.md`: known-good local reference toolchain (macOS
   version, Rust/Cargo, Swift driver, Swift compiler). Pre-GA this is a
   reference, not a hard pin; the project targets latest stable by
   default.
-- `soak-testing.md` — the Tier S process: the real binaries under
+- `soak-testing.md`: the Tier S process: the real binaries under
   hours of seeded file churn on both sides, fault injection, the model
   and its oracle, the status and report files an agent reads, how to
   triage the first violation, and where the long runs happen
   (`./scripts/soak.sh`).
-- `e2e-verification.md` — the Tier E2E process: black-box verification
+- `e2e-verification.md`: the Tier E2E process: black-box verification
   of the real `vapor`/`vapord` binaries by the `tools/e2e` harness,
   one disposable `.vapor/e2e/` sandbox per scenario
   (`./scripts/e2e.sh`). Covers the safety contract, the shared tree
@@ -48,9 +48,9 @@ workspace.
 
 ## Related references
 
-- `docs/ci/README.md` — how those same scripts run in CI.
-- `docs/architecture/testing-strategy.md` — the authoritative reference
+- `docs/ci/README.md`: how those same scripts run in CI.
+- `docs/architecture/testing-strategy.md`: the authoritative reference
   for the test taxonomy, discipline rules, per-surface scope, and the
   explicit "do not test" list. Read before writing or reviewing a test.
-- `docs/plans/core.md` — the runtime plan behind the workspace structure
+- `docs/plans/core.md`: the runtime plan behind the workspace structure
   the runbook covers (`core/platform`, `core/lifecycle`, `core/cli`).

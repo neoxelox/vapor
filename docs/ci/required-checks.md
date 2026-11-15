@@ -164,16 +164,22 @@ to scripts.
 
 ## Local parity command set
 
-Run the same validations locally before opening a PR:
+Run the validation ladder locally before opening a PR (`AGENTS.md`
+§8.4; the `vapor-validate` skill says which tier a change needs):
 
+- `./scripts/format.sh`
 - `./scripts/lint.sh`
 - `./scripts/test.sh`
-- `./scripts/build.sh`
+- `./scripts/e2e.sh` for a change that alters daemon- or CLI-observable
+  behaviour
 
 For performance-sensitive changes, run:
 
 - `./scripts/perf.sh`
 
-`./scripts/lint.sh` includes format checks (`./scripts/format.sh check`).
+`./scripts/lint.sh` includes the format check, the dependency check
+(`cargo deny`), the locale catalog check, and the em dash check. CI
+also builds every binary in `build.yml`; `./scripts/build.sh` does the
+same locally.
 
 Release workflow is tag-driven and should not be configured as a required status check for pull requests on `main`.

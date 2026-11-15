@@ -12,7 +12,7 @@ distribution trust chain.
 
 Runtime, engine, and cross-platform abstractions are owned by
 `docs/plans/core.md`. The macOS app consumes the Rust-backed runtime and its
-platform abstractions — it does not reimplement sync, scheduling, throttling,
+platform abstractions: it does not reimplement sync, scheduling, throttling,
 or durable state in Swift.
 
 ## 1) Non-negotiables (macOS-specific)
@@ -26,12 +26,12 @@ or durable state in Swift.
   executables:
   - `Contents/MacOS/Vapor` (app)
   - `Contents/MacOS/vapord` (daemon)
-  - `Contents/Helpers/vapor` (CLI — kept out of `Contents/MacOS/`
+  - `Contents/Helpers/vapor` (CLI: kept out of `Contents/MacOS/`
     because the default macOS filesystem is case-insensitive and
     `vapor` would collide with `Vapor`)
 - Runtime daemon launch targets the bundled binary only
   (`Contents/MacOS/vapord`; the bundled CLI resolves it first as a
-  sibling, then at `../MacOS/vapord`) — never a global install path.
+  sibling, then at `../MacOS/vapord`), never a global install path.
 - Autolaunch at login is on by default and restores Vapor as a menubar-only
   surface (no automatic main-window presentation).
 - Closing the main window is a UI action only; `vapord` keeps running.
@@ -49,7 +49,7 @@ or durable state in Swift.
    - Settings UI (app-global + per-profile overrides).
    - Menubar status: `Idle`, `Queued`, `Syncing`, `Throttled`, `Suspended`,
      `Error`.
-   - Controls: `Pause`/`Resume`, `Flush now`, diagnostics panel, timeline tab.
+   - Controls: `Pause`/`Resume`, `Sync now`, diagnostics panel, timeline tab.
    - Consumes Keychain via macOS-native APIs (production `SecretStore`
      implementation in `core/platform/secrets/macos.rs`).
    - Invokes the Rust-backed lifecycle layer (`core/lifecycle`) for
@@ -57,8 +57,8 @@ or durable state in Swift.
      state by running the bundled `vapor` CLI (`Contents/Helpers/vapor`)
      as a subprocess (`vapor service … --json`); no lifecycle policy in
      Swift.
-2. **Rust daemon (`vapord`)** — see `docs/plans/core.md`.
-3. **Shared runtime/platform layer** — see `docs/plans/core.md`.
+2. **Rust daemon (`vapord`)**, see `docs/plans/core.md`.
+3. **Shared runtime/platform layer**, see `docs/plans/core.md`.
 
 ## 3) Auto-launch and lifecycle
 
@@ -136,19 +136,18 @@ Ordered steps:
    into `Vapor.icns` with `iconutil` as the flat fallback behind
    `CFBundleIconFile`, after checking every slot is present at its pixel
    size.
-7. Copy optional resources from `apps/macos/Resources`.
-8. Sign (ad-hoc default; Developer ID + hardened runtime when
+7. Sign (ad-hoc default; Developer ID + hardened runtime when
    `VAPOR_SIGN_IDENTITY` is set; optional entitlements via
    `VAPOR_ENTITLEMENTS`).
-9. Validate (`plutil`, `codesign --verify`, `spctl` best-effort).
-10. Produce `dist/Vapor.zip` via `ditto --keepParent`.
-11. Notarize + staple + re-zip when `VAPOR_NOTARY_PROFILE` is set.
+8. Validate (`plutil`, `codesign --verify`).
+9. Produce `dist/Vapor.zip` via `ditto --keepParent`.
+10. When `VAPOR_NOTARY_PROFILE` is set: notarize, read Apple's answer,
+    staple, check the stapled app (`stapler validate`, `spctl`), and
+    re-zip.
 
-Required environment inputs:
+The app name, the executable name, and the bundle identifier are fixed
+in the script (`AGENTS.md` §2.2). Environment inputs:
 
-- `APP_NAME` (default `Vapor`)
-- `EXECUTABLE_NAME` (default `Vapor`)
-- `BUNDLE_ID` (default `sh.arn.vapor`)
 - `MIN_MACOS` (default `26.0`)
 - `ICON_DOCUMENT` (default `assets/macos/Vapor.icon`)
 - `ICONSET_DIR` (default `assets/macos/Vapor.iconset`)
@@ -191,7 +190,7 @@ Full policy in `docs/operations/macos/distribution-trust-chain.md`.
 
 - UI behavior validated on clean macOS host for happy + failure paths
   (manually by the project owner; UI rendering is deliberately not
-  automated — see §7.1).
+  automated, see §7.1).
 - Window-close vs menubar-quit vs daemon-stop semantics pass automated
   logic coverage (see §4) via `AppLifecycleCoordinator` state transitions.
 - `dist/Vapor.app` always embeds `Contents/MacOS/Vapor`,
@@ -199,7 +198,7 @@ Full policy in `docs/operations/macos/distribution-trust-chain.md`.
   resolves the bundled binaries only.
 - Signed + notarized path works end-to-end when credentials are supplied.
 - `AGENTS.md` invariants for throttle discipline, durability, and low-impact
-  goals are preserved — validated via the core runtime's platform-native
+  goals are preserved: validated via the core runtime's platform-native
   sampler/installer implementations.
 
 ## 7.1) Testing scope (macOS app)
@@ -207,14 +206,14 @@ Full policy in `docs/operations/macos/distribution-trust-chain.md`.
 Logic tests only. The full policy lives in `AGENTS.md §9` and
 `docs/architecture/testing-strategy.md`; the macOS-specific scope is:
 
-- **Tested** — configuration parsing + normalization (`VaporConfiguration`),
+- **Tested**: configuration parsing + normalization (`VaporConfiguration`),
   `AppLifecycleCoordinator` state transitions, `AppShellViewModel` state
   mapping, localization fallback, `StructuredLogger` redaction,
   `VaporPaths` resolution, `VaporBundleLayout` validation, the Swift shim
   over `core/lifecycle` (`VaporCLIServiceController` JSON decoding, the
   `DaemonLifecycleManager` facade, `DaemonHealthMonitor` outcome
   routing).
-- **Not tested** — SwiftUI view rendering, menubar layout, Dock
+- **Not tested**: SwiftUI view rendering, menubar layout, Dock
   transitions, window focus, keyboard handling, animation timing,
   accessibility audit. UI correctness is verified by the project owner
   manually.
@@ -226,12 +225,12 @@ than duplicating the Rust policy tests.
 
 ## 8) Doc deliverables tied to this plan
 
-- `docs/architecture/macos/app-lifecycle.md` — macOS lifecycle semantics.
-- `docs/operations/macos/launchagent-policy.md` — plist policy + crash-loop
+- `docs/architecture/macos/app-lifecycle.md`: macOS lifecycle semantics.
+- `docs/operations/macos/launchagent-policy.md`: plist policy + crash-loop
   interaction + validation scenarios.
-- `docs/operations/macos/distribution-trust-chain.md` — signing + notarization
+- `docs/operations/macos/distribution-trust-chain.md`: signing + notarization
   + entitlement review.
-- `apps/macos/README.md` — local build/package/signed/notarized commands.
+- `apps/macos/README.md`: local build/package/signed/notarized commands.
 
 ## 9) Items moved to the core plan
 
@@ -240,18 +239,18 @@ The following items used to live in the macOS plan and now belong to
 work:
 
 - The full sync pipeline (FS watching, debounce, scheduler, throttle, storm
-  handling, durable queue, reconcile, retry, backpressure) — all inside
+  handling, durable queue, reconcile, retry, backpressure): all inside
   `core/daemon`.
 - Bidirectional sync mechanics (self-write cache, op-id correlation,
-  remote-to-local apply, provider cursor) — all inside `core/daemon` +
+  remote-to-local apply, provider cursor): all inside `core/daemon` +
   `core/providers`.
-- Conflict policy, tombstone semantics, deviceId derivation —
+- Conflict policy, deletion semantics, deviceId derivation:
   `core/daemon` + `core/shared`.
-- Multi-profile model + override resolution — `core/daemon` + `core/shared`.
-- Auto-tuning, user resource budgets, idle boost — `core/daemon`.
-- Provider-system extensibility — `core/providers`.
-- Google Drive provider — `core/providers`.
-- IPC contract schema (previously "XPC contracts") —
+- Multi-profile model + override resolution: `core/daemon` + `core/shared`.
+- User resource budgets, idle boost: `core/daemon`.
+- Provider-system extensibility: `core/providers`.
+- Google Drive provider: `core/providers`.
+- IPC contract schema (previously "XPC contracts"):
   `docs/architecture/ipc-contracts.md`.
-- LaunchAgent install/start/stop logic — `core/platform/service::macos`.
-- Crash-loop guard + daemon lifecycle orchestration — `core/lifecycle`.
+- LaunchAgent install/start/stop logic: `core/platform/service::macos`.
+- Crash-loop guard + daemon lifecycle orchestration: `core/lifecycle`.

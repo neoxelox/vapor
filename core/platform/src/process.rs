@@ -40,7 +40,7 @@ impl Error for ProcessSupervisorError {
 /// The handler argument is invoked when the OS asks the daemon to stop:
 /// `SIGTERM` / `SIGINT` on Unix, `SetConsoleCtrlHandler` events /
 /// `SERVICE_STOP` / `WM_ENDSESSION` on Windows. Implementations must
-/// keep the handler body minimal — typical use is "set the
+/// keep the handler body minimal: typical use is "set the
 /// `SHUTDOWN_REQUESTED` atomic and return". The tick loop observes the
 /// flag at the next tick boundary and exits cleanly.
 pub trait ProcessSupervisor: Send + Sync {

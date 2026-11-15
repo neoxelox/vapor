@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SWIFT_DIR="$ROOT_DIR/apps/macos"
-MODE="${1:-check}"
+MODE="${1:-apply}"
 
 export VAPOR_DIR="${VAPOR_DIR:-$ROOT_DIR/.vapor}"
 export VAPOR_ENV="${VAPOR_ENV:-dev}"
@@ -30,8 +30,9 @@ if ! swift format --help >/dev/null 2>&1; then
 fi
 
 if [[ "$MODE" == "check" ]]; then
-  echo "[swift-format] swift format lint --recursive $SWIFT_DIR"
-  swift format lint --recursive "$SWIFT_DIR"
+  # --strict: without it a finding is a warning and the check exits 0.
+  echo "[swift-format] swift format lint --strict --recursive $SWIFT_DIR"
+  swift format lint --strict --recursive "$SWIFT_DIR"
 else
   echo "[swift-format] swift format format --in-place --recursive $SWIFT_DIR"
   swift format format --in-place --recursive "$SWIFT_DIR"

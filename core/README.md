@@ -10,21 +10,21 @@ in them.
 
 ## Crates
 
-- `core/daemon` — `vapor-daemon` crate and `vapord` binary: fs-watch
+- `core/daemon`: `vapor-daemon` crate and `vapord` binary: fs-watch
   ingest, debounce, scheduler, throttle, durable queue, staged executor,
   reconcile walk, remote poll, multi-profile runtime, IPC service.
-- `core/providers` — the `Provider` trait and capabilities, the
+- `core/providers`: the `Provider` trait and capabilities, the
   filesystem and Google Drive providers, the contract test suite.
-- `core/shared` — constants (source of truth), configuration model,
+- `core/shared`: constants (source of truth), configuration model,
   error taxonomy, runtime paths, logging with redaction.
-- `core/ipc` — framed JSON transport between every surface and the
+- `core/ipc`: framed JSON transport between every surface and the
   daemon (Unix domain socket today).
-- `core/platform` — per-OS native implementations behind portable
+- `core/platform`, per-OS native implementations behind portable
   traits (fs watch, service install, secret store, metrics, idle,
-  filesystem capabilities, process supervision).
-- `core/lifecycle` — crash-loop guard, autolaunch setting store, and the
+  the user's trash, filesystem capabilities, process supervision).
+- `core/lifecycle`: crash-loop guard, autolaunch setting store, and the
   daemon lifecycle manager every surface drives through the CLI.
-- `core/cli` — the `vapor` binary, the universal control plane.
+- `core/cli`: the `vapor` binary, the universal control plane.
 
 ## Testing
 

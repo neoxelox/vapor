@@ -11,10 +11,10 @@ scenario locally.
   `acceptance-budgets-and-benchmark-harness.md` and run
   `./scripts/perf.sh` before merging if the change is performance-
   sensitive.
-- **Investigating a regression?** The harness scenarios (idle, active
-  coding, storm, network degradation, crash durability) are the
-  reproducible starting points. Thresholds are explicit; pass/fail is
-  mechanical.
+- **Investigating a regression?** The soak cell that `perf.sh` runs is
+  the reproducible starting point. Each threshold says whether a tool
+  gates it, reports it, tests it in a constructed case, or does not
+  measure it yet; only the gated ones are pass/fail today.
 - **Tuning the throttle or budget system?** SLOs constrain what you can
   change: user resource ceilings must hold under every scenario, and
   idle-boost must never preempt `Suspended`.
@@ -23,19 +23,21 @@ scenario locally.
 
 ## Documents
 
-- `acceptance-budgets-and-benchmark-harness.md` — five-scenario SLO
-  matrix (idle impact, active load, storm backpressure, network
+- `acceptance-budgets-and-benchmark-harness.md`: five-scenario SLO
+  matrix (idle impact, load protection, storm backpressure, network
   degradation, crash durability) with explicit CPU / memory / disk /
-  latency thresholds; benchmark scenarios; cross-product coverage
-  requirements when layered with user resource ceilings and idle boost.
+  latency thresholds and the state of each one (gated, reported,
+  tested, not measured); the Tier 2 release gate; cross-product
+  coverage requirements when layered with user resource ceilings and
+  idle boost.
 
 ## Related references
 
-- `docs/ci/overview.md` — where `perf.yml` is invoked and how it gates
+- `docs/ci/overview.md`, where `perf.yml` is invoked and how it gates
   releases.
-- `docs/ci/required-checks.md` — required status checks; `perf` is a
+- `docs/ci/required-checks.md`: required status checks; `perf` is a
   release-only gate, not a PR-required check.
-- `docs/tasks/core.md` — the runtime tasks that land (and tighten) these
+- `docs/tasks/core.md`: the runtime tasks that land (and tighten) these
   SLOs.
 
 This area tracks measurable targets and repeatable validation methods;

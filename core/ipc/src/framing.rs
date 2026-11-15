@@ -135,7 +135,7 @@ mod tests {
         // Manually craft a frame whose declared length exceeds the cap.
         let bogus_length = (constants::ipc::MAX_PAYLOAD_BYTES as u32) + 1;
         buffer.extend_from_slice(&bogus_length.to_le_bytes());
-        // We don't even need to fill the payload — the reader must reject
+        // We don't even need to fill the payload: the reader must reject
         // before trying to allocate.
         let mut reader = Cursor::new(buffer);
         let error = read_frame(&mut reader).expect_err("oversized");

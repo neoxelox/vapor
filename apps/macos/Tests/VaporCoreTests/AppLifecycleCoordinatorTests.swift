@@ -72,7 +72,7 @@ func cleanShutdownFromMenubarLeavesLaunchAgentPassive() async {
   )
 
   // Menubar quit must only stop the daemon and terminate the app process.
-  // It must not bootstrap, install, disable, or start the service —
+  // It must not bootstrap, install, disable, or start the service:
   // those actions would either tear down the LaunchAgent (losing
   // autolaunch on next login) or coax launchd into a restart cycle.
   // Combined with KeepAlive=false (locked by the plist-policy tests in

@@ -167,7 +167,9 @@ impl Model {
                         .retain(|path, _| !path.starts_with(&prefix));
                 }
             }
-            Op::Mkdir { .. } => {}
+            // The file is back with the bytes it had, on either side
+            // of any mode, so nothing the model expects has changed.
+            Op::Restore { .. } | Op::Mkdir { .. } => {}
         }
     }
 
