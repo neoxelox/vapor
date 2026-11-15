@@ -50,11 +50,13 @@ and the repository enforces `sha_pinning_required`:
 - `maxim-lobanov/setup-xcode` v1.7.0
 - `actions-rust-lang/setup-rust-toolchain` v1.17.0
 - `actions/cache` v5.1.0 for Rust (`cargo`) and SwiftPM caches. Each
-  of `lint.yml`, `test.yml`, and `build.yml` has its own word in the
-  key (`cargo-lint-`, `cargo-test-`, `cargo-build-`), so the three do
-  not overwrite each other inside one release run. The `package` job
-  of `release.yml` has no build cache: a job that signs builds from a
-  clean tree.
+  of `lint.yml`, `test.yml`, and `build.yml` has its own word in both
+  keys (`cargo-lint-`, `spm-lint-`, and the same for `test` and
+  `build`), so the three do not overwrite each other inside one
+  release run. The lint key also carries the cargo-deny version,
+  because the cache holds that binary. The SwiftPM key follows
+  `apps/macos/Package.swift`. The `package` job of `release.yml` has
+  no build cache: a job that signs builds from a clean tree.
 - `actions/upload-artifact` v4.6.2 for the Tier E2E report, the soak
   and perf reports, and the release packages
 - `actions/download-artifact` v8.0.1 for the release packages in the

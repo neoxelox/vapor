@@ -96,12 +96,26 @@ struct ProfileSlot {
     /// Set when the runtime suspended the profile: when to compose it
     /// again, and how many times that was tried.
     runtime_retry: Option<RuntimeRetry>,
+    /// Set on a profile that was composed again after a suspension,
+    /// until it ran without a failure for the wait it had reached. A
+    /// profile that composes and then fails the same way would
+    /// otherwise start from the shortest wait every time, and each
+    /// attempt opens a database and builds a filter on the tick thread.
+    relapse: Option<Relapse>,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct RuntimeRetry {
     attempts: usize,
     at: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Relapse {
+    /// The attempts the next suspension starts from.
+    attempts: usize,
+    /// From here on the profile counts as healthy again.
+    forgiven_at: Instant,
 }
 
 /// The wait before the next attempt to compose a suspended profile.
@@ -168,6 +182,8 @@ pub struct MultiProfileRuntime {
     /// Provider I/O runs on worker threads; a profile composed later
     /// gets the same.
     transfer_workers: bool,
+    /// The user paused the daemon and did not resume it yet.
+    paused_by_user: bool,
     /// What stops `vapor.json` from giving the profiles it means to,
     /// for the status of a daemon with no profile.
     config_problems: Vec<String>,
@@ -257,6 +273,11 @@ impl MultiProfileRuntime {
         if self.transfer_workers && slot.failed.is_none() {
             slot.runtime
                 .enable_transfer_workers(Some(self.tick_waker.clone()));
+        }
+        // `vapor pause` is for the whole daemon. A profile that joins
+        // while it holds starts paused, like the ones that were there.
+        if self.paused_by_user {
+            slot.control.request_pause();
         }
     }
 
@@ -378,6 +399,7 @@ impl MultiProfileRuntime {
             watchers_enabled: start_watchers,
             last_missing_root_check_inst: None,
             transfer_workers: false,
+            paused_by_user: false,
             config_problems: Vec::new(),
         })
     }
@@ -543,7 +565,12 @@ impl MultiProfileRuntime {
                         "profile composed again after a runtime failure",
                         now,
                     );
+                    let attempts = retry.attempts + 1;
                     self.slots[index] = slot;
+                    self.slots[index].relapse = Some(Relapse {
+                        attempts,
+                        forgiven_at: now_inst + suspended_profile_retry_delay(attempts),
+                    });
                     recomposed = true;
                 }
                 still_failing => {
@@ -612,6 +639,9 @@ impl MultiProfileRuntime {
         {
             let budget = crate::resource_budget::EffectiveBudgetConfig::resolve(&config);
             let ceiling = budget.concurrent_transfers;
+            // A profile composed later starts from the settings that
+            // hold now, not from the ones the daemon started with.
+            self.composer.concurrent_transfers = ceiling;
             self.shared_budget
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -644,6 +674,7 @@ impl MultiProfileRuntime {
             )
         }) {
             let options = EventPathFilterOptions::from_config(&config);
+            self.composer.filter_options = options.clone();
             let mut seen: Vec<*const crate::fs_events::SharedEventPathFilter> = Vec::new();
             for slot in &self.slots {
                 if let Some(filter) = slot.runtime.shared_path_filter() {
@@ -845,15 +876,24 @@ impl MultiProfileRuntime {
         self.purge_other_trash_if_due(now);
 
         let mut report = MultiTickReport::default();
+        let now_inst = self.clock.now();
         for slot in &mut self.slots {
             if slot.failed.is_some() {
                 report.failed_profiles += 1;
                 continue;
             }
+            // The wait a profile starts from when it is suspended now.
+            let attempts = slot.relapse.map_or(0, |relapse| relapse.attempts);
             let outcome = catch_unwind(AssertUnwindSafe(|| slot.runtime.tick(now)));
             match outcome {
                 Ok(Ok(tick_report)) => {
                     slot.consecutive_tick_errors = 0;
+                    if slot
+                        .relapse
+                        .is_some_and(|relapse| now_inst >= relapse.forgiven_at)
+                    {
+                        slot.relapse = None;
+                    }
                     report.ticked_profiles += 1;
                     report.any_pending_work |= slot.runtime.profile_has_pending_work(&tick_report);
                 }
@@ -879,8 +919,8 @@ impl MultiProfileRuntime {
                         );
                         suspend_profile(slot, format!("repeated tick failures: {error:?}"), now);
                         slot.runtime_retry = Some(RuntimeRetry {
-                            attempts: 0,
-                            at: self.clock.now() + suspended_profile_retry_delay(0),
+                            attempts,
+                            at: now_inst + suspended_profile_retry_delay(attempts),
                         });
                         report.failed_profiles += 1;
                     }
@@ -895,8 +935,8 @@ impl MultiProfileRuntime {
                     );
                     suspend_profile(slot, format!("panicked: {reason}"), now);
                     slot.runtime_retry = Some(RuntimeRetry {
-                        attempts: 0,
-                        at: self.clock.now() + suspended_profile_retry_delay(0),
+                        attempts,
+                        at: now_inst + suspended_profile_retry_delay(attempts),
                     });
                     report.failed_profiles += 1;
                 }
@@ -1066,6 +1106,9 @@ impl MultiProfileRuntime {
         };
         let pause = external.take_pause_request();
         let reconcile = external.take_reconcile_request();
+        if let Some(pause) = pause {
+            self.paused_by_user = pause;
+        }
         for slot in &self.slots {
             match pause {
                 Some(true) => slot.control.request_pause(),
@@ -1525,6 +1568,7 @@ fn compose_slot(
         failed,
         missing_root: None,
         runtime_retry: None,
+        relapse: None,
     }
 }
 
@@ -1552,6 +1596,7 @@ fn suspended_placeholder(
         failed: Some(reason),
         missing_root: None,
         runtime_retry: None,
+        relapse: None,
     }
 }
 
@@ -1678,6 +1723,7 @@ fn missing_root_placeholder(
         failed: Some(reason),
         missing_root: Some(root),
         runtime_retry: None,
+        relapse: None,
     }
 }
 
@@ -2779,7 +2825,8 @@ mod tests {
         // A live key: the ceiling drops without touching the queue.
         std::fs::write(
             &config_path,
-            "{\"resourceLimits\": {\"cpuPercent\": 7}, \"provider\": \"gdrive\"}\n",
+            "{\"resourceLimits\": {\"cpuPercent\": 7, \"concurrentTransfers\": 3}, \
+             \"postIgnoreRules\": [\"*.late\"], \"provider\": \"gdrive\"}\n",
         )
         .expect("edit config");
         let later = std::fs::metadata(&config_path)
@@ -2806,6 +2853,13 @@ mod tests {
                 .cpu_percent,
             7,
             "resourceLimits applies live"
+        );
+        // A profile composed after this change starts from the settings
+        // that hold now.
+        assert_eq!(multi.composer.concurrent_transfers, Some(3));
+        assert_eq!(
+            multi.composer.filter_options.post_user_rules,
+            vec!["*.late".to_string()]
         );
         assert_eq!(multi.restart_required(), &["provider"]);
         let status = multi.aggregate_status(clock.now_system());
@@ -2978,6 +3032,90 @@ mod tests {
                 .exists(),
             "the profile syncs again"
         );
+    }
+
+    #[test]
+    fn a_profile_composed_while_the_daemon_is_paused_starts_paused() {
+        let mut fixture = MultiFixture::new(&[("only", SyncMode::TwoWay, false)]);
+        let control = Arc::new(RuntimeControl::new());
+        fixture.multi.attach_control(control.clone());
+        fixture.tick(6_000);
+        fixture
+            .multi
+            .runtime_for("only")
+            .expect("runtime")
+            .replace_provider_for_testing(Box::new(PanickingProvider));
+        fixture.tick(6_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 1);
+
+        // The user pauses the daemon while the profile is suspended.
+        control.request_pause();
+        fixture.tick(6_000);
+
+        // The profile is composed again: it joins a paused daemon.
+        let local = fixture.local_roots["only"].clone();
+        std::fs::write(local.join("waits.txt"), b"paused").expect("seed");
+        fixture.tick(61_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0, "composed again");
+        fixture.converge(8);
+        assert_eq!(
+            fixture
+                .multi
+                .runtime_for("only")
+                .expect("runtime")
+                .app()
+                .snapshot()
+                .run_state,
+            RunState::Paused
+        );
+        assert!(
+            !fixture.cloud_roots["only"].join("waits.txt").exists(),
+            "a paused daemon admits no work, in a profile that joined late too"
+        );
+
+        control.request_resume();
+        fixture.converge(16);
+        assert!(fixture.cloud_roots["only"].join("waits.txt").exists());
+    }
+
+    #[test]
+    fn a_profile_that_composes_and_fails_again_waits_longer_each_time() {
+        let mut fixture = MultiFixture::new(&[("only", SyncMode::TwoWay, false)]);
+        fixture.tick(6_000);
+        let fail = |fixture: &mut MultiFixture| {
+            fixture
+                .multi
+                .runtime_for("only")
+                .expect("runtime")
+                .replace_provider_for_testing(Box::new(PanickingProvider));
+            fixture.tick(6_000);
+            assert_eq!(fixture.multi.failed_profile_count(), 1);
+        };
+
+        // The first suspension waits the shortest time.
+        fail(&mut fixture);
+        fixture.tick(61_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0, "composed again");
+
+        // It fails again at once. The wait is the next one, not the
+        // shortest one again.
+        fail(&mut fixture);
+        fixture.tick(61_000);
+        assert_eq!(
+            fixture.multi.failed_profile_count(),
+            1,
+            "one minute is not enough the second time"
+        );
+        fixture.tick(240_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0);
+
+        // A profile that then runs for as long as the wait it reached
+        // starts from the shortest wait when it fails much later.
+        fixture.tick(1_800_000);
+        fixture.tick(6_000);
+        fail(&mut fixture);
+        fixture.tick(61_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0);
     }
 
     #[test]

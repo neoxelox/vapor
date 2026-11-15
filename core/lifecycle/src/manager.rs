@@ -144,6 +144,8 @@ struct Inner {
     daemon_should_be_running: bool,
     /// A registered unexpected exit whose restart hasn't happened yet.
     awaiting_restart: bool,
+    /// When a stop was last asked for (wall clock, milliseconds).
+    stop_requested_at_ms: Option<u64>,
     /// The durable document as this manager last read or wrote it. A
     /// store that holds something else was written by another process.
     synced: Option<PersistedLifecycleState>,
@@ -172,6 +174,7 @@ impl Inner {
             last_crash_at_ms: persisted.last_crash_at_ms,
             daemon_should_be_running: persisted.daemon_should_be_running,
             awaiting_restart: persisted.awaiting_restart,
+            stop_requested_at_ms: persisted.stop_requested_at_ms,
             synced: Some(persisted.clone()),
         }
     }
@@ -201,6 +204,7 @@ impl DaemonLifecycleManager {
                 last_crash_at_ms: None,
                 daemon_should_be_running: false,
                 awaiting_restart: false,
+                stop_requested_at_ms: None,
                 synced: None,
             }),
         }
@@ -345,6 +349,7 @@ impl DaemonLifecycleManager {
             // unregistered daemon, whether or not it keeps running.
             inner.daemon_should_be_running = false;
             inner.awaiting_restart = false;
+            inner.stop_requested_at_ms = stop_daemon_now.then(|| self.wall_clock.now_ms());
             self.persist_locked(inner, now)
         })?;
         if stop_daemon_now {
@@ -411,12 +416,19 @@ impl DaemonLifecycleManager {
     /// Stops the daemon because the user asked: the stop is expected,
     /// so the next health check counts no crash.
     pub fn stop_daemon_for_termination(&self, now: Instant) -> Result<(), DaemonLifecycleError> {
-        self.installer.stop_daemon()?;
+        // The intent is written before the signal. A daemon that is slow
+        // to exit (a worker inside a network call) makes the wait in
+        // `stop_daemon` give up; the exit that follows must still read
+        // as expected, and a health check that lands in between must
+        // not read the daemon as started by someone else.
         self.with_inner(|inner| {
             inner.daemon_should_be_running = false;
             inner.awaiting_restart = false;
+            inner.stop_requested_at_ms = Some(self.wall_clock.now_ms());
             self.persist_locked(inner, now)
-        })
+        })?;
+        self.installer.stop_daemon()?;
+        Ok(())
     }
 
     /// One supervision tick (the engine behind `vapor service check`).
@@ -451,11 +463,24 @@ impl DaemonLifecycleManager {
     ) -> Result<DaemonHealthCheckOutcome, DaemonLifecycleError> {
         match status {
             ServiceStatus::Running => {
-                if inner.awaiting_restart || !inner.daemon_should_be_running {
+                let stopping = inner.stop_requested_at_ms.is_some_and(|at_ms| {
+                    self.wall_clock.now_ms().saturating_sub(at_ms)
+                        <= vapor_shared::constants::service::STOP_GRACE_SECONDS * 1_000
+                });
+                if stopping {
+                    // A stop was asked for moments ago and the daemon
+                    // has not exited yet. It is on its way out.
+                    return Ok(DaemonHealthCheckOutcome::Running);
+                }
+                if inner.awaiting_restart
+                    || !inner.daemon_should_be_running
+                    || inner.stop_requested_at_ms.is_some()
+                {
                     // Observed reality wins: someone (launchd RunAtLoad,
                     // a manual `vapor service start`) brought it up.
                     inner.awaiting_restart = false;
                     inner.daemon_should_be_running = true;
+                    inner.stop_requested_at_ms = None;
                     self.persist_locked(inner, now)?;
                 }
                 Ok(DaemonHealthCheckOutcome::Running)
@@ -463,6 +488,9 @@ impl DaemonLifecycleManager {
             ServiceStatus::NotInstalled => Ok(DaemonHealthCheckOutcome::NotInstalled),
             ServiceStatus::Stopped | ServiceStatus::CrashLoopPaused => {
                 if !inner.daemon_should_be_running {
+                    if inner.stop_requested_at_ms.take().is_some() {
+                        self.persist_locked(inner, now)?;
+                    }
                     return Ok(DaemonHealthCheckOutcome::StoppedExpected);
                 }
 
@@ -526,6 +554,7 @@ impl DaemonLifecycleManager {
             self.installer.start_daemon()?;
             inner.daemon_should_be_running = true;
             inner.awaiting_restart = false;
+            inner.stop_requested_at_ms = None;
             self.persist_locked(inner, now)?;
             Ok(DaemonLifecycleActionResult::Started)
         })
@@ -549,6 +578,7 @@ impl DaemonLifecycleManager {
             },
             paused_indefinitely: inner.crash_loop_guard.is_paused_indefinitely(),
             awaiting_restart: inner.awaiting_restart,
+            stop_requested_at_ms: inner.stop_requested_at_ms,
         };
         store
             .save(&document)
@@ -1155,6 +1185,62 @@ mod tests {
             .expect("check");
         assert_eq!(outcome, DaemonHealthCheckOutcome::StoppedExpected);
         assert_eq!(store.current().expect("state").consecutive_crashes, 0);
+    }
+
+    #[test]
+    fn a_daemon_that_is_slow_to_exit_after_a_stop_is_not_counted_as_a_crash() {
+        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let store = Arc::new(InMemoryLifecycleStateStore::new());
+        let clock = Arc::new(FixedWallClock::at(1_000_000));
+        let manager = durable_manager_with(
+            installer.clone(),
+            store.clone(),
+            clock.clone(),
+            check_policy(),
+        );
+
+        let t0 = Instant::now();
+        manager.start_daemon_if_allowed(t0).expect("start");
+        manager
+            .stop_daemon_for_termination(t0 + Duration::from_secs(1))
+            .expect("stop");
+        // The daemon has not exited yet when another surface checks.
+        installer.set_status_for_testing(ServiceStatus::Running);
+        clock.set(1_005_000);
+        let outcome = manager
+            .check_daemon_health(t0 + Duration::from_secs(5))
+            .expect("check");
+        assert_eq!(outcome, DaemonHealthCheckOutcome::Running);
+        assert!(
+            !store.current().expect("state").daemon_should_be_running,
+            "a daemon on its way out is not read as started by someone else"
+        );
+
+        // It exits: an expected stop, with no crash and no restart.
+        installer.set_status_for_testing(ServiceStatus::Stopped);
+        clock.set(1_020_000);
+        let outcome = manager
+            .check_daemon_health(t0 + Duration::from_secs(20))
+            .expect("check");
+        assert_eq!(outcome, DaemonHealthCheckOutcome::StoppedExpected);
+        let state = store.current().expect("state");
+        assert_eq!(state.consecutive_crashes, 0);
+        assert_eq!(state.stop_requested_at_ms, None);
+
+        // Long after a stop request, a daemon that runs was started by
+        // someone, and is supervised again.
+        manager
+            .start_daemon_if_allowed(t0 + Duration::from_secs(30))
+            .expect("start");
+        manager
+            .stop_daemon_for_termination(t0 + Duration::from_secs(31))
+            .expect("stop");
+        installer.set_status_for_testing(ServiceStatus::Running);
+        clock.set(1_020_000 + 600_000);
+        manager
+            .check_daemon_health(t0 + Duration::from_secs(700))
+            .expect("check");
+        assert!(store.current().expect("state").daemon_should_be_running);
     }
 
     #[test]

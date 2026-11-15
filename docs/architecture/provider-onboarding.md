@@ -124,9 +124,22 @@ things do not map. Each one is skipped and reported, never forced:
 
 - Google Docs, Sheets, Slides, and other files with no bytes of their
   own, and shortcuts: skipped.
-- Two files with one name in one folder: one of them syncs (the choice
-  is stable), and a warning names the other. Giving the second one a
+- Two files with one name in one folder: one of them syncs (the one
+  with the lowest id, so the choice is stable), and a warning names the
+  other. A change of the other file is not a change of the path, and
+  its removal or its rename is not the removal of the file that syncs:
+  the changes feed asks Drive one time which file a path names before
+  it reports the first change of that path. Giving the second file a
   local name of its own is open work (`docs/tasks/core.md`).
+- A name in another spelling (`README.md` for `readme.md`), which a
+  Drive query can answer for: a lookup binds a path only to a file
+  whose name is exactly the name asked for.
+- Two uploads into one new folder at the same time: the lookup and the
+  creation of a folder run one at a time, so the folder is made one
+  time. A folder id found in the cache is confirmed with Drive before
+  an upload goes into it when the last confirmation is older than 5
+  seconds, so a folder that was trashed or moved out does not take the
+  file.
 - A name with `/`: the file stays in the cloud only.
 - A deletion made in the cloud while the daemon was not running is
   found by the startup reconcile, not by the feed. Keeping the Drive

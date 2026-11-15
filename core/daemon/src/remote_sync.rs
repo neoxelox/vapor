@@ -395,6 +395,16 @@ impl RemotePoller {
                         // The walk materializes the colliding name as a
                         // conflict copy and records the alias; the feed
                         // asks for that walk rather than duplicating it.
+                        // Every change asks: the walk is also what carries
+                        // a later change of that object to its copy. The
+                        // report is made one time for each name.
+                        if let Some(parent) = local_target.parent() {
+                            batch.push((
+                                parent.to_path_buf(),
+                                PendingIntentKind::ReconcileSubtree,
+                                event_time,
+                            ));
+                        }
                         if self.reported_collisions.insert(local_target.clone()) {
                             crate::logging::info(
                                 "Remote change collides with a differently-cased local file; a reconcile will materialize it as a conflict copy",
@@ -405,13 +415,6 @@ impl RemotePoller {
                             );
                             report.name_collisions += 1;
                             self.name_collisions.push((local_target.clone(), existing));
-                            if let Some(parent) = local_target.parent() {
-                                batch.push((
-                                    parent.to_path_buf(),
-                                    PendingIntentKind::ReconcileSubtree,
-                                    event_time,
-                                ));
-                            }
                         }
                         continue;
                     }
@@ -877,6 +880,44 @@ mod tests {
             .expect("intent");
         assert_eq!(intent.kind, PendingIntentKind::ApplyRemoteDelete);
         assert_eq!(intent.path, fixture.local_root.join("gone.txt"));
+    }
+
+    #[test]
+    fn each_change_of_a_colliding_cloud_name_asks_for_the_folder_walk() {
+        let mut fixture = Fixture::new();
+        std::fs::write(fixture.local_root.join("Readme.md"), b"local").expect("seed local");
+        if !crate::name_collision::folds_case_at(&fixture.local_root)
+            || std::fs::symlink_metadata(fixture.local_root.join("readme.md")).is_err()
+        {
+            // This volume keeps the two names apart: no collision.
+            return;
+        }
+        fixture.poll(ts(0)); // baseline
+        let change = |fixture: &mut Fixture, at: u64| {
+            std::fs::write(fixture.cloud_root.join("readme.md"), at.to_string()).expect("cloud");
+            fixture.feed.emit(
+                fixture.cloud_root.join("readme.md"),
+                WatchEventKind::Modified,
+                ts(at),
+            );
+            let report = fixture.poll(ts(at + 10));
+            let intent = fixture
+                .state_db
+                .lease_next_ready(ts(at + 20))
+                .expect("lease")
+                .expect("the folder walk is queued");
+            assert_eq!(intent.kind, PendingIntentKind::ReconcileSubtree);
+            assert_eq!(intent.path, fixture.local_root);
+            fixture
+                .state_db
+                .complete_leased(intent.id)
+                .expect("the walk ran");
+            report.name_collisions
+        };
+        assert_eq!(change(&mut fixture, 100), 1, "reported the first time");
+        // The cloud object changes again. Its copy on this device only
+        // follows through another walk of the folder.
+        assert_eq!(change(&mut fixture, 200), 0, "reported one time");
     }
 
     #[test]

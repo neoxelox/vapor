@@ -175,8 +175,10 @@ mod tests {
                         .path
                         .strip_prefix(&root)
                         .expect("under the root")
-                        .display()
-                        .to_string(),
+                        .components()
+                        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join("/"),
                     entry.kind,
                     entry.rule.as_str(),
                 )

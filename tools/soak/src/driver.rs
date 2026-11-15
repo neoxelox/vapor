@@ -815,17 +815,22 @@ impl Driver {
                 // daemon applied, a rename in flight); an op that no
                 // longer applies is skipped, not a failure of the run.
                 self.note(format!(
-                    "skipped {} on {}: {error}",
+                    "skipped {} on {}: {}",
                     op.kind(),
-                    side.label()
+                    side.label(),
+                    error.failure
                 ));
                 self.log_event(serde_json::json!({
-                    "side": side.label(), "op": op, "version": version, "skipped": error.message,
+                    "side": side.label(), "op": op, "version": version,
+                    "skipped": error.failure.message,
                 }));
                 // A restore that failed after its removal (a full disk)
-                // leaves a plain deletion, and the model must say so.
+                // leaves a plain deletion, and the model must say so. A
+                // restore that found no file removed nothing: a file the
+                // daemon lost stays in the model, and the oracle
+                // reports the loss.
                 let recorded = match &op {
-                    Op::Restore { path, .. } if !join_relative(&root, path).exists() => {
+                    Op::Restore { path, .. } if error.removed_its_file => {
                         Op::Delete { path: path.clone() }
                     }
                     _ => op,

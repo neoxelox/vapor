@@ -325,6 +325,58 @@ fn a_resumable_upload_whose_final_answer_has_no_checksum_reports_the_hash_of_its
 }
 
 #[test]
+fn a_lookup_binds_a_path_only_to_a_file_the_listing_shows_under_that_name() {
+    // The query can answer for another spelling of the name, and for a
+    // Google Doc, which the listing skips. Neither one is the file at
+    // this path, whatever its id.
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(
+        200,
+        r#"{"files":[
+            {"id":"a-other-case","name":"README.md","mimeType":"text/plain","size":"1","md5Checksum":"upper"},
+            {"id":"b-the-file","name":"readme.md","mimeType":"text/plain","size":"2","md5Checksum":"lower"}
+        ]}"#,
+    );
+    let stat = provider
+        .stat(&RemotePath::new("readme.md").expect("path"))
+        .expect("stat")
+        .expect("present");
+    assert_eq!(stat.content_hash.as_deref(), Some("lower"));
+
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(
+        200,
+        r#"{"files":[
+            {"id":"a-sheet","name":"Budget","mimeType":"application/vnd.google-apps.spreadsheet"},
+            {"id":"b-file","name":"Budget","mimeType":"text/plain","size":"3","md5Checksum":"file"}
+        ]}"#,
+    );
+    let stat = provider
+        .stat(&RemotePath::new("Budget").expect("path"))
+        .expect("stat")
+        .expect("present");
+    assert_eq!(stat.content_hash.as_deref(), Some("file"));
+
+    // Only a Google Doc under the name: nothing is at the path.
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(
+        200,
+        r#"{"files":[
+            {"id":"a-sheet","name":"Budget","mimeType":"application/vnd.google-apps.spreadsheet"}
+        ]}"#,
+    );
+    assert!(
+        provider
+            .stat(&RemotePath::new("Budget").expect("path"))
+            .expect("stat")
+            .is_none()
+    );
+}
+
+#[test]
 fn two_files_with_one_name_give_one_entry_and_the_choice_never_depends_on_the_order() {
     let listing = |first: &str, second: &str, third: &str| {
         format!(
@@ -415,6 +467,46 @@ fn a_folder_that_a_request_confirmed_is_not_looked_up_again_until_the_feed_repor
 }
 
 #[test]
+fn an_upload_that_drive_stored_with_another_checksum_fails_and_is_sent_again() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    transport.push_response(200, r#"{"files":[]}"#); // resolve absent
+    transport.push_response_with_headers(
+        200,
+        "",
+        vec![(
+            "Location".to_string(),
+            "https://upload.example/session-9".to_string(),
+        )],
+    );
+    transport.push_response(308, "");
+    // Drive answers with the checksum of other bytes.
+    transport.push_response(200, r#"{"id":"big","md5Checksum":"0123456789abcdef"}"#);
+
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let source = scratch.path().join("big.bin");
+    std::fs::write(
+        &source,
+        vec![7_u8; (SIMPLE_UPLOAD_MAX_BYTES + CHUNK_GRANULARITY) as usize],
+    )
+    .expect("seed");
+    let mut session = provider
+        .begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("big.bin").expect("path"),
+            op_id: "dev-op9".to_string(),
+            precondition: RemotePrecondition::None,
+        })
+        .expect("session");
+    session.step(SIMPLE_UPLOAD_MAX_BYTES).expect("initiate");
+    session.step(SIMPLE_UPLOAD_MAX_BYTES).expect("chunk 1");
+    let error = session
+        .step(u64::MAX)
+        .expect_err("a checksum that differs is not a completed upload");
+    assert_eq!(error.kind, ProviderErrorKind::Transient, "{error:?}");
+}
+
+#[test]
 fn large_upload_is_resumable_with_content_range_chunks() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = ensured_provider(transport.clone());
@@ -428,16 +520,14 @@ fn large_upload_is_resumable_with_content_range_chunks() {
         )],
     );
     transport.push_response(308, ""); // first chunk accepted
-    transport.push_response(200, r#"{"id":"big","md5Checksum":"big-md5"}"#); // final
+    // Two 256KiB-aligned chunks beyond the simple-upload threshold.
+    let payload = vec![7_u8; (SIMPLE_UPLOAD_MAX_BYTES + CHUNK_GRANULARITY) as usize];
+    let sent_md5 = md5_hex_of_bytes(&payload);
+    transport.push_response(200, format!(r#"{{"id":"big","md5Checksum":"{sent_md5}"}}"#)); // final
 
     let scratch = tempfile::TempDir::new().expect("scratch");
     let source = scratch.path().join("big.bin");
-    // Two 256KiB-aligned chunks beyond the simple-upload threshold.
-    std::fs::write(
-        &source,
-        vec![7_u8; (SIMPLE_UPLOAD_MAX_BYTES + CHUNK_GRANULARITY) as usize],
-    )
-    .expect("seed");
+    std::fs::write(&source, &payload).expect("seed");
 
     let mut session = provider
         .begin_upload(UploadRequest {
@@ -463,7 +553,7 @@ fn large_upload_is_resumable_with_content_range_chunks() {
         TransferStep::Completed(outcome) => outcome,
         other => panic!("expected completion, got {other:?}"),
     };
-    assert_eq!(outcome.content_hash, "big-md5");
+    assert_eq!(outcome.content_hash, sent_md5);
 
     let requests = transport.recorded_requests();
     let initiate = &requests[2];
@@ -670,6 +760,79 @@ fn changes_baseline_and_increments_map_paths_and_op_ids() {
     assert_eq!(page.changes.len(), 1);
     assert_eq!(page.changes[0].kind, RemoteChangeKind::Removed);
     assert_eq!(page.changes[0].path.as_str(), "changed.txt");
+}
+
+#[test]
+fn a_second_file_under_one_name_never_reads_as_the_file_the_path_names() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let poll = |cursor: &str| match provider.poll_changes(Some(cursor), 100).expect("poll") {
+        ChangesPoll::Page(page) => page.changes,
+        other => panic!("expected page, got {other:?}"),
+    };
+    let change_of = |id: &str, name: &str, hash: &str| {
+        format!(
+            r#"{{"newStartPageToken":"next","changes":[
+                {{"fileId":"{id}","file":{{"id":"{id}","name":"{name}","mimeType":"text/plain",
+                 "size":"3","md5Checksum":"{hash}","parents":["root-folder"]}}}}
+            ]}}"#
+        )
+    };
+    let both = r#"{"files":[
+        {"id":"b-second","name":"n.txt","mimeType":"text/plain","size":"3","md5Checksum":"second"},
+        {"id":"a-kept","name":"n.txt","mimeType":"text/plain","size":"3","md5Checksum":"kept"}
+    ]}"#;
+
+    // Nothing is known about `n.txt` yet, and the file that changed is
+    // the second one of that name. One lookup finds the file the path
+    // names, and the change is not a change of the path.
+    transport.push_response(200, change_of("b-second", "n.txt", "second"));
+    transport.push_response(200, both);
+    assert!(poll("t1").is_empty(), "the second file stays in the cloud");
+
+    // The file the path names changes: that is a change of the path,
+    // and it needs no lookup.
+    transport.push_response(200, change_of("a-kept", "n.txt", "kept-2"));
+    let changes = poll("t2");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].path.as_str(), "n.txt");
+    assert_eq!(changes[0].content_hash.as_deref(), Some("kept-2"));
+
+    // The second file is trashed, then a third one is renamed away from
+    // the name: neither is the removal of `n.txt`.
+    transport.push_response(
+        200,
+        r#"{"newStartPageToken":"next","changes":[{"fileId":"b-second","removed":true}]}"#,
+    );
+    assert!(poll("t3").is_empty(), "the path still names the kept file");
+    transport.push_response(200, change_of("c-third", "n.txt", "third"));
+    assert!(poll("t4").is_empty());
+    transport.push_response(200, change_of("c-third", "other.txt", "third"));
+    transport.push_response(
+        200,
+        r#"{"files":[
+            {"id":"c-third","name":"other.txt","mimeType":"text/plain","size":"3","md5Checksum":"third"}
+        ]}"#,
+    );
+    let changes = poll("t5");
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| (change.path.as_str(), change.kind))
+            .collect::<Vec<_>>(),
+        vec![("other.txt", RemoteChangeKind::CreatedOrModified)],
+        "the rename gives the new name, and no removal of the name the kept file has"
+    );
+
+    // The kept file is trashed: that is the removal of the path.
+    transport.push_response(
+        200,
+        r#"{"newStartPageToken":"next","changes":[{"fileId":"a-kept","removed":true}]}"#,
+    );
+    let changes = poll("t6");
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].kind, RemoteChangeKind::Removed);
+    assert_eq!(changes[0].path.as_str(), "n.txt");
 }
 
 #[test]

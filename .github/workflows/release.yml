@@ -434,13 +434,16 @@ jobs:
           fi
 
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            # A published release is what users read and downloaded.
+            # Its notes may be edited by hand, and its assets have known
+            # checksums. Only a draft is rewritten.
             is_draft=$(gh release view "$TAG_NAME" --json isDraft --jq .isDraft)
-            draft_flag=()
-            if [[ "$is_draft" == "true" ]]; then
-              draft_flag=(--draft)
+            if [[ "$is_draft" != "true" ]]; then
+              echo "[release] $TAG_NAME is published; its notes and its assets are not replaced. Correct it with a new tag."
+              exit 1
             fi
             gh release edit "$TAG_NAME" \
-              "${draft_flag[@]}" \
+              --draft \
               "${prerelease_reconcile[@]}" \
               --notes-file "$RUNNER_TEMP/release-notes.md"
           else

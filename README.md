@@ -30,7 +30,7 @@ Three things to know before the first launch:
 
 Available now:
 
-- 🔁 Two-way sync between a local folder and a cloud folder. Changes are picked up within seconds while you work.
+- 🔁 Two-way sync between a local folder and a cloud folder. A change on this device is picked up within seconds; a change in the cloud within a minute while you work, and sooner when the device is idle.
 - 🧠 Nothing is lost. Every change is written to disk before it moves, so a crash, a reboot, or a dropped connection resumes where it stopped.
 - 🛡 Edits never silently overwrite each other. When several devices change the same file before it syncs, Vapor keeps every version.
 - 🧭 Each conflicted file becomes one question that lists every version and whose edit it is. Pick the one to keep, from any device, and the others go to the trash; or settle it in the Finder.

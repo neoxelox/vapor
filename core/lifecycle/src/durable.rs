@@ -54,6 +54,10 @@ pub struct PersistedLifecycleState {
     /// happened yet (backoff pending or pause engaged). Prevents the
     /// same exit from being counted as a fresh crash on every check.
     pub awaiting_restart: bool,
+    /// When a surface last asked the daemon to stop, in milliseconds
+    /// since the Unix epoch. A daemon that still runs shortly after is
+    /// exiting, not started by someone else.
+    pub stop_requested_at_ms: Option<u64>,
 }
 
 impl Default for PersistedLifecycleState {
@@ -65,6 +69,7 @@ impl Default for PersistedLifecycleState {
             last_crash_at_ms: None,
             paused_indefinitely: false,
             awaiting_restart: false,
+            stop_requested_at_ms: None,
         }
     }
 }
@@ -235,6 +240,7 @@ mod tests {
             last_crash_at_ms: Some(1_750_000_000_000),
             paused_indefinitely: false,
             awaiting_restart: true,
+            stop_requested_at_ms: None,
         }
     }
 

@@ -49,7 +49,10 @@ impl std::fmt::Display for ProfilesError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(error) => write!(f, "{error}"),
-            Self::UnreadableConfig(reason) => write!(f, "vapor.json cannot be edited: {reason}"),
+            Self::UnreadableConfig(reason) => write!(
+                f,
+                "vapor.json cannot be edited: {reason}. Fix the file, then run the command again"
+            ),
             Self::Invalid(reason) => write!(f, "{reason}"),
             Self::UnknownProfile { requested, known } if known.is_empty() => {
                 write!(f, "no profile '{requested}': there is no profile yet")
@@ -196,13 +199,6 @@ pub struct AddRequest {
     pub mode: Option<String>,
 }
 
-impl AddRequest {
-    /// No flag was given: on a terminal the command asks.
-    pub fn is_empty(&self) -> bool {
-        *self == Self::default()
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddOutcome {
@@ -287,10 +283,49 @@ impl Prompter for TerminalPrompter {
     }
 }
 
+/// The ids of the profiles that `vapor.json` names now.
+pub fn profile_ids(config_path: &Path) -> Vec<String> {
+    list(config_path)
+        .profiles
+        .into_iter()
+        .map(|profile| profile.id)
+        .collect()
+}
+
+/// An id to offer for a profile of the folder `local`: the folder's
+/// name when it can be an id, a numbered one otherwise.
+fn suggested_id(local: &str, taken: &[String]) -> String {
+    let from_folder: String = Path::new(local.trim())
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let from_folder = from_folder.trim_matches('-').to_string();
+    if is_valid_profile_id(&from_folder) && !taken.contains(&from_folder) {
+        return from_folder;
+    }
+    (taken.len() + 1..)
+        .map(|number| format!("profile-{number}"))
+        .find(|id| !taken.contains(id))
+        .unwrap_or_default()
+}
+
 /// Fills what the request leaves open by asking, with the default that
-/// a plain `add` would take as the suggestion.
+/// a plain `add` would take as the suggestion. `taken` holds the ids of
+/// the profiles that exist: next to one of them the new profile needs
+/// an id of its own, so that is asked too.
 pub fn ask_for_missing(
     request: AddRequest,
+    taken: &[String],
     prompter: &mut dyn Prompter,
 ) -> Result<AddRequest, ProfilesError> {
     let provider = match request.provider {
@@ -321,7 +356,16 @@ pub fn ask_for_missing(
             constants::sync_mode::DEFAULT,
         )?,
     };
+    let id = match request.id {
+        Some(id) => Some(id),
+        None if taken.is_empty() => None,
+        None => Some(prompter.ask(
+            "Id of the new profile (lowercase letters, digits, `-`, `_`)",
+            &suggested_id(&local, taken),
+        )?),
+    };
     Ok(AddRequest {
+        id,
         provider: Some(provider),
         local: Some(local),
         cloud: Some(cloud),
@@ -342,6 +386,14 @@ struct PlannedProfile {
     /// The roots as the daemon resolves them.
     local_resolved: PathBuf,
     cloud_resolved: String,
+}
+
+impl PlannedProfile {
+    /// The local root as the daemon holds it: canonical. A one-way
+    /// question and its confirmation are about exactly that path.
+    fn local_as_the_daemon_holds_it(&self) -> PathBuf {
+        vapor_shared::paths::canonicalize_ahead(&self.local_resolved)
+    }
 }
 
 fn read_document(config_path: &Path) -> Result<Map<String, Value>, ProfilesError> {
@@ -458,6 +510,36 @@ fn plan(
     })
 }
 
+/// The profile the request gives with `vapor.json` as it is now, and
+/// what writing it needs.
+struct PlanOnDisk {
+    planned: PlannedProfile,
+    document: Map<String, Value>,
+    config: VaporConfig,
+    existing: Vec<ResolvedProfile>,
+}
+
+/// Plans the request against the file on disk. The caller holds the
+/// configuration lock.
+fn plan_on_disk(config_path: &Path, request: &AddRequest) -> Result<PlanOnDisk, ProfilesError> {
+    let document = read_document(config_path)?;
+    let load = vapor_shared::config::load_from(config_path);
+    // A file the daemon refuses stays refused with one more profile in
+    // it, and a `profiles` value of the wrong shape would be replaced.
+    let problems = vapor_daemon::profiles::unusable_configuration(&load);
+    if !problems.is_empty() {
+        return Err(ProfilesError::UnreadableConfig(problems.join("; ")));
+    }
+    let existing = vapor_daemon::profiles::resolve_profiles(&load.config);
+    let planned = plan(&existing, &load.config.provider, request)?;
+    Ok(PlanOnDisk {
+        planned,
+        document,
+        config: load.config,
+        existing,
+    })
+}
+
 /// `raw` as a full path: a `~` path and an absolute path stay as they
 /// are; a relative path is anchored at the current directory.
 fn full_path(raw: &str) -> String {
@@ -471,15 +553,16 @@ fn full_path(raw: &str) -> String {
 }
 
 fn profile_entry(profile: &PlannedProfile) -> Value {
+    use constants::profile as keys;
     let mut entry = json!({
-        "id": profile.id,
-        "provider": profile.provider,
-        constants::config::KEY_LOCAL_ROOT: profile.local,
-        constants::config::KEY_CLOUD_ROOT: profile.cloud,
-        constants::config::KEY_SYNC_MODE: profile.mode.as_config_value(),
+        keys::KEY_ID: profile.id,
+        keys::KEY_PROVIDER: profile.provider,
+        keys::KEY_LOCAL_ROOT: profile.local,
+        keys::KEY_CLOUD_ROOT: profile.cloud,
+        keys::KEY_SYNC_MODE: profile.mode.as_config_value(),
     });
     if let Some(name) = &profile.name {
-        entry["name"] = json!(name);
+        entry[keys::KEY_NAME] = json!(name);
     }
     entry
 }
@@ -514,8 +597,8 @@ fn write_profile(
     };
     if implicit_exists {
         let mut implicit = json!({
-            "id": constants::profile::DEFAULT_PROFILE_ID,
-            "provider": config.provider,
+            constants::profile::KEY_ID: constants::profile::DEFAULT_PROFILE_ID,
+            constants::profile::KEY_PROVIDER: config.provider,
             keys::KEY_SYNC_MODE: config.sync_mode,
         });
         if let Some(local) = config.configured_local_root() {
@@ -540,32 +623,42 @@ pub fn add(
     config_path: &Path,
     storage: &ProfileStorage,
     request: &AddRequest,
-    mut prompter: Option<&mut dyn Prompter>,
+    prompter: Option<&mut dyn Prompter>,
     now: SystemTime,
 ) -> Result<AddOutcome, ProfilesError> {
-    let (planned, others_run) = vapor_shared::runtime_paths::with_config_lock(config_path, || {
-        let mut document = read_document(config_path)?;
-        let load = vapor_shared::config::load_from(config_path);
-        if load.unreadable {
-            return Err(ProfilesError::UnreadableConfig(
-                load.load_issue.unwrap_or_default(),
-            ));
-        }
-        let existing = vapor_daemon::profiles::resolve_profiles(&load.config);
-        let planned = plan(&existing, &load.config.provider, request)?;
-        if planned.mode != SyncMode::TwoWay
-            && let Some(prompter) = prompter.as_deref_mut()
-        {
+    use vapor_shared::runtime_paths::with_config_lock;
+    // The question waits for a person. It is asked with the lock
+    // released: the app, `vapor config set`, and the daemon write the
+    // same file, and each would wait for the answer.
+    let mut confirmed = None;
+    if let Some(prompter) = prompter {
+        let planned = with_config_lock(config_path, || plan_on_disk(config_path, request))?.planned;
+        if planned.mode != SyncMode::TwoWay {
             let question = vapor_daemon::one_way::question(
                 planned.mode,
-                &planned.local_resolved,
+                &planned.local_as_the_daemon_holds_it(),
                 &planned.cloud_resolved,
             );
             if !prompter.confirm(&question)? {
                 return Err(ProfilesError::Declined);
             }
+            confirmed = Some(planned);
         }
-        write_profile(&mut document, &load.config, &planned);
+    }
+    let (planned, others_run) = with_config_lock(config_path, || {
+        let PlanOnDisk {
+            planned,
+            mut document,
+            config,
+            existing,
+        } = plan_on_disk(config_path, request)?;
+        if confirmed.as_ref().is_some_and(|asked| *asked != planned) {
+            // The answer was about another mirror than the file gives now.
+            return Err(ProfilesError::Invalid(
+                "vapor.json changed while the question was open; run the command again".to_string(),
+            ));
+        }
+        write_profile(&mut document, &config, &planned);
         vapor_shared::runtime_paths::write_config_document(config_path, &Value::Object(document))?;
         // A profile that can run next to this one keeps the daemon
         // shaped as it is until a restart.
@@ -575,7 +668,7 @@ pub fn add(
 
     let one_way = if planned.mode == SyncMode::TwoWay {
         None
-    } else if prompter.is_some() {
+    } else if confirmed.is_some() {
         // The user said yes above: record it where the daemon looks.
         let database =
             vapor_shared::runtime_paths::profile_database_path_in(&storage.state, &planned.id);
@@ -583,7 +676,7 @@ pub fn add(
             Ok(mut state_db) => vapor_daemon::one_way::acknowledge(
                 &mut state_db,
                 planned.mode,
-                &planned.local_resolved,
+                &planned.local_as_the_daemon_holds_it(),
                 &planned.cloud_resolved,
                 now,
             )
@@ -622,8 +715,8 @@ pub struct RemoveOutcome {
     pub local_root: Option<String>,
     pub cloud_root: Option<String>,
     /// Where the files Vapor removed for this profile still are, when
-    /// its trash holds any. Nothing purges them after the profile is
-    /// gone, so the user decides.
+    /// its trash holds any. The daemon deletes each one when its
+    /// retention time ends, as it does for a profile that runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trash: Option<String>,
 }
@@ -640,7 +733,8 @@ impl RemoveOutcome {
         if let Some(trash) = &self.trash {
             out.push_str(&format!(
                 "Files that Vapor removed for this profile are still in {trash}. \
-                 Delete that folder when you no longer need them.\n"
+                 Vapor deletes each one when its trash retention time ends; \
+                 copy out what you still need.\n"
             ));
         }
         out
@@ -712,6 +806,14 @@ pub fn remove(
     confirm: &mut dyn FnMut(&ProfileRow) -> io::Result<bool>,
 ) -> Result<RemoveOutcome, ProfilesError> {
     use constants::config as keys;
+    // With a file that cannot name profiles, "the profile is not in
+    // vapor.json" is not known, and its state must not go as a leftover.
+    let problems = vapor_daemon::profiles::unusable_configuration(
+        &vapor_shared::config::load_from(config_path),
+    );
+    if !problems.is_empty() {
+        return Err(ProfilesError::UnreadableConfig(problems.join("; ")));
+    }
     let report = list(config_path);
     let configured = report
         .profiles
@@ -746,7 +848,10 @@ pub fn remove(
             } else {
                 let kept: Vec<Value> = list_entries
                     .into_iter()
-                    .filter(|entry| entry["id"].as_str().map(str::trim) != Some(profile_id))
+                    .filter(|entry| {
+                        entry[constants::profile::KEY_ID].as_str().map(str::trim)
+                            != Some(profile_id)
+                    })
                     .collect();
                 if kept.is_empty() {
                     document.remove(keys::KEY_PROFILES);
@@ -1039,7 +1144,8 @@ mod tests {
     #[test]
     fn with_no_flags_the_setup_asks_and_an_empty_answer_takes_the_suggestion() {
         let mut prompter = Scripted::new(&["", "/tmp/vapor-test-local", "", "push-only"]);
-        let filled = ask_for_missing(AddRequest::default(), &mut prompter).expect("answers");
+        let filled = ask_for_missing(AddRequest::default(), &[], &mut prompter).expect("answers");
+        assert_eq!(filled.id, None, "the first profile needs no id");
         assert_eq!(filled.provider.as_deref(), Some("filesystem"));
         assert_eq!(filled.local.as_deref(), Some("/tmp/vapor-test-local"));
         assert_eq!(filled.cloud.as_deref(), Some("~/cloud/Vapor"));
@@ -1053,6 +1159,7 @@ mod tests {
                 provider: Some("gdrive".to_string()),
                 ..AddRequest::default()
             },
+            &[],
             &mut prompter,
         )
         .expect("answers");
@@ -1062,6 +1169,134 @@ mod tests {
             "the provider's suggestion"
         );
         assert_eq!(prompter.asked.len(), 3);
+
+        // Next to a profile that exists, the new one needs an id: it is
+        // asked, and the folder's name is the suggestion.
+        let taken = ["default".to_string()];
+        let mut prompter = Scripted::new(&["", "", "", "", ""]);
+        let filled = ask_for_missing(
+            AddRequest {
+                local: Some("/tmp/vapor-test/Work Files".to_string()),
+                ..AddRequest::default()
+            },
+            &taken,
+            &mut prompter,
+        )
+        .expect("answers");
+        assert_eq!(filled.id.as_deref(), Some("work-files"));
+        assert!(
+            prompter
+                .asked
+                .last()
+                .expect("asked")
+                .contains("Id of the new profile")
+        );
+        assert_eq!(prompter.asked.len(), 4, "the folder was given");
+        assert_eq!(suggested_id("/tmp/default", &taken), "profile-2");
+        assert_eq!(suggested_id("/", &taken), "profile-2");
+
+        // An id that was given is not asked.
+        let mut prompter = Scripted::new(&["", "", "", ""]);
+        let filled = ask_for_missing(
+            AddRequest {
+                id: Some("work".to_string()),
+                ..AddRequest::default()
+            },
+            &taken,
+            &mut prompter,
+        )
+        .expect("answers");
+        assert_eq!(filled.id.as_deref(), Some("work"));
+        assert_eq!(prompter.asked.len(), 4);
+    }
+
+    #[test]
+    fn the_one_way_question_is_asked_with_the_configuration_lock_released() {
+        /// Says yes after it took the configuration lock itself, the
+        /// way the app or `vapor config set` would while the question
+        /// is open.
+        struct TakesTheLock {
+            config_path: PathBuf,
+            took_it: bool,
+        }
+        impl Prompter for TakesTheLock {
+            fn ask(&mut self, _: &str, default: &str) -> io::Result<String> {
+                Ok(default.to_string())
+            }
+            fn confirm(&mut self, _: &str) -> io::Result<bool> {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let config_path = self.config_path.clone();
+                std::thread::spawn(move || {
+                    let taken = vapor_shared::runtime_paths::with_config_lock(&config_path, || {
+                        Ok::<(), io::Error>(())
+                    });
+                    let _ = sender.send(taken.is_ok());
+                });
+                self.took_it = receiver
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .unwrap_or(false);
+                Ok(true)
+            }
+        }
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        let mut prompter = TakesTheLock {
+            config_path: path.clone(),
+            took_it: false,
+        };
+        let outcome = add(
+            &path,
+            &storage(&temp),
+            &AddRequest {
+                mode: Some("push-only".to_string()),
+                ..request(&temp, "mirror")
+            },
+            Some(&mut prompter),
+            now(),
+        )
+        .expect("add");
+        assert!(
+            prompter.took_it,
+            "another writer of vapor.json does not wait for the answer"
+        );
+        assert_eq!(outcome.one_way, Some("confirmed"));
+    }
+
+    #[test]
+    fn a_file_the_daemon_refuses_is_neither_added_to_nor_removed_from() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        let work_state = storage(&temp).state.join("profiles").join("work");
+        std::fs::create_dir_all(&work_state).expect("state");
+        std::fs::write(work_state.join("vapor.sqlite"), b"state").expect("state");
+        let mut yes = |_: &ProfileRow| Ok(true);
+        let wrong_shape = r#"{ "profiles": { "id": "work", "localRoot": "/tmp/vapor-test-w" } }"#;
+        let not_json = r#"{ "profiles": [ { "id": "work", "#;
+
+        for contents in [wrong_shape, not_json] {
+            std::fs::write(&path, contents).expect("write");
+            let refused = add(&path, &storage(&temp), &request(&temp, "home"), None, now())
+                .expect_err("the file names no profile the daemon would run");
+            assert!(
+                matches!(refused, ProfilesError::UnreadableConfig(_)),
+                "{refused}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("read"),
+                contents,
+                "the file is the user's to fix"
+            );
+
+            // `work` may still be in the file. Its state is not a
+            // leftover, and nothing of it goes.
+            let refused = remove(&path, &storage(&temp), "work", false, &no_secrets, &mut yes)
+                .expect_err("the file cannot say whether it names the profile");
+            assert!(
+                matches!(refused, ProfilesError::UnreadableConfig(_)),
+                "{refused}"
+            );
+            assert!(work_state.join("vapor.sqlite").exists());
+        }
     }
 
     #[test]
@@ -1095,11 +1330,15 @@ mod tests {
             vapor_shared::runtime_paths::profile_database_path_in(&storage(&temp).state, "default"),
         )
         .expect("state");
+        // The daemon asks with the canonical form of the folder, which
+        // it creates. The confirmation has to be for that path.
+        let local = PathBuf::from(one_way.local.as_deref().expect("local"));
+        std::fs::create_dir_all(&local).expect("the daemon creates the folder");
         assert!(
             vapor_daemon::one_way::acknowledged(
                 &state_db,
                 SyncMode::PullOnly,
-                Path::new(outcome.profile.local_root.as_deref().expect("local")),
+                &vapor_shared::paths::canonicalize(&local).expect("canonical"),
                 outcome.profile.cloud_root.as_deref().expect("cloud"),
             )
             .expect("read")
@@ -1297,6 +1536,9 @@ mod tests {
     fn the_json_shapes_are_stable() {
         let temp = TempDir::new().expect("temp");
         let path = config_path(&temp);
+        // What the command writes for this folder: the path itself where
+        // it is absolute, and with the drive on a host that needs one.
+        let local = full_path("/tmp/vapor-shape-local");
         let outcome = add(
             &path,
             &storage(&temp),
@@ -1318,7 +1560,7 @@ mod tests {
                     "id": "default",
                     "name": "default",
                     "provider": "gdrive",
-                    "localRoot": "/tmp/vapor-shape-local",
+                    "localRoot": local,
                     "cloudRoot": "/Shape",
                     "syncMode": "push-only",
                     "enabled": true
@@ -1335,7 +1577,7 @@ mod tests {
                     "id": "default",
                     "name": "default",
                     "provider": "gdrive",
-                    "localRoot": "/tmp/vapor-shape-local",
+                    "localRoot": local,
                     "cloudRoot": "/Shape",
                     "syncMode": "push-only",
                     "enabled": true
@@ -1361,7 +1603,7 @@ mod tests {
             .expect("json"),
             json!({
                 "removed": "default",
-                "localRoot": "/tmp/vapor-shape-local",
+                "localRoot": local,
                 "cloudRoot": "/Shape"
             })
         );

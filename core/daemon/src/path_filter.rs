@@ -88,7 +88,16 @@ pub struct EventPathFilter {
     /// (highest matching rule index) still holds.
     glob_set: GlobSet,
     glob_owner: Vec<GlobOwner>,
+    /// The ignore files these rules were read from, each with the
+    /// state it had then. A walk that meets an ignore file in another
+    /// state, or one that is not here, holds rules that are not in
+    /// force yet.
+    ignore_files: std::collections::BTreeMap<PathBuf, IgnoreFileState>,
 }
+
+/// What tells one version of an ignore file from the next: its
+/// modification time and its size.
+pub(crate) type IgnoreFileState = (Option<std::time::SystemTime>, u64);
 
 /// Compiles every rule's globs into a single [`GlobSet`], recording which
 /// rule each glob belongs to.
@@ -178,12 +187,14 @@ impl EventPathFilter {
 
         let mut gitignore_file_count = 0usize;
         let mut vaporignore_file_count = 0usize;
+        let mut ignore_files = std::collections::BTreeMap::new();
 
         if options.use_gitignore {
             gitignore_file_count = append_rules_from_file_tree(
                 &mut rules,
                 watch_root,
                 constants::filtering::GIT_IGNORE_FILE_NAME,
+                &mut ignore_files,
             );
         }
 
@@ -192,6 +203,7 @@ impl EventPathFilter {
                 &mut rules,
                 watch_root,
                 constants::filtering::VAPOR_IGNORE_FILE_NAME,
+                &mut ignore_files,
             );
         }
 
@@ -223,7 +235,14 @@ impl EventPathFilter {
             rules,
             glob_set,
             glob_owner,
+            ignore_files,
         }
+    }
+
+    /// Whether these rules were read from the ignore file at `path` in
+    /// the state it has now.
+    pub(crate) fn has_loaded(&self, path: &Path, state: IgnoreFileState) -> bool {
+        self.ignore_files.get(path) == Some(&state)
     }
 
     /// Whether `path` is out of scope. For a path whose kind the caller
@@ -333,6 +352,7 @@ fn append_rules_from_file_tree(
     rules: &mut Vec<CompiledRule>,
     watch_root: &Path,
     file_name: &str,
+    loaded: &mut std::collections::BTreeMap<PathBuf, IgnoreFileState>,
 ) -> usize {
     // Mirror git: never read an ignore file inside a directory that the
     // rules compiled so far already exclude. Otherwise a third-party
@@ -350,6 +370,15 @@ fn append_rules_from_file_tree(
     };
     let ignore_files = collect_ignore_files(watch_root, file_name, &is_ignored_dir);
     for ignore_file in &ignore_files {
+        // The state from before the read: a file that changes during
+        // the read then differs from what is recorded, and is read
+        // again.
+        if let Ok(metadata) = fs::symlink_metadata(ignore_file) {
+            loaded.insert(
+                ignore_file.clone(),
+                (metadata.modified().ok(), metadata.len()),
+            );
+        }
         append_rules_from_file(rules, watch_root, ignore_file.as_path());
     }
 

@@ -81,7 +81,10 @@ machine or CI:
 
 - Everything lives under the repo-local `.vapor/e2e/` sandbox.
   `./scripts/clean.sh` removes all residue and stops any manual
-  sandbox daemon first. Never touch `~/.vapor`.
+  sandbox daemon first. It signals a process only when that process is
+  a `vapor` or `vapord` that runs from this repository's build: a pid
+  file can outlive its daemon, and the number can go to the installed
+  daemon. Never touch `~/.vapor`.
 - Never install host services: no `vapor service install`, no
   LaunchAgent or launchd mutation, no login items. (`vapor doctor`
   reads host state; that is fine.)
@@ -90,10 +93,12 @@ machine or CI:
 - No network. The filesystem provider is the default; the Google Drive
   mode is opt-in and needs credentials (below).
 - The user's home is not the real one. Every process a scenario starts
-  gets `HOME` (and `USERPROFILE`) set to `<sandbox>/user`, so a `~` in
-  a path, a default folder, or a marker file lands inside the sandbox.
-  Only a Google Drive run and the `--full` launchd scenario keep the
-  real home, because the browser sign-in and `launchd` need it.
+  gets `HOME` (and `USERPROFILE`) set to `<sandbox>/user`, and the
+  `XDG_*_HOME` variables removed, so a `~` in a path, a default folder,
+  a marker file, the user's trash, or a service unit lands inside the
+  sandbox. The check of the binaries before a run is pinned the same
+  way. Only a Google Drive run and the `--full` launchd scenario keep
+  the real home, because the browser sign-in and `launchd` need it.
 - A failed scenario preserves its sandbox and prints diagnostics for
   every daemon it started; a green run deletes its sandboxes (keep them
   with `--keep`). Any non-zero exit preserves.
@@ -358,6 +363,8 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S65 | vapor report replaces every folder path and file name by a code in the config, the logs, and the live state, and says so; --keep-paths keeps them and says that the report is not for a public issue |
 | S66 | vapor status counts the paths that the ignore rules keep out of sync, and vapor ignored lists each one with its rule, a folder one time and never a file that only shares a folder rule's name |
 | S67 | in push-only, a file whose name the cloud respells so that only the case changes gets this device's spelling back in the cloud, with no restart and no reconcile request (needs a volume that folds case) |
+| S68 | a file that left both folders while the daemon was down, and that is put back on this device with the same bytes, is uploaded and never moved to the trash |
+| S69 | a folder that moves into the sync root with a .gitignore of its own syncs by those rules: the files the rules hide never reach the cloud |
 | R01 | install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd, then the headless supervisor (`install --supervise`) restarting a killed daemon on its own (`--full`) |
 
 ## Extending the harness

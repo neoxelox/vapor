@@ -17,13 +17,20 @@ Tasks: `docs/tasks/core.md`.
   background service (LaunchAgent on macOS; Task Scheduler / SCM on
   Windows; systemd on Linux).
 - `secrets`, per-provider OAuth tokens and other credentials. Keychain
-  Services on macOS (shipped); Credential Manager on Windows and
-  libsecret / age-encrypted file on Linux (stubs).
+  Services on macOS (shipped); on Linux the Secret Service of the
+  desktop session, or the external command named by
+  `VAPOR_SECRETS_COMMAND` on a headless host, never a plain file;
+  Credential Manager on Windows (a stub).
 - `metrics`: `PlatformMetricsSampler` returning fresh `ThrottleInputs`
   once per throttle interval (host CPU, power, thermal, memory and user
-  presence on macOS; static defaults on Linux and Windows).
-- `idle`: user-idle duration source (HID idle clock on macOS; zero on
-  Linux and Windows so idle boost stays off there).
+  presence on macOS; `/proc` and `/sys` on Linux; static defaults on
+  Windows).
+- `idle`: user-idle duration source (HID idle clock on macOS; on Linux
+  a host with no graphical session counts as idle and one with a
+  session reads zero, so idle boost stays off there; zero on Windows).
+- `trash`: the user's own trash (`TrashBin`: the Finder trash on
+  macOS, the XDG trash on Linux), which the daemon's trash uses when
+  `trash.useSystem` is on.
 - `fs_caps`: filesystem capabilities (xattr / ADS support, case
   sensitivity).
 - `process`: graceful-shutdown signal handler registration.

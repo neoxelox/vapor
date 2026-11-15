@@ -453,6 +453,17 @@ pub struct DaemonRuntime {
     /// Survives slice pauses so a large tree converges across slices
     /// instead of restarting from scratch (strict mirror).
     reconcile_walker: Option<crate::reconcile_walk::ReconcileWalker>,
+    /// A whole-scope reconcile was asked for while a whole-scope walk
+    /// was under way. That walk passed some folders before the request,
+    /// so one more runs after it.
+    whole_scope_rescan_wanted: bool,
+    /// Folders that appeared with an ignore file inside, and when. The
+    /// files under them are reported once the rules of that file are in
+    /// force; reported before, a file the rules hide would upload.
+    folders_waiting_for_rules: Vec<(PathBuf, SystemTime)>,
+    /// Folders a reconcile walk left for the same reason: each gets a
+    /// walk of its own when the rules are in.
+    walks_waiting_for_rules: Vec<PathBuf>,
     /// Cumulative strict-mirror observability counters:
     /// one-way modes must never be silent about the data they rewrite.
     mirror_revert_count: u64,
@@ -640,6 +651,8 @@ impl DaemonRuntime {
             || report.staged_executor.active_total > 0
             || self.running_reconcile_intent_id.is_some()
             || self.scheduler.pending_count() > 0
+            || !self.folders_waiting_for_rules.is_empty()
+            || !self.walks_waiting_for_rules.is_empty()
         {
             return true;
         }
@@ -699,6 +712,9 @@ impl DaemonRuntime {
         self.apply_resolved_decisions(now)?;
         self.withdraw_holds_left_empty(now)?;
         self.sync_conflict_decisions(now)?;
+        if self.one_way_hold.is_some() {
+            self.release_one_way_hold_if_acknowledged(now)?;
+        }
 
         let (stabilized_events, suppressed_local_echoes, stabilize_mirror_reverts) =
             self.stabilize_events(now);
@@ -871,6 +887,8 @@ impl DaemonRuntime {
                                 constants::engine::RECONCILE_UNREADABLE_RETRY_SECONDS,
                             );
                         let unreadable_dirs = walker.take_unreadable_dirs();
+                        self.walks_waiting_for_rules
+                            .extend(walker.take_dirs_waiting_for_rules());
                         // The root itself: nothing under it can sync,
                         // and status has to say why.
                         if let Some((root, kind)) = unreadable_dirs.iter().find(|(directory, _)| {
@@ -955,9 +973,22 @@ impl DaemonRuntime {
                                         "local root is readable again",
                                     );
                                 }
-                                // The merge flag covers one whole-scope walk.
-                                self.state_db
-                                    .delete_state(constants::state::MERGE_WITHOUT_DELETIONS_KEY)?;
+                                if std::mem::take(&mut self.whole_scope_rescan_wanted) {
+                                    // The merge flag stays for the walk
+                                    // that follows: the request may be
+                                    // the one that set it.
+                                    self.state_db
+                                        .enqueue_startup_reconcile_intent(&completed_root, now)?;
+                                    logging::info(
+                                        "A whole-scope reconcile was requested while one walked; walking once more",
+                                        &[("root", completed_root.display().to_string())],
+                                    );
+                                } else {
+                                    // The merge flag covers one whole-scope walk.
+                                    self.state_db.delete_state(
+                                        constants::state::MERGE_WITHOUT_DELETIONS_KEY,
+                                    )?;
+                                }
                                 if self.startup_reconstruction_barrier {
                                     self.startup_reconstruction_barrier = false;
                                     self.startup_barrier_expires_inst = None;
@@ -1091,7 +1122,36 @@ impl DaemonRuntime {
         let Some(path_filter) = self.path_filter.clone() else {
             return Ok(());
         };
-        path_filter.drive_rebuild(&self.provider_call_mode);
+        if path_filter.drive_rebuild(&self.provider_call_mode) {
+            // The rules of the folders that waited for them are in.
+            for (folder, observed_at) in std::mem::take(&mut self.folders_waiting_for_rules) {
+                let reported = self.report_subtree_events(&folder, observed_at);
+                logging::info(
+                    "Reported the children of a directory that appeared with ignore rules of its own",
+                    &[
+                        ("path", folder.display().to_string()),
+                        ("files", reported.to_string()),
+                    ],
+                );
+            }
+            let mut walks = std::mem::take(&mut self.walks_waiting_for_rules);
+            walks.sort();
+            walks.dedup();
+            if !walks.is_empty() {
+                let batch: Vec<_> = walks
+                    .into_iter()
+                    .map(|folder| (folder, PendingIntentKind::ReconcileSubtree, now))
+                    .collect();
+                self.state_db.enqueue_intents_coalesced(
+                    &batch,
+                    crate::safeguards::IntentSource::ReconcileBacklog,
+                )?;
+                logging::info(
+                    "Queued a walk of the folders that waited for their ignore rules",
+                    &[("folders", batch.len().to_string())],
+                );
+            }
+        }
         let generation = path_filter.rules_generation();
         if generation != self.seen_rules_generation {
             self.seen_rules_generation = generation;
@@ -1471,6 +1531,9 @@ impl DaemonRuntime {
             .take()
             .map(normalize_watch_root)
             .transpose()?;
+        if let Some(local_root) = sync_scope.local_root.as_deref() {
+            vapor_shared::paths::note_sync_root(local_root);
+        }
 
         // The cloud root: adopted on first contact, checked against the
         // recorded identity afterwards. A runtime on its own probes it
@@ -1659,6 +1722,9 @@ impl DaemonRuntime {
             last_cloud_root_attempt_inst: None,
             sign_in_hold: false,
             reconcile_walker: None,
+            whole_scope_rescan_wanted: false,
+            folders_waiting_for_rules: Vec::new(),
+            walks_waiting_for_rules: Vec::new(),
             mirror_revert_count: 0,
             mirror_delete_count: 0,
             conflict_count: 0,
@@ -2515,9 +2581,19 @@ impl DaemonRuntime {
         }) {
             self.withdraw_decision(stale.id, now)?;
         }
-        if mode == vapor_shared::SyncMode::TwoWay
-            || one_way::acknowledged(&self.state_db, mode, &local_root, &cloud_root)?
-        {
+        if mode == vapor_shared::SyncMode::TwoWay {
+            // A confirmation is for the mirror that ran. A profile that
+            // synced both ways since then holds changes the user made
+            // on both sides, so a return to the mirror asks again.
+            self.state_db
+                .delete_state(constants::state::ONE_WAY_ACKNOWLEDGED_KEY)?;
+            return Ok(());
+        }
+        if one_way::acknowledged(&self.state_db, mode, &local_root, &cloud_root)? {
+            // Confirmed on another surface while this question was open.
+            if let Some(answered) = open.filter(asks_for_this_mirror) {
+                self.withdraw_decision(answered.id, now)?;
+            }
             return Ok(());
         }
         let decision_id = match open.filter(asks_for_this_mirror) {
@@ -2557,6 +2633,38 @@ impl DaemonRuntime {
             self.app.set_run_state(RunState::Error, reason.clone());
         }
         self.one_way_hold = Some(reason);
+        Ok(())
+    }
+
+    /// Lets a held one-way profile run when the confirmation arrived
+    /// from another surface: `vapor profiles add` on a terminal asks the
+    /// question itself and records the answer in the state database,
+    /// and the daemon can compose the profile before that write lands.
+    fn release_one_way_hold_if_acknowledged(
+        &mut self,
+        now: SystemTime,
+    ) -> Result<(), DaemonRuntimeError> {
+        use crate::one_way;
+        let mode = self.sync_scope.sync_mode;
+        let Some(local_root) = self.sync_scope.local_root.clone() else {
+            return Ok(());
+        };
+        let cloud_root = self.sync_scope.cloud_root.clone();
+        if !one_way::acknowledged(&self.state_db, mode, &local_root, &cloud_root)? {
+            return Ok(());
+        }
+        if let Some(open) = self
+            .state_db
+            .open_decision(one_way::DECISION_KIND, Some(&local_root))?
+        {
+            self.withdraw_decision(open.id, now)?;
+        }
+        self.one_way_hold = None;
+        self.restore_run_state_after_root_recovery("one-way mode confirmed");
+        logging::info(
+            "One-way mode was confirmed on another surface; the profile runs as a strict mirror",
+            &[("sync_mode", mode.as_config_value().to_string())],
+        );
         Ok(())
     }
 
@@ -2976,29 +3084,15 @@ impl DaemonRuntime {
                 self.app
                     .set_run_state(RunState::Paused, "user paused via vapor pause");
             } else {
-                // Re-derive the run state from what can actually admit
-                // work: resuming while the cloud root is unavailable must
-                // not report Running (which would mask the real blocker),
-                // since the tick loop still leases nothing.
-                if let Some(reason) = self.sign_in_reason() {
-                    self.app.set_run_state(RunState::Error, reason);
-                } else if !self.cloud_root_ready {
-                    self.app.set_run_state(
-                        RunState::Error,
-                        format!(
-                            "cloud root {} is unavailable; sync work is blocked until it can be ensured",
-                            self.sync_scope.cloud_root
-                        ),
-                    );
-                } else {
-                    let reason = match self.sync_scope.local_root.as_ref() {
-                        Some(path) => {
-                            format!("user resumed via vapor resume; watching {}", path.display())
-                        }
-                        None => "user resumed via vapor resume".to_string(),
-                    };
-                    self.app.set_run_state(RunState::Running, reason);
-                }
+                // The pause ends. The state then says what still stops
+                // work, if anything does: a sign-in, a question about a
+                // root or about a one-way mode, a cloud root that is not
+                // there, a full cloud. Reporting Running over one of
+                // those would hide the real blocker, since the tick loop
+                // still leases nothing.
+                self.app
+                    .set_run_state(RunState::Running, "user resumed via vapor resume");
+                self.restore_run_state_after_root_recovery("user resumed via vapor resume");
             }
         }
         if reconcile_request {
@@ -3137,6 +3231,18 @@ impl DaemonRuntime {
             return Ok(());
         };
 
+        // The queue holds one whole-scope reconcile at a time, so a
+        // request made while one walks joins it. The walk already
+        // compared some folders, and the request is for a scan from
+        // now: a rule that changed, events that were dropped, the
+        // user's own `vapor reconcile`.
+        if self
+            .reconcile_walker
+            .as_ref()
+            .is_some_and(|walker| walker.is_whole_scope())
+        {
+            self.whole_scope_rescan_wanted = true;
+        }
         self.state_db
             .enqueue_startup_reconcile_intent(local_root, now)?;
         self.startup_reconstruction_barrier = true;
@@ -3394,13 +3500,32 @@ impl DaemonRuntime {
         (accepted, suppressed, mirror_reverts)
     }
 
-    /// Walks a directory that just appeared and records one `Created`
-    /// event per regular file underneath it, pruning ignored names the
-    /// way the watcher bridge would. Stops at
-    /// `SYNTHESIZED_SUBTREE_EVENT_CAP` files and leaves a subtree
-    /// reconcile marker for the rest. Returns the number of files
-    /// reported.
+    /// Reports the files under a directory that just appeared, as the
+    /// events the watcher would have delivered for them. A directory
+    /// that brings an ignore file with it (a project folder moved in)
+    /// waits: its rules are not in force yet, and the watcher bridge,
+    /// which asks for the reload when it sees an ignore file change,
+    /// never saw this one. The reload is asked for here, and the files
+    /// are reported when it is in. Returns the number of files
+    /// reported now.
     fn synthesize_subtree_events(&mut self, directory: &Path, observed_at: SystemTime) -> usize {
+        if let Some(filter) = self.path_filter.clone()
+            && may_hold_an_ignore_file(directory, &filter)
+        {
+            filter.request_reload();
+            self.folders_waiting_for_rules
+                .push((directory.to_path_buf(), observed_at));
+            return 0;
+        }
+        self.report_subtree_events(directory, observed_at)
+    }
+
+    /// Walks a directory and records one `Created` event per regular
+    /// file underneath it, pruning ignored names the way the watcher
+    /// bridge would. Stops at `SYNTHESIZED_SUBTREE_EVENT_CAP` files and
+    /// leaves a subtree reconcile marker for the rest. Returns the
+    /// number of files reported.
+    fn report_subtree_events(&mut self, directory: &Path, observed_at: SystemTime) -> usize {
         let Some(recorder) = self.recorder.clone() else {
             return 0;
         };
@@ -3653,7 +3778,7 @@ impl DaemonRuntime {
                     let enqueued = self.state_db.enqueue_intents_coalesced_with(
                         &restores,
                         crate::safeguards::IntentSource::Fresh,
-                        true,
+                        crate::state_db::Approval::Guards,
                     )?;
                     self.mass_change_guard.reset();
                     format!(
@@ -3913,7 +4038,7 @@ impl DaemonRuntime {
                     .enqueue_intents_coalesced_with(
                         &[(path.clone(), PendingIntentKind::Delete, now)],
                         crate::safeguards::IntentSource::Fresh,
-                        true,
+                        crate::state_db::Approval::NamedPath,
                     )
                     .map_err(|error| error.to_string())?;
                 "preferred the local side: the cloud side is being removed; the local side goes up"
@@ -4395,6 +4520,47 @@ impl DaemonRuntime {
         }
         Ok(())
     }
+}
+
+/// Whether an ignore file whose rules are not in force lies under
+/// `directory`, in a place the rules in force do not hide. The look is
+/// bounded, because it runs on the tick thread: a tree with more
+/// entries than one report covers counts as "may hold one", and waits
+/// for a reload of the rules, which walks it on a worker.
+fn may_hold_an_ignore_file(
+    directory: &Path,
+    filter: &crate::fs_events::SharedEventPathFilter,
+) -> bool {
+    let mut budget = constants::engine::SYNTHESIZED_SUBTREE_EVENT_CAP;
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(current) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if budget == 0 {
+                return true;
+            }
+            budget -= 1;
+            let path = entry.path();
+            if filter.should_ignore(&path) {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => pending.push(path),
+                Ok(kind) if kind.is_file() && filter.is_ignore_file(&path) => {
+                    let state = entry
+                        .metadata()
+                        .map(|metadata| (metadata.modified().ok(), metadata.len()));
+                    if !state.is_ok_and(|state| filter.covers(&path, state)) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 /// Timeline text for a remote name that would alias a local file.
@@ -6502,6 +6668,51 @@ mod tests {
             }
         }
         assert_eq!(fixture.runtime.app.snapshot().run_state, RunState::Running);
+    }
+
+    #[test]
+    fn a_reconcile_requested_while_one_walks_gets_a_walk_of_its_own() {
+        let mut fixture = BidirectionalFixture::new();
+        // More folders than one slice of the walk compares.
+        let folders = constants::engine::RECONCILE_DIRS_PER_SLICE_IDLE + 16;
+        for index in 0..folders {
+            std::fs::create_dir(fixture.watch_root.join(format!("folder-{index:03}")))
+                .expect("folder");
+        }
+        fixture
+            .runtime
+            .schedule_startup_reconcile(timestamp_ms(fixture.now_ms))
+            .expect("startup scan");
+        // A walker that outlives a tick has folders left to compare.
+        for _ in 0..10 {
+            if fixture.runtime.reconcile_walker.is_some() {
+                break;
+            }
+            fixture.tick(1_000);
+        }
+        assert!(
+            fixture.runtime.reconcile_walker.is_some(),
+            "the walk is under way"
+        );
+
+        // A file appears in the root, which the walk compared first,
+        // and no watcher event tells of it. The user asks for a
+        // reconcile.
+        std::fs::write(
+            fixture.watch_root.join("late.txt"),
+            b"after the root was compared",
+        )
+        .expect("late file");
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+        control.request_reconcile();
+
+        fixture.converge(40);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("late.txt")).expect("uploaded"),
+            b"after the root was compared",
+            "the walk that was under way had passed the root; the request got a walk of its own"
+        );
     }
 
     #[test]
@@ -8721,6 +8932,46 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_that_moves_in_with_an_ignore_file_syncs_by_the_rules_of_that_file() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        // A project made elsewhere, then moved in: the watcher reports
+        // the folder, and nothing for the files under it.
+        let staged = fixture
+            .watch_root
+            .parent()
+            .expect("parent")
+            .join("staged-project");
+        std::fs::create_dir_all(staged.join("src")).expect("dirs");
+        std::fs::write(staged.join(".gitignore"), "secret.env\nbuild-output/\n").expect("rules");
+        std::fs::write(staged.join("secret.env"), b"TOKEN=not-for-the-cloud").expect("secret");
+        std::fs::write(staged.join("src/main.rs"), b"fn main() {}").expect("source");
+        std::fs::create_dir_all(staged.join("build-output")).expect("dirs");
+        std::fs::write(staged.join("build-output/app.bin"), b"binary").expect("output");
+        let project = fixture.watch_root.join("project");
+        std::fs::rename(&staged, &project).expect("move in");
+        fixture.record_local_event(&project, FsEventKind::Created, fixture.now_ms);
+        // The folder's event, the reload of the rules, then the events
+        // of its files, each with a quiet window of its own.
+        for _ in 0..4 {
+            fixture.tick(6_000);
+        }
+        fixture.converge(24);
+
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("project/src/main.rs")).expect("source"),
+            b"fn main() {}"
+        );
+        assert!(fixture.cloud_root.join("project/.gitignore").is_file());
+        assert!(
+            !fixture.cloud_root.join("project/secret.env").exists()
+                && !fixture.cloud_root.join("project/build-output").exists(),
+            "what the folder's own rules hide never reaches the cloud: {:?}",
+            files_in(&fixture.cloud_root)
+        );
+    }
+
+    #[test]
     fn shutdown_flush_persists_events_still_inside_their_debounce_window() {
         // A write reported by the watcher moments before SIGTERM has not
         // stabilized yet. The shutdown flush must turn it into a durable
@@ -8838,6 +9089,23 @@ mod tests {
             "{:?}",
             snapshot.reason
         );
+
+        // A pause and a resume do not hide the question behind "running".
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+        control.request_pause();
+        fixture.tick(1_000);
+        assert_eq!(fixture.runtime.app.snapshot().run_state, RunState::Paused);
+        control.request_resume();
+        fixture.tick(1_000);
+        let resumed = fixture.runtime.app.snapshot().clone();
+        assert_eq!(resumed.run_state, RunState::Error);
+        assert!(
+            resumed.reason.contains("pull-only needs your confirmation"),
+            "{:?}",
+            resumed.reason
+        );
+        assert!(local_only.exists());
         let decision = fixture
             .runtime
             .state_db()
@@ -8934,6 +9202,92 @@ mod tests {
         let two_way = start(vapor_shared::SyncMode::TwoWay, &cloud_root);
         assert!(two_way.one_way_hold.is_none());
         assert_eq!(open_questions(&two_way), 0);
+        drop(two_way);
+
+        // The first mirror again, after the profile ran both ways: the
+        // old confirmation does not cover what changed since.
+        let back = start(vapor_shared::SyncMode::PushOnly, &cloud_root);
+        assert!(back.one_way_hold.is_some());
+        assert_eq!(open_questions(&back), 1);
+    }
+
+    #[test]
+    fn a_confirmation_from_another_surface_releases_a_held_mirror() {
+        let temp = TempDir::new().expect("temp dir");
+        let watch_root = temp.path().join("watch");
+        let cloud_root = temp.path().join("cloud");
+        for directory in [&watch_root, &cloud_root] {
+            std::fs::create_dir_all(directory).expect("dir");
+        }
+        let database_path = temp.path().join("state/vapor.sqlite");
+        let start = || {
+            DaemonRuntime::build(
+                SyncScope {
+                    local_root: Some(watch_root.clone()),
+                    cloud_root: cloud_root.to_string_lossy().into_owned(),
+                    sync_mode: vapor_shared::SyncMode::PullOnly,
+                },
+                EventPathFilterOptions::default(),
+                DurableStateDb::open(&database_path).expect("open durable state db"),
+                Box::new(vapor_providers::FilesystemProvider::new()),
+                Arc::new(StaticMetricsSampler::default()),
+                Arc::new(crate::clock::ManualClock::at_now()),
+                false,
+            )
+            .expect("runtime")
+        };
+        let open_questions = |runtime: &DaemonRuntime| {
+            runtime
+                .state_db()
+                .decisions(false)
+                .expect("decisions")
+                .into_iter()
+                .filter(|decision| {
+                    decision.kind == constants::decision::KIND_ONE_WAY_MODE && decision.is_open()
+                })
+                .count()
+        };
+        // What `vapor profiles add` does on a terminal after a yes: it
+        // writes the confirmation through a connection of its own.
+        let confirm_elsewhere = |runtime: &DaemonRuntime| {
+            let scope = runtime.sync_scope.clone();
+            let mut other = DurableStateDb::open(&database_path).expect("second connection");
+            crate::one_way::acknowledge(
+                &mut other,
+                scope.sync_mode,
+                scope.local_root.as_deref().expect("local root"),
+                &scope.cloud_root,
+                timestamp_ms(1),
+            )
+            .expect("confirm");
+        };
+
+        // The daemon composed the profile before the confirmation
+        // landed: it asks, then finds the confirmation and runs.
+        let mut held = start();
+        assert!(held.one_way_hold.is_some());
+        assert_eq!(open_questions(&held), 1);
+        confirm_elsewhere(&held);
+        held.tick(timestamp_ms(2)).expect("tick");
+        assert!(held.one_way_hold.is_none());
+        assert_eq!(open_questions(&held), 0);
+        assert_eq!(held.app.snapshot().run_state, RunState::Running);
+        drop(held);
+
+        // A question left open by a daemon that stopped before the
+        // confirmation landed is withdrawn at the next start.
+        let mut other = DurableStateDb::open(&database_path).expect("second connection");
+        other
+            .delete_state(constants::state::ONE_WAY_ACKNOWLEDGED_KEY)
+            .expect("forget");
+        drop(other);
+        let asks = start();
+        assert_eq!(open_questions(&asks), 1);
+        confirm_elsewhere(&asks);
+        drop(asks);
+        let runs = start();
+        assert!(runs.one_way_hold.is_none());
+        assert_eq!(open_questions(&runs), 0);
     }
 
     // ---- A change in only the spelling of a name ----
@@ -9018,7 +9372,9 @@ mod tests {
         assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
         assert_eq!(
             fixture.runtime.state_db().failed_depth().expect("failed"),
-            0
+            0,
+            "{:?}",
+            fixture.runtime.state_db().failed_summaries()
         );
         assert_eq!(fixture.runtime.conflict_count(), 0);
     }
@@ -9196,6 +9552,84 @@ mod tests {
             "every seeded file must be indexed"
         );
         paths
+    }
+
+    #[test]
+    fn applying_a_deletion_burst_keeps_a_cloud_file_this_device_never_saw() {
+        // Another device added a file to a folder that the user then
+        // deletes here. The deletion of that cloud entry is queued with
+        // the others, and the guard holds the burst before it is
+        // planned. The user answers `apply`. The answer is about what
+        // the user deleted: the file this device never compared has no
+        // index row, and it stays.
+        let mut fixture = BidirectionalFixture::new();
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        let paths = seed_synced_files(&mut fixture, 40);
+        for path in &paths[..12] {
+            std::fs::remove_file(path).expect("unlink");
+            fixture.record_local_event(path, FsEventKind::Removed, fixture.now_ms);
+        }
+        fixture.converge(30);
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision("mass-delete", None)
+            .expect("query")
+            .expect("twelve of forty files is a burst");
+
+        // The deletion of the entry this device never saw, held with
+        // the burst while it is still unplanned.
+        let unseen_cloud = fixture.cloud_root.join("d0/from-another-device.txt");
+        let unseen_local = fixture.watch_root.join("d0/from-another-device.txt");
+        std::fs::write(&unseen_cloud, b"added elsewhere").expect("cloud-only file");
+        let now = timestamp_ms(fixture.now_ms);
+        fixture
+            .runtime
+            .state_db_mut()
+            .enqueue_intents_coalesced(
+                &[(unseen_local.clone(), PendingIntentKind::Delete, now)],
+                crate::safeguards::IntentSource::Fresh,
+            )
+            .expect("enqueue");
+        fixture
+            .runtime
+            .state_db_mut()
+            .hold_pending_of_kind(PendingIntentKind::Delete, decision.id)
+            .expect("hold");
+
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "apply", now)
+            .expect("resolve");
+        fixture.converge(60);
+
+        assert!(
+            !fixture.cloud_root.join("d0/f0.txt").exists(),
+            "the deletions the user made went through"
+        );
+        assert_eq!(
+            std::fs::read(&unseen_cloud).expect("the unseen file stays in the cloud"),
+            b"added elsewhere"
+        );
+        assert_eq!(
+            std::fs::read(&unseen_local).expect("and comes down to this device"),
+            b"added elsewhere"
+        );
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0,
+            "{:?}",
+            fixture.runtime.state_db().failed_summaries()
+        );
     }
 
     #[test]

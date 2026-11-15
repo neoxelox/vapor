@@ -332,9 +332,44 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// An operation that did not apply.
+#[derive(Debug)]
+pub struct NotApplied {
+    pub failure: Failure,
+    /// The operation removed the file at its path before it failed: a
+    /// restore whose write did not land. The tree then holds a plain
+    /// deletion that the workload made. With this unset the tree is as
+    /// the operation found it, so a file that is missing was missing
+    /// before, and the workload did not remove it.
+    pub removed_its_file: bool,
+}
+
 /// Applies an operation to a real directory tree. Returns the number of
 /// files touched (a tree delete counts every file it removed).
-pub fn apply(root: &Path, op: &Op, seed: u64, version: u64, size: u64) -> Result<usize, Failure> {
+pub fn apply(
+    root: &Path,
+    op: &Op,
+    seed: u64,
+    version: u64,
+    size: u64,
+) -> Result<usize, NotApplied> {
+    let mut removed_its_file = false;
+    apply_to_tree(root, op, seed, version, size, &mut removed_its_file).map_err(|failure| {
+        NotApplied {
+            failure,
+            removed_its_file,
+        }
+    })
+}
+
+fn apply_to_tree(
+    root: &Path,
+    op: &Op,
+    seed: u64,
+    version: u64,
+    size: u64,
+    removed_its_file: &mut bool,
+) -> Result<usize, Failure> {
     let full = |relative: &str| -> PathBuf {
         let mut path = root.to_path_buf();
         for segment in relative.split('/') {
@@ -389,6 +424,7 @@ pub fn apply(root: &Path, op: &Op, seed: u64, version: u64, size: u64) -> Result
             let bytes = fs::read(&target)?;
             let modified = fs::metadata(&target)?.modified()?;
             fs::remove_file(&target)?;
+            *removed_its_file = true;
             std::thread::sleep(std::time::Duration::from_millis(*pause_ms));
             // What a restore from the trash leaves: the old bytes under
             // the old name, with the old modification time.
@@ -757,6 +793,15 @@ mod tests {
             content_for(7, "sub/one.txt", 1, 300),
             "the bytes of the version before the removal"
         );
+
+        // A restore of a file that is not there removed nothing: when
+        // the daemon lost the file, the model must keep expecting it.
+        let missing = Op::Restore {
+            path: "sub/never-there.txt".to_string(),
+            pause_ms: 0,
+        };
+        let not_applied = apply(dir.path(), &missing, 7, 3, 0).expect_err("nothing to restore");
+        assert!(!not_applied.removed_its_file);
         assert_eq!(
             fs::metadata(&file).expect("stat").modified().expect("time"),
             old

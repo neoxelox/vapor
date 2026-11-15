@@ -5,12 +5,15 @@
 //! carry, so the daemon has to know that figure. It never assumes one.
 //! Each direction starts from the speed the OS reports for the network
 //! interface, which is an upper bound (a fast LAN can sit behind a slow
-//! uplink). From the first transfer on the daemon measures: every step
-//! of a transfer moves its bytes at the speed of the link, whatever the
-//! limiter does between two steps, so the highest rate a step reached
-//! in the last minutes is the capacity. When no step was large enough
-//! to measure for that long, one step runs without the limiter as a
-//! short probe. A faster link gives a higher rate with no setting to
+//! uplink). From the first transfer on the daemon measures. A step that
+//! ran without the limiter moved its bytes at the speed of the link:
+//! the highest rate such a step reached in the last minutes is the
+//! capacity. A step that the limiter sized is short, and most of the
+//! time of a short step is the round trip to the provider, so it reads
+//! low: it can raise the estimate and never lowers it. When no step
+//! measured the link for that long, one step runs without the limiter
+//! as a probe, sized to last about a second on the link as it was last
+//! measured. A faster link gives a higher rate with no setting to
 //! change.
 //!
 //! Uploads and downloads have a token bucket each, because the two
@@ -27,6 +30,17 @@ use vapor_shared::constants;
 pub enum TransferDirection {
     Upload,
     Download,
+}
+
+/// What the rate of one transfer step says about the link.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StepReading {
+    /// The step ran without the limiter and did nothing but move bytes:
+    /// its rate is the link's.
+    Link,
+    /// The limiter sized the step, or the step also finished the
+    /// transfer (a last request, a commit): its rate is a lower bound.
+    AtLeast,
 }
 
 /// What one direction of the link is known to carry.
@@ -189,14 +203,27 @@ impl TransferBandwidth {
         true
     }
 
+    /// How many bytes the probe step may move: about a second on the
+    /// link as it was last measured, so the round trip to the provider
+    /// is a small part of what the probe times. Never less than
+    /// `LINK_CAPACITY_PROBE_BYTES`, which is enough on a slow link.
+    pub fn probe_bytes(&self, direction: TransferDirection, now: Instant) -> u64 {
+        self.capacity_bytes_per_second(direction, now)
+            .map_or(u64::MAX, |capacity| {
+                capacity.max(constants::engine::LINK_CAPACITY_PROBE_BYTES)
+            })
+    }
+
     /// Records one finished transfer step. A step that moved enough
-    /// bytes over enough time is a measurement of the link.
+    /// bytes over enough time says something about the link: its rate
+    /// is the link's, or a lower bound of it (see [`StepReading`]).
     pub fn record_step(
         &self,
         direction: TransferDirection,
         bytes: u64,
         elapsed: Duration,
         now: Instant,
+        reading: StepReading,
     ) {
         if bytes == 0 {
             return;
@@ -217,9 +244,23 @@ impl TransferBandwidth {
         {
             return;
         }
-        let rate = (bytes as f64 / elapsed.as_secs_f64()) as u64;
+        let rate = ((bytes as f64 / elapsed.as_secs_f64()) as u64).max(1);
+        let os_reported = link.os_reported;
         let estimate = link.direction(direction);
-        estimate.samples.push_back((now, rate.max(1)));
+        if reading == StepReading::AtLeast {
+            // A lower bound says something only when it is above what
+            // is known. Kept otherwise, it would become the estimate
+            // when the real measurements age out, and the ceiling, a
+            // share of the estimate, would fall step by step.
+            let known = estimate
+                .fresh_capacity(now)
+                .or(estimate.last_measured)
+                .or(os_reported);
+            if known.is_some_and(|known| rate <= known) {
+                return;
+            }
+        }
+        estimate.samples.push_back((now, rate));
         if estimate.samples.len() > constants::engine::LINK_CAPACITY_SAMPLES_MAX {
             estimate.samples.pop_front();
         }
@@ -268,6 +309,7 @@ mod tests {
             4 * MIB,
             Duration::from_secs(1),
             t0,
+            StepReading::Link,
         );
         assert_eq!(
             bandwidth.capacity_bytes_per_second(TransferDirection::Upload, t0),
@@ -297,6 +339,7 @@ mod tests {
             5 * MIB,
             Duration::from_secs(2),
             t0,
+            StepReading::Link,
         );
         assert_eq!(
             bandwidth.capacity_bytes_per_second(TransferDirection::Upload, t0),
@@ -321,6 +364,7 @@ mod tests {
                 rate,
                 Duration::from_secs(1),
                 t0 + Duration::from_secs(offset),
+                StepReading::Link,
             );
         }
         let at = t0 + Duration::from_secs(30);
@@ -341,6 +385,7 @@ mod tests {
             40 * MIB,
             Duration::from_secs(1),
             later,
+            StepReading::Link,
         );
         assert_eq!(
             bandwidth.capacity_bytes_per_second(TransferDirection::Download, later),
@@ -352,12 +397,19 @@ mod tests {
     fn steps_too_small_or_too_short_are_not_measurements() {
         let bandwidth = TransferBandwidth::default();
         let t0 = Instant::now();
-        bandwidth.record_step(TransferDirection::Upload, 4_096, Duration::from_secs(1), t0);
+        bandwidth.record_step(
+            TransferDirection::Upload,
+            4_096,
+            Duration::from_secs(1),
+            t0,
+            StepReading::Link,
+        );
         bandwidth.record_step(
             TransferDirection::Upload,
             8 * MIB,
             Duration::from_micros(200),
             t0,
+            StepReading::Link,
         );
         assert_eq!(
             bandwidth.capacity_bytes_per_second(TransferDirection::Upload, t0),
@@ -385,6 +437,7 @@ mod tests {
             2 * MIB,
             Duration::from_secs(1),
             t0 + window,
+            StepReading::Link,
         );
         assert!(
             !bandwidth.take_probe(
@@ -413,6 +466,7 @@ mod tests {
             64 * MIB,
             Duration::from_secs(1),
             t0,
+            StepReading::Link,
         );
         assert!(!bandwidth.take_probe(TransferDirection::Upload, t0));
         bandwidth.apply_ceiling(25, t0);
@@ -432,12 +486,14 @@ mod tests {
             window * 125_000,
             Duration::from_millis(1),
             t0,
+            StepReading::Link,
         );
         bandwidth.record_step(
             TransferDirection::Download,
             window * 125_000,
             Duration::from_millis(1),
             t0,
+            StepReading::Link,
         );
         // 250 000 bytes each second over the window: 2 000 kbit/s.
         assert_eq!(bandwidth.used_kbps(t0), 2_000);
@@ -445,6 +501,106 @@ mod tests {
             bandwidth.used_kbps(t0 + Duration::from_secs(window + 1)),
             0,
             "an idle daemon uses nothing"
+        );
+    }
+
+    #[test]
+    fn a_step_that_the_limiter_sized_raises_the_estimate_and_never_lowers_it() {
+        let bandwidth = TransferBandwidth::default();
+        let t0 = Instant::now();
+        let window = Duration::from_secs(constants::engine::LINK_CAPACITY_WINDOW_SECONDS);
+        // The probe: 8 MiB each second.
+        bandwidth.record_step(
+            TransferDirection::Upload,
+            8 * MIB,
+            Duration::from_secs(1),
+            t0,
+            StepReading::Link,
+        );
+        // Under a 25 % ceiling the steps are small, and the round trip
+        // is most of their time: each reads far below the link.
+        for second in 1..=(window.as_secs() + 60) {
+            bandwidth.record_step(
+                TransferDirection::Upload,
+                MIB / 2,
+                Duration::from_millis(400),
+                t0 + Duration::from_secs(second),
+                StepReading::AtLeast,
+            );
+        }
+        let later = t0 + window + Duration::from_secs(61);
+        assert_eq!(
+            bandwidth.capacity_bytes_per_second(TransferDirection::Upload, later),
+            Some(8 * MIB),
+            "the low readings did not become the estimate when the probe aged out"
+        );
+        assert!(
+            bandwidth.take_probe(TransferDirection::Upload, later),
+            "and they do not stand in for the next probe"
+        );
+
+        // A limited step that moved faster than the estimate: the link
+        // carries at least that.
+        bandwidth.record_step(
+            TransferDirection::Upload,
+            3 * MIB,
+            Duration::from_millis(250),
+            later,
+            StepReading::AtLeast,
+        );
+        assert_eq!(
+            bandwidth.capacity_bytes_per_second(TransferDirection::Upload, later),
+            Some(12 * MIB)
+        );
+
+        // A probe that reads lower is a slower link, once the old
+        // readings are out of the window.
+        let much_later = later + window + Duration::from_secs(1);
+        bandwidth.record_step(
+            TransferDirection::Upload,
+            2 * MIB,
+            Duration::from_secs(1),
+            much_later,
+            StepReading::Link,
+        );
+        assert_eq!(
+            bandwidth.capacity_bytes_per_second(TransferDirection::Upload, much_later),
+            Some(2 * MIB)
+        );
+    }
+
+    #[test]
+    fn the_probe_lasts_about_a_second_on_the_link_as_last_measured() {
+        let bandwidth = TransferBandwidth::default();
+        let t0 = Instant::now();
+        assert_eq!(
+            bandwidth.probe_bytes(TransferDirection::Download, t0),
+            u64::MAX,
+            "nothing known: the step's own size bounds it"
+        );
+        bandwidth.record_step(
+            TransferDirection::Download,
+            12 * MIB,
+            Duration::from_secs(1),
+            t0,
+            StepReading::Link,
+        );
+        assert_eq!(
+            bandwidth.probe_bytes(TransferDirection::Download, t0),
+            12 * MIB
+        );
+
+        let slow = TransferBandwidth::default();
+        slow.record_step(
+            TransferDirection::Download,
+            200 * 1024,
+            Duration::from_secs(2),
+            t0,
+            StepReading::Link,
+        );
+        assert_eq!(
+            slow.probe_bytes(TransferDirection::Download, t0),
+            constants::engine::LINK_CAPACITY_PROBE_BYTES
         );
     }
 }

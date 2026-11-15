@@ -330,7 +330,13 @@ Found while the fixes were built, and fixed in the same change:
 - Tier S: the soak workload gained a rename that changes only the case
   and a removal that is undone. Three five-minute cells ran with them
   (`two-way`, `pull-only`, `push-only`): no violation after the
-  push-only fix. The release gate runs the long cells.
+  push-only fix. The cells ran again after the fixes of the pull
+  request review, and the push-only cell found one more defect: the
+  filesystem provider failed an intent for good when an entry went
+  away while its path was resolved (a rename that changes only the
+  spelling was under way). The lookup now looks again, and an entry
+  that stays away is a failure to try again. The release gate runs the
+  long cells.
 - Not verified, and why:
   - The Google Drive changes were built from the API documents (D34).
     No run used a real account.
@@ -341,6 +347,18 @@ Found while the fixes were built, and fixed in the same change:
     material exists yet.
   - The Mac app was not launched (D35). The pull request carries the
     manual checklist.
+- The adversarial review of the pull request (D37): six reviewers, one
+  for each area (engine data safety; runtime, profiles, and trash;
+  providers and platform; CLI, IPC, and app; scripts, CI, and tools;
+  documents). They reported 68 findings and no data loss in normal
+  use. 63 were fixed, each code fix with a test that fails without it.
+  One did not reproduce in an experiment (a state database set aside
+  under an open connection keeps its write-ahead log). Two became
+  tasks (`docs/tasks/core.md` E-7, E-8). Two were declined: a
+  `lifecycle.json` written by an older build reads as defaults (no
+  build before GA has users), and a count in `REVIEW.md`, which is
+  removed with the merge. The pull request lists each finding with its
+  verdict.
 
 ## Open points
 
@@ -361,7 +379,9 @@ the owner.
    each option that was left out**, and prints the folders it chose.
    The other choice is to refuse without both folders.
 5. **`vapor profiles remove` keeps the profile's trash** and prints its
-   folder. It forgets the sync state and the sign-in.
+   folder. It forgets the sync state and the sign-in. The daemon
+   deletes each trashed file when its retention time ends, as for a
+   profile that runs.
 6. **Two profiles whose local folders overlap are not refused.** One
    profile whose cloud folder is inside its local folder is. What an
    overlap between profiles should mean is not decided
@@ -391,6 +411,32 @@ the owner.
 14. **The `Unreleased` section of the changelog was rewritten by the
     agent** as a short list (D26). The owner may want other words for
     a change.
+15. **`vapor profiles add` on a terminal asks for each option that was
+    left out**, and for the id when a profile exists already. Before
+    the review of the pull request it asked only when no option was
+    given. It also refuses a `vapor.json` that the daemon would refuse,
+    and so does `vapor profiles remove`.
+16. **A one-way confirmation ends when the profile runs `two-way`.** A
+    return to the same mirror asks again, because both sides changed
+    in between.
+17. **An `apply` answer to a deletion burst does not stand in for the
+    sync index.** It lets the held deletions pass the guard. A cloud
+    file with no index row still stays (D3). Only an answer that names
+    the path itself (a `type-mismatch` side) deletes without a row.
+18. **The reconcile walk removes the index rows of names that left
+    both sides.** A row is the evidence for a deletion (D4), and such a
+    row would vouch for a deletion that did not happen.
+19. **A redacted report can keep a name that is one plain lowercase
+    word** when the name stands alone in a sentence. Replacing those
+    would replace the same word in every message. The report says so.
+20. **`AGENTS.md` §3 names two exceptions to "no provider I/O and no
+    hashing on the tick thread"**: a file of up to 8 MiB is hashed in
+    line, and the re-baseline of an expired cursor polls in line. The
+    other choice is to move both to workers first
+    (`docs/tasks/core.md` E-6).
+21. **A daemon of another build is restarted by `vapor service install`
+    and `bootstrap`.** That is how an update replaces the daemon that
+    runs. A daemon of the same build is never restarted.
 
 Not built, with the task that tracks each one:
 
@@ -398,6 +444,12 @@ Not built, with the task that tracks each one:
 |---|---|---|
 | A local name for the second of two Drive files with one name | One of the two syncs, and a warning names the other | `docs/tasks/core.md` P-1 |
 | The Drive file id in the sync index | A cloud deletion made while the daemon was down is found by the startup scan | `docs/tasks/core.md` P-2 |
+| Hashing of small files and the cursor re-baseline off the tick thread | Both run in line, bounded | `docs/tasks/core.md` E-6 |
+| A question for two local names that the cloud folder folds together | The second upload waits and is tried again | `docs/tasks/core.md` E-7 |
+| The checks of a profile before its local root is made | An invalid profile is suspended after its folder is made | `docs/tasks/core.md` E-8 |
+| A sync root whose own spelling changes while the daemon runs | Names below the root compare right; the watcher path is not checked | `docs/tasks/core.md` E-9 |
+| A hold on the events of a folder while its new ignore file loads | A folder that moves in whole waits; files written one by one do not | `docs/tasks/core.md` E-10 |
+| The bandwidth charge of a Drive chunk below 256 KiB | The excess is not taken from the bucket | `docs/tasks/core.md` P-6 |
 | Proxy settings and system root certificates in the HTTP transport | A network that inspects TLS cannot sync | `docs/tasks/core.md` P-3 |
 | A live check of the Drive changes | Built from the API documents | `docs/tasks/core.md` P-4 |
 | The Google verification decision | The client can serve 100 users | `docs/tasks/core.md` P-5 |

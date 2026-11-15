@@ -10,6 +10,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # The version of cargo-deny that `scripts/lint.sh` runs. It is part
+  # of the Rust cache key: the cache holds the built binary.
+  CARGO_DENY_VERSION: 0.20.2
+
 # Inside a reusable-workflow call the `github` context is the caller's,
 # so the group carries this workflow's own name to stay distinct from the
 # caller's group, and runs on `main` or on a release tag are never
@@ -63,25 +68,21 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-lint-deny${{ env.CARGO_DENY_VERSION }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-lint-
+            ${{ runner.os }}-cargo-lint-deny${{ env.CARGO_DENY_VERSION }}-
 
       - name: Cache SwiftPM dependencies
         if: matrix.scope == 'full'
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: apps/macos/.build
-          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
-          restore-keys: |
-            ${{ runner.os }}-spm-
+          key: ${{ runner.os }}-spm-lint-${{ hashFiles('apps/macos/Package.swift') }}
 
       # A cargo subcommand built from crates.io, not an action. The
       # binary lands in ~/.cargo/bin, which the Rust cache above keeps.
       - name: Install cargo-deny
         shell: bash
-        env:
-          CARGO_DENY_VERSION: 0.20.2
         run: |
           set -euo pipefail
 

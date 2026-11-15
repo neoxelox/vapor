@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn unknown_field_in_hello_payload_is_ignored_not_rejected() {
-        // C5 forward-compat rule: a future field appended by peer N+1
+        // Forward compatibility: a future field appended by peer N+1
         // must not break peer N's parser.
         let raw = r#"{
             "schemaVersion": 3,

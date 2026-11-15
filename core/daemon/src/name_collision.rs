@@ -96,6 +96,53 @@ mod tests {
     }
 
     #[test]
+    fn a_respelled_folder_above_the_sync_root_says_nothing_about_a_file_below_it() {
+        let dir = TempDir::new().expect("dir");
+        let base = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        let root = base.join("vapor");
+        fs::create_dir(&root).expect("dir");
+        fs::create_dir(root.join("Photos")).expect("dir");
+        fs::write(root.join("Photos/a.txt"), b"x").expect("seed");
+        vapor_shared::paths::note_sync_root(&root);
+
+        fs::rename(&root, base.join("Vapor")).expect("respell");
+        if fs::symlink_metadata(&root).is_err() {
+            // This volume keeps the two spellings apart: the root moved.
+            return;
+        }
+        assert_eq!(
+            local_spelling(&root.join("Photos/a.txt")),
+            LocalSpelling::Exact
+        );
+        // Below the root a spelling still counts, and the stored path
+        // keeps the root as the process holds it.
+        for other in ["Photos/A.txt", "photos/a.txt"] {
+            assert_eq!(
+                local_spelling(&root.join(other)),
+                LocalSpelling::Other(root.join("Photos/a.txt")),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_the_volume_folds_by_a_rule_of_its_own_is_another_spelling() {
+        let dir = TempDir::new().expect("dir");
+        let root = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        // A final sigma and a capital sigma fold together on a volume
+        // that folds by the full Unicode rules; a lowercase of each
+        // character does not make them equal.
+        let stored = root.join("\u{03bf}\u{03b4}\u{03bf}\u{03c2}.txt");
+        fs::write(&stored, b"x").expect("seed");
+        let other = root.join("\u{039f}\u{0394}\u{039f}\u{03a3}.txt");
+        if fs::symlink_metadata(&other).is_err() {
+            // This volume keeps the two names apart.
+            return;
+        }
+        assert_eq!(local_spelling(&other), LocalSpelling::Other(stored));
+    }
+
+    #[test]
     fn a_folder_spelled_differently_is_not_an_alias_of_the_file() {
         let dir = TempDir::new().expect("dir");
         let root = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");

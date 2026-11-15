@@ -148,11 +148,16 @@ does not). The rules:
   overwritten and content that exists only there is removed. The
   acknowledgement is recorded in the profile's state DB
   (`one_way.acknowledged`) for that profile, that mode, and that pair of
-  roots; a change of any of the three asks again. `vapor decisions`
-  and the app show the same question, so a hand-edited `vapor.json`
-  cannot enable a mirror silently. `vapor profiles add --mode`
-  shows the warning on a terminal and records a yes; with `--json` it
-  asks nothing and leaves the question to the daemon.
+  roots; a change of any of the three asks again, and so does a
+  return to the mirror after the profile ran `two-way`: both sides
+  changed since, and the old answer does not cover that. `vapor
+  decisions` and the app show the same question, so a hand-edited
+  `vapor.json` cannot enable a mirror silently. `vapor profiles add
+  --mode` shows the warning on a terminal and records a yes for the
+  path as the daemon holds it; a daemon that composed the profile
+  before the record landed withdraws its question when it finds the
+  record. With `--json` the command asks nothing and leaves the
+  question to the daemon. A `vapor resume` does not lift the hold.
 - **An unknown value stops the profile.** A `syncMode` the build does
   not know suspends that profile with the value in its reason. It never
   falls back to `two-way`, which would upload from a folder the user

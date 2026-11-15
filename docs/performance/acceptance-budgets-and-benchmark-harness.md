@@ -11,8 +11,9 @@ measured fact:
 - **gated**: `scripts/perf.sh` asserts it on the report of the Tier 2
   soak cell, and a release does not ship without it.
 - **reported**: the soak report holds the number; nothing fails on it.
-- **tested**: a Tier 1 test asserts the rule in a constructed case; no
-  run measures it on a live daemon.
+- **tested**: a test asserts the rule in a constructed case (Tier 1,
+  or the e2e scenario the row names); no release run measures it under
+  the soak workload.
 - **not measured**: a target with no tool behind it yet
   (`docs/tasks/core.md`).
 
@@ -70,7 +71,7 @@ mode exists.
 
 SLO-1 through SLO-5 above are measured against default `resourceLimits` (`cpuPercent: 15`, `memoryPercent: 10`, `bandwidthPercent: 25`) with `idleBoost` enabled at defaults. User-configurable ceilings do not relax these SLOs; they tighten the throttle controller's admission envelope so Vapor stays inside its budget at all times.
 
-- **Lowered ceilings.** When a user lowers `resourceLimits.*Percent` below defaults, the SLO thresholds still apply as stated. The throttle controller is expected to engage `Light`/`Throttled`/`Suspended` earlier (at lower Vapor-attributable CPU / measured bandwidth), which keeps the daemon inside the SLO envelope by construction. A test case at `resourceLimits.cpuPercent = 5` must still pass SLO-1 idle CPU p95 `<= 3.0%` and SLO-2 active CPU p95 `<= 12.0%`.
+- **Lowered ceilings.** When a user lowers `resourceLimits.*Percent` below defaults, the SLO thresholds still apply as stated. The daemon then takes workers away earlier, and goes to `Throttled` earlier, at a lower CPU share of its own; a lower bandwidth share is a lower rate. That keeps the daemon inside the SLO envelope by construction. A ceiling never gives `Suspended`: only critical thermal pressure does. A test case at `resourceLimits.cpuPercent = 5` must still pass SLO-1 idle CPU p95 `<= 3.0%` and SLO-2 active CPU p95 `<= 12.0%`.
 - **Raised ceilings.** User values above defaults are allowed but never relax the throttle controller's decision points; SLO thresholds still apply because the throttle controller remains the binding constraint at the SLO-level workload mix.
 - **Idle-boost engaged.** Under an active idle boost, CPU/memory/bandwidth may transiently approach `boost*Percent` while the machine is genuinely idle. SLOs are evaluated over representative workload windows that explicitly include idle-boost-eligible periods; boost-driven transient headroom consumption does not count as an SLO violation as long as the throttle state is `Idle` and all idle-boost gating conditions hold.
 - **Profile overrides.** Effective daemon ceilings resolve by MIN-lowering across global and enabled-profile values (see `docs/architecture/data-flow.md`). SLO runs must cover representative profile configurations: global-only, single profile with override, and two profiles with divergent overrides.

@@ -117,17 +117,18 @@ const GDRIVE_CLIENT_ENV: [&str; 2] = [
 ];
 
 /// Refuses a `vapor` binary that was built with a Google Drive OAuth
-/// client. Tokens live in the login keychain, not under `VAPOR_DIR`, so
-/// a sandboxed daemon with a built-in client and a `gdrive` profile
-/// would find the developer's real sign-in and reach their Drive. The
-/// harness builds without one; this catches `--skip-build` over
-/// binaries built some other way. With the runtime override removed,
-/// an `ok` doctor row can only mean a built-in client.
+/// client. A sandbox has a secret scope of its own, so it cannot read
+/// the sign-in of the real install; this is the second barrier, and it
+/// keeps a test binary from ever starting a real sign-in. The harness
+/// builds without a client; this catches `--skip-build` over binaries
+/// built some other way. With the runtime override removed, an `ok`
+/// doctor row can only mean a built-in client.
 pub fn refuse_built_in_oauth_client(cli_bin: &Path, scratch: &Path) -> Result<(), Failure> {
     let mut command = Command::new(cli_bin);
     command
         .args(["doctor", "--json"])
         .env(vapor_shared::constants::env::VAPOR_DIR, scratch);
+    crate::sandbox::pin_home(&mut command, scratch);
     for name in GDRIVE_CLIENT_ENV {
         command.env_remove(name);
     }

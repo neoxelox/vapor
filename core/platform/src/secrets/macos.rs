@@ -178,17 +178,25 @@ impl SecretStore for NativeSecretStore {
     }
 
     fn set(&self, name: &str, value: &str) -> Result<(), SecretStoreError> {
-        match self.update(name, value) {
-            Err(SecretStoreError::NotFound(_)) => match self.add(name, value) {
-                // Lost a create race against another Vapor process; the
-                // item exists now, so the update path applies.
-                Err(SecretStoreError::Backend(error))
-                    if error.to_string().contains(DUPLICATE_MARKER) =>
-                {
-                    self.update(name, value)
-                }
-                other => other,
-            },
+        // Replace the item, do not update it. Only a new item gets the
+        // access list that names the binaries of this build. An item
+        // that an older build wrote keeps its old list through an
+        // update, and the daemon of this build, which never prompts,
+        // could then not read the token that a new sign-in just stored.
+        match self.delete(name) {
+            Ok(()) | Err(SecretStoreError::NotFound(_)) => {}
+            // The item cannot be removed (the user refused, or no
+            // session can ask): keep what is there and write the value.
+            Err(_) => return self.update(name, value),
+        }
+        match self.add(name, value) {
+            // Lost a create race against another Vapor process; the
+            // item exists now, so the update path applies.
+            Err(SecretStoreError::Backend(error))
+                if error.to_string().contains(DUPLICATE_MARKER) =>
+            {
+                self.update(name, value)
+            }
             other => other,
         }
     }

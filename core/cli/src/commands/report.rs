@@ -61,8 +61,9 @@ pub const REPORTS_KEPT: usize = 5;
 
 const REDACTED_NOTE: &str = "no credentials: tokens live in the platform secret store, and the \
      logs are written through the redacting logger. File and folder names are replaced by \
-     stable codes (p-xxxxxxxx). A name inside an error message that the operating system or \
-     the provider wrote can remain: read the report before you share it";
+     stable codes (p-xxxxxxxx). A name that stands alone in a sentence can remain when it is \
+     one plain lowercase word, or when no path in the report holds it: read the report \
+     before you share it";
 const KEPT_NOTE: &str = "no credentials: tokens live in the platform secret store, and the logs \
      are written through the redacting logger. This report was written with the paths kept: \
      it holds the sync folders' paths and the name of every file that synced. Do not attach \
@@ -103,13 +104,58 @@ pub fn write_support_report(
 
     let config_name = vapor_shared::constants::runtime::CONFIGURATION_FILE_NAME;
     let config_path = vapor_dir.join(config_name);
-    let redactor = (paths == Paths::Redact).then(|| {
+    let mut redactor = (paths == Paths::Redact).then(|| {
         super::redact::Redactor::new(
             &vapor_shared::config::load_from(&config_path).config,
             vapor_shared::runtime_paths::home_directory().as_deref(),
             vapor_shared::device_id::persisted(&config_path).as_deref(),
         )
     });
+    let logs_dir = vapor_dir.join(vapor_shared::constants::runtime::LOGS_DIRECTORY_NAME);
+    let mut log_files: Vec<PathBuf> = match fs::read_dir(&logs_dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    log_files.sort();
+    // The first pass: the redactor reads everything the report will
+    // hold and learns the names, so a name is replaced in a sentence
+    // that holds it with no folder in front of it too.
+    if let Some(redactor) = redactor.as_mut() {
+        let mut learn_json =
+            |contents: &str| match serde_json::from_str::<serde_json::Value>(contents) {
+                Ok(document) => redactor.learn_json(&document),
+                Err(_) => contents
+                    .lines()
+                    .for_each(|line| redactor.learn_log_line(line)),
+            };
+        if let Ok(contents) = fs::read_to_string(&config_path) {
+            learn_json(&contents);
+        }
+        if let Some(live) = &live {
+            for contents in [
+                &live.status_json,
+                &live.diagnostics_json,
+                &live.timeline_json,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                learn_json(contents);
+            }
+        }
+        for log in &log_files {
+            if let Ok(bytes) = fs::read(log) {
+                String::from_utf8_lossy(&bytes)
+                    .lines()
+                    .for_each(|line| redactor.learn_log_line(line));
+            }
+        }
+    }
+    let redactor = redactor;
     // A JSON document goes through the redactor as a document, so a
     // path field is redacted whole. One that does not parse is treated
     // as lines of text.
@@ -134,26 +180,22 @@ pub fn write_support_report(
     }
 
     // Daemon/CLI logs (written through the redacting logger).
-    let logs_dir = vapor_dir.join(vapor_shared::constants::runtime::LOGS_DIRECTORY_NAME);
     if logs_dir.is_dir() {
         let report_logs = path.join(vapor_shared::constants::runtime::LOGS_DIRECTORY_NAME);
         fs::create_dir_all(&report_logs)?;
-        let mut entries: Vec<_> = fs::read_dir(&logs_dir)?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.path().is_file())
-            .collect();
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let name = entry.file_name();
+        for log in &log_files {
+            let Some(name) = log.file_name() else {
+                continue;
+            };
             match &redactor {
                 Some(redactor) => {
                     // Lossy on purpose: a log holds the bytes of file
                     // names, and a name need not be UTF-8.
-                    let contents = String::from_utf8_lossy(&fs::read(entry.path())?).into_owned();
-                    fs::write(report_logs.join(&name), redact_lines(redactor, &contents))?;
+                    let contents = String::from_utf8_lossy(&fs::read(log)?).into_owned();
+                    fs::write(report_logs.join(name), redact_lines(redactor, &contents))?;
                 }
                 None => {
-                    fs::copy(entry.path(), report_logs.join(&name))?;
+                    fs::copy(log, report_logs.join(name))?;
                 }
             }
             artifacts.push(format!(
@@ -167,10 +209,18 @@ pub fn write_support_report(
     // Live daemon captures, each independent. "Reachable" is decided by
     // the status call alone: a later endpoint failing must not erase the
     // captures that did land or misreport the daemon as unreachable.
-    let capture_errors = live
+    // An error text can name the socket, which is under the home
+    // directory.
+    let capture_errors: Vec<String> = live
         .as_ref()
         .map(|live| live.capture_errors.clone())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .map(|error| match &redactor {
+            Some(redactor) => redactor.log_line(&error),
+            None => error,
+        })
+        .collect();
     let mut daemon_reachable = false;
     if let Some(live) = live {
         daemon_reachable = live.status_json.is_some();
@@ -237,18 +287,21 @@ pub fn prune_old_reports(reports_root: &Path) -> usize {
     let Ok(entries) = fs::read_dir(reports_root) else {
         return 0;
     };
-    let mut reports: Vec<(std::time::SystemTime, PathBuf)> = entries
+    // A report's name holds the time it was made, and a collision
+    // suffix after it. A folder's modification time moves when anything
+    // touches the folder, so the name decides the order.
+    let mut reports: Vec<((u64, u64), PathBuf)> = entries
         .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("vapor-report-")
-                && entry.file_type().is_ok_and(|kind| kind.is_dir())
-        })
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .filter_map(|entry| {
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, entry.path()))
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let mut parts = name.strip_prefix("vapor-report-")?.splitn(2, '-');
+            let made_at: u64 = parts.next()?.parse().ok()?;
+            let suffix: u64 = match parts.next() {
+                Some(suffix) => suffix.parse().ok()?,
+                None => 0,
+            };
+            Some(((made_at, suffix), entry.path()))
         })
         .collect();
     reports.sort();
@@ -302,8 +355,8 @@ pub fn render_report(report: &SupportReport) -> String {
         out.push_str(&format!("  + {artifact}\n"));
     }
     out.push_str(if report.paths_redacted {
-        "File and folder names are replaced by codes. A name inside an error message can \
-         remain: read the report before you share it.\n"
+        "File and folder names are replaced by codes. A name that stands alone in a \
+         sentence can remain: read the report before you share it.\n"
     } else {
         "This report holds your folder paths and the name of every file that synced. Do not \
          attach it to a public issue.\n"
@@ -451,6 +504,9 @@ mod tests {
         );
     }
 
+    // The fixtures are Unix paths. The redaction of drive-letter and
+    // backslash paths is open work for the Windows surface.
+    #[cfg(unix)]
     #[test]
     fn a_report_holds_no_folder_or_file_name_unless_the_user_keeps_them() {
         let vapor_dir = TempDir::new().expect("vapor dir");
@@ -478,8 +534,15 @@ mod tests {
                 r#"{"items":[{"path":"/Users/sam/Family Photos/summer 2025/beach day.jpg"}]}"#
                     .to_string(),
             ),
-            timeline_json: None,
-            capture_errors: Vec::new(),
+            // A question names the file with no folder in front of it,
+            // and an error names the socket under the home directory.
+            timeline_json: Some(
+                r#"{"entries":[{"message":"Keep only beach day.jpg? (beach day.jpg | other)"}]}"#
+                    .to_string(),
+            ),
+            capture_errors: vec![
+                "diagnostics: no answer on /Users/sam/.vapor/vapord.sock".to_string(),
+            ],
         };
         let everything = |report: &SupportReport| {
             [
@@ -487,6 +550,8 @@ mod tests {
                 "logs/vapord.log",
                 "status.json",
                 "diagnostics.json",
+                "timeline.json",
+                "manifest.json",
             ]
             .iter()
             .map(|name| fs::read_to_string(report.path.join(name)).expect(name))
@@ -520,6 +585,10 @@ mod tests {
         );
         let manifest = fs::read_to_string(redacted.path.join("manifest.json")).expect("manifest");
         assert!(manifest.contains("\"pathsRedacted\": true"), "{manifest}");
+        assert!(
+            manifest.contains("/.vapor/vapord.sock"),
+            "the layout of the runtime directory stays: {manifest}"
+        );
         assert!(render_report(&redacted).contains("read the report before you share it"));
 
         let kept = write_support_report(
@@ -545,12 +614,6 @@ mod tests {
             let report =
                 write_support_report(vapor_dir.path(), reports.path(), None, index, Paths::Redact)
                     .expect("report");
-            // Distinct modification times, oldest first.
-            let stamp = std::time::SystemTime::UNIX_EPOCH
-                + std::time::Duration::from_secs(1_700_000_000 + index);
-            fs::File::open(&report.path)
-                .and_then(|directory| directory.set_modified(stamp))
-                .expect("set the report's time");
             written.push(report.path);
         }
         fs::create_dir_all(reports.path().join("my-notes")).expect("another folder");

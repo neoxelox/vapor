@@ -39,6 +39,30 @@ are never reused.
 - [ ] E-5 `Pause`, `Resume`, and `Reconcile` for one profile: a profile
       argument on the three IPC controls and `--profile` on the three
       commands. Today each one acts on every profile.
+- [ ] E-6 Take the last two pieces of provider and hash work off the
+      tick thread (`AGENTS.md` §3 names them as the exceptions): the
+      planner and the reconcile walk hash a file of up to 8 MiB in line,
+      and the re-baseline of an expired changes cursor polls in line.
+- [ ] E-7 Ask when a case-sensitive local root holds `a.txt` and
+      `A.txt` and the cloud folder folds case. Today the second upload
+      waits for the name to go and is tried again without end; it needs a
+      decision, like the name collision in the other direction.
+- [ ] E-8 Check a profile's provider and roots before its local root is
+      created and adopted. A profile with an unknown provider or with
+      overlapping roots is suspended, and its local folder is made first.
+- [ ] E-9 Follow a sync root whose own spelling changes while the
+      daemon runs (`vapor` renamed to `Vapor` on a volume that folds
+      case). Names below the root compare right; not checked is whether
+      the watcher still delivers events under the path the daemon holds.
+      The filesystem provider refuses every path under a cloud root that
+      was respelled, until a restart.
+- [ ] E-10 Hold the watcher events of a folder while the rules of an
+      ignore file that just appeared in it load. A folder that moves in
+      whole waits for its rules, and so does a folder that the reconcile
+      walk meets. Files written one by one next to a new `.gitignore`
+      can still be queued under the old rules in the seconds before the
+      reload lands. A rule reload that fails also leaves the folders
+      that wait for it unreported until the next reload.
 - [ ] C8-71 Per-path detail on timeline `conflict` events (today the
       event carries only the per-tick count), so app notifications can
       name the conflicted file without an immediate list scan. Needed
@@ -69,6 +93,10 @@ are never reused.
       verification, or a narrower scope with what it costs. It gates
       general availability of the Drive provider and waits for the
       owner.
+- [ ] P-6 Charge the bandwidth bucket for what a Drive resumable chunk
+      really sends. A chunk is 256 KiB at least, so a grant below that
+      sends more than it was given, and the excess is not taken from the
+      bucket.
 
 ## Platform layer
 
@@ -128,6 +156,10 @@ the primary path is blocked by it. See `docs/tasks/README.md`.
 - [ ] C6-9 The named-pipe IPC transport, with the user and the hash of
       the runtime directory in the pipe name
       (`docs/architecture/windows/ipc-transport.md`).
+- [ ] C6-10 `vapor report` redaction for Windows paths: drive letters
+      and backslash separators in the configuration, the logs, and the
+      live state. The redactor splits a path at `/` today, and its
+      tests with path fixtures run on Unix only.
 
 ### Linux (native traits in; not a shipping surface yet)
 

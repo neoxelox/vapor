@@ -53,8 +53,11 @@ pub mod runtime {
     pub const PROFILES_DIRECTORY_NAME: &str = "profiles";
     /// The managed trash: `vapor_dir/trash/<profile>/<entry>/`, one
     /// directory per discarded item holding the payload under its
-    /// original name and a `meta.json` next to it.
+    /// original name and a `meta.json` next to it. A payload that has
+    /// that name itself is kept as `<name>~payload`.
     pub const TRASH_DIRECTORY_NAME: &str = "trash";
+    /// Where `vapor report` writes by default: `vapor_dir/reports/`.
+    pub const REPORTS_DIRECTORY_NAME: &str = "reports";
     pub const TRASH_ENTRY_META_FILE_NAME: &str = "meta.json";
     pub const CONFIGURATION_FILE_NAME: &str = "vapor.json";
     pub const SQLITE_DATABASE_FILE_NAME: &str = "vapor.sqlite";
@@ -552,7 +555,8 @@ pub mod decision {
     pub const KIND_ROOT_REPLACED: &str = "root-replaced";
     /// A file on one side is a folder on the other.
     pub const KIND_TYPE_MISMATCH: &str = "type-mismatch";
-    /// A local name the cloud cannot store (not valid UTF-8).
+    /// A local name that cannot be a sync path (not valid UTF-8, or
+    /// with a backslash in it).
     pub const KIND_UNSYNCABLE_NAME: &str = "unsyncable-name";
     /// A file changed in more than one place before the changes synced;
     /// Vapor kept every version, and one has to stay.
@@ -697,6 +701,10 @@ pub mod service {
     pub const CRASH_LOOP_MAX_DELAY_SECONDS: u64 = 120;
     pub const CRASH_LOOP_FREE_RESTARTS: u32 = 1;
     pub const CRASH_LOOP_PAUSE_AFTER_CRASHES: u32 = 5;
+    /// How long after a stop request a daemon that still runs counts as
+    /// "on its way out". A worker inside a network call can hold the
+    /// exit for as long as its socket timeout.
+    pub const STOP_GRACE_SECONDS: u64 = 180;
     /// The headless supervisor: a second service definition that runs
     /// `vapor service check --loop` where no app surface does, so a
     /// CLI-only install still restarts a crashed daemon under the
@@ -1077,8 +1085,9 @@ pub mod engine {
     /// test harnesses need the same transfer rate on every host. A
     /// production daemon measures its link and never uses this.
     pub const STATIC_INPUTS_LINK_CAPACITY_KBPS: u32 = 100_000;
-    /// The link capacity is the highest rate a transfer step reached
-    /// inside this window. An estimate older than this gets one probe.
+    /// The link capacity is the highest rate that a transfer step
+    /// with no limiter on it reached inside this window. An estimate
+    /// older than this gets one probe.
     pub const LINK_CAPACITY_WINDOW_SECONDS: u64 = 5 * 60;
     /// A transfer step measures the link only when it moved at least
     /// this much over at least this long; anything smaller is timer
@@ -1087,8 +1096,10 @@ pub mod engine {
     pub const LINK_CAPACITY_SAMPLE_MIN_MILLIS: u64 = 10;
     /// Measurements kept for each direction.
     pub const LINK_CAPACITY_SAMPLES_MAX: usize = 64;
-    /// Size of the one step that runs without the limiter when the
-    /// estimate is old: enough to measure, short on any link.
+    /// The least the one step that runs without the limiter moves
+    /// when the estimate is old. On a link measured faster, the probe
+    /// moves about one second's worth, so the round trip to the
+    /// provider is a small part of what it times.
     pub const LINK_CAPACITY_PROBE_BYTES: u64 = 1024 * 1024;
     /// `vapor status` reports the bandwidth the daemon used over this
     /// many seconds.

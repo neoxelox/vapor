@@ -20,8 +20,10 @@ JSON-RPC.
 
 ## Contract versioning rules
 
-Every request and response payload carries an explicit `schemaVersion: u32`
-field at the top level. Keys are camelCase and every value that names a
+The handshake (`hello`, its ack) and every data payload (the ack of
+a control request, status, diagnostics, timeline) carry an explicit
+`schemaVersion: u32` field at the top level. A bare method call and an
+error body carry none: the handshake already agreed the protocol. Keys are camelCase and every value that names a
 state or a choice is kebab-case (`run: {state: "running"}`,
 `throttle: {state: "idle"}`), the same shape `vapor … --json` prints;
 the values come from the vocabulary modules in

@@ -2667,8 +2667,11 @@ fn continue_plan_delete(
                 // No row: this device never compared the cloud object
                 // with anything, so it cannot know that the deletion
                 // was of this content. The object stays, unless the
-                // user answered a decision with this deletion.
-                None => intent.approved,
+                // user's answer named this path. An answer about a
+                // burst of deletions does not: it lets the burst pass
+                // the guard, and a file that another device added to a
+                // deleted folder was never part of what the user saw.
+                None => intent.names_path,
             };
             if unchanged {
                 return PlanOutcome::RemoteDelete(plan);
@@ -2836,10 +2839,17 @@ fn continue_plan_directory_delete(
     }
     // The children of a deletion the user answered a decision with
     // carry that answer.
+    let approval = if intent.names_path {
+        crate::state_db::Approval::NamedPath
+    } else if intent.approved {
+        crate::state_db::Approval::Guards
+    } else {
+        crate::state_db::Approval::None
+    };
     let enqueued = match state_db.enqueue_intents_coalesced_with(
         &batch,
         crate::safeguards::IntentSource::Fresh,
-        intent.approved,
+        approval,
     ) {
         Ok(count) => count,
         Err(error) => {

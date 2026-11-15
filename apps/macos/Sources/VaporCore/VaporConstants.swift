@@ -27,14 +27,12 @@ public enum VaporConstants {
     public static let autoLaunch = true
     public static let useGitignore = true
     public static let useVaporignore = true
+    /// The roots that setup offers. Suggestions only: no profile exists
+    /// until the user accepts or changes them, and nothing writes them
+    /// by itself. Mirrors `constants.rs::filtering::DEFAULT_LOCAL_ROOT`,
+    /// `DEFAULT_CLOUD_ROOT`, and `DEFAULT_FILESYSTEM_CLOUD_ROOT`.
     public static let localRoot = "~/Vapor"
-    /// The cloud root a remote provider uses while `cloudRoot`
-    /// is unset. Mirrors `constants.rs::filtering::DEFAULT_CLOUD_ROOT`.
     public static let cloudRoot = "/Vapor"
-    /// The cloud root the filesystem provider uses while the key is
-    /// unset. Mirrors `DEFAULT_FILESYSTEM_CLOUD_ROOT`; the
-    /// daemon picks between the two by provider, which is why the app
-    /// never writes a cloud root it did not read.
     public static let filesystemCloudRoot = "~/cloud/Vapor"
     public static let postIgnoreRules: [String] = []
     public static let language = VaporConstants.Localization.defaultLanguageCode

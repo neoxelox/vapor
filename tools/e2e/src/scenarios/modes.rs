@@ -35,6 +35,22 @@ pub fn scenarios() -> Vec<Scenario> {
             run: offline_cloud_delete,
         },
         Scenario {
+            id: "S68",
+            name: "left-both-sides-then-put-back",
+            proves: "a file that left both folders while the daemon was down, and that is put back on this device with the same bytes, is uploaded and never moved to the trash",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: left_both_sides_then_put_back,
+        },
+        Scenario {
+            id: "S69",
+            name: "moved-in-folder-keeps-its-rules",
+            proves: "a folder that moves into the sync root with a .gitignore of its own syncs by those rules: the files the rules hide never reach the cloud",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: moved_in_folder_keeps_its_rules,
+        },
+        Scenario {
             id: "S29",
             name: "push-only-mirror",
             proves: "push-only uploads local content, overwrites a divergent cloud edit, and removes a cloud-only file without ever downloading",
@@ -254,6 +270,79 @@ fn offline_cloud_delete(ctx: &mut Ctx) -> Result<(), Failure> {
             == "this device edited it after the cloud deleted it\n",
         "a local copy that changed since the last sync is kept and re-uploaded"
     );
+    Ok(())
+}
+
+fn left_both_sides_then_put_back(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let first = start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("keep.txt"), "kept\n")?;
+    write_file(&home.local.join("report.txt"), "the report\n")?;
+    ctx.converge_from(&mark, 2, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("report.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    ctx.stop_daemon(first)?;
+    // The file leaves both folders while no daemon watches.
+    fs::remove_file(home.local.join("report.txt"))?;
+    fs::remove_file(home.cloud.join("report.txt"))?;
+    ctx.start_daemon()?;
+    ctx.settle(Duration::from_secs(60))?;
+
+    // The user puts it back from a copy: the same bytes as the last
+    // version that synced. The sync index must not read that as "the
+    // cloud deleted it".
+    write_file(&home.local.join("report.txt"), "the report\n")?;
+    ctx.wait_exists(&home.cloud.join("report.txt"), Duration::from_secs(60))?;
+    ctx.settle(Duration::from_secs(60))?;
+    ensure!(
+        read_string(&home.local.join("report.txt"))? == "the report\n",
+        "the file that was put back stays on this device"
+    );
+    let trash = ctx.cli().json(&["trash", "list", "--json"])?;
+    ensure!(
+        trash["entries"]
+            .as_array()
+            .is_some_and(|entries| entries.is_empty()),
+        "nothing went to the trash: {trash}"
+    );
+    Ok(())
+}
+
+fn moved_in_folder_keeps_its_rules(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    // A project made next to the sync root, then moved in whole: the
+    // watcher reports the folder and nothing for the files under it.
+    let staged = home
+        .local
+        .parent()
+        .ok_or_else(|| Failure::new("the local root has no parent"))?
+        .join("staged-project");
+    write_file(&staged.join(".gitignore"), "secret.env\nbuild-output/\n")?;
+    write_file(&staged.join("secret.env"), "TOKEN=not-for-the-cloud\n")?;
+    write_file(&staged.join("src/main.rs"), "fn main() {}\n")?;
+    write_file(&staged.join("build-output/app.bin"), "binary\n")?;
+    fs::rename(&staged, home.local.join("project"))?;
+
+    ctx.wait_exists(
+        &home.cloud.join("project/src/main.rs"),
+        Duration::from_secs(60),
+    )?;
+    ctx.wait_exists(
+        &home.cloud.join("project/.gitignore"),
+        Duration::from_secs(60),
+    )?;
+    ctx.settle(Duration::from_secs(60))?;
+    ensure!(
+        !home.cloud.join("project/secret.env").exists()
+            && !home.cloud.join("project/build-output").exists(),
+        "what the folder's own rules hide never reaches the cloud"
+    );
+    // The two hidden entries are on this device only, by the rules.
+    ctx.oracle_ignore("secret.env");
+    ctx.oracle_ignore("build-output/");
     Ok(())
 }
 

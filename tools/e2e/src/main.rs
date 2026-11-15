@@ -338,7 +338,7 @@ fn sandbox_stop(repo_root: &Path, path: Option<PathBuf>) -> Result<(), vapor_e2e
         let pid_file = target.join("daemon.pid");
         if let Ok(text) = fs::read_to_string(&pid_file)
             && let Ok(pid) = text.trim().parse::<u32>()
-            && is_vapor_process(pid)
+            && is_repository_daemon(pid, repo_root)
         {
             terminate_pid(pid);
             println!("[e2e] stopped daemon pid {pid} of {}", target.display());
@@ -349,26 +349,52 @@ fn sandbox_stop(repo_root: &Path, path: Option<PathBuf>) -> Result<(), vapor_e2e
     Ok(())
 }
 
-/// Whether `pid` is a running `vapor` or `vapord`. A pid file can
-/// outlive its daemon, and the OS can give the number to another
-/// process, so nothing is signalled on the number alone.
-fn is_vapor_process(pid: u32) -> bool {
+/// Whether `pid` is a `vapor` or `vapord` that runs from this
+/// repository's build. A pid file can outlive its daemon, and the OS
+/// can give the number to another process: to the installed daemon of
+/// the user, too, whose name is the same. So nothing is signalled on
+/// the number or on the name alone.
+fn is_repository_daemon(pid: u32, repo_root: &Path) -> bool {
     #[cfg(unix)]
-    let output = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output();
+    {
+        let Ok(output) = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "args="])
+            .output()
+        else {
+            return false;
+        };
+        let command = String::from_utf8_lossy(&output.stdout);
+        let command = command.trim();
+        [
+            Some(repo_root.to_path_buf()),
+            vapor_shared::paths::canonicalize(repo_root).ok(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|root| {
+            command
+                .strip_prefix(&format!("{}/", root.display()))
+                .and_then(|inside| inside.split(' ').next())
+                .and_then(|program| program.rsplit('/').next())
+                .is_some_and(|name| matches!(name, "vapor" | "vapord"))
+        })
+    }
+    // No daemon scenario runs on this host yet; the image name is what
+    // the task list gives.
     #[cfg(not(unix))]
-    let output = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-        .output();
-    let Ok(output) = output else {
-        return false;
-    };
-    let text = String::from_utf8_lossy(&output.stdout);
-    let command = text.trim().trim_start_matches('"');
-    let command = command.split('"').next().unwrap_or(command);
-    let name = command.rsplit(['/', '\\']).next().unwrap_or(command);
-    matches!(name.trim_end_matches(".exe"), "vapor" | "vapord")
+    {
+        let _ = repo_root;
+        let Ok(output) = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output()
+        else {
+            return false;
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let command = text.trim().trim_start_matches('"');
+        let command = command.split('"').next().unwrap_or(command);
+        matches!(command.trim_end_matches(".exe"), "vapor" | "vapord")
+    }
 }
 
 fn terminate_pid(pid: u32) {

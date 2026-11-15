@@ -81,8 +81,8 @@ profile without it.
   servers / devs). Exits non-zero if another daemon is already attached to
   this `VAPOR_DIR`.
 - `service install`: picks the right installer for the host OS
-  automatically; `--user` (default) vs `--system` switch. Configures the OS
-  restart policy to match `core/lifecycle::CrashLoopGuard`.
+  automatically, for the current user. Configures the OS restart
+  policy to match `core/lifecycle::CrashLoopGuard`.
 - `service status`: reports `running` / `stopped` / `not-installed` /
   `crash-loop-paused` (the crash-loop pause is overlaid from durable
   lifecycle state) plus `label`, `autoLaunch`, and a `crashLoop`
@@ -106,8 +106,8 @@ profile without it.
 - `status`, `pause`, `resume`, `reconcile`, `timeline`, `diagnostics`:
   talk to a running daemon via the IPC channel
   (`docs/architecture/ipc-contracts.md`). Exit non-zero with a clear message
-  if no daemon is running; never hang. `reconcile` is the on-demand path
-  past the idle gate: the scan runs under any throttle state but
+  if no daemon is running; never hang. `reconcile` is the user's own
+  request for a whole-scope scan: it runs under any throttle state but
   `suspended`, and `--json` returns the daemon's ack for the app shim.
 - `doctor`: reports platform-specific sanity checks: inotify watch limits on
   Linux, Task Scheduler task presence on Windows, LaunchAgent plist presence
@@ -126,9 +126,8 @@ binaries are deferred and gated on the optional Waves 12 to 14 in
 
 ### 4.1 Primary (macOS)
 
-- Pure Rust binary. Target triples:
-  - `aarch64-apple-darwin`
-  - `x86_64-apple-darwin`
+- Pure Rust binary. Target triple: `aarch64-apple-darwin`. There is
+  no Intel Mac build.
 - Packaged as zstd-compressed tarballs with SHA256 checksums.
 - Signed with the shared macOS Developer ID identity (shares
   `release-macos` GitHub Environment secrets with the app bundle).

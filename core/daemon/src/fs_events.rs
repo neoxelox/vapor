@@ -15,7 +15,7 @@ use vapor_platform::fs_watch::{
 use vapor_shared::constants;
 
 use crate::logging;
-use crate::path_filter::{EventPathFilter, EventPathFilterOptions};
+use crate::path_filter::{EventPathFilter, EventPathFilterOptions, IgnoreFileState};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FsEventKind {
@@ -151,8 +151,16 @@ pub struct SharedEventPathFilter {
     options: RwLock<EventPathFilterOptions>,
     filter: RwLock<EventPathFilter>,
     reload_requested: AtomicBool,
-    /// The rebuild in flight, if any.
-    rebuild: std::sync::Mutex<Option<crate::provider_jobs::ProviderCall<EventPathFilter>>>,
+    /// The rebuild in flight, if any, with its number.
+    rebuild: std::sync::Mutex<Option<(u64, crate::provider_jobs::ProviderCall<EventPathFilter>)>>,
+    /// How many rebuilds started, and the number of the last one that
+    /// landed.
+    rebuilds_started: std::sync::atomic::AtomicU64,
+    rebuilds_landed: std::sync::atomic::AtomicU64,
+    /// The ignore files a reload was asked for, each with the state it
+    /// had and the number of the first rebuild that can hold it.
+    awaited_ignore_files:
+        std::sync::Mutex<std::collections::BTreeMap<PathBuf, (IgnoreFileState, u64)>>,
     /// Counts the rebuilds that changed what the rules decide. A
     /// runtime that sees a new value queues a whole-scope reconcile:
     /// a file the old rules hid is in scope now, and nothing else
@@ -178,8 +186,49 @@ impl SharedEventPathFilter {
             filter: RwLock::new(filter),
             reload_requested: AtomicBool::new(false),
             rebuild: std::sync::Mutex::new(None),
+            rebuilds_started: std::sync::atomic::AtomicU64::new(0),
+            rebuilds_landed: std::sync::atomic::AtomicU64::new(0),
+            awaited_ignore_files: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             rules_generation: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Whether the rules in force were read from the ignore file at
+    /// `path` in the state it has now.
+    pub(crate) fn covers(&self, path: &Path, state: IgnoreFileState) -> bool {
+        self.filter
+            .read()
+            .expect("SharedEventPathFilter lock poisoned")
+            .has_loaded(path, state)
+    }
+
+    /// [`Self::covers`], and a reload when the answer is no. A caller
+    /// that gets `false` waits with what the rules of that file decide:
+    /// the files next to it, the folders under it. The wait ends when a
+    /// rebuild that started after the request lands. If the rules still
+    /// do not hold the file then (a file the rebuild cannot read, a
+    /// folder it does not enter), the answer is `true`: the rules in
+    /// force are the rules there are, and a folder must not wait for
+    /// ever.
+    pub(crate) fn covers_or_requests(&self, path: &Path, state: IgnoreFileState) -> bool {
+        if self.covers(path, state) {
+            return true;
+        }
+        let mut awaited = self
+            .awaited_ignore_files
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((awaited_state, needed)) = awaited.get(path)
+            && *awaited_state == state
+        {
+            return self.rebuilds_landed.load(Ordering::Acquire) >= *needed;
+        }
+        // A rebuild that runs now may have passed this folder already;
+        // the next one to start is the first that can hold the file.
+        let needed = self.rebuilds_started.load(Ordering::Acquire) + 1;
+        awaited.insert(path.to_path_buf(), (state, needed));
+        self.request_reload();
+        false
     }
 
     /// Takes the toggles and user rules of a live `vapor.json` change.
@@ -235,20 +284,23 @@ impl SharedEventPathFilter {
     /// Marks an observed path: when it names an *enabled* ignore-file
     /// kind, a reload is requested.
     fn note_observed_path(&self, path: &Path) {
+        if self.is_ignore_file(path) {
+            self.request_reload();
+        }
+    }
+
+    /// Whether `path` names an ignore file of a kind that is turned on.
+    pub(crate) fn is_ignore_file(&self, path: &Path) -> bool {
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            return;
+            return false;
         };
         let options = self
             .options
             .read()
             .expect("SharedEventPathFilter options lock poisoned");
-        let is_gitignore =
-            options.use_gitignore && file_name == constants::filtering::GIT_IGNORE_FILE_NAME;
-        let is_vaporignore =
-            options.use_vaporignore && file_name == constants::filtering::VAPOR_IGNORE_FILE_NAME;
-        if is_gitignore || is_vaporignore {
-            self.request_reload();
-        }
+        (options.use_gitignore && file_name == constants::filtering::GIT_IGNORE_FILE_NAME)
+            || (options.use_vaporignore
+                && file_name == constants::filtering::VAPOR_IGNORE_FILE_NAME)
     }
 
     /// How many rebuilds changed what the rules decide.
@@ -274,16 +326,22 @@ impl SharedEventPathFilter {
                 .read()
                 .expect("SharedEventPathFilter options lock poisoned")
                 .clone();
-            *rebuild = Some(crate::provider_jobs::ProviderCall::start(
-                mode,
-                "ignore-rules",
-                move || EventPathFilter::for_watch_root(&watch_root, &options),
+            let number = self.rebuilds_started.fetch_add(1, Ordering::AcqRel) + 1;
+            *rebuild = Some((
+                number,
+                crate::provider_jobs::ProviderCall::start(mode, "ignore-rules", move || {
+                    EventPathFilter::for_watch_root(&watch_root, &options)
+                }),
             ));
         }
-        let Some(outcome) = rebuild.as_mut().and_then(|call| call.take()) else {
+        let Some((number, outcome)) = rebuild
+            .as_mut()
+            .and_then(|(number, call)| call.take().map(|outcome| (*number, outcome)))
+        else {
             return false;
         };
         *rebuild = None;
+        self.rebuilds_landed.store(number, Ordering::Release);
         let rebuilt = match outcome {
             Ok(rebuilt) => rebuilt,
             Err(panic) => {

@@ -59,6 +59,11 @@ in its pull request and in the documents under `docs/`.
 - Google Drive: an upload over 5 MiB records its checksum, so the next edit of that file can upload (built from the API documents, not yet checked against a live account). Two files with one name no longer take turns. A full Drive holds uploads and lets downloads go on.
 - After an update of a prerelease, the daemon asks for a new sign-in. It no longer waits on a keychain dialog that nobody sees.
 - In `push-only`, a name that the cloud respells gets this device's spelling back.
+- A file that left both folders while Vapor was not running, and that you put back later, is no longer moved to the trash.
+- A folder moved in with a `.gitignore` of its own no longer uploads the files that those rules hide.
+- A file named `meta.json` that Vapor removed can be listed and restored from the trash.
+- A sync folder that is read-only syncs. Before, it was read as a replaced folder after the first check.
+- Google Drive: two uploads at once into a new folder no longer make that folder twice, and a file whose name differs only in capitals, or a Google Doc of the same name, is no longer taken for the file at a path (built from the API documents, not yet checked against a live account).
 - A command run in a test or development directory can no longer read or remove the sign-in of the real install.
 - A long changelog section no longer fails a release: the release body is cut at GitHub's limit and links the changelog.
 - The many sync, command-line, app, and IPC fixes of the earlier reviews in this cycle. The git history of this file has each one.

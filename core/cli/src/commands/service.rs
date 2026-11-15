@@ -151,6 +151,37 @@ pub enum ServiceCommandOutcome {
     Acknowledged,
 }
 
+/// What a daemon of this build says about itself in `vapor status`.
+pub fn this_build() -> String {
+    format!("vapord/{}", vapor_daemon::build_info::VERSION)
+}
+
+/// After an install or a bootstrap: stops a running daemon that is
+/// another build than this binary and starts the installed one.
+///
+/// An update replaces the binaries and leaves the service definition
+/// as it was, so the install changes nothing, and a start leaves a
+/// running daemon alone. Without this step the old daemon would serve
+/// the new CLI and app until the next login. `running_build` is what
+/// the running daemon answered (`None` when it gave no answer, which a
+/// daemon that was just started does).
+pub fn replace_daemon_of_another_build(
+    manager: &DaemonLifecycleManager,
+    installer: &dyn ServiceInstaller,
+    running_build: Option<&str>,
+    now: Instant,
+) -> Result<bool, ServiceCommandError> {
+    let Some(running) = running_build else {
+        return Ok(false);
+    };
+    if running == this_build() || installer.status()? != ServiceStatus::Running {
+        return Ok(false);
+    }
+    manager.stop_daemon_for_termination(now)?;
+    manager.start_daemon_if_allowed(now)?;
+    Ok(true)
+}
+
 /// Entry point for the binary's `clap` dispatch. The `manager`,
 /// `installer`, and current-time hooks are split out so unit tests can
 /// substitute fakes without touching real `launchctl`.
@@ -683,6 +714,43 @@ mod tests {
             ServiceCommandOutcome::Action(DaemonLifecycleActionResult::Started)
         );
         assert_eq!(installer.operations(), vec!["install", "start"]);
+    }
+
+    #[test]
+    fn a_running_daemon_of_another_build_is_replaced_and_the_same_build_is_left_alone() {
+        let installer = fake_installer();
+        installer.set_status_for_testing(ServiceStatus::Running);
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+        let now = Instant::now();
+
+        // The same build, and a daemon that gave no answer: nothing.
+        assert!(
+            !replace_daemon_of_another_build(
+                &manager,
+                installer.as_ref(),
+                Some(&this_build()),
+                now
+            )
+            .expect("same build")
+        );
+        assert!(
+            !replace_daemon_of_another_build(&manager, installer.as_ref(), None, now)
+                .expect("no answer")
+        );
+        assert!(installer.operations().is_empty());
+
+        // The build of before an update: stop, then start.
+        assert!(
+            replace_daemon_of_another_build(
+                &manager,
+                installer.as_ref(),
+                Some("vapord/0.0.1-older"),
+                now
+            )
+            .expect("another build")
+        );
+        assert_eq!(installer.operations(), vec!["stop", "start"]);
     }
 
     #[test]

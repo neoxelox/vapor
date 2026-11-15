@@ -97,6 +97,31 @@ impl From<rusqlite::Error> for StateDbError {
     }
 }
 
+/// What a decision of the user allows an intent to do.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Approval {
+    #[default]
+    None,
+    /// The guard that held the intent lets it pass. Nothing else
+    /// changes: a deletion still needs its sync index row.
+    Guards,
+    /// The user's answer named this very path (the side of a clash to
+    /// remove). It passes the guards, and for a deletion it stands in
+    /// for the sync index row.
+    NamedPath,
+}
+
+impl Approval {
+    /// The value of the `approved` column.
+    fn stored(self) -> i64 {
+        match self {
+            Approval::None => 0,
+            Approval::Guards => 1,
+            Approval::NamedPath => 2,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurableIntentRecord {
     pub id: i64,
@@ -117,6 +142,9 @@ pub struct DurableIntentRecord {
     /// The user approved this intent through a decision; the guards
     /// that hold deletions let it through.
     pub approved: bool,
+    /// The user's answer named this path. For a deletion, the answer
+    /// then stands in for the sync index row that it has not got.
+    pub names_path: bool,
     /// The decision this intent is parked behind, while held.
     pub held_by: Option<i64>,
 }
@@ -479,6 +507,26 @@ impl DurableStateDb {
         id: i64,
     ) -> Result<Option<DurableFailedIntentRecord>, StateDbError> {
         fetch_failed_intent(&self.connection, id)
+    }
+
+    /// One line for each failed intent (kind, path, error), for the
+    /// message of a test that expects none.
+    #[cfg(test)]
+    pub fn failed_summaries(&self) -> Vec<String> {
+        let Ok(mut statement) = self
+            .connection
+            .prepare("SELECT id FROM failed_intents ORDER BY id")
+        else {
+            return Vec::new();
+        };
+        let ids: Vec<i64> = statement
+            .query_map([], |row| row.get(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        ids.into_iter()
+            .filter_map(|id| self.failed_record(id).ok().flatten())
+            .map(|record| format!("{record:?}"))
+            .collect()
     }
 
     pub fn lease_next_ready(
@@ -980,19 +1028,19 @@ impl DurableStateDb {
         intents: &[(PathBuf, PendingIntentKind, SystemTime)],
         source: crate::safeguards::IntentSource,
     ) -> Result<usize, StateDbError> {
-        self.enqueue_intents_coalesced_with(intents, source, false)
+        self.enqueue_intents_coalesced_with(intents, source, Approval::None)
     }
 
-    /// Like [`Self::enqueue_intents_coalesced`], with `approved` set on
-    /// every row it inserts: the intent carries out a decision the user
-    /// made (a restore after `discard`, the merge after a root answer),
-    /// so no guard or planner second-guesses it. A row that already
-    /// existed keeps its own flag.
+    /// Like [`Self::enqueue_intents_coalesced`], with the approval set
+    /// on every row it inserts: the intent carries out a decision the
+    /// user made (a restore after `discard`, the merge after a root
+    /// answer, the side of a clash the user chose to remove). A row
+    /// that already existed keeps its own approval.
     pub fn enqueue_intents_coalesced_with(
         &mut self,
         intents: &[(PathBuf, PendingIntentKind, SystemTime)],
         source: crate::safeguards::IntentSource,
-        approved: bool,
+        approval: Approval,
     ) -> Result<usize, StateDbError> {
         if intents.is_empty() {
             return Ok(0);
@@ -1033,10 +1081,10 @@ impl DurableStateDb {
                 *observed_at,
                 source,
             )?;
-            if approved {
+            if approval != Approval::None {
                 transaction.execute(
-                    "UPDATE queue_intents SET approved = 1 WHERE id = ?",
-                    params![id],
+                    "UPDATE queue_intents SET approved = ? WHERE id = ?",
+                    params![approval.stored(), id],
                 )?;
             }
             inserted += 1;
@@ -1317,6 +1365,79 @@ impl DurableStateDb {
             )
             .optional()?
             .is_some())
+    }
+
+    /// The names directly inside `directory` that the sync index holds
+    /// a row for, or rows under. One index seek for each name, however
+    /// many rows lie under it.
+    pub fn sync_index_names_in(
+        &self,
+        directory: &Path,
+    ) -> Result<std::collections::BTreeSet<String>, StateDbError> {
+        let (lower, upper) = rows_under_bounds(directory)?;
+        let mut from_row = self.connection.prepare_cached(
+            "SELECT path_text FROM sync_index
+             WHERE path_text >= ? AND path_text < ? ORDER BY path_text LIMIT 1",
+        )?;
+        let mut after_row = self.connection.prepare_cached(
+            "SELECT path_text FROM sync_index
+             WHERE path_text > ? AND path_text < ? ORDER BY path_text LIMIT 1",
+        )?;
+        let mut names = std::collections::BTreeSet::new();
+        // The next seek starts at `position`, or just past it.
+        let (mut position, mut inclusive) = (lower.clone(), true);
+        loop {
+            let statement = if inclusive {
+                &mut from_row
+            } else {
+                &mut after_row
+            };
+            let found: Option<String> = statement
+                .query_row(params![position, upper], |row| row.get(0))
+                .optional()?;
+            let Some(path) = found else {
+                break;
+            };
+            let below = &path[lower.len()..];
+            match below.split_once(std::path::MAIN_SEPARATOR) {
+                Some((name, _)) => {
+                    // Past every row under this name. A name that only
+                    // starts the same way (`photos.txt` next to
+                    // `photos/`) sorts before the folder's rows and was
+                    // seen already.
+                    position = rows_under_bounds(&directory.join(name))?.1;
+                    inclusive = true;
+                    names.insert(name.to_string());
+                }
+                None => {
+                    names.insert(below.to_string());
+                    position = path;
+                    inclusive = false;
+                }
+            }
+        }
+        Ok(names)
+    }
+
+    /// Removes the row of `path` and every row under it, where the row
+    /// was last written before `before`. Returns the rows removed.
+    pub fn remove_sync_index_tree_written_before(
+        &mut self,
+        path: &Path,
+        before: SystemTime,
+    ) -> Result<usize, StateDbError> {
+        let (lower, upper) = rows_under_bounds(path)?;
+        Ok(self.connection.execute(
+            "DELETE FROM sync_index
+             WHERE (path_text = ?1 OR (path_text >= ?2 AND path_text < ?3))
+               AND updated_at_ms < ?4",
+            params![
+                path_to_text(path)?,
+                lower,
+                upper,
+                system_time_to_millis(before)?
+            ],
+        )?)
     }
 
     pub fn remove_sync_index(&mut self, path: &Path) -> Result<(), StateDbError> {
@@ -1901,7 +2022,8 @@ impl DurableStateDb {
     ) -> Result<usize, StateDbError> {
         let changed = self.connection.execute(
             "UPDATE queue_intents
-             SET state = ?, available_at_ms = ?, decision_id = NULL, approved = 1
+             SET state = ?, available_at_ms = ?, decision_id = NULL,
+                 approved = MAX(approved, 1)
              WHERE decision_id = ? AND state = ?",
             params![
                 STATE_PENDING,
@@ -2400,6 +2522,7 @@ fn raw_intent_to_record(raw: RawIntentRow) -> Result<DurableIntentRecord, StateD
         last_error: last_error.map(|value| sanitize_persisted_error(&value)),
         remote_path: remote_path_text,
         approved: approved != 0,
+        names_path: approved == Approval::NamedPath.stored(),
         held_by: (state == STATE_HELD).then_some(decision_id).flatten(),
     })
 }

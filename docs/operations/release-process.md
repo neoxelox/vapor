@@ -298,7 +298,7 @@ into the environment, then the matrix entry, then the trust chain doc.
    without material. Do not gate on the tag anywhere else.
 3. **Install the material**, gated on the platform and on `enabled`:
    the EV certificate into the runner's certificate store on Windows
-   (Azure Key Vault or a USB HSM per `AGENTS.md` §7.3), the GPG key into
+   (Azure Key Vault or a USB HSM per `docs/plans/core.md` §6), the GPG key into
    a throwaway keyring on Linux. Export whatever the packaging script
    needs through `GITHUB_ENV`, as the macOS step does with the keychain
    path.
@@ -328,10 +328,11 @@ are in, since a prerelease signs when the material is present.
 - Reruns are allowed for the same tag.
 - Rerun the existing tag workflow from GitHub Actions; do not create a manual release run from a branch ref.
 - Asset uploads use replacement semantics (`gh release upload --clobber`)
-  while the release is a draft. A rerun on a published release fails at
-  the upload: users may hold the published files and their checksums,
-  so a published release is corrected with a new tag.
-- Existing release object is reused and edited in place when present.
+  while the release is a draft. A rerun on a published release fails
+  before it changes the notes or the assets: users may hold the
+  published files and their checksums, and the owner may have edited
+  the notes, so a published release is corrected with a new tag.
+- A draft release object is reused and edited in place when present.
 - If rerun still fails, follow `docs/operations/release-incident-playbook.md`.
 
 ## Rollback and corrective release policy

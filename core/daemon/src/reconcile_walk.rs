@@ -89,6 +89,9 @@ struct LocalEntry {
 struct PendingEnumeration {
     directory: PathBuf,
     call: ProviderCall<Result<Vec<RemoteEntry>, ProviderError>>,
+    /// When the listing was asked for. A sync index row written after
+    /// this is newer than what the listing shows.
+    requested_at: SystemTime,
 }
 
 pub struct ReconcileWalker {
@@ -114,6 +117,11 @@ pub struct ReconcileWalker {
     /// folder that was not compared is not converged; the runtime
     /// walks each again later.
     unreadable_dirs: Vec<(PathBuf, std::io::ErrorKind)>,
+    /// Folders that hold an ignore file whose rules are not in force
+    /// yet. They were not compared: with the old rules, a file that the
+    /// new ones hide would upload. A reload was asked for, and the
+    /// runtime walks them again when it lands.
+    dirs_waiting_for_rules: Vec<PathBuf>,
     /// Ignore rules, applied symmetrically: local entries and remote
     /// entries (via their local-equivalent path) that match never
     /// produce intents and are never descended into. Without this the
@@ -148,6 +156,7 @@ impl ReconcileWalker {
             name_collisions: Vec::new(),
             respelled: Vec::new(),
             unreadable_dirs: Vec::new(),
+            dirs_waiting_for_rules: Vec::new(),
             pending_dirs: VecDeque::from([subtree_root.to_path_buf()]),
             stats: WalkStats::default(),
             merge_without_deletions: false,
@@ -255,6 +264,11 @@ impl ReconcileWalker {
 
     pub fn take_unreadable_dirs(&mut self) -> Vec<(PathBuf, std::io::ErrorKind)> {
         std::mem::take(&mut self.unreadable_dirs)
+    }
+
+    /// The folders this walk left for the reload of the ignore rules.
+    pub fn take_dirs_waiting_for_rules(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.dirs_waiting_for_rules)
     }
 
     /// A local file is set aside under a temp name for the moment a
@@ -458,6 +472,43 @@ impl ReconcileWalker {
         Ok(())
     }
 
+    /// Removes the sync index rows of names that neither side holds any
+    /// more: a file that left both sides while no daemon watched, or
+    /// the old spelling of a name that both sides respelled. Such a row
+    /// would later vouch for a deletion that never happened: the file
+    /// put back on this device would read as "deleted in the cloud" and
+    /// go to the trash. With no row, the file is new and is kept.
+    ///
+    /// A row written after the cloud listing was asked for stays: the
+    /// listing is older than the transfer that wrote it.
+    fn forget_names_that_left_both_sides(
+        &mut self,
+        state_db: &mut DurableStateDb,
+        directory: &Path,
+        listed: &std::collections::BTreeSet<String>,
+        pairs: &BTreeMap<String, EntryPair>,
+        listed_at: SystemTime,
+    ) -> Result<(), WalkError> {
+        let mut removed = 0usize;
+        for name in state_db.sync_index_names_in(directory)? {
+            if listed.contains(&name) || pairs.contains_key(&name) {
+                continue;
+            }
+            removed += state_db
+                .remove_sync_index_tree_written_before(&directory.join(&name), listed_at)?;
+        }
+        if removed > 0 {
+            crate::logging::info(
+                "Forgot the sync index rows of names that left both sides",
+                &[
+                    ("directory", directory.display().to_string()),
+                    ("rows", removed.to_string()),
+                ],
+            );
+        }
+        Ok(())
+    }
+
     /// The entries on this device that an ignore rule hid from this
     /// walk so far; the count starts again from zero.
     pub fn take_ignored_local_entries(&mut self) -> u64 {
@@ -514,7 +565,11 @@ impl ReconcileWalker {
                 let provider = provider.clone();
                 let call =
                     ProviderCall::start(mode, "enumerate", move || provider.enumerate(&remote_dir));
-                self.pending_enumeration = Some(PendingEnumeration { directory, call });
+                self.pending_enumeration = Some(PendingEnumeration {
+                    directory,
+                    call,
+                    requested_at: now,
+                });
             }
             let pending = self
                 .pending_enumeration
@@ -525,11 +580,11 @@ impl ReconcileWalker {
                 // progress until it lands.
                 return Ok(false);
             };
-            let directory = self
-                .pending_enumeration
-                .take()
-                .expect("pending listing")
-                .directory;
+            let PendingEnumeration {
+                directory,
+                requested_at,
+                ..
+            } = self.pending_enumeration.take().expect("pending listing");
             let remote_entries = match result {
                 Ok(Ok(entries)) => entries,
                 Ok(Err(error)) if error.kind == ProviderErrorKind::NotFound => Vec::new(),
@@ -540,7 +595,14 @@ impl ReconcileWalker {
                     ))));
                 }
             };
-            self.compare_directory(sync_mode, state_db, &directory, remote_entries, now)?;
+            self.compare_directory(
+                sync_mode,
+                state_db,
+                &directory,
+                remote_entries,
+                requested_at,
+                now,
+            )?;
             self.stats.directories_compared += 1;
             if !should_continue() {
                 return Ok(self.pending_dirs.is_empty());
@@ -555,6 +617,7 @@ impl ReconcileWalker {
         state_db: &mut DurableStateDb,
         directory: &Path,
         remote_entries: Vec<RemoteEntry>,
+        listed_at: SystemTime,
         now: SystemTime,
     ) -> Result<(), WalkError> {
         let mut pairs: BTreeMap<String, EntryPair> = BTreeMap::new();
@@ -593,6 +656,26 @@ impl ReconcileWalker {
                             now,
                         );
                         continue;
+                    }
+                    // An ignore file whose rules are not in force (it
+                    // came with a folder that moved in, or changed with
+                    // no watcher event): this folder is compared when
+                    // they are.
+                    if let Some(filter) = &self.path_filter
+                        && filter.is_ignore_file(&entry.path())
+                        && let Ok(metadata) = entry.metadata()
+                        && metadata.is_file()
+                        && !filter.covers_or_requests(
+                            &entry.path(),
+                            (metadata.modified().ok(), metadata.len()),
+                        )
+                    {
+                        crate::logging::info(
+                            "A folder holds an ignore file whose rules are not loaded; comparing it after the reload",
+                            &[("directory", directory.display().to_string())],
+                        );
+                        self.dirs_waiting_for_rules.push(directory.to_path_buf());
+                        return Ok(());
                     }
                     // A link is not followed: it counts as what it is,
                     // never as the folder it points at.
@@ -681,7 +764,9 @@ impl ReconcileWalker {
         }
 
         let mut batch: Vec<(PathBuf, PendingIntentKind, SystemTime)> = Vec::new();
+        let listed: std::collections::BTreeSet<String> = pairs.keys().cloned().collect();
         self.settle_spellings(sync_mode, state_db, directory, &mut pairs, &mut batch, now)?;
+        self.forget_names_that_left_both_sides(state_db, directory, &listed, &pairs, listed_at)?;
 
         // Remote-only names that differ only by case cannot all
         // materialize on a case-insensitive local filesystem. The
@@ -906,7 +991,11 @@ impl ReconcileWalker {
             self.stats.intents_enqueued += state_db.enqueue_intents_coalesced_with(
                 &batch,
                 crate::safeguards::IntentSource::ReconcileBacklog,
-                self.merge_without_deletions,
+                if self.merge_without_deletions {
+                    crate::state_db::Approval::Guards
+                } else {
+                    crate::state_db::Approval::None
+                },
             )?;
         }
         Ok(())
@@ -1078,6 +1167,75 @@ mod tests {
 
     fn ts(ms: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_750_000_000_000 + ms)
+    }
+
+    #[test]
+    fn the_walk_forgets_the_rows_of_names_that_left_both_sides() {
+        let mut fixture = Fixture::new();
+        let root = fixture.local_root.clone();
+        let earlier = ts(0) - std::time::Duration::from_secs(60);
+        let seed = |fixture: &mut Fixture, path: &Path, at: SystemTime| {
+            fixture
+                .state_db
+                .set_sync_index(path, "hash", 1, None, None, "op", at)
+                .expect("index");
+        };
+        // Present on both sides, and present on one side only.
+        for name in ["both.txt", "local.txt", "cloud.txt", "photos/kept.jpg"] {
+            seed(&mut fixture, &root.join(name), earlier);
+        }
+        std::fs::create_dir_all(root.join("photos")).expect("dir");
+        std::fs::create_dir_all(fixture.cloud_root.join("photos")).expect("dir");
+        for (side, name) in [
+            (&root, "both.txt"),
+            (&fixture.cloud_root.clone(), "both.txt"),
+            (&root, "local.txt"),
+            (&fixture.cloud_root.clone(), "cloud.txt"),
+            (&root, "photos/kept.jpg"),
+            (&fixture.cloud_root.clone(), "photos/kept.jpg"),
+        ] {
+            std::fs::write(side.join(name), b"x").expect("seed");
+        }
+        // On neither side: a file, a folder's files, a name that starts
+        // like a folder that stays, and a file inside that folder.
+        let gone = [
+            "gone.txt",
+            "old/a.txt",
+            "old/deeper/b.txt",
+            "photos.txt",
+            "photos/gone.jpg",
+        ];
+        for name in gone {
+            seed(&mut fixture, &root.join(name), earlier);
+        }
+        // A transfer that finished after the listing was asked for.
+        seed(&mut fixture, &root.join("just-synced.txt"), ts(5));
+
+        fixture.run_walk(SyncMode::TwoWay);
+
+        for name in gone {
+            assert_eq!(
+                fixture.state_db.sync_index(&root.join(name)).expect("read"),
+                None,
+                "{name}"
+            );
+        }
+        for name in [
+            "both.txt",
+            "local.txt",
+            "cloud.txt",
+            "photos/kept.jpg",
+            "just-synced.txt",
+        ] {
+            assert!(
+                fixture
+                    .state_db
+                    .sync_index(&root.join(name))
+                    .expect("read")
+                    .is_some(),
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -1648,6 +1806,73 @@ mod tests {
                 PendingIntentKind::Download
             )],
             "only the non-ignored file may produce an intent"
+        );
+    }
+
+    #[test]
+    fn a_folder_with_an_ignore_file_that_is_not_loaded_waits_for_the_reload() {
+        let mut fixture = Fixture::new();
+        let filter = Arc::new(crate::fs_events::SharedEventPathFilter::new(
+            &fixture.local_root,
+            crate::path_filter::EventPathFilterOptions::default(),
+        ));
+        // After the rules were built, a project arrives with rules of
+        // its own, and no watcher event tells of it.
+        let project = fixture.local_root.join("project");
+        std::fs::create_dir_all(project.join("src")).expect("dirs");
+        std::fs::write(project.join(".gitignore"), "secret.env\n").expect("rules");
+        std::fs::write(project.join("secret.env"), b"TOKEN").expect("secret");
+        std::fs::write(project.join("src/main.rs"), b"fn main() {}").expect("source");
+        std::fs::write(fixture.local_root.join("plain.txt"), b"plain").expect("plain");
+
+        let walk = |fixture: &mut Fixture| {
+            let mut walker = ReconcileWalker::new(
+                &fixture.local_root,
+                &fixture.local_root,
+                Some(filter.clone()),
+            );
+            for _ in 0..64 {
+                if walker
+                    .process(
+                        fixture.provider.clone(),
+                        &ProviderCallMode::Inline,
+                        SyncMode::TwoWay,
+                        &mut fixture.state_db,
+                        8,
+                        ts(0),
+                        &|| true,
+                    )
+                    .expect("walk step")
+                {
+                    break;
+                }
+            }
+            walker.take_dirs_waiting_for_rules()
+        };
+
+        // The folder is left alone, with everything under it, and a
+        // reload is asked for. The rest of the tree is compared.
+        assert_eq!(walk(&mut fixture), vec![project.clone()]);
+        assert_eq!(
+            fixture.queued_kinds(),
+            vec![(
+                fixture.local_root.join("plain.txt"),
+                PendingIntentKind::Upload
+            )]
+        );
+
+        // With the rules in, the folder is compared by them.
+        assert!(filter.rebuild_if_requested(), "the walk asked for a reload");
+        assert!(walk(&mut fixture).is_empty());
+        let queued = fixture.queued_kinds();
+        assert!(
+            queued.contains(&(project.join("src/main.rs"), PendingIntentKind::Upload))
+                && queued.contains(&(project.join(".gitignore"), PendingIntentKind::Upload)),
+            "{queued:?}"
+        );
+        assert!(
+            !queued.iter().any(|(path, _)| path.ends_with("secret.env")),
+            "{queued:?}"
         );
     }
 

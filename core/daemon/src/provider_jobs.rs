@@ -694,10 +694,13 @@ fn run_transfer(
         // An old estimate of the link gets one step without the
         // limiter: a short probe, so the ceiling follows the link.
         let probing = context.bandwidth.take_probe(direction, now);
+        // A step with no limiter on it reads the link.
+        let mut unlimited = probing;
         let grant = if probing {
-            Ok(step_bytes.min(vapor_shared::constants::engine::LINK_CAPACITY_PROBE_BYTES))
+            Ok(step_bytes.min(context.bandwidth.probe_bytes(direction, now)))
         } else {
             let mut shaper = context.bandwidth.shaper(direction);
+            unlimited = shaper.rate().is_none();
             let useful = shaper
                 .rate()
                 .map(|rate| rate / USEFUL_GRANTS_PER_SECOND)
@@ -726,6 +729,11 @@ fn run_transfer(
                     bytes_transferred,
                     done.saturating_duration_since(now),
                     done,
+                    if unlimited {
+                        crate::bandwidth::StepReading::Link
+                    } else {
+                        crate::bandwidth::StepReading::AtLeast
+                    },
                 );
                 // Return the slack: a step routinely spends less than its
                 // grant (chunk alignment / short final chunk), and keeping
@@ -753,11 +761,16 @@ fn run_transfer(
             }
             Ok(TransferStep::Completed(outcome)) => {
                 let done = context.clock.now();
+                // The step that ends a transfer also finishes it at
+                // the provider, and a provider that sends a small file
+                // in one request sends it here: the time covers more
+                // than these bytes.
                 context.bandwidth.record_step(
                     direction,
                     left_before.unwrap_or(0).min(grant),
                     done.saturating_duration_since(now),
                     done,
+                    crate::bandwidth::StepReading::AtLeast,
                 );
                 return ProviderJobOutcome::TransferCompleted(outcome);
             }

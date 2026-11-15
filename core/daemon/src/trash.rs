@@ -292,24 +292,41 @@ impl LocalTrash {
                     meta,
                 )
             })
+            .map_err(MoveError::NothingMoved)
             .and_then(|()| {
-                let destination = entry_dir.join(&file_name);
+                let destination = payload_path(&entry_dir, &file_name);
                 match fs::rename(path, &destination) {
                     Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
-                        // Another volume: copy, then remove. A copy that
-                        // fails leaves the original untouched.
-                        copy_any(path, &destination).and_then(|()| remove_any(path))
+                        copy_then_remove(path, &destination)
                     }
-                    result => result,
+                    result => result.map_err(MoveError::NothingMoved),
                 }
             });
-        if let Err(error) = moved {
-            // The item is still at its path (or the copy is partial):
-            // the entry describes nothing.
-            let _ = fs::remove_dir_all(&entry_dir);
-            return Err(error);
+        match moved {
+            Ok(()) => Ok(Disposition::Managed(id)),
+            Err(MoveError::NothingMoved(error)) => {
+                // The item is still whole at its path: the entry
+                // describes nothing.
+                let _ = fs::remove_dir_all(&entry_dir);
+                Err(error)
+            }
+            Err(MoveError::CopiedNotRemoved(error)) => {
+                // The entry holds the whole item, and a part of the
+                // original may be gone. The entry stays: it is the only
+                // complete copy. The discard still failed, so the
+                // caller tries again and what is left goes to an entry
+                // of its own.
+                crate::logging::warning(
+                    "Copied an item to the trash but could not remove the original; the copy stays in the trash",
+                    &[
+                        ("path", path.display().to_string()),
+                        ("trash_entry", id),
+                        ("error", error.to_string()),
+                    ],
+                );
+                Err(error)
+            }
         }
-        Ok(Disposition::Managed(id))
     }
 
     /// Makes the directory of a new entry in `location` and returns its
@@ -396,7 +413,7 @@ impl LocalTrash {
         let entry = self.read_entry(&entry_dir).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("no trash entry {id}"))
         })?;
-        let payload = entry_dir.join(&entry.file_name);
+        let payload = payload_path(&entry_dir, &entry.file_name);
         if fs::symlink_metadata(&payload).is_err() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -491,7 +508,37 @@ fn read_entry(entry_dir: &Path) -> Option<TrashEntry> {
 }
 
 fn has_payload(entry_dir: &Path, entry: &TrashEntry) -> bool {
-    fs::symlink_metadata(entry_dir.join(&entry.file_name)).is_ok()
+    fs::symlink_metadata(payload_path(entry_dir, &entry.file_name)).is_ok()
+}
+
+/// Where an entry keeps the item it holds: under the item's own name,
+/// next to the metadata file. An item that has the metadata file's name
+/// (in any spelling the volume folds onto it) would replace that file,
+/// so it is kept under a name that no metadata file has.
+fn payload_path(entry_dir: &Path, file_name: &str) -> PathBuf {
+    let meta = constants::runtime::TRASH_ENTRY_META_FILE_NAME;
+    if vapor_shared::paths::fold_name(file_name) == vapor_shared::paths::fold_name(meta) {
+        entry_dir.join(format!("{file_name}~payload"))
+    } else {
+        entry_dir.join(file_name)
+    }
+}
+
+/// How a move into the trash failed.
+enum MoveError {
+    /// The item is whole at its original path.
+    NothingMoved(io::Error),
+    /// The entry holds a complete copy, and the original could not be
+    /// removed, or only a part of it was.
+    CopiedNotRemoved(io::Error),
+}
+
+/// Moves `path` to `destination` on another volume: a copy, then the
+/// removal of the original. A copy that fails leaves the original
+/// untouched.
+fn copy_then_remove(path: &Path, destination: &Path) -> Result<(), MoveError> {
+    copy_any(path, destination).map_err(MoveError::NothingMoved)?;
+    remove_any(path).map_err(MoveError::CopiedNotRemoved)
 }
 
 /// Removes what has expired in one trash location. An entry expires by
@@ -705,6 +752,61 @@ mod tests {
         };
         assert_eq!(left("removed"), 1, "the recent entry stays");
         assert_eq!(left("running"), 1, "a running profile purges its own trash");
+    }
+
+    #[test]
+    fn a_file_named_like_the_metadata_file_is_listed_and_restored() {
+        let temp = TempDir::new().expect("temp");
+        let trash = managed(&temp);
+        let root = temp.path().join("root");
+        fs::create_dir_all(&root).expect("root");
+        for name in ["meta.json", "META.JSON"] {
+            let file = root.join(name);
+            fs::write(&file, b"the user's own file").expect("seed");
+            let Disposition::Managed(id) = trash
+                .discard(&file, "cloud-delete", at(100))
+                .expect("discard")
+            else {
+                panic!("the managed trash holds it");
+            };
+            let listed = trash.list();
+            assert_eq!(listed.len(), 1, "{name}: the entry reads as an entry");
+            assert_eq!(listed[0].file_name, name);
+            assert_eq!(trash.restore(&id).expect("restore"), file);
+            assert_eq!(fs::read(&file).expect("read"), b"the user's own file");
+            fs::remove_file(&file).expect("reset");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_whose_original_cannot_be_removed_keeps_the_copy() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TempDir::new().expect("temp");
+        let folder = temp.path().join("root/album");
+        fs::create_dir_all(folder.join("locked")).expect("dirs");
+        fs::write(folder.join("a.jpg"), b"a").expect("seed");
+        fs::write(folder.join("locked/b.jpg"), b"b").expect("seed");
+        // The folder can be read, so the copy is whole. Nothing can be
+        // removed from `locked`, so the removal stops part way.
+        fs::set_permissions(folder.join("locked"), fs::Permissions::from_mode(0o555))
+            .expect("lock");
+        let destination = temp.path().join("entry/album");
+        fs::create_dir_all(destination.parent().unwrap()).expect("entry");
+
+        let moved = copy_then_remove(&folder, &destination);
+        fs::set_permissions(folder.join("locked"), fs::Permissions::from_mode(0o755)).ok();
+        if moved.is_ok() {
+            // Running as a user that permissions do not stop.
+            return;
+        }
+        assert!(matches!(moved, Err(MoveError::CopiedNotRemoved(_))));
+        assert_eq!(fs::read(destination.join("a.jpg")).expect("copy"), b"a");
+        assert_eq!(
+            fs::read(destination.join("locked/b.jpg")).expect("copy"),
+            b"b",
+            "the copy is whole, whatever is left of the original"
+        );
     }
 
     #[test]

@@ -88,9 +88,7 @@ impl Home {
             command.env_remove(name);
         }
         if let Some(user_home) = &self.user_home {
-            for name in USER_HOME_ENV {
-                command.env(name, user_home);
-            }
+            pin_home(command, user_home);
         }
         command
             .env(constants::env::VAPOR_DIR, &self.dir)
@@ -112,6 +110,28 @@ impl Home {
 /// The variables a process reads its home directory from: `HOME` on
 /// Unix, `USERPROFILE` on Windows.
 const USER_HOME_ENV: [&str; 2] = ["HOME", "USERPROFILE"];
+
+/// The variables that move a per-user folder away from the home
+/// directory. Vapor reads the first two (the system trash, the service
+/// unit); with all of them unset, each folder is under the home.
+const XDG_HOME_ENV: [&str; 4] = [
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+];
+
+/// Gives `command` the home directory `home`, so no default path of the
+/// process it starts reaches the real home of the user who runs the
+/// harness.
+pub fn pin_home(command: &mut Command, home: &Path) {
+    for name in USER_HOME_ENV {
+        command.env(name, home);
+    }
+    for name in XDG_HOME_ENV {
+        command.env_remove(name);
+    }
+}
 
 /// One scenario's sandbox: a directory holding one or more homes.
 #[derive(Clone, Debug)]

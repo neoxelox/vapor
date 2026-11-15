@@ -217,16 +217,9 @@ impl FilesystemProvider {
         let root = self.canonical_root()?;
         let resolved = remote.resolve_under(&root);
 
-        let anchor = deepest_existing_ancestor(&resolved);
-        let canonical_anchor = vapor_shared::paths::canonicalize(&anchor).map_err(|error| {
-            classify_scope_failure(
-                &root,
-                format!(
-                    "cannot canonicalize {} while resolving {remote}: {error}",
-                    anchor.display()
-                ),
-            )
-        })?;
+        let canonical_anchor =
+            canonical_existing_ancestor(&resolved, &vapor_shared::paths::canonicalize)
+                .map_err(|error| scope_lookup_failure(&root, remote, &error))?;
         if !canonical_anchor.starts_with(&root) {
             return Err(classify_scope_failure(
                 &root,
@@ -308,6 +301,26 @@ impl FilesystemProvider {
             }
         }
         Ok(())
+    }
+
+    /// Whether the nearest folder that exists on the way to `target`
+    /// is stored under another spelling than the path asks for.
+    fn folder_stored_under_another_spelling(&self, target: &Path) -> bool {
+        let Ok(root) = self.canonical_root() else {
+            return false;
+        };
+        let mut folder = target.parent();
+        while let Some(current) = folder {
+            if current == root || !current.starts_with(&root) {
+                return false;
+            }
+            match vapor_shared::paths::stored_spelling(current) {
+                vapor_shared::paths::StoredSpelling::Other(_) => return true,
+                vapor_shared::paths::StoredSpelling::Exact => return false,
+                vapor_shared::paths::StoredSpelling::Absent => folder = current.parent(),
+            }
+        }
+        false
     }
 
     fn ensure_feed_started(&self) -> Result<(), ProviderError> {
@@ -560,10 +573,14 @@ impl Provider for FilesystemProvider {
         request: UploadRequest,
     ) -> Result<Box<dyn TransferSession>, ProviderError> {
         let target = self.resolve_in_scope(&request.remote_path)?;
-        if stored_under_another_spelling(&target).is_some() {
-            // The folder holds this name under another spelling, and
-            // writing here would replace that object. Its own deletion
-            // or move frees the name; until then the upload waits.
+        if stored_under_another_spelling(&target).is_some()
+            || self.folder_stored_under_another_spelling(&target)
+        {
+            // The folder holds this name, or one of the folders on the
+            // way to it, under another spelling. Writing here would
+            // replace that object, or land inside a folder that then
+            // does not answer for this path. Its own deletion or move
+            // frees the name; until then the upload waits.
             return Err(ProviderError::transient(format!(
                 "the cloud folder holds {} under another spelling; waiting for that name to go",
                 request.remote_path
@@ -906,6 +923,40 @@ fn classify_scope_failure(root: &Path, message: String) -> ProviderError {
         ));
     }
     ProviderError::permanent(message)
+}
+
+/// The canonical form of the deepest ancestor of `path` that exists.
+/// One look finds that ancestor and a second one canonicalizes it. An
+/// entry that goes between the two (another writer of the cloud folder
+/// removed it, or a rename that changes only its spelling is under
+/// way, which a volume may carry out in two steps) is looked for
+/// again, a few times.
+fn canonical_existing_ancestor(
+    path: &Path,
+    canonicalize: &dyn Fn(&Path) -> io::Result<PathBuf>,
+) -> io::Result<PathBuf> {
+    const LOOKS: usize = 4;
+    let mut last = io::Error::from(io::ErrorKind::NotFound);
+    for _ in 0..LOOKS {
+        match canonicalize(&deepest_existing_ancestor(path)) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => last = error,
+            outcome => return outcome,
+        }
+    }
+    Err(last)
+}
+
+/// What a failed look for the anchor of `remote` means. An entry that
+/// kept going away while it was looked for changed under the daemon:
+/// the next attempt finds what is there then. Anything else cannot be
+/// placed inside the root, which is permanent, unless the root itself
+/// is gone.
+fn scope_lookup_failure(root: &Path, remote: &RemotePath, error: &io::Error) -> ProviderError {
+    let message = format!("cannot resolve {remote} under the cloud sync root: {error}");
+    if error.kind() == io::ErrorKind::NotFound && root.is_dir() {
+        return ProviderError::transient(message);
+    }
+    classify_scope_failure(root, message)
 }
 
 fn deepest_existing_ancestor(path: &Path) -> PathBuf {
@@ -2004,6 +2055,86 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_that_goes_while_its_path_is_resolved_is_looked_for_again() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let root = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        let file = root.join("a.txt");
+        fs::write(&file, b"x").expect("seed");
+        let remote = RemotePath::new("a.txt").expect("path");
+
+        // The entry is gone for the first two looks, as in the middle
+        // of a rename, and there for the third.
+        let looks = std::cell::Cell::new(0);
+        let flaky = |path: &Path| {
+            looks.set(looks.get() + 1);
+            if looks.get() <= 2 {
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            } else {
+                vapor_shared::paths::canonicalize(path)
+            }
+        };
+        assert_eq!(
+            canonical_existing_ancestor(&file, &flaky).expect("found"),
+            file
+        );
+
+        // It never comes back: that is a change under the daemon, to
+        // try again later, and never a permanent failure of the path.
+        let gone = |_: &Path| Err(io::Error::from(io::ErrorKind::NotFound));
+        let error = canonical_existing_ancestor(&file, &gone).expect_err("gone");
+        assert_eq!(
+            scope_lookup_failure(&root, &remote, &error).kind,
+            vapor_shared::ProviderErrorKind::Transient
+        );
+        // Another failure cannot place the path inside the root.
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            scope_lookup_failure(&root, &remote, &denied).kind,
+            vapor_shared::ProviderErrorKind::Permanent
+        );
+        // A root that is gone is its own state, whatever the error.
+        assert_eq!(
+            scope_lookup_failure(&root.join("no-root"), &remote, &error).kind,
+            vapor_shared::ProviderErrorKind::CloudRootUnavailable
+        );
+    }
+
+    #[test]
+    fn an_upload_waits_while_its_folder_is_stored_under_another_spelling() {
+        let dir = tempfile::TempDir::new().expect("dir");
+        let provider = provider_at(dir.path());
+        let root = vapor_shared::paths::canonicalize(dir.path()).expect("canonical");
+        fs::create_dir(root.join("Docs")).expect("dir");
+        if fs::symlink_metadata(root.join("docs")).is_err() {
+            // This volume keeps the two spellings apart by itself.
+            return;
+        }
+        let source = dir.path().join("source.bin");
+        fs::write(&source, b"payload").expect("source");
+        let upload = |remote: &str| {
+            provider.begin_upload(UploadRequest {
+                local_source: source.clone(),
+                remote_path: RemotePath::new(remote).expect("path"),
+                op_id: "op".to_string(),
+                precondition: RemotePrecondition::None,
+            })
+        };
+
+        // Written through, the file would land in `Docs/`, and `docs/a`
+        // would then read as absent.
+        for remote in ["docs/a.txt", "docs/new/deeper/a.txt"] {
+            let refused = upload(remote).err().expect("the upload waits");
+            assert_eq!(
+                refused.kind,
+                vapor_shared::ProviderErrorKind::Transient,
+                "{remote}"
+            );
+        }
+        assert!(upload("Docs/a.txt").is_ok(), "the stored spelling uploads");
+        assert!(upload("Docs/new/a.txt").is_ok());
+    }
+
+    #[test]
     fn a_move_can_change_only_the_spelling_of_a_file_or_of_its_folder() {
         let dir = tempfile::TempDir::new().expect("dir");
         let provider = provider_at(dir.path());
@@ -2020,6 +2151,8 @@ mod tests {
                         .to_string_lossy()
                         .into_owned()
                 })
+                // A host without xattr keeps the op-id tag in a side-file.
+                .filter(|name| !name.ends_with(".vapor-meta.json"))
                 .collect();
             names.sort();
             names

@@ -62,37 +62,40 @@ impl ProfileSet {
 /// default one in their place, would sync folders the user did not
 /// choose.
 pub fn resolve_profile_set(load: &VaporConfigLoadResult) -> ProfileSet {
-    use constants::config as keys;
-    if load.unreadable {
+    let problems = unusable_configuration(load);
+    if !problems.is_empty() {
         return ProfileSet {
             profiles: Vec::new(),
-            problems: vec![format!(
-                "vapor.json cannot be read: {}",
-                load.load_issue.as_deref().unwrap_or("unknown error")
-            )],
+            problems,
         };
     }
-    let scope_keys = [
+    resolve_profile_set_from(&load.config)
+}
+
+/// Why a loaded `vapor.json` names no profile at all: the file cannot
+/// be read, or a key that decides the profiles has a value of the wrong
+/// shape. Empty when the file can name profiles. A surface that edits
+/// or removes profiles reads this first: with such a file, "the profile
+/// is not there" is not known.
+pub fn unusable_configuration(load: &VaporConfigLoadResult) -> Vec<String> {
+    use constants::config as keys;
+    if load.unreadable {
+        return vec![format!(
+            "vapor.json cannot be read: {}",
+            load.load_issue.as_deref().unwrap_or("unknown error")
+        )];
+    }
+    [
         keys::KEY_PROFILES,
         keys::KEY_LOCAL_ROOT,
         keys::KEY_CLOUD_ROOT,
         keys::KEY_PROVIDER,
         keys::KEY_SYNC_MODE,
-    ];
-    let broken: Vec<&str> = scope_keys
-        .into_iter()
-        .filter(|key| load.invalid_keys.contains(key))
-        .collect();
-    if !broken.is_empty() {
-        return ProfileSet {
-            profiles: Vec::new(),
-            problems: broken
-                .into_iter()
-                .map(|key| format!("`{key}` in vapor.json has a value of the wrong shape"))
-                .collect(),
-        };
-    }
-    resolve_profile_set_from(&load.config)
+    ]
+    .into_iter()
+    .filter(|key| load.invalid_keys.contains(key))
+    .map(|key| format!("`{key}` in vapor.json has a value of the wrong shape"))
+    .collect()
 }
 
 /// The profiles of `config`, valid or not. For callers that hold a
@@ -307,10 +310,20 @@ mod tests {
     use vapor_shared::SyncMode;
     use vapor_shared::config::ProfileConfig;
 
+    /// A fixture path that is absolute on this host: `/tmp/x` names no
+    /// drive on Windows, where it is a relative path.
+    fn rooted(path: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{path}")
+        } else {
+            path.to_string()
+        }
+    }
+
     fn base_config() -> VaporConfig {
         VaporConfig {
-            local_root: Some("/tmp/vapor-top-local".to_string()),
-            cloud_root: Some("/tmp/vapor-top-cloud".to_string()),
+            local_root: Some(rooted("/tmp/vapor-top-local")),
+            cloud_root: Some(rooted("/tmp/vapor-top-cloud")),
             sync_mode: "two-way".to_string(),
             ..VaporConfig::default()
         }
@@ -333,7 +346,7 @@ mod tests {
             ProfileConfig {
                 id: "mirror".to_string(),
                 name: Some("Cloud Mirror".to_string()),
-                local_root: Some("/tmp/vapor-mirror".to_string()),
+                local_root: Some(rooted("/tmp/vapor-mirror")),
                 sync_mode: Some("pull-only".to_string()),
                 ..ProfileConfig::default()
             },
@@ -348,8 +361,6 @@ mod tests {
         let mirror = &profiles[0];
         assert_eq!(mirror.name, "Cloud Mirror");
         assert_eq!(mirror.scope.sync_mode, SyncMode::PullOnly, "override wins");
-        // Windows absolutizes "/tmp/…" against the current drive, so
-        // assert resolution shape rather than a Unix-literal path.
         let mirror_local = mirror
             .scope
             .local_root
@@ -425,7 +436,7 @@ mod tests {
         assert!(fresh.is_unconfigured(), "a fresh install has no profile");
 
         let half = VaporConfig {
-            local_root: Some("/tmp/vapor-top-local".to_string()),
+            local_root: Some(rooted("/tmp/vapor-top-local")),
             ..VaporConfig::default()
         };
         let set = resolve_profile_set_from(&half);
@@ -439,7 +450,7 @@ mod tests {
         let partial = VaporConfig {
             profiles: vec![ProfileConfig {
                 id: "work".to_string(),
-                local_root: Some("/tmp/vapor-work".to_string()),
+                local_root: Some(rooted("/tmp/vapor-work")),
                 ..ProfileConfig::default()
             }],
             ..VaporConfig::default()
@@ -495,8 +506,12 @@ mod tests {
         // the top-level roots must not run instead.
         std::fs::write(
             &path,
-            r#"{ "localRoot": "/tmp/a", "cloudRoot": "/tmp/b",
-                 "profiles": [{ "id": "work", "enabled": "yes" }] }"#,
+            format!(
+                r#"{{ "localRoot": "{}", "cloudRoot": "{}",
+                 "profiles": [{{ "id": "work", "enabled": "yes" }}] }}"#,
+                rooted("/tmp/a"),
+                rooted("/tmp/b")
+            ),
         )
         .expect("seed");
         let set = resolve_profile_set(&vapor_shared::config::load_from(&path));
@@ -506,7 +521,15 @@ mod tests {
             vec!["`profiles` in vapor.json has a value of the wrong shape".to_string()]
         );
 
-        std::fs::write(&path, r#"{ "localRoot": "/tmp/a", "cloudRoot": "/tmp/b" }"#).expect("seed");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{ "localRoot": "{}", "cloudRoot": "{}" }}"#,
+                rooted("/tmp/a"),
+                rooted("/tmp/b")
+            ),
+        )
+        .expect("seed");
         let set = resolve_profile_set(&vapor_shared::config::load_from(&path));
         assert_eq!(set.profiles.len(), 1);
         assert_eq!(set.profiles[0].invalid, None);

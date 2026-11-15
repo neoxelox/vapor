@@ -21,7 +21,7 @@ in them.
   daemon (Unix domain socket today).
 - `core/platform`, per-OS native implementations behind portable
   traits (fs watch, service install, secret store, metrics, idle,
-  filesystem capabilities, process supervision).
+  the user's trash, filesystem capabilities, process supervision).
 - `core/lifecycle`: crash-loop guard, autolaunch setting store, and the
   daemon lifecycle manager every surface drives through the CLI.
 - `core/cli`: the `vapor` binary, the universal control plane.

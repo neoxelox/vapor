@@ -113,6 +113,9 @@ pub fn check_local_root(
         }
         (None, true) => adopt_local(state_db, root, device_id, now),
         (Some(_), false) => Ok(RootStatus::Missing),
+        // Adopted with no identity (the folder could hold no marker):
+        // there is nothing to compare, and the folder is there.
+        (Some(expected), true) if expected.is_empty() => Ok(RootStatus::Ready),
         (Some(expected), true) => {
             // A marker that cannot be read (a privacy permission the
             // user refused, an I/O error) says nothing about which
@@ -140,11 +143,12 @@ pub fn check_local_root(
 /// file is "gone" from a root that was swapped (a volume unmounted, a
 /// folder put in its place), and the user deleted nothing: the
 /// periodic check has not seen the swap yet. A profile that has adopted
-/// no root has nothing to compare, and a marker that cannot be read
-/// vouches for nothing.
+/// no root, or adopted one that could hold no marker, has nothing to
+/// compare, and a marker that cannot be read vouches for nothing.
 pub fn local_root_is_adopted(state_db: &DurableStateDb, root: &Path) -> bool {
     match recorded_identity(state_db, RootSide::Local) {
         Ok(None) => true,
+        Ok(Some(expected)) if expected.is_empty() => true,
         Ok(Some(expected)) => root_marker::read_marker(root)
             .ok()
             .flatten()
@@ -301,6 +305,28 @@ mod tests {
 
     fn at(seconds: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds)
+    }
+
+    #[test]
+    fn a_root_adopted_with_no_marker_stays_ready_and_is_never_read_as_replaced() {
+        // What a read-only folder leaves: adopted, with no identity.
+        let temp = TempDir::new().expect("temp");
+        let mut state_db = db(&temp);
+        let root = temp.path().join("ReadOnly");
+        std::fs::create_dir_all(&root).expect("root");
+        record_identity(&mut state_db, RootSide::Local, "", at(1)).expect("record");
+
+        assert_eq!(
+            check_local_root(&mut state_db, &root, "dev", at(2)).expect("check"),
+            RootStatus::Ready
+        );
+        assert!(local_root_is_adopted(&state_db, &root));
+        // A folder that is gone is still waited for.
+        std::fs::remove_dir(&root).expect("remove");
+        assert_eq!(
+            check_local_root(&mut state_db, &root, "dev", at(3)).expect("check"),
+            RootStatus::Missing
+        );
     }
 
     #[test]

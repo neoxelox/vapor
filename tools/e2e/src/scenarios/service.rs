@@ -256,7 +256,7 @@ fn service_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     svc.expect("R6", &["start"], "result", "crash-loop-paused")?;
     let lifecycle = fs::read_to_string(home.lifecycle_state())?;
     ensure!(
-        lifecycle.contains("\"paused_indefinitely\": true"),
+        lifecycle.contains("\"pausedIndefinitely\": true"),
         "R6: pause not persisted in lifecycle.json: {lifecycle}"
     );
 

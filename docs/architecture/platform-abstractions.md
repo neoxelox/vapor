@@ -149,9 +149,8 @@ Every consumer opens the store through `open_store(SecretAccess)`:
 
 Returns a `ThrottleInputs` (`on_battery`, `low_power_mode`,
 `thermal_pressure`, `system_cpu_load_percent`, `vapor_cpu_load_percent`,
-`disk_pressure`, `network_error_rate_percent`, `network_throughput_kbps`,
-`link_speed_kbps`, `user_active`, `vapor_memory_bytes`,
-`device_memory_bytes`). CPU
+`disk_pressure`, `network_error_rate_percent`, `link_speed_kbps`,
+`user_active`, `vapor_memory_bytes`, `device_memory_bytes`). CPU
 percentages are shares of the whole device, so a single busy core on an
 eight-core machine reads as 13%.
 

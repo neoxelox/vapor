@@ -59,9 +59,19 @@ surface produced by `core/platform/service::macos`.
   nothing, so a running daemon is not restarted by a second install.
 - Start never kills: `launchctl kickstart` runs without `-k`, so a
   start request for a daemon that already runs leaves it running.
+- A daemon of another build is replaced: an update puts a new `vapord`
+  where the old one runs, and neither rule above would restart it.
+  After `vapor service install` or `bootstrap`, the CLI asks the
+  running daemon for its build (`vapord/<version>` in the status) and
+  restarts it when the build is not the CLI's own, or when the daemon
+  speaks another IPC version. A daemon of the same build is left alone.
 - Stop waits: after the stop signal the installer waits up to 10
   seconds for the daemon to exit, so its shutdown flush completes
-  before the caller goes on.
+  before the caller goes on. The intent to stop is written to
+  `lifecycle.json` (`stopRequestedAtMs`) before the signal. A daemon
+  that takes longer to exit (a worker inside a network call) is "on
+  its way out" for 180 seconds: a supervision tick in that time does
+  not count a crash and does not restart it.
 - `ProcessType`: `Background` so the daemon participates in background
   resource-management policy. This has a price that was measured on an
   idle Apple silicon Mac with `taskpolicy -b`, which applies the same
@@ -118,7 +128,7 @@ protection. `launchd` is intentionally passive (`KeepAlive = false`):
    invokes `vapor service check`: one supervision tick that detects an
    unexpected daemon exit, registers the crash, and restarts or defers
    per the schedule above. Expected stops are never counted, and the
-   `awaiting_restart` marker prevents the same exit from being counted
+   `awaitingRestart` marker prevents the same exit from being counted
    twice. Crash-loop bookkeeping (`consecutiveCrashes`,
    `lastCrashAtMs`, `pausedIndefinitely`, `awaitingRestart`) persists
    durably in `<vapor_dir>/state/lifecycle.json` (owned by

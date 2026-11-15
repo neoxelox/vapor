@@ -548,8 +548,9 @@ fn dispatch_profiles(action: ProfilesAction) -> Result<ExitCode, String> {
             let interactive =
                 !json && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
             let mut prompter = profiles_cmd::TerminalPrompter;
-            if interactive && request.is_empty() {
-                request = profiles_cmd::ask_for_missing(request, &mut prompter)
+            if interactive {
+                let taken = profiles_cmd::profile_ids(&path);
+                request = profiles_cmd::ask_for_missing(request, &taken, &mut prompter)
                     .map_err(|e| e.to_string())?;
             }
             let outcome = profiles_cmd::add(
@@ -574,12 +575,19 @@ fn dispatch_profiles(action: ProfilesAction) -> Result<ExitCode, String> {
                     "removing a profile needs a confirmation; pass --yes to give it".to_string(),
                 );
             }
-            // Anything but "no daemon answers" counts as running: a
-            // daemon that is slow to answer still holds the state.
-            let daemon_running = !matches!(
-                ipc_cmd::status(),
-                Err(vapor_cli::commands::IpcCliError::DaemonNotRunning)
-            );
+            // A daemon holds the lock of its runtime directory for its
+            // whole life, whether or not it answers on the socket. The
+            // lock stays held here until the removal is over, so no
+            // daemon starts in the middle of it.
+            let daemon_lock =
+                vapor_daemon::singleton::SingletonLock::acquire_for_current_vapor_dir();
+            let daemon_running = match &daemon_lock {
+                Ok(_) => false,
+                Err(vapor_daemon::singleton::SingletonLockError::AlreadyRunning(_)) => true,
+                Err(error) => {
+                    return Err(format!("cannot tell whether a daemon is running: {error}"));
+                }
+            };
             let open_secrets = || -> std::sync::Arc<dyn vapor_platform::SecretStore> {
                 std::sync::Arc::from(auth_cmd::build_native_store().0)
             };
@@ -788,7 +796,7 @@ fn dispatch_report(
     });
 
     let vapor_dir = vapor_shared::runtime_paths::vapor_directory();
-    let default_root = vapor_dir.join("reports");
+    let default_root = vapor_dir.join(vapor_shared::constants::runtime::REPORTS_DIRECTORY_NAME);
     let output_root = output.unwrap_or_else(|| default_root.clone());
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1098,6 +1106,24 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
         let mut outcome =
             service_cmd::dispatch(command, &manager, installer.as_ref(), Instant::now())
                 .map_err(|e| e.to_string())?;
+        if matches!(command, ServiceCommand::Bootstrap | ServiceCommand::Install) {
+            // A daemon that refuses the handshake speaks another IPC
+            // version, so it is another build too.
+            let running_build = match ipc_cmd::status() {
+                Ok(status) => Some(status.daemon),
+                Err(vapor_cli::commands::IpcCliError::Client(
+                    vapor_ipc::ClientError::IncompatibleVersion(_),
+                )) => Some("another IPC version".to_string()),
+                Err(_) => None,
+            };
+            service_cmd::replace_daemon_of_another_build(
+                &manager,
+                installer.as_ref(),
+                running_build.as_deref(),
+                Instant::now(),
+            )
+            .map_err(|e| e.to_string())?;
+        }
         match &mut outcome {
             service_cmd::ServiceCommandOutcome::Status(report) => {
                 report.supervisor_installed = vapor_platform::ServiceInstaller::status(&supervisor)

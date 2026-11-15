@@ -55,10 +55,10 @@ are provider-neutral unless a section says otherwise.
   `gdrive-oauth-client` row: built in, from the environment, or none.
   It prints the id, which is public, and never the secret.
 - The e2e harness and the soak build their binaries without a client
-  and refuse a filesystem-provider run over binaries that carry one.
-  Tokens live in the login keychain rather than under `VAPOR_DIR`, so a
-  sandboxed daemon with a built-in client could otherwise find the
-  developer's own sign-in and reach their Drive.
+  and refuse a filesystem-provider run over binaries that carry one. A
+  sandbox has a secret scope of its own (see below), so it cannot read
+  the sign-in of the real install; the refusal is the second barrier,
+  and it keeps a test binary from ever starting a real sign-in.
 
 ## Consent screen status and token lifetime
 
@@ -98,7 +98,10 @@ is not visible in another: sign in again there.
   wrote it plus its companions (`vapor` and `vapord`, side by side in
   a build directory or at `Contents/Helpers/vapor` and
   `Contents/MacOS/vapord` inside the bundle). The daemon therefore
-  reads a token the CLI stored without a keychain prompt.
+  reads a token the CLI stored without a keychain prompt. A store over
+  an item that exists removes the item and adds it again, because only
+  the creation writes the access list: a sign-in after an update gives
+  the item the list of the binaries that run now.
 - The daemon never opens a keychain dialog. It reads with the
   interaction turned off, so a read that would need the user's consent
   fails, and the profile holds for a sign-in (below). A dialog from a
@@ -154,7 +157,9 @@ is not visible in another: sign in again there.
   - The daemon logs a rejected token request as a WARNING with the
     code under `error_code`, never the body.
 - One refresh runs at a time for a profile: two calls that find the
-  token expired share one request.
+  token expired share one request, and so do the calls that Drive
+  answered with `401` for the same token. A dead token endpoint is
+  asked one time, not one time for each worker.
 - A daemon with no OAuth client (none built in, none in the
   environment) cannot build the provider: the profile is suspended
   with the reason in `vapor status`, and the other profiles keep
