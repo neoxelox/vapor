@@ -169,6 +169,15 @@ fn report_hides_names(ctx: &mut Ctx) -> Result<(), Failure> {
         CONVERGE_TIMEOUT,
     )?;
     ctx.settle(CONVERGE_TIMEOUT)?;
+    // The reports are judged by a name that the daemon's log holds. The
+    // log lines that name the file come a moment after the transfer
+    // (the cloud feed's own event, the second look at the file), so the
+    // scenario waits for one: a report written before it would hold no
+    // name to hide, and none to keep.
+    let daemon_log = home.daemon_log();
+    ctx.wait_until(CONVERGE_TIMEOUT, "the daemon log to name the file", || {
+        read_string(&daemon_log).is_ok_and(|log| log.contains("zebra budget draft.txt"))
+    })?;
     let sandbox_name = ctx
         .sandbox
         .root
