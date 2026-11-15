@@ -96,8 +96,10 @@ does not know stops the profile; it never falls back to `two-way`.
 
 The folder on this device that Vapor syncs. It has no default: a
 profile exists only when the user set its two roots, and until then
-Vapor syncs nothing and creates no folder. `vapor profiles add`
-suggests `~/Vapor`. Vapor creates the folder on first contact. The
+Vapor syncs nothing and creates no folder. On a terminal, `vapor
+profiles add` asks for the folder and suggests `~/Vapor`; with no
+terminal it needs `--local` and `--cloud`. Vapor creates the folder on
+first contact. The
 path is absolute or starts with `~`; a relative path is a profile
 problem, and `vapor profiles add` writes the full path for a relative
 one. `vapor config get localRoot` prints an empty line while it is

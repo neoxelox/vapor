@@ -187,8 +187,11 @@ impl ProfileStorage {
     }
 }
 
-/// What `vapor profiles add` was given. Everything is optional: what
-/// is missing takes the default that setup offers.
+/// What `vapor profiles add` was given. The two folders are the user's
+/// to choose: a terminal asks for them and offers a suggestion
+/// ([`ask_for_missing`]), and with no terminal both have to be given.
+/// The provider and the mode take their defaults when they are left
+/// out.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AddRequest {
     pub id: Option<String>,
@@ -451,17 +454,17 @@ fn plan(
         .unwrap_or_else(|| constants::sync_mode::DEFAULT.to_string());
     let mode = vapor_daemon::sync_directories::parse_sync_mode(&mode_text)
         .map_err(ProfilesError::Invalid)?;
-    let local = request
-        .local
-        .clone()
-        .unwrap_or_else(|| constants::filtering::DEFAULT_LOCAL_ROOT.to_string());
-    let cloud = request
-        .cloud
-        .clone()
-        .unwrap_or_else(|| constants::filtering::default_cloud_root(&provider).to_string());
-    if local.trim().is_empty() || cloud.trim().is_empty() {
-        return invalid("a profile needs a local folder and a cloud folder".to_string());
-    }
+    // A profile exists only when the user chose its two folders. A
+    // terminal asked for them before this point. With no terminal there
+    // is nobody to ask, and a suggestion that nobody saw is no choice.
+    let chosen = |folder: &Option<String>| folder.clone().filter(|path| !path.trim().is_empty());
+    let (Some(local), Some(cloud)) = (chosen(&request.local), chosen(&request.cloud)) else {
+        return invalid(
+            "a profile needs its two folders: --local <path> --cloud <path> \
+             (on a terminal, `vapor profiles add` asks for them)"
+                .to_string(),
+        );
+    };
     // A path typed in a terminal is relative to the terminal's
     // directory. The daemon has no such directory, so the full path is
     // what gets written.
@@ -1128,6 +1131,7 @@ mod tests {
             &AddRequest {
                 provider: Some("gdrive".to_string()),
                 local: Some(temp.path().join("drive").display().to_string()),
+                cloud: Some("/Vapor".to_string()),
                 ..AddRequest::default()
             },
             None,
@@ -1139,6 +1143,39 @@ mod tests {
             outcome.sign_in.as_deref(),
             Some("vapor auth login --profile default")
         );
+    }
+
+    #[test]
+    fn with_no_terminal_both_folders_have_to_be_given() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        let both = request(&temp, "home");
+        for incomplete in [
+            AddRequest::default(),
+            AddRequest {
+                cloud: None,
+                ..both.clone()
+            },
+            AddRequest {
+                local: None,
+                ..both.clone()
+            },
+            AddRequest {
+                local: Some("  ".to_string()),
+                ..both.clone()
+            },
+        ] {
+            let refused = add(&path, &storage(&temp), &incomplete, None, now())
+                .expect_err("a suggestion that nobody saw is no choice");
+            assert!(
+                refused
+                    .to_string()
+                    .contains("--local <path> --cloud <path>"),
+                "{refused}"
+            );
+            assert!(!path.exists(), "nothing is written");
+        }
+        add(&path, &storage(&temp), &both, None, now()).expect("both folders given");
     }
 
     #[test]

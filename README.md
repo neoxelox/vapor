@@ -83,7 +83,7 @@ In flight and coming next:
 | `vapor resume` | `--json` | Resumes sync. |
 | `vapor reconcile` | `--json` | Compares both folders now and syncs the differences. |
 | `vapor profiles list` | `--json` | Lists the sync profiles: the folders, the cloud, the direction. |
-| `vapor profiles add` | `--id <id>`, `--name <name>`, `--provider <provider>`, `--local <path>`, `--cloud <path>`, `--mode <mode>`, `--json` | Adds a profile. On a terminal it asks for what you leave out; the first one is the setup of a fresh install and starts syncing at once. |
+| `vapor profiles add` | `--id <id>`, `--name <name>`, `--provider <provider>`, `--local <path>`, `--cloud <path>`, `--mode <mode>`, `--json` | Adds a profile. On a terminal it asks for what you leave out; a script has to give `--local` and `--cloud`. The first one is the setup of a fresh install and starts syncing at once. |
 | `vapor profiles remove <id>` | `--yes`, `--json` | Stops syncing a profile and forgets its sync state and sign-in. The files on both sides stay. Needs the daemon stopped. |
 | `vapor ignored` | `--profile <id>`, `--json` | Lists what the ignore rules keep out of sync, with the rule that hides each path. |
 | `vapor decisions list` | `--all`, `--json` | Lists the questions waiting for you: conflicts, and actions Vapor will not take on its own. `--all` adds the answered ones. |
@@ -153,7 +153,7 @@ The Applies column says when a change takes effect: **live** within a few second
 | `trash.retentionDays` | `7` | live | Days an item stays in the trash. |
 | `trash.useSystem` | `false` | live | Try the system trash (the Finder's Trash) first. |
 
-Each `profiles` entry has an `id` and optionally `name`, `enabled`, `provider`, `localRoot`, `cloudRoot`, `syncMode`, `resourceLimits`, and `idleBoost`; unset fields inherit the top-level value, and a profile's limits can only be stricter than the top-level ones. `vapor profiles add` writes an entry for you, and suggests `~/Vapor` and `/Vapor` for the two folders. The first profile starts without a restart.
+Each `profiles` entry has an `id` and optionally `name`, `enabled`, `provider`, `localRoot`, `cloudRoot`, `syncMode`, `resourceLimits`, and `idleBoost`; unset fields inherit the top-level value, and a profile's limits can only be stricter than the top-level ones. `vapor profiles add` writes an entry for you; on a terminal it suggests `~/Vapor` and `/Vapor` for the two folders. The first profile starts without a restart.
 
 ### Environment variables
 

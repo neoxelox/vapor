@@ -199,6 +199,8 @@ fn a_token_on_the_command_line_is_refused_and_never_stored() {
             "gdrive",
             "--local",
             &home.path().join("local").to_string_lossy(),
+            "--cloud",
+            "/Vapor",
         ],
     );
     assert!(added.status.success(), "{}", stderr(&added));

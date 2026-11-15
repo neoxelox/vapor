@@ -1,6 +1,6 @@
 # Full review of the repository, and what it changed
 
-Status: implemented 2026-11-14
+Status: implemented 2026-11-15
 
 ## Goal
 
@@ -244,6 +244,32 @@ Notes on round 6:
   in the build and has more than one reasonable answer is recorded in
   the spec as the agent's choice, marked as open for the owner.
 
+### Round 7, 2026-11-15: the choices the build made
+
+The owner read the open points before the merge and accepted each
+recommendation, except the one that is still under Open points. Each
+decision below is the owner's (owner, 2026-11-15).
+
+| # | Decision |
+|---|---|
+| D39 | With no terminal, `vapor profiles add` refuses unless both `--local` and `--cloud` are given. A suggestion that nobody saw is no choice (D5). On a terminal the command asks, and offers `~/Vapor` and `/Vapor`. The build took the suggestions before; D39 changes that. |
+| D40 | The LaunchAgent keeps `ProcessType: Background`. Hashing is about 2.7 times slower under that policy, and device impact comes first. The work on the Mac app measures real sync speed, and the owner decides again then. |
+| D41 | `AGENTS.md` §3 names two bounded exceptions to "no provider I/O and no hashing on the tick thread": a file of up to 8 MiB is hashed in line, and the re-baseline of an expired changes cursor polls in line. Removing them is the first task after the merge (`docs/tasks/core.md` E-6). |
+| D42 | A daemon whose profiles are all suspended stays up. It retries them on the schedule of D16 and answers `vapor status`. It does not exit. |
+| D43 | The run state for "no usable profile" is named `unconfigured`. It is part of the `--json` contract. |
+| D44 | Neither root has a default. A `localRoot` with no `cloudRoot` is no profile. |
+| D45 | On a terminal, `vapor profiles add` asks for each option that is left out, and for the id when a profile exists. It refuses a `vapor.json` that the daemon refuses, and so does `vapor profiles remove`. |
+| D46 | `vapor profiles remove` forgets the sync state and the sign-in, and keeps the profile's trash. The daemon deletes each trashed file when its retention time ends. |
+| D47 | The one-way confirmation lives in the state database, so a database that is set aside and rebuilt asks again. The confirmation also ends when the profile runs `two-way`: a return to the same mirror asks again. |
+| D48 | An `apply` answer to a deletion burst lets the held deletions pass the guard. It does not stand in for the sync index: a cloud file with no index row stays (D3). Only an answer that names the path itself deletes without a row. |
+| D49 | The reconcile walk removes the sync index rows of names that left both folders. |
+| D50 | A redacted report can keep a name that is one plain lowercase word, when the name stands alone in a sentence. The report says so. |
+| D51 | `vapor service install` and `bootstrap` restart a daemon of another build. A daemon of the same build is never restarted. |
+| D52 | `./scripts/lint.sh` needs `cargo deny` and a network connection. A missing tool fails lint with the install command. |
+| D53 | `version.sh` refuses instead of guessing: `bump` on a prerelease and `prerelease` on a stable version stop with the command to use. |
+| D54 | The CLI gets no Intel Mac build either (D33). |
+| D55 | The short `Unreleased` list of the changelog stands as the agent wrote it (D26). |
+
 ## Design
 
 How the decisions were built. The system documents describe the result
@@ -362,81 +388,23 @@ Found while the fixes were built, and fixed in the same change:
 
 ## Open points
 
-Choices that came up in the build and have more than one reasonable
-answer. Each one states what the build does today. Each one waits for
-the owner.
+Round 7 settled the choices that the build made (D39 to D55). What is
+still open:
 
-1. **A daemon whose profiles are all suspended stays up.** It retries
-   them on the schedule of D16 and answers `vapor status`. The other
-   choice is to exit and let the lifecycle guard decide.
-2. **The run state for "no usable profile" is named `unconfigured`.**
-   It is part of the `--json` contract now.
-3. **Neither root has a default.** D5 says a profile exists only when
-   the user set its roots. The build reads that as both roots: a
-   `localRoot` with no `cloudRoot` is no profile. `~/Vapor` and
-   `/Vapor` are suggestions that `vapor profiles add` offers.
-4. **`vapor profiles add` with no terminal takes the suggestion for
-   each option that was left out**, and prints the folders it chose.
-   The other choice is to refuse without both folders.
-5. **`vapor profiles remove` keeps the profile's trash** and prints its
-   folder. It forgets the sync state and the sign-in. The daemon
-   deletes each trashed file when its retention time ends, as for a
-   profile that runs.
-6. **Two profiles whose local folders overlap are not refused.** One
+1. **Linux and Windows read no interface speed.** There a direction
+   of the link has no bandwidth limit until its first measured
+   transfer (`docs/tasks/core.md` C3-11). The owner asked why on
+   2026-11-15; the answer and the choice are with the owner.
+2. **Two profiles whose local folders overlap are not refused.** One
    profile whose cloud folder is inside its local folder is. What an
    overlap between profiles should mean is not decided
    (`docs/tasks/core.md` E-3).
-7. **The cloud-side window of a swapped root is open for 15 seconds.**
+3. **The cloud-side window of a swapped root is open for 15 seconds.**
    A local file that a cloud deletion removes in that window goes to
    the trash (`docs/tasks/core.md` E-2).
-8. **`ProcessType` stays `Background` in the LaunchAgent.** Measured
-   with `taskpolicy -b` on an idle Apple silicon Mac: hashing is about
-   2.7 times slower than with the standard policy. `Standard` would
-   make sync faster and the daemon less polite
-   (`docs/operations/macos/launchagent-policy.md`).
-9. **Lint needs `cargo deny` and a network connection.** A missing
-   tool fails lint with the install command. A new advisory can turn
-   lint red on an unrelated change.
-10. **`version.sh` refuses instead of guessing.** `bump` on a
-    prerelease and `prerelease` on a stable version stop with the
-    command to use. The other choice is what `npm version` does.
-11. **No Intel Mac build of the CLI either.** D33 says Vapor gets no
-    Intel Mac build; the task list dropped the `x86_64-apple-darwin`
-    CLI target with it.
-12. **The one-way acknowledgement lives in the state database.** A
-    database that is set aside and rebuilt asks the question again.
-13. **Linux and Windows read no interface speed.** There a direction
-    of the link has no bandwidth limit until its first measured
-    transfer (`docs/tasks/core.md` C3-11).
-14. **The `Unreleased` section of the changelog was rewritten by the
-    agent** as a short list (D26). The owner may want other words for
-    a change.
-15. **`vapor profiles add` on a terminal asks for each option that was
-    left out**, and for the id when a profile exists already. Before
-    the review of the pull request it asked only when no option was
-    given. It also refuses a `vapor.json` that the daemon would refuse,
-    and so does `vapor profiles remove`.
-16. **A one-way confirmation ends when the profile runs `two-way`.** A
-    return to the same mirror asks again, because both sides changed
-    in between.
-17. **An `apply` answer to a deletion burst does not stand in for the
-    sync index.** It lets the held deletions pass the guard. A cloud
-    file with no index row still stays (D3). Only an answer that names
-    the path itself (a `type-mismatch` side) deletes without a row.
-18. **The reconcile walk removes the index rows of names that left
-    both sides.** A row is the evidence for a deletion (D4), and such a
-    row would vouch for a deletion that did not happen.
-19. **A redacted report can keep a name that is one plain lowercase
-    word** when the name stands alone in a sentence. Replacing those
-    would replace the same word in every message. The report says so.
-20. **`AGENTS.md` §3 names two exceptions to "no provider I/O and no
-    hashing on the tick thread"**: a file of up to 8 MiB is hashed in
-    line, and the re-baseline of an expired cursor polls in line. The
-    other choice is to move both to workers first
-    (`docs/tasks/core.md` E-6).
-21. **A daemon of another build is restarted by `vapor service install`
-    and `bootstrap`.** That is how an update replaces the daemon that
-    runs. A daemon of the same build is never restarted.
+4. **The Google verification path for the Drive scope.** It gates
+   general availability of the Drive provider
+   (`docs/tasks/core.md` P-5).
 
 Not built, with the task that tracks each one:
 

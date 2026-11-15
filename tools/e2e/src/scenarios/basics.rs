@@ -87,7 +87,7 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             id: "S63",
             name: "profiles-command-sets-an-install-up",
-            proves: "vapor profiles add sets a fresh install up with one command and no restart; it refuses a cloud folder inside the local folder; remove refuses while the daemon runs, then forgets the sync state and leaves the files on both sides",
+            proves: "vapor profiles add sets a fresh install up with one command and no restart, and refuses when no terminal can ask and a folder is left out; it refuses a cloud folder inside the local folder; remove refuses while the daemon runs, then forgets the sync state and leaves the files on both sides",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
             run: profiles_command_sets_an_install_up,
@@ -238,6 +238,21 @@ fn profiles_command_sets_an_install_up(ctx: &mut Ctx) -> Result<(), Failure> {
     ensure!(
         listed["profiles"] == serde_json::json!([]) && listed["problems"] == serde_json::json!([]),
         "a fresh install lists no profile and no problem: {listed}"
+    );
+
+    // With no terminal there is nobody to ask for the folders, and a
+    // suggestion that nobody saw is no choice: the command refuses, and
+    // the install stays as it was.
+    let no_folders = cli.run(&["profiles", "add", "--json"])?;
+    ensure!(
+        !no_folders.success() && no_folders.stderr.contains("--local <path> --cloud <path>"),
+        "profiles add with no folders and no terminal must refuse: {}",
+        no_folders.stderr
+    );
+    let listed = cli.json(&["profiles", "list", "--json"])?;
+    ensure!(
+        listed["profiles"] == serde_json::json!([]),
+        "a refused add leaves no profile: {listed}"
     );
 
     // One command sets the install up; the running daemon picks it up.

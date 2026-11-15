@@ -255,11 +255,13 @@ enum ProfilesAction {
         /// The cloud provider: `filesystem` or `gdrive`.
         #[arg(long, value_name = "PROVIDER")]
         provider: Option<String>,
-        /// The folder on this device (suggested: `~/Vapor`).
+        /// The folder on this device. Needed when no terminal can ask
+        /// for it (there the suggestion is `~/Vapor`).
         #[arg(long, value_name = "PATH")]
         local: Option<String>,
-        /// The folder in the cloud (suggested: `/Vapor` on Google
-        /// Drive, `~/cloud/Vapor` for the filesystem provider).
+        /// The folder in the cloud. Needed when no terminal can ask
+        /// for it (there the suggestion is `/Vapor` on Google Drive,
+        /// `~/cloud/Vapor` for the filesystem provider).
         #[arg(long, value_name = "PATH")]
         cloud: Option<String>,
         /// `two-way` (the default), `pull-only`, or `push-only`. A
