@@ -16,67 +16,57 @@ Vapor is an invisible-first cloud sync app that stays out of your way. It keeps 
 
 Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/vapor/releases) page.
 
-- **macOS**: unzip `Vapor.zip` from the latest release and move `Vapor` into Applications. It needs macOS 26 or later on Apple silicon. There is no Intel Mac build.
+- **macOS**: install the `Vapor` app (from `Vapor.zip`) from the latest release assets.
 - **Windows / Linux**: planned. The CLI (`vapor`) would ship for Windows and Linux before the GUI apps do.
 - **CLI (`vapor`)**: ships inside the app, at `Vapor.app/Contents/Helpers/vapor`. Link it onto your `PATH` to use it from a terminal. Standalone downloads are planned.
-
-Three things to know before the first launch:
-
-- Prereleases are not signed with a Developer ID yet, so macOS refuses to open the app the first time. Allow it under System Settings > Privacy & Security > Open Anyway. If that is not a trade you want to make, build from source.
-- Vapor syncs nothing, and creates no folder, until you say what to sync. The app's own setup screen is on the way; today the terminal does it: `vapor profiles add` asks which cloud, which folder on this device, and which folder in the cloud.
-- macOS asks before any app reads Documents, Desktop, Downloads, iCloud Drive, or a removable drive. If your sync folder is in one of them, say yes when it asks; `vapor doctor` tells you when a folder is out of reach.
 
 ## Features
 
 Available now:
 
-- 🔁 Two-way sync between a local folder and a cloud folder. A change on this device is picked up within seconds; a change in the cloud within a minute while you work, and sooner when the device is idle.
-- 🧠 Nothing is lost. Every change is written to disk before it moves, so a crash, a reboot, or a dropped connection resumes where it stopped.
-- 🛡 Edits never silently overwrite each other. When several devices change the same file before it syncs, Vapor keeps every version.
-- 🧭 Each conflicted file becomes one question that lists every version and whose edit it is. Pick the one to keep, from any device, and the others go to the trash; or settle it in the Finder.
-- ❓ When the evidence is ambiguous, Vapor holds only the files in question, asks you a plain question with a short list of answers, and keeps the question until you answer it, from the terminal or the app.
-- 🗑️ Nothing Vapor removes from your device is gone: it waits in a trash you can list and restore from, for as long as you choose.
-- 🔌 An unplugged drive, or an empty folder where your sync folder used to be, never turns into deletions on the other side. Vapor waits for the folder, and asks before it merges anything.
-- ✂️ Renaming or moving a file, on either side, moves it on the other side too, even when only the capitals change. No re-upload, no re-download.
-- 🔤 Two cloud files whose names differ only in case both reach a device that cannot tell them apart: the second arrives as a copy tied to its own cloud file, and neither is overwritten.
-- 🔂 Your own uploads never bounce back as new changes, so two devices cannot ping-pong a file forever.
-- 🔀 Pick a direction per folder. Full two-way, or a one-way mirror for read-only backups and copies. A mirror overwrites and removes to match its source, so it runs only after you have said yes to exactly that.
-- 🚪 Nothing happens before you choose. A fresh install syncs nothing and creates no folder until you name the two folders, and one command sets it up: `vapor profiles add`.
-- 🧩 Run several sync profiles at once. One folder can flow to two clouds, or separate setups stay isolated.
-- 📦 Downloads land whole or not at all, and big uploads are chunked so a pause does not restart them.
-- ⏳ Retries back off on their own and respect provider rate limits, so a bad hour of connectivity fixes itself.
-- 🪶 Sync slows down while you use the device, on battery, and in Low Power Mode, and it never stops for them. Only a device that is overheating pauses it.
-- ⚙️ Ceilings on the share of CPU, memory, and network Vapor may use, measured while it runs, so streaming and browsing always have room.
-- 📶 Vapor measures what your connection carries and takes the share you set. A faster link syncs faster with nothing to change.
-- 🌙 When the device sits idle, Vapor speeds up. It backs off the moment you return.
-- 🌩 A burst of thousands of file changes is absorbed instead of turned into thousands of uploads.
-- 🛟 A sudden mass deletion, from this device or from the cloud, is held and put to you as a question before it can reach the other side; everything else keeps syncing.
-- 🧹 Ignore rules, including your existing gitignore files, keep build output and junk out of the sync, and `vapor ignored` shows exactly what they hold back and which rule does it.
-- ♻️ Settings apply while it runs. Ceilings, ignore rules, and safeguards change without a restart, and Vapor tells you when one is needed.
-- 🚀 Starts at login, restarts itself after a crash, and stops retrying when something is really broken instead of looping.
-- ⏯️ Pause, resume, and sync on demand. Changes made while paused sync when you resume, and `vapor reconcile` (Sync now in the app) compares both folders right away.
-- 📈 Status with a reason, queue depth, a live activity timeline, per-file "why is this stuck", and a one-command support report that replaces your file and folder names with codes before you share it.
-- ⌨️ A full command line for scripts and servers. Everything the app does, the terminal does too, including a headless supervisor that restarts a crashed sync where no app is running.
-- 🔐 Sign-in tokens live in the system keychain, logs never contain secrets, and nothing leaves your device except the files you chose to sync.
-- 🔑 An expired or revoked cloud sign-in puts sync on hold instead of failing it. Your changes wait in the queue, one click in the app signs you back in, and sync picks up where it stopped.
-- 🔕 Lives in the menu bar. No windows unless you ask for one.
-- 🟠 The menu bar mark turns orange only when Vapor needs you: a sign-in to renew, a question to answer, a conflict to settle, a setting that wants a restart, a sync that stopped on an error.
+- 🔁 **Two-way sync.** A local folder and a cloud folder stay in step, usually within seconds.
+- 🧠 **Crash-safe queue.** Every change is saved to disk before it moves, so a crash or a reboot loses nothing.
+- 🛡 **Keep-both conflicts.** When two devices edit the same file, every version is kept and you pick the one to keep.
+- ❓ **Decisions.** When Vapor is not sure, it holds only those files and asks you a plain question.
+- 🛟 **Mass-delete guard.** A sudden burst of deletions waits for your yes before it reaches the other side.
+- 🔌 **Unplug-safe.** An unplugged drive or a swapped sync folder never turns into deletions.
+- 🗑️ **Trash.** Everything Vapor removes on your device waits in a trash you can restore from.
+- ✂️ **Move detection.** A rename or a move syncs as a move, never as a new upload.
+- 🔤 **Case-safe names.** Two files that differ only in capitals never overwrite each other.
+- 🔂 **Loop prevention.** Vapor's own writes never bounce back as new changes.
+- ⏮️ **Offline catch-up.** Edits, renames, and deletions made while Vapor was off sync at the next start.
+- 🔀 **Sync modes.** Two-way, or a one-way mirror for backups, which runs only after you confirm it.
+- 🧩 **Profiles.** Nothing syncs until you add a folder pair with `vapor profiles add`, and several can run at once.
+- 📦 **Resilient transfers.** Downloads land whole, big uploads resume, and retries back off and respect rate limits.
+- 🪶 **Adaptive throttle.** Sync slows down on battery or while you work, and pauses only if the device overheats.
+- 🌙 **Idle boost.** Sync speeds up while the device sits idle and backs off the moment you return.
+- ⚙️ **Resource ceilings.** You cap the share of CPU, memory, and bandwidth, and Vapor measures itself against it.
+- 🌩 **Storm control.** A burst of thousands of changes becomes one scan, not thousands of uploads.
+- 🧹 **Ignore rules.** Your `.gitignore` files work as they are, and `vapor ignored` shows what they hold back.
+- ♻️ **Live settings.** Ceilings, ignore rules, and safeguards apply while Vapor runs, with no restart.
+- 🚀 **Always on.** It starts at login, restarts after a crash, and stops retrying when something is really broken.
+- ⏯️ **Pause, resume, Sync now.** Changes wait while paused, and Sync now compares both folders right away.
+- 📈 **Explains itself.** Status with a reason, a live timeline, and a support report with your file names hidden.
+- ⌨️ **Full command line.** Everything the app does, `vapor` does too, for scripts and for servers with no app.
+- 🔐 **Private by design.** Tokens stay in the system keychain, logs hold no secrets, and only your files leave the device.
+- 🔑 **Sign-in hold.** An expired cloud sign-in puts sync on hold, and signing in again resumes it where it stopped.
+- 🔕 **Menu bar app.** No window unless you ask, and the mark turns orange only when Vapor needs you.
 
 In flight and coming next:
 
-- 🪟 A diagnostics window in the Mac app with throttle reason, queue, open questions, and timeline, plus live pause and resume controls.
-- 🚪 A first-run setup in the Mac app that asks which provider and which folders to use, in place of the terminal command.
-- 🔔 A notification when Vapor has a question for you, conflicts included.
-- 🖥️ Windows and Linux apps on the same runtime as the Mac app.
-- 📥 Standalone command-line downloads for every OS, with Docker and systemd recipes.
-- 🧾 Signed and notarized releases, verified on a clean machine every cycle.
+- 🪟 **Diagnostics window.** Throttle reason, queue, open questions, and timeline in the Mac app.
+- 🚪 **First-run setup.** The Mac app asks for the cloud and the two folders, in place of the terminal command.
+- 🔔 **Notifications.** A system notification when Vapor has a question for you.
+- 🖥️ **Windows and Linux apps.** The same runtime as the Mac app.
+- 📥 **Standalone CLI downloads.** For every OS, with Docker and systemd recipes.
+- 🧾 **Signed releases.** Signed and notarized, and verified on a clean machine every cycle.
 
 ## Providers
 
 Available now:
 
 - [File System](https://github.com/neoxelox/vapor/tree/main/core/providers/src/filesystem): any locally mounted folder (external drives, network mounts, another directory).
-- [Google Drive](https://workspace.google.com/products/drive/): sign in with `vapor auth login`, or Sign In in the app. Google Docs, Sheets, Slides, and shortcuts stay in the cloud: they are not files Vapor can download. A prerelease build asks you to sign in again after each update.
+- [Google Drive](https://workspace.google.com/products/drive/): sign in with `vapor auth login`, or Sign In in the app.
 
 In flight and coming next:
 
@@ -228,10 +218,7 @@ Releases are cut from a clean `main`: run the release gate (`./scripts/release.s
 
 ## Agents
 
-Use `docs/README.md` as the entrypoint index for agent work. Every
-documentation group has a `README.md` that is the starting point for
-that group: always enter at the group README, not at an individual
-file.
+Use `docs/README.md` as the entrypoint index for agent work. Every documentation group has a `README.md` that is the starting point for that group: always enter at the group README, not at an individual file.
 
 - Product direction, status, goals: `docs/product/README.md`
 - Architecture, system boundaries, platform abstractions, IPC contracts: `docs/architecture/README.md`
