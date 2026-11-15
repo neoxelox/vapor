@@ -27,6 +27,10 @@ status.
 - `configuration.md`: every `vapor.json` key in detail: when a change
   applies, the edge cases and floors, and how profiles merge. The root
   `README.md` keeps the one-table summary.
+- `ignore-rules.md`: which files stay out of sync: the four sources of
+  rules and their precedence, how a rule is read, the built-in list,
+  what no rule can change, and `vapor ignored`. The root `README.md`
+  links here from its Configuration table.
 - `install.md`: requirements, the install steps, and what to know
   before the first launch (an unsigned prerelease, the setup command,
   the macOS folder prompts, the Google Drive limits). The root

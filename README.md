@@ -125,10 +125,10 @@ The Applies column says when a change takes effect: **live** within a few second
 | `syncMode` | `"two-way"` | restart | The direction: `two-way`, `pull-only` (a read-only local mirror), or `push-only` (a read-only cloud backup). A one-way mode waits for your confirmation (`vapor decisions`). |
 | `localRoot` | none: you choose it | restart | The folder on this device. Nothing syncs until both folders are set. |
 | `cloudRoot` | none: you choose it | restart | The folder in the cloud. |
-| `useGitignore` | `true` | live | Honour `.gitignore` files under the local root. |
-| `useVaporignore` | `true` | live | Honour `.vaporignore` files under the local root. |
-| `preIgnoreRules` | a built-in list | live | Ignore rules applied before the ignore files, one `.gitignore` rule per entry. |
-| `postIgnoreRules` | `[]` | live | Ignore rules applied after the ignore files; `!rule` here wins over everything. |
+| `useGitignore` | `true` | live | Honour `.gitignore` files under the local root. [Ignore rules](docs/product/ignore-rules.md). |
+| `useVaporignore` | `true` | live | Honour `.vaporignore` files under the local root. [Ignore rules](docs/product/ignore-rules.md). |
+| `preIgnoreRules` | a built-in list | live | Rules applied before the ignore files, one `.gitignore` rule per entry. [Ignore rules](docs/product/ignore-rules.md). |
+| `postIgnoreRules` | `[]` | live | Rules applied after the ignore files; `!rule` here wins over everything. [Ignore rules](docs/product/ignore-rules.md). |
 | `timelineLimit` | `1000` | live | How many entries `vapor timeline` keeps, at most `10000`. |
 | `language` | `"en"` | app | The app's language. |
 | `deviceId` | the host name plus four random characters | restart | This device's name in conflict copies. Written once on the first run. |
@@ -168,15 +168,6 @@ Each `profiles` entry has an `id` and optionally `name`, `enabled`, `provider`, 
 | `VAPOR_THROTTLE_INPUTS` | `host` | Test harnesses only: `static` or `file:<path>` replace the device's real load readings. Never set it on a real install. |
 
 The build, release, and test variables are in `.env.example`.
-
-### Ignore rules
-
-- Filesystem callback filtering applies before event metadata is recorded.
-- Ignore rules are symmetric: a name that matches them never syncs in either direction; it is skipped by local ingest, by the remote changes feed, and by reconcile comparison on both sides, so an ignored file (for example `.DS_Store`) can never be pulled down from the cloud or produce a conflict copy.
-- Rule precedence (lowest to highest): `preIgnoreRules` -> `.gitignore` (when enabled, recursive per-directory) -> `.vaporignore` (when enabled, recursive per-directory) -> `postIgnoreRules`.
-- `.vaporignore` supports glob-like rules and `!` unignore rules, read the way git reads them: a rule that ends in `/` hides folders only, and a file under a hidden folder cannot be shown again (`logs/` then `!logs/keep.txt` still hides it; write `logs/*` then `!logs/keep.txt`).
-- A rule change applies within seconds, and the files it frees start to sync. `vapor status` counts what the rules hold back, and `vapor ignored` lists it.
-- `preIgnoreRules` default content covers common low-signal, regenerable paths across programming ecosystems: dependency/module directories (`node_modules/`, `vendor/`, `Pods/`, …), build outputs (`dist/`, `build/`, `out/`, `target/`, `_build/`, …), tool caches (`__pycache__/`, `.gradle/`, `.terraform/`, `.cache/`, …), and OS/editor junk (`.DS_Store`, swap/tmp/partial files, logs, what an OS keeps at the root of a volume such as `.fseventsd/`, `.Spotlight-V100/`, `System Volume Information/`). Repositories (`.git/`) and dotenv files are deliberately NOT ignored: they sync like any other content. Independently of every rule, a directory named `.vapor` never syncs, with everything under it: it is Vapor's own runtime state or a volume's trash, wherever it sits.
 
 ## Development
 

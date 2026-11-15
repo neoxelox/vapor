@@ -120,30 +120,16 @@ root. Both default to `true`.
 
 ### `preIgnoreRules` and `postIgnoreRules`
 
-Lists of rules in `.gitignore` syntax, one rule per entry. Precedence,
-lowest to highest: `preIgnoreRules`, then `.gitignore` files, then
-`.vaporignore` files, then `postIgnoreRules`, so a `!rule` in
-`postIgnoreRules` wins over everything. `preIgnoreRules` defaults to a
-built-in list of regenerable output (dependency folders, build output,
-tool caches, OS and editor junk); `postIgnoreRules` defaults to `[]`.
-The README's Ignore rules section describes what the defaults cover and
-what they deliberately leave in.
+Lists of rules in `.gitignore` syntax, one rule per entry.
+`preIgnoreRules` defaults to a built-in list of regenerable output
+(dependency folders, build output, tool caches, OS and editor junk),
+and a value of your own replaces that list. `postIgnoreRules` defaults
+to `[]`.
 
-The rules read as git reads them, on the watcher and on the reconcile
-walk alike:
-
-- A rule that ends in `/` matches folders only. `build/` hides a
-  folder named `build` and not a file of that name.
-- A file under an excluded folder cannot be included again: `logs/`
-  followed by `!logs/keep.txt` still hides `keep.txt`. Exclude the
-  contents instead: `logs/*` followed by `!logs/keep.txt`.
-- A change to a rule, in an ignore file or in `vapor.json`, applies
-  within seconds and is followed by a whole-scope reconcile, so a file
-  that a rule frees starts to sync and nothing waits for a restart.
-
-`vapor status` shows how many local paths the rules keep out of sync
-for each profile, and `vapor ignored` lists them with the rule that
-hides each one (a hidden folder is one line).
+The four keys apply within seconds, with no restart. The precedence of
+the four sources, how a rule is read, what the built-in list covers,
+what no rule can change, and how to see what the rules hold back:
+`ignore-rules.md`.
 
 ### `timelineLimit`
 
