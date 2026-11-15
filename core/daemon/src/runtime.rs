@@ -9369,7 +9369,12 @@ mod tests {
             std::fs::read(fixture.watch_root.join("Notes.txt")).expect("local"),
             b"minutes"
         );
-        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+        assert_eq!(
+            fixture.runtime.state_db().queue_depth().expect("depth"),
+            0,
+            "{:?}",
+            fixture.runtime.state_db().queued_summaries()
+        );
         assert_eq!(
             fixture.runtime.state_db().failed_depth().expect("failed"),
             0,

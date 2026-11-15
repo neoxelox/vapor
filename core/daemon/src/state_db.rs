@@ -529,6 +529,35 @@ impl DurableStateDb {
             .collect()
     }
 
+    /// One line for each queued intent (kind, path, attempts, last
+    /// error), for the message of a test that expects an empty queue.
+    #[cfg(test)]
+    pub fn queued_summaries(&self) -> Vec<String> {
+        let Ok(mut statement) = self
+            .connection
+            .prepare("SELECT id FROM queue_intents ORDER BY id")
+        else {
+            return Vec::new();
+        };
+        let ids: Vec<i64> = statement
+            .query_map([], |row| row.get(0))
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default();
+        ids.into_iter()
+            .filter_map(|id| self.intent_record(id).ok().flatten())
+            .map(|record| {
+                format!(
+                    "{:?} {} attempts={} last_error={:?} held_by={:?}",
+                    record.kind,
+                    record.path.display(),
+                    record.attempt_count,
+                    record.last_error,
+                    record.held_by
+                )
+            })
+            .collect()
+    }
+
     pub fn lease_next_ready(
         &mut self,
         now: SystemTime,
