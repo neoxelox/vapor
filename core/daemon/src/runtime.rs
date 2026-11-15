@@ -5187,11 +5187,24 @@ mod tests {
                 return;
             };
             let current = local_tree_state(&self.watch_root);
-            for path in seen.keys().filter(|path| !current.contains_key(*path)) {
+            // The watcher bridge drops what the ignore rules hide, and
+            // that covers Vapor's own files: on a host with no extended
+            // attributes the op-id tag of a file is a side-file next to
+            // it.
+            let filter = self.runtime.path_filter.clone();
+            let hidden = |path: &std::path::Path| {
+                filter
+                    .as_ref()
+                    .is_some_and(|filter| filter.should_ignore(path))
+            };
+            for path in seen
+                .keys()
+                .filter(|path| !current.contains_key(*path) && !hidden(path))
+            {
                 self.record_local_event(path, FsEventKind::Renamed, self.now_ms);
             }
             for (path, state) in &current {
-                if seen.get(path) != Some(state) && !state.0 {
+                if seen.get(path) != Some(state) && !state.0 && !hidden(path) {
                     self.record_local_event(path, FsEventKind::Renamed, self.now_ms);
                     self.record_local_event(path, FsEventKind::Modified, self.now_ms);
                 }
