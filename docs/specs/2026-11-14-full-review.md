@@ -247,8 +247,8 @@ Notes on round 6:
 ### Round 7, 2026-11-15: the choices the build made
 
 The owner read the open points before the merge and accepted each
-recommendation, except the one that is still under Open points. Each
-decision below is the owner's (owner, 2026-11-15).
+recommendation. Each decision below is the owner's
+(owner, 2026-11-15).
 
 | # | Decision |
 |---|---|
@@ -269,6 +269,7 @@ decision below is the owner's (owner, 2026-11-15).
 | D53 | `version.sh` refuses instead of guessing: `bump` on a prerelease and `prerelease` on a stable version stop with the command to use. |
 | D54 | The CLI gets no Intel Mac build either (D33). |
 | D55 | The short `Unreleased` list of the changelog stands as the agent wrote it (D26). |
+| D56 | Linux and Windows read no interface speed for now. It is not a design choice: neither is a shipping surface yet, and the figure is only the start of the bandwidth ceiling. There the first transfer step of each direction runs with no limit, and the ceiling holds from the first measurement on. The owner accepts this on the condition that the work has its tasks: `docs/tasks/core.md` PL-3 (Linux) and C6-4 (Windows). |
 
 ## Design
 
@@ -388,21 +389,17 @@ Found while the fixes were built, and fixed in the same change:
 
 ## Open points
 
-Round 7 settled the choices that the build made (D39 to D55). What is
+Round 7 settled the choices that the build made (D39 to D56). What is
 still open:
 
-1. **Linux and Windows read no interface speed.** There a direction
-   of the link has no bandwidth limit until its first measured
-   transfer (`docs/tasks/core.md` C3-11). The owner asked why on
-   2026-11-15; the answer and the choice are with the owner.
-2. **Two profiles whose local folders overlap are not refused.** One
+1. **Two profiles whose local folders overlap are not refused.** One
    profile whose cloud folder is inside its local folder is. What an
    overlap between profiles should mean is not decided
    (`docs/tasks/core.md` E-3).
-3. **The cloud-side window of a swapped root is open for 15 seconds.**
+2. **The cloud-side window of a swapped root is open for 15 seconds.**
    A local file that a cloud deletion removes in that window goes to
    the trash (`docs/tasks/core.md` E-2).
-4. **The Google verification path for the Drive scope.** It gates
+3. **The Google verification path for the Drive scope.** It gates
    general availability of the Drive provider
    (`docs/tasks/core.md` P-5).
 

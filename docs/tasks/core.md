@@ -102,11 +102,28 @@ are never reused.
 
 - [ ] C3-11 Remaining throttle inputs. macOS: a disk-pressure source
       (none is public; evaluate free space on the sync-root volume as a
-      proxy). Linux: the speed of the network interface, the
-      display-server idle query, and PSI. Windows: the full sampler and
-      idle notifier listed in
+      proxy). Linux: the display-server idle query and PSI (the
+      interface speed is PL-3). Windows: the full sampler and idle
+      notifier listed in
       `docs/architecture/platform-abstractions.md`, when that surface
-      ships.
+      ships (C6-4, C6-5).
+- [ ] PL-3 Read the interface speed on Linux, into
+      `ThrottleInputs::link_speed_kbps`
+      (`core/platform/src/metrics/linux.rs`). It is the starting figure
+      of the bandwidth ceiling: macOS has it, so the ceiling holds from
+      the first byte there. Linux reads none today, so the first
+      transfer step of each direction runs with no limit, and the
+      ceiling holds from the first measurement on.
+      - Wired: `/sys/class/net/<interface>/speed`, in Mbit/s, for the
+        interface that carries the default route (`/proc/net/route`).
+        A value of `-1` or a read error means "not known", as today.
+      - Wi-Fi: `/sys` has no figure. The rate of the current link
+        comes from an nl80211 station query over netlink. Until that
+        is built, Wi-Fi stays "not known".
+      - Done when: the sampler's test reads a plausible figure or none
+        on the Linux CI job, as the macOS test does, and
+        `docs/architecture/platform-abstractions.md` no longer says
+        "with no interface speed".
 - [ ] PL-1 Move a file to the macOS system trash through
       `NSFileManager.trashItem`, so Finder offers Put Back and a file
       on another volume goes to that volume's trash. The rename into
@@ -141,7 +158,12 @@ the primary path is blocked by it. See `docs/tasks/README.md`.
       `GetProcessTimes`, `GetSystemPowerStatus`,
       `CallNtPowerInformation(SystemPowerInformation)`, the interface
       speed, and metered connection awareness via
-      `NotifyNetworkConnectivityHintChange`.
+      `NotifyNetworkConnectivityHintChange`. The interface speed is
+      the transmit and receive link speed of the interface that
+      carries the default route (`GetIfTable2`), into
+      `ThrottleInputs::link_speed_kbps`: the starting figure of the
+      bandwidth ceiling, as in PL-3. Without it the first transfer
+      step of each direction runs with no limit.
 - [ ] C6-5 `core/platform/idle/windows.rs`: `GetLastInputInfo` polled on
       the 1s throttle cadence.
 - [ ] C6-6 `core/platform/fs_caps/windows.rs`: NTFS Alternate Data Streams

@@ -160,8 +160,9 @@ shim or the desktop Secret Service. Left before Linux ships a surface:
   protected like `release-macos`).
 - `cli.md` L2-6: `vapor service install` round-trip automated on
   Linux CI (a `systemctl --user` session on the runner).
-- `core.md` C3-11 (Linux part): the interface speed, display-server
-  idle, PSI.
+- `core.md` PL-3: the interface speed on Linux, the starting figure of
+  the bandwidth ceiling.
+- `core.md` C3-11 (Linux part): display-server idle, PSI.
 - `core.md` TR-10: the rest of the Linux soak.
 
 ### Wave 14: Cross-OS CLI distribution (optional)
