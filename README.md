@@ -14,34 +14,35 @@ Vapor is an invisible-first cloud sync app that stays out of your way. It keeps 
 
 ## Install
 
-One file per device, and nothing else to install: it holds the app, the `vapor` command, and the daemon that syncs in the background. Pick your row and take the file from the [latest release](https://github.com/neoxelox/vapor/releases).
+One file installs the app, the `vapor` command, and the background daemon. Pick your device and download its file from the [releases page](https://github.com/neoxelox/vapor/releases).
 
-| Your device | File | Version | Status |
-| --- | --- | --- | --- |
-| Mac with Apple silicon, macOS 26 or later | [`Vapor-macos-arm64.pkg`](https://github.com/neoxelox/vapor/releases) | [![latest release](https://img.shields.io/github/v/release/neoxelox/vapor?include_prereleases&label=)](https://github.com/neoxelox/vapor/releases) | Prerelease, not signed yet |
-| Windows, x64 | `Vapor-windows-x64.msi` | none yet | Planned |
-| Windows, ARM64 | `Vapor-windows-arm64.msi` | none yet | Planned |
-| Linux x64, Debian and Ubuntu | `Vapor-linux-x64.deb` | none yet | Planned |
-| Linux ARM64, Debian and Ubuntu | `Vapor-linux-arm64.deb` | none yet | Planned |
-| Linux x64, Fedora and RHEL | `Vapor-linux-x64.rpm` | none yet | Planned |
-| Linux ARM64, Fedora and RHEL | `Vapor-linux-arm64.rpm` | none yet | Planned |
+| Device | File | Release |
+| --- | --- | --- |
+| macOS 26+, Apple silicon | [`Vapor-macos-arm64.pkg`](https://github.com/neoxelox/vapor/releases) | [![latest release](https://img.shields.io/github/v/release/neoxelox/vapor?include_prereleases&label=)](https://github.com/neoxelox/vapor/releases) |
+| Windows, x64 | `Vapor-windows-x64.msi` | Planned |
+| Windows, ARM64 | `Vapor-windows-arm64.msi` | Planned |
+| Linux, x64 | `Vapor-linux-x64.deb` or `.rpm` | Planned |
+| Linux, ARM64 | `Vapor-linux-arm64.deb` or `.rpm` | Planned |
 
-There is no Intel Mac build. The installer comes with the release after `0.2.0-alpha.3`; that one and the ones before it hold `Vapor.zip`: unzip it and move Vapor to Applications.
+### MacOS
 
-### With a double click
+1. **Install it.** Open the file and follow the installer. From a terminal, run `sudo installer -pkg Vapor-macos-arm64.pkg -target /`.
+2. **Set it up.** Run `vapor init`. It asks for your cloud and your two folders, then sync starts and keeps running in the background.
 
-1. Download the file for your device.
-2. Open it and follow the installer. A prerelease is not signed yet, so macOS stops it once: allow it under System Settings > Privacy & Security > Open Anyway.
-3. Open a terminal and run `vapor init`. It asks which cloud, which folder on this device, and which folder in the cloud. Then sync starts, and it keeps running in the background. The app's own setup screen is on the way.
+Prereleases are not signed yet, so macOS blocks the installer the first time. Allow it under System Settings > Privacy & Security > Open Anyway.
 
-### From a terminal
+To remove Vapor and everything it put on the Mac, quit it from the menu bar and run:
 
 ```sh
-sudo installer -pkg Vapor-macos-arm64.pkg -target /
-vapor init
+vapor service uninstall                 # stops the daemon, removes its two background jobs
+vapor auth logout                       # removes the sign-in from the keychain
+sudo rm -rf /Applications/Vapor.app /usr/local/bin/vapor
+sudo pkgutil --forget sh.arn.vapor.pkg  # the installer's record
+defaults delete sh.arn.vapor            # the app's preferences
+rm -rf ~/.vapor                         # settings, logs, sync state, Vapor's trash
 ```
 
-A script gives the answers as flags, and nothing is asked: `vapor init --provider filesystem --local ~/Vapor --cloud /Volumes/Backup/Vapor`. For Google Drive it also pipes a sign-in token with `--token -`. Run `vapor init` again whenever you like: it does only what is left, and tells you when nothing is. The detail is in [Install and first launch](docs/product/install.md).
+Your synced folders stay, on the Mac and in the cloud. Updates, setup from a script, and more on removal are in [Install and first launch](docs/product/install.md).
 
 ## Features
 

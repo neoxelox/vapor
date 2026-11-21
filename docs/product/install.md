@@ -67,13 +67,40 @@ window. Vapor has no update check yet: a new release is on the
 
 ## Remove
 
-1. `vapor service uninstall` stops the daemon and removes the two
-   background jobs.
-2. Move `Vapor.app` to the Trash.
-3. `sudo rm /usr/local/bin/vapor` removes the link.
+The installer has no uninstaller, so a removal is by hand. Quit Vapor
+from the menu bar, then run these in this order. The first two need
+the CLI, and the CLI goes with the app.
 
-The runtime directory `~/.vapor` (settings, logs, sync state, trash)
-and your synced folders stay until you delete them.
+```sh
+vapor service uninstall
+vapor auth logout
+sudo rm -rf /Applications/Vapor.app /usr/local/bin/vapor
+sudo pkgutil --forget sh.arn.vapor.pkg
+defaults delete sh.arn.vapor
+rm -rf ~/.vapor
+```
+
+What each line removes:
+
+1. The background service. `vapor service uninstall` stops the daemon
+   and removes the two background jobs, the daemon and its supervisor.
+2. The sign-in in the login keychain. With more than one profile,
+   `vapor auth logout` needs `--profile <id>`, once for each profile
+   that signs in.
+3. The app, with the daemon and the CLI inside it, and the link on the
+   `PATH`. If `/usr/local/bin/vapor` is another program, which the
+   installer left alone, take it out of the line.
+4. The record that macOS keeps of the installed package.
+5. The preferences file of the app.
+6. The runtime directory: settings, logs, sync state, and Vapor's
+   trash. The trash holds the files that Vapor removed from this device
+   in the retention window, so look there first if you miss one.
+
+What stays:
+
+- Your synced folders, on the Mac and in the cloud.
+- A sync folder on another drive keeps its part of the trash in a
+  `.vapor` folder at the top of that drive. Delete that folder too.
 
 ## The first run
 

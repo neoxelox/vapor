@@ -144,9 +144,11 @@ Exit gate:
       uninstaller: after the user moves `Vapor.app` to the Trash, the
       link at `/usr/local/bin/vapor` points at nothing, and the two
       LaunchAgents point at binaries that are gone.
-      `docs/product/install.md` gives the three steps by hand today.
-      Decide between a `vapor` command that removes the install and a
-      menu item in the app.
+      `docs/product/install.md` gives the removal by hand today, as
+      six commands. Decide between a `vapor` command that removes the
+      install and a menu item in the app. Check also what macOS itself
+      keeps after the app is gone: the login item of the app and the
+      privacy answers.
 
 Exit gate:
 
