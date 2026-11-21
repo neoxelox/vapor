@@ -648,15 +648,23 @@ impl init_cmd::InitHost for NativeInitHost {
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            // A daemon binary that is missing, or a service manager that
-            // gives no answer, reads as not installed: the install is
-            // what then says what is wrong.
-            let installed = locate_daemon_binary()
+            // The service is in place with both jobs: the daemon's, and
+            // the supervisor's that restarts it. A daemon binary that
+            // is missing, or a service manager that gives no answer,
+            // reads as not installed: the install is what then says
+            // what is wrong.
+            let registered = |status: Result<vapor_platform::ServiceStatus, _>| {
+                status.is_ok_and(|status| status != vapor_platform::ServiceStatus::NotInstalled)
+            };
+            let daemon = locate_daemon_binary()
                 .and_then(|daemon| service_cmd::build_native(self.config_path.clone(), daemon).ok())
-                .and_then(|(_, installer)| {
-                    vapor_platform::ServiceInstaller::status(installer.as_ref()).ok()
-                })
-                .is_some_and(|status| status != vapor_platform::ServiceStatus::NotInstalled);
+                .is_some_and(|(_, installer)| {
+                    registered(vapor_platform::ServiceInstaller::status(installer.as_ref()))
+                });
+            let supervisor = service_cmd::supervisor_installer().is_ok_and(|supervisor| {
+                registered(vapor_platform::ServiceInstaller::status(&supervisor))
+            });
+            let installed = daemon && supervisor;
             if installed {
                 ServiceState::Installed
             } else {
@@ -757,7 +765,10 @@ fn dispatch_init(
     let mut report = init_cmd::run(
         &path,
         &profiles_cmd::ProfileStorage::of_this_install(),
-        store.as_ref(),
+        &init_cmd::Secrets {
+            store: store.as_ref(),
+            problem: fallback_reason.as_deref(),
+        },
         &request,
         interactive.then_some(&mut prompter as &mut dyn profiles_cmd::Prompter),
         &mut host,
@@ -773,14 +784,6 @@ fn dispatch_init(
             .map(|step| step.state)
     };
     use vapor_shared::constants::init as names;
-    if let Some(reason) = fallback_reason
-        && step_state(names::STEP_SIGN_IN) == Some(names::STATE_DONE)
-    {
-        eprintln!(
-            "vapor: warning: {reason}; the sign-in was kept in process memory only and will \
-             not survive this command."
-        );
-    }
     // A daemon that this run started needs a moment before it answers.
     let attempts = if step_state(names::STEP_SERVICE) == Some(names::STATE_DONE) {
         15
@@ -1419,13 +1422,17 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
             // build: a daemon of the old one still runs, and is replaced
             // here. The supervisor of the old build ended itself when
             // it saw its binary replaced, which is what started this one.
-            service_cmd::replace_daemon_of_another_build(
+            // An error here (a daemon slow to exit) does not end the
+            // supervisor: the replacement left the daemon meant to run,
+            // and the ticks below start it.
+            if let Err(error) = service_cmd::replace_daemon_of_another_build(
                 &manager,
                 installer.as_ref(),
                 running_daemon_build().as_deref(),
                 Instant::now(),
-            )
-            .map_err(|e| e.to_string())?;
+            ) {
+                eprintln!("vapor: warning: replacing the daemon of another build: {error}");
+            }
             let binary = vapor_cli::commands::daemon_binary::cli_path();
             let started_as = binary.as_deref().map(service_cmd::BinaryStamp::of);
             let updated = || match (&binary, &started_as) {
@@ -1526,7 +1533,8 @@ fn linger_note(outcome: &service_cmd::LingerOutcome) -> Option<String> {
         }
         service_cmd::LingerOutcome::Off => None,
         service_cmd::LingerOutcome::Refused(reason) => Some(format!(
-            "warning: the system did not turn lingering on ({reason}); the daemon stops when              you log out. An administrator can turn it on: sudo loginctl enable-linger $USER"
+            "warning: the system did not turn lingering on ({reason}); the daemon stops when \
+             you log out. An administrator can turn it on: sudo loginctl enable-linger $USER"
         )),
     }
 }

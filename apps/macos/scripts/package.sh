@@ -339,6 +339,20 @@ if [[ -n "$VAPOR_NOTARY_PROFILE" ]]; then
   fi
 fi
 
+# What the steps below write outside dist/. Removed however the script
+# ends: a refused notarization leaves no copy of the app behind.
+package_work=""
+app_submission_dir=""
+cleanup_work() {
+  local path
+  for path in "$package_work" "$app_submission_dir"; do
+    if [[ -n "$path" ]]; then
+      rm -rf "$path"
+    fi
+  done
+}
+trap cleanup_work EXIT
+
 # Submits one file to Apple and stops unless Apple accepts it.
 # `notarytool submit --wait` exits 0 when Apple answers "Invalid", so
 # the answer is read from its output, and a refusal prints Apple's log.
@@ -368,7 +382,6 @@ if [[ -n "$VAPOR_NOTARY_PROFILE" ]]; then
   app_submission_dir="$(mktemp -d)"
   ditto -c -k --keepParent "$app_bundle" "$app_submission_dir/$APP_NAME.zip"
   notarize "$app_submission_dir/$APP_NAME.zip"
-  rm -rf "$app_submission_dir"
 
   xcrun stapler staple "$app_bundle"
   # Check the ticket, then ask Gatekeeper the question a user's Mac
@@ -445,7 +458,6 @@ if [[ -n "$VAPOR_INSTALLER_SIGN_IDENTITY" ]]; then
 fi
 rm -f "$package_path"
 productbuild "${product_args[@]}" "$package_path" >/dev/null
-rm -rf "$package_work"
 
 if [[ -n "$VAPOR_NOTARY_PROFILE" ]]; then
   notarize "$package_path"

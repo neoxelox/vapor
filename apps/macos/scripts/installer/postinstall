@@ -4,7 +4,12 @@
 # of the app is an update of the CLI too.
 #
 # Installer passes the volume it installs to as the third argument.
-set -eu
+#
+# The script never fails the install: the app is in place by now, and a
+# link that cannot be made is a line in the install log, with the place
+# where the CLI is. A non-zero exit would tell the user that the whole
+# install failed.
+set -u
 
 volume="${3:-/}"
 volume="${volume%/}"
@@ -12,26 +17,30 @@ app_cli="$volume/Applications/Vapor.app/Contents/Helpers/vapor"
 link_dir="$volume/usr/local/bin"
 link="$link_dir/vapor"
 
+not_linked() {
+  echo "vapor: $1; the Vapor CLI is at $app_cli"
+  exit 0
+}
+
 # /usr/local/bin is on the default PATH of macOS, and a fresh system
 # does not have it.
-mkdir -p "$link_dir"
+mkdir -p "$link_dir" 2>/dev/null || not_linked "$link_dir cannot be made"
 
 # A link of an earlier install is replaced, and so is a link that
 # leads nowhere. Anything else with this name is another program, and
-# it stays: the install still succeeds, and the CLI is in the app.
+# it stays.
 if [ -L "$link" ]; then
   case "$(readlink "$link")" in
     */Vapor.app/Contents/Helpers/vapor) ;;
     *)
       if [ -e "$link" ]; then
-        echo "vapor: $link belongs to another program; the Vapor CLI is at $app_cli"
-        exit 0
+        not_linked "$link belongs to another program"
       fi
       ;;
   esac
 elif [ -e "$link" ]; then
-  echo "vapor: $link belongs to another program; the Vapor CLI is at $app_cli"
-  exit 0
+  not_linked "$link belongs to another program"
 fi
 
-ln -sfn "$app_cli" "$link"
+ln -sfn "$app_cli" "$link" 2>/dev/null || not_linked "$link cannot be made"
+exit 0

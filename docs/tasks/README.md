@@ -43,7 +43,8 @@ and macOS app.** Everything else is deferred or optional.
   builds and passes its tests on every OS in CI, and OS-specific code
   sits behind the `core/platform` traits.
 - **Deferred / optional**: Windows and Linux app surfaces, the Windows
-  platform implementations, and cross-OS CLI distribution. Work in
+  platform implementations, and the Linux and Windows install
+  packages. Work in
   this bucket starts only when the project owner decides to ship a
   non-macOS surface.
 
@@ -174,7 +175,7 @@ Depends on whichever of Waves 12, 13 has shipped. A platform ships
 install packages that hold the app, the CLI, and the daemon; there is
 no CLI download.
 
-- `core.md` C7-8: the Linux `.deb` and `.rpm` for x64 and ARM64. They
+- `core.md` C7-10: the Linux `.deb` and `.rpm` for x64 and ARM64. They
   install on a server with no desktop, and they may ship before the
   Linux app window exists (Wave 16), with the CLI and the daemon only.
 - `core.md` C6-11: the Windows installers for x64 and ARM64. They need

@@ -14,11 +14,11 @@ Vapor is an invisible-first cloud sync app that stays out of your way. It keeps 
 
 ## Install
 
-One file per device. It installs the app, the `vapor` command, and the background service, and a newer file updates all three. Pick your row and take the file from the [latest release](https://github.com/neoxelox/vapor/releases).
+One file per device, and nothing else to install: it holds the app, the `vapor` command, and the daemon that syncs in the background. Pick your row and take the file from the [latest release](https://github.com/neoxelox/vapor/releases).
 
 | Your device | File | Version | Status |
 | --- | --- | --- | --- |
-| Mac with Apple silicon, macOS 26 or later | [`Vapor-macos-arm64.pkg`](https://github.com/neoxelox/vapor/releases) | [![latest release](https://img.shields.io/github/v/release/neoxelox/vapor?include_prereleases&label=)](https://github.com/neoxelox/vapor/releases) | Available as a prerelease, not signed yet |
+| Mac with Apple silicon, macOS 26 or later | [`Vapor-macos-arm64.pkg`](https://github.com/neoxelox/vapor/releases) | [![latest release](https://img.shields.io/github/v/release/neoxelox/vapor?include_prereleases&label=)](https://github.com/neoxelox/vapor/releases) | Prerelease, not signed yet |
 | Windows, x64 | `Vapor-windows-x64.msi` | none yet | Planned |
 | Windows, ARM64 | `Vapor-windows-arm64.msi` | none yet | Planned |
 | Linux x64, Debian and Ubuntu | `Vapor-linux-x64.deb` | none yet | Planned |
@@ -26,7 +26,7 @@ One file per device. It installs the app, the `vapor` command, and the backgroun
 | Linux x64, Fedora and RHEL | `Vapor-linux-x64.rpm` | none yet | Planned |
 | Linux ARM64, Fedora and RHEL | `Vapor-linux-arm64.rpm` | none yet | Planned |
 
-There is no Intel Mac build. Releases up to `0.2.0-alpha.3` hold `Vapor.zip` in place of the installer: unzip it and move Vapor to Applications.
+There is no Intel Mac build. The installer comes with the release after `0.2.0-alpha.3`; that one and the ones before it hold `Vapor.zip`: unzip it and move Vapor to Applications.
 
 ### With a double click
 
@@ -41,7 +41,7 @@ sudo installer -pkg Vapor-macos-arm64.pkg -target /
 vapor init
 ```
 
-A script gives the answers as flags, and nothing is asked: `vapor init --provider gdrive --local ~/Vapor --cloud /Vapor`. Run `vapor init` again whenever you like: it does only what is left, and tells you when nothing is. The detail is in [Install and first launch](docs/product/install.md).
+A script gives the answers as flags, and nothing is asked: `vapor init --provider filesystem --local ~/Vapor --cloud /Volumes/Backup/Vapor`. For Google Drive it also pipes a sign-in token with `--token -`. Run `vapor init` again whenever you like: it does only what is left, and tells you when nothing is. The detail is in [Install and first launch](docs/product/install.md).
 
 ## Features
 
@@ -69,7 +69,7 @@ Available now:
 - 🧹 **Ignore rules.** Your `.gitignore` files work as they are, and `vapor ignored` shows what they hold back.
 - ♻️ **Live settings.** Ceilings, ignore rules, and safeguards apply while Vapor runs, with no restart.
 - 🚀 **Always on.** It starts at login, restarts after a crash with or without the app open, and stops retrying when something is really broken.
-- 🧰 **One installer.** One file installs the app, the `vapor` command, and the background service, and a newer file updates all three.
+- 🧰 **One installer.** The app, the daemon, and `vapor` on your `PATH` arrive together, and installing a newer file updates all three.
 - ⏯️ **Pause, resume, Sync now.** Changes wait while paused, and Sync now compares both folders right away.
 - 📈 **Explains itself.** Status with a reason, a live timeline, and a support report with your file names hidden.
 - ⌨️ **Full command line.** Everything the app does, `vapor` does too, for scripts and for servers with no app.

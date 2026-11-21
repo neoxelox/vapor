@@ -193,8 +193,10 @@ fn init_sets_an_install_up_and_a_second_run_changes_nothing() {
     let home = TempDir::new().expect("home");
     let local = home.path().join("local");
     let cloud = home.path().join("cloud");
-    // `--auto-launch off` in every call: a test never registers a
-    // service with the host.
+    // `--auto-launch off` in each call that could register a service:
+    // a test never does that to the host. The last call needs none,
+    // and proves why: the answer is in `vapor.json` by then, and it is
+    // read before the service manager is looked at.
 
     // Nobody to ask and no folders: a refusal on stderr, nothing on
     // stdout, nothing written.
@@ -264,7 +266,8 @@ fn init_sets_an_install_up_and_a_second_run_changes_nothing() {
 fn init_exits_one_while_a_step_waits_for_a_person() {
     let home = TempDir::new().expect("home");
     // A provider with an account, no terminal for the browser, and no
-    // token on stdin: the profile is written and the sign-in waits.
+    // token on stdin: nobody can sign in here, and the command says so
+    // with exit code 1.
     let waiting = vapor(
         home.path(),
         &[
@@ -283,9 +286,30 @@ fn init_exits_one_while_a_step_waits_for_a_person() {
     assert_eq!(waiting.status.code(), Some(1), "{}", stderr(&waiting));
     let report = json(&waiting);
     assert_eq!(report["initialized"], false, "{report}");
-    assert_eq!(report["steps"][1]["step"], "sign-in");
-    assert_eq!(report["steps"][1]["state"], "waits");
-    assert_eq!(report["profiles"][0]["provider"], "gdrive");
+    let sign_in = report["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .find(|step| step["step"] == "sign-in")
+        .unwrap_or_else(|| panic!("no sign-in step: {report}"));
+    match sign_in["state"].as_str() {
+        // The host has a secret store: the profile is written, and the
+        // sign-in waits for a person.
+        Some("waits") => assert_eq!(report["profiles"][0]["provider"], "gdrive", "{report}"),
+        // The host has none (a bare Linux runner, Windows): a sign-in
+        // would be gone when the command ends, so the step fails with
+        // that reason and nothing is written.
+        Some("failed") => {
+            assert!(
+                sign_in["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("keeps no sign-in")),
+                "{report}"
+            );
+            assert_eq!(report["profiles"], serde_json::json!([]), "{report}");
+        }
+        other => panic!("the sign-in step must wait or fail, got {other:?}: {report}"),
+    }
 
     // A token on the command line is refused before anything runs.
     let on_the_command_line = vapor(home.path(), &["init", "--token", "ya29.test"]);

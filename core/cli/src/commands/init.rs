@@ -227,11 +227,20 @@ impl InitReport {
     }
 }
 
+/// The secret store of this run. `problem` says why the store keeps
+/// nothing past this process, when that is so: a host with no keychain
+/// and no secrets command. A sign-in made there would be gone at once,
+/// so the sign-in step fails with the reason and makes none.
+pub struct Secrets<'a> {
+    pub store: &'a dyn SecretStore,
+    pub problem: Option<&'a str>,
+}
+
 /// `vapor init`. `prompter` is given on a terminal.
 pub fn run(
     config_path: &Path,
     storage: &ProfileStorage,
-    store: &dyn SecretStore,
+    secrets: &Secrets<'_>,
     request: &InitRequest,
     mut prompter: Option<&mut (dyn Prompter + '_)>,
     host: &mut dyn InitHost,
@@ -246,7 +255,7 @@ pub fn run(
         let first = first_profile(
             config_path,
             storage,
-            store,
+            secrets,
             request,
             prompter.as_deref_mut(),
             host,
@@ -267,8 +276,8 @@ pub fn run(
             );
         }
         let steps = vec![
-            existing_profiles_step(&listed.profiles),
-            sign_in_existing(config_path, store, host)?,
+            existing_profiles_step(config_path, storage, &listed.profiles),
+            sign_in_existing(config_path, secrets, host)?,
         ];
         (steps, listed.profiles)
     };
@@ -287,7 +296,7 @@ enum FirstProfile {
 fn first_profile(
     config_path: &Path,
     storage: &ProfileStorage,
-    store: &dyn SecretStore,
+    secrets: &Secrets<'_>,
     request: &InitRequest,
     mut prompter: Option<&mut (dyn Prompter + '_)>,
     host: &mut dyn InitHost,
@@ -304,7 +313,7 @@ fn first_profile(
     // look into the account. The profile does not exist yet: the
     // sign-in is stored under the id the first profile gets.
     let id = constants::profile::DEFAULT_PROFILE_ID;
-    let sign_in = sign_in_step(store, host, &[(id.to_string(), provider.clone())])?;
+    let sign_in = sign_in_step(secrets, host, &[(id.to_string(), provider.clone())])?;
     if sign_in.state == names::STATE_FAILED {
         return Ok(FirstProfile::Stopped(vec![sign_in]));
     }
@@ -361,7 +370,11 @@ fn first_profile(
         prompter.map(|prompter| -> &mut dyn Prompter { prompter }),
         now,
     )?;
-    auth::forget_other_providers(store, &outcome.profile.id, &outcome.profile.provider)?;
+    auth::forget_other_providers(
+        secrets.store,
+        &outcome.profile.id,
+        &outcome.profile.provider,
+    )?;
 
     let profile = if outcome.one_way == Some("asks") {
         InitStep::new(
@@ -381,7 +394,11 @@ fn first_profile(
     ))
 }
 
-fn existing_profiles_step(rows: &[ProfileRow]) -> InitStep {
+fn existing_profiles_step(
+    config_path: &Path,
+    storage: &ProfileStorage,
+    rows: &[ProfileRow],
+) -> InitStep {
     let problems: Vec<String> = rows
         .iter()
         .filter_map(|row| {
@@ -390,13 +407,31 @@ fn existing_profiles_step(rows: &[ProfileRow]) -> InitStep {
                 .map(|problem| format!("{}: {problem}", row.id))
         })
         .collect();
-    if problems.is_empty() {
+    if !problems.is_empty() {
+        return InitStep::new(
+            names::STEP_PROFILE,
+            names::STATE_FAILED,
+            Some(problems.join("; ")),
+        );
+    }
+    // A one-way profile syncs nothing until its question has an
+    // answer, however many runs ago the profile was written.
+    let config = vapor_shared::config::load_from(config_path).config;
+    let waiting: Vec<String> = vapor_daemon::profiles::resolve_profiles(&config)
+        .iter()
+        .filter(|profile| profiles::one_way_waits(storage, profile))
+        .map(|profile| profile.id.clone())
+        .collect();
+    if waiting.is_empty() {
         InitStep::new(names::STEP_PROFILE, names::STATE_DONE, None)
     } else {
         InitStep::new(
             names::STEP_PROFILE,
-            names::STATE_FAILED,
-            Some(problems.join("; ")),
+            names::STATE_WAITS,
+            Some(format!(
+                "{} syncs nothing until you confirm the one-way mode: vapor decisions list",
+                waiting.join(", ")
+            )),
         )
     }
 }
@@ -405,26 +440,27 @@ fn existing_profiles_step(rows: &[ProfileRow]) -> InitStep {
 /// whose provider has an account and that holds no sign-in.
 fn sign_in_existing(
     config_path: &Path,
-    store: &dyn SecretStore,
+    secrets: &Secrets<'_>,
     host: &mut dyn InitHost,
 ) -> Result<InitStep, InitError> {
     let config = vapor_shared::config::load_from(config_path).config;
-    let accounts: Vec<(String, String)> = auth::status_from(store, &config, None)?
+    let accounts: Vec<(String, String)> = auth::status_from(secrets.store, &config, None)?
         .profiles
         .into_iter()
         .filter(|entry| entry.state != constants::auth::STATE_NOT_NEEDED)
         .map(|entry| (entry.profile_id, entry.provider))
         .collect();
-    sign_in_step(store, host, &accounts)
+    sign_in_step(secrets, host, &accounts)
 }
 
 /// Signs in each `(profile id, provider)` whose provider has an
 /// account and that holds no sign-in yet.
 fn sign_in_step(
-    store: &dyn SecretStore,
+    secrets: &Secrets<'_>,
     host: &mut dyn InitHost,
     accounts: &[(String, String)],
 ) -> Result<InitStep, InitError> {
+    let store = secrets.store;
     let accounts: Vec<&(String, String)> = accounts
         .iter()
         .filter(|(_, provider)| constants::provider::SIGN_IN_REQUIRED.contains(&provider.as_str()))
@@ -440,6 +476,18 @@ fn sign_in_step(
     for (profile_id, provider) in accounts {
         if auth::signed_in(store, profile_id, provider)? {
             continue;
+        }
+        if let Some(problem) = secrets.problem {
+            // Nothing here keeps a sign-in, so none is made: a browser
+            // round whose token is gone when this command ends would
+            // read as done and leave the daemon signed out.
+            return Ok(InitStep::new(
+                names::STEP_SIGN_IN,
+                names::STATE_FAILED,
+                Some(format!(
+                    "{provider}: this host keeps no sign-in ({problem})"
+                )),
+            ));
         }
         match host.sign_in(provider) {
             Some(Ok(token)) => auth::store_sign_in(store, profile_id, provider, &token)?,
@@ -473,10 +521,16 @@ fn service_step(
     host: &mut dyn InitHost,
 ) -> Result<InitStep, InitError> {
     let step = |state, detail| InitStep::new(names::STEP_SERVICE, state, detail);
+    // True whatever the service manager holds: an explicit no looks at
+    // nothing, so it cannot say that no service is registered.
     let off = || {
         step(
             names::STATE_OFF,
-            Some("Vapor does not start at login; `vapor run` runs it by hand".to_string()),
+            Some(
+                "auto-launch is off: `vapor run` runs the daemon by hand, and `vapor service \
+                 uninstall` removes a service that is registered"
+                    .to_string(),
+            ),
         )
     };
     // An explicit no is recorded and nothing is looked at: the service
@@ -653,13 +707,30 @@ mod tests {
             prompter: Option<&mut dyn Prompter>,
             host: &mut Scripted,
         ) -> Result<InitReport, InitError> {
+            self.run_with(None, request, prompter, host)
+        }
+
+        fn storage(&self) -> ProfileStorage {
+            ProfileStorage {
+                state: self.temp.path().join("state"),
+                trash: self.temp.path().join("trash"),
+            }
+        }
+
+        fn run_with(
+            &self,
+            store_problem: Option<&str>,
+            request: &InitRequest,
+            prompter: Option<&mut dyn Prompter>,
+            host: &mut Scripted,
+        ) -> Result<InitReport, InitError> {
             run(
                 &self.config(),
-                &ProfileStorage {
-                    state: self.temp.path().join("state"),
-                    trash: self.temp.path().join("trash"),
+                &self.storage(),
+                &Secrets {
+                    store: self.store.as_ref(),
+                    problem: store_problem,
                 },
-                self.store.as_ref(),
                 request,
                 prompter,
                 host,
@@ -884,23 +955,95 @@ mod tests {
     }
 
     #[test]
-    fn a_one_way_mode_with_no_terminal_waits_for_its_answer() {
+    fn a_one_way_mode_with_no_terminal_waits_until_its_question_is_answered() {
         let install = Install::fresh();
         let mut host = Scripted::default();
         let request = InitRequest {
             mode: Some("push-only".to_string()),
             ..install.flags()
         };
+        let waits = |report: &InitReport| {
+            !report.initialized
+                && report.steps[0].state == "waits"
+                && report.steps[0]
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("vapor decisions list"))
+        };
         let report = install.run(&request, None, &mut host).expect("init");
+        assert!(waits(&report), "{report:?}");
+
+        // A later run finds the profile written and still held: the
+        // question has no answer, so the install is not set up.
+        let report = install
+            .run(&InitRequest::default(), None, &mut host)
+            .expect("second run");
+        assert!(waits(&report), "{report:?}");
+
+        // The answer, as `vapor decisions resolve` records it.
+        let config = vapor_shared::config::load_from(&install.config()).config;
+        let profile = vapor_daemon::profiles::resolve_profiles(&config).remove(0);
+        let database = vapor_shared::runtime_paths::profile_database_path_in(
+            &install.storage().state,
+            &profile.id,
+        );
+        std::fs::create_dir_all(database.parent().expect("parent")).expect("mkdir");
+        let mut state_db = vapor_daemon::state_db::DurableStateDb::open(&database).expect("db");
+        vapor_daemon::one_way::acknowledge(
+            &mut state_db,
+            profile.scope.sync_mode,
+            &vapor_shared::paths::canonicalize_ahead(
+                profile.scope.local_root.as_deref().expect("local root"),
+            ),
+            &profile.scope.cloud_root,
+            SystemTime::UNIX_EPOCH,
+        )
+        .expect("acknowledge");
+        drop(state_db);
+
+        let report = install
+            .run(&InitRequest::default(), None, &mut host)
+            .expect("third run");
+        assert!(report.initialized, "{report:?}");
+    }
+
+    #[test]
+    fn a_host_that_keeps_no_sign_in_fails_the_step_and_makes_none() {
+        let install = Install::fresh();
+        let mut host = Scripted {
+            sign_in: Some(Ok("ya29.test".to_string())),
+            ..Scripted::default()
+        };
+        let request = InitRequest {
+            provider: Some("gdrive".to_string()),
+            local: Some(install.folder("local")),
+            cloud: Some("/Vapor".to_string()),
+            ..InitRequest::default()
+        };
+        let report = install
+            .run_with(Some("no secret store"), &request, None, &mut host)
+            .expect("init");
         assert!(!report.initialized);
-        assert_eq!(report.steps[0].state, "waits");
+        assert_eq!(states(&report), [("sign-in", "failed")]);
         assert!(
             report.steps[0]
                 .detail
                 .as_deref()
-                .is_some_and(|detail| detail.contains("vapor decisions list")),
+                .is_some_and(|detail| detail.contains("no secret store")),
             "{report:?}"
         );
+        assert!(
+            host.calls.is_empty(),
+            "no sign-in is made: {:?}",
+            host.calls
+        );
+        assert!(!install.config().exists());
+
+        // A provider with no account needs no store.
+        let report = install
+            .run_with(Some("no secret store"), &install.flags(), None, &mut host)
+            .expect("init with the filesystem provider");
+        assert!(report.initialized, "{report:?}");
     }
 
     #[test]

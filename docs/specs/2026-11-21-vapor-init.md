@@ -153,14 +153,22 @@ A plan for the build. The code decides the details.
   replaces its binary, so the new build takes over with no step by the
   user.
 - A one-way mode that waits for its answer makes the profile step
-  wait on the run that writes the profile. A later run reads the
-  profile as done, and the state of the daemon in the summary shows
-  the question that still waits.
+  wait, on the run that writes the profile and on every later run,
+  until the acknowledgement is in the state database of the
+  profile.
 - A refusal to turn lingering on leaves the service step done, with
   the command for an administrator in its detail. `vapor doctor` does
   not check lingering yet (`docs/tasks/cli.md` L5-4).
 - A host with no service manager, such as a container, runs
-  `vapor init --auto-launch off` and then `vapor run`.
+  `vapor init --auto-launch off` and then `vapor run`. That answer
+  registers no job, the supervisor included: D14 holds where the
+  background service is registered. It also looks at nothing, so a
+  sandbox or a test never reaches the service manager of the host.
+- The service step is done only with both jobs registered. A daemon
+  job with no supervisor next to it is installed again.
+- A host whose secret store keeps nothing past the process (no
+  keychain and no secrets command) fails the sign-in step with the
+  reason, and no sign-in is made.
 - `vapor init --json` asks nothing and prints one object: each step
   with its state, and the status. Keys are camelCase and values are
   kebab-case, as on every command.

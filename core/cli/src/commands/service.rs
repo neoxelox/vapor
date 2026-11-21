@@ -181,8 +181,7 @@ pub fn replace_daemon_of_another_build(
     if running == this_build() || installer.status()? != ServiceStatus::Running {
         return Ok(false);
     }
-    manager.stop_daemon_for_termination(now)?;
-    manager.start_daemon_if_allowed(now)?;
+    manager.replace_daemon(now)?;
     Ok(true)
 }
 
@@ -542,17 +541,21 @@ pub fn install_with_supervisor(
     now: Instant,
 ) -> Result<ServiceCommandOutcome, ServiceCommandError> {
     let outcome = dispatch(command, manager, installer, now)?;
-    replace_daemon_of_another_build(manager, installer, running_build, now)?;
+    // The supervisor first: if the replacement below reports an error
+    // (a daemon slow to exit), the supervisor is there to finish it.
     ensure_supervisor(installer, supervisor)?;
+    replace_daemon_of_another_build(manager, installer, running_build, now)?;
     Ok(outcome)
 }
 
 /// Whether an install turns lingering on. Left to itself Vapor does it
-/// on a host with no desktop session, where the daemon would stop at
-/// the last logout; `choice` is the user's own answer.
+/// where no desktop session keeps the user's services up, so the
+/// daemon would stop at the last logout; `choice` is the user's own
+/// answer. A display that an SSH session forwards (`ssh -X`) is no
+/// desktop session: it ends with the connection.
 #[cfg(any(target_os = "linux", test))]
-pub fn linger_wanted(choice: Option<bool>, desktop_session: bool) -> bool {
-    choice.unwrap_or(!desktop_session)
+pub fn linger_wanted(choice: Option<bool>, display: bool, over_ssh: bool) -> bool {
+    choice.unwrap_or(!display || over_ssh)
 }
 
 /// What became of lingering during an install.
@@ -571,8 +574,9 @@ pub enum LingerOutcome {
 /// caller tells the user what is left to do.
 #[cfg(target_os = "linux")]
 pub fn apply_linger(choice: Option<bool>) -> LingerOutcome {
-    let desktop = vapor_platform::NativeIdleNotifier::for_current_host().has_gui_session();
-    if !linger_wanted(choice, desktop) {
+    let display = vapor_platform::NativeIdleNotifier::for_current_host().has_gui_session();
+    let over_ssh = std::env::var_os("SSH_CONNECTION").is_some();
+    if !linger_wanted(choice, display, over_ssh) {
         return LingerOutcome::Off;
     }
     if vapor_platform::linger_enabled() == Some(true) {
@@ -987,10 +991,21 @@ mod tests {
 
     #[test]
     fn lingering_is_the_default_only_where_no_desktop_keeps_a_session() {
-        assert!(linger_wanted(None, false), "a server: on by default");
-        assert!(!linger_wanted(None, true), "a desktop: not needed");
-        assert!(!linger_wanted(Some(false), false), "the user said off");
-        assert!(linger_wanted(Some(true), true), "the user said on");
+        assert!(linger_wanted(None, false, true), "a server: on by default");
+        assert!(
+            linger_wanted(None, false, false),
+            "a console with no display"
+        );
+        assert!(!linger_wanted(None, true, false), "a desktop: not needed");
+        assert!(
+            linger_wanted(None, true, true),
+            "a display forwarded over SSH ends with the connection"
+        );
+        assert!(
+            !linger_wanted(Some(false), false, true),
+            "the user said off"
+        );
+        assert!(linger_wanted(Some(true), true, false), "the user said on");
     }
 
     #[test]

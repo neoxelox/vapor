@@ -176,7 +176,7 @@ impl LifecycleStateStore for JsonFileLifecycleStateStore {
         let mut serialized = serde_json::to_string_pretty(state)
             .map_err(|error| JsonFileError::Parse(error.to_string()))?;
         serialized.push('\n');
-        // Per-writer temp name: the app's health tick and a user's
+        // Per-writer temp name: the supervisor's tick and a user's
         // `vapor service` command can save concurrently.
         let tmp_path = vapor_shared::runtime_paths::unique_temp_path(&self.path);
         fs::write(&tmp_path, serialized.as_bytes())?;

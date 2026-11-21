@@ -201,7 +201,7 @@ runners. What remains before Linux ships a surface:
 - [ ] C7-7 Linux distribution trust chain doc:
       `docs/operations/linux/distribution-trust-chain.md` + systemd unit
       policy in `docs/operations/linux/systemd-unit-policy.md`.
-- [ ] C7-8 The Linux packages: a `.deb` and an `.rpm` for x64 and for
+- [ ] C7-10 The Linux packages: a `.deb` and an `.rpm` for x64 and for
       ARM64 (`Vapor-linux-<arch>.<ext>`), as a `package (linux)` entry
       of `release.yml`, each with its GPG signature inside. A package
       puts `vapor` in `/usr/bin` and installs on a host with no

@@ -5,8 +5,9 @@
 #   verify-package.sh [package] --install  and what it leaves on the host
 #
 # The install needs root and changes the host: it puts Vapor.app in
-# /Applications and a link in /usr/local/bin. It is for a disposable CI
-# runner, and it refuses to run anywhere else. It never opens the app.
+# /Applications and a link in /usr/local/bin. It is for a disposable
+# GitHub Actions runner, and it refuses to run anywhere else. It never
+# opens the app.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -57,7 +58,10 @@ if [[ "$INSTALL" != "true" ]]; then
   exit 0
 fi
 
-[[ -n "${CI:-}" ]] || fail "--install changes the host; it runs on a CI runner only"
+# `GITHUB_ACTIONS`, not `CI`: a developer shell or an agent harness can
+# carry `CI`, and this would replace the Vapor that the machine runs.
+[[ "${GITHUB_ACTIONS:-}" == "true" ]] \
+  || fail "--install changes the host; it runs on a GitHub Actions runner only"
 
 sudo installer -pkg "$PACKAGE" -target /
 

@@ -149,7 +149,7 @@ Built on 2026-11-21, for macOS (D1 to D5, D7, D8, D10):
   certificates.
 
 D6 and D9, and the Windows installer, are open work:
-`docs/tasks/core.md` C7-8 and C6-11.
+`docs/tasks/core.md` C7-10 and C6-11.
 
 ## Open points
 

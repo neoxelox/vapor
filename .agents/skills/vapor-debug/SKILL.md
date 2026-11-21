@@ -48,7 +48,7 @@ The `vapor` CLI is the fastest signal. Use it before reading raw files:
 - `vapor report`: one redacted archive with status, diagnostics, timeline, config, and log tail; the first thing to ask a user for.
 - `vapor logs --tail 100`: recent daemon log lines, already redacted.
 - `vapor timeline --json`: diagnostics activity timeline (real events; an empty list means nothing has been recorded yet, not that the feature is missing).
-- `launchctl list | grep sh.arn.vapor` and `ps aux | grep vapord`: is the service loaded, is the process alive? (The LaunchAgent label is `sh.arn.vapor.daemon`; a headless install also has `sh.arn.vapor.supervisor`, and `vapor service status` says whether it is installed.)
+- `launchctl list | grep sh.arn.vapor` and `ps aux | grep vapord`: is the service loaded, is the process alive? (The LaunchAgent label is `sh.arn.vapor.daemon`; every install also has `sh.arn.vapor.supervisor`, the job that restarts a crashed daemon, and `vapor service status` says whether it is installed.)
 
 ## 2. Gather logs and crash reports
 

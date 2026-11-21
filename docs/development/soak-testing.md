@@ -91,7 +91,7 @@ touch those files too.
 `none`, `crash`, `all`, or a comma-separated list. Extra operations a
 fault performs stay on the phase's side and path subset, so the
 one-writer rule holds through a fault. After a crash the driver
-restarts the daemon itself (a CLI-only install has no supervisor); the
+restarts the daemon itself (the driver starts its own daemon, with no service and so no supervisor); the
 mass-delete guard holding a subtree removal is answered with `vapor
 decisions resolve <id> --choose apply` and recorded as a `guard-trip`,
 since that is the product working as designed. While the driver has

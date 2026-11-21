@@ -57,4 +57,21 @@ ln -s "$volume/other-vapor" "$link"
 run_postinstall >/dev/null || fail "the install fails next to a link of another program"
 [[ "$(readlink "$link")" == "$volume/other-vapor" ]] || fail "a link of another program was replaced"
 
+# A /usr/local/bin that cannot be a directory (a file stands there, or
+# a link to a volume that is gone) costs the link, never the install.
+for blocker in file dead-link; do
+  blocked="$(mktemp -d)"
+  mkdir -p "$blocked/usr/local"
+  if [[ "$blocker" == file ]]; then
+    echo "not a directory" >"$blocked/usr/local/bin"
+  else
+    ln -s "$blocked/gone" "$blocked/usr/local/bin"
+  fi
+  said="$(sh "$POSTINSTALL" package "$blocked" "$blocked")" \
+    || fail "the install fails when /usr/local/bin is a $blocker"
+  [[ "$said" == *"Applications/Vapor.app/Contents/Helpers/vapor"* ]] \
+    || fail "with /usr/local/bin a $blocker, the script does not say where the CLI is: $said"
+  rm -rf "$blocked"
+done
+
 echo "[installer-test] OK"

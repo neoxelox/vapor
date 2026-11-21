@@ -526,6 +526,36 @@ fn plan(
     })
 }
 
+/// Whether a one-way profile still waits for the answer to its
+/// data-loss question. The daemon holds such a profile, so a setup that
+/// called it done would report a sync that does not run. No state
+/// database means nobody was asked yet. A database that cannot be read
+/// says nothing, and `vapor status` stays the place that tells.
+pub fn one_way_waits(storage: &ProfileStorage, profile: &ResolvedProfile) -> bool {
+    let mode = profile.scope.sync_mode;
+    let Some(local_root) = profile.scope.local_root.as_deref() else {
+        return false;
+    };
+    if mode == SyncMode::TwoWay {
+        return false;
+    }
+    let database =
+        vapor_shared::runtime_paths::profile_database_path_in(&storage.state, &profile.id);
+    if !database.exists() {
+        return true;
+    }
+    vapor_daemon::state_db::DurableStateDb::open(&database)
+        .and_then(|state_db| {
+            vapor_daemon::one_way::acknowledged(
+                &state_db,
+                mode,
+                &vapor_shared::paths::canonicalize_ahead(local_root),
+                &profile.scope.cloud_root,
+            )
+        })
+        .is_ok_and(|acknowledged| !acknowledged)
+}
+
 /// `provider` trimmed, when it is a provider Vapor has.
 pub fn known_provider(provider: &str) -> Result<String, ProfilesError> {
     let provider = provider.trim();

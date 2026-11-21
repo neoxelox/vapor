@@ -63,7 +63,7 @@ The CLI has no download of its own: it ships inside the install
 package of each platform, which puts it on the `PATH` (`AGENTS.md`
 §7.5, `docs/specs/2026-11-21-platform-release-assets.md`). The macOS
 installer is in place. The Linux packages are `docs/tasks/core.md`
-C7-8, and the Windows installer is C6-11.
+C7-10, and the Windows installer is C6-11.
 
 ## Tests
 

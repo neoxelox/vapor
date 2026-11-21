@@ -146,6 +146,8 @@ to scripts.
 - Build workflow (`.github/workflows/build.yml`)
   - triggers: `pull_request`, `push` to `main`, `workflow_call`
   - `./scripts/build.sh`
+  - macOS only: `./scripts/build.sh package`, then
+    `apps/macos/scripts/verify-package.sh --install`
 - Perf workflow (`.github/workflows/perf.yml`)
   - triggers: `workflow_call` from `.github/workflows/release.yml`, `workflow_dispatch`
   - runner matrix: `macos-latest` (platforms join as their budgets are calibrated)
