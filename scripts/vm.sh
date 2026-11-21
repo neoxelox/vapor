@@ -12,7 +12,8 @@
 #   ./scripts/vm.sh [run options]   run the scenario suite
 #   ./scripts/vm.sh --setup         pull the guest image (one time, 36 GB)
 #   ./scripts/vm.sh --guest         start a guest for manual work
-#   ./scripts/vm.sh --guest-stop    stop and delete the manual guests
+#   ./scripts/vm.sh --guest-stop    stop and delete every guest of this
+#                                   checkout: manual, kept, or left over
 #   ./scripts/vm.sh --list          list scenarios
 #   ./scripts/vm.sh --clean         delete this checkout's guests and the
 #                                   prepared guests; the image stays
@@ -51,10 +52,10 @@ for arg in "$@"; do
   esac
 done
 
+mkdir -p "$VM_ROOT"
 cargo build --quiet --manifest-path "$ROOT_DIR/Cargo.toml" -p vapor-vm
 
 build_driver() {
-  mkdir -p "$VM_ROOT"
   swift build --quiet -c release \
     --package-path "$ROOT_DIR/tools/vm/driver" \
     --scratch-path "$VM_ROOT/driver-build"
@@ -67,13 +68,16 @@ case "$subcommand" in
   run | guest)
     if [[ "$skip_build" -eq 0 ]]; then
       echo "[vm] building the installer (./scripts/build.sh package)"
-      "$ROOT_DIR/scripts/build.sh" package >"$VM_ROOT.build.log" 2>&1 || {
-        tail -n 40 "$VM_ROOT.build.log"
-        echo "[vm] the installer did not build; full log: $VM_ROOT.build.log"
+      "$ROOT_DIR/scripts/build.sh" package >"$VM_ROOT/build.log" 2>&1 || {
+        tail -n 40 "$VM_ROOT/build.log"
+        echo "[vm] the installer did not build; full log: $VM_ROOT/build.log"
         exit 2
       }
-      # The service round trip runs the e2e harness inside a guest.
-      cargo build --quiet --manifest-path "$ROOT_DIR/Cargo.toml" \
+      # The service round trip runs the e2e harness inside a guest. That
+      # harness refuses binaries with a built-in Google Drive client, so
+      # these are built without one, as `scripts/e2e.sh` builds them.
+      env -u VAPOR_GDRIVE_CLIENT_ID -u VAPOR_GDRIVE_CLIENT_SECRET \
+        cargo build --quiet --manifest-path "$ROOT_DIR/Cargo.toml" \
         -p vapor-e2e -p vapor-cli -p vapor-daemon
     fi
     build_driver

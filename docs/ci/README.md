@@ -31,7 +31,7 @@ triggers them, and which ones gate a release.
 
 ## Test tier model
 
-Testing runs in four tiers. Authoritative definition:
+Testing runs in five tiers. Authoritative definition:
 `docs/architecture/testing-strategy.md §CI tier execution`.
 
 - **Tier 1**: `./scripts/test.sh` in `test.yml` (runs on every PR; a
@@ -70,8 +70,8 @@ Testing runs in four tiers. Authoritative definition:
   contributor's Mac and as a leg of `./scripts/release.sh`
   (`AGENTS.md §9.9`; process in
   `docs/development/vm-verification.md`). The `test` jobs still
-  compile its harness, run the harness's unit tests, and on macOS
-  compile and lint its driver.
+  compile its harness and run the harness's unit tests, and the macOS
+  one compiles its driver. The macOS `lint` job lints the driver.
 
 `./scripts/test.sh` enforces the Tier 1 budget itself: when
 `VAPOR_TEST_MAX_SECONDS` is set (the `test` workflow sets `300`), the

@@ -70,9 +70,16 @@ transitions, view-model state mapping, localization fallback, logger
 redaction, paths, bundle layout are all covered in
 `apps/macos/Tests/VaporCoreTests/` and `Tests/VaporAppTests/`. **No
 SwiftUI view rendering tests, no menubar layout tests, no Dock
-transition tests, no keyboard-focus tests**: UI correctness is
-verified by the project owner manually. Policy: `AGENTS.md §9`; full
-rationale: `docs/architecture/testing-strategy.md`.
+transition tests, no keyboard-focus tests** in this suite. Policy:
+`AGENTS.md §9`; full rationale:
+`docs/architecture/testing-strategy.md`.
+
+What the installed app does on the screen is tested by Tier VM
+(`./scripts/vm.sh`, `docs/development/vm-verification.md`), in a macOS
+virtual machine. It finds a control in a window by its accessibility
+identifier, so a new control gets one in
+`Sources/VaporCore/AccessibilityID.swift`. How a screen looks is
+judged by the project owner.
 
 ## Local dev
 
@@ -103,7 +110,9 @@ rationale: `docs/architecture/testing-strategy.md`.
   (`scripts/installer/postinstall`).
 - Check what the installer holds: `apps/macos/scripts/verify-package.sh`.
   Its `--install` mode installs the package and is for a CI runner only.
-- Launch packaged app: `open dist/Vapor.app`
+- Launch packaged app: `open dist/Vapor.app`. This is for the project
+  owner, by hand. An agent never opens it on the host; it gets a guest
+  with the build installed from `./scripts/vm.sh --guest`.
 
 ## Signed distribution
 

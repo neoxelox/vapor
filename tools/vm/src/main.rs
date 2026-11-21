@@ -42,7 +42,8 @@ enum Cmd {
     Setup,
     /// Start a guest with the build installed, for manual work.
     Guest,
-    /// Stop and delete the manual guests of this checkout.
+    /// Stop and delete every guest of this checkout: a manual guest,
+    /// a guest that `--keep` left, a guest of a run that was killed.
     GuestStop,
     /// Stop and delete the guests of this checkout and the prepared
     /// guests. The image stays.
@@ -85,8 +86,8 @@ fn main() -> ExitCode {
         }
         Cmd::Setup => runner::setup(&repo_root).map(|()| true),
         Cmd::Guest => runner::manual_guest(&repo_root).map(|()| true),
-        Cmd::GuestStop => runner::stop_manual_guests(&repo_root).map(|count| {
-            println!("[vm] deleted {count} manual guest(s)");
+        Cmd::GuestStop => runner::stop_guests(&repo_root).map(|count| {
+            println!("[vm] deleted {count} guest(s) of this checkout");
             true
         }),
         Cmd::Clean => runner::clean(&repo_root).map(|count| {

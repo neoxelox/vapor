@@ -9,8 +9,12 @@ use vapor_e2e::{Failure, ensure};
 use vapor_shared::constants::service::{DAEMON_LABEL, SUPERVISOR_LABEL};
 
 use crate::guest::{guest_results, guest_stage};
-use crate::scenario::{APP_PATH, CLI_PATH, Ctx, GuestKind, MAIN_WINDOW, PROCESS_TIMEOUT, Scenario};
+use crate::scenario::{APP_PATH, CLI_PATH, Ctx, GuestKind, PROCESS_TIMEOUT, Scenario};
 use crate::ui;
+
+/// The round trip waits through a crash-loop backoff and takes about
+/// 85 s on an idle guest.
+const ROUND_TRIP_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Names of the debug binaries the e2e harness needs, as the runner
 /// stages them under `e2e/` in the stage share.
@@ -92,8 +96,12 @@ fn install(ctx: &mut Ctx) -> Result<(), Failure> {
         "{CLI_PATH} must link to the CLI inside the app, it links to `{}`",
         link.trim()
     );
-    // A new shell of the user finds `vapor` with no path.
-    let version = ctx.guest.sh_ok("/bin/zsh -lc 'vapor --version'")?;
+    // A new login shell of the user finds `vapor` by name. The shell
+    // starts with an empty environment, so the search path is the one
+    // macOS gives a user, not one that the harness set.
+    let version = ctx.guest.sh_ok(
+        "/usr/bin/env -i HOME=\"$HOME\" USER=\"$USER\" LOGNAME=\"$USER\" /bin/zsh -lc 'vapor --version'",
+    )?;
     ensure!(
         version.contains(&ctx.build.version),
         "`vapor --version` says `{}`, the build is {}",
@@ -160,8 +168,8 @@ fn first_start(ctx: &mut Ctx) -> Result<(), Failure> {
 
     // The app starts in the menu bar only.
     ensure!(
-        !ctx.app().exists(MAIN_WINDOW, None),
-        "the first start must not open the main window"
+        ctx.main_window_absent(),
+        "the first start must leave the app running with no main window"
     );
     ctx.open_menu()?;
     ctx.shot("menu")
@@ -181,7 +189,7 @@ fn start_at_login(ctx: &mut Ctx) -> Result<(), Failure> {
     )?;
     ctx.shot("before-restart")?;
 
-    ctx.guest.reboot()?;
+    ctx.restart_guest()?;
 
     // Nothing starts the app here: the login item must.
     wait_until(PROCESS_TIMEOUT, "the app to start at login", || {
@@ -196,8 +204,8 @@ fn start_at_login(ctx: &mut Ctx) -> Result<(), Failure> {
     )?;
     hold_for(
         Duration::from_secs(5),
-        "no main window opens after a start at login",
-        || !ctx.app().exists(MAIN_WINDOW, None),
+        "the app keeps running with no main window after a start at login",
+        || ctx.main_window_absent(),
     )?;
     ctx.shot("after-restart")
 }
@@ -224,11 +232,14 @@ fn service_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
         binaries.join(" ")
     ))?;
 
-    let output = ctx.guest.sh(&format!(
-        "cd \"{root}\" && ./target/debug/vapor-e2e --repo-root \"{root}\" run --only R01 --full --skip-build --json '{report}' > '{}/{}/e2e-output.txt' 2>&1",
-        guest_results(),
-        ctx.slug
-    ))?;
+    let output = ctx.guest.sh_within(
+        &format!(
+            "cd \"{root}\" && ./target/debug/vapor-e2e --repo-root \"{root}\" run --only R01 --full --skip-build --json '{report}' > '{}/{}/e2e-output.txt' 2>&1",
+            guest_results(),
+            ctx.slug
+        ),
+        ROUND_TRIP_TIMEOUT,
+    )?;
     let text = std::fs::read_to_string(ctx.dir().join("e2e-report.json")).unwrap_or_default();
     let verdict = serde_json::from_str::<serde_json::Value>(&text)
         .ok()

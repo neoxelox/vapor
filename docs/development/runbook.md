@@ -15,7 +15,7 @@
 
 - Build both stacks (release): `./scripts/build.sh`
 - Build + package macOS app bundle: `./scripts/build.sh package`
-- Clean build and dist artifacts: `./scripts/clean.sh`
+- Clean build and dist artifacts, the repo-local `.vapor/`, and the Tier VM guests of this checkout: `./scripts/clean.sh`
 - Lint both stacks: `./scripts/lint.sh`
 - Format both stacks: `./scripts/format.sh`
 - Format check both stacks: `./scripts/format.sh check`

@@ -4,8 +4,11 @@
 //! [`VM_PREFIX`], and it never pulls an image during a run.
 
 use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use vapor_e2e::Failure;
 
@@ -28,6 +31,9 @@ pub const MAX_MACOS_GUESTS: usize = 2;
 
 /// The screen of a guest, so screenshots have one size on every host.
 pub const DISPLAY: &str = "1440x900";
+
+/// How often a running `tart exec` is asked whether it ended.
+const EXEC_POLL: Duration = Duration::from_millis(10);
 
 pub fn image() -> String {
     format!("{IMAGE_REPOSITORY}@{IMAGE_DIGEST}")
@@ -201,13 +207,85 @@ pub fn start(name: &str, shares: &[Share<'_>], log: &Path) -> Result<Child, Fail
         .map_err(|error| Failure::new(format!("could not start tart to run `{name}`: {error}")))
 }
 
-/// Runs a command in a running guest, as the logged-in user.
-pub fn exec(name: &str, arguments: &[&str]) -> Result<Output, Failure> {
+/// Runs a command in a running guest, as the logged-in user. A command
+/// that does not end within `timeout` is a failure: a guest that hangs
+/// must not hang the run.
+pub fn exec(name: &str, arguments: &[&str], timeout: Duration) -> Result<Output, Failure> {
     ours(name)?;
+    let mut child = tart()
+        .arg("exec")
+        .arg(name)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            Failure::new(format!(
+                "could not start tart to run a command in a guest: {error}"
+            ))
+        })?;
+    // The pipes are read while the command runs, so a command with a
+    // lot of output cannot block on a full pipe.
+    let reader = |pipe: Option<Box<dyn Read + Send>>| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    };
+    let stdout = reader(
+        child
+            .stdout
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
+    let stderr = reader(
+        child
+            .stderr
+            .take()
+            .map(|pipe| Box::new(pipe) as Box<dyn Read + Send>),
+    );
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(EXEC_POLL),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Failure::new(format!(
+                    "a command in the guest `{name}` did not end within {}s: {}",
+                    timeout.as_secs(),
+                    arguments.join(" ")
+                )));
+            }
+            Err(error) => {
+                return Err(Failure::new(format!(
+                    "could not wait for a command in the guest `{name}`: {error}"
+                )));
+            }
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+/// Whether a VM runs macOS. Apple's limit of two guests counts macOS
+/// guests only, and `tart list` does not say what a VM runs.
+pub fn is_macos(name: &str) -> bool {
     run(
-        tart().arg("exec").arg(name).args(arguments),
-        "run a command in a guest",
+        tart().args(["get", name, "--format", "json"]),
+        "read a VM's configuration",
     )
+    .ok()
+    .and_then(|output| serde_json::from_slice::<serde_json::Value>(&output.stdout).ok())
+    .is_none_or(|configuration| configuration["OS"] != "linux")
 }
 
 pub fn suspend(name: &str) -> Result<(), Failure> {

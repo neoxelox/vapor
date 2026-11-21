@@ -39,7 +39,8 @@ describe the new behaviour. Do this before the commit, not after.
    set. The spec records why; the owning document under `docs/` still
    describes the new behaviour on its own.
 7. macOS UI changes: state the intended experience and its HIG
-   alignment in the change, and hand the owner a manual checklist.
+   alignment in the change, and give the owner the screenshots of the
+   Tier VM run with a list of what to judge (`vapor-vm`).
 
 ## The sweep for stale mentions
 

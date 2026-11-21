@@ -136,6 +136,8 @@ pub struct Ctx<'a> {
     guest_dir: String,
     host_dir: PathBuf,
     step: u32,
+    /// How many video files the scenario started.
+    videos: u32,
     pub notes: Vec<String>,
 }
 
@@ -156,6 +158,7 @@ impl<'a> Ctx<'a> {
             guest_dir: format!("{}/{slug}", guest_results()),
             host_dir,
             step: 0,
+            videos: 0,
             notes: Vec::new(),
         })
     }
@@ -175,6 +178,39 @@ impl<'a> Ctx<'a> {
     }
 
     // -- Evidence ---------------------------------------------------
+
+    /// Starts a video of the screen. The first file of a scenario is
+    /// `scenario.mov`; a scenario that restarts the guest gets one
+    /// more file for each boot, because a restart ends the recording.
+    pub fn start_video(&mut self) {
+        self.videos += 1;
+        let file = match self.videos {
+            1 => "scenario.mov".to_string(),
+            part => format!("scenario-{part}.mov"),
+        };
+        let _ = self.guest.sh(&format!(
+            "nohup screencapture -x -v '{}/{file}' >/dev/null 2>&1 &",
+            self.guest_dir
+        ));
+    }
+
+    /// Ends the video. An interrupt makes `screencapture` finish the
+    /// file.
+    pub fn stop_video(&self) {
+        let _ = self.guest.sh("pkill -INT -x screencapture");
+        let _ = wait_until(Duration::from_secs(15), "the video to be written", || {
+            !self.guest.succeeds("pgrep -x screencapture >/dev/null")
+        });
+    }
+
+    /// Restarts the guest's operating system, as a user restarts a
+    /// Mac, with a video before the restart and one after it.
+    pub fn restart_guest(&mut self) -> Result<(), Failure> {
+        self.stop_video();
+        self.guest.reboot()?;
+        self.start_video();
+        Ok(())
+    }
 
     /// A screenshot of the whole screen, named after the step. The
     /// notifications of macOS are closed first so they do not cover
@@ -396,6 +432,13 @@ impl<'a> Ctx<'a> {
         )
     }
 
+    /// Whether the app runs and shows no main window. An app that
+    /// crashed has no window either, and that is not what a scenario
+    /// means by "no window".
+    pub fn main_window_absent(&self) -> bool {
+        self.process_runs("Vapor") && self.app().lacks(MAIN_WINDOW, None)
+    }
+
     /// Opens the main window from the menu, as a user does.
     pub fn open_main_window(&self) -> Result<(), Failure> {
         self.click_menu_item(MENU_OPEN)?;
@@ -442,7 +485,8 @@ impl<'a> Ctx<'a> {
 // How a scenario names a control. A control in a window has an
 // accessibility identifier; the source of truth for those is
 // `apps/macos/Sources/VaporCore/AccessibilityID.swift`, and a test
-// below fails when one used here is not in that file.
+// below fails when an `id=` selector anywhere in this crate names an
+// identifier that is not in that file.
 
 /// The menu bar item itself. SwiftUI gives it no identifier, and the
 /// app has exactly one. Its menu is searched inside it.
@@ -467,23 +511,6 @@ pub const NOTICE_DECISIONS: &str = "id=notice.decisions";
 pub const SETTINGS_USE_GITIGNORE: &str = "id=settings.use-gitignore";
 pub const SETTINGS_AUTO_LAUNCH: &str = "id=settings.auto-launch";
 
-/// Every identifier above that the app must define.
-pub const APP_IDENTIFIERS: &[&str] = &[
-    MAIN_WINDOW,
-    SIDEBAR_DASHBOARD,
-    SIDEBAR_DIAGNOSTICS,
-    DASHBOARD_STATUS,
-    DASHBOARD_STATUS_DETAIL,
-    DASHBOARD_SYNC_DETAIL,
-    DASHBOARD_SYNC_NOW,
-    DASHBOARD_AUTO_LAUNCH,
-    DIAGNOSTICS_VERSION,
-    NOTICE_RESTART_REQUIRED,
-    NOTICE_DECISIONS,
-    SETTINGS_USE_GITIGNORE,
-    SETTINGS_AUTO_LAUNCH,
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,15 +519,50 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
     }
 
+    /// Every `"id=<identifier>"` literal in the Rust sources of this
+    /// crate, with the file it is in.
+    fn id_selectors(directory: &Path, found: &mut Vec<(String, PathBuf)>) {
+        for entry in fs::read_dir(directory).expect("a source directory lists") {
+            let path = entry.expect("a directory entry reads").path();
+            if path.is_dir() {
+                id_selectors(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let text = fs::read_to_string(&path).expect("a source file reads");
+                for part in text.split("\"id=").skip(1) {
+                    let identifier: String = part
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+                        .collect();
+                    // A literal that ends right after the identifier is
+                    // a selector; anything else is prose or a format.
+                    if !identifier.is_empty() && part[identifier.len()..].starts_with('"') {
+                        found.push((identifier, path.clone()));
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn every_identifier_a_scenario_uses_is_defined_by_the_app() {
         let swift = repo_root().join("apps/macos/Sources/VaporCore/AccessibilityID.swift");
         let source = fs::read_to_string(&swift).expect("the identifier file of the app exists");
-        for selector in APP_IDENTIFIERS {
-            let identifier = selector.strip_prefix("id=").expect("an id selector");
+        let mut selectors = Vec::new();
+        id_selectors(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut selectors,
+        );
+        assert!(
+            selectors
+                .iter()
+                .any(|(identifier, _)| identifier == "main-window"),
+            "the scan found no selector; it no longer reads the sources"
+        );
+        for (identifier, file) in selectors {
             assert!(
                 source.contains(&format!("\"{identifier}\"")),
-                "{identifier} is used by a scenario but {} does not define it",
+                "{} uses the identifier `{identifier}`, which {} does not define",
+                file.display(),
                 swift.display()
             );
         }

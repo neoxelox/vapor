@@ -23,6 +23,10 @@ const GUEST_PATH: &str = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 
 /// A boot takes about 25 s and a resume about 10 s on an idle host.
 const READY_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long one command in a guest gets unless the caller says more.
+pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long one probe of a guest that is coming up gets.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub fn guest_stage() -> String {
@@ -68,7 +72,10 @@ impl Guest {
             stage: stage.to_path_buf(),
             results: results.to_path_buf(),
         };
-        guest.boot()?;
+        if let Err(failure) = guest.boot() {
+            let _ = guest.destroy();
+            return Err(failure);
+        }
         Ok(guest)
     }
 
@@ -132,6 +139,7 @@ impl Guest {
                         "-c",
                         &format!("/usr/bin/pgrep -x Dock >/dev/null && /bin/ls '{stage}' '{results}' >/dev/null"),
                     ],
+                    PROBE_TIMEOUT,
                 )
                 .is_ok_and(|output| output.status.success())
             },
@@ -167,8 +175,14 @@ impl Guest {
 
     /// Runs `script` with `/bin/sh` in the guest, as the logged-in user.
     pub fn sh(&self, script: &str) -> Result<Output, Failure> {
+        self.sh_within(script, COMMAND_TIMEOUT)
+    }
+
+    /// Like [`Guest::sh`], for a script that needs more or less time
+    /// than a command gets by default.
+    pub fn sh_within(&self, script: &str, timeout: Duration) -> Result<Output, Failure> {
         let script = format!("export PATH={GUEST_PATH}; {script}");
-        tart::exec(&self.name, &["/bin/sh", "-c", &script])
+        tart::exec(&self.name, &["/bin/sh", "-c", &script], timeout)
     }
 
     /// Like [`Guest::sh`], but a non-zero exit is a failure that quotes
@@ -217,11 +231,6 @@ impl Guest {
         tart::delete(&self.name)
     }
 
-    /// Stops the guest and leaves its clone in Tart's store.
-    pub fn stop(mut self) {
-        self.stop_now();
-    }
-
     /// Leaves the guest running after the harness exits.
     pub fn detach(mut self) {
         self.child = None;
@@ -249,12 +258,12 @@ impl Guest {
 }
 
 impl Drop for Guest {
-    /// A guest that a panic or an early return left behind is stopped,
-    /// so no VM keeps running after the harness. Its clone stays for
-    /// `./scripts/clean.sh`.
+    /// A guest that a panic or an early return left behind is stopped
+    /// and its clone deleted, so a failure on any path leaves no VM.
     fn drop(&mut self) {
         if self.child.is_some() {
             self.stop_now();
+            let _ = tart::delete(&self.name);
         }
     }
 }

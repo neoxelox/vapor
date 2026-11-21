@@ -80,6 +80,13 @@ decision waits; the sign-in notice has a Sign In button.
       ignored --json`, with the rule that hides each path.
 - [ ] M3-15 (idea) One long-lived status connection in place of a CLI
       process for each health tick.
+- [ ] M3-16 The state before the first read of the daemon. The app
+      reads the daemon 30 seconds after its start, and until then the
+      menu and the Dashboard show `Idle` with the provider
+      `Filesystem`, whatever the daemon does. Read the daemon once at
+      the start, and show that the state is not known until an answer
+      is there. Found by Tier VM (`./scripts/vm.sh`), whose state
+      scenarios wait for the first read.
 
 Exit gate:
 
@@ -154,6 +161,15 @@ Exit gate:
       privacy answers. A fresh guest of Tier VM
       (`docs/development/vm-verification.md`) is the Mac to check it
       on, and the scenario that proves the removal belongs there.
+- [ ] M5-6 A restart of the Mac within a few seconds of the first
+      start loses the login item. macOS writes a new login item to
+      disk a few seconds after the app registers it. After a restart
+      inside that window the daemon and the supervisor run, the app
+      does not start, and no menu bar item shows until the user opens
+      the app, which registers the item again. Decide whether that is
+      acceptable, or whether a job that already runs at login should
+      start the app. Found by Tier VM: its start-at-login scenario
+      waits until macOS saved the item.
 
 Exit gate:
 
@@ -213,8 +229,9 @@ for tests; the app never assumes it.
       the flow says so.
 - [ ] O-4 Copy in `assets/locales/en.json`, logic tests for the step
       model and the gate (which state opens the window, what each
-      answer writes, what a cancel leaves behind), no UI tests, and the
-      manual verification checklist for the owner: fresh install shows
+      answer writes, what a cancel leaves behind), no UI tests in Tier
+      1, Tier VM scenarios for the flow, and the list of what the owner
+      judges: fresh install shows
       the flow, nothing exists under the home until Start, Google Drive
       sign-in round-trips, the filesystem choice creates exactly the
       two folders chosen.

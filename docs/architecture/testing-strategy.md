@@ -290,9 +290,9 @@ only tier that starts the Mac app, because the app registers launchd
 jobs and a login item that would replace those of a real install on a
 contributor's Mac. The harness is a Rust dev crate (`tools/vm`,
 `vapor-vm`) with a small Swift driver that works inside the guest
-through the accessibility API. A scenario finds a control by its
-accessibility identifier, compares a text with the English catalog, and
-keeps screenshots and a video under `.vapor/vm/`.
+through the accessibility API. A scenario finds a control in a window
+by its accessibility identifier, compares a text of the app with the
+English catalog, and keeps screenshots and a video under `.vapor/vm/`.
 
 The tier proves how the installed app behaves. It does not judge how a
 screen looks: the project owner does that from the screenshots. It also
@@ -340,9 +340,10 @@ tests is worse than a hundred well-chosen ones.
   correct by construction; testing it tests serde, not us.
 - **Generated code** from `build.rs`.
 - **UI rendering** on the macOS app: SwiftUI views, menubar layout,
-  Dock transitions, keyboard focus, animation timing. UI correctness
-  is verified by the project owner manually. This applies to every
-  future GUI surface (Windows, Linux).
+  Dock transitions, keyboard focus, animation timing. No unit test
+  covers them. Tier VM proves how the installed Mac app behaves, and
+  the project owner judges how it looks. A future GUI surface
+  (Windows, Linux) gets no UI unit tests either.
 - **Interactive TTY behavior** on the CLI: cursor positioning, color
   codes, terminal resize, ncurses interactions.
 - **Third-party crate internals** (e.g., do not test that `rusqlite`
@@ -431,8 +432,8 @@ value", the test is not worth writing.
   The JSON report is uploaded as a workflow artifact.
 - **Tier VM**: `scripts/vm.sh`, not in CI. A GitHub-hosted macOS
   runner is a virtual machine and cannot run a macOS guest. It runs on
-  a contributor's Mac, on request for a change to the Mac app or its
-  install, and as a leg of `./scripts/release.sh`. Tier 1 still
+  a contributor's Mac: required for a change to the Mac app or its
+  install, and a leg of `./scripts/release.sh`. Tier 1 still
   compiles the harness and its driver on every pull request, and runs
   the harness's own unit tests.
 

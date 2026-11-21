@@ -38,15 +38,21 @@ Full process doc: `docs/development/vm-verification.md`. Policy:
 - The packaged app starts inside a guest only. Never open
   `dist/Vapor.app` or the installer on the host, and never run a
   command of a scenario outside `tart exec`.
-- Never run Homebrew for the tier. Tart is installed by hand; when it
-  is missing, say so and give the commands from the process doc.
+- Do not run Homebrew for the tier on your own. Tart is installed by
+  hand; when it is missing, say so and give the commands from the
+  process doc. Install or remove it only when the owner asks, and
+  remove it with `HOMEBREW_NO_AUTOREMOVE=1`: without it Homebrew also
+  removes every formula it counts as an unused dependency.
 - Never pull an image outside `./scripts/vm.sh --setup`, and run
   `--setup` only when the owner asked for it: it downloads 32 GB.
-- Change only VMs named `vapor-vm-*`. A VM with another name belongs
-  to the contributor.
-- Stop what you started: `./scripts/vm.sh --guest-stop` deletes the
-  manual guests of this checkout, and `./scripts/clean.sh` deletes
-  every guest this checkout made.
+- Change a guest through `./scripts/vm.sh` only. It touches the
+  guests of this checkout and no other VM. Never stop or delete a VM
+  by hand with `tart`: it can belong to the contributor, or to a run
+  of another checkout.
+- Stop what you started: `./scripts/vm.sh --guest-stop` deletes every
+  guest of this checkout (a manual guest, a guest that `--keep` left,
+  a guest of a run that was killed). `./scripts/clean.sh` does the
+  same with the rest of `.vapor`.
 
 ## Mode 1 and 2: the suite and one scenario
 
@@ -54,13 +60,19 @@ Full process doc: `docs/development/vm-verification.md`. Policy:
 ./scripts/vm.sh                    # build + all
 ./scripts/vm.sh --skip-build       # reuse dist/ and the debug binaries
 ./scripts/vm.sh --only V02,V11     # by id or name
-./scripts/vm.sh --keep             # keep the guest of a failure, stopped
+./scripts/vm.sh --keep             # leave the guest of a failure running
 ./scripts/vm.sh --json out.json    # the report somewhere else
 ```
 
 Read the verdict line of each scenario: `PASS` or `FAIL` with the
 reason. The run is green only with zero `FAIL`, and it fails when it
 leaves a guest behind.
+
+With `--keep` the guest of a failed scenario stays up, as the tier
+started it: no window and no route to the Internet. The run prints its
+name; look at it with `tart exec <guest> ...` as in mode 3, and delete
+it with `./scripts/vm.sh --guest-stop`. Until then it holds its place,
+and the next run waits for it.
 
 Everything of a run is under `.vapor/vm/run-<id>/`. On a `FAIL` read,
 in this order: the reason in `report.json`, the `NN-failure.png`
@@ -90,8 +102,9 @@ tart exec <guest> /usr/sbin/screencapture -x "/Volumes/My Shared Files/results/s
 
 A screenshot lands in `.vapor/vm/manual-<id>/session/` on the host.
 After a change to the app, stop the guest and start a new one: the
-guest has the build that was staged when it started. Finish with
-`./scripts/vm.sh --guest-stop`.
+guest has the build that was staged when it started. The manual guest
+takes the place of the shared guest, so a suite run waits until it is
+gone. Finish with `./scripts/vm.sh --guest-stop`.
 
 ## Reporting a UI change
 
@@ -123,11 +136,15 @@ change that a user sees gives the owner:
 4. Name a control in a window by its accessibility identifier. A new
    control gets one in
    `apps/macos/Sources/VaporCore/AccessibilityID.swift`, a modifier in
-   the view, and a constant in `tools/vm/src/scenario.rs`, listed in
-   `APP_IDENTIFIERS`. An item of the menu bar menu has no identifier;
-   name it by its catalog key (`ctx.menu_item(key)`).
-5. Compare a text with the catalog (`ctx.copy.get(key)`,
-   `ctx.wait_text`), never with a sentence in the scenario.
+   the view, and a constant in `tools/vm/src/scenario.rs`. A Tier 1
+   test reads every `"id=..."` selector of the harness and fails when
+   the app does not define its identifier. An item of the menu bar
+   menu has no identifier; name it by its catalog key
+   (`ctx.menu_item(key)`).
+5. Compare a text of the app with the catalog (`ctx.copy.get(key)`,
+   `ctx.wait_text`), never with a sentence in the scenario. A text of
+   macOS itself (a system menu item, a Finder window) is a literal,
+   with a comment that says whose text it is.
 6. Run it alone (`--only Vxx`), then against a build without the
    change: it must fail before and pass after. Quote both runs.
 7. Update the catalog table in `docs/development/vm-verification.md`
@@ -140,6 +157,9 @@ shared scenario must not depend on the one before it.
 ## Known limits (today)
 
 - The look is the owner's judgement, from the screenshots.
+- The daemon in a guest works at the pace of `Throttled` while a
+  scenario acts: the pointer events of the driver count as a user at
+  the device.
 - The guest has no network: no Google sign-in.
 - Gatekeeper and System Integrity Protection are off in the image, and
   a local build is signed ad hoc, so the trust chain is not tested.

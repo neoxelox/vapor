@@ -47,7 +47,10 @@ done
 # from its path. `./scripts/vm.sh --clean` also removes the prepared
 # guests; the pulled image stays either way.
 if command -v tart >/dev/null 2>&1 && command -v shasum >/dev/null 2>&1; then
-  checkout_tag="$(printf '%s' "$ROOT_DIR_PHYSICAL" | shasum -a 256 | cut -c1-8)"
+  # `realpath` gives the spelling the harness hashes, also on a volume
+  # that folds case.
+  checkout_path="$(realpath "$ROOT_DIR" 2>/dev/null || echo "$ROOT_DIR_PHYSICAL")"
+  checkout_tag="$(printf '%s' "$checkout_path" | shasum -a 256 | cut -c1-8)"
   while IFS= read -r vm; do
     [[ "$vm" == "vapor-vm-$checkout_tag-"* ]] || continue
     echo "[clean] deleting the test guest $vm"

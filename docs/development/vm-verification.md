@@ -11,8 +11,9 @@ are in `docs/specs/2026-11-21-isolated-macos-e2e.md`.
 Tier E2E proves the daemon and the CLI in a sandbox on the host, and it
 never starts the app. The app cannot be tested on a contributor's Mac:
 at start it registers launchd jobs with fixed labels and a login item,
-which would replace those of a real install. So before this tier
-nothing tested the installer, the first start, the start at login, or
+which would replace those of a real install. CI installs the installer
+on a runner and checks what it holds, and nothing started the app
+after that. So no test covered the first start, the start at login, or
 any screen of the app, and an agent could not see what it built.
 
 Tier VM runs all of that in a macOS virtual machine. The Mac of the
@@ -67,8 +68,13 @@ that catalog too, never from a sentence in the scenario.
    named `vapor-vm-*`, and it stops or deletes no other name. A VM of
    the contributor is never touched.
 7. **A run deletes every guest it made**, on a pass and on a failure,
-   and fails when one is left.
-8. **No script of the repository runs Homebrew.** The contributor
+   and fails when one is left. Only `--keep` leaves a guest, on
+   request.
+8. **What stays on the host is known.** The evidence under the
+   repo-local `.vapor/vm/`; one empty lock file, `vapor-vm.lock`, in
+   the user's temporary directory; and in Tart's store the image and
+   the two prepared guests.
+9. **No script of the repository runs Homebrew.** The contributor
    installs Tart by hand.
 
 ## What a contributor installs, one time
@@ -123,7 +129,8 @@ judge.
 ./scripts/vm.sh                    # build the installer, run every scenario
 ./scripts/vm.sh --only V02,V11     # by id or name
 ./scripts/vm.sh --skip-build       # reuse dist/ and the debug binaries
-./scripts/vm.sh --keep             # keep the guest of a failed scenario, stopped
+./scripts/vm.sh --keep             # leave the guest of a failed scenario running
+./scripts/vm.sh --guest-stop       # delete every guest of this checkout
 ./scripts/vm.sh --list             # the catalog
 ./scripts/vm.sh --clean            # delete this checkout's guests and the prepared guests
 ```
@@ -131,6 +138,13 @@ judge.
 The run prints one line for each scenario and ends with the path of
 `report.json`. The exit code is 0 for a green run, 1 when a scenario
 failed, and 2 when the host cannot run the tier.
+
+With `--keep` the guest of a failed scenario stays up as the tier
+started it, with no window and no route to the Internet. The run
+prints its name. Look at it with `tart exec <guest> ...`, as with a
+manual guest, and delete it with `./scripts/vm.sh --guest-stop`. Do not
+start a guest of the tier with a plain `tart run`: that opens a window
+and gives the guest the Internet.
 
 ### Evidence
 
@@ -141,7 +155,7 @@ Everything of a run is under `.vapor/vm/run-<id>/`, which
 |---|---|
 | `report.json` | Each scenario with its verdict, its reasons, and its notes. |
 | `<scenario>/NN-<step>.png` | A screenshot of the guest's screen at a named step. |
-| `<scenario>/scenario.mov` | A video of the whole scenario. |
+| `<scenario>/scenario.mov` | A video of the scenario. A scenario that restarts the guest has `scenario-2.mov` for the time after the restart. |
 | `<scenario>/controls.json` | Every control of the app, written at a failure. |
 | `<scenario>/logs/`, `status.txt`, `launchd.txt` | The daemon's logs and state from the guest. |
 | `<guest>.tart.log` | What Tart printed for a guest. |
@@ -173,7 +187,9 @@ keeps them.
   host. The shared guest and the fresh guests run side by side. Each
   has a prepared guest of its own, because two clones of one saved
   guest have the same network address and cannot run together. A run
-  waits when a place is taken, also by a run of another checkout.
+  waits when a place is taken, also by a run of another checkout. Do
+  not run `./scripts/vm.sh --clean` while another checkout runs the
+  tier: it deletes the prepared guests that the other run clones.
 - **A checkout touches its own guests only.** Tart's store is shared
   by every checkout on the machine, so the name of a guest carries a
   tag made from the path of its checkout.
@@ -184,13 +200,14 @@ For a look at a change while it is built:
 
 ```sh
 ./scripts/vm.sh --guest        # a guest with the build installed, app started
-./scripts/vm.sh --guest-stop   # stop and delete it
+./scripts/vm.sh --guest-stop   # stop and delete every guest of this checkout
 ```
 
 `--guest` prints the commands that work on the guest: `tart exec` for
 a command, the driver for the controls, and `screencapture` for a
 screenshot, which lands in `.vapor/vm/manual-<id>/`. The guest takes
-the place of the shared guest until it is stopped.
+the place of the shared guest until it is stopped, and a run of the
+suite waits for that place.
 
 ## Scenario catalog
 
@@ -226,8 +243,9 @@ that waits for a state on the screen waits up to one read.
   installed app is `Shared`, with the start state it needs.
 - A new control in a window gets an identifier in
   `AccessibilityID.swift` and a constant in
-  `tools/vm/src/scenario.rs`. A Tier 1 test fails when a scenario uses
-  an identifier that the app does not define.
+  `tools/vm/src/scenario.rs`. A Tier 1 test reads every `"id=..."`
+  selector in the harness and fails when the app does not define its
+  identifier.
 - Wait with `wait_until`, with a deadline and a description. A bare
   sleep hides what the scenario waits for.
 - Take a screenshot at each step a reader of the evidence wants to
@@ -242,6 +260,9 @@ that waits for a state on the screen waits up to one read.
 - **Gatekeeper and notarization.** The image has Gatekeeper and System
   Integrity Protection off, and a local build is signed ad hoc.
 - **An upgrade** from an older release, and what a removal leaves.
+- **The daemon at full pace.** The pointer events of the driver count
+  as a user at the device, so the daemon in a guest works at the pace
+  of `Throttled` while a scenario acts.
 - **Another macOS.** The tier tests on the newest macOS that Tart has
   an image for. The minimum that Vapor supports is not tested.
 
@@ -250,6 +271,6 @@ that waits for a state on the screen waits up to one read.
 Tier 1 tests the logic of the app and of the core in process. Tier E2E
 tests the real daemon and CLI on the host, on every pull request. Tier
 VM tests the installed product on a Mac that is not the contributor's,
-on request and before a release. A behaviour of the daemon belongs in
+for a change to the Mac app or its install and before a release. A behaviour of the daemon belongs in
 Tier E2E even when the app shows it; Tier VM proves that the app shows
 it.

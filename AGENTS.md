@@ -705,8 +705,9 @@ If a test's failure mode is "I typo'd a default value", skip it.
   scenarios whose needs the host cannot meet skip by name) and locally
   by the contributor (host-safe default). Contract in §9.8; procedure
   in the `vapor-e2e` skill.
-- **Tier VM**: `./scripts/vm.sh` (the `tools/vm` harness), on request
-  and as a leg of `./scripts/release.sh`. The installer of the build,
+- **Tier VM**: `./scripts/vm.sh` (the `tools/vm` harness), run by the
+  contributor: required for a change to the Mac app or its install,
+  and a leg of `./scripts/release.sh`. The installer of the build,
   installed in a macOS virtual machine, with the app driven as a user
   does. Never a PR gate: a GitHub-hosted runner cannot run a macOS
   guest. Contract in §9.9; procedure in the `vapor-vm` skill.
@@ -789,32 +790,38 @@ contributor's Mac without replacing the launchd jobs and the login item
 of a real install. Tier VM tests the installed product on a Mac that is
 not the contributor's: a macOS virtual machine. Procedure: the
 `vapor-vm` skill and `docs/development/vm-verification.md`. The
-invariants (owner, 2026-11-21):
+invariants:
 
 - `./scripts/vm.sh` builds the installer, the harness (`tools/vm`,
   crate `vapor-vm`) and its driver (`tools/vm/driver`), dev tools that
   never ship. It installs the installer, unchanged, in a macOS guest
   made with Tart from an image pinned by digest, and acts on the app
   through the accessibility API of macOS and the installed `vapor`
-  CLI. The app carries no test hook.
-- Isolation is absolute. The packaged app and the installer start only
-  inside a guest. A guest sees two host directories (the staged build,
-  read-only, and the run's directory), has no window, no sound, no
-  shared clipboard, and no route to the Internet. The harness changes
-  only VMs named `vapor-vm-*`, a run deletes every guest it made, and
-  everything a run leaves on the host is under the repo-local
-  `.vapor/vm/` (removed by `./scripts/clean.sh`).
+  CLI. The app carries no test hook (owner, 2026-11-21).
+- Isolation is absolute (owner, 2026-11-21). The packaged app and the
+  installer start only inside a guest. A guest sees two host
+  directories (the staged build, read-only, and the run's directory),
+  has no window, no sound, no shared clipboard, and no route to the
+  Internet. The harness changes only VMs named `vapor-vm-*`, and a
+  checkout only its own.
+- A run deletes every guest it made; only `--keep` leaves one, on
+  request. What stays on the host is the evidence under the repo-local
+  `.vapor/vm/` (removed by `./scripts/clean.sh`), one empty lock file
+  in the user's temporary directory, and in Tart's store the image and
+  the prepared guests that every run clones (removed by
+  `./scripts/vm.sh --clean` and `tart delete`).
 - A run never downloads. `./scripts/vm.sh --setup` is the one command
   that uses the network (the guest image, 36 GB on disk). No script of
-  the repository runs Homebrew: the contributor installs Tart by hand.
+  the repository runs Homebrew: the contributor installs Tart by hand
+  (owner, 2026-11-21).
 - A scenario declares the guest it needs, by what it tests: a fresh
   guest for the install, a first start, a start at login, or a
   removal; the shared guest for the screens and states of the
-  installed app. The scenarios that share a guest do not depend on
-  their order.
+  installed app (owner, 2026-11-21). The scenarios that share a guest
+  do not depend on their order.
 - Required before an agent reports as done a change under `apps/macos`
   or a change to how the app is packaged or installed, and as a leg of
-  `./scripts/release.sh`.
+  `./scripts/release.sh` (owner, 2026-11-21).
 - When a change adds behaviour that a user sees in the app or in the
   install, add a scenario under `tools/vm/src/scenarios/` in the same
   change set: it must fail before the change and pass after. Weakening
@@ -825,7 +832,7 @@ invariants (owner, 2026-11-21):
   identifier in the same change set.
 - An agent verifies behaviour and never the look. The report of a UI
   change gives the owner the screenshots of the run and a list of what
-  to judge.
+  to judge (owner, 2026-11-21).
 
 ## 10) Pull requests, commits, and documentation
 
@@ -906,7 +913,8 @@ for what is already granted nor acts on what is not.
   review.
 - Only when the owner asks for that specific action: push a branch,
   open a PR, cut or rehearse a release, run e2e against Google Drive,
-  install or remove Tart, pull the guest image
+  install or remove Tart (a removal with `HOMEBREW_NO_AUTOREMOVE=1`,
+  so Homebrew removes nothing else), pull the guest image
   (`./scripts/vm.sh --setup`), change repository settings, release
   environments, or the action allowlist.
 - Never: merge a PR, push to `main` outside the release flow, launch a

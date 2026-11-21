@@ -6,9 +6,9 @@
 //! may run at a time, so the two groups run side by side when both
 //! places are free.
 
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,6 +24,7 @@ use crate::scenario::{
     Start,
 };
 use crate::scenarios::{self, install::E2E_BINARIES};
+use crate::tart::Vm;
 use crate::tart::{self, MAX_MACOS_GUESTS, MIN_TART_VERSION, VM_PREFIX};
 use crate::ui::{self, DRIVER};
 
@@ -135,11 +136,38 @@ pub fn discover_repo_root() -> Result<PathBuf, Failure> {
 
 // -- The host ---------------------------------------------------------
 
+/// A macOS guest cannot be newer than its host, and the image is
+/// macOS 27.
+const MIN_HOST_MACOS: u32 = 27;
+
+/// The major version of the macOS this process runs on.
+fn host_macos_major() -> Option<u32> {
+    let output = Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// Fails with what to do when this machine cannot run the tier.
 pub fn check_host() -> Result<(), Failure> {
     ensure!(
         cfg!(all(target_os = "macos", target_arch = "aarch64")),
         "Tier VM runs macOS guests, which needs a Mac with Apple silicon"
+    );
+    let host = host_macos_major();
+    ensure!(
+        host.is_some_and(|major| major >= MIN_HOST_MACOS),
+        "the guest runs macOS {MIN_HOST_MACOS}, which needs macOS {MIN_HOST_MACOS} or newer on this Mac; it runs macOS {}",
+        host.map_or_else(
+            || "of an unknown version".to_string(),
+            |major| major.to_string()
+        )
     );
     let version = tart::version().map_err(|failure| {
         Failure::new(format!(
@@ -258,27 +286,20 @@ pub fn prepared_name(place: Place) -> String {
 /// question of macOS, and was saved to disk. A clone of it starts in
 /// seconds.
 pub fn ensure_prepared(paths: &Paths) -> Result<(), Failure> {
-    let wanted: Vec<String> = Place::ALL
-        .iter()
-        .map(|place| prepared_name(*place))
-        .collect();
+    // Another process that makes the same guests finishes first.
+    let _store = StoreLock::take()?;
     let existing = tart::list()?;
-    // A prepared guest of an older image, or one that a failed setup
-    // left half made, is in the way.
-    for vm in existing.iter().filter(|vm| {
-        vm.is_ours()
-            && vm.name.starts_with(&format!("{VM_PREFIX}prepared-"))
-            && !(wanted.contains(&vm.name) && vm.state == "suspended")
-    }) {
-        let _ = tart::stop(&vm.name);
-        tart::delete(&vm.name)?;
-    }
-    for name in wanted {
-        if existing
-            .iter()
-            .any(|vm| vm.name == name && vm.state == "suspended")
-        {
-            continue;
+    for name in Place::ALL.iter().map(|place| prepared_name(*place)) {
+        match existing.iter().find(|vm| vm.name == name) {
+            Some(vm) if vm.state == "suspended" => continue,
+            // One that a failed setup left half made is in the way. A
+            // prepared guest of another image digest is left alone: a
+            // checkout that pins that digest uses it.
+            Some(_) => {
+                let _ = tart::stop(&name);
+                tart::delete(&name)?;
+            }
+            None => {}
         }
         println!("[vm] preparing `{name}`, a guest that runs are cloned from (one time)");
         make_prepared(paths, &name)?;
@@ -292,7 +313,10 @@ fn make_prepared(paths: &Paths, name: &str) -> Result<(), Failure> {
     fs::create_dir_all(&results)?;
 
     tart::clone(&tart::image(), name)?;
-    tart::configure(name)?;
+    if let Err(failure) = tart::configure(name) {
+        let _ = tart::delete(name);
+        return Err(failure);
+    }
     let guest = Guest::adopt(name, &paths.stage, &results)?;
     match prepare(&guest) {
         Ok(()) => guest.suspend(),
@@ -327,30 +351,62 @@ fn prepare(guest: &Guest) -> Result<(), Failure> {
 
 // -- Places for guests ------------------------------------------------
 
-/// One guest starts at a time, so two threads of a run cannot both
-/// take the last place.
-static START: Mutex<()> = Mutex::new(());
+/// Held while a process looks for a free place and starts a guest in
+/// it, and while it makes the prepared guests. Tart's store is shared
+/// by every checkout on the machine: without the lock two runs that
+/// both see a free place both take it. The lock is an empty file in
+/// the user's temporary directory, the one thing the tier keeps on the
+/// host outside the repository and Tart's store.
+struct StoreLock {
+    _file: File,
+}
+
+impl StoreLock {
+    fn take() -> Result<Self, Failure> {
+        let path = std::env::temp_dir().join("vapor-vm.lock");
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|error| Failure::new(format!("cannot open {}: {error}", path.display())))?;
+        file.lock()
+            .map_err(|error| Failure::new(format!("cannot lock {}: {error}", path.display())))?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// Why a guest cannot start in `place` now, or `None` when it can.
+fn blocker(place: Place) -> Option<String> {
+    let Ok(all) = tart::list() else {
+        return Some("`tart list` failed".to_string());
+    };
+    let running: Vec<&Vm> = all.iter().filter(|vm| vm.is_running()).collect();
+    if let Some(vm) = running.iter().find(|vm| Place::of(&vm.name) == Some(place)) {
+        return Some(format!("the guest `{}` runs in its place", vm.name));
+    }
+    // A guest of the tier runs macOS; for another VM Tart is asked.
+    let macos = running
+        .iter()
+        .filter(|vm| vm.is_ours() || tart::is_macos(&vm.name))
+        .count();
+    (macos >= MAX_MACOS_GUESTS).then(|| format!("{macos} macOS guests already run on this host"))
+}
 
 /// Starts a clone of the prepared guest of `place`, after waiting
-/// until the place is free and the host runs fewer than two guests.
+/// until the place is free and the host runs fewer than two macOS
+/// guests.
 fn start_guest(place: Place, name: &str, paths: &Paths, results: &Path) -> Result<Guest, Failure> {
-    let _one_at_a_time = START
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let free = || {
-        tart::list().is_ok_and(|all| {
-            let running: Vec<_> = all.iter().filter(|vm| vm.is_running()).collect();
-            running.len() < MAX_MACOS_GUESTS
-                && !running.iter().any(|vm| Place::of(&vm.name) == Some(place))
-        })
-    };
-    if !free() {
-        println!("[vm] waiting for a place for the guest `{name}`");
+    let _store = StoreLock::take()?;
+    if let Some(reason) = blocker(place) {
+        println!(
+            "[vm] waiting to start `{name}`: {reason}. If no run is in progress, `./scripts/vm.sh --guest-stop` deletes the guests of this checkout"
+        );
     }
     wait_until(
         SLOT_TIMEOUT,
         "a place for a guest: Apple permits two macOS guests on one host, and the tier runs one guest of each kind",
-        free,
+        || blocker(place).is_none(),
     )?;
     Guest::start(&prepared_name(place), name, &paths.stage, results)
 }
@@ -381,23 +437,6 @@ fn reset(ctx: &Ctx, start: Start) -> Result<(), Failure> {
     ctx.wait_service_running()?;
     ui::close_notifications(ctx.guest);
     Ok(())
-}
-
-// -- Video ------------------------------------------------------------
-
-fn video_start(guest: &Guest, slug: &str) {
-    let _ = guest.sh(&format!(
-        "nohup screencapture -x -v '{}/{slug}/scenario.mov' >/dev/null 2>&1 &",
-        guest_results()
-    ));
-}
-
-fn video_stop(guest: &Guest) {
-    // An interrupt makes `screencapture` finish the file.
-    let _ = guest.sh("pkill -INT -x screencapture");
-    let _ = wait_until(Duration::from_secs(15), "the video to be written", || {
-        !guest.succeeds("pgrep -x screencapture >/dev/null")
-    });
 }
 
 // -- One scenario -----------------------------------------------------
@@ -449,7 +488,7 @@ fn run_scenario(
         GuestKind::Fresh => Ok(()),
     }
     .and_then(|()| {
-        video_start(ctx.guest, &slug);
+        ctx.start_video();
         (scenario.run)(&mut ctx)
     });
     if let Err(failure) = outcome {
@@ -459,7 +498,7 @@ fn run_scenario(
         ctx.dump_controls();
     }
     ctx.collect_logs();
-    video_stop(ctx.guest);
+    ctx.stop_video();
     result.notes = std::mem::take(&mut ctx.notes);
     result.seconds = started.elapsed().as_secs_f64();
     println!(
@@ -493,15 +532,15 @@ impl Run<'_> {
     }
 
     /// Deletes a guest, or with `--keep` leaves the guest of a failure
-    /// stopped in Tart's store and says its name.
+    /// running as the tier started it (no window, no route to the
+    /// Internet) and says how to look at it and how to delete it.
     fn finish(&self, guest: Guest, any_failed: bool) {
         if self.keep && any_failed {
             println!(
-                "[vm] kept the guest `{}`; start it with `tart run {}`, delete it with ./scripts/clean.sh",
-                guest.name(),
-                guest.name()
+                "[vm] kept the guest `{name}`, which still runs. A command in it: `tart exec {name} /usr/local/bin/vapor status`. It holds its place until `./scripts/vm.sh --guest-stop` deletes it",
+                name = guest.name()
             );
-            guest.stop();
+            guest.detach();
         } else if let Err(failure) = guest.destroy() {
             println!("[vm] {failure}");
         }
@@ -779,15 +818,16 @@ fn delete_guests(prefix: &str) -> Result<usize, Failure> {
     Ok(deleted)
 }
 
-/// Stops and deletes the manual guests of this checkout.
-pub fn stop_manual_guests(repo_root: &Path) -> Result<usize, Failure> {
-    delete_guests(&Paths::new(repo_root)?.guest_name("manual-"))
+/// Stops and deletes every guest of this checkout: a manual guest, a
+/// guest that `--keep` left, and a guest of a run that was killed.
+pub fn stop_guests(repo_root: &Path) -> Result<usize, Failure> {
+    delete_guests(&Paths::new(repo_root)?.guest_name(""))
 }
 
 /// Stops and deletes the guests of this checkout, then the prepared
 /// guests, which every checkout shares. The pulled image stays.
 pub fn clean(repo_root: &Path) -> Result<usize, Failure> {
-    let mut deleted = delete_guests(&Paths::new(repo_root)?.guest_name(""))?;
+    let mut deleted = stop_guests(repo_root)?;
     // What still runs belongs to a run of another checkout, which
     // clones the prepared guests.
     if tart::list()?

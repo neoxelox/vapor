@@ -91,7 +91,8 @@ decision.
 - Be critical. Push back with evidence, on the owner's ideas too.
 - A question about the Mac app's look needs something the owner can
   judge: a precise description, the Apple HIG pattern it follows, or a
-  reference app. Agents never verify UI, so the owner makes that call.
+  reference app. An agent verifies how the app behaves and never how
+  it looks, so the owner makes that call.
 - Stop when the remaining questions would not change what gets built.
   Say the design is complete and ask to start.
 

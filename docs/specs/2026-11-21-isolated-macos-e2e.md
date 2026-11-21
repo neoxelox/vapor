@@ -397,13 +397,16 @@ On the shared guest, with the filesystem provider:
 
 ### What the build changed in this design
 
-The build found five points where the design above does not hold as
+The build found these points where the design above does not hold as
 written. The text above stays as the record of the design.
 
 - **Menu items have no identifier (D18).** The identifiers reach the
   controls of the windows only. A scenario names a menu item by its
-  catalog key, and every text that a scenario compares comes from the
-  catalog.
+  catalog key, and every text of the app that a scenario compares
+  comes from the catalog. Three texts of macOS itself are written in
+  the scenarios: the Settings item of the app menu, the title of
+  Finder's Applications window, and the name of the app in a
+  notification.
 - **Two prepared guests, not one.** A clone resumes with the network
   address of the guest it came from, and Tart refuses two VMs with one
   address. So each of the two places for guests has a prepared guest
@@ -419,7 +422,14 @@ written. The text above stays as the record of the design.
   by every checkout on a machine, so the name of a guest carries a tag
   made from the path of its checkout. `./scripts/clean.sh` deletes the
   guests with that tag. `./scripts/vm.sh --clean` also deletes the
-  prepared guests.
+  prepared guests. A lock file in the user's temporary directory
+  keeps two runs from one place for a guest.
+- **A kept guest keeps running.** `--keep` leaves the guest of a
+  failure up as the tier started it, and `--guest-stop` deletes it. A
+  plain `tart run` of a stopped guest opens a window and gives the
+  guest the Internet.
+- **A video for each boot.** A restart of the guest ends the
+  recording, so the scenario of the start at login has two files.
 
 The scenarios also differ in two points. Quit runs on the shared guest:
 it needs no fresh Mac. One scenario covers both the error state and a
@@ -499,7 +509,8 @@ disabled, was not.
 
 On the design machine, with the build of this change:
 
-- `./scripts/vm.sh` passed with all 14 scenarios in 319 s. The four
+- `./scripts/vm.sh` passed with all 14 scenarios. The last run took
+  422 s, of which about 80 s made the two prepared guests. The four
   scenarios of the install ran in fresh guests while the ten scenarios
   of the installed app ran in the shared guest.
 - 13 of the 14 scenarios failed against builds that were broken by
@@ -509,18 +520,22 @@ On the design machine, with the build of this change:
   saved, a Quit that leaves the daemon, and a status that always says
   Idle with no detail and no notice. The broken builds were not
   committed. The fourteenth scenario runs `R01` of Tier E2E, which
-  that tier proves.
+  that tier proves. The review of the change then made six
+  assertions stricter; those were run against the real build only.
 - A listing of the host from before and after the run showed no
   difference, and Tart's store held no clone of the run.
 - `./scripts/format.sh`, `./scripts/lint.sh`, and `./scripts/test.sh`
-  passed with the new crate and the driver. Tier 1 ran in 22 s.
+  passed with the new crate and the driver. Tier 1 ran in 19 s.
+- A manual guest held the place of the shared guest, a run of the
+  suite waited for it and said why, and the run went on when
+  `./scripts/vm.sh --guest-stop` deleted the guest.
 - The launchd round trip `R01` passed inside a guest. It is the first
   run of that scenario on a contributor's machine.
 
 The owner did not look at the screenshots of a run yet.
 
 What the run of the tier found in the product, reported to the owner
-and not changed here:
+and not changed here. Each has a task in `docs/tasks/macos.md`:
 
 - macOS writes a new login item to disk a few seconds after the app
   registers it. A restart of the Mac before that loses the item:
@@ -529,10 +544,10 @@ and not changed here:
 - Before its first read of the daemon, 30 seconds after its start,
   the app shows "Idle" with the provider "Filesystem", whatever the
   daemon does.
-- With no sync profile the app shows "Paused", and the daemon says
-  "unconfigured".
-- The pointer events of the driver count as a user at the device, so
-  the daemon in the guest works at the pace of "Throttled".
+
+One limit of the tier itself: the pointer events of the driver count
+as a user at the device, so the daemon in a guest works at the pace of
+"Throttled" while a scenario acts.
 
 ## Open points
 

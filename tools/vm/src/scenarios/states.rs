@@ -205,6 +205,20 @@ fn needs_answer(ctx: &mut Ctx) -> Result<(), Failure> {
 
     expect_state(ctx, "sync_state_error_label", "needs-answer")?;
     ctx.open_main_window()?;
+    // Under the status the Dashboard gives the daemon's reason, which
+    // says what the user must confirm.
+    let reason = ctx
+        .status()
+        .and_then(|status| status["run"]["reason"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    ensure!(!reason.is_empty(), "the daemon gives no reason for `error`");
+    ctx.app().wait(
+        DASHBOARD_SYNC_DETAIL,
+        Some(MAIN_WINDOW),
+        STATUS_TIMEOUT,
+        "the Dashboard to show the daemon's reason",
+        |node| node.text() == reason,
+    )?;
     ctx.wait_text(
         NOTICE_DECISIONS,
         Some(MAIN_WINDOW),

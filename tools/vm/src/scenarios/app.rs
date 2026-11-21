@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use vapor_e2e::wait::{hold_for, wait_until};
 use vapor_e2e::{Failure, ensure};
-use vapor_shared::constants::service::DAEMON_LABEL;
+use vapor_shared::constants::service::{DAEMON_LABEL, HEALTH_TICK_INTERVAL_SECONDS};
 
 use crate::scenario::{
     Ctx, DASHBOARD_AUTO_LAUNCH, DASHBOARD_STATUS, DIAGNOSTICS_VERSION, GuestKind, MAIN_WINDOW,
@@ -57,8 +57,8 @@ pub fn scenarios() -> Vec<Scenario> {
 }
 
 fn menu(ctx: &mut Ctx) -> Result<(), Failure> {
-    // With a daemon that answers and auto-launch on, every action is
-    // available.
+    // A started app with auto-launch on offers every action. The
+    // wait only makes the screenshot show a daemon that is up.
     wait_until(
         PROCESS_TIMEOUT,
         "the daemon to answer `vapor status`",
@@ -109,7 +109,7 @@ fn main_window_count(ctx: &Ctx) -> Result<usize, Failure> {
 
 fn main_window(ctx: &mut Ctx) -> Result<(), Failure> {
     ensure!(
-        !ctx.app().exists(MAIN_WINDOW, None),
+        ctx.main_window_absent(),
         "the app must start with no main window"
     );
     ctx.open_main_window()?;
@@ -140,14 +140,13 @@ fn main_window(ctx: &mut Ctx) -> Result<(), Failure> {
     // Closing the window is a UI action only.
     ctx.app().click(CLOSE_BUTTON, Some(MAIN_WINDOW))?;
     ctx.app().wait_gone(MAIN_WINDOW, None)?;
-    ensure!(
-        ctx.process_runs("Vapor"),
-        "closing the window ended the app"
-    );
-    ensure!(
-        ctx.job_runs(DAEMON_LABEL),
-        "closing the window stopped the daemon"
-    );
+    // A stop of the daemon goes through the CLI and takes a moment,
+    // so one look right after the click would miss it.
+    hold_for(
+        Duration::from_secs(8),
+        "the app and the daemon keep running after the window closes",
+        || ctx.process_runs("Vapor") && ctx.job_runs(DAEMON_LABEL),
+    )?;
     ctx.wait_menu_bar_item()?;
     ctx.shot("window-closed")
 }
@@ -205,9 +204,10 @@ fn quit(ctx: &mut Ctx) -> Result<(), Failure> {
         "`vapor status` still gets an answer after Quit Vapor"
     );
     // The supervisor restarts a daemon that crashed, never one the
-    // user stopped.
+    // user stopped. It looks once in each health interval, so the hold
+    // is longer than one interval.
     hold_for(
-        Duration::from_secs(12),
+        Duration::from_secs(HEALTH_TICK_INTERVAL_SECONDS + 10),
         "neither the app nor the daemon starts again after Quit Vapor",
         || !ctx.process_runs("Vapor") && !ctx.process_runs("vapord"),
     )?;

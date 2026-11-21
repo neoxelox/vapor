@@ -134,9 +134,9 @@ Two obligations when Tier E2E applies:
    base commit: it must fail before the feature and pass after. Running
    only the pre-existing scenarios proves that nothing broke, not that
    the feature works.
-2. **Owner handoff.** If the change also affects a UI surface, finish
-   the report with a short manual-verification checklist for the
-   project owner, since agents never verify UI.
+2. **The app.** If the change also affects the Mac app or its
+   install, run Tier VM (`vm-verification.md`) and give the project
+   owner its screenshots with a list of what to judge.
 
 ## Running it
 
@@ -414,8 +414,9 @@ Discipline rules:
   driver (`tools/soak`, `docs/development/soak-testing.md`).
 - **Live Google Drive.** The mode exists as a flag; the Drive-side
   operations and the credentials wait on the project owner (above).
-- **macOS app UI.** Owner-verified manually, per the standing test
-  carve-out. Tier E2E's job there is the handoff checklist.
+- **macOS app UI.** Tier E2E never starts the app. Tier VM
+  (`vm-verification.md`) tests the installed app in a virtual machine,
+  and the project owner judges the look.
 - **The Windows daemon.** Its scenarios skip until the native
   platform traits ship; the harness itself builds and runs `S01` there
   on every PR. Linux runs the daemon scenarios; what it skips is the

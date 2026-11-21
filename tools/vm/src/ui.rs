@@ -117,15 +117,22 @@ impl<'a> Ui<'a> {
         Ok(serde_json::from_str(&text)?)
     }
 
-    /// The first control that matches, or `None`. `within` narrows the
-    /// search to the controls under another one, for a control that
-    /// more than one window shows.
+    /// The first control that matches, or `None` when the app runs and
+    /// has no such control. `within` narrows the search to the controls
+    /// under another one, for a control that more than one window
+    /// shows.
     pub fn find(&self, selector: &str, within: Option<&str>) -> Result<Option<Node>, Failure> {
         let command = self.command("find", Some(selector), within);
         let output = self.guest.sh(&command)?;
         match output.status.code() {
             Some(0) => Ok(Some(serde_json::from_slice(&output.stdout)?)),
-            Some(EXIT_NOT_FOUND | EXIT_APP_NOT_RUNNING) => Ok(None),
+            Some(EXIT_NOT_FOUND) => Ok(None),
+            // Not "no control": a scenario that asserts that a window
+            // is absent must not pass because the app crashed.
+            Some(EXIT_APP_NOT_RUNNING) => Err(Failure::new(format!(
+                "the app `{}` does not run in the guest",
+                self.app
+            ))),
             _ => Err(Failure::new(format!(
                 "the driver failed on `{command}`: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
@@ -135,6 +142,12 @@ impl<'a> Ui<'a> {
 
     pub fn exists(&self, selector: &str, within: Option<&str>) -> bool {
         matches!(self.find(selector, within), Ok(Some(_)))
+    }
+
+    /// Whether the app runs and has no control that matches. An app
+    /// that does not run, or a driver that fails, is not an answer.
+    pub fn lacks(&self, selector: &str, within: Option<&str>) -> bool {
+        matches!(self.find(selector, within), Ok(None))
     }
 
     /// Waits until a control matches and `accept` takes it.

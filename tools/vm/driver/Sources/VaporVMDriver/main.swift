@@ -367,13 +367,20 @@ case "close-notifications":
   printJSON(["closed": closed])
 
 case "allow-screen-capture":
-  // macOS asks once in a while whether a tool may capture the screen
-  // with no picker. The dialog belongs to UserNotificationCenter.
+  // macOS asks once in a while whether the guest agent may capture
+  // the screen with no picker. The dialog belongs to
+  // UserNotificationCenter, which also shows other questions; only the
+  // one that names the guest agent is answered, so a question that the
+  // product under test causes stays on the screen.
   let running = NSWorkspace.shared.runningApplications
   guard
     let center = running.first(where: { $0.localizedName == "UserNotificationCenter" }),
-    let button = first(
-      Selector("id=action-button-1"), under: roots(of: center.processIdentifier))
+    let dialog = first(
+      Selector("value~=tart-guest-agent"), under: roots(of: center.processIdentifier)),
+    let parent = attribute(dialog, kAXParentAttribute),
+    CFGetTypeID(parent) == AXUIElementGetTypeID(),
+    // The type check above makes the cast safe.
+    let button = first(Selector("id=action-button-1"), under: [parent as! AXUIElement])
   else {
     printJSON(["pressed": false])
     break
