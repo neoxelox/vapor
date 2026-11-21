@@ -20,7 +20,10 @@ form; the runbook wins on any disagreement.
    `Unreleased`; the script only checks that the section exists and
    stops with "CHANGELOG.md missing section" when it does not.
 3. `./scripts/release.sh` green on the commit being released: the
-   format check, lint, Tier 1, and the e2e suite once per provider. The
+   format check, lint, Tier 1, the e2e suite once per provider, and
+   the Tier VM suite. Tier VM is the last leg and needs Tart and the
+   guest image on this Mac: check `./scripts/vm.sh --list` and
+   `tart list` before the gate starts (`vapor-vm`). The
    Google Drive leg runs only here, by hand, with the dedicated test
    account and `VAPOR_GDRIVE_CLIENT_ID` set (exported or in `.env`); it
    never runs in CI and never against a personal account.
@@ -85,7 +88,8 @@ recipe in `docs/operations/release-process.md`.
   (`apps/macos/scripts/verify-package.sh <file>` checks it; the package
   job also installs it on its runner).
 - Release notes match the `CHANGELOG.md` section for the tag.
-- Never open the packaged app; the owner verifies launch by hand.
+- Never open the packaged app on the host. Tier VM starts it in a
+  guest, and the owner judges the look.
 
 ## Reruns and failures
 

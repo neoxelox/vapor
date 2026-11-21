@@ -1,4 +1,5 @@
 import SwiftUI
+import VaporCore
 
 private enum SidebarDestination: CaseIterable, Identifiable {
   case dashboard
@@ -22,6 +23,15 @@ private enum SidebarDestination: CaseIterable, Identifiable {
     }
   }
 
+  var accessibilityID: String {
+    switch self {
+    case .dashboard:
+      return AccessibilityID.Sidebar.dashboard
+    case .diagnostics:
+      return AccessibilityID.Sidebar.diagnostics
+    }
+  }
+
   var symbolName: String {
     switch self {
     case .dashboard:
@@ -41,6 +51,7 @@ struct ContentView: View {
       List(SidebarDestination.allCases, selection: $selection) { destination in
         Label(viewModel.localized(destination.localizationKey), systemImage: destination.symbolName)
           .tag(destination)
+          .accessibilityIdentifier(destination.accessibilityID)
       }
       .navigationSplitViewColumnWidth(min: 180, ideal: 210)
       .navigationTitle(viewModel.localized("app_title"))
@@ -80,9 +91,11 @@ private struct DiagnosticsSummaryView: View {
             )
           )
           .font(.headline)
+          .accessibilityIdentifier(AccessibilityID.Diagnostics.status)
           Text(viewModel.localized(viewModel.state.syncState.detailLocalizationKey))
             .font(.subheadline)
             .foregroundStyle(.secondary)
+            .accessibilityIdentifier(AccessibilityID.Diagnostics.statusDetail)
           SignInNotice(viewModel: viewModel)
           UserActionNotice(viewModel: viewModel)
         }
@@ -95,15 +108,21 @@ private struct DiagnosticsSummaryView: View {
             viewModel.localized(
               viewModel.state.autoLaunchEnabled
                 ? "diagnostics_auto_launch_enabled" : "diagnostics_auto_launch_disabled"
-            ))
+            )
+          )
+          .accessibilityIdentifier(AccessibilityID.Diagnostics.autoLaunch)
           Text(viewModel.localized("diagnostics_provider_format", viewModel.state.providerName))
             .foregroundStyle(.secondary)
+            .accessibilityIdentifier(AccessibilityID.Diagnostics.provider)
           Text(viewModel.localized("diagnostics_version_format", viewModel.versionDisplay))
             .foregroundStyle(.secondary)
+            .accessibilityIdentifier(AccessibilityID.Diagnostics.version)
           Text(viewModel.localized("diagnostics_build_format", viewModel.buildVersionDisplay))
             .foregroundStyle(.secondary)
+            .accessibilityIdentifier(AccessibilityID.Diagnostics.build)
           Text(viewModel.localized("runtime_directory_format", viewModel.state.vaporDirectoryPath))
             .foregroundStyle(.secondary)
+            .accessibilityIdentifier(AccessibilityID.Diagnostics.runtimeDirectory)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       }

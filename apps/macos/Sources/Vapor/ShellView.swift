@@ -1,4 +1,5 @@
 import SwiftUI
+import VaporCore
 
 struct ShellView: View {
   @ObservedObject var viewModel: AppShellViewModel
@@ -19,13 +20,16 @@ struct ShellView: View {
             )
           )
           .font(.headline)
+          .accessibilityIdentifier(AccessibilityID.Dashboard.status)
           Text(viewModel.localized(viewModel.state.syncState.detailLocalizationKey))
             .font(.subheadline)
             .foregroundStyle(.secondary)
+            .accessibilityIdentifier(AccessibilityID.Dashboard.statusDetail)
           if let syncDetail = viewModel.state.syncDetail {
             Text(syncDetail)
               .font(.caption)
               .foregroundStyle(.secondary)
+              .accessibilityIdentifier(AccessibilityID.Dashboard.syncDetail)
           }
           SyncNowControl(viewModel: viewModel)
           SignInNotice(viewModel: viewModel)
@@ -45,11 +49,13 @@ struct ShellView: View {
       }
 
       Toggle(viewModel.localized("settings_start_at_login"), isOn: autoLaunchBinding)
+        .accessibilityIdentifier(AccessibilityID.Dashboard.autoLaunch)
       loginItemApprovalHint
 
       Text(viewModel.localized("runtime_directory_format", viewModel.state.vaporDirectoryPath))
         .font(.caption)
         .foregroundStyle(.secondary)
+        .accessibilityIdentifier(AccessibilityID.Dashboard.runtimeDirectory)
     }
     .padding(24)
     .frame(minWidth: 460, minHeight: 320)
@@ -66,10 +72,12 @@ struct ShellView: View {
         Text(viewModel.localized("login_item_requires_approval_detail"))
           .font(.caption)
           .foregroundStyle(Color.vaporPrimary)
+          .accessibilityIdentifier(AccessibilityID.Notice.loginItemApproval)
         Button(viewModel.localized("login_item_open_settings")) {
           viewModel.openLoginItemSettings()
         }
         .controlSize(.small)
+        .accessibilityIdentifier(AccessibilityID.Notice.openLoginItemSettings)
       }
     }
   }
@@ -90,6 +98,7 @@ struct ShellView: View {
       VStack(alignment: .leading, spacing: 6) {
         Text(viewModel.localized("config_issue_preserved_file_format", configurationIssuePath))
           .font(.subheadline)
+          .accessibilityIdentifier(AccessibilityID.Dashboard.configurationIssue)
         Text(configurationIssueReason)
           .font(.caption)
           .foregroundStyle(.secondary)
@@ -187,9 +196,12 @@ struct SettingsView: View {
       }
 
       Toggle(viewModel.localized("settings_start_at_login"), isOn: autoLaunchBinding)
+        .accessibilityIdentifier(AccessibilityID.Settings.autoLaunch)
       loginItemApprovalHint
       Toggle(viewModel.localized("settings_use_gitignore"), isOn: useGitignoreBinding)
+        .accessibilityIdentifier(AccessibilityID.Settings.useGitignore)
       Toggle(viewModel.localized("settings_use_vaporignore"), isOn: useVaporignoreBinding)
+        .accessibilityIdentifier(AccessibilityID.Settings.useVaporignore)
 
       Section(viewModel.localized("settings_user_ignore_rules")) {
         VStack(alignment: .leading, spacing: 6) {
@@ -201,6 +213,7 @@ struct SettingsView: View {
           TextEditor(text: preIgnoreRulesBinding)
             .font(.system(.body, design: .monospaced))
             .frame(minHeight: 110)
+            .accessibilityIdentifier(AccessibilityID.Settings.preIgnoreRules)
         }
 
         VStack(alignment: .leading, spacing: 6) {
@@ -212,12 +225,14 @@ struct SettingsView: View {
           TextEditor(text: postIgnoreRulesBinding)
             .font(.system(.body, design: .monospaced))
             .frame(minHeight: 110)
+            .accessibilityIdentifier(AccessibilityID.Settings.postIgnoreRules)
         }
 
         Button(viewModel.localized("settings_save_ignore_rules")) {
           viewModel.saveIgnoreRuleSettings()
         }
         .disabled(!viewModel.hasPendingIgnoreRuleChanges)
+        .accessibilityIdentifier(AccessibilityID.Settings.saveIgnoreRules)
 
         Text(viewModel.localized("settings_ignore_rules_apply_note"))
           .font(.caption)
@@ -229,6 +244,7 @@ struct SettingsView: View {
           Text(code).tag(code)
         }
       }
+      .accessibilityIdentifier(AccessibilityID.Settings.language)
 
       Text(viewModel.localized("runtime_directory_format", viewModel.state.vaporDirectoryPath))
         .font(.caption)
@@ -240,6 +256,7 @@ struct SettingsView: View {
         viewModel.disableAutoLaunchAndStopNow()
       }
       .disabled(!viewModel.state.autoLaunchEnabled)
+      .accessibilityIdentifier(AccessibilityID.Settings.stopNow)
     }
     .padding(24)
     .frame(width: 420)
@@ -256,10 +273,12 @@ struct SettingsView: View {
         Text(viewModel.localized("login_item_requires_approval_detail"))
           .font(.caption)
           .foregroundStyle(Color.vaporPrimary)
+          .accessibilityIdentifier(AccessibilityID.Notice.loginItemApproval)
         Button(viewModel.localized("login_item_open_settings")) {
           viewModel.openLoginItemSettings()
         }
         .controlSize(.small)
+        .accessibilityIdentifier(AccessibilityID.Notice.openLoginItemSettings)
       }
     }
   }
@@ -318,12 +337,14 @@ struct RestartRequiredNotice: View {
         Text(viewModel.localized("settings_restart_required_format", notice))
           .font(.caption)
           .foregroundStyle(Color.vaporPrimary)
+          .accessibilityIdentifier(AccessibilityID.Notice.restartRequired)
         Button(viewModel.localized("settings_restart_daemon")) {
           viewModel.restartDaemon()
         }
         .controlSize(.small)
         .disabled(!viewModel.state.autoLaunchEnabled)
         .help(viewModel.localized("restart_needs_auto_launch_hint"))
+        .accessibilityIdentifier(AccessibilityID.Notice.restart)
       }
     }
   }
@@ -342,6 +363,7 @@ struct SignInNotice: View {
         Text(viewModel.localized("sign_in_required_format", providerName))
           .font(.caption)
           .foregroundStyle(Color.vaporPrimary)
+          .accessibilityIdentifier(AccessibilityID.Notice.signIn)
         Text(viewModel.localized("sign_in_required_detail"))
           .font(.caption2)
           .foregroundStyle(.secondary)
@@ -355,6 +377,7 @@ struct SignInNotice: View {
         .controlSize(.small)
         .disabled(viewModel.state.signInInProgress)
         .help(viewModel.localized("sign_in_hint"))
+        .accessibilityIdentifier(AccessibilityID.Notice.signInButton)
       }
     }
   }
@@ -377,6 +400,7 @@ struct UserActionNotice: View {
         )
         .font(.caption)
         .foregroundStyle(Color.vaporPrimary)
+        .accessibilityIdentifier(AccessibilityID.Notice.decisions)
         Text(viewModel.localized("attention_cli_hint"))
           .font(.caption2)
           .foregroundStyle(.secondary)
@@ -399,6 +423,7 @@ struct SyncNowControl: View {
           Text(viewModel.localized("scan_waiting_hint"))
             .font(.caption)
             .foregroundStyle(.secondary)
+            .accessibilityIdentifier(AccessibilityID.Dashboard.scanWaiting)
         }
         Button(viewModel.localized("menubar_sync_now")) {
           viewModel.syncNow()
@@ -406,6 +431,7 @@ struct SyncNowControl: View {
         .controlSize(.small)
         .disabled(viewModel.state.scanIsRunning)
         .help(viewModel.localized("sync_now_hint"))
+        .accessibilityIdentifier(AccessibilityID.Dashboard.syncNow)
       }
     }
   }

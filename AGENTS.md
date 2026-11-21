@@ -279,9 +279,10 @@ The release procedure itself is the `vapor-release` skill and
   file; `scripts/version.sh` is the only entrypoint for bumps and sync;
   release tags must equal `v$(cat VERSION)`.
 - Build provenance must keep semantic version and git commit SHA separate.
-- AI contributors must never auto-open packaged apps (for example `open
-  dist/Vapor.app`); app launch verification is performed manually by the
-  project owner.
+- AI contributors must never open a packaged app on their host (for
+  example `open dist/Vapor.app`). A packaged app starts only inside a
+  guest of Tier VM (§9.9), where an agent verifies how it behaves; the
+  project owner judges how it looks (owner, 2026-11-21).
 
 ### 7.2) macOS distribution
 
@@ -355,6 +356,11 @@ Linux app window exists (owner, 2026-11-21). Expected controls:
     in §3 to §6 does not license more of it: fix it when the fix is
     small and in the area being changed, otherwise report it and add a
     task under `docs/tasks/`.
+  - A finding is never lost. Whoever finds a bug, something broken, or
+    an improvement that could be made, and does not fix it in the same
+    change, adds it as a task under `docs/tasks/` in that change set
+    and names it in the report. The owner decides later what to do
+    with each one (owner, 2026-11-21).
 - Swift (macOS app only)
   - Prefer structured concurrency and explicit actor boundaries.
   - Keep UI/state surfaces deterministic and reason-first.
@@ -420,7 +426,8 @@ the "latest stable" policy above.
 
 Contributors run the repository wrapper scripts under `scripts/`, never
 raw tool commands, in the order `format`, `lint`, `test`, then `e2e` for
-runtime-affecting changes. The wrappers set the project environment
+runtime-affecting changes and `vm` for changes to the Mac app or to its
+install. The wrappers set the project environment
 (`VAPOR_DIR`, `VAPOR_ENV`, log routing). `lint` includes the dependency
 check (`cargo deny`), which needs that tool installed and a network
 connection. Which tier a change needs and
@@ -654,7 +661,9 @@ As important as §9.2. Refuse tests for:
 - Generated code from `build.rs`.
 - **UI rendering on any app surface**: SwiftUI views, menubar layout,
   Dock transitions, and the equivalent on future Windows/Linux apps.
-  UI correctness is verified by the project owner manually.
+  No unit test covers them. On macOS, Tier VM (§9.9) proves how the
+  installed app behaves, and the project owner judges how it looks
+  from the screenshots of a run (owner, 2026-11-21).
 - **Interactive TTY behavior** on the `vapor` CLI: color codes, cursor
   positioning, terminal resize, ncurses interactions.
 - Third-party crate internals.
@@ -668,7 +677,8 @@ If a test's failure mode is "I typo'd a default value", skip it.
   so nothing is carved out.
 - `apps/macos` (Swift): logic tests only (configuration, lifecycle
   coordinator state transitions, view-model state mapping, localization
-  fallback, logger redaction). **No UI tests.**
+  fallback, logger redaction). **No UI tests in Tier 1.** What the
+  installed app does on the screen is Tier VM's (§9.9).
 - `core/cli` (`vapor` binary): logic + shape-lock + integration tests.
   `vapor service install` / `run` / `status` round-trip in CI. **No
   interactive TTY tests.**
@@ -700,6 +710,12 @@ If a test's failure mode is "I typo'd a default value", skip it.
   scenarios whose needs the host cannot meet skip by name) and locally
   by the contributor (host-safe default). Contract in §9.8; procedure
   in the `vapor-e2e` skill.
+- **Tier VM**: `./scripts/vm.sh` (the `tools/vm` harness), run by the
+  contributor: required for a change to the Mac app or its install,
+  and a leg of `./scripts/release.sh`. The installer of the build,
+  installed in a macOS virtual machine, with the app driven as a user
+  does. Never a PR gate: a GitHub-hosted runner cannot run a macOS
+  guest. Contract in §9.9; procedure in the `vapor-vm` skill.
 
 ### 9.6) Flaky-test policy
 
@@ -762,9 +778,8 @@ work once, end to end. Procedure: the `vapor-e2e` skill and
   in words and a task in `docs/tasks/core.md`. Weakening an assertion
   to make a run green is never acceptable. A known-gap scenario that
   passes makes the run red until its marker is removed.
-- UI-affecting changes additionally get a short manual-verification
-  handoff checklist for the project owner, since agents never verify
-  UI.
+- UI-affecting changes go through Tier VM (§9.9), which is where an
+  agent sees the app.
 - The filesystem provider is the default. Google Drive is an opt-in
   mode (`--provider gdrive`) that needs real credentials for a
   dedicated test account: never part of the default run, never in CI,
@@ -772,6 +787,58 @@ work once, end to end. Procedure: the `vapor-e2e` skill and
   account. It runs once per release, by hand, as a leg of
   `./scripts/release.sh`, which runs the suite for every provider
   the harness knows before a version bump.
+
+### 9.9) Virtual machine verification (Tier VM)
+
+Tier E2E never starts the Mac app, and the app cannot run on a
+contributor's Mac without replacing the launchd jobs and the login item
+of a real install. Tier VM tests the installed product on a Mac that is
+not the contributor's: a macOS virtual machine. Procedure: the
+`vapor-vm` skill and `docs/development/vm-verification.md`. The
+invariants:
+
+- `./scripts/vm.sh` builds the installer, the harness (`tools/vm`,
+  crate `vapor-vm`) and its driver (`tools/vm/driver`), dev tools that
+  never ship. It installs the installer, unchanged, in a macOS guest
+  made with Tart from an image pinned by digest, and acts on the app
+  through the accessibility API of macOS and the installed `vapor`
+  CLI. The app carries no test hook (owner, 2026-11-21).
+- Isolation is absolute (owner, 2026-11-21). The packaged app and the
+  installer start only inside a guest. A guest sees two host
+  directories (the staged build, read-only, and the run's directory),
+  has no window, no sound, no shared clipboard, and no route to the
+  Internet. A manual guest shows a window only when a person asked to
+  use it by hand (`./scripts/vm.sh --guest --window`). The harness changes only VMs named `vapor-vm-*`, and a
+  checkout only its own.
+- A run deletes every guest it made; only `--keep` leaves one, on
+  request. What stays on the host is the evidence under the repo-local
+  `.vapor/vm/` (removed by `./scripts/clean.sh`), one empty lock file
+  in the user's temporary directory, and in Tart's store the image and
+  the prepared guests that every run clones (removed by
+  `./scripts/vm.sh --clean` and `tart delete`).
+- A run never downloads. `./scripts/vm.sh --setup` is the one command
+  that uses the network (the guest image, 36 GB on disk). No script of
+  the repository runs Homebrew: the contributor installs Tart by hand
+  (owner, 2026-11-21).
+- A scenario declares the guest it needs, by what it tests: a fresh
+  guest for the install, a first start, a start at login, or a
+  removal; the shared guest for the screens and states of the
+  installed app (owner, 2026-11-21). The scenarios that share a guest
+  do not depend on their order.
+- Required before an agent reports as done a change under `apps/macos`
+  or a change to how the app is packaged or installed, and as a leg of
+  `./scripts/release.sh` (owner, 2026-11-21).
+- When a change adds behaviour that a user sees in the app or in the
+  install, add a scenario under `tools/vm/src/scenarios/` in the same
+  change set: it must fail before the change and pass after. Weakening
+  an assertion to make a run green is never acceptable.
+- A scenario finds a control in a window by its accessibility
+  identifier (`apps/macos/Sources/VaporCore/AccessibilityID.swift`),
+  and compares a text with the English catalog. A new control gets its
+  identifier in the same change set.
+- An agent verifies behaviour and never the look. The report of a UI
+  change gives the owner the screenshots of the run and a list of what
+  to judge (owner, 2026-11-21).
 
 ## 10) Pull requests, commits, and documentation
 
@@ -804,6 +871,11 @@ The invariants behind them:
   commit's subject. The owner merges, as a squash, the only method the
   repository allows, so that subject is the commit on `main`. Agents
   never merge.
+- A PR that changes what a user sees shows it. Its description
+  carries the screenshots of the change, from a Tier VM run (§9.9),
+  and a video when the change moves on the screen, so the reviewer
+  sees what changed. Both are optional, and a picture shows a guest
+  only, never a contributor's machine (owner, 2026-11-21).
 - Every PR gets one adversarial review by the agent's own subagents
   (owner, 2026-11-14). It starts the moment the PR opens and runs
   while CI runs, so it adds no time to the wait. One pass; the agent
@@ -842,7 +914,8 @@ Collected from the rules in this file, so an agent neither stops to ask
 for what is already granted nor acts on what is not.
 
 - Without asking: run the wrapper scripts the validation ladder calls
-  for (§8.4) and the e2e manual sandbox; read repository and PR state
+  for (§8.4), the e2e manual sandbox, and the Tier VM manual guest;
+  read repository and PR state
   with `git` and read-only `gh` calls; write scratch files under
   `.context/` and the repo-local `.vapor/`; read `~/.vapor` to
   diagnose a failure the owner reported (`vapor-debug`); and, on a PR
@@ -851,10 +924,13 @@ for what is already granted nor acts on what is not.
   review.
 - Only when the owner asks for that specific action: push a branch,
   open a PR, cut or rehearse a release, run e2e against Google Drive,
-  change repository settings, release environments, or the action
-  allowlist.
+  install or remove Tart (a removal with `HOMEBREW_NO_AUTOREMOVE=1`,
+  so Homebrew removes nothing else), pull the guest image
+  (`./scripts/vm.sh --setup`), change repository settings, release
+  environments, or the action allowlist.
 - Never: merge a PR, push to `main` outside the release flow, launch a
-  packaged app, run `./scripts/e2e.sh --full` on a contributor machine,
+  packaged app on the host (inside a Tier VM guest is that tier's job),
+  run `./scripts/e2e.sh --full` on a contributor machine,
   write to `~/.vapor` or run a test or a reproduction against it, or
   use the network in a test.
 
@@ -908,6 +984,7 @@ carries its own trigger conditions in its description.
 | `vapor-design` | The owner asks for a feature, a change to sync semantics, or any change with more than one reasonable answer; before building one; when a change would contradict a recorded decision. |
 | `vapor-validate` | Before committing a change under `core/*`, `apps/*`, or `scripts/*`; when a script run is red. |
 | `vapor-e2e` | A change alters daemon- or CLI-observable behaviour and Tier 1 is green; to watch a feature in the real product. |
+| `vapor-vm` | A change touches the Mac app or its install; to see the installed app or reproduce a bug in it; to get screenshots of a UI change for the owner. |
 | `vapor-soak` | Proving the product is safe for real data: hours of seeded churn with faults and a no-loss oracle, watched on a loop and triaged at the first violation. |
 | `vapor-debug` | The daemon crashed, will not start, sync is stuck, or a status looks wrong; a bug or a failing test has no obvious cause. |
 | `vapor-config` | Adding or changing a `vapor.json` key, `VAPOR_*` variable, default, path name, or launch label. |

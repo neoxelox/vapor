@@ -82,6 +82,7 @@ in its pull request and in the documents under `docs/`.
 - Tier E2E (`./scripts/e2e.sh`) drives the real binaries in sandboxes on every pull request. Tier S (`./scripts/soak.sh`) is hours of seeded file churn with a no-loss check, as a release gate.
 - The release pipeline packages each platform under its own protected environment. Actions are pinned and allowlisted, and `main` is protected by a ruleset.
 - The pre-commit hook runs lint and Tier 1.
+- Tier VM (`./scripts/vm.sh`) installs the packaged app in a macOS virtual machine and acts on it as a user does, with screenshots of each scenario. The controls in the windows of the Mac app have accessibility identifiers, which the tier finds them by.
 
 ## [0.2.0-alpha.3] - 2026-03-10
 

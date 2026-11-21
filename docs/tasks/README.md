@@ -78,10 +78,12 @@ None of them blocks the Mac app work.
 
 Status: pending and unblocked.
 
-- `macos.md` M3-2 … M3-15: the menubar state model, the diagnostics
+- `macos.md` M3-2 … M3-19: the menubar state model, the diagnostics
   panel, the per-item "why stuck" view, the live timeline tab, the
   decisions pane (conflicts included), the trash pane, the root-state
-  display, notifications, and the ignored-paths view. `core.md` C8-71
+  display, notifications, the ignored-paths view, the state before
+  the first read of the daemon, late answers to an action, and the
+  two controls for auto-launch. `core.md` C8-71
   (per-path timeline detail) is the one open core dependency, only for
   naming files inside notifications.
 - `macos.md` M4-1 … M4-5: profiles UX: create, rename, select, enable,
@@ -100,8 +102,8 @@ takes.
 - `macos.md` O-1 … O-4: the first-run flow: provider for the first
   profile, sign-in, roots, sync mode, start at login; the gate that
   opens it while the install is unconfigured; re-entry from Settings
-  for a second profile; copy, logic tests, and the owner's manual
-  checklist.
+  for a second profile; copy, logic tests, Tier VM scenarios, and
+  the list of what the owner judges.
 
 The project owner's decision behind it: most real installs will use
 Google Drive, so a pair of filesystem folders created before anyone

@@ -80,6 +80,14 @@ or CLI, also run the end-to-end suite:
 ./scripts/e2e.sh
 ```
 
+If your change touches the Mac app or its install, also run the
+virtual machine suite. It needs a Mac with Apple silicon and Tart
+(`docs/development/vm-verification.md`):
+
+```sh
+./scripts/vm.sh
+```
+
 This drives the real `vapor` and `vapord` binaries black-box, one
 disposable sandbox per scenario under `.vapor/e2e/`, and ends every
 scenario by comparing the two trees. It never touches `~/.vapor`,

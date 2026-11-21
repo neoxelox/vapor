@@ -41,6 +41,24 @@ for pid_file in "$ROOT_DIR"/.vapor/e2e/*/daemon.pid; do
   fi
 done
 
+# A Tier VM run that was interrupted, or a manual guest, leaves a test
+# guest in Tart's store. The store is shared by every checkout, so only
+# the guests that this checkout made go: their names carry a tag made
+# from its path. `./scripts/vm.sh --clean` also removes the prepared
+# guests; the pulled image stays either way.
+if command -v tart >/dev/null 2>&1 && command -v shasum >/dev/null 2>&1; then
+  # `realpath` gives the spelling the harness hashes, also on a volume
+  # that folds case.
+  checkout_path="$(realpath "$ROOT_DIR" 2>/dev/null || echo "$ROOT_DIR_PHYSICAL")"
+  checkout_tag="$(printf '%s' "$checkout_path" | shasum -a 256 | cut -c1-8)"
+  while IFS= read -r vm; do
+    [[ "$vm" == "vapor-vm-$checkout_tag-"* ]] || continue
+    echo "[clean] deleting the test guest $vm"
+    tart stop "$vm" >/dev/null 2>&1 || true
+    tart delete "$vm" >/dev/null 2>&1 || true
+  done < <(tart list --source local --quiet 2>/dev/null || true)
+fi
+
 paths=(
   "$ROOT_DIR/target"
   "$ROOT_DIR/debug"

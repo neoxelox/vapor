@@ -80,6 +80,31 @@ decision waits; the sign-in notice has a Sign In button.
       ignored --json`, with the rule that hides each path.
 - [ ] M3-15 (idea) One long-lived status connection in place of a CLI
       process for each health tick.
+- [ ] M3-16 The state before the first read of the daemon. The app
+      reads the daemon 30 seconds after its start, and until then the
+      menu and the Dashboard show `Idle` with the provider
+      `Filesystem`, whatever the daemon does. Read the daemon once at
+      the start, and show that the state is not known until an answer
+      is there. Found by Tier VM (`./scripts/vm.sh`), whose state
+      scenarios wait for the first read.
+- [ ] M3-17 The screen answers an action late. The app reads the
+      daemon each 30 seconds only, so after Sync now, Restart sync, or
+      a change of the start-at-login toggle the menu and the Dashboard
+      show the old state for up to 30 seconds. Read the daemon right
+      after each action that the app starts. Related: M3-15.
+- [ ] M3-18 The menu item `Toggle auto-launch`. It does not say
+      whether the setting is on, and it names the setting in another
+      way than the Dashboard and Settings ("Start Vapor at login").
+      Show it as one item with a checkmark and the same wording.
+- [ ] M3-19 "Start Vapor at login" set to off stops sync at once. On
+      macOS the removal of a launchd job ends its process, so the
+      toggle stops the daemon while the app stays open, and
+      `vapor service uninstall --keep-running` cannot keep it up (its
+      own test says so). The button "Disable auto-launch and stop now"
+      in Settings then does nothing more than the toggle. Decide what
+      "off" means for the daemon that runs now: keep it running until
+      the next logout, or say on the toggle that sync stops, and
+      remove the second control.
 
 Exit gate:
 
@@ -137,7 +162,10 @@ Exit gate:
 - [ ] M5-2 Verify entitlements drift check runs on every release build.
 - [ ] M5-3 Verify LaunchAgent/login-item behavior stability across upgrades
       (upgrade from N-1 → N does not leave orphaned plists or duplicate
-      login items).
+      login items). Tier VM (`docs/development/vm-verification.md`)
+      gives the clean Mac for this: a scenario that installs the
+      installer of release N-1 in a fresh guest, then the one of N.
+      It needs the older installer as an input of the run.
 - [ ] M5-4 Preserve rollback artifacts per `docs/operations/release-
       process.md`.
 - [ ] M5-5 What a removal leaves behind. An installer has no
@@ -148,7 +176,27 @@ Exit gate:
       six commands. Decide between a `vapor` command that removes the
       install and a menu item in the app. Check also what macOS itself
       keeps after the app is gone: the login item of the app and the
-      privacy answers.
+      privacy answers. A fresh guest of Tier VM
+      (`docs/development/vm-verification.md`) is the Mac to check it
+      on, and the scenario that proves the removal belongs there.
+- [ ] M5-6 A restart of the Mac within a few seconds of the first
+      start loses the login item. macOS writes a new login item to
+      disk a few seconds after the app registers it. After a restart
+      inside that window the daemon and the supervisor run, the app
+      does not start, and no menu bar item shows until the user opens
+      the app, which registers the item again. Decide whether that is
+      acceptable, or whether a job that already runs at login should
+      start the app. Found by Tier VM: its start-at-login scenario
+      waits until macOS saved the item.
+- [ ] M5-7 Three notifications at the first start, and how macOS lists
+      Vapor's background items. The first start gives "Login Item
+      Added" for the app, and one "App Background Activity" each for
+      `vapor` and `vapord`, named by their executables. In Login Items
+      & Extensions the two jobs are items of an unknown developer, not
+      of Vapor. Check what a signed build shows. Then decide whether
+      the app should register the two jobs through `SMAppService`, so
+      that they belong to Vapor and the user sees one item; the CLI
+      must still install the service with no app.
 
 Exit gate:
 
@@ -208,8 +256,9 @@ for tests; the app never assumes it.
       the flow says so.
 - [ ] O-4 Copy in `assets/locales/en.json`, logic tests for the step
       model and the gate (which state opens the window, what each
-      answer writes, what a cancel leaves behind), no UI tests, and the
-      manual verification checklist for the owner: fresh install shows
+      answer writes, what a cancel leaves behind), no UI tests in Tier
+      1, Tier VM scenarios for the flow, and the list of what the owner
+      judges: fresh install shows
       the flow, nothing exists under the home until Start, Google Drive
       sign-in round-trips, the filesystem choice creates exactly the
       two folders chosen.
@@ -234,3 +283,28 @@ Policy: `AGENTS.md §9`. Full taxonomy:
       the coverage of configuration, lifecycle, localization, paths,
       logger redaction, bundle layout, and ViewModel state transitions
       intact.
+- [ ] MT-2 Tier VM scenarios that the first version does not have
+      (`docs/development/vm-verification.md`): the crash-loop state of
+      the menu with its acknowledge action, the sign-in notice, the
+      configuration issue box, the ignore rules editor and the
+      language picker of Settings, the actions Sync now and Restart
+      sync, and the login item approval hint. The upgrade and the
+      removal scenarios belong to M5-3 and M5-5.
+- [ ] MT-3 Identifiers for the menu bar menu. macOS builds its items
+      from the SwiftUI views and drops the accessibility identifier,
+      so Tier VM finds an item by its catalog text and an assistive
+      tool has no stable name for it. An AppKit menu, or the window
+      style of the menu bar extra, keeps the identifiers. Both change
+      how the menu is built, so the owner decides.
+- [ ] MT-4 `./scripts/vm.sh --clean` under a run of another checkout.
+      It keeps the prepared guests only while a guest of another
+      checkout runs. Between two scenarios of that run no guest runs,
+      and the clean deletes the prepared guest that the run clones
+      next. Take the store lock and look for guests of other checkouts
+      that exist, not only for ones that run.
+- [ ] MT-5 The daemon in a Tier VM guest works at the pace of
+      `Throttled`. The pointer events of the driver count as a user at
+      the device, so the scenario of the syncing state sees
+      "Throttled" where an idle Mac shows "Syncing". Find a way to
+      show the idle pace too, for example a wait until the daemon
+      counts the user as away before the scenario looks.

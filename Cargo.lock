@@ -1440,6 +1440,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "vapor-vm"
+version = "0.2.0-alpha.3"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "sha2",
+ "vapor-e2e",
+ "vapor-shared",
+]
+
+[[package]]
 name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -206,8 +206,8 @@ Full policy in `docs/operations/macos/distribution-trust-chain.md`.
 ## 7) Definition of done (macOS milestones)
 
 - UI behavior validated on clean macOS host for happy + failure paths
-  (manually by the project owner; UI rendering is deliberately not
-  automated, see §7.1).
+  (the behaviour by Tier VM in a macOS virtual machine, the look by
+  the project owner; see §7.1).
 - Window-close vs menubar-quit vs daemon-stop semantics pass automated
   logic coverage (see §4) via `AppLifecycleCoordinator` state transitions.
 - `dist/Vapor.app` always embeds `Contents/MacOS/Vapor`,
@@ -232,8 +232,9 @@ Logic tests only. The full policy lives in `AGENTS.md §9` and
   routing).
 - **Not tested**: SwiftUI view rendering, menubar layout, Dock
   transitions, window focus, keyboard handling, animation timing,
-  accessibility audit. UI correctness is verified by the project owner
-  manually.
+  accessibility audit. No unit test covers them: Tier VM proves what
+  the installed app does on the screen, and the project owner judges
+  how it looks.
 
 Lifecycle *policy* tests live with the Rust `core/lifecycle` crate; the
 Swift-side `DaemonLifecycleManagerTests` covers only what Swift still

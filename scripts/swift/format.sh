@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SWIFT_DIR="$ROOT_DIR/apps/macos"
+# The Tier VM driver is the other Swift code of the repository.
+DRIVER_DIR="$ROOT_DIR/tools/vm/driver"
 MODE="${1:-apply}"
 
 export VAPOR_DIR="${VAPOR_DIR:-$ROOT_DIR/.vapor}"
@@ -29,11 +31,14 @@ if ! swift format --help >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ "$MODE" == "check" ]]; then
-  # --strict: without it a finding is a warning and the check exits 0.
-  echo "[swift-format] swift format lint --strict --recursive $SWIFT_DIR"
-  swift format lint --strict --recursive "$SWIFT_DIR"
-else
-  echo "[swift-format] swift format format --in-place --recursive $SWIFT_DIR"
-  swift format format --in-place --recursive "$SWIFT_DIR"
-fi
+for dir in "$SWIFT_DIR" "$DRIVER_DIR"; do
+  [[ -d "$dir" ]] || continue
+  if [[ "$MODE" == "check" ]]; then
+    # --strict: without it a finding is a warning and the check exits 0.
+    echo "[swift-format] swift format lint --strict --recursive $dir"
+    swift format lint --strict --recursive "$dir"
+  else
+    echo "[swift-format] swift format format --in-place --recursive $dir"
+    swift format format --in-place --recursive "$dir"
+  fi
+done

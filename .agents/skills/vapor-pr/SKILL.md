@@ -118,6 +118,36 @@ gh pr create --base main --title "<commit subject>" --label <type> \
   --body-file .context/pr-body.md
 ```
 
+**Pictures.** A change that a user sees gets pictures in the
+description, so the reviewer sees what changed (owner, 2026-11-21).
+Both kinds are optional: attach what helps a review, and nothing for a
+change with nothing to see.
+
+- Take them from a Tier VM run (`vapor-vm`): the screenshots that show
+  the change, and a video (`./scripts/vm.sh --video`) only when the
+  change moves on the screen. When the difference is small, add the
+  same screenshot from a run on `origin/main`, as before and after.
+- Look at each file before you attach it. An attachment of a public
+  repository is public. It shows a guest only, never a contributor's
+  machine (`AGENTS.md` §6.1).
+- Copy the files next to the body under `.context/`, reference each
+  one in the body as `![what it shows](./menu.png)`, and pass each one
+  with `--attach`. `gh` uploads the file and rewrites the reference.
+  The text after `#` is the alt text of an image:
+
+```sh
+gh pr create --base main --title "<commit subject>" --label <type> \
+  --body-file .context/pr-body.md \
+  --attach '.context/menu.png#The menu of the menu bar item'
+gh pr edit <number> --body-file .context/pr-body.md \
+  --attach '.context/menu.png#The menu of the menu bar item'   # later, or to replace one
+```
+
+- `--attach` needs a recent `gh`: 2.104 has it, and
+  `gh pr create --help` names it when it is there. With an older `gh`,
+  name the files and their scenarios in the description and say that
+  the pictures are not attached.
+
 The description, in Simplified Technical English (`AGENTS.md` §8.11),
 answers in this order:
 
@@ -138,8 +168,11 @@ Then, one short section each:
 - Risk and rollback.
 - Migration or compatibility (pre-GA: "none required" when a format
   changed without migration, and where that is documented).
-- For UI changes, a manual checklist for the owner. Agents never
-  verify UI.
+- For UI changes, the Tier VM scenarios that ran with their verdicts,
+  the pictures that show the change, attached so the description
+  renders them (see Pictures above), and a list of what the owner
+  judges. An agent verifies behaviour and never the look
+  (`AGENTS.md` §9.9).
 - The generated-with line the harness requires.
 
 ## 4. Review and CI, at the same time
@@ -208,7 +241,7 @@ gets one. Launch them in one message so they run at the same time.
 | CLI and app: `core/cli`, `apps/macos` | A `--json` shape or exit code changed with no shape test. Business logic or lifecycle policy in Swift. Window close tied to daemon stop. UI copy outside `assets/locales`. A literal key or default outside the constants modules. |
 | Scripts, CI, release: `scripts/`, `.github/`, `tools/` | A script that can touch `~/.vapor` or the network. An action that is not allowlisted and SHA-pinned. A secret that crosses platform environments. A required check renamed without the ruleset. |
 | Docs and agent files | Rules that contradict each other or the code. A stale name for a command, key, or path. A skill without its symlink or index rows. A task id or decision number in a code comment or a system doc. A README claim that is not true yet. |
-| Every area | Personal information (`AGENTS.md` §6.1). Changed behaviour with no test or e2e scenario. A test that sleeps, retries, or restates the code. A breaking change with no `CHANGELOG.md` line. |
+| Every area | Personal information (`AGENTS.md` §6.1). Changed behaviour with no test, e2e scenario, or Tier VM scenario. A test that sleeps, retries, or restates the code. A breaking change with no `CHANGELOG.md` line. |
 
 **Triage.** A finding is a claim to verify, not an order. Read the
 code it points at, with its callers and tests. Reproduce a runtime
@@ -244,6 +277,8 @@ and leave the thread for the human to resolve.
   The merge is a squash, and the PR history shows each round.
 - Put every fix that is ready into one push. Each push costs a CI
   cycle.
+- When a fix changes what a picture in the description shows, attach
+  the new picture and remove the old reference from the body.
 - Run `vapor-validate` before the push, then `git push origin HEAD`.
 - After every push, repeat the CI and base checks of step 4. The
   review does not run again.
@@ -265,5 +300,6 @@ answered. In Simplified Technical English (`AGENTS.md` §8.11):
   (fixed, declined, out of scope) and where the fix or the evidence
   is;
 - each human comment and its answer;
-- for UI changes, the manual checklist for the owner;
+- for UI changes, the Tier VM verdicts, the screenshots, and the list
+  of what the owner judges;
 - anything left open or skipped, and why.

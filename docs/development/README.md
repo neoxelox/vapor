@@ -21,6 +21,9 @@ workspace.
   Tier 1 passes, run `./scripts/e2e.sh` and read
   `e2e-verification.md` for when the tier is required and how to
   extend it.
+- **Changing the Mac app or its install?** Run `./scripts/vm.sh` and
+  read `vm-verification.md`: it tests the installed app in a macOS
+  virtual machine and keeps screenshots of what it saw.
 
 ## Documents
 
@@ -45,6 +48,12 @@ workspace.
   oracle and log-hygiene checks, verdicts and known gaps, when a
   change requires an E2E run, the scenario catalog, and the discipline
   rules for adding scenarios.
+- `vm-verification.md`: the Tier VM process: the packaged installer
+  installed in a macOS virtual machine made with Tart, and the app
+  driven as a user does by the `tools/vm` harness (`./scripts/vm.sh`).
+  Covers the safety contract, what a contributor installs one time,
+  when a change requires a run, the evidence a run keeps, the guests,
+  the manual guest, the scenario catalog, and how to add a scenario.
 
 ## Related references
 

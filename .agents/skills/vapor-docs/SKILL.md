@@ -29,7 +29,9 @@ describe the new behaviour. Do this before the commit, not after.
    it. Shortened README content moves into `docs/`, never disappears.
 4. `docs/tasks/<surface>.md` and `docs/tasks/README.md`: close or add
    the task, and update the wave orchestrator when a wave opens, closes,
-   or changes dependencies. `docs/plans/<surface>.md` when the scope, a
+   or changes dependencies. Every bug, broken thing, or possible
+   improvement that the work found and did not fix gets a task here,
+   so the owner can decide on it later (`AGENTS.md` §8). `docs/plans/<surface>.md` when the scope, a
    principle, or a non-goal of a surface changes.
 5. `AGENTS.md` when a durable rule, invariant, or contributor policy
    changes. Edit `AGENTS.md` and `.agents/` only; `CLAUDE.md` and
@@ -39,7 +41,8 @@ describe the new behaviour. Do this before the commit, not after.
    set. The spec records why; the owning document under `docs/` still
    describes the new behaviour on its own.
 7. macOS UI changes: state the intended experience and its HIG
-   alignment in the change, and hand the owner a manual checklist.
+   alignment in the change, and give the owner the screenshots of the
+   Tier VM run with a list of what to judge (`vapor-vm`).
 
 ## The sweep for stale mentions
 

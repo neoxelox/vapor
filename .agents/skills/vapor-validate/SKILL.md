@@ -1,6 +1,6 @@
 ---
 name: vapor-validate
-description: Runs Vapor's validation ladder in the required order (format, lint, test, then e2e for runtime-affecting changes), explains which tier a change needs, and reads a red run. Use before committing any change under core/*, apps/*, or scripts/*, and whenever a script run fails and the failure needs classifying.
+description: Runs Vapor's validation ladder in the required order (format, lint, test, then e2e for runtime-affecting changes and vm for changes to the Mac app or its install), explains which tier a change needs, and reads a red run. Use before committing any change under core/*, apps/*, or scripts/*, and whenever a script run fails and the failure needs classifying.
 license: GPL-3.0-only
 ---
 
@@ -17,6 +17,7 @@ relies on.
 ./scripts/lint.sh     # clippy -D warnings, swift-format lint, format check, version sync
 ./scripts/test.sh     # Tier 1: Rust + Swift + version checks
 ./scripts/e2e.sh      # Tier E2E: real vapor + vapord, one sandbox per scenario (see below)
+./scripts/vm.sh       # Tier VM: the installer and the app in a macOS virtual machine (see below)
 ```
 
 `format` first because `lint` fails on unformatted code. Run all of them
@@ -30,7 +31,7 @@ nothing.
 | Docs only, `assets/locales` only | `lint`: it checks that the locale catalogs parse, and that no tracked file holds an em dash |
 | Tests only | `format`, `lint`, `test` |
 | Anything under `core/*` or `scripts/*` that a user could observe through the daemon or CLI, including startup, shutdown, IPC, schema, config and build changes to the shipping binaries | `format`, `lint`, `test`, `e2e` |
-| `apps/macos` logic | `format`, `lint`, `test`; UI rendering is never tested, hand the owner a manual checklist |
+| `apps/macos`, the packaging scripts, or the installer | `format`, `lint`, `test`, `vm`; hand the owner the screenshots of the run and a list of what to judge, since an agent verifies behaviour and never the look |
 | Performance-sensitive engine changes | the above plus `./scripts/perf.sh` (Tier 2, release gate; not a PR gate: one release-profile soak cell with the SLO checks) |
 | Changes to the executor, reconcile, deletion, or conflict paths | the above plus a soak (`vapor-soak` skill); quote its report |
 
@@ -71,6 +72,23 @@ nothing.
 - The harness sets `VAPOR_THROTTLE_INPUTS=static` so a developer at
   the keyboard does not hold the daemon at `Throttled`.
 - Details and the manual sandbox: the `vapor-e2e` skill.
+
+## Tier VM rules
+
+- `./scripts/vm.sh` needs a Mac with Apple silicon, macOS 27, and Tart
+  with the guest image. When one is missing it says so and exits with
+  2; report that as a blocker, and do not install Tart or pull the
+  image unless the owner asked.
+- The packaged app starts inside a guest only, never on the host.
+- A change that adds behaviour a user sees in the app or in the
+  install adds a scenario under `tools/vm/src/scenarios/` in the same
+  change set: it must fail before the change and pass after.
+- A new control in a window gets an accessibility identifier in
+  `apps/macos/Sources/VaporCore/AccessibilityID.swift`. A Tier 1 test
+  fails when a scenario uses one that the app does not define.
+- The run keeps screenshots and the report under
+  `.vapor/vm/run-<id>/`. Look at the screenshots before reporting.
+- Details and the manual guest: the `vapor-vm` skill.
 
 ## Reading a red run
 

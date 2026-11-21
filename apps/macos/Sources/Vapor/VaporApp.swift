@@ -4,7 +4,7 @@ import VaporCore
 
 @main
 struct VaporApp: App {
-  private static let mainWindowID = "main-window"
+  private static let mainWindowID = AccessibilityID.mainWindow
 
   @StateObject private var viewModel: AppShellViewModel
   private let logger = StructuredLogger(component: "app-lifecycle")
