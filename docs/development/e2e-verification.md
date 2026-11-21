@@ -365,7 +365,8 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S67 | in push-only, a file whose name the cloud respells so that only the case changes gets this device's spelling back in the cloud, with no restart and no reconcile request (needs a volume that folds case) |
 | S68 | a file that left both folders while the daemon was down, and that is put back on this device with the same bytes, is uploaded and never moved to the trash |
 | S69 | a folder that moves into the sync root with a .gitignore of its own syncs by those rules: the files the rules hide never reach the cloud |
-| R01 | install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd, then the headless supervisor (`install --supervise`) restarting a killed daemon on its own (`--full`) |
+| S70 | vapor init takes a fresh install to a running sync with one command and no terminal, refuses when a folder is left out, and a second run changes nothing and says initialized |
+| R01 | install registers the daemon and its supervisor with real launchd; then, with the supervisor set aside, start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall; then the supervisor of a new install restarting a killed daemon on its own (`--full`, disposable runners only) |
 
 ## Extending the harness
 

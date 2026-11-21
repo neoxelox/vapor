@@ -107,11 +107,19 @@ backoff computed by `core/lifecycle::CrashLoopGuard`:
 - systemd: `Restart=no` (same reason).
 - Task Scheduler: `RestartOnFailure` matching the guard.
 
-The one service that is kept alive by the OS is the headless supervisor
+The one service that is kept alive by the OS is the supervisor
 (`vapor service check --loop`, descriptor `keep_alive: true`):
 `KeepAlive=true` on launchd, `Restart=always` with `RestartSec=5` on
-systemd. It is the supervisor that applies the guard's backoff to the
-daemon.
+systemd. Every install registers it next to the daemon. It is the
+supervisor that applies the guard's backoff to the daemon, and the one
+caller of the check that restarts it; an app only reads the state.
+
+On Linux the daemon is a unit of the user's own systemd, which stops
+with the user's last session. A host with no desktop session has no
+session that lasts, so the install of the service turns lingering on
+there (`loginctl enable-linger`, which systemd's default policy lets a
+user do for the own account). macOS and Windows have no such setting:
+a LaunchAgent and a logon task run while the user is logged in.
 
 ### `SecretStore`
 

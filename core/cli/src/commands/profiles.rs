@@ -100,7 +100,7 @@ impl ProfilesListReport {
     pub fn render_text(&self) -> String {
         let mut out = String::new();
         if self.profiles.is_empty() && self.problems.is_empty() {
-            out.push_str("No sync profile yet. Set one up with: vapor profiles add\n");
+            out.push_str("No sync profile yet. Set Vapor up with: vapor init\n");
         }
         for profile in &self.profiles {
             out.push_str(&format!(
@@ -322,6 +322,37 @@ fn suggested_id(local: &str, taken: &[String]) -> String {
         .unwrap_or_default()
 }
 
+/// The questions of a setup, one function each: `vapor profiles add`
+/// and `vapor init` ask them in their own order, in the same words and
+/// with the same suggestion.
+pub fn ask_provider(prompter: &mut dyn Prompter) -> io::Result<String> {
+    prompter.ask(
+        &format!("Provider ({})", constants::provider::ALL.join(", ")),
+        constants::provider::DEFAULT,
+    )
+}
+
+pub fn ask_local(prompter: &mut dyn Prompter) -> io::Result<String> {
+    prompter.ask(
+        "Folder on this device",
+        constants::filtering::DEFAULT_LOCAL_ROOT,
+    )
+}
+
+pub fn ask_cloud(prompter: &mut dyn Prompter, provider: &str) -> io::Result<String> {
+    prompter.ask(
+        "Folder in the cloud",
+        constants::filtering::default_cloud_root(provider),
+    )
+}
+
+pub fn ask_mode(prompter: &mut dyn Prompter) -> io::Result<String> {
+    prompter.ask(
+        &format!("Sync mode ({})", constants::sync_mode::ALL.join(", ")),
+        constants::sync_mode::DEFAULT,
+    )
+}
+
 /// Fills what the request leaves open by asking, with the default that
 /// a plain `add` would take as the suggestion. `taken` holds the ids of
 /// the profiles that exist: next to one of them the new profile needs
@@ -333,31 +364,19 @@ pub fn ask_for_missing(
 ) -> Result<AddRequest, ProfilesError> {
     let provider = match request.provider {
         Some(provider) => provider,
-        None => prompter.ask(
-            &format!("Provider ({})", constants::provider::ALL.join(", ")),
-            constants::provider::DEFAULT,
-        )?,
+        None => ask_provider(prompter)?,
     };
     let local = match request.local {
         Some(local) => local,
-        None => prompter.ask(
-            "Folder on this device",
-            constants::filtering::DEFAULT_LOCAL_ROOT,
-        )?,
+        None => ask_local(prompter)?,
     };
     let cloud = match request.cloud {
         Some(cloud) => cloud,
-        None => prompter.ask(
-            "Folder in the cloud",
-            constants::filtering::default_cloud_root(&provider),
-        )?,
+        None => ask_cloud(prompter, &provider)?,
     };
     let mode = match request.mode {
         Some(mode) => mode,
-        None => prompter.ask(
-            &format!("Sync mode ({})", constants::sync_mode::ALL.join(", ")),
-            constants::sync_mode::DEFAULT,
-        )?,
+        None => ask_mode(prompter)?,
     };
     let id = match request.id {
         Some(id) => Some(id),
@@ -441,13 +460,7 @@ fn plan(
         .provider
         .clone()
         .unwrap_or_else(|| top_provider.to_string());
-    let provider = provider.trim().to_string();
-    if !constants::provider::ALL.contains(&provider.as_str()) {
-        return invalid(format!(
-            "unknown provider '{provider}'; use one of {}",
-            constants::provider::ALL.join(", ")
-        ));
-    }
+    let provider = known_provider(&provider)?;
     let mode_text = request
         .mode
         .clone()
@@ -461,7 +474,7 @@ fn plan(
     let (Some(local), Some(cloud)) = (chosen(&request.local), chosen(&request.cloud)) else {
         return invalid(
             "a profile needs its two folders: --local <path> --cloud <path> \
-             (on a terminal, `vapor profiles add` asks for them)"
+             (on a terminal the command asks for them)"
                 .to_string(),
         );
     };
@@ -510,6 +523,71 @@ fn plan(
         mode,
         local_resolved,
         cloud_resolved: scope.cloud_root,
+    })
+}
+
+/// Whether a one-way profile still waits for the answer to its
+/// data-loss question. The daemon holds such a profile, so a setup that
+/// called it done would report a sync that does not run. No state
+/// database means nobody was asked yet. A database that cannot be read
+/// says nothing, and `vapor status` stays the place that tells.
+pub fn one_way_waits(storage: &ProfileStorage, profile: &ResolvedProfile) -> bool {
+    let mode = profile.scope.sync_mode;
+    let Some(local_root) = profile.scope.local_root.as_deref() else {
+        return false;
+    };
+    if mode == SyncMode::TwoWay {
+        return false;
+    }
+    let database =
+        vapor_shared::runtime_paths::profile_database_path_in(&storage.state, &profile.id);
+    if !database.exists() {
+        return true;
+    }
+    vapor_daemon::state_db::DurableStateDb::open(&database)
+        .and_then(|state_db| {
+            vapor_daemon::one_way::acknowledged(
+                &state_db,
+                mode,
+                &vapor_shared::paths::canonicalize_ahead(local_root),
+                &profile.scope.cloud_root,
+            )
+        })
+        .is_ok_and(|acknowledged| !acknowledged)
+}
+
+/// `provider` trimmed, when it is a provider Vapor has.
+pub fn known_provider(provider: &str) -> Result<String, ProfilesError> {
+    let provider = provider.trim();
+    if constants::provider::ALL.contains(&provider) {
+        Ok(provider.to_string())
+    } else {
+        Err(ProfilesError::Invalid(format!(
+            "unknown provider '{provider}'; use one of {}",
+            constants::provider::ALL.join(", ")
+        )))
+    }
+}
+
+/// What a request would write, with nothing written: the id the
+/// profile gets and its cloud folder as the daemon resolves it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Preview {
+    pub id: String,
+    pub provider: String,
+    pub cloud_root: String,
+}
+
+/// Plans a request and writes nothing. It refuses what [`add`] refuses,
+/// so a setup that asks more questions after the folders learns of a
+/// bad folder before it asks them.
+pub fn preview(config_path: &Path, request: &AddRequest) -> Result<Preview, ProfilesError> {
+    use vapor_shared::runtime_paths::with_config_lock;
+    let planned = with_config_lock(config_path, || plan_on_disk(config_path, request))?.planned;
+    Ok(Preview {
+        id: planned.id,
+        provider: planned.provider,
+        cloud_root: planned.cloud_resolved,
     })
 }
 
@@ -966,7 +1044,7 @@ mod tests {
         let report = list(&config_path(&temp));
         assert!(report.profiles.is_empty());
         assert!(report.problems.is_empty());
-        assert!(report.render_text().contains("vapor profiles add"));
+        assert!(report.render_text().contains("vapor init"));
     }
 
     #[test]

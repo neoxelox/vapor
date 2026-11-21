@@ -66,10 +66,13 @@
 - Crash-loop protection is owned by `core/lifecycle::CrashLoopGuard`
   (not `launchd`, and not Swift: the app only relays outcomes). Crash counters, backoff, and pause
   persist in `<vapor_dir>/state/lifecycle.json`, so they survive
-  process restarts and are shared across surfaces. The app's
-  `DaemonHealthMonitor` runs `vapor service check` every 30 seconds
-  (`VaporConstants.Daemon.healthTickIntervalSeconds`) so unexpected
-  daemon exits are detected and routed through the guard. After 5
+  process restarts and are shared across surfaces. The supervisor job
+  that every install registers runs `vapor service check` every 30
+  seconds, so unexpected daemon exits are detected and routed through
+  the guard with the app open or closed. The app's
+  `DaemonHealthMonitor` reads the result on the same cadence
+  (`VaporConstants.Daemon.healthTickIntervalSeconds`) with `vapor
+  service status`, and restarts nothing. After 5
   consecutive unclean exits within 10 minutes the guard enters a
   durable `CrashLoopPaused` state, stops attempting auto-restart, and
   the app surfaces a reasoned diagnostic to the menubar; the user must

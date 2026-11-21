@@ -156,8 +156,9 @@ so renaming the machine does not change it.
 
 Named sync profiles. Absent means one implicit profile named `default`
 built from the top-level keys, which exists once both roots are set.
-`vapor profiles list|add|remove` manages them: the first `add` is the
-setup of a fresh install and starts syncing with no restart; `remove`
+`vapor profiles list|add|remove` manages them: the first `add` starts
+syncing with no restart, and `vapor init` runs it for a fresh install,
+with the sign-in and the background service; `remove`
 needs the daemon stopped, forgets the profile's sync state and
 sign-in, keeps its trash, and leaves the files on both sides. Each
 entry runs as an isolated pipeline with its own state database, trash,

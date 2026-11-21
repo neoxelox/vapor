@@ -33,6 +33,11 @@ fi
 bash "$ROOT_DIR/scripts/tests/version.sh"
 bash "$ROOT_DIR/scripts/tests/dotenv.sh"
 bash "$ROOT_DIR/scripts/tests/notes.sh"
+# The installer's script is a macOS matter; its links mean nothing to
+# the filesystem of a Windows runner.
+if [[ "$is_macos" == true ]]; then
+  bash "$ROOT_DIR/scripts/tests/installer.sh"
+fi
 
 # Tier 1 budget (AGENTS.md §9.1): CI sets VAPOR_TEST_MAX_SECONDS so a suite
 # that outgrows its budget fails loudly instead of eroding the feedback

@@ -112,28 +112,34 @@ func statusDecodesTheFullReport() throws {
 }
 
 @Test
-func checkDecodesEveryHealthOutcome() throws {
-  let runner = ScriptedCLIRunner(standardOutput: #"{"health":"running"}"#)
+func healthIsReadFromStatusAndNeverThroughCheck() throws {
+  // The keys of a status report that the health read uses; the report
+  // carries more, which the decoder ignores.
+  let runner = ScriptedCLIRunner(standardOutput: #"{"status":"running","health":"running"}"#)
   let controller = VaporCLIServiceController(runner: runner)
 
   #expect(try controller.checkDaemonHealth() == .running)
 
-  runner.standardOutput = #"{"health":"not-installed"}"#
+  runner.standardOutput = #"{"status":"not-installed","health":"not-installed"}"#
   #expect(try controller.checkDaemonHealth() == .notInstalled)
 
-  runner.standardOutput = #"{"health":"stopped-expected"}"#
+  runner.standardOutput = #"{"status":"stopped","health":"stopped-expected"}"#
   #expect(try controller.checkDaemonHealth() == .stoppedExpected)
 
-  runner.standardOutput = #"{"health":"restarted-after-crash"}"#
-  #expect(try controller.checkDaemonHealth() == .restartedAfterCrash)
-
-  runner.standardOutput = #"{"health":"restart-deferred","remainingSeconds":2.0}"#
+  runner.standardOutput =
+    #"{"status":"stopped","health":"restart-deferred","remainingSeconds":2.0}"#
   #expect(try controller.checkDaemonHealth() == .restartDeferred(2.0))
 
-  runner.standardOutput = #"{"health":"crash-loop-paused"}"#
+  runner.standardOutput = #"{"status":"crash-loop-paused","health":"crash-loop-paused"}"#
   #expect(try controller.checkDaemonHealth() == .crashLoopPaused)
 
-  #expect(runner.invocations.allSatisfy { $0 == ["service", "check", "--json"] })
+  // `check` restarts a daemon, and the supervisor job is its one
+  // caller. The app only reads.
+  #expect(runner.invocations.allSatisfy { $0 == ["service", "status", "--json"] })
+
+  // A value the read cannot give is refused, not guessed.
+  runner.standardOutput = #"{"status":"running","health":"restarted-after-crash"}"#
+  #expect(throws: (any Error).self) { try controller.checkDaemonHealth() }
 }
 
 @Test

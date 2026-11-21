@@ -41,10 +41,7 @@ impl Display for AuthError {
                 "no profile '{requested}' (profiles: {})",
                 known.join(", ")
             ),
-            Self::NoProfile => write!(
-                f,
-                "no sync profile yet; set one up with `vapor profiles add`"
-            ),
+            Self::NoProfile => write!(f, "no sync profile yet; set Vapor up with `vapor init`"),
             Self::AmbiguousProfile(known) => write!(
                 f,
                 "several profiles exist; pass --profile <id> ({})",
@@ -109,6 +106,18 @@ pub fn select_profile(
     }
 }
 
+/// The profile id a sign-out acts on. It is [`select_profile`], with
+/// one more case: an install with no profile can hold the sign-in that
+/// `vapor init` made before it wrote one, under the id of the first
+/// profile, and a sign-out removes that.
+pub fn logout_target(config: &VaporConfig, requested: Option<&str>) -> Result<String, AuthError> {
+    match select_profile(config, requested) {
+        Ok(profile) => Ok(profile.id),
+        Err(AuthError::NoProfile) => Ok(constants::profile::DEFAULT_PROFILE_ID.to_string()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Whether the profile's provider needs a sign-in, for `login` to refuse
 /// early instead of storing a credential nothing reads.
 pub fn require_sign_in(profile: &ResolvedProfile) -> Result<(), AuthError> {
@@ -128,7 +137,51 @@ pub fn login_into(
     token: &str,
 ) -> Result<(), AuthError> {
     require_sign_in(profile)?;
-    store.set(&key(&profile.id, &profile.provider_kind), token)?;
+    store_sign_in(store, &profile.id, &profile.provider_kind, token)
+}
+
+/// Stores a sign-in under a profile id and a provider. `vapor init`
+/// signs in before the profile exists, under the id the profile gets,
+/// so the folder step can look into the account.
+pub fn store_sign_in(
+    store: &dyn SecretStore,
+    profile_id: &str,
+    provider: &str,
+    token: &str,
+) -> Result<(), AuthError> {
+    store.set(&key(profile_id, provider), token)?;
+    Ok(())
+}
+
+/// Whether a sign-in is stored for this profile id and provider. The
+/// store is asked for names only; no secret is read.
+pub fn signed_in(
+    store: &dyn SecretStore,
+    profile_id: &str,
+    provider: &str,
+) -> Result<bool, AuthError> {
+    Ok(stored_names(store)?.contains(&key(profile_id, provider)))
+}
+
+/// Removes the sign-ins a profile id holds for every provider but
+/// `keep`: what a sign-in made before the profile existed leaves behind
+/// when the profile is then written for another provider.
+pub fn forget_other_providers(
+    store: &dyn SecretStore,
+    profile_id: &str,
+    keep: &str,
+) -> Result<(), AuthError> {
+    let stored = stored_names(store)?;
+    for provider in constants::provider::ALL {
+        let name = key(profile_id, provider);
+        if *provider == keep || !stored.contains(&name) {
+            continue;
+        }
+        match store.delete(&name) {
+            Ok(()) | Err(SecretStoreError::NotFound(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     Ok(())
 }
 
@@ -471,7 +524,34 @@ mod tests {
     fn an_install_with_no_profile_is_told_how_to_add_one() {
         let error = select_profile(&VaporConfig::default(), None).expect_err("no profile");
         assert!(matches!(error, AuthError::NoProfile));
-        assert!(error.to_string().contains("vapor profiles add"));
+        assert!(error.to_string().contains("vapor init"));
+    }
+
+    #[test]
+    fn a_sign_out_with_no_profile_removes_the_sign_in_made_before_one() {
+        let store = InMemorySecretStore::new();
+        store_sign_in(&store, "default", "gdrive", "ya29.test").expect("store");
+        assert!(signed_in(&store, "default", "gdrive").expect("signed in"));
+
+        let target = logout_target(&VaporConfig::default(), None).expect("target");
+        assert_eq!(target, constants::profile::DEFAULT_PROFILE_ID);
+        assert!(logout_from(&store, &target).expect("logout"));
+        assert!(!signed_in(&store, "default", "gdrive").expect("signed out"));
+
+        // With a profile it is the profile that is signed out.
+        let config = config_with(&[("work", "gdrive")]);
+        assert_eq!(logout_target(&config, None).expect("target"), "work");
+    }
+
+    #[test]
+    fn a_profile_keeps_only_the_sign_in_of_its_provider() {
+        let store = InMemorySecretStore::new();
+        for provider in constants::provider::ALL {
+            store_sign_in(&store, "default", provider, "ya29.test").expect("store");
+        }
+        forget_other_providers(&store, "default", constants::provider::GDRIVE).expect("forget");
+        assert!(signed_in(&store, "default", constants::provider::GDRIVE).expect("kept"));
+        assert!(!signed_in(&store, "default", constants::provider::FILESYSTEM).expect("gone"));
     }
 
     #[test]

@@ -16,7 +16,8 @@ use vapor_cli::{RunOptions, ServiceCommand};
 use vapor_cli::{
     commands::{
         auth as auth_cmd, config as config_cmd, decisions as decisions_cmd, doctor as doctor_cmd,
-        ipc as ipc_cmd, profiles as profiles_cmd, run as run_cmd, trash as trash_cmd,
+        init as init_cmd, ipc as ipc_cmd, profiles as profiles_cmd, run as run_cmd,
+        trash as trash_cmd,
     },
     resolve_configuration_path,
 };
@@ -36,6 +37,47 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Set Vapor up on this device: the folders to sync, the sign-in,
+    /// and the background service. A terminal asks for each answer;
+    /// with no terminal every answer is an option. Run it again at any
+    /// time: it does only what is left.
+    Init {
+        /// The cloud provider: `filesystem` or `gdrive`.
+        #[arg(long, value_name = "PROVIDER")]
+        provider: Option<String>,
+        /// The folder on this device. Needed when no terminal can ask
+        /// for it.
+        #[arg(long, value_name = "PATH")]
+        local: Option<String>,
+        /// The folder in the cloud. Needed when no terminal can ask
+        /// for it.
+        #[arg(long, value_name = "PATH")]
+        cloud: Option<String>,
+        /// `two-way` (the default), `pull-only`, or `push-only`. A
+        /// one-way mode overwrites and removes files on one side, and
+        /// needs a confirmation before it runs.
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
+        /// Read the sign-in token from stdin instead of opening the
+        /// browser: `--token -`. A token is never taken from the
+        /// command line.
+        #[arg(long, value_name = "-")]
+        token: Option<String>,
+        /// Whether Vapor starts at login and runs in the background
+        /// (`on` when left out with no terminal). `off` records the
+        /// answer and leaves the service as it is.
+        #[arg(long, value_name = "on|off")]
+        auto_launch: Option<Switch>,
+        /// Lingering keeps the daemon running after the last logout.
+        /// Vapor turns it on where no desktop keeps a session open;
+        /// `off` leaves the setting alone, `on` sets it on a desktop too.
+        #[cfg(target_os = "linux")]
+        #[arg(long, value_name = "on|off")]
+        linger: Option<Switch>,
+        /// Print JSON. Never asks a question.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show what the daemon is doing and why.
     Status {
         /// Print JSON.
@@ -314,7 +356,8 @@ enum AuthAction {
         #[arg(long, conflicts_with = "token")]
         browser: bool,
     },
-    /// Remove a profile's stored credentials.
+    /// Remove a profile's stored credentials. With no profile yet, it
+    /// removes the sign-in that `vapor init` made before it wrote one.
     Logout {
         /// The profile to sign out (default: the only profile).
         #[arg(long, value_name = "ID")]
@@ -340,12 +383,15 @@ enum ServiceAction {
         #[arg(long)]
         json: bool,
     },
-    /// Turn auto-launch on, install the service, and start the daemon.
+    /// Turn auto-launch on, install the service and the supervisor
+    /// that restarts a crashed daemon, and start the daemon.
     Install {
-        /// Also install a supervisor that restarts a crashed daemon, for
-        /// a device without the app.
-        #[arg(long)]
-        supervise: bool,
+        /// Lingering keeps the daemon running after the last logout.
+        /// Vapor turns it on where no desktop keeps a session open;
+        /// `off` leaves the setting alone, `on` sets it on a desktop too.
+        #[cfg(target_os = "linux")]
+        #[arg(long, value_name = "on|off")]
+        linger: Option<Switch>,
         /// Print JSON.
         #[arg(long)]
         json: bool,
@@ -387,7 +433,8 @@ enum ServiceAction {
         json: bool,
     },
     /// Restart the daemon if it exited unexpectedly, within the
-    /// crash-loop limits.
+    /// crash-loop limits. The supervisor job runs this; `status` reads
+    /// the same state and changes nothing.
     Check {
         /// Keep checking until stopped, printing only changes.
         #[arg(long = "loop")]
@@ -405,6 +452,19 @@ enum ServiceAction {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// The answer to a yes-or-no option.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+enum Switch {
+    On,
+    Off,
+}
+
+impl Switch {
+    fn is_on(self) -> bool {
+        self == Self::On
+    }
 }
 
 fn main() -> ExitCode {
@@ -470,6 +530,32 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
                 _ => Ok(ExitCode::SUCCESS),
             }
         }
+        Command::Init {
+            provider,
+            local,
+            cloud,
+            mode,
+            token,
+            auto_launch,
+            #[cfg(target_os = "linux")]
+            linger,
+            json,
+        } => {
+            #[cfg(not(target_os = "linux"))]
+            let linger: Option<Switch> = None;
+            dispatch_init(
+                init_cmd::InitRequest {
+                    provider,
+                    local,
+                    cloud,
+                    mode,
+                    auto_launch: auto_launch.map(Switch::is_on),
+                    linger: linger.map(Switch::is_on),
+                },
+                token,
+                json,
+            )
+        }
         Command::Service { action } => dispatch_service(action),
         Command::Status { json } => dispatch_status(json),
         Command::Pause { json } => dispatch_ack_json("pause", ipc_cmd::pause(), json),
@@ -506,6 +592,230 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+/// The real device behind `vapor init`: the browser or stdin for a
+/// sign-in, the provider for a look into the account, and the service
+/// manager.
+struct NativeInitHost {
+    interactive: bool,
+    token_on_stdin: bool,
+    config_path: std::path::PathBuf,
+}
+
+impl init_cmd::InitHost for NativeInitHost {
+    fn sign_in(&mut self, provider: &str) -> Option<Result<String, String>> {
+        if self.token_on_stdin {
+            return Some(resolve_auth_token(Some("-".to_string())));
+        }
+        if self.interactive && provider == vapor_shared::constants::provider::GDRIVE {
+            return Some(auth_cmd::run_gdrive_pkce_flow());
+        }
+        None
+    }
+
+    fn cloud_folder(
+        &mut self,
+        provider: &str,
+        profile_id: &str,
+        cloud_root: &str,
+    ) -> init_cmd::CloudFolder {
+        use init_cmd::CloudFolder;
+        let provider = match vapor_providers::select_provider_for_profile(provider, profile_id) {
+            Ok(provider) => provider,
+            Err(error) => return CloudFolder::Unchecked(error.to_string()),
+        };
+        match provider.root_identity(cloud_root) {
+            Ok(_) => CloudFolder::Exists,
+            Err(error) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
+                CloudFolder::New
+            }
+            Err(error) => CloudFolder::Unchecked(error.to_string()),
+        }
+    }
+
+    fn service(&mut self) -> init_cmd::ServiceState {
+        use init_cmd::ServiceState;
+        let auto_launch = config_cmd::get(
+            &self.config_path,
+            vapor_shared::constants::config::KEY_AUTO_LAUNCH,
+        );
+        if matches!(
+            auto_launch.as_ref().map(|value| value.as_deref()),
+            Ok(Some("false"))
+        ) {
+            return ServiceState::Off;
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            // The service is in place with both jobs: the daemon's, and
+            // the supervisor's that restarts it. A daemon binary that
+            // is missing, or a service manager that gives no answer,
+            // reads as not installed: the install is what then says
+            // what is wrong.
+            let registered = |status: Result<vapor_platform::ServiceStatus, _>| {
+                status.is_ok_and(|status| status != vapor_platform::ServiceStatus::NotInstalled)
+            };
+            let daemon = locate_daemon_binary()
+                .and_then(|daemon| service_cmd::build_native(self.config_path.clone(), daemon).ok())
+                .is_some_and(|(_, installer)| {
+                    registered(vapor_platform::ServiceInstaller::status(installer.as_ref()))
+                });
+            let supervisor = service_cmd::supervisor_installer().is_ok_and(|supervisor| {
+                registered(vapor_platform::ServiceInstaller::status(&supervisor))
+            });
+            let installed = daemon && supervisor;
+            if installed {
+                ServiceState::Installed
+            } else {
+                ServiceState::NotInstalled
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            ServiceState::Unavailable(
+                "Vapor has no background service on this platform yet; `vapor run` runs the daemon"
+                    .to_string(),
+            )
+        }
+    }
+
+    fn install_service(&mut self, linger: Option<bool>) -> Result<Option<String>, String> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let daemon = locate_daemon_binary()
+                .ok_or_else(|| "vapord binary not found near the running CLI".to_string())?;
+            let (manager, installer) = service_cmd::build_native(self.config_path.clone(), daemon)
+                .map_err(|e| e.to_string())?;
+            let supervisor = service_cmd::supervisor_installer().map_err(|e| e.to_string())?;
+            let outcome = service_cmd::install_with_supervisor(
+                ServiceCommand::Install,
+                &manager,
+                installer.as_ref(),
+                &supervisor,
+                running_daemon_build().as_deref(),
+                Instant::now(),
+            )
+            .map_err(|e| e.to_string())?;
+            if matches!(
+                outcome,
+                service_cmd::ServiceCommandOutcome::Action(
+                    vapor_lifecycle::DaemonLifecycleActionResult::RelaunchDeferred(_)
+                )
+            ) {
+                // A crash-loop pause holds the start; the line names
+                // the command that clears it.
+                return Err(service_cmd::render_text(&outcome));
+            }
+            #[cfg(target_os = "linux")]
+            {
+                Ok(linger_note(&service_cmd::apply_linger(linger)))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = linger;
+                Ok(None)
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = linger;
+            Err("Vapor has no background service on this platform yet".to_string())
+        }
+    }
+
+    fn decline_service(&mut self) -> Result<(), String> {
+        config_cmd::set(
+            &self.config_path,
+            vapor_shared::constants::config::KEY_AUTO_LAUNCH,
+            "false",
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    fn note(&mut self, line: &str) {
+        eprintln!("{line}");
+    }
+}
+
+fn dispatch_init(
+    request: init_cmd::InitRequest,
+    token: Option<String>,
+    json: bool,
+) -> Result<ExitCode, String> {
+    use std::io::IsTerminal;
+    if token.as_deref().is_some_and(|value| value != "-") {
+        return Err(
+            "a token on the command line is visible in the process list and the shell \
+             history; pipe it on stdin instead: `<command that prints the token> | vapor init \
+             --token -`"
+                .to_string(),
+        );
+    }
+    let path = resolve_configuration_path();
+    // A person at a terminal is asked; a script and `--json` never are.
+    let interactive = !json && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let (store, fallback_reason) = auth_cmd::build_native_store();
+    let mut prompter = profiles_cmd::TerminalPrompter;
+    let mut host = NativeInitHost {
+        interactive,
+        token_on_stdin: token.is_some(),
+        config_path: path.clone(),
+    };
+    let mut report = init_cmd::run(
+        &path,
+        &profiles_cmd::ProfileStorage::of_this_install(),
+        &init_cmd::Secrets {
+            store: store.as_ref(),
+            problem: fallback_reason.as_deref(),
+        },
+        &request,
+        interactive.then_some(&mut prompter as &mut dyn profiles_cmd::Prompter),
+        &mut host,
+        std::time::SystemTime::now(),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let step_state = |name: &str| {
+        report
+            .steps
+            .iter()
+            .find(|step| step.step == name)
+            .map(|step| step.state)
+    };
+    use vapor_shared::constants::init as names;
+    // A daemon that this run started needs a moment before it answers.
+    let attempts = if step_state(names::STEP_SERVICE) == Some(names::STATE_DONE) {
+        15
+    } else {
+        1
+    };
+    for attempt in 0..attempts {
+        if let Ok(status) = ipc_cmd::status() {
+            report.daemon = Some(init_cmd::DaemonLine {
+                state: status.run.state,
+                reason: status.run.reason,
+            });
+            break;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+    } else {
+        print!("{}", report.render_text());
+    }
+    Ok(if report.initialized {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
 }
 
 fn dispatch_profiles(action: ProfilesAction) -> Result<ExitCode, String> {
@@ -988,13 +1298,13 @@ fn dispatch_auth(action: AuthAction) -> Result<ExitCode, String> {
         }
         AuthAction::Logout { profile } => {
             let profile =
-                auth_cmd::select_profile(&config, profile.as_deref()).map_err(|e| e.to_string())?;
+                auth_cmd::logout_target(&config, profile.as_deref()).map_err(|e| e.to_string())?;
             let removed =
-                auth_cmd::logout_from(store.as_ref(), &profile.id).map_err(|e| e.to_string())?;
+                auth_cmd::logout_from(store.as_ref(), &profile).map_err(|e| e.to_string())?;
             if removed {
-                println!("Signed profile {} out.", profile.id);
+                println!("Signed profile {profile} out.");
             } else {
-                println!("Profile {} was not signed in.", profile.id);
+                println!("Profile {profile} was not signed in.");
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -1051,12 +1361,20 @@ fn resolve_auth_token(token: Option<String>) -> Result<String, String> {
 }
 
 fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
-    let mut supervise = false;
     let mut check_loop: Option<Duration> = None;
+    #[cfg(target_os = "linux")]
+    let mut linger_choice: Option<bool> = None;
     let (command, json) = match action {
         ServiceAction::Bootstrap { json } => (ServiceCommand::Bootstrap, json),
-        ServiceAction::Install { json, supervise: s } => {
-            supervise = s;
+        ServiceAction::Install {
+            json,
+            #[cfg(target_os = "linux")]
+            linger,
+        } => {
+            #[cfg(target_os = "linux")]
+            {
+                linger_choice = linger.map(Switch::is_on);
+            }
             (ServiceCommand::Install, json)
         }
         ServiceAction::Uninstall { json, keep_running } => {
@@ -1100,41 +1418,58 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
                 move || flag.store(true, std::sync::atomic::Ordering::SeqCst),
             )
             .map_err(|e| e.to_string())?;
-            service_cmd::check_loop(&manager, installer.as_ref(), interval, json, &stop)
-                .map_err(|e| e.to_string())?;
+            // A supervisor that starts after an update is the new
+            // build: a daemon of the old one still runs, and is replaced
+            // here. The supervisor of the old build ended itself when
+            // it saw its binary replaced, which is what started this one.
+            // An error here (a daemon slow to exit) does not end the
+            // supervisor: the replacement left the daemon meant to run,
+            // and the ticks below start it.
+            if let Err(error) = service_cmd::replace_daemon_of_another_build(
+                &manager,
+                installer.as_ref(),
+                running_daemon_build().as_deref(),
+                Instant::now(),
+            ) {
+                eprintln!("vapor: warning: replacing the daemon of another build: {error}");
+            }
+            let binary = vapor_cli::commands::daemon_binary::cli_path();
+            let started_as = binary.as_deref().map(service_cmd::BinaryStamp::of);
+            let updated = || match (&binary, &started_as) {
+                (Some(path), Some(stamp)) => stamp.replaced_by(&service_cmd::BinaryStamp::of(path)),
+                _ => false,
+            };
+            service_cmd::check_loop(
+                &manager,
+                installer.as_ref(),
+                interval,
+                json,
+                &stop,
+                &updated,
+            )
+            .map_err(|e| e.to_string())?;
             return Ok(ExitCode::SUCCESS);
         }
         let supervisor = service_cmd::supervisor_installer().map_err(|e| e.to_string())?;
-        let mut outcome =
-            service_cmd::dispatch(command, &manager, installer.as_ref(), Instant::now())
-                .map_err(|e| e.to_string())?;
-        if matches!(command, ServiceCommand::Bootstrap | ServiceCommand::Install) {
-            // A daemon that refuses the handshake speaks another IPC
-            // version, so it is another build too.
-            let running_build = match ipc_cmd::status() {
-                Ok(status) => Some(status.daemon),
-                Err(vapor_cli::commands::IpcCliError::Client(
-                    vapor_ipc::ClientError::IncompatibleVersion(_),
-                )) => Some("another IPC version".to_string()),
-                Err(_) => None,
-            };
-            service_cmd::replace_daemon_of_another_build(
+        let mut outcome = if matches!(command, ServiceCommand::Bootstrap | ServiceCommand::Install)
+        {
+            service_cmd::install_with_supervisor(
+                command,
                 &manager,
                 installer.as_ref(),
-                running_build.as_deref(),
+                &supervisor,
+                running_daemon_build().as_deref(),
                 Instant::now(),
             )
-            .map_err(|e| e.to_string())?;
+        } else {
+            service_cmd::dispatch(command, &manager, installer.as_ref(), Instant::now())
         }
+        .map_err(|e| e.to_string())?;
         match &mut outcome {
             service_cmd::ServiceCommandOutcome::Status(report) => {
                 report.supervisor_installed = vapor_platform::ServiceInstaller::status(&supervisor)
                     .map(|status| status != vapor_platform::ServiceStatus::NotInstalled)
                     .unwrap_or(false);
-            }
-            service_cmd::ServiceCommandOutcome::Action(_) if supervise => {
-                vapor_platform::ServiceInstaller::install_and_enable(&supervisor)
-                    .map_err(|e| format!("supervisor install failed: {e}"))?;
             }
             service_cmd::ServiceCommandOutcome::Action(_)
                 if matches!(command, ServiceCommand::Uninstall { .. })
@@ -1146,6 +1481,13 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
                     .map_err(|e| format!("supervisor uninstall failed: {e}"))?;
             }
             _ => {}
+        }
+        #[cfg(target_os = "linux")]
+        if command == ServiceCommand::Install {
+            // On stderr: stdout carries the answer a surface parses.
+            if let Some(note) = linger_note(&service_cmd::apply_linger(linger_choice)) {
+                eprintln!("vapor: {note}");
+            }
         }
         if json {
             let serialized = serde_json::to_string_pretty(&service_cmd::render_json(&outcome))
@@ -1159,11 +1501,41 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let _ = (command, json, supervise, check_loop);
+        let _ = (command, json, check_loop);
         Err(
             "`vapor service` needs a native service manager; Windows lands with that surface"
                 .to_string(),
         )
+    }
+}
+
+/// The build of the daemon that answers on the socket, or `None` when
+/// none answers. A daemon that refuses the handshake speaks another IPC
+/// version, so it is another build too.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn running_daemon_build() -> Option<String> {
+    match ipc_cmd::status() {
+        Ok(status) => Some(status.daemon),
+        Err(vapor_cli::commands::IpcCliError::Client(
+            vapor_ipc::ClientError::IncompatibleVersion(_),
+        )) => Some("another IPC version".to_string()),
+        Err(_) => None,
+    }
+}
+
+/// What to tell the user about lingering after an install, when there
+/// is something to tell.
+#[cfg(target_os = "linux")]
+fn linger_note(outcome: &service_cmd::LingerOutcome) -> Option<String> {
+    match outcome {
+        service_cmd::LingerOutcome::On => {
+            Some("lingering is on, so the daemon keeps running after you log out".to_string())
+        }
+        service_cmd::LingerOutcome::Off => None,
+        service_cmd::LingerOutcome::Refused(reason) => Some(format!(
+            "warning: the system did not turn lingering on ({reason}); the daemon stops when \
+             you log out. An administrator can turn it on: sudo loginctl enable-linger $USER"
+        )),
     }
 }
 

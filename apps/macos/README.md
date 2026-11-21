@@ -14,10 +14,10 @@ Responsibilities:
 
 Current implementation notes:
 
-- Daemon lifecycle is delegated to the Rust core: the app invokes the bundled `vapor` CLI (`Contents/Helpers/vapor`), and all lifecycle policy (autolaunch persistence, crash-loop backoff and pause, supervision) lives in `core/lifecycle` behind `vapor service`.
+- Daemon lifecycle is delegated to the Rust core: the app invokes the bundled `vapor` CLI (`Contents/Helpers/vapor`), and all lifecycle policy (autolaunch persistence, crash-loop backoff and pause, supervision) lives in `core/lifecycle` behind `vapor service`. The app restarts nothing: the supervisor job that every install registers does, and the app reads the health from `vapor service status`.
 - `VaporCore` includes `DaemonLifecycleManager` as a thin facade over the `LaunchAgentControlling` seam: it owns only serialization (one lifecycle operation at a time) and login-item registration; zero lifecycle policy lives in Swift.
 - `VaporCore` includes `VaporCLIServiceController`, the default `LaunchAgentControlling` implementation: it runs `vapor service <cmd> --json` as a subprocess and decodes the stable JSON contract rendered by `core/cli/src/commands/service.rs`.
-- `VaporCore` includes `DaemonHealthMonitor`, a 30-second timer (`VaporConstants.Daemon.healthTickIntervalSeconds`) that runs `vapor service check` each tick so unexpected daemon exits are detected and routed through the Rust crash-loop guard.
+- `VaporCore` includes `DaemonHealthMonitor`, a 30-second timer (`VaporConstants.Daemon.healthTickIntervalSeconds`) that reads `vapor service status` each tick, so the app shows what the supervisor found and did. The app restarts nothing.
 - `VaporCore` includes `AppLifecycleCoordinator` for app-window/menubar lifecycle actions (Dock presence, daemon stop on quit).
 - `VaporCore` includes `VaporConfigurationStore` + `VaporPaths` for runtime directory resolution and `vapor.json` persistence.
 - `VaporCore` includes `VaporLocalizationStore` for JSON-catalog UI copy lookup with device-language selection and English fallback.
@@ -25,7 +25,7 @@ Current implementation notes:
 - The LaunchAgent plist and `launchctl` interaction are owned by the Rust `NativeServiceInstaller` (`core/platform`), reached through `vapor service`; no Swift code writes the plist.
 - `AppShellViewModel` uses lifecycle defaults backed by `VaporCLIServiceController` and `SMAppService.mainApp` integration to restore Vapor at login in menubar-only mode.
 - The Settings window covers `autoLaunch` (Start at login), `useGitignore`, `useVaporignore`, `preIgnoreRules`, `postIgnoreRules` (one rule per line in the editor, a list in the file), and `language`, persisted in `vapor.json`; every other key is set with `vapor config set` or in the file. The running daemon applies ignore toggles and rules within a few seconds; roots, provider and profile changes need a restart, which the daemon reports in status and the app offers as "Restart sync" (the LaunchAgent environment carries only `VAPOR_DIR` and `VAPOR_ENV`; no environment variable overrides a `vapor.json` key).
-- The daemon creates a sync folder only on a profile's first contact with it, and a profile exists only when the user set its two folders. With no usable profile the daemon stays up and reports the run state `unconfigured`; the app shows that as paused, with the daemon's reason, until the first-run flow exists (`docs/tasks/macos.md`). `vapor profiles add` from the bundled CLI sets the first profile up.
+- The daemon creates a sync folder only on a profile's first contact with it, and a profile exists only when the user set its two folders. With no usable profile the daemon stays up and reports the run state `unconfigured`; the app shows that as paused, with the daemon's reason, until the first-run flow exists (`docs/tasks/macos.md`). `vapor init` in a terminal sets the install up; the installer puts `vapor` on the `PATH`.
 - The 30-second health tick also reads `vapor status --json` when the daemon is running, so the Dashboard and menu bar show the daemon's real state (idle, syncing, throttled, suspended, paused, stopped, error) with its throttle reason, instead of a static label.
 - The menu bar mark has two faces. AppKit tints the template mark for the menu bar appearance; while `AppShellState.needsUserAction` holds (a profile that needs a new sign-in to its provider, a parked question, an unresolved conflict, a crash-loop pause, a blocked login item, a restart-required setting, an unreadable config file, or the Error state the status text labels "Action required") the app shows the same mark filled with the brand colour (`VaporConstants.Brand`, Aerospace International Orange) as a non-template image, and the menu names the waiting questions and conflicts with the CLI commands that answer them. `MenuBarIcon.attention(from:)` rasterises that face once per scale from the template at launch.
 - Under Error or Paused the status detail is the daemon's own run-state reason (`run.reason` in `vapor status --json`, which the daemon picks: a suspension first, otherwise the first profile in that state that gives one), such as a cloud root it cannot ensure, in place of the throttle reason. While the whole-scope scan waits or runs, the detail is the scan's own line (`reconcile.detail` from `vapor status --json`), so a device that is too hot to scan says so instead of looking stuck. `AppShellState.syncDetail(for:status:)` is the one place that ranks the three.
@@ -96,12 +96,19 @@ rationale: `docs/architecture/testing-strategy.md`.
 
 - Direct packaging: `apps/macos/scripts/package.sh`
 - Via repo build: `./scripts/build.sh package`
+- Outputs: `dist/Vapor.app`, and the installer
+  `dist/Vapor-macos-arm64.pkg`, which is the release asset. The
+  installer puts the app in `/Applications` and links
+  `/usr/local/bin/vapor` to the CLI inside it
+  (`scripts/installer/postinstall`).
+- Check what the installer holds: `apps/macos/scripts/verify-package.sh`.
+  Its `--install` mode installs the package and is for a CI runner only.
 - Launch packaged app: `open dist/Vapor.app`
 
 ## Signed distribution
 
-- Set signing identity: `VAPOR_SIGN_IDENTITY="Developer ID Application: ..."`
-- Package: `VAPOR_SIGN_IDENTITY="Developer ID Application: ..." apps/macos/scripts/package.sh`
+- Two identities, set together or not at all: `VAPOR_SIGN_IDENTITY="Developer ID Application: ..."` signs the app, and `VAPOR_INSTALLER_SIGN_IDENTITY="Developer ID Installer: ..."` signs the installer.
+- Package: `VAPOR_SIGN_IDENTITY="Developer ID Application: ..." VAPOR_INSTALLER_SIGN_IDENTITY="Developer ID Installer: ..." apps/macos/scripts/package.sh`
 
 Optional entitlements (the repository ships no entitlements file: the
 app needs none today):
@@ -112,7 +119,8 @@ app needs none today):
 
 1. Create a keychain profile with `xcrun notarytool store-credentials`.
 2. Run packaging with a notary profile (presence of `VAPOR_NOTARY_PROFILE` enables notarization):
-   - `VAPOR_SIGN_IDENTITY="Developer ID Application: ..." VAPOR_NOTARY_PROFILE="<profile>" apps/macos/scripts/package.sh`
+   - `VAPOR_SIGN_IDENTITY="Developer ID Application: ..." VAPOR_INSTALLER_SIGN_IDENTITY="Developer ID Installer: ..." VAPOR_NOTARY_PROFILE="<profile>" apps/macos/scripts/package.sh`
+   - The app is notarized and stapled first, then the installer that holds it.
 
 ## Xcode debugging convenience
 

@@ -157,15 +157,17 @@ fn report_hides_names(ctx: &mut Ctx) -> Result<(), Failure> {
     let home = ctx.primary.clone();
     start_primary(ctx)?;
     let cli = ctx.cli();
-    // Names that appear nowhere else, one of them with spaces.
+    // Names that appear nowhere else, one of them with spaces. No word
+    // of them is one the daemon logs on its own: a long sandbox path
+    // makes it log that the socket path is over its "budget".
     let mark = ctx.mark();
     write_file(
-        &home.local.join("Quarterly Plans/zebra budget draft.txt"),
+        &home.local.join("Quarterly Plans/zebra ledger draft.txt"),
         "figures\n",
     )?;
     ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
     ctx.wait_exists(
-        &home.cloud.join("Quarterly Plans/zebra budget draft.txt"),
+        &home.cloud.join("Quarterly Plans/zebra ledger draft.txt"),
         CONVERGE_TIMEOUT,
     )?;
     ctx.settle(CONVERGE_TIMEOUT)?;
@@ -176,7 +178,7 @@ fn report_hides_names(ctx: &mut Ctx) -> Result<(), Failure> {
     // name to hide, and none to keep.
     let daemon_log = home.daemon_log();
     ctx.wait_until(CONVERGE_TIMEOUT, "the daemon log to name the file", || {
-        read_string(&daemon_log).is_ok_and(|log| log.contains("zebra budget draft.txt"))
+        read_string(&daemon_log).is_ok_and(|log| log.contains("zebra ledger draft.txt"))
     })?;
     let sandbox_name = ctx
         .sandbox
@@ -211,7 +213,7 @@ fn report_hides_names(ctx: &mut Ctx) -> Result<(), Failure> {
     );
     for name in [
         "zebra",
-        "budget",
+        "ledger",
         "Quarterly",
         "Plans",
         sandbox_name.as_str(),
@@ -232,7 +234,7 @@ fn report_hides_names(ctx: &mut Ctx) -> Result<(), Failure> {
 
     let (manifest, text, human) = write_report(&["--keep-paths"], "reports-kept")?;
     ensure!(
-        manifest["pathsRedacted"] == false && text.contains("zebra budget draft.txt"),
+        manifest["pathsRedacted"] == false && text.contains("zebra ledger draft.txt"),
         "--keep-paths must keep the names"
     );
     ensure!(

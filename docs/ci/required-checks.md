@@ -146,6 +146,8 @@ to scripts.
 - Build workflow (`.github/workflows/build.yml`)
   - triggers: `pull_request`, `push` to `main`, `workflow_call`
   - `./scripts/build.sh`
+  - macOS only: `./scripts/build.sh package`, then
+    `apps/macos/scripts/verify-package.sh --install`
 - Perf workflow (`.github/workflows/perf.yml`)
   - triggers: `workflow_call` from `.github/workflows/release.yml`, `workflow_dispatch`
   - runner matrix: `macos-latest` (platforms join as their budgets are calibrated)
@@ -159,7 +161,7 @@ to scripts.
   - trigger: pushed `v*` tags
   - `preflight` validates tag format, `VERSION` match, tag ancestry on `main`, and the changelog section
   - calls `lint`, `test`, `perf`, and `soak` in parallel
-  - `package (<platform>)` declares `needs: [preflight, lint, test, perf, soak]`, one matrix entry per shipping platform (`macos` on `macos-latest` under `release-macos` today), `./scripts/build.sh package`, assets uploaded as the `release-<platform>` artifact
+  - `package (<platform>)` declares `needs: [preflight, lint, test, perf, soak]`, one matrix entry per shipping platform (`macos` on `macos-latest` under `release-macos` today), `./scripts/build.sh package`, the installer checked and installed on the runner (`verify-package.sh --install`), assets uploaded as the `release-<platform>` artifact
   - `publish` declares `needs: [preflight, package]`, downloads every platform's assets, writes `Checksums.txt`, `gh release create/edit/upload`
 
 ## Local parity command set

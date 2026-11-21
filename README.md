@@ -14,11 +14,35 @@ Vapor is an invisible-first cloud sync app that stays out of your way. It keeps 
 
 ## Install
 
-Download Vapor directly from the [GitHub Releases](https://github.com/neoxelox/vapor/releases) page.
+One file installs the app, the `vapor` command, and the background daemon. Pick your device and download its file from the [releases page](https://github.com/neoxelox/vapor/releases).
 
-- **macOS**: install the `Vapor` app (from `Vapor.zip`) from the latest release assets.
-- **Windows / Linux**: planned. The CLI (`vapor`) would ship for Windows and Linux before the GUI apps do.
-- **CLI (`vapor`)**: ships inside the app, at `Vapor.app/Contents/Helpers/vapor`. Link it onto your `PATH` to use it from a terminal. Standalone downloads are planned.
+| Device | File | Release |
+| --- | --- | --- |
+| macOS 26+, Apple silicon | [`Vapor-macos-arm64.pkg`](https://github.com/neoxelox/vapor/releases) | [![latest release](https://img.shields.io/github/v/release/neoxelox/vapor?include_prereleases&label=)](https://github.com/neoxelox/vapor/releases) |
+| Windows, x64 | `Vapor-windows-x64.msi` | Planned |
+| Windows, ARM64 | `Vapor-windows-arm64.msi` | Planned |
+| Linux, x64 | `Vapor-linux-x64.deb` or `.rpm` | Planned |
+| Linux, ARM64 | `Vapor-linux-arm64.deb` or `.rpm` | Planned |
+
+### MacOS
+
+1. **Install it.** Open the file and follow the installer. From a terminal, run `sudo installer -pkg Vapor-macos-arm64.pkg -target /`.
+2. **Set it up.** Run `vapor init`. It asks for your cloud and your two folders, then sync starts and keeps running in the background.
+
+Prereleases are not signed yet, so macOS blocks the installer the first time. Allow it under System Settings > Privacy & Security > Open Anyway.
+
+To remove Vapor and everything it put on the Mac, quit it from the menu bar and run:
+
+```sh
+vapor service uninstall                 # stops the daemon, removes its two background jobs
+vapor auth logout                       # removes the sign-in from the keychain
+sudo rm -rf /Applications/Vapor.app /usr/local/bin/vapor
+sudo pkgutil --forget sh.arn.vapor.pkg  # the installer's record
+defaults delete sh.arn.vapor            # the app's preferences
+rm -rf ~/.vapor                         # settings, logs, sync state, Vapor's trash
+```
+
+Your synced folders stay, on the Mac and in the cloud. Updates, setup from a script, and more on removal are in [Install and first launch](docs/product/install.md).
 
 ## Features
 
@@ -36,7 +60,8 @@ Available now:
 - 🔂 **Loop prevention.** Vapor's own writes never bounce back as new changes.
 - ⏮️ **Offline catch-up.** Edits, renames, and deletions made while Vapor was off sync at the next start.
 - 🔀 **Sync modes.** Two-way, or a one-way mirror for backups, which runs only after you confirm it.
-- 🧩 **Profiles.** Nothing syncs until you add a folder pair with `vapor profiles add`, and several can run at once.
+- 🪄 **One-command setup.** `vapor init` takes a fresh install to a running sync: cloud, sign-in, folders, start at login. Run it again and it does only what is left.
+- 🧩 **Profiles.** Nothing syncs until you choose a folder pair, and several can run at once (`vapor profiles add`).
 - 📦 **Resilient transfers.** Downloads land whole, big uploads resume, and retries back off and respect rate limits.
 - 🪶 **Adaptive throttle.** Sync slows down on battery or while you work, and pauses only if the device overheats.
 - 🌙 **Idle boost.** Sync speeds up while the device sits idle and backs off the moment you return.
@@ -44,7 +69,8 @@ Available now:
 - 🌩 **Storm control.** A burst of thousands of changes becomes one scan, not thousands of uploads.
 - 🧹 **Ignore rules.** Your `.gitignore` files work as they are, and `vapor ignored` shows what they hold back.
 - ♻️ **Live settings.** Ceilings, ignore rules, and safeguards apply while Vapor runs, with no restart.
-- 🚀 **Always on.** It starts at login, restarts after a crash, and stops retrying when something is really broken.
+- 🚀 **Always on.** It starts at login, restarts after a crash with or without the app open, and stops retrying when something is really broken.
+- 🧰 **One installer.** The app, the daemon, and `vapor` on your `PATH` arrive together, and installing a newer file updates all three.
 - ⏯️ **Pause, resume, Sync now.** Changes wait while paused, and Sync now compares both folders right away.
 - 📈 **Explains itself.** Status with a reason, a live timeline, and a support report with your file names hidden.
 - ⌨️ **Full command line.** Everything the app does, `vapor` does too, for scripts and for servers with no app.
@@ -58,7 +84,8 @@ In flight and coming next:
 - 🚪 **First-run setup.** The Mac app asks for the cloud and the two folders, in place of the terminal command.
 - 🔔 **Notifications.** A system notification when Vapor has a question for you.
 - 🖥️ **Windows and Linux apps.** The same runtime as the Mac app.
-- 📥 **Standalone CLI downloads.** For every OS, with Docker and systemd recipes.
+- 🐧 **Linux packages for servers.** A `.deb` and an `.rpm` that install on a server with no desktop, with Docker and systemd recipes.
+- 🗂️ **Cloud folder picker.** Setup lists the folders of your cloud, so you pick one or make a new one.
 - 🧾 **Signed releases.** Signed and notarized, and verified on a clean machine every cycle.
 
 ## Providers
@@ -78,12 +105,13 @@ In flight and coming next:
 
 | Command | Flags | What it does |
 | --- | --- | --- |
+| `vapor init` | `--provider <provider>`, `--local <path>`, `--cloud <path>`, `--mode <mode>`, `--token -`, `--auto-launch <on\|off>`, `--linger <on\|off>` (Linux), `--json` | Sets Vapor up: the cloud, the sign-in, the two folders, and the background service. A terminal asks for each answer; a script gives them as flags and has to give `--local` and `--cloud`. A later run does only what is left. Exits with 1 while a step waits for you. |
 | `vapor status` | `--json` | Shows what sync is doing and why: run state, throttle, queue, open questions. |
 | `vapor pause` | `--json` | Pauses sync. Changes are still recorded and sync on resume. |
 | `vapor resume` | `--json` | Resumes sync. |
 | `vapor reconcile` | `--json` | Compares both folders now and syncs the differences. |
 | `vapor profiles list` | `--json` | Lists the sync profiles: the folders, the cloud, the direction. |
-| `vapor profiles add` | `--id <id>`, `--name <name>`, `--provider <provider>`, `--local <path>`, `--cloud <path>`, `--mode <mode>`, `--json` | Adds a profile. On a terminal it asks for what you leave out; a script has to give `--local` and `--cloud`. The first one is the setup of a fresh install and starts syncing at once. |
+| `vapor profiles add` | `--id <id>`, `--name <name>`, `--provider <provider>`, `--local <path>`, `--cloud <path>`, `--mode <mode>`, `--json` | Adds a profile. On a terminal it asks for what you leave out; a script has to give `--local` and `--cloud`. The first one starts syncing at once. `vapor init` runs it for a fresh install, with the sign-in and the background service. |
 | `vapor profiles remove <id>` | `--yes`, `--json` | Stops syncing a profile and forgets its sync state and sign-in. The files on both sides stay. Needs the daemon stopped. |
 | `vapor ignored` | `--profile <id>`, `--json` | Lists what the ignore rules keep out of sync, with the rule that hides each path. |
 | `vapor decisions list` | `--all`, `--json` | Lists the questions waiting for you: conflicts, and actions Vapor will not take on its own. `--all` adds the answered ones. |
@@ -95,14 +123,14 @@ In flight and coming next:
 | `vapor config get <key>` | | Prints a setting, or its default when unset. |
 | `vapor config set <key> <value>` | | Changes one setting and says when it takes effect. |
 | `vapor auth login` | `--profile <id>`, `--browser`, `--token -` | Signs a profile in to its cloud. `--token -` reads a token from stdin; a token is never taken as an argument. |
-| `vapor auth logout` | `--profile <id>` | Removes a profile's stored sign-in. |
+| `vapor auth logout` | `--profile <id>` | Removes a profile's stored sign-in. With no profile yet, it removes the sign-in that `vapor init` kept. |
 | `vapor auth status` | `--profile <id>`, `--json` | Shows which profiles are signed in. |
-| `vapor service install` | `--supervise`, `--json` | Starts Vapor at login and starts it now. `--supervise` adds a supervisor that restarts a crashed daemon where no app runs. |
+| `vapor service install` | `--linger <on\|off>` (Linux), `--json` | Starts Vapor at login and starts it now, with the supervisor that restarts a crashed daemon. On a Linux host with no desktop it turns lingering on, so Vapor keeps running after you log out; `--linger off` leaves that alone. |
 | `vapor service uninstall` | `--keep-running`, `--json` | Stops starting Vapor at login, and stops it unless `--keep-running`. |
 | `vapor service start`, `stop`, `restart` | `--json` | Starts, stops, or restarts the daemon. A restart applies the settings that need one. |
-| `vapor service status` | `--json` | Says whether the service is installed and running, or paused after repeated crashes. |
+| `vapor service status` | `--json` | Says whether the service is installed and running, or paused after repeated crashes. Changes nothing. |
 | `vapor service bootstrap` | `--json` | Installs and starts the service when `autoLaunch` is on. The app runs it at startup. |
-| `vapor service check` | `--loop`, `--interval <seconds>`, `--json` | Restarts the daemon if it exited unexpectedly, within the crash-loop limits. |
+| `vapor service check` | `--loop`, `--interval <seconds>`, `--json` | Restarts the daemon if it exited unexpectedly, within the crash-loop limits. The supervisor runs it for you. |
 | `vapor service acknowledge` | `--json` | Clears a crash-loop pause so the daemon may start again. |
 | `vapor timeline` | `--json` | Shows recent activity. |
 | `vapor diagnostics` | `--json` | Lists queued and in-flight work, with the reason each item waits. |

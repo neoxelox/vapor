@@ -76,3 +76,17 @@ jobs:
       - name: Run build
         shell: bash
         run: ./scripts/build.sh
+
+      # The installer is what a Mac user downloads. It is built from
+      # the binaries of the step above, unsigned, and installed on this
+      # runner, so a break in the packaging shows at the pull request
+      # and not at a release, after an hour of gates.
+      - name: Build the installer (macOS)
+        if: matrix.scope == 'full'
+        shell: bash
+        run: ./scripts/build.sh package
+
+      - name: Install it and check the CLI on the PATH (macOS)
+        if: matrix.scope == 'full'
+        shell: bash
+        run: apps/macos/scripts/verify-package.sh --install

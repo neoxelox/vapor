@@ -8,8 +8,8 @@ Release invariants:
 
 - Packaging remains script-first via `./scripts/build.sh package` and `apps/macos/scripts/package.sh`.
 - Root `VERSION` is the single source-of-truth for Vapor app + daemon semantic versioning.
-- `dist/Vapor.app` is the local packaged bundle used for validation and zipping.
-- GitHub Releases publish file assets, so the distributable release payload is `Vapor.zip` containing `Vapor.app`.
+- `dist/Vapor.app` is the local packaged bundle used for validation and for building the installer.
+- The release payload of a platform is its install packages, named `Vapor-<os>-<arch>.<ext>`. Each holds the app, the `vapor` CLI, and `vapord`, and its installer puts `vapor` on the `PATH`. On macOS it is `Vapor-macos-arm64.pkg`. Vapor ships no standalone CLI and no detached signature file.
 - Packaged app metadata uses Apple-valid bundle version keys, while raw semver/prerelease value and git commit SHA are stored in dedicated Vapor build-info fields.
 - Stable releases (`vX.Y.Z`) require signing and notarization and fail hard if prerequisites are unavailable.
 - Tag history is immutable for released versions.
@@ -56,6 +56,7 @@ Release invariants:
   stable tag requires per platform.
 - For stable releases on macOS:
   - `VAPOR_SIGN_IDENTITY` configured in the `release-macos` environment secrets.
+  - `VAPOR_INSTALLER_SIGN_IDENTITY` configured in the `release-macos` environment secrets.
   - `VAPOR_NOTARY_PROFILE` configured in the `release-macos` environment secrets.
   - `APPLE_DEVELOPER_ID_P12_BASE64` configured in the `release-macos` environment secrets.
   - `APPLE_DEVELOPER_ID_P12_PASSWORD` configured in the `release-macos` environment secrets.
@@ -185,12 +186,13 @@ one it gates.
 
 ## Apple secret preparation
 
-- Export a `Developer ID Application` certificate plus private key from Keychain Access as a `.p12` file.
+- Export the `Developer ID Application` certificate and the `Developer ID Installer` certificate, each with its private key, from Keychain Access into one `.p12` file: select both, then export. The first signs the app, the second signs the installer, and the workflow imports the one file.
 - Convert the `.p12` file to base64 for `APPLE_DEVELOPER_ID_P12_BASE64`:
   - `base64 -i vapor-developer-id.p12 | pbcopy`
 - Store the `.p12` export password as `APPLE_DEVELOPER_ID_P12_PASSWORD`.
 - Create a strong temporary-keychain password for CI as `APPLE_KEYCHAIN_PASSWORD`.
 - Set `VAPOR_SIGN_IDENTITY` to the exact `Developer ID Application: ...` identity string shown by Keychain Access or `security find-identity -v -p codesigning`.
+- Set `VAPOR_INSTALLER_SIGN_IDENTITY` to the exact `Developer ID Installer: ...` identity string shown by Keychain Access or `security find-identity -v` (an installer identity is not a code signing one, so `-p codesigning` does not list it).
 - Download the App Store Connect API key `.p8` file and convert it to base64 for `APPLE_NOTARY_API_KEY_P8_BASE64`:
   - `base64 -i AuthKey_<KEYID>.p8 | pbcopy`
 - Store the App Store Connect key identifier as `APPLE_NOTARY_KEY_ID`.
@@ -255,8 +257,8 @@ one it gates.
      - Calls reusable `lint.yml`, `test.yml`, `perf.yml`, and `soak.yml` in parallel; the soak matrix takes about an hour.
      - Preflight verifies the tag ref is valid, exactly matches `VERSION`, the tag commit is reachable from `origin/main`, and `CHANGELOG.md` holds the tag's section.
      - `package (<platform>)` runs once per shipping platform (`macos` on `macos-latest` under the `release-macos` environment today; Windows and Linux entries join the matrix when those surfaces ship, each under its own environment) and declares `needs: [preflight, lint, test, perf, soak]`, so packaging does not begin unless ref validation and all four gates pass.
-     - The macOS entry imports the Developer ID certificate into a temporary keychain and creates the `notarytool` profile on-runner when signing/notarization is configured, verifies the imported keychain actually contains `VAPOR_SIGN_IDENTITY` before packaging begins, and passes the temporary keychain path into packaging so `notarytool submit` resolves the stored profile explicitly.
-     - Every entry runs `./scripts/build.sh package`, validates its own artifact structure, and uploads its assets as the `release-<platform>` workflow artifact.
+     - The macOS entry imports the Developer ID certificate into a temporary keychain and creates the `notarytool` profile on-runner when signing/notarization is configured, verifies the imported keychain actually contains `VAPOR_SIGN_IDENTITY` and `VAPOR_INSTALLER_SIGN_IDENTITY` before packaging begins, and passes the temporary keychain path into packaging so `notarytool submit` resolves the stored profile explicitly.
+     - Every entry runs `./scripts/build.sh package`, validates its own artifact structure, and uploads its assets as the `release-<platform>` workflow artifact. The macOS entry runs `apps/macos/scripts/verify-package.sh --install`: it checks what the installer holds, installs it on the runner, and checks that `vapor` is on the `PATH` and finds the daemon inside the app.
      - `publish` (on `ubuntu-latest`, the only job with `contents: write`) downloads every platform's assets into `dist/`, writes one `Checksums.txt` with a SHA-256 line per asset, builds the release body with `scripts/notes.sh` (one line on what the Mac app runs on, then the changelog section of the tag, cut at GitHub's limit with a link to the changelog when it is longer), and creates or updates the GitHub Release. Assets are uploaded with replacement (`--clobber`) while the release is a draft. The job refuses to replace the assets of a published release.
 
 6. Publish policy
@@ -265,12 +267,13 @@ one it gates.
 
 7. Post-run verification
      - Confirm release assets include:
-       - `Vapor.zip`
+       - `Vapor-macos-arm64.pkg`
        - `Checksums.txt` (one `sha256sum` line per asset, verifiable with `sha256sum -c` next to the downloaded files)
-    - Confirm package contents include:
-      - `Vapor.app/Contents/MacOS/Vapor`
-      - `Vapor.app/Contents/MacOS/vapord`
-      - `Vapor.app/Contents/Helpers/vapor`
+    - Confirm the installer holds (`apps/macos/scripts/verify-package.sh <file>`; the package job runs it, and installs the package on its runner to check the link):
+      - `Applications/Vapor.app/Contents/MacOS/Vapor`
+      - `Applications/Vapor.app/Contents/MacOS/vapord`
+      - `Applications/Vapor.app/Contents/Helpers/vapor`
+      - the `postinstall` script that links `/usr/local/bin/vapor`
     - Confirm release notes match `CHANGELOG.md` section for the tag.
 
 ## Adding a platform to the package matrix
@@ -304,11 +307,13 @@ into the environment, then the matrix entry, then the trust chain doc.
    path.
 4. **Build** with `./scripts/build.sh package`, the same step for every
    platform. Teach `scripts/<stack>/build.sh` to sign when the material
-   is present (`signtool` on Windows, a detached GPG signature next to
-   the AppImage on Linux) and to write the assets under `dist/`.
+   is present (`signtool` on Windows, a GPG signature inside each
+   `.deb` and `.rpm` on Linux) and to write the assets under `dist/`,
+   named `Vapor-<os>-<arch>.<ext>`.
 5. **Validate outputs**, gated on the platform: the equivalent of the
-   macOS `test -x` lines for the installer or AppImage and, when
-   `enabled`, that the signature verifies.
+   macOS `verify-package.sh` run (the three executables in the package,
+   an install on the runner, and `vapor` on the `PATH` after it) and,
+   when `enabled`, that the signature verifies.
 6. **Upload** is the shared step: `matrix.assets` goes up as
    `release-<platform>`. `publish` picks it up, adds it to
    `Checksums.txt`, and attaches it to the release without any change.
@@ -359,6 +364,6 @@ are in, since a prerelease signs when the material is present.
 - [ ] Release workflow succeeded.
 - [ ] A stable tag's packaged `vapor doctor` shows the built-in Google
       Drive client (the macOS package job checks it).
-- [ ] Stable release zip was built from the signed, stapled app bundle.
+- [ ] Stable release installer is signed, notarized, and stapled, and holds the signed, stapled app bundle.
 - [ ] Checksums present and verified.
 - [ ] Draft reviewed and published by maintainer.

@@ -48,4 +48,6 @@ when its area is next changed; there is no backfill.
 
 | Spec | What it decides |
 |---|---|
+| `2026-11-21-vapor-init.md` | `vapor init`, the one command for the first run from a terminal: its steps and their order, that it is the same onboarding as the apps', start at login and lingering asked with the answer yes by default, a later run that does only what is left, and flags for a run with no terminal. |
+| `2026-11-21-platform-release-assets.md` | What a release holds on each platform: one install package that holds the app, the CLI, and the daemon, no standalone CLI, asset names that say the platform and the architecture, `vapor` on the `PATH` at install time, one update for all three, a `.pkg` on macOS, a `.deb` and an `.rpm` on Linux that install on a server with no desktop, and no update check for now. |
 | `2026-11-14-full-review.md` | What the full review of the repository changed: when a deletion propagates, how a change of spelling syncs, that a throttle state slows sync and does not stop it, measured CPU and bandwidth ceilings, no folder before the user chose, the one-way warning as a decision, no state migrations before GA, ignore-rule semantics, the redacted report, and the release rules. Also the choices that still wait for the owner. |

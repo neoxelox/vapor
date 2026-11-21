@@ -182,6 +182,15 @@ the primary path is blocked by it. See `docs/tasks/README.md`.
       and backslash separators in the configuration, the logs, and the
       live state. The redactor splits a path at `/` today, and its
       tests with path fixtures run on Unix only.
+- [ ] C6-11 The Windows installers, `Vapor-windows-x64` and
+      `Vapor-windows-arm64`, as a `package (windows)` entry of
+      `release.yml`. One installer holds the app, `vapord.exe`, and
+      `vapor.exe`; the CLI gets a directory of its own, because
+      `Vapor.exe` cannot share one with it on a filesystem that ignores
+      case, and the installer puts that directory on the `PATH`. Open
+      with it: `.msi` or `.msix`, which follows the UI toolkit of the
+      app, and how the supervisor hands over to a new build after an
+      update (`docs/specs/2026-11-21-platform-release-assets.md`).
 
 ### Linux (native traits in; not a shipping surface yet)
 
@@ -192,6 +201,18 @@ runners. What remains before Linux ships a surface:
 - [ ] C7-7 Linux distribution trust chain doc:
       `docs/operations/linux/distribution-trust-chain.md` + systemd unit
       policy in `docs/operations/linux/systemd-unit-policy.md`.
+- [ ] C7-10 The Linux packages: a `.deb` and an `.rpm` for x64 and for
+      ARM64 (`Vapor-linux-<arch>.<ext>`), as a `package (linux)` entry
+      of `release.yml`, each with its GPG signature inside. A package
+      puts `vapor` in `/usr/bin` and installs on a host with no
+      desktop: the desktop libraries are optional dependencies, so a
+      server gets the CLI and the daemon and `vapor init` sets it up.
+      The first packages may hold `vapor` and `vapord` only; the app
+      window joins the same packages later, under the same names. The
+      package check installs it on the runner and finds `vapor` on the
+      `PATH`, as the macOS one does. Open with it: where `vapord` goes
+      (`/usr/bin` or a private directory), and a distribution with
+      neither format, which builds from source.
 - The `vapor service` round-trip against a real `systemctl --user`
   session (`cli.md` L2-6) and the rest of the Linux soak (TR-10).
 

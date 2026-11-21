@@ -95,8 +95,10 @@ Behavior invariants:
   app process). The daemon installs platform-native shutdown handlers so
   `launchctl kill TERM` exits the tick loop at the next tick boundary.
 - Crash-loop protection is owned by `core/lifecycle` (not `launchd` and
-  not Swift): the app's `DaemonHealthMonitor` runs `vapor service check`
-  every 30 seconds, and crash counters/backoff/pause persist in
+  not Swift): the supervisor job that every install registers runs
+  `vapor service check` every 30 seconds, the app's
+  `DaemonHealthMonitor` reads the result with `vapor service status`
+  and restarts nothing, and crash counters/backoff/pause persist in
   `<vapor_dir>/state/lifecycle.json`. After 5 consecutive unclean exits
   within 10 minutes the guard enters `CrashLoopPaused` and the app
   surfaces a reasoned menubar diagnostic; the user must acknowledge (the
@@ -104,7 +106,7 @@ Behavior invariants:
 
 ## 5) Native app bundle and distribution foundation
 
-Script-first packaging that produces `Vapor.app` and a zip artifact without
+Script-first packaging that produces `Vapor.app` and its installer without
 Xcode archive flow.
 
 ### 5.1 SwiftUI app entry
@@ -140,10 +142,22 @@ Ordered steps:
    `VAPOR_SIGN_IDENTITY` is set; optional entitlements via
    `VAPOR_ENTITLEMENTS`).
 8. Validate (`plutil`, `codesign --verify`).
-9. Produce `dist/Vapor.zip` via `ditto --keepParent`.
-10. When `VAPOR_NOTARY_PROFILE` is set: notarize, read Apple's answer,
-    staple, check the stapled app (`stapler validate`, `spctl`), and
-    re-zip.
+9. When `VAPOR_NOTARY_PROFILE` is set: notarize the app, read Apple's
+   answer, staple, and check the stapled app (`stapler validate`,
+   `spctl`).
+10. Build the installer `dist/Vapor-macos-arm64.pkg`: `pkgbuild` puts
+    the app under `/Applications`, not relocatable and with no version
+    check, with the `postinstall` script that links
+    `/usr/local/bin/vapor` to the CLI in the app; `productbuild` wraps
+    it in a distribution that refuses an Intel Mac and a macOS below
+    `MIN_MACOS`, and signs it when `VAPOR_INSTALLER_SIGN_IDENTITY` is
+    set.
+11. When `VAPOR_NOTARY_PROFILE` is set: notarize the installer, staple
+    it, and check it (`stapler validate`, `spctl -t install`).
+
+`apps/macos/scripts/verify-package.sh` checks what is in the installer.
+With `--install`, on a CI runner only, it installs it and checks the
+app, the link, and that the CLI finds the daemon through the link.
 
 The app name, the executable name, and the bundle identifier are fixed
 in the script (`AGENTS.md` §2.2). Environment inputs:
@@ -152,7 +166,9 @@ in the script (`AGENTS.md` §2.2). Environment inputs:
 - `ICON_DOCUMENT` (default `assets/macos/Vapor.icon`)
 - `ICONSET_DIR` (default `assets/macos/Vapor.iconset`)
 - `DIST_DIR` (default `dist`)
-- `VAPOR_SIGN_IDENTITY` (optional)
+- `VAPOR_SIGN_IDENTITY` (optional; Developer ID Application)
+- `VAPOR_INSTALLER_SIGN_IDENTITY` (optional; Developer ID Installer;
+  set with `VAPOR_SIGN_IDENTITY` or not at all)
 - `VAPOR_ENTITLEMENTS` (optional)
 - `VAPOR_NOTARY_PROFILE` (optional; presence enables notarization)
 
@@ -160,7 +176,8 @@ in the script (`AGENTS.md` §2.2). Environment inputs:
 
 Full policy in `docs/operations/macos/distribution-trust-chain.md`.
 
-- Code signing (Developer ID Application) for all three executables.
+- Code signing (Developer ID Application) for all three executables,
+  and (Developer ID Installer) for the installer.
 - Hardened runtime enabled for distributable binaries.
 - Notarization + staple required for release artifacts.
 - Entitlement review for least-privilege access.

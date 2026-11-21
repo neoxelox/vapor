@@ -431,6 +431,29 @@ impl DaemonLifecycleManager {
         Ok(())
     }
 
+    /// Stops the daemon so that the installed binary takes its place:
+    /// what an update needs. Unlike a stop the user asked for, the
+    /// daemon is still meant to run, and that is written before the
+    /// signal. So whatever the stop and the start then do (a daemon
+    /// slow to exit, a crash-loop backoff that holds the start), the
+    /// next check brings the daemon up, and the exit is not counted as
+    /// a crash.
+    pub fn replace_daemon(
+        &self,
+        now: Instant,
+    ) -> Result<DaemonLifecycleActionResult, DaemonLifecycleError> {
+        self.with_inner(|inner| {
+            inner.daemon_should_be_running = true;
+            inner.awaiting_restart = true;
+            inner.stop_requested_at_ms = None;
+            self.persist_locked(inner, now)
+        })?;
+        let stopped = self.installer.stop_daemon();
+        let started = self.start_daemon_if_allowed_inner(now)?;
+        stopped?;
+        Ok(started)
+    }
+
     /// One supervision tick (the engine behind `vapor service check`).
     ///
     /// Probes the platform service manager and reconciles observed
@@ -452,6 +475,48 @@ impl DaemonLifecycleManager {
         self.with_inner(|inner| {
             self.reload_locked(inner, now)?;
             self.check_locked(inner, status, now)
+        })
+    }
+
+    /// What a supervision tick would find, with nothing changed: no
+    /// crash is counted and no daemon is started. A surface that only
+    /// shows the state reads this. The supervisor job is the one caller
+    /// of [`check_daemon_health`](Self::check_daemon_health), so an exit
+    /// is counted once however many surfaces look at it.
+    pub fn observe_daemon_health(
+        &self,
+        now: Instant,
+    ) -> Result<DaemonHealthCheckOutcome, DaemonLifecycleError> {
+        let status = self.installer.status()?;
+        self.observe_daemon_health_for(status, now)
+    }
+
+    /// [`observe_daemon_health`](Self::observe_daemon_health) for a
+    /// service status the caller probed already.
+    pub fn observe_daemon_health_for(
+        &self,
+        status: ServiceStatus,
+        now: Instant,
+    ) -> Result<DaemonHealthCheckOutcome, DaemonLifecycleError> {
+        self.with_inner(|inner| {
+            self.reload_locked(inner, now)?;
+            Ok(match status {
+                ServiceStatus::Running => DaemonHealthCheckOutcome::Running,
+                ServiceStatus::NotInstalled => DaemonHealthCheckOutcome::NotInstalled,
+                ServiceStatus::Stopped | ServiceStatus::CrashLoopPaused => {
+                    if !inner.daemon_should_be_running {
+                        DaemonHealthCheckOutcome::StoppedExpected
+                    } else if inner.crash_loop_guard.is_paused_indefinitely() {
+                        DaemonHealthCheckOutcome::CrashLoopPaused
+                    } else {
+                        // An exit the supervisor has not seen yet, or one
+                        // whose backoff runs. The restart is its to do.
+                        DaemonHealthCheckOutcome::RestartDeferred(
+                            inner.crash_loop_guard.remaining_delay(now),
+                        )
+                    }
+                }
+            })
         })
     }
 
@@ -1164,6 +1229,135 @@ mod tests {
         installer.set_status_for_testing(ServiceStatus::NotInstalled);
         let outcome = manager.check_daemon_health(Instant::now()).expect("check");
         assert_eq!(outcome, DaemonHealthCheckOutcome::NotInstalled);
+    }
+
+    #[test]
+    fn observing_an_exit_counts_no_crash_and_starts_nothing() {
+        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let store = Arc::new(InMemoryLifecycleStateStore::new());
+        let clock = Arc::new(FixedWallClock::at(0));
+        let manager = durable_manager_with(installer.clone(), store.clone(), clock, check_policy());
+
+        let t0 = Instant::now();
+        manager.bootstrap_if_needed(t0).expect("bootstrap");
+        assert_eq!(
+            manager.observe_daemon_health(t0).expect("observe"),
+            DaemonHealthCheckOutcome::Running
+        );
+
+        // The daemon exits on its own. However often a surface looks,
+        // the exit is the supervisor's to count and to answer.
+        installer.set_status_for_testing(ServiceStatus::Stopped);
+        for second in 1..=3 {
+            let outcome = manager
+                .observe_daemon_health(t0 + Duration::from_secs(second))
+                .expect("observe");
+            assert_eq!(
+                outcome,
+                DaemonHealthCheckOutcome::RestartDeferred(Duration::ZERO)
+            );
+        }
+        assert_eq!(store.current().expect("state").consecutive_crashes, 0);
+        assert_eq!(installer.status().expect("status"), ServiceStatus::Stopped);
+
+        // The supervisor's check then counts it one time and restarts.
+        let outcome = manager
+            .check_daemon_health(t0 + Duration::from_secs(4))
+            .expect("check");
+        assert_eq!(outcome, DaemonHealthCheckOutcome::RestartedAfterCrash);
+        assert_eq!(store.current().expect("state").consecutive_crashes, 1);
+
+        // A stop on purpose reads as expected.
+        manager
+            .stop_daemon_for_termination(t0 + Duration::from_secs(5))
+            .expect("stop");
+        installer.set_status_for_testing(ServiceStatus::Stopped);
+        assert_eq!(
+            manager
+                .observe_daemon_health(t0 + Duration::from_secs(6))
+                .expect("observe"),
+            DaemonHealthCheckOutcome::StoppedExpected
+        );
+    }
+
+    #[test]
+    fn replacing_a_daemon_leaves_it_meant_to_run_even_when_a_backoff_holds_the_start() {
+        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let store = Arc::new(InMemoryLifecycleStateStore::new());
+        let clock = Arc::new(FixedWallClock::at(0));
+        let manager = durable_manager_with(installer.clone(), store.clone(), clock, check_policy());
+
+        let t0 = Instant::now();
+        manager.bootstrap_if_needed(t0).expect("bootstrap");
+        // Two crashes: the second one puts a backoff on the next start.
+        for second in [1, 2] {
+            installer.set_status_for_testing(ServiceStatus::Stopped);
+            manager
+                .check_daemon_health(t0 + Duration::from_secs(second))
+                .expect("check");
+        }
+        let crashes = store.current().expect("state").consecutive_crashes;
+        assert!(
+            manager
+                .crash_loop_state(t0 + Duration::from_secs(2))
+                .awaiting_restart,
+            "the second crash waits for its backoff"
+        );
+
+        // An update replaces the daemon while that backoff runs. The
+        // start is held, and the daemon stays meant to run.
+        let result = manager
+            .replace_daemon(t0 + Duration::from_secs(2))
+            .expect("replace");
+        assert!(
+            matches!(result, DaemonLifecycleActionResult::RelaunchDeferred(_)),
+            "{result:?}"
+        );
+        installer.set_status_for_testing(ServiceStatus::Stopped);
+        let state = store.current().expect("state");
+        assert!(state.daemon_should_be_running);
+        assert!(matches!(
+            manager
+                .observe_daemon_health(t0 + Duration::from_secs(3))
+                .expect("observe"),
+            DaemonHealthCheckOutcome::RestartDeferred(_)
+        ));
+
+        // The check after the backoff starts it, and the stop of the
+        // replacement was no crash.
+        let outcome = manager
+            .check_daemon_health(t0 + Duration::from_secs(60))
+            .expect("check");
+        assert_eq!(outcome, DaemonHealthCheckOutcome::RestartedAfterCrash);
+        assert_eq!(store.current().expect("state").consecutive_crashes, crashes);
+    }
+
+    #[test]
+    fn replacing_a_healthy_daemon_stops_and_starts_it() {
+        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let store = Arc::new(InMemoryLifecycleStateStore::new());
+        let clock = Arc::new(FixedWallClock::at(0));
+        let manager = durable_manager_with(installer.clone(), store.clone(), clock, check_policy());
+        let t0 = Instant::now();
+        manager.bootstrap_if_needed(t0).expect("bootstrap");
+
+        let result = manager
+            .replace_daemon(t0 + Duration::from_secs(1))
+            .expect("replace");
+        assert_eq!(result, DaemonLifecycleActionResult::Started);
+        assert_eq!(
+            installer.operations(),
+            ["install", "start", "stop", "start"]
+        );
+        let state = store.current().expect("state");
+        assert!(state.daemon_should_be_running);
+        assert_eq!(state.consecutive_crashes, 0);
+        assert_eq!(
+            manager
+                .check_daemon_health(t0 + Duration::from_secs(2))
+                .expect("check"),
+            DaemonHealthCheckOutcome::Running
+        );
     }
 
     #[test]

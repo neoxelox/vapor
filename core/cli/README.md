@@ -9,7 +9,7 @@ Tasks: `docs/tasks/cli.md`.
 
 ## Commands
 
-`status`, `pause`, `resume`, `reconcile`,
+`init`, `status`, `pause`, `resume`, `reconcile`,
 `profiles list|add|remove`, `decisions list|show|resolve`, `ignored`,
 `trash list|restore|empty`, `config get|set`,
 `auth login|logout|status`, `service bootstrap|install|uninstall|start|stop|restart|status|check|acknowledge`,
@@ -25,9 +25,10 @@ shapes are locked by assertion tests in each command module. `vapor
 cargo install --path core/cli
 ```
 
-Drops the `vapor` binary into `~/.cargo/bin`. There is no signed
-standalone release artifact yet; build-from-source is the supported
-path.
+Drops the `vapor` binary into `~/.cargo/bin`. The CLI has no download
+of its own: it ships inside the install package of each platform,
+whose installer puts it on the `PATH`. Build-from-source is the path
+for a host that has no package.
 
 ## Layout
 

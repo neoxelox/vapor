@@ -200,9 +200,9 @@ final class AppShellViewModel: ObservableObject {
     }
   }
 
-  /// Periodic supervision. The Rust core (via `vapor service
-  /// check`) owns detection and restart policy; the monitor only owns
-  /// the timer and reflects the outcome into UI state.
+  /// Periodic health read. The Rust core owns detection and restart
+  /// policy, in the supervisor job; the monitor only owns the timer and
+  /// reflects what `vapor service status` reports into UI state.
   private func startDaemonHealthMonitoringIfNeeded() {
     guard healthMonitor == nil else {
       return
@@ -314,10 +314,10 @@ final class AppShellViewModel: ObservableObject {
 
   func handleQuitFromMenuBar() async {
     // Drain the health tick off the main actor first: `stop()` blocks on
-    // the health queue behind any in-flight `vapor service check`, which
-    // could otherwise beachball the main thread and (worse) race a
-    // restart against the stop below. Running it on `lifecycleQueue` also
-    // orders it ahead of the coordinator's stop on the same queue.
+    // the health queue behind any in-flight `vapor service status`, which
+    // could otherwise beachball the main thread. Running it on
+    // `lifecycleQueue` also orders it ahead of the coordinator's stop on
+    // the same queue.
     let monitor = self.healthMonitor
     await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
       lifecycleQueue.async {

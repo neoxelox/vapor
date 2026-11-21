@@ -29,7 +29,7 @@ Inside `VAPOR_DIR`:
 | Artifact | Path |
 |----------|------|
 | Config | `vapor.json` (a running daemon applies the live keys within seconds; roots, provider, profiles and sync mode need a restart and show up in `vapor status` as `restartRequired`) |
-| Daemon log | `logs/vapord.log` (rotates at 8 MiB, three generations); `logs/vapord.stdout.log` / `.stderr.log` are the service manager's redirects; `logs/vapor-supervisor.log` is the headless supervisor's (`vapor service check --loop` under launchd, when installed with `--supervise`) |
+| Daemon log | `logs/vapord.log` (rotates at 8 MiB, three generations); `logs/vapord.stdout.log` / `.stderr.log` are the service manager's redirects; `logs/vapor-supervisor.log` is the supervisor's (`vapor service check --loop` under the service manager, which every install registers; it is what restarts a crashed daemon) |
 | Durable queue/state DB | `state/vapor.sqlite` for the implicit `default` profile; `state/profiles/<id>/vapor.sqlite` per configured profile (tables: `queue_intents`, `failed_intents`, `pending_decisions`, `name_aliases`, `state_entries`, `sync_index`, `schema_meta`; schema 7) |
 | DB that was set aside | `vapor.sqlite.corrupt-<ms>` (a damaged file) or `vapor.sqlite.schema-v<n>-<ms>` (another schema version) next to the DB: the daemon moved it aside and started fresh; a startup reconcile rebuilt the index. Removed after 30 days |
 | Lifecycle state | `state/lifecycle.json` (crash-loop bookkeeping shared by the CLI and the app) |
@@ -48,7 +48,7 @@ The `vapor` CLI is the fastest signal. Use it before reading raw files:
 - `vapor report`: one redacted archive with status, diagnostics, timeline, config, and log tail; the first thing to ask a user for.
 - `vapor logs --tail 100`: recent daemon log lines, already redacted.
 - `vapor timeline --json`: diagnostics activity timeline (real events; an empty list means nothing has been recorded yet, not that the feature is missing).
-- `launchctl list | grep sh.arn.vapor` and `ps aux | grep vapord`: is the service loaded, is the process alive? (The LaunchAgent label is `sh.arn.vapor.daemon`; a headless install also has `sh.arn.vapor.supervisor`, and `vapor service status` says whether it is installed.)
+- `launchctl list | grep sh.arn.vapor` and `ps aux | grep vapord`: is the service loaded, is the process alive? (The LaunchAgent label is `sh.arn.vapor.daemon`; every install also has `sh.arn.vapor.supervisor`, the job that restarts a crashed daemon, and `vapor service status` says whether it is installed.)
 
 ## 2. Gather logs and crash reports
 

@@ -59,6 +59,7 @@ fn help_names_every_command() {
     assert!(output.status.success());
     let help = stdout(&output);
     for command in [
+        "init",
         "run",
         "status",
         "profiles",
@@ -184,7 +185,141 @@ fn profiles_set_an_install_up_without_a_daemon_and_never_ask_without_a_terminal(
     let removed = vapor(home.path(), &["profiles", "remove", "default", "--yes"]);
     assert!(removed.status.success(), "{}", stderr(&removed));
     let listed = vapor(home.path(), &["profiles", "list"]);
-    assert!(stdout(&listed).contains("vapor profiles add"));
+    assert!(stdout(&listed).contains("vapor init"));
+}
+
+#[test]
+fn init_sets_an_install_up_and_a_second_run_changes_nothing() {
+    let home = TempDir::new().expect("home");
+    let local = home.path().join("local");
+    let cloud = home.path().join("cloud");
+    // `--auto-launch off` in each call that could register a service:
+    // a test never does that to the host. The last call needs none,
+    // and proves why: the answer is in `vapor.json` by then, and it is
+    // read before the service manager is looked at.
+
+    // Nobody to ask and no folders: a refusal on stderr, nothing on
+    // stdout, nothing written.
+    let refused = vapor(home.path(), &["init", "--auto-launch", "off", "--json"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(stdout(&refused).is_empty(), "{}", stdout(&refused));
+    assert!(
+        stderr(&refused).contains("--local <path> --cloud <path>"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(!home.path().join("vapor.json").exists());
+
+    let first = vapor(
+        home.path(),
+        &[
+            "init",
+            "--local",
+            &local.to_string_lossy(),
+            "--cloud",
+            &cloud.to_string_lossy(),
+            "--auto-launch",
+            "off",
+            "--json",
+        ],
+    );
+    assert!(first.status.success(), "{}", stderr(&first));
+    let report = json(&first);
+    assert_eq!(report["initialized"], true, "{report}");
+    let states: Vec<(&str, &str)> = report["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .map(|step| {
+            (
+                step["step"].as_str().expect("step"),
+                step["state"].as_str().expect("state"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        states,
+        [
+            ("profile", "done"),
+            ("sign-in", "not-needed"),
+            ("service", "off"),
+        ]
+    );
+    assert_eq!(report["profiles"][0]["id"], "default");
+    assert!(report.get("daemon").is_none(), "no daemon runs: {report}");
+    assert!(!local.exists(), "init creates no folder");
+
+    // The second run changes nothing and says so in words.
+    let written = std::fs::read_to_string(home.path().join("vapor.json")).expect("config");
+    let second = vapor(home.path(), &["init"]);
+    assert!(second.status.success(), "{}", stderr(&second));
+    let text = stdout(&second);
+    assert!(text.starts_with("Vapor is initialized.\n"), "{text}");
+    assert!(text.contains("daemon: not running"), "{text}");
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("vapor.json")).expect("config"),
+        written
+    );
+}
+
+#[test]
+fn init_exits_one_while_a_step_waits_for_a_person() {
+    let home = TempDir::new().expect("home");
+    // A provider with an account, no terminal for the browser, and no
+    // token on stdin: nobody can sign in here, and the command says so
+    // with exit code 1.
+    let waiting = vapor(
+        home.path(),
+        &[
+            "init",
+            "--provider",
+            "gdrive",
+            "--local",
+            &home.path().join("local").to_string_lossy(),
+            "--cloud",
+            "/Vapor",
+            "--auto-launch",
+            "off",
+            "--json",
+        ],
+    );
+    assert_eq!(waiting.status.code(), Some(1), "{}", stderr(&waiting));
+    let report = json(&waiting);
+    assert_eq!(report["initialized"], false, "{report}");
+    let sign_in = report["steps"]
+        .as_array()
+        .expect("steps")
+        .iter()
+        .find(|step| step["step"] == "sign-in")
+        .unwrap_or_else(|| panic!("no sign-in step: {report}"));
+    match sign_in["state"].as_str() {
+        // The host has a secret store: the profile is written, and the
+        // sign-in waits for a person.
+        Some("waits") => assert_eq!(report["profiles"][0]["provider"], "gdrive", "{report}"),
+        // The host has none (a bare Linux runner, Windows): a sign-in
+        // would be gone when the command ends, so the step fails with
+        // that reason and nothing is written.
+        Some("failed") => {
+            assert!(
+                sign_in["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("keeps no sign-in")),
+                "{report}"
+            );
+            assert_eq!(report["profiles"], serde_json::json!([]), "{report}");
+        }
+        other => panic!("the sign-in step must wait or fail, got {other:?}: {report}"),
+    }
+
+    // A token on the command line is refused before anything runs.
+    let on_the_command_line = vapor(home.path(), &["init", "--token", "ya29.test"]);
+    assert_eq!(on_the_command_line.status.code(), Some(1));
+    let reason = stderr(&on_the_command_line);
+    assert!(reason.contains("process list"), "{reason}");
+    assert!(
+        !reason.contains("ya29"),
+        "the refusal must not repeat the token: {reason}"
+    );
 }
 
 #[test]

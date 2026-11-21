@@ -7,6 +7,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 APP_NAME="Vapor"
 EXECUTABLE_NAME="Vapor"
 BUNDLE_ID="sh.arn.vapor"
+# The release asset: one installer, named after the platform and the
+# architecture it is for.
+PACKAGE_ID="$BUNDLE_ID.pkg"
+PACKAGE_NAME="$APP_NAME-macos-arm64.pkg"
 MIN_MACOS="${MIN_MACOS:-26.0}"
 ICON_DOCUMENT="${ICON_DOCUMENT:-assets/macos/Vapor.icon}"
 ICONSET_DIR="${ICONSET_DIR:-assets/macos/Vapor.iconset}"
@@ -14,10 +18,26 @@ ASSET_CATALOG="${ASSET_CATALOG:-assets/macos/Vapor.xcassets}"
 ACCENT_COLOR_NAME="${ACCENT_COLOR_NAME:-AccentColor}"
 DIST_DIR="${DIST_DIR:-dist}"
 VAPOR_SIGN_IDENTITY="${VAPOR_SIGN_IDENTITY:-}"
+VAPOR_INSTALLER_SIGN_IDENTITY="${VAPOR_INSTALLER_SIGN_IDENTITY:-}"
 VAPOR_ENTITLEMENTS="${VAPOR_ENTITLEMENTS:-}"
 VAPOR_NOTARY_PROFILE="${VAPOR_NOTARY_PROFILE:-}"
 VAPOR_NOTARY_KEYCHAIN="${VAPOR_NOTARY_KEYCHAIN:-}"
 export VAPOR_ENV="${VAPOR_ENV:-prod}"
+
+# The Mac app is built for Apple silicon, and the asset name says so.
+if [[ "$(uname -m)" != "arm64" ]]; then
+  echo "[package] The Mac app is built for Apple silicon; this host is $(uname -m)"
+  exit 1
+fi
+
+# The app and its installer are signed together or not at all: an
+# installer that is not signed is refused whatever the app inside is. An
+# unsigned pair is what a prerelease ships.
+if [[ -n "$VAPOR_SIGN_IDENTITY" && -z "$VAPOR_INSTALLER_SIGN_IDENTITY" ]] \
+  || [[ -z "$VAPOR_SIGN_IDENTITY" && -n "$VAPOR_INSTALLER_SIGN_IDENTITY" ]]; then
+  echo "[package] Set both VAPOR_SIGN_IDENTITY (Developer ID Application) and VAPOR_INSTALLER_SIGN_IDENTITY (Developer ID Installer), or neither"
+  exit 1
+fi
 
 "$ROOT_DIR/scripts/version.sh" check-sync >/dev/null
 eval "$("$ROOT_DIR/scripts/version.sh" metadata)"
@@ -306,50 +326,147 @@ plutil -lint "$info_plist"
 codesign --verify --deep --verbose=4 "$app_bundle"
 
 mkdir -p "$DIST_DIR"
-zip_path="$DIST_DIR/$APP_NAME.zip"
-rm -f "$zip_path"
-ditto -c -k --keepParent "$app_bundle" "$zip_path"
 
+notary_auth_args=()
 if [[ -n "$VAPOR_NOTARY_PROFILE" ]]; then
   if [[ -z "$VAPOR_SIGN_IDENTITY" ]]; then
     echo "[package] Notarization requires VAPOR_SIGN_IDENTITY with Developer ID Application certificate"
     exit 1
   fi
-
   notary_auth_args=(--keychain-profile "$VAPOR_NOTARY_PROFILE")
   if [[ -n "$VAPOR_NOTARY_KEYCHAIN" ]]; then
     notary_auth_args+=(--keychain "$VAPOR_NOTARY_KEYCHAIN")
   fi
+fi
 
-  # `notarytool submit --wait` exits 0 when Apple answers "Invalid", so
-  # the answer is read from its output, and a refusal prints Apple's log.
+# What the steps below write outside dist/. Removed however the script
+# ends: a refused notarization leaves no copy of the app behind.
+package_work=""
+app_submission_dir=""
+cleanup_work() {
+  local path
+  for path in "$package_work" "$app_submission_dir"; do
+    if [[ -n "$path" ]]; then
+      rm -rf "$path"
+    fi
+  done
+}
+trap cleanup_work EXIT
+
+# Submits one file to Apple and stops unless Apple accepts it.
+# `notarytool submit --wait` exits 0 when Apple answers "Invalid", so
+# the answer is read from its output, and a refusal prints Apple's log.
+notarize() {
+  local submission="$1"
+  local notary_output notary_status notary_id
   notary_output="$(mktemp)"
-  if ! xcrun notarytool submit "$zip_path" "${notary_auth_args[@]}" --wait 2>&1 | tee "$notary_output"; then
-    echo "[package] notarytool submit failed"
+  if ! xcrun notarytool submit "$submission" "${notary_auth_args[@]}" --wait 2>&1 | tee "$notary_output"; then
+    echo "[package] notarytool submit failed for $submission"
     exit 1
   fi
   notary_status="$(sed -n 's/^ *status: *//p' "$notary_output" | tail -n 1)"
   notary_id="$(sed -n 's/^ *id: *//p' "$notary_output" | tail -n 1)"
   rm -f "$notary_output"
   if [[ "$notary_status" != "Accepted" ]]; then
-    echo "[package] Apple did not accept the submission (status: ${notary_status:-unknown})"
+    echo "[package] Apple did not accept $submission (status: ${notary_status:-unknown})"
     if [[ -n "$notary_id" ]]; then
       xcrun notarytool log "$notary_id" "${notary_auth_args[@]}" || true
     fi
     exit 1
   fi
+}
+
+# The app is notarized on its own first, so the bundle that goes into
+# the installer carries its ticket and opens with no network.
+if [[ -n "$VAPOR_NOTARY_PROFILE" ]]; then
+  app_submission_dir="$(mktemp -d)"
+  ditto -c -k --keepParent "$app_bundle" "$app_submission_dir/$APP_NAME.zip"
+  notarize "$app_submission_dir/$APP_NAME.zip"
 
   xcrun stapler staple "$app_bundle"
-  # The stapled app is what ships: check the ticket, then ask Gatekeeper
-  # the question a user's Mac asks at first launch.
+  # Check the ticket, then ask Gatekeeper the question a user's Mac
+  # asks at first launch.
   xcrun stapler validate "$app_bundle"
   spctl -a -t exec -vv "$app_bundle"
+fi
 
-  rm -f "$zip_path"
-  ditto -c -k --keepParent "$app_bundle" "$zip_path"
+# The installer: Vapor.app into /Applications, and a script that links
+# the CLI of the app onto the PATH.
+package_work="$(mktemp -d)"
+package_root="$package_work/root"
+component_plist="$package_work/component.plist"
+component_package="$package_work/packages/$APP_NAME.pkg"
+distribution="$package_work/distribution.xml"
+package_path="$DIST_DIR/$PACKAGE_NAME"
+installer_scripts="$package_work/scripts"
 
-  echo "[package] Notarized zip artifact: $zip_path"
+mkdir -p "$package_root/Applications" "$package_work/packages"
+ditto "$app_bundle" "$package_root/Applications/$APP_NAME.app"
+# Copied without extended attributes: pkgbuild packs each attribute of
+# a script as a second file next to it.
+ditto --norsrc --noextattr "$ROOT_DIR/apps/macos/scripts/installer" "$installer_scripts"
+
+# Installer moves a "relocatable" bundle to wherever a copy with the
+# same identifier already is, a build directory included. Vapor goes to
+# /Applications, where the link and the service definitions point. The
+# version check goes too: the package the user opens is the version the
+# user gets, an older one included.
+pkgbuild --analyze --root "$package_root" "$component_plist" >/dev/null
+# `-replace` sets a key that the analysis wrote and adds one that it
+# left out; which keys it writes changes between macOS versions.
+plutil -replace 0.BundleIsRelocatable -bool false "$component_plist"
+plutil -replace 0.BundleIsVersionChecked -bool false "$component_plist"
+
+pkgbuild \
+  --root "$package_root" \
+  --component-plist "$component_plist" \
+  --identifier "$PACKAGE_ID" \
+  --version "$short_version" \
+  --install-location / \
+  --scripts "$installer_scripts" \
+  "$component_package" >/dev/null
+
+# The distribution wrapper is what refuses an Intel Mac and an older
+# macOS before anything is installed.
+cat >"$distribution" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>$APP_NAME</title>
+  <options customize="never" require-scripts="false" hostArchitectures="arm64"/>
+  <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>
+  <volume-check>
+    <allowed-os-versions>
+      <os-version min="$MIN_MACOS"/>
+    </allowed-os-versions>
+  </volume-check>
+  <choices-outline>
+    <line choice="$PACKAGE_ID"/>
+  </choices-outline>
+  <choice id="$PACKAGE_ID" visible="false">
+    <pkg-ref id="$PACKAGE_ID"/>
+  </choice>
+  <pkg-ref id="$PACKAGE_ID" version="$short_version" onConclusion="none">$APP_NAME.pkg</pkg-ref>
+</installer-gui-script>
+EOF
+
+product_args=(--distribution "$distribution" --package-path "$package_work/packages")
+if [[ -n "$VAPOR_INSTALLER_SIGN_IDENTITY" ]]; then
+  product_args+=(--sign "$VAPOR_INSTALLER_SIGN_IDENTITY" --timestamp)
+  if [[ -n "$VAPOR_NOTARY_KEYCHAIN" ]]; then
+    product_args+=(--keychain "$VAPOR_NOTARY_KEYCHAIN")
+  fi
+fi
+rm -f "$package_path"
+productbuild "${product_args[@]}" "$package_path" >/dev/null
+
+if [[ -n "$VAPOR_NOTARY_PROFILE" ]]; then
+  notarize "$package_path"
+  xcrun stapler staple "$package_path"
+  xcrun stapler validate "$package_path"
+  # The question Gatekeeper asks when the user opens the installer.
+  spctl -a -t install -vv "$package_path"
+  echo "[package] Notarized installer: $package_path"
 fi
 
 echo "[package] App bundle: $app_bundle"
-echo "[package] Zip artifact: $zip_path"
+echo "[package] Installer: $package_path"
