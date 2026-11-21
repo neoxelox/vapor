@@ -294,6 +294,12 @@ The host:
 | D19 | D19 replaces the video part of D14: a run records no video by default. The owner saw the videos of the first runs: "some videos that im seeing of the vm its just a plain image" (2026-11-21). A run records a video of each scenario only when it gets `--video`, for a change that moves on the screen. The screenshots at each named step stay. |
 | D20 | The description of a pull request that changes something visual carries pictures of the change: the screenshots from a Tier VM run, and a video when the change moves. Both are optional. The owner: "so the person reviewing the PR has more context and can do a better review seeing what changed" (2026-11-21). The GitHub CLI uploads them with its `--attach` option. A picture shows a guest only, because the repository is public. |
 
+### Round 6, 2026-11-21: a window for a person
+
+| # | Decision |
+|---|---|
+| D21 | A manual guest opens a window on the contributor's Mac when a person asks to use it by hand: `./scripts/vm.sh --guest --window`. Only the manual guest, and only with the option. A run of the suite never opens a window. The clipboard stays unshared and the guest still has no route to the Internet. The owner asked for it: "so that i can test that feature/vapor myself in that vm ... to see how it looks inside the simulator" (2026-11-21). |
+
 ## Design
 
 Tier VM runs the installer of the build in a macOS guest and acts on
@@ -435,6 +441,9 @@ written. The text above stays as the record of the design.
   failure up as the tier started it, and `--guest-stop` deletes it. A
   plain `tart run` of a stopped guest opens a window and gives the
   guest the Internet.
+- **A window on request (D21).** The rule "a guest has no window"
+  holds for every run. A manual guest shows Tart's window when a
+  person asked to use it.
 - **A video for each boot.** A restart of the guest ends the
   recording, so the scenario of the start at login has two files
   when a run records (D19).

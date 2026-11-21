@@ -87,6 +87,24 @@ decision waits; the sign-in notice has a Sign In button.
       the start, and show that the state is not known until an answer
       is there. Found by Tier VM (`./scripts/vm.sh`), whose state
       scenarios wait for the first read.
+- [ ] M3-17 The screen answers an action late. The app reads the
+      daemon each 30 seconds only, so after Sync now, Restart sync, or
+      a change of the start-at-login toggle the menu and the Dashboard
+      show the old state for up to 30 seconds. Read the daemon right
+      after each action that the app starts. Related: M3-15.
+- [ ] M3-18 The menu item `Toggle auto-launch`. It does not say
+      whether the setting is on, and it names the setting in another
+      way than the Dashboard and Settings ("Start Vapor at login").
+      Show it as one item with a checkmark and the same wording.
+- [ ] M3-19 "Start Vapor at login" set to off stops sync at once. On
+      macOS the removal of a launchd job ends its process, so the
+      toggle stops the daemon while the app stays open, and
+      `vapor service uninstall --keep-running` cannot keep it up (its
+      own test says so). The button "Disable auto-launch and stop now"
+      in Settings then does nothing more than the toggle. Decide what
+      "off" means for the daemon that runs now: keep it running until
+      the next logout, or say on the toggle that sync stops, and
+      remove the second control.
 
 Exit gate:
 
@@ -170,6 +188,15 @@ Exit gate:
       acceptable, or whether a job that already runs at login should
       start the app. Found by Tier VM: its start-at-login scenario
       waits until macOS saved the item.
+- [ ] M5-7 Three notifications at the first start, and how macOS lists
+      Vapor's background items. The first start gives "Login Item
+      Added" for the app, and one "App Background Activity" each for
+      `vapor` and `vapord`, named by their executables. In Login Items
+      & Extensions the two jobs are items of an unknown developer, not
+      of Vapor. Check what a signed build shows. Then decide whether
+      the app should register the two jobs through `SMAppService`, so
+      that they belong to Vapor and the user sees one item; the CLI
+      must still install the service with no app.
 
 Exit gate:
 
@@ -256,3 +283,28 @@ Policy: `AGENTS.md §9`. Full taxonomy:
       the coverage of configuration, lifecycle, localization, paths,
       logger redaction, bundle layout, and ViewModel state transitions
       intact.
+- [ ] MT-2 Tier VM scenarios that the first version does not have
+      (`docs/development/vm-verification.md`): the crash-loop state of
+      the menu with its acknowledge action, the sign-in notice, the
+      configuration issue box, the ignore rules editor and the
+      language picker of Settings, the actions Sync now and Restart
+      sync, and the login item approval hint. The upgrade and the
+      removal scenarios belong to M5-3 and M5-5.
+- [ ] MT-3 Identifiers for the menu bar menu. macOS builds its items
+      from the SwiftUI views and drops the accessibility identifier,
+      so Tier VM finds an item by its catalog text and an assistive
+      tool has no stable name for it. An AppKit menu, or the window
+      style of the menu bar extra, keeps the identifiers. Both change
+      how the menu is built, so the owner decides.
+- [ ] MT-4 `./scripts/vm.sh --clean` under a run of another checkout.
+      It keeps the prepared guests only while a guest of another
+      checkout runs. Between two scenarios of that run no guest runs,
+      and the clean deletes the prepared guest that the run clones
+      next. Take the store lock and look for guests of other checkouts
+      that exist, not only for ones that run.
+- [ ] MT-5 The daemon in a Tier VM guest works at the pace of
+      `Throttled`. The pointer events of the driver count as a user at
+      the device, so the scenario of the syncing state sees
+      "Throttled" where an idle Mac shows "Syncing". Find a way to
+      show the idle pace too, for example a wait until the daemon
+      counts the user as away before the scenario looks.

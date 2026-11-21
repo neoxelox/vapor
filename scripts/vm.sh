@@ -12,6 +12,8 @@
 #   ./scripts/vm.sh [run options]   run the scenario suite
 #   ./scripts/vm.sh --setup         pull the guest image (one time, 36 GB)
 #   ./scripts/vm.sh --guest         start a guest for manual work
+#   ./scripts/vm.sh --guest --window  the same, with its screen in a
+#                                   window, for a person to use by hand
 #   ./scripts/vm.sh --guest-stop    stop and delete every guest of this
 #                                   checkout: manual, kept, or left over
 #   ./scripts/vm.sh --list          list scenarios

@@ -42,19 +42,28 @@ pub struct Guest {
     child: Option<Child>,
     stage: PathBuf,
     results: PathBuf,
+    /// Whether Tart shows the guest's screen in a window on the host.
+    window: bool,
 }
 
 impl Guest {
     /// Clones `source` as `name`, starts the clone, and waits until it
     /// answers commands with both shares mounted and its clock set.
     /// `stage` is shared read-only and `results` read-write.
-    pub fn start(source: &str, name: &str, stage: &Path, results: &Path) -> Result<Self, Failure> {
+    pub fn start(
+        source: &str,
+        name: &str,
+        stage: &Path,
+        results: &Path,
+        window: bool,
+    ) -> Result<Self, Failure> {
         tart::clone(source, name)?;
         let mut guest = Self {
             name: name.to_string(),
             child: None,
             stage: stage.to_path_buf(),
             results: results.to_path_buf(),
+            window,
         };
         if let Err(failure) = guest.boot() {
             // A clone that never came up must not stay behind.
@@ -71,6 +80,7 @@ impl Guest {
             child: None,
             stage: stage.to_path_buf(),
             results: results.to_path_buf(),
+            window: false,
         };
         if let Err(failure) = guest.boot() {
             let _ = guest.destroy();
@@ -93,7 +103,7 @@ impl Guest {
                 read_only: false,
             },
         ];
-        self.child = Some(tart::start(&self.name, &shares, &log)?);
+        self.child = Some(tart::start(&self.name, &shares, &log, self.window)?);
         self.wait_ready()?;
         self.remount_shares()?;
         self.set_clock()

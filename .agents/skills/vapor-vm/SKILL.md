@@ -96,7 +96,16 @@ hang.
 
 ```
 ./scripts/vm.sh --guest [--skip-build]
+./scripts/vm.sh --guest --window     # only when a person asks to try it by hand
 ```
+
+With `--window` the screen of the guest shows in a window on the
+contributor's Mac, and a person uses the app in it as in a simulator.
+Start it only when the owner, or the person you work for, asks to see
+or to try the change themselves; never to look at it yourself, for
+that a screenshot is enough. Say that the window is up, leave the
+guest running while they use it, and delete it with `--guest-stop`
+when they are done.
 
 It prints the name of the guest and the commands that work on it:
 

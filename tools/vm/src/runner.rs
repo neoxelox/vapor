@@ -399,7 +399,13 @@ fn blocker(place: Place) -> Option<String> {
 /// Starts a clone of the prepared guest of `place`, after waiting
 /// until the place is free and the host runs fewer than two macOS
 /// guests.
-fn start_guest(place: Place, name: &str, paths: &Paths, results: &Path) -> Result<Guest, Failure> {
+fn start_guest(
+    place: Place,
+    name: &str,
+    paths: &Paths,
+    results: &Path,
+    window: bool,
+) -> Result<Guest, Failure> {
     let _store = StoreLock::take()?;
     if let Some(reason) = blocker(place) {
         println!(
@@ -411,7 +417,7 @@ fn start_guest(place: Place, name: &str, paths: &Paths, results: &Path) -> Resul
         "a place for a guest: Apple permits two macOS guests on one host, and the tier runs one guest of each kind",
         || blocker(place).is_none(),
     )?;
-    Guest::start(&prepared_name(place), name, &paths.stage, results)
+    Guest::start(&prepared_name(place), name, &paths.stage, results, window)
 }
 
 // -- The shared guest -------------------------------------------------
@@ -558,13 +564,14 @@ impl Run<'_> {
             return Vec::new();
         }
         let name = self.guest_name("shared");
-        let started = start_guest(Place::Shared, &name, self.paths, self.dir).and_then(|guest| {
-            guest.sh_ok(&format!(
-                "sudo installer -pkg '{}/{INSTALLER}' -target / && test -d '{APP_PATH}'",
-                guest_stage()
-            ))?;
-            Ok(guest)
-        });
+        let started =
+            start_guest(Place::Shared, &name, self.paths, self.dir, false).and_then(|guest| {
+                guest.sh_ok(&format!(
+                    "sudo installer -pkg '{}/{INSTALLER}' -target / && test -d '{APP_PATH}'",
+                    guest_stage()
+                ))?;
+                Ok(guest)
+            });
         let mut guest = match started {
             Ok(guest) => guest,
             Err(failure) => {
@@ -595,7 +602,7 @@ impl Run<'_> {
             .iter()
             .map(|scenario| {
                 let name = self.guest_name(scenario.id);
-                match start_guest(Place::Fresh, &name, self.paths, self.dir) {
+                match start_guest(Place::Fresh, &name, self.paths, self.dir, false) {
                     Ok(mut guest) => {
                         let result =
                             run_scenario(scenario, &mut guest, self.copy, self.build, self.video);
@@ -772,7 +779,7 @@ pub fn setup(repo_root: &Path) -> Result<(), Failure> {
 
 /// Starts a guest with the build installed and the app started, and
 /// leaves it running for manual work.
-pub fn manual_guest(repo_root: &Path) -> Result<(), Failure> {
+pub fn manual_guest(repo_root: &Path, window: bool) -> Result<(), Failure> {
     let paths = Paths::new(repo_root)?;
     check_host()?;
     check_image()?;
@@ -785,17 +792,23 @@ pub fn manual_guest(repo_root: &Path) -> Result<(), Failure> {
     let dir = paths.vm_root.join(format!("manual-{id}"));
     fs::create_dir_all(&dir)?;
     let name = paths.guest_name(&format!("manual-{id}"));
-    let mut guest = start_guest(Place::Shared, &name, &paths, &dir)?;
+    let mut guest = start_guest(Place::Shared, &name, &paths, &dir, window)?;
     let ready = (|| {
         let ctx = Ctx::new(&mut guest, &copy, &build, "session")?;
         ctx.install()?;
-        ctx.launch_app()
+        ctx.launch_app()?;
+        ctx.wait_service_running()
     })();
     if let Err(failure) = ready {
         let _ = guest.destroy();
         return Err(failure);
     }
     println!("[vm] the guest `{name}` runs with this build installed and the app started.");
+    if window {
+        println!(
+            "  its screen is in a Tart window on this Mac: use the app in it as a user does. The guest user is `admin`"
+        );
+    }
     println!("  a command in the guest:  tart exec {name} /usr/local/bin/vapor status");
     println!(
         "  the controls of the app: tart exec {name} '{}/{DRIVER}' tree sh.arn.vapor",

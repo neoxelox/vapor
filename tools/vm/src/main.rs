@@ -45,7 +45,12 @@ enum Cmd {
     /// guest. The one command that uses the network.
     Setup,
     /// Start a guest with the build installed, for manual work.
-    Guest,
+    Guest {
+        /// Show the guest's screen in a window on this Mac, to use the
+        /// app in it by hand. Only when a person asked to look.
+        #[arg(long)]
+        window: bool,
+    },
     /// Stop and delete every guest of this checkout: a manual guest,
     /// a guest that `--keep` left, a guest of a run that was killed.
     GuestStop,
@@ -95,7 +100,7 @@ fn main() -> ExitCode {
             Ok(true)
         }
         Cmd::Setup => runner::setup(&repo_root).map(|()| true),
-        Cmd::Guest => runner::manual_guest(&repo_root).map(|()| true),
+        Cmd::Guest { window } => runner::manual_guest(&repo_root, window).map(|()| true),
         Cmd::GuestStop => runner::stop_guests(&repo_root).map(|count| {
             println!("[vm] deleted {count} guest(s) of this checkout");
             true

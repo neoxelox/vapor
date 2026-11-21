@@ -175,18 +175,21 @@ pub fn configure(name: &str) -> Result<(), Failure> {
     .map(drop)
 }
 
-/// Starts a VM with no window, no sound, no shared clipboard, and a
-/// network that reaches the host only. The child lives as long as the
-/// VM runs; its output goes to `log`.
-pub fn start(name: &str, shares: &[Share<'_>], log: &Path) -> Result<Child, Failure> {
+/// Starts a VM with no sound, no shared clipboard, and a network that
+/// reaches the host only. It has no window either, unless `window`
+/// asks for Tart's own: that is for a person who wants to use a manual
+/// guest, never for a run. The child lives as long as the VM runs; its
+/// output goes to `log`.
+pub fn start(name: &str, shares: &[Share<'_>], log: &Path, window: bool) -> Result<Child, Failure> {
     ours(name)?;
     let out = File::create(log)?;
     let err = out.try_clone()?;
     let mut command = tart();
+    command.args(["run", name]);
+    if !window {
+        command.arg("--no-graphics");
+    }
     command.args([
-        "run",
-        name,
-        "--no-graphics",
         "--no-audio",
         "--no-clipboard",
         "--net-host",

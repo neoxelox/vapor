@@ -356,6 +356,11 @@ Linux app window exists (owner, 2026-11-21). Expected controls:
     in §3 to §6 does not license more of it: fix it when the fix is
     small and in the area being changed, otherwise report it and add a
     task under `docs/tasks/`.
+  - A finding is never lost. Whoever finds a bug, something broken, or
+    an improvement that could be made, and does not fix it in the same
+    change, adds it as a task under `docs/tasks/` in that change set
+    and names it in the report. The owner decides later what to do
+    with each one (owner, 2026-11-21).
 - Swift (macOS app only)
   - Prefer structured concurrency and explicit actor boundaries.
   - Keep UI/state surfaces deterministic and reason-first.
@@ -802,7 +807,8 @@ invariants:
   installer start only inside a guest. A guest sees two host
   directories (the staged build, read-only, and the run's directory),
   has no window, no sound, no shared clipboard, and no route to the
-  Internet. The harness changes only VMs named `vapor-vm-*`, and a
+  Internet. A manual guest shows a window only when a person asked to
+  use it by hand (`./scripts/vm.sh --guest --window`). The harness changes only VMs named `vapor-vm-*`, and a
   checkout only its own.
 - A run deletes every guest it made; only `--keep` leaves one, on
   request. What stays on the host is the evidence under the repo-local

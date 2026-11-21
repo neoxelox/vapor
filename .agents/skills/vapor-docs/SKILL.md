@@ -29,7 +29,9 @@ describe the new behaviour. Do this before the commit, not after.
    it. Shortened README content moves into `docs/`, never disappears.
 4. `docs/tasks/<surface>.md` and `docs/tasks/README.md`: close or add
    the task, and update the wave orchestrator when a wave opens, closes,
-   or changes dependencies. `docs/plans/<surface>.md` when the scope, a
+   or changes dependencies. Every bug, broken thing, or possible
+   improvement that the work found and did not fix gets a task here,
+   so the owner can decide on it later (`AGENTS.md` §8). `docs/plans/<surface>.md` when the scope, a
    principle, or a non-goal of a surface changes.
 5. `AGENTS.md` when a durable rule, invariant, or contributor policy
    changes. Edit `AGENTS.md` and `.agents/` only; `CLAUDE.md` and

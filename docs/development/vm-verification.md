@@ -57,7 +57,9 @@ that catalog too, never from a sentence in the scenario.
    directory (the installer, the driver, the e2e binaries) is shared
    read-only. The directory of the run is shared read-write for the
    evidence.
-3. **A guest has no window, no sound, and no shared clipboard.**
+3. **A guest has no window, no sound, and no shared clipboard.** The
+   one exception is a manual guest that a person asked to see
+   (`--guest --window`).
 4. **A guest has no route to the Internet.** Its network reaches the
    host only. One limit stays: a service that the host itself offers
    on that network is reachable from the guest.
@@ -207,8 +209,9 @@ keeps them.
 For a look at a change while it is built:
 
 ```sh
-./scripts/vm.sh --guest        # a guest with the build installed, app started
-./scripts/vm.sh --guest-stop   # stop and delete every guest of this checkout
+./scripts/vm.sh --guest            # a guest with the build installed, app started
+./scripts/vm.sh --guest --window   # the same, with its screen in a window on this Mac
+./scripts/vm.sh --guest-stop       # stop and delete every guest of this checkout
 ```
 
 `--guest` prints the commands that work on the guest: `tart exec` for
@@ -216,6 +219,14 @@ a command, the driver for the controls, and `screencapture` for a
 screenshot, which lands in `.vapor/vm/manual-<id>/`. The guest takes
 the place of the shared guest until it is stopped, and a run of the
 suite waits for that place.
+
+With `--window`, Tart shows the screen of the guest in a window, and a
+person uses the app in it with the pointer and the keyboard, as in a
+simulator. It is for the project owner, or for a contributor who wants
+to try a change by hand: an agent starts it only when it is asked to.
+The guest still shares no clipboard and has no route to the Internet,
+and `tart exec` and the driver work on it as before. The user of the
+guest is `admin`.
 
 ## Scenario catalog
 
