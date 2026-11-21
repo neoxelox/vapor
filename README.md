@@ -14,11 +14,9 @@ Vapor is an invisible-first cloud sync app that stays out of your way. It keeps 
 
 ## Install
 
-One file installs the app, the `vapor` command, and the background daemon. Pick your device and download its file from the [releases page](https://github.com/neoxelox/vapor/releases).
-
 | Device | File | Release |
 | --- | --- | --- |
-| macOS 26+, Apple silicon | [`Vapor-macos-arm64.pkg`](https://github.com/neoxelox/vapor/releases) | [![latest release](https://img.shields.io/github/v/release/neoxelox/vapor?include_prereleases&label=)](https://github.com/neoxelox/vapor/releases) |
+| MacOS 26+, Apple silicon | [`Vapor-macos-arm64.pkg`](https://github.com/neoxelox/vapor/releases) | [![latest release](https://img.shields.io/github/v/release/neoxelox/vapor?include_prereleases&label=)](https://github.com/neoxelox/vapor/releases) |
 | Windows, x64 | `Vapor-windows-x64.msi` | Planned |
 | Windows, ARM64 | `Vapor-windows-arm64.msi` | Planned |
 | Linux, x64 | `Vapor-linux-x64.deb` or `.rpm` | Planned |
@@ -26,12 +24,12 @@ One file installs the app, the `vapor` command, and the background daemon. Pick 
 
 ### MacOS
 
-1. **Install it.** Open the file and follow the installer. From a terminal, run `sudo installer -pkg Vapor-macos-arm64.pkg -target /`.
-2. **Set it up.** Run `vapor init`. It asks for your cloud and your two folders, then sync starts and keeps running in the background.
+- **Install via App.** Open the package file, follow the installer and go through the onboarding.
+- **Install via Terminal.** From a terminal, run `sudo installer -pkg Vapor-macos-arm64.pkg -target /` and go through the onboarding running `vapor init`.
 
-Prereleases are not signed yet, so macOS blocks the installer the first time. Allow it under System Settings > Privacy & Security > Open Anyway.
+Prereleases are not signed, so macOS blocks the installer the first time. Allow it under System Settings > Privacy & Security > Open Anyway.
 
-To remove Vapor and everything it put on the Mac, quit it from the menu bar and run:
+To remove Vapor entirely, quit it from the menu bar and run:
 
 ```sh
 vapor service uninstall                 # stops the daemon, removes its two background jobs
@@ -42,7 +40,7 @@ defaults delete sh.arn.vapor            # the app's preferences
 rm -rf ~/.vapor                         # settings, logs, sync state, Vapor's trash
 ```
 
-Your synced folders stay, on the Mac and in the cloud. Updates, setup from a script, and more on removal are in [Install and first launch](docs/product/install.md).
+Your synced folders stay, locally and in the cloud. See [Install and first launch](docs/product/install.md) for more info.
 
 ## Features
 
