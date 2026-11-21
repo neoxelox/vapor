@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # The release gate: everything a release must pass, run by hand on the
 # maintainer's machine before the version bump is committed. Format,
-# lint, the Tier 1 suite, and the e2e suite once per provider the
-# harness knows. The Google Drive leg needs the dedicated test account
-# and VAPOR_GDRIVE_CLIENT_ID set, exported or in .env; it never runs in
-# CI and never against a personal account. A missing leg fails the
-# gate: a release is not good to go until every provider has run.
+# lint, the Tier 1 suite, the e2e suite once per provider the harness
+# knows, and the Tier VM suite, which installs the release's installer
+# in a macOS guest. The Google Drive leg needs the dedicated test
+# account and VAPOR_GDRIVE_CLIENT_ID set, exported or in .env; it never
+# runs in CI and never against a personal account. The Tier VM leg
+# needs Tart and the guest image (./scripts/vm.sh --setup). A missing
+# leg fails the gate: a release is not good to go until every provider
+# and the installed app have run.
 # Process: docs/operations/release-process.md.
 set -euo pipefail
 
@@ -46,5 +49,8 @@ for provider in $providers; do
   "$ROOT_DIR/scripts/e2e.sh" --provider "$provider"
 done
 
+step "vm (Tier VM)"
+"$ROOT_DIR/scripts/vm.sh"
+
 echo
-echo "[release] every gate passed for providers: $(echo $providers | tr '\n' ' ')"
+echo "[release] every gate passed for providers: $(echo $providers | tr '\n' ' '), and Tier VM"

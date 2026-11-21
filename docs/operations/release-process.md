@@ -229,6 +229,11 @@ one it gates.
      does not see a sign-in made anywhere else. How the test account's
      token reaches each sandbox is part of the open Drive-leg work
      (`docs/development/e2e-verification.md` §Provider modes).
+     The last leg is Tier VM (`./scripts/vm.sh`): it builds the
+     installer and tests it in a macOS virtual machine. It needs Tart
+     and the guest image on the maintainer's Mac
+     (`docs/development/vm-verification.md`), and a missing leg fails
+     the gate here too.
    - If the gate finds a bug, stop the release. Fix it in a pull
      request, merge it, update `main`, and run the gate again. No fix
      is committed on `main` directly: the release push carries the
@@ -354,7 +359,7 @@ are in, since a prerelease signs when the material is present.
 
 - [ ] Changelog entry exists for target version.
 - [ ] Worktree is clean except for `CHANGELOG.md` before running `./scripts/version.sh`.
-- [ ] `./scripts/release.sh` passed (`format`, `lint`, `test`, e2e for every provider).
+- [ ] `./scripts/release.sh` passed (`format`, `lint`, `test`, e2e for every provider, Tier VM).
 - [ ] No fix was committed on `main` for this release; every gate fix went through a pull request.
 - [ ] `./scripts/version.sh ...` created commit `release: v$(cat VERSION)` and tag `v$(cat VERSION)`.
 - [ ] Release push command used: `git push origin "$(git branch --show-current)" --follow-tags`.

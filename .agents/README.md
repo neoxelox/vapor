@@ -20,6 +20,7 @@ expects as a symlink, so there is one source of truth.
 | `vapor-design` | The owner asks for a feature, a change to sync semantics, or any change with more than one reasonable answer; before building one; when a change would contradict a recorded decision. |
 | `vapor-validate` | Before committing a change under `core/*`, `apps/*`, or `scripts/*`; when a script run is red. |
 | `vapor-e2e` | A change alters daemon- or CLI-observable behaviour and Tier 1 is green; to watch a feature in the real product. |
+| `vapor-vm` | A change touches the Mac app or its install; to see the installed app or reproduce a bug in it; to get screenshots of a UI change for the owner. |
 | `vapor-soak` | Proving the product is safe for real data: an hours-long seeded workload with faults and a no-loss oracle, watched on a loop, triaged at the first violation. |
 | `vapor-debug` | The daemon crashed, will not start, sync is stuck, or a status looks wrong; a bug or a failing test has no obvious cause. |
 | `vapor-config` | Adding or changing a `vapor.json` key, a `VAPOR_*` variable, a default, a path name, or a launch label. |

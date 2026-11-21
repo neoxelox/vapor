@@ -9,6 +9,7 @@ members = [
   "core/shared",
   "tools/e2e",
   "tools/soak",
+  "tools/vm",
 ]
 resolver = "2"
 

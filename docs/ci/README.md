@@ -64,6 +64,14 @@ Testing runs in four tiers. Authoritative definition:
   host-mutating `vapor service` round-trip against real `launchd`,
   which installs a real LaunchAgent and is therefore meant for
   disposable CI runners only.
+- **Tier VM**: `./scripts/vm.sh`, in no workflow. It tests the
+  installed Mac app in a macOS virtual machine, and a GitHub-hosted
+  macOS runner is a virtual machine that cannot run one. It runs on a
+  contributor's Mac and as a leg of `./scripts/release.sh`
+  (`AGENTS.md §9.9`; process in
+  `docs/development/vm-verification.md`). The `test` jobs still
+  compile its harness, run the harness's unit tests, and on macOS
+  compile and lint its driver.
 
 `./scripts/test.sh` enforces the Tier 1 budget itself: when
 `VAPOR_TEST_MAX_SECONDS` is set (the `test` workflow sets `300`), the

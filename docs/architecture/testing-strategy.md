@@ -281,6 +281,25 @@ the same change set. Full process, scenario catalog, and extension
 discipline: `docs/development/e2e-verification.md`; policy summary:
 `AGENTS.md §9.8`.
 
+### Virtual machine tests (Tier VM; changes to the Mac app or its install)
+
+`./scripts/vm.sh` installs the packaged installer in a macOS virtual
+machine made with Tart and acts on the app as a user does: a click on
+the menu bar item, a look at a window, a restart of the Mac. It is the
+only tier that starts the Mac app, because the app registers launchd
+jobs and a login item that would replace those of a real install on a
+contributor's Mac. The harness is a Rust dev crate (`tools/vm`,
+`vapor-vm`) with a small Swift driver that works inside the guest
+through the accessibility API. A scenario finds a control by its
+accessibility identifier, compares a text with the English catalog, and
+keeps screenshots and a video under `.vapor/vm/`.
+
+The tier proves how the installed app behaves. It does not judge how a
+screen looks: the project owner does that from the screenshots. It also
+runs the launchd round trip of Tier E2E in a guest, which a
+contributor's Mac must never run. Full process and scenario catalog:
+`docs/development/vm-verification.md`; policy summary: `AGENTS.md §9.9`.
+
 ### Soak tests (Tier S; release gate and on demand)
 
 `./scripts/soak.sh` runs the real binaries under hours of seeded file
@@ -410,6 +429,12 @@ value", the test is not worth writing.
   host-mutating by design, so it is opt-in: contributors run the
   default (host-safe) suite; only disposable CI runners pass `--full`.
   The JSON report is uploaded as a workflow artifact.
+- **Tier VM**: `scripts/vm.sh`, not in CI. A GitHub-hosted macOS
+  runner is a virtual machine and cannot run a macOS guest. It runs on
+  a contributor's Mac, on request for a change to the Mac app or its
+  install, and as a leg of `./scripts/release.sh`. Tier 1 still
+  compiles the harness and its driver on every pull request, and runs
+  the harness's own unit tests.
 
 ## Per-surface scope
 
@@ -428,9 +453,11 @@ localization fallback, logger redaction: all tested. The existing
 suite under `apps/macos/Tests/` is the template and the correct
 shape.
 
-**No UI tests.** No SwiftUI view rendering tests, no menubar layout
-tests, no Dock/window-state snapshot tests, no keyboard-focus tests.
-UI correctness is verified by the project owner manually.
+**No UI tests in Tier 1.** No SwiftUI view rendering tests, no menubar
+layout tests, no Dock/window-state snapshot tests, no keyboard-focus
+tests. What the installed app does on the screen is proven by Tier VM,
+in a virtual machine. How it looks is judged by the project owner,
+from the screenshots of a run.
 
 Lifecycle policy lives in `core/lifecycle` and is tested there; the
 Swift-side `DaemonLifecycleManagerTests` covers only what Swift still

@@ -1,0 +1,26 @@
+[package]
+name = "vapor-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Development tool, never shipped: installs the packaged app in a macOS
+# virtual machine made with Tart and acts on it as a user does. Lives in
+# the workspace so format, lint, and test cover it like any other crate.
+# Reuses the e2e harness library for failures and bounded waits.
+
+[dependencies]
+clap = { version = "=4.5.50", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+vapor-e2e = { path = "../e2e" }
+vapor-shared = { path = "../../core/shared" }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "vapor-vm"
+path = "src/main.rs"

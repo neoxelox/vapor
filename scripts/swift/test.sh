@@ -3,6 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SWIFT_DIR="$ROOT_DIR/apps/macos"
+# The Tier VM driver has no tests of its own: it needs a guest to act
+# on. Compiling it here keeps it buildable on every pull request.
+DRIVER_DIR="$ROOT_DIR/tools/vm/driver"
+DRIVER_BUILD_DIR="$ROOT_DIR/.vapor/vm/driver-build"
 
 export VAPOR_DIR="${VAPOR_DIR:-$ROOT_DIR/.vapor}"
 export VAPOR_ENV="${VAPOR_ENV:-dev}"
@@ -31,6 +35,11 @@ fi
 if [[ ! -f "$SWIFT_DIR/Package.swift" ]]; then
   echo "[swift-test] Package.swift not found in apps/macos. Skipping Swift tests."
   exit 0
+fi
+
+if [[ "$MODE" != "run" && -f "$DRIVER_DIR/Package.swift" ]]; then
+  echo "[swift-test] swift build -c release --package-path $DRIVER_DIR"
+  swift build --quiet -c release --package-path "$DRIVER_DIR" --scratch-path "$DRIVER_BUILD_DIR"
 fi
 
 if [[ "$MODE" == "build" ]]; then

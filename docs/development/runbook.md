@@ -23,10 +23,11 @@
 - Sync `assets/` (locale catalogs, brand images) into every app surface: `./scripts/resources.sh`
 - Install git pre-commit hook: `./scripts/hooks.sh` (uninstall: `./scripts/hooks.sh uninstall`)
 - Version helper: `./scripts/version.sh`
-- Release gate (format check, lint, Tier 1, and the e2e suite once per provider; the Google Drive leg needs the test account): `./scripts/release.sh`
+- Release gate (format check, lint, Tier 1, the e2e suite once per provider, and the Tier VM suite; the Google Drive leg needs the test account, and the Tier VM leg needs Tart and the guest image): `./scripts/release.sh`
 - Release body for a version (the changelog section, cut at GitHub's limit): `./scripts/notes.sh <version>`
 - Performance gate (one release-profile soak cell with SLO assertions): `./scripts/perf.sh` (`VAPOR_PERF_SOAK_DURATION`, `VAPOR_PERF_SOAK_SEED`)
 - Soak verification (Tier S): `./scripts/soak.sh` (`--duration`, `--seed`, `--mode`, `--load`, `--faults`, `--throttle`, `--release`, `--status`, `--verify`; see `docs/development/soak-testing.md`)
+- Verification of the installed Mac app in a macOS virtual machine (Tier VM): `./scripts/vm.sh` (`--only Vxx`, `--keep`, `--skip-build`, `--json`, `--list`, `--guest`, `--guest-stop`, `--setup`, `--clean`; needs Tart; see `docs/development/vm-verification.md`)
 - End-to-end verification of the real binaries in disposable sandboxes: `./scripts/e2e.sh` (`--only Sxx`, `--keep`, `--skip-build`, `--json`, `--list`, `--sandbox`, `--sandbox-stop`; see `docs/development/e2e-verification.md`)
 
 ## Stack helpers
@@ -155,6 +156,12 @@ Fast facts for local dev:
   alters runtime behavior a user would observe through the daemon or
   CLI. One sandbox per scenario under `.vapor/e2e/`; `--only Sxx`
   runs one scenario; see `docs/development/e2e-verification.md`.
+- **Virtual machine verification** runs via `./scripts/vm.sh` (Tier
+  VM, the `tools/vm` harness) for a change to the Mac app or its
+  install. It installs the packaged installer in a macOS guest and
+  keeps screenshots and a video of each scenario under `.vapor/vm/`;
+  `--only Vxx` runs one scenario and `--guest` gives a guest to look
+  at; see `docs/development/vm-verification.md`.
 - **Linux from a macOS checkout.** The `core/platform` Linux
   implementations and the daemon on inotify are verified in a
   container over the same working tree. The target directory is a

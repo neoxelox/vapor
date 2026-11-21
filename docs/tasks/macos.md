@@ -137,7 +137,10 @@ Exit gate:
 - [ ] M5-2 Verify entitlements drift check runs on every release build.
 - [ ] M5-3 Verify LaunchAgent/login-item behavior stability across upgrades
       (upgrade from N-1 → N does not leave orphaned plists or duplicate
-      login items).
+      login items). Tier VM (`docs/development/vm-verification.md`)
+      gives the clean Mac for this: a scenario that installs the
+      installer of release N-1 in a fresh guest, then the one of N.
+      It needs the older installer as an input of the run.
 - [ ] M5-4 Preserve rollback artifacts per `docs/operations/release-
       process.md`.
 - [ ] M5-5 What a removal leaves behind. An installer has no
@@ -148,7 +151,9 @@ Exit gate:
       six commands. Decide between a `vapor` command that removes the
       install and a menu item in the app. Check also what macOS itself
       keeps after the app is gone: the login item of the app and the
-      privacy answers.
+      privacy answers. A fresh guest of Tier VM
+      (`docs/development/vm-verification.md`) is the Mac to check it
+      on, and the scenario that proves the removal belongs there.
 
 Exit gate:
 
