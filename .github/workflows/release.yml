@@ -150,7 +150,7 @@ jobs:
           - platform: macos
             os: macos-latest
             environment: release-macos
-            assets: dist/Vapor.zip
+            assets: dist/Vapor-macos-arm64.pkg
     env:
       TAG_NAME: ${{ needs.preflight.outputs.tag_name }}
       RELEASE_VERSION: ${{ needs.preflight.outputs.release_version }}
@@ -211,6 +211,7 @@ jobs:
         env:
           RELEASE_STABLE: ${{ needs.preflight.outputs.release_stable }}
           VAPOR_SIGN_IDENTITY: ${{ secrets.VAPOR_SIGN_IDENTITY }}
+          VAPOR_INSTALLER_SIGN_IDENTITY: ${{ secrets.VAPOR_INSTALLER_SIGN_IDENTITY }}
           VAPOR_NOTARY_PROFILE: ${{ secrets.VAPOR_NOTARY_PROFILE }}
           APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
           APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
@@ -222,13 +223,13 @@ jobs:
           set -euo pipefail
 
           signing_configured=false
-          if [[ -n "$VAPOR_SIGN_IDENTITY" || -n "$VAPOR_NOTARY_PROFILE" || -n "$APPLE_DEVELOPER_ID_P12_BASE64" || -n "$APPLE_DEVELOPER_ID_P12_PASSWORD" || -n "$APPLE_KEYCHAIN_PASSWORD" || -n "$APPLE_NOTARY_API_KEY_P8_BASE64" || -n "$APPLE_NOTARY_KEY_ID" || -n "$APPLE_NOTARY_ISSUER_ID" ]]; then
+          if [[ -n "$VAPOR_SIGN_IDENTITY" || -n "$VAPOR_INSTALLER_SIGN_IDENTITY" || -n "$VAPOR_NOTARY_PROFILE" || -n "$APPLE_DEVELOPER_ID_P12_BASE64" || -n "$APPLE_DEVELOPER_ID_P12_PASSWORD" || -n "$APPLE_KEYCHAIN_PASSWORD" || -n "$APPLE_NOTARY_API_KEY_P8_BASE64" || -n "$APPLE_NOTARY_KEY_ID" || -n "$APPLE_NOTARY_ISSUER_ID" ]]; then
             signing_configured=true
           fi
 
           if [[ "$signing_configured" == "true" ]]; then
             missing=()
-            for required_var in VAPOR_SIGN_IDENTITY VAPOR_NOTARY_PROFILE APPLE_DEVELOPER_ID_P12_BASE64 APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_KEYCHAIN_PASSWORD APPLE_NOTARY_API_KEY_P8_BASE64 APPLE_NOTARY_KEY_ID; do
+            for required_var in VAPOR_SIGN_IDENTITY VAPOR_INSTALLER_SIGN_IDENTITY VAPOR_NOTARY_PROFILE APPLE_DEVELOPER_ID_P12_BASE64 APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_KEYCHAIN_PASSWORD APPLE_NOTARY_API_KEY_P8_BASE64 APPLE_NOTARY_KEY_ID; do
               if [[ -z "${!required_var}" ]]; then
                 missing+=("$required_var")
               fi
@@ -241,7 +242,7 @@ jobs:
           fi
 
           if [[ "$RELEASE_STABLE" == "true" && "$signing_configured" != "true" ]]; then
-            echo "[release] stable release requires signing identity, notarization profile, Developer ID certificate, and notary API credentials"
+            echo "[release] stable release requires the two signing identities (app and installer), notarization profile, Developer ID certificates, and notary API credentials"
             exit 1
           fi
 
@@ -251,6 +252,7 @@ jobs:
         if: matrix.platform == 'macos' && steps.signing_config.outputs.enabled == 'true'
         env:
           VAPOR_SIGN_IDENTITY: ${{ secrets.VAPOR_SIGN_IDENTITY }}
+          VAPOR_INSTALLER_SIGN_IDENTITY: ${{ secrets.VAPOR_INSTALLER_SIGN_IDENTITY }}
           VAPOR_NOTARY_PROFILE: ${{ secrets.VAPOR_NOTARY_PROFILE }}
           APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
           APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
@@ -290,7 +292,9 @@ jobs:
           security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$APPLE_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          # One .p12 holds the two Developer ID certificates: Application
+          # signs the app, Installer signs the package.
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$APPLE_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple: -k "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
           keychains=("$KEYCHAIN_PATH")
@@ -304,6 +308,12 @@ jobs:
 
           if ! security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -F "$VAPOR_SIGN_IDENTITY" >/dev/null; then
             echo "[release] imported keychain does not contain signing identity '$VAPOR_SIGN_IDENTITY'"
+            exit 1
+          fi
+          # An installer identity is not a code signing one, so it is
+          # looked for among all the identities of the keychain.
+          if ! security find-identity -v "$KEYCHAIN_PATH" | grep -F "$VAPOR_INSTALLER_SIGN_IDENTITY" >/dev/null; then
+            echo "[release] imported keychain does not contain installer identity '$VAPOR_INSTALLER_SIGN_IDENTITY'"
             exit 1
           fi
 
@@ -324,6 +334,7 @@ jobs:
         shell: bash
         env:
           VAPOR_SIGN_IDENTITY: ${{ secrets.VAPOR_SIGN_IDENTITY }}
+          VAPOR_INSTALLER_SIGN_IDENTITY: ${{ secrets.VAPOR_INSTALLER_SIGN_IDENTITY }}
           VAPOR_NOTARY_PROFILE: ${{ secrets.VAPOR_NOTARY_PROFILE }}
           VAPOR_ENTITLEMENTS: ${{ vars.VAPOR_ENTITLEMENTS }}
           VAPOR_GDRIVE_CLIENT_ID: ${{ secrets.VAPOR_GDRIVE_CLIENT_ID }}
@@ -336,10 +347,12 @@ jobs:
           set -euo pipefail
 
           test -d dist/Vapor.app
-          test -f dist/Vapor.zip
           test -x dist/Vapor.app/Contents/MacOS/Vapor
           test -x dist/Vapor.app/Contents/MacOS/vapord
           test -x dist/Vapor.app/Contents/Helpers/vapor
+          # What is in the installer, and what it leaves on this runner:
+          # the app in /Applications and `vapor` on the PATH.
+          apps/macos/scripts/verify-package.sh dist/Vapor-macos-arm64.pkg --install
 
       # The shipped CLI reports a built-in client exactly when the
       # environment provided one (the runtime override is unset here).

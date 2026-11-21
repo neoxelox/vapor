@@ -152,9 +152,8 @@ reproduce the sculpture), and `symbolic/apps/vapor-symbolic.svg`.
 `Exec=vapor`; point `Exec` at the installed binary when packaging.
 `linux/install-icons.sh [prefix]` copies the tree under
 `<prefix>/share/icons/` (default `~/.local`) and refreshes the GTK icon
-cache when one exists; it installs artwork only. AppImage packagers can
-use the 256 or 512 px PNG as `.DirIcon`. Nothing here has been installed
-on a desktop yet.
+cache when one exists; it installs artwork only. Nothing here has been
+installed on a desktop yet.
 
 ## GitHub
 

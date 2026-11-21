@@ -12,7 +12,12 @@ GitHub Actions workflows are defined in `.github/workflows/`:
   launchd round-trip or the disk-image ones), the Windows job runs the
   harness and `S01` and picks up the daemon scenarios once its native
   traits ship.
-- `build.yml`: runs distribution builds via repository scripts.
+- `build.yml`: runs distribution builds via repository scripts. The
+  macOS job also builds the installer, unsigned, installs it on the
+  runner, and checks that the app is in `/Applications`, that `vapor`
+  is on the `PATH`, and that the CLI finds the daemon through the link
+  (`apps/macos/scripts/verify-package.sh --install`), so a break in the
+  packaging shows at the pull request and not at a release.
 - `perf.yml`: Tier 2, a release gate and on demand, never a PR gate:
   one soak cell against the release profile with the SLO checks
   asserted on its report (`scripts/perf.sh`), on a runner matrix that
@@ -128,6 +133,6 @@ Pull requests from forks do not start these workflows until a maintainer approve
 
 `perf.yml` and `soak.yml` have no schedule and no PR trigger: `release.yml` calls both through `workflow_call` for versioned release runs, and `workflow_dispatch` runs either by hand with a duration and a seed.
 
-`release.yml` runs on pushed tags matching `v*`. Preflight validates that the tag exactly matches `VERSION`, that the tagged commit is on `main`, and that `CHANGELOG.md` has the tag's section; then `lint.yml`, `test.yml`, `perf.yml`, and `soak.yml` run in parallel. The soak matrix is the long leg: nine cells of 45 minutes each, side by side. After all four gates pass, `package (<platform>)` runs once per shipping platform, on that platform's runner and under its protected environment (`release-macos` in the matrix today; `release-windows` and `release-linux` exist with the same protection and join the matrix when those surfaces ship), and uploads its assets as the `release-<platform>` artifact; `./scripts/build.sh package` stays the source of truth. The `publish` job then downloads every platform's assets, writes one `Checksums.txt` over all of them, and creates or updates the draft GitHub Release. Preflight and `publish` run on `ubuntu-latest`: nothing in them is platform work.
+`release.yml` runs on pushed tags matching `v*`. Preflight validates that the tag exactly matches `VERSION`, that the tagged commit is on `main`, and that `CHANGELOG.md` has the tag's section; then `lint.yml`, `test.yml`, `perf.yml`, and `soak.yml` run in parallel. The soak matrix is the long leg: nine cells of 45 minutes each, side by side. After all four gates pass, `package (<platform>)` runs once per shipping platform, on that platform's runner and under its protected environment (`release-macos` in the matrix today; `release-windows` and `release-linux` exist with the same protection and join the matrix when those surfaces ship), and uploads its assets as the `release-<platform>` artifact (`Vapor-macos-arm64.pkg` on macOS, after the same install check as the `build` job); `./scripts/build.sh package` stays the source of truth. The `publish` job then downloads every platform's assets, writes one `Checksums.txt` over all of them, and creates or updates the draft GitHub Release. Preflight and `publish` run on `ubuntu-latest`: nothing in them is platform work.
 
 The `main` ruleset (required checks, bypass policy, how to inspect and recreate it) is documented in `docs/ci/required-checks.md`.

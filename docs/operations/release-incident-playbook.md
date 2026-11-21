@@ -25,7 +25,7 @@ Mitigation:
 
 Recovery verification:
 
-- Successful run produces `Vapor.zip` and checksum file.
+- Successful run produces `Vapor-macos-arm64.pkg` and the checksum file.
 - Release remains draft until maintainer approval.
 
 ## 2) Notary service outage or timeout
@@ -43,7 +43,7 @@ Mitigation:
 Recovery verification:
 
 - Notarization step passes.
-- `stapler` succeeds and the uploaded `Vapor.zip` was rebuilt from the stapled app bundle.
+- `stapler` succeeds for the app and for the installer, and the uploaded `Vapor-macos-arm64.pkg` holds the stapled app bundle.
 
 ## 3) Partial asset upload or mismatched asset set
 

@@ -18,7 +18,7 @@ pub use macos::NativeServiceInstaller;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub use linux::NativeServiceInstaller;
+pub use linux::{NativeServiceInstaller, enable_linger, linger_enabled};
 
 #[cfg(target_os = "windows")]
 mod windows;

@@ -56,4 +56,6 @@ pub use service::{
     InMemoryServiceInstaller, NativeServiceInstaller, ServiceDescriptor, ServiceInstallError,
     ServiceInstaller, ServiceStatus,
 };
+#[cfg(target_os = "linux")]
+pub use service::{enable_linger, linger_enabled};
 pub use trash::{InMemoryTrashBin, NativeTrashBin, TrashBin};

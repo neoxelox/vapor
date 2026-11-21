@@ -122,20 +122,24 @@ protection. `launchd` is intentionally passive (`KeepAlive = false`):
    delays are shorter than the 30-second supervision tick, so what a
    user sees is a restart on the next tick or the one after it; the
    schedule decides which tick, not the second.
-   Detection is app-side but policy-free: the macOS app runs a
-   30-second timer (`DaemonHealthMonitor`,
-   `VaporConstants.Daemon.healthTickIntervalSeconds`) whose every tick
-   invokes `vapor service check`: one supervision tick that detects an
-   unexpected daemon exit, registers the crash, and restarts or defers
-   per the schedule above. Expected stops are never counted, and the
-   `awaitingRestart` marker prevents the same exit from being counted
-   twice. Crash-loop bookkeeping (`consecutiveCrashes`,
-   `lastCrashAtMs`, `pausedIndefinitely`, `awaitingRestart`) persists
-   durably in `<vapor_dir>/state/lifecycle.json` (owned by
-   `core/lifecycle`), so backoff and pause survive process restarts and
-   are shared across surfaces. Each surface reads the file again before
-   it acts and writes its change before it starts the daemon, so the
-   app's tick and a `vapor service` command do not undo each other.
+   Detection belongs to the supervisor job (next section): every 30
+   seconds it runs `vapor service check`, one supervision tick that
+   detects an unexpected daemon exit, registers the crash, and restarts
+   or defers per the schedule above. It is the one caller of that
+   check, so one exit is counted once. The macOS app restarts nothing:
+   its 30-second timer (`DaemonHealthMonitor`,
+   `VaporConstants.Daemon.healthTickIntervalSeconds`) runs `vapor
+   service status`, which reports the `health` a check would find and
+   changes nothing, and the app shows it. Expected stops are never
+   counted, and the `awaitingRestart` marker prevents the same exit
+   from being counted twice. Crash-loop bookkeeping
+   (`consecutiveCrashes`, `lastCrashAtMs`, `pausedIndefinitely`,
+   `awaitingRestart`) persists durably in
+   `<vapor_dir>/state/lifecycle.json` (owned by `core/lifecycle`), so
+   backoff and pause survive process restarts and are shared across
+   surfaces. Each process reads the file again before it acts and
+   writes its change before it starts the daemon, so the supervisor's
+   tick and a `vapor service` command do not undo each other.
 3. After 5 consecutive crashes within the `failureWindow` (default 10
    minutes), the guard enters a durable `CrashLoopPaused` state, stops
    attempting auto-restart (`vapor service status` reports
@@ -148,21 +152,35 @@ protection. `launchd` is intentionally passive (`KeepAlive = false`):
    a contributor finds code or scripts that set `KeepAlive = true` on the
    daemon's job, that is a policy violation and must be reverted.
 
-## The headless supervisor
+## The supervisor
 
-Without the app, nobody runs `vapor service check`, so a CLI-only
-install would never restart a crashed daemon. `vapor service install
---supervise` registers a second LaunchAgent, `sh.arn.vapor.supervisor`,
-whose program is the `vapor` binary itself running `service check
---loop`: the app's health tick as a process, one tick every 30 seconds
-(`--interval` to change it), printing an outcome only when it changes.
+Every install registers a second LaunchAgent next to the daemon's,
+`sh.arn.vapor.supervisor`: `vapor service install`, `vapor service
+bootstrap` (what the app runs at its start), and `vapor init` all do
+it. Its program is the `vapor` binary itself running `service check
+--loop`: one supervision tick every 30 seconds (`--interval` to change
+it), printing an outcome only when it changes. A crashed daemon so
+comes back with the app open, with the app closed, and on a device
+that never opens the app.
+
 This job is the one job launchd keeps alive (`KeepAlive = true`): it is
 the supervisor, not the daemon, so the crash-loop guard still owns
 every daemon restart and its budget. Its output lands in
 `<vapor_dir>/logs/vapor-supervisor.log`. `vapor service status` reports
 `supervisorInstalled`, and `vapor service uninstall` removes both jobs.
-The `--full` e2e run installs it, kills the daemon, and asserts the
-supervisor alone brings it back.
+A daemon that the user stopped (`vapor service stop`, Quit Vapor) reads
+as stopped on purpose, and the supervisor leaves it stopped.
+
+The supervisor is also what carries an update through. An installer
+replaces the binaries and starts nothing. At its next tick the
+supervisor sees that its own binary was replaced and ends itself;
+launchd starts the new one, which stops a daemon of the old build and
+starts the new daemon. So the CLI, the daemon, and the supervisor run
+the same version within about a minute of an install, with no step by
+the user.
+
+The `--full` e2e run installs both jobs, kills the daemon, and asserts
+the supervisor alone brings it back.
 
 ## Validation
 
@@ -178,22 +196,23 @@ candidate:
   `StandardOutPath`, `StandardErrorPath`, `EnvironmentVariables`,
   `ProcessType=Background`, and no other keys; the supervisor's plist
   is the same shape with `KeepAlive=true`.
-- **SIGKILL scenario**: with no app running and no supervisor
-  installed, start the daemon, `kill -9` its pid, wait `30s`, and
-  assert no automatic restart has occurred (no new pid for `vapord`).
-  With the app running, its health tick restarts the daemon within
-  one or two ticks; the restart comes from the coordinator, never from
-  `launchd`.
+- **SIGKILL scenario**: with no app running, start the daemon, `kill
+  -9` its pid, and assert the supervisor restarts it within one or two
+  ticks. The restart comes from the supervisor, never from `launchd`:
+  with the supervisor job taken off launchd by hand, the daemon stays
+  down.
 - **Crash-loop pause scenario**: force 5 crashes within 10 minutes, assert
   the coordinator reaches `CrashLoopPaused` and stops restart attempts, and
   that the menubar surfaces the paused state with the documented reason.
 - **Clean shutdown scenario**: menubar-quit the app, assert both app and
-  daemon exit cleanly, assert `launchd` does not relaunch the daemon until
-  the next login or explicit app launch.
+  daemon exit cleanly, assert neither `launchd` nor the supervisor
+  relaunches the daemon until the next login or explicit app launch.
 
-The service lifecycle path (install → start → status → crash-loop
-supervision through backoff and pause → acknowledge → stop → uninstall)
-is exercised against real `launchd` in CI by the `--full` phase of
-`./scripts/e2e.sh` (`test.yml`'s macOS job runs the e2e step with
-`--full`); that phase installs a real LaunchAgent, so it is opt-in and
-runs only on disposable CI runners.
+The service lifecycle path (install of both jobs → start → status →
+crash-loop supervision through backoff and pause → acknowledge → stop →
+uninstall) is exercised against real `launchd` in CI by the `--full`
+phase of `./scripts/e2e.sh` (`test.yml`'s macOS job runs the e2e step
+with `--full`). The steps that walk the guard run `service check` by
+hand, so the scenario sets the supervisor aside for them and installs
+it again for the restart check. That phase installs real LaunchAgents,
+so it is opt-in and runs only on disposable CI runners.

@@ -4,14 +4,14 @@
 
 - Current stage: pre-GA, with no users yet. Runtime work is tracked in `docs/tasks/core.md`, macOS app work in `docs/tasks/macos.md`, and CLI work in `docs/tasks/cli.md`. The version is in the root `VERSION` file.
 - Two providers ship: the filesystem provider (default; a local directory plays the cloud side) and Google Drive (`provider = "gdrive"`, OAuth with PKCE, tokens in the macOS login keychain). Sync profiles, keep-both conflict copies, loop prevention, one-way sync modes, live configuration reload, and the `vapor` CLI are all in the runtime today.
-- Product direction: bidirectional eventual consistency between a user-selected local folder and a user-selected provider folder. macOS is the first shipping surface; the `vapor` CLI follows on every OS; Windows and Linux apps land on the same portable Rust runtime.
+- Product direction: bidirectional eventual consistency between a user-selected local folder and a user-selected provider folder. macOS is the first shipping surface; Windows and Linux follow on the same portable Rust runtime. Each platform ships one install package that holds the app, the `vapor` CLI, and the daemon, and the Linux one also installs on a server with no desktop.
 - Google Drive is the first external cloud target and is selectable now; it is exercised offline in CI through a scripted HTTP transport. A run against a live account is a leg of the release gate (`./scripts/e2e.sh --provider gdrive`); its Drive-side operations are open work that waits on a dedicated test account.
 - Primary constraint: do no harm to user workload, battery, and thermal headroom, on every supported OS.
 - Pre-GA compatibility policy: backward compatibility is not guaranteed yet; config/state/schema and local interfaces may change during active development.
 
 ## Product goals
 
-- Keep one selected local folder bidirectionally synced with one selected provider folder, with durable intent state. The user chooses both folders: nothing syncs, and no folder is created, until a profile has its two roots (`vapor profiles add`, or the app's first-run flow). `~/Vapor` and `/Vapor` are the suggestions the setup offers.
+- Keep one selected local folder bidirectionally synced with one selected provider folder, with durable intent state. The user chooses both folders: nothing syncs, and no folder is created, until a profile has its two roots (`vapor init`, or the app's first-run flow). `~/Vapor` and `/Vapor` are the suggestions the setup offers.
 - Scope sync strictly to that configured folder pair; Vapor is not intended to be full-device backup.
 - Stay low-impact during active development and heavy system load.
 - Defer expensive work under pressure while maintaining eventual consistency.

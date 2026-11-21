@@ -154,6 +154,64 @@ impl NativeServiceInstaller {
     }
 }
 
+/// Lingering lets the services of a user run while the user has no
+/// session. A host with no desktop needs it: without it systemd stops
+/// the daemon when the last SSH session of the user ends. The default
+/// policy of systemd lets a user set it for the own account; a host
+/// whose policy refuses gets the error, with what `loginctl` said.
+pub fn enable_linger() -> Result<(), ServiceInstallError> {
+    let output = linger_command("enable-linger", &[])
+        .output()
+        .map_err(|error| ServiceInstallError::Backend(Box::new(error)))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(ServiceInstallError::Backend(Box::new(
+        std::io::Error::other(format!(
+            "loginctl enable-linger exited with {}: {stderr}",
+            output.status
+        )),
+    )))
+}
+
+/// Whether lingering is on for this user, or `None` when `loginctl`
+/// gives no answer.
+pub fn linger_enabled() -> Option<bool> {
+    let output = linger_command("show-user", &["--property=Linger", "--value"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// `loginctl <verb> <uid> [options]`. The user is named because the
+/// form with no user needs the caller to be inside a login session,
+/// which a provisioning script is not.
+fn linger_command(verb: &str, options: &[&str]) -> Command {
+    let mut command = Command::new("loginctl");
+    command
+        .arg(verb)
+        .arg(current_uid().to_string())
+        .args(options);
+    command
+}
+
+fn current_uid() -> u32 {
+    // SAFETY: `getuid` never fails and has no side effects; it takes no
+    // pointer and returns a plain integer.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::getuid()
+    }
+}
+
 /// systemd quoting: double quotes with `\\` and `"` escaped.
 fn quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
@@ -216,6 +274,20 @@ impl ServiceInstaller for NativeServiceInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lingering_is_asked_for_this_user_by_number() {
+        let command = linger_command("enable-linger", &[]);
+        assert_eq!(command.get_program(), "loginctl");
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            ["enable-linger".to_string(), current_uid().to_string()]
+        );
+    }
 
     fn descriptor(keep_alive: bool) -> ServiceDescriptor {
         ServiceDescriptor {

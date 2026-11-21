@@ -27,7 +27,8 @@ the owner: §10.1.
 
 ## 1) Product intent and non-negotiables
 
-- `vapor` is an invisible-first background sync product. The shipping surfaces today are the macOS app and the `vapor` CLI (currently distributed inside `Vapor.app` as `Contents/Helpers/vapor`; standalone CLI artifacts are a pending roadmap wave); Windows and Linux apps follow and consume the same portable Rust runtime.
+- `vapor` is an invisible-first background sync product. The shipping surfaces today are the macOS app and the `vapor` CLI; Windows and Linux apps follow and consume the same portable Rust runtime.
+- A user installs one thing and updates one thing. Each platform ships install packages that hold the app, the `vapor` CLI, and the `vapord` daemon, and the installer puts `vapor` on the `PATH`. Vapor ships no standalone CLI and no standalone runtime (owner, 2026-11-21; `docs/specs/2026-11-21-platform-release-assets.md`).
 - The Rust core (`core/*`) is the single portable runtime that powers every surface. Apps under `apps/*` and the `vapor` CLI are UI + OS-integration shims over that runtime; no business logic lives in them.
 - Platform-specific code is allowed and encouraged inside `core/platform` when it unlocks native performance; the engine consumes traits, not OS APIs directly.
 - Primary priority is user device impact, not strict real-time sync.
@@ -94,12 +95,20 @@ the owner: §10.1.
     this layer; nothing reimplements it.
 - `vapor` CLI (`core/cli`)
   - Headless-first binary that exposes the full runtime on every OS.
+  - `vapor init` is the first run from a terminal. It and the
+    onboarding of an app are the same onboarding: the same steps in
+    the same order. A change to the steps of one changes the other in
+    the same change set (owner, 2026-11-21).
 - SwiftUI app (`apps/macos`)
   - UX, onboarding, settings, diagnostics, menubar state.
   - Delegates autolaunch, crash-loop, daemon control, and live status to
     `core/lifecycle` and the daemon by invoking the bundled `vapor` CLI
     (`Contents/Helpers/vapor`) as a subprocess with `--json` output; no
     lifecycle policy is implemented in Swift.
+  - Restarts nothing. The supervisor job that every install registers
+    is the one thing that restarts a crashed daemon, with the app open
+    or closed; a surface only reads the state (`vapor service status`)
+    (owner, 2026-11-21).
 - Future apps (`apps/windows`, `apps/linux`) consume the same `core/*`
   stack; no business logic in UI code.
 
@@ -232,8 +241,10 @@ The release procedure itself is the `vapor-release` skill and
   The `vapor` CLI has no environment of its own (§7.5).
 - Signing follows the tag, on every platform. A stable tag ships only
   signed artifacts: the platform's `package` job refuses to run when its
-  signing material is missing (Developer ID and notarization on macOS,
-  the EV certificate on Windows, the GPG key on Linux). A prerelease tag
+  signing material is missing (the two Developer ID certificates and
+  notarization on macOS, the EV certificate on Windows, the GPG key on
+  Linux). A signature is inside the file that it signs; a release holds
+  no detached signature file. A prerelease tag
   (`-alpha`, `-beta`, `-rc`) needs no signing material on any platform
   and ships unsigned when none is configured; when it is, the artifacts
   are signed all the same. The pre-GA tags are all prereleases, which is
@@ -280,16 +291,20 @@ Full policy: `docs/operations/macos/distribution-trust-chain.md`.
   notarization, entitlement review.
 - The Mac app is built for Apple silicon. There is no Intel Mac build
   (owner, 2026-11-14).
-- `Vapor.app` is the single distributable package and must contain the
-  three executables:
+- The release asset is an installer, `Vapor-macos-arm64.pkg`. It puts
+  `Vapor.app` in `/Applications` and links `/usr/local/bin/vapor` to
+  the CLI inside the app, so the app is the one thing that is installed
+  and updated (owner, 2026-11-21). The Developer ID Application
+  certificate signs the app and the Developer ID Installer certificate
+  signs the installer; both are notarized and stapled.
+- `Vapor.app` must contain the three executables:
   - `Contents/MacOS/Vapor`
   - `Contents/MacOS/vapord`
   - `Contents/Helpers/vapor` (the CLI the app shim drives; it lives in
     `Helpers/` because the default macOS filesystem is case-insensitive
     and `vapor` would collide with `Vapor` inside `MacOS/`)
-- GitHub Releases must publish file assets, so release uploads use a
-  zip that contains `Vapor.app`; the raw `.app` bundle directory remains a
-  local packaging/validation artifact rather than a direct release asset.
+- The raw `.app` bundle directory remains a local packaging/validation
+  artifact; the installer is the release asset.
 - Runtime daemon launch must target only the bundled sibling binary
   (`Contents/MacOS/vapord`) and must not rely on global install paths.
 - Xcode project/workspace support is optional convenience for debugging and
@@ -303,21 +318,29 @@ Full policy: `docs/operations/macos/distribution-trust-chain.md`.
 ### 7.3) Windows distribution (future)
 
 Lands with `apps/windows`, under the isolated `release-windows` GitHub
-Environment. Expected controls: `docs/plans/core.md` §6.
+Environment: one installer for x64 and one for ARM64. Expected
+controls: `docs/plans/core.md` §6.
 
 ### 7.4) Linux distribution (future)
 
-Lands with `apps/linux`, under the isolated `release-linux` GitHub
-Environment. Expected controls: `docs/plans/core.md` §6.
+Under the isolated `release-linux` GitHub Environment: a `.deb` and an
+`.rpm` for x64 and for ARM64. A package installs on a host with no
+desktop, where the CLI and the daemon work, and it may ship before the
+Linux app window exists (owner, 2026-11-21). Expected controls:
+`docs/plans/core.md` §6.
 
-### 7.5) CLI (`vapor`) distribution
+### 7.5) Release assets and the CLI
 
-Pure Rust binaries per supported target triple, zstd-compressed, checksummed.
-Signing follows the host-OS policy (Developer ID on macOS, EV cert on
-Windows, GPG signature on Linux). Published alongside platform installers
-under the same GitHub Release tag. CLI release jobs run under the owning
-platform's GitHub Environment; there is no separate `release-cli`
-environment because the CLI has no secrets or trust chain of its own.
+- An asset is named `Vapor-<os>-<arch>.<ext>`, so the name says which
+  device it is for: `<os>` is `macos`, `windows`, or `linux`, and
+  `<arch>` is `arm64` or `x64`. Every build is 64-bit (owner,
+  2026-11-21).
+- The CLI has no asset and no release job of its own. It ships inside
+  each platform's install package, and the installer puts it on the
+  `PATH`.
+- Vapor has no automatic update and no update check for now. An update
+  is the install of the newer file, which updates the app, the CLI, and
+  the daemon together (owner, 2026-11-21).
 
 ## 8) Engineering standards
 

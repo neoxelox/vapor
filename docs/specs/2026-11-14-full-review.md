@@ -128,7 +128,7 @@ Each decision below is the owner's (owner, 2026-11-14).
 
 | # | Decision |
 |---|---|
-| D7 | One command sets up a profile from a terminal and runs underneath the apps: `vapor profiles add`, as `docs/tasks/cli.md` L1-6 plans. With no flags on a terminal it asks the questions. The first `add` is the setup. There is no `vapor init`. (D5) |
+| D7 | One command sets up a profile from a terminal and runs underneath the apps: `vapor profiles add`, as `docs/tasks/cli.md` L1-6 plans. With no flags on a terminal it asks the questions. The first `add` is the setup. There is no `vapor init`. (D5) Replaced by D1 of `2026-11-21-vapor-init.md`. |
 | D8 | A reconcile scan starts in `Light` and in `Throttled` too, for each kind of scan, at the caps of that state, and it stays interruptible. (ENG-01, ENG-03) |
 | D9 | Vapor does not stop syncing for a condition that can last: a device on battery, an active user, Low Power Mode. A throttle state makes sync slower. It does not stop it. The owner's words: "we must always keep syncing in the device, we cannot stop syncing, we are a background cloud sync". The wording of this row is the agent's. Which conditions may still stop all sync was open at that point; D19 settled it. |
 | D10 | Low Power Mode gives `Throttled`. (ENG-02) |

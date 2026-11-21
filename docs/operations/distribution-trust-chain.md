@@ -9,9 +9,9 @@ concrete policy for each platform lives in the per-platform doc below.
 - macOS: `docs/operations/macos/distribution-trust-chain.md`
 - Windows: (placeholder, lands when `apps/windows` starts)
 - Linux: (placeholder, lands when `apps/linux` starts)
-- CLI (`vapor` binary): signing follows the host OS policy (Developer ID
-  on macOS, EV cert on Windows, GPG signature on Linux). The CLI ships
-  alongside the platform installers under the same GitHub Release tag.
+- CLI (`vapor` binary): it has no artifact of its own. It ships inside
+  each platform's install package, signed with it, and the installer
+  puts it on the `PATH`.
 
 ## Shared principles (apply to every platform)
 
@@ -21,8 +21,13 @@ concrete policy for each platform lives in the per-platform doc below.
   release secrets (`release-macos`, `release-windows`, and
   `release-linux` exist with identical protection; each platform's
   secrets go in when its surface ships). The `vapor` CLI has no
-  environment of its own: its artifacts are signed and published by
-  each platform's release job under that platform's environment.
+  environment of its own: it is signed and published inside each
+  platform's install package, under that platform's environment.
+- A platform ships install packages named `Vapor-<os>-<arch>.<ext>`.
+  Each holds the app, the CLI, and the daemon, so a user installs one
+  thing and updates one thing. A signature is inside the file that it
+  signs: a release holds no detached signature file, and
+  `Checksums.txt` is not signed.
 - Each of those environments is protected before its secrets are added:
   deployments restricted to a `v*` tag rule with no branch rule, and a
   required reviewer gating the signing job. A new environment starts

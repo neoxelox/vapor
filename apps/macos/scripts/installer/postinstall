@@ -1,0 +1,37 @@
+#!/bin/sh
+# Runs as root when Installer has put Vapor.app in /Applications. It
+# puts the `vapor` CLI of the app on the PATH, as a link, so an update
+# of the app is an update of the CLI too.
+#
+# Installer passes the volume it installs to as the third argument.
+set -eu
+
+volume="${3:-/}"
+volume="${volume%/}"
+app_cli="$volume/Applications/Vapor.app/Contents/Helpers/vapor"
+link_dir="$volume/usr/local/bin"
+link="$link_dir/vapor"
+
+# /usr/local/bin is on the default PATH of macOS, and a fresh system
+# does not have it.
+mkdir -p "$link_dir"
+
+# A link of an earlier install is replaced, and so is a link that
+# leads nowhere. Anything else with this name is another program, and
+# it stays: the install still succeeds, and the CLI is in the app.
+if [ -L "$link" ]; then
+  case "$(readlink "$link")" in
+    */Vapor.app/Contents/Helpers/vapor) ;;
+    *)
+      if [ -e "$link" ]; then
+        echo "vapor: $link belongs to another program; the Vapor CLI is at $app_cli"
+        exit 0
+      fi
+      ;;
+  esac
+elif [ -e "$link" ]; then
+  echo "vapor: $link belongs to another program; the Vapor CLI is at $app_cli"
+  exit 0
+fi
+
+ln -sfn "$app_cli" "$link"

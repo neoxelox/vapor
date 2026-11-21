@@ -271,7 +271,7 @@ fn check_profiles(
         checks.push(DoctorCheck {
             name: constants::doctor::CHECK_PROFILES.to_string(),
             status: DoctorCheckStatus::Warning,
-            detail: "no sync profile yet; set one up with `vapor profiles add`".to_string(),
+            detail: "no sync profile yet; set Vapor up with `vapor init`".to_string(),
         });
         return checks;
     }
@@ -604,7 +604,7 @@ mod tests {
         assert_eq!(checks.len(), 1);
         assert_eq!(checks[0].name, "profiles");
         assert_eq!(checks[0].status, DoctorCheckStatus::Warning);
-        assert!(checks[0].detail.contains("vapor profiles add"));
+        assert!(checks[0].detail.contains("vapor init"));
     }
 
     #[test]

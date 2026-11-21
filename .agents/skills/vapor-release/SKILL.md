@@ -70,14 +70,20 @@ minutes side by side on macOS and Linux runners, so the gates take
 about an hour. A paused run is not a broken run. Signing follows the
 tag on every platform: a stable tag refuses to package without the
 platform's signing secrets, a prerelease tag ships unsigned when none
-is configured. Adding a platform to the package matrix follows the
+is configured. On macOS the material is two identities, set together:
+`VAPOR_SIGN_IDENTITY` for the app and `VAPOR_INSTALLER_SIGN_IDENTITY`
+for the installer. Adding a platform to the package matrix follows the
 recipe in `docs/operations/release-process.md`.
 
 ## Post-run verification
 
-- Release assets: `Vapor.zip`, `Checksums.txt`.
-- Package contents: `Vapor.app/Contents/MacOS/Vapor`,
-  `Vapor.app/Contents/MacOS/vapord`, `Vapor.app/Contents/Helpers/vapor`.
+- Release assets: `Vapor-macos-arm64.pkg`, `Checksums.txt`.
+- The installer holds `Applications/Vapor.app` with
+  `Contents/MacOS/Vapor`, `Contents/MacOS/vapord`, and
+  `Contents/Helpers/vapor`, and the `postinstall` script that links
+  `/usr/local/bin/vapor`
+  (`apps/macos/scripts/verify-package.sh <file>` checks it; the package
+  job also installs it on its runner).
 - Release notes match the `CHANGELOG.md` section for the tag.
 - Never open the packaged app; the owner verifies launch by hand.
 

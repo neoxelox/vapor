@@ -38,8 +38,24 @@ pub struct DaemonBinary {
 }
 
 pub fn locate() -> Option<DaemonBinary> {
-    let current = std::env::current_exe().ok();
+    let current = cli_path();
     locate_from(current.as_deref(), std::env::var_os("PATH").as_deref())
+}
+
+/// The running CLI as the file it is. An installer puts a link to the
+/// CLI on the `PATH`, and on macOS a program started through a link is
+/// told the path of the link: the daemon is next to the binary, not
+/// next to the link, and a service definition must pin the binary.
+pub fn cli_path() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .map(|invoked| behind_links(&invoked))
+}
+
+/// `path` with every link in it followed. A path that cannot be
+/// resolved stays as it is, and the search then reports what it finds.
+pub fn behind_links(path: &Path) -> PathBuf {
+    vapor_shared::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Pure resolver over an explicit CLI path and `PATH` value.
@@ -122,6 +138,28 @@ mod tests {
         let found = locate_from(Some(&cli), None).expect("found");
         assert_eq!(found.source, DaemonBinarySource::Bundled);
         assert_eq!(found.path, daemon);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_on_the_path_leads_to_the_daemon_next_to_the_binary() {
+        let temp = TempDir::new().expect("temp");
+        let contents = temp.path().join("Vapor.app").join("Contents");
+        let cli = contents.join("Helpers").join("vapor");
+        touch(&cli);
+        let daemon = contents.join("MacOS").join(daemon_name());
+        touch(&daemon);
+        let link = temp.path().join("bin").join("vapor");
+        fs::create_dir_all(link.parent().expect("parent")).expect("mkdir");
+        std::os::unix::fs::symlink(&cli, &link).expect("symlink");
+
+        assert!(
+            locate_from(Some(&link), None).is_none(),
+            "next to the link there is no daemon"
+        );
+        let found = locate_from(Some(&behind_links(&link)), None).expect("found");
+        assert_eq!(found.source, DaemonBinarySource::Bundled);
+        assert_eq!(found.path, behind_links(&daemon));
     }
 
     #[test]

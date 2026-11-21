@@ -1147,7 +1147,7 @@ impl MultiProfileRuntime {
             let (run_state, run_reason) = if self.config_problems.is_empty() {
                 (
                     RunState::Unconfigured,
-                    "no sync profile yet; set one up with `vapor profiles add`".to_string(),
+                    "no sync profile yet; set Vapor up with `vapor init`".to_string(),
                 )
             } else {
                 (RunState::Error, self.config_problems.join("; "))
@@ -2580,7 +2580,7 @@ mod tests {
             let status = multi.aggregate_status(clock.now_system());
             assert_eq!(status.run_state, constants::run_state::UNCONFIGURED);
             assert!(
-                status.run_reason.contains("vapor profiles add"),
+                status.run_reason.contains("vapor init"),
                 "status names the command that sets a profile up: {:?}",
                 status.run_reason
             );

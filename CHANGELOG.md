@@ -24,9 +24,11 @@ in its pull request and in the documents under `docs/`.
 - The bandwidth ceiling is a share of what your link carries. Vapor measures that from its own transfers, so a faster link syncs faster.
 - Settings apply while Vapor runs: ceilings, ignore rules, safeguards, and the trash within seconds. `vapor status` says when a setting needs a restart.
 - Ignore rules in both directions: `preIgnoreRules`, `.gitignore`, `.vaporignore`, `postIgnoreRules`. `vapor status` counts what they hold back, and `vapor ignored` lists each path with its rule.
-- The `vapor` command line: `status`, `pause`, `resume`, `reconcile`, `profiles`, `decisions`, `ignored`, `trash`, `config`, `auth`, `service`, `timeline`, `diagnostics`, `logs`, `doctor`, `report`, `run`, `version`. Most take `--json`.
+- The `vapor` command line: `init`, `status`, `pause`, `resume`, `reconcile`, `profiles`, `decisions`, `ignored`, `trash`, `config`, `auth`, `service`, `timeline`, `diagnostics`, `logs`, `doctor`, `report`, `run`, `version`. Most take `--json`.
 - `vapor report` writes a support report with file and folder names replaced by codes. `--keep-paths` keeps the names.
-- Start at login, crash-loop protection that survives a restart, and a supervisor for a device with no app (`vapor service install --supervise`).
+- Start at login, crash-loop protection that survives a restart, and a supervisor on every install that restarts a crashed daemon, with the app open or closed.
+- `vapor init` sets Vapor up in one command: the cloud, the sign-in, the two folders, and the background service. A script gives the answers as flags, and a later run does only what is left.
+- One installer for the Mac, `Vapor-macos-arm64.pkg`: it installs the app, the daemon, and the `vapor` command on the `PATH`, and a newer one updates all three.
 - A cloud sign-in that expired or was revoked puts the profile on hold. `vapor auth login`, or Sign In in the app, resumes it where it stopped.
 - The Mac app shows what sync is doing and why, has Sync now and a Sign In button, and its menu bar mark turns orange when Vapor needs you.
 - The daemon runs on Linux: inotify, a systemd user unit, the freedesktop trash, and the Secret Service or an external secrets command.
@@ -46,6 +48,7 @@ in its pull request and in the documents under `docs/`.
 - A negation under an ignored folder follows git: it does not show the file again. A rule that ends in `/` matches folders only.
 - A crash inside one profile stops that profile only. Vapor tries it again after 1, 5, and 30 minutes.
 - The Mac app is built for Apple silicon. There is no Intel Mac build.
+- The installer replaces `Vapor.zip`, and there is no separate CLI download. `vapor service install` no longer takes `--supervise`: every install has the supervisor.
 
 ### Fixed
 

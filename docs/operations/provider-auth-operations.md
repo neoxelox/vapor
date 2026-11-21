@@ -18,6 +18,12 @@ are provider-neutral unless a section says otherwise.
   that prints the token> | vapor auth login --token -`); a token given
   as an argument is refused and not stored, because an argument shows
   in the process list and stays in the shell history.
+- `vapor init` signs in before the profile exists, so its folder step
+  can look into the account. The token is stored under the id that the
+  first profile gets (`default`) and the provider. It stays when the
+  user stops before the folders: the next `vapor init` uses it, and
+  `vapor auth logout` removes it. When the profile is then written for
+  another provider, the sign-in of the first one is removed.
 - No backend takes part. PKCE and the loopback redirect protect the
   code exchange, and the app talks to Google directly.
 - Requested scope is `https://www.googleapis.com/auth/drive` (full

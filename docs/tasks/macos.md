@@ -127,15 +127,26 @@ Exit gate:
 ## Distribution hardening
 
 - [ ] M5-1 Verify signed + notarized path end-to-end against a clean macOS
-      host every release cycle. `package.sh` reads the notarization
-      status and checks the stapled app, but that path has not run:
-      no signing material exists yet.
+      host every release cycle, for the app and for the installer.
+      `package.sh` reads the notarization status of each and checks the
+      stapled app and the stapled installer, but that path has not run:
+      no signing material exists yet. It needs two certificates in one
+      `.p12`, Developer ID Application and Developer ID Installer
+      (`docs/operations/release-process.md`). The unsigned installer is
+      built and installed on a runner on every pull request.
 - [ ] M5-2 Verify entitlements drift check runs on every release build.
 - [ ] M5-3 Verify LaunchAgent/login-item behavior stability across upgrades
       (upgrade from N-1 → N does not leave orphaned plists or duplicate
       login items).
 - [ ] M5-4 Preserve rollback artifacts per `docs/operations/release-
       process.md`.
+- [ ] M5-5 What a removal leaves behind. An installer has no
+      uninstaller: after the user moves `Vapor.app` to the Trash, the
+      link at `/usr/local/bin/vapor` points at nothing, and the two
+      LaunchAgents point at binaries that are gone.
+      `docs/product/install.md` gives the three steps by hand today.
+      Decide between a `vapor` command that removes the install and a
+      menu item in the app.
 
 Exit gate:
 
@@ -145,8 +156,8 @@ Exit gate:
 
 The runtime side is in place: an install with no usable configuration
 syncs nothing and creates no folder, `vapor status` says `unconfigured`
-and names the command, and `vapor profiles add` sets the first profile
-up with no restart. Owned here even though the runtime underneath is
+and names `vapor init`, which is the same first run from a terminal,
+and `vapor profiles add` sets the first profile up with no restart. Owned here even though the runtime underneath is
 cross-platform, because the onboarding UI is macOS-native; Windows and
 Linux get parallel tasks in their own lists once those apps start.
 
@@ -169,7 +180,12 @@ for tests; the app never assumes it.
       picker, suggestion `~/Vapor`); cloud folder (the provider-aware
       suggestion, editable); sync mode, with the one-way choice behind
       the confirmation from M4-5; start at login, default on; a summary
-      and a Start button. More settings and options join the sequence
+      and a Start button. This is the order of `vapor init`, and it
+      stays that way: the onboarding of the app and `vapor init` are
+      the same onboarding, and a change to the steps of one changes
+      the other in the same change set (`AGENTS.md` §2). The cloud
+      folder step gets a menu of the account's folders, from the same
+      listing as the CLI's (`cli.md` L1-8). More settings and options join the sequence
       as the owner defines them at the pass. Follows Apple HIG for
       onboarding: a single window, native controls, one decision per
       step, a Back path, no custom chrome.

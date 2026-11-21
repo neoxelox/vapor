@@ -643,6 +643,28 @@ pub mod timeline {
     pub const KIND_CLOUD_FULL: &str = "cloud-full";
 }
 
+/// `vapor init`: the steps of a first run, and the state of each.
+pub mod init {
+    pub const STEP_PROFILE: &str = "profile";
+    pub const STEP_SIGN_IN: &str = "sign-in";
+    pub const STEP_SERVICE: &str = "service";
+
+    pub const STATE_DONE: &str = "done";
+    /// The provider has no account, so there is nothing to sign in to.
+    pub const STATE_NOT_NEEDED: &str = "not-needed";
+    /// A person has to act: sign in, or answer a question.
+    pub const STATE_WAITS: &str = "waits";
+    pub const STATE_FAILED: &str = "failed";
+    /// The user chose not to start Vapor at login.
+    pub const STATE_OFF: &str = "off";
+    /// The platform has no service manager that Vapor drives yet.
+    pub const STATE_UNAVAILABLE: &str = "unavailable";
+
+    /// The states that leave nothing for `vapor init` to do.
+    pub const SETTLED_STATES: &[&str] =
+        &[STATE_DONE, STATE_NOT_NEEDED, STATE_OFF, STATE_UNAVAILABLE];
+}
+
 /// A profile's sign-in state (`vapor auth status`).
 pub mod auth {
     pub const STATE_SIGNED_IN: &str = "signed-in";

@@ -50,7 +50,7 @@ public enum SyncSurfaceState: String, CaseIterable, Codable, Sendable {
     }
   }
 
-  /// Maps one supervision tick (and the daemon's own status when it was
+  /// Maps one health read (and the daemon's own status when it was
   /// running) onto the surface state. Order matters: a daemon in
   /// `Error` or `Paused` says so before any queue or throttle detail.
   public static func from(
@@ -62,7 +62,7 @@ public enum SyncSurfaceState: String, CaseIterable, Codable, Sendable {
       return .error
     case .notInstalled, .stoppedExpected, .restartDeferred:
       return .stopped
-    case .running, .restartedAfterCrash:
+    case .running:
       break
     }
     guard let status else {

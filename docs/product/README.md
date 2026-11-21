@@ -31,10 +31,11 @@ status.
   rules and their precedence, how a rule is read, the built-in list,
   what no rule can change, and `vapor ignored`. The root `README.md`
   links here from its Configuration table.
-- `install.md`: requirements, the install steps, and what to know
-  before the first launch (an unsigned prerelease, the setup command,
-  the macOS folder prompts, the Google Drive limits). The root
-  `README.md` keeps the one-line steps.
+- `install.md`: the install file of each device, the install, update,
+  and removal steps, the first run with `vapor init` on a terminal and
+  with no terminal, and what to know before it (an unsigned
+  prerelease, the macOS folder prompts, the Google Drive limits). The
+  root `README.md` keeps the table and the short steps.
 
 ## Related references
 

@@ -167,15 +167,24 @@ multi-language clients become a requirement.
 Each platform owns its own trust chain. Every platform gets an isolated
 GitHub Environment holding its secrets.
 
-- macOS: Developer ID Application cert + `notarytool` keychain profile.
-  Environment: `release-macos`. Delegated spec in
+Each platform ships install packages named `Vapor-<os>-<arch>.<ext>`.
+A package holds the app, the `vapor` CLI, and `vapord`, and its
+installer puts `vapor` on the `PATH`; a signature is inside the file it
+signs (`AGENTS.md` §7).
+
+- macOS: `Vapor-macos-arm64.pkg`. Developer ID Application cert for the
+  app, Developer ID Installer cert for the package, and a `notarytool`
+  keychain profile. Environment: `release-macos`. Delegated spec in
   `docs/operations/macos/distribution-trust-chain.md`.
-- Windows: EV code-signing certificate (Azure Key Vault or USB HSM) + WiX or
-  MSIX packaging + `signtool`. Environment: `release-windows`.
-- Linux: GPG-signed AppImage first; `.deb`/`.rpm` as demand surfaces;
-  Flathub/Snap later. Environment: `release-linux`.
-- CLI: static-ish Rust binaries per target triple, zstd-compressed,
-  checksummed, published to GitHub Releases alongside the platform installers.
+- Windows: one installer for x64 and one for ARM64. EV code-signing
+  certificate (Azure Key Vault or USB HSM) + WiX or MSIX packaging +
+  `signtool`; the format follows the UI toolkit of the app.
+  Environment: `release-windows`.
+- Linux: a `.deb` and an `.rpm` for x64 and for ARM64, GPG-signed
+  inside the package. They install on a host with no desktop, and may
+  ship before the app window exists. Flathub/Snap later, as demand
+  surfaces. Environment: `release-linux`.
+- CLI: no artifact of its own. It ships inside each package.
 
 ## 7) The `vapor` CLI
 

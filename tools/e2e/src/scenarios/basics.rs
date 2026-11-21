@@ -93,6 +93,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: profiles_command_sets_an_install_up,
         },
         Scenario {
+            id: "S70",
+            name: "init-sets-an-install-up",
+            proves: "vapor init takes a fresh install to a running sync with one command and no terminal, refuses when a folder is left out, and a second run changes nothing and says initialized",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: init_sets_an_install_up,
+        },
+        Scenario {
             id: "S09",
             name: "socket-relocation",
             proves: "an over-budget VAPOR_DIR relocates the IPC socket under the OS temp dir; status and doctor still work",
@@ -163,7 +171,7 @@ fn fresh_install_is_unconfigured(ctx: &mut Ctx) -> Result<(), Failure> {
         .status()
         .ok_or_else(|| Failure::new("status --json did not answer"))?;
     ensure!(
-        status.run.reason.contains("vapor profiles add"),
+        status.run.reason.contains("vapor init"),
         "status must name the command that sets a profile up: {:?}",
         status.run.reason
     );
@@ -224,6 +232,112 @@ fn fresh_install_is_unconfigured(ctx: &mut Ctx) -> Result<(), Failure> {
         &home.cloud.join("first.txt"),
         CONVERGE_TIMEOUT,
     )?;
+    Ok(())
+}
+
+fn init_sets_an_install_up(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let cli = ctx.cli();
+    let kind = ctx.paths.daemon_kind;
+    ctx.start_daemon_in(&home, kind, false)?;
+    cli.wait_run_state(
+        vapor_shared::constants::run_state::UNCONFIGURED,
+        crate::scenario::STARTUP_TIMEOUT,
+    )?;
+    // `--auto-launch off` in every call: a sandbox never registers a
+    // service with the host, and the daemon here is the harness's own.
+
+    // No terminal and no folders: nobody chose them, so nothing is
+    // written.
+    let no_folders = cli.run(&["init", "--auto-launch", "off", "--json"])?;
+    ensure!(
+        !no_folders.success() && no_folders.stderr.contains("--local <path> --cloud <path>"),
+        "init with no folders and no terminal must refuse: {}",
+        no_folders.stderr
+    );
+    ensure!(
+        cli.json(&["profiles", "list", "--json"])?["profiles"] == serde_json::json!([]),
+        "a refused init leaves no profile"
+    );
+
+    // One command, every answer an option.
+    let local = home.local.to_string_lossy().into_owned();
+    let cloud = home.cloud.to_string_lossy().into_owned();
+    let first = cli.json(&[
+        "init",
+        "--provider",
+        "filesystem",
+        "--local",
+        &local,
+        "--cloud",
+        &cloud,
+        "--auto-launch",
+        "off",
+        "--json",
+    ])?;
+    let states = |report: &serde_json::Value| -> Vec<(String, String)> {
+        report["steps"]
+            .as_array()
+            .map(|steps| {
+                steps
+                    .iter()
+                    .map(|step| {
+                        (
+                            step["step"].as_str().unwrap_or_default().to_string(),
+                            step["state"].as_str().unwrap_or_default().to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let settled = [
+        ("profile".to_string(), "done".to_string()),
+        ("sign-in".to_string(), "not-needed".to_string()),
+        ("service".to_string(), "off".to_string()),
+    ];
+    ensure!(
+        first["initialized"] == true && states(&first) == settled,
+        "one init run sets the install up: {first}"
+    );
+    ensure!(
+        first["profiles"][0]["id"] == "default",
+        "the first profile is the default one: {first}"
+    );
+
+    // The running daemon picks the profile up and syncs.
+    cli.wait_run_state("running", CONVERGE_TIMEOUT)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("first.txt"), "the first file\n")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_same_content(
+        &home.local.join("first.txt"),
+        &home.cloud.join("first.txt"),
+        CONVERGE_TIMEOUT,
+    )?;
+
+    // A second run has nothing left to do: it changes nothing, and it
+    // says so with the state of the daemon.
+    let before = fs::read_to_string(home.config_path())?;
+    let second = cli.json(&["init", "--json"])?;
+    ensure!(
+        second["initialized"] == true && states(&second) == settled,
+        "a second init run finds every step settled: {second}"
+    );
+    ensure!(
+        second["daemon"]["state"] == "running",
+        "an initialized install reports the daemon: {second}"
+    );
+    ensure!(
+        fs::read_to_string(home.config_path())? == before,
+        "a second init run must not change vapor.json"
+    );
+    ensure!(
+        cli.json(&["profiles", "list", "--json"])?["profiles"]
+            .as_array()
+            .is_some_and(|profiles| profiles.len() == 1),
+        "a second init run adds no second profile"
+    );
     Ok(())
 }
 

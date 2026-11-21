@@ -1,9 +1,11 @@
 //! `vapor service bootstrap|install|uninstall|start|stop|restart|status|check|acknowledge`.
 //!
-//! `check --loop` is the headless supervisor: what the macOS app's
-//! health tick does every 30 seconds, as a process, for a CLI-only
-//! install. `install --supervise` registers it with the service
-//! manager as a second, kept-alive job (`sh.arn.vapor.supervisor`).
+//! `check --loop` is the supervisor: the one process that restarts a
+//! daemon that exited on its own, within the crash-loop limits. Every
+//! install registers it with the service manager as a second,
+//! kept-alive job (`sh.arn.vapor.supervisor`), so a crashed daemon
+//! comes back with or without an app. The surfaces only read what it
+//! did (`status`).
 //!
 //! Drives `core/lifecycle::DaemonLifecycleManager` over the platform's
 //! native `ServiceInstaller`. macOS today; Windows / Linux land with
@@ -131,7 +133,9 @@ pub struct ServiceStatusReport {
     pub label: String,
     pub auto_launch: bool,
     pub crash_loop: CrashLoopStateSnapshot,
-    /// Whether the headless supervisor job is registered.
+    /// What a supervision tick would find, read with nothing changed.
+    pub health: DaemonHealthCheckOutcome,
+    /// Whether the supervisor job is registered.
     pub supervisor_installed: bool,
 }
 
@@ -245,6 +249,7 @@ pub fn dispatch(
                 label: constants::service::DAEMON_LABEL.to_string(),
                 auto_launch: manager.auto_launch_enabled()?,
                 crash_loop: manager.crash_loop_state(now),
+                health: manager.observe_daemon_health_for(probed, now)?,
                 supervisor_installed: false,
             }))
         }
@@ -302,41 +307,57 @@ pub fn render_json(outcome: &ServiceCommandOutcome) -> serde_json::Value {
                 serde_json::json!({"result": names::RESULT_NOT_INSTALLED})
             }
         },
-        ServiceCommandOutcome::Health(health) => match health {
-            DaemonHealthCheckOutcome::Running => {
-                serde_json::json!({"health": names::HEALTH_RUNNING})
+        ServiceCommandOutcome::Health(health) => health_json(health),
+        ServiceCommandOutcome::Status(report) => {
+            let mut status = serde_json::json!({
+                "status": status_wire_name(report.status),
+                "label": report.label,
+                "autoLaunch": report.auto_launch,
+                "crashLoop": {
+                    "paused": report.crash_loop.paused,
+                    "consecutiveCrashes": report.crash_loop.consecutive_crashes,
+                    "lastCrashAtMs": report.crash_loop.last_crash_at_ms,
+                    "awaitingRestart": report.crash_loop.awaiting_restart,
+                },
+                "supervisorInstalled": report.supervisor_installed,
+            });
+            // `health` and, for a deferred restart, `remainingSeconds`:
+            // the keys of a `check` answer, so a surface reads both the
+            // same way.
+            if let (Some(status), serde_json::Value::Object(health)) =
+                (status.as_object_mut(), health_json(&report.health))
+            {
+                status.extend(health);
             }
-            DaemonHealthCheckOutcome::NotInstalled => {
-                serde_json::json!({"health": names::HEALTH_NOT_INSTALLED})
-            }
-            DaemonHealthCheckOutcome::StoppedExpected => {
-                serde_json::json!({"health": names::HEALTH_STOPPED_EXPECTED})
-            }
-            DaemonHealthCheckOutcome::RestartedAfterCrash => {
-                serde_json::json!({"health": names::HEALTH_RESTARTED_AFTER_CRASH})
-            }
-            DaemonHealthCheckOutcome::RestartDeferred(remaining) => serde_json::json!({
-                "health": names::HEALTH_RESTART_DEFERRED,
-                "remainingSeconds": seconds(*remaining),
-            }),
-            DaemonHealthCheckOutcome::CrashLoopPaused => {
-                serde_json::json!({"health": names::HEALTH_CRASH_LOOP_PAUSED})
-            }
-        },
-        ServiceCommandOutcome::Status(report) => serde_json::json!({
-            "status": status_wire_name(report.status),
-            "label": report.label,
-            "autoLaunch": report.auto_launch,
-            "crashLoop": {
-                "paused": report.crash_loop.paused,
-                "consecutiveCrashes": report.crash_loop.consecutive_crashes,
-                "lastCrashAtMs": report.crash_loop.last_crash_at_ms,
-                "awaitingRestart": report.crash_loop.awaiting_restart,
-            },
-            "supervisorInstalled": report.supervisor_installed,
-        }),
+            status
+        }
         ServiceCommandOutcome::Acknowledged => {
             serde_json::json!({"result": names::RESULT_ACKNOWLEDGED})
+        }
+    }
+}
+
+fn health_json(health: &DaemonHealthCheckOutcome) -> serde_json::Value {
+    use constants::service as names;
+    match health {
+        DaemonHealthCheckOutcome::Running => {
+            serde_json::json!({"health": names::HEALTH_RUNNING})
+        }
+        DaemonHealthCheckOutcome::NotInstalled => {
+            serde_json::json!({"health": names::HEALTH_NOT_INSTALLED})
+        }
+        DaemonHealthCheckOutcome::StoppedExpected => {
+            serde_json::json!({"health": names::HEALTH_STOPPED_EXPECTED})
+        }
+        DaemonHealthCheckOutcome::RestartedAfterCrash => {
+            serde_json::json!({"health": names::HEALTH_RESTARTED_AFTER_CRASH})
+        }
+        DaemonHealthCheckOutcome::RestartDeferred(remaining) => serde_json::json!({
+            "health": names::HEALTH_RESTART_DEFERRED,
+            "remainingSeconds": seconds(*remaining),
+        }),
+        DaemonHealthCheckOutcome::CrashLoopPaused => {
+            serde_json::json!({"health": names::HEALTH_CRASH_LOOP_PAUSED})
         }
     }
 }
@@ -404,9 +425,9 @@ pub fn render_text(outcome: &ServiceCommandOutcome) -> String {
                 ));
             }
             line.push_str(if report.supervisor_installed {
-                "\nsupervisor: installed (vapor service check --loop runs under the service manager)"
+                "\nsupervisor: installed (it restarts a daemon that exited on its own)"
             } else {
-                "\nsupervisor: not installed (the app supervises; headless installs use `vapor service install --supervise`)"
+                "\nsupervisor: not installed (`vapor service install` registers it)"
             });
             line
         }
@@ -494,13 +515,84 @@ fn service_environment(vapor_directory: &std::path::Path) -> Vec<(String, String
     environment
 }
 
-/// The headless supervisor's service definition: this very `vapor`
-/// binary running `service check --loop`, kept alive by the service
-/// manager, with the same runtime directory as the daemon.
+/// Registers the supervisor job next to a daemon job that is
+/// registered, and reports whether it did. With no daemon job there is
+/// nothing to supervise, and a supervisor would only start and exit.
+pub fn ensure_supervisor(
+    daemon: &dyn ServiceInstaller,
+    supervisor: &dyn ServiceInstaller,
+) -> Result<bool, ServiceCommandError> {
+    if daemon.status()? == ServiceStatus::NotInstalled {
+        return Ok(false);
+    }
+    supervisor.install_and_enable()?;
+    Ok(true)
+}
+
+/// `bootstrap` or `install`, whole: the daemon job, a daemon of this
+/// build, and the supervisor job. Every surface that puts Vapor in the
+/// background goes through here, so no install is left without the one
+/// process that restarts a crashed daemon.
+pub fn install_with_supervisor(
+    command: ServiceCommand,
+    manager: &DaemonLifecycleManager,
+    installer: &dyn ServiceInstaller,
+    supervisor: &dyn ServiceInstaller,
+    running_build: Option<&str>,
+    now: Instant,
+) -> Result<ServiceCommandOutcome, ServiceCommandError> {
+    let outcome = dispatch(command, manager, installer, now)?;
+    replace_daemon_of_another_build(manager, installer, running_build, now)?;
+    ensure_supervisor(installer, supervisor)?;
+    Ok(outcome)
+}
+
+/// Whether an install turns lingering on. Left to itself Vapor does it
+/// on a host with no desktop session, where the daemon would stop at
+/// the last logout; `choice` is the user's own answer.
+#[cfg(any(target_os = "linux", test))]
+pub fn linger_wanted(choice: Option<bool>, desktop_session: bool) -> bool {
+    choice.unwrap_or(!desktop_session)
+}
+
+/// What became of lingering during an install.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LingerOutcome {
+    On,
+    /// Not wanted here; the setting stays as it was.
+    Off,
+    /// The system refused. Holds what it said.
+    Refused(String),
+}
+
+/// Turns lingering on when [`linger_wanted`] says so. A refusal is an
+/// outcome, not an error: the service is installed and runs, and the
+/// caller tells the user what is left to do.
+#[cfg(target_os = "linux")]
+pub fn apply_linger(choice: Option<bool>) -> LingerOutcome {
+    let desktop = vapor_platform::NativeIdleNotifier::for_current_host().has_gui_session();
+    if !linger_wanted(choice, desktop) {
+        return LingerOutcome::Off;
+    }
+    if vapor_platform::linger_enabled() == Some(true) {
+        return LingerOutcome::On;
+    }
+    match vapor_platform::enable_linger() {
+        Ok(()) => LingerOutcome::On,
+        Err(error) => LingerOutcome::Refused(error.to_string()),
+    }
+}
+
+/// The supervisor's service definition: this very `vapor` binary
+/// running `service check --loop`, kept alive by the service manager,
+/// with the same runtime directory as the daemon.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn supervisor_installer() -> Result<NativeServiceInstaller, ServiceCommandError> {
-    let executable = std::env::current_exe().map_err(|error| {
-        ServiceCommandError::Install(ServiceInstallError::Backend(Box::new(error)))
+    let executable = super::daemon_binary::cli_path().ok_or_else(|| {
+        ServiceCommandError::Install(ServiceInstallError::Backend(Box::new(
+            std::io::Error::other("cannot tell where the running vapor binary is"),
+        )))
     })?;
     let vapor_directory = vapor_shared::runtime_paths::vapor_directory();
     let logs_directory = vapor_shared::runtime_paths::logs_directory();
@@ -521,20 +613,49 @@ pub fn supervisor_installer() -> Result<NativeServiceInstaller, ServiceCommandEr
     Ok(NativeServiceInstaller::for_current_user(descriptor)?)
 }
 
+/// What tells one build of a file from the next: an update replaces
+/// the binary, and its size or its modification time changes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BinaryStamp(Option<(u64, std::time::SystemTime)>);
+
+impl BinaryStamp {
+    pub fn of(path: &std::path::Path) -> Self {
+        Self(
+            std::fs::metadata(path)
+                .ok()
+                .and_then(|meta| Some((meta.len(), meta.modified().ok()?))),
+        )
+    }
+
+    /// Whether the file is now another one. A file that cannot be read
+    /// at either moment says nothing, and counts as the same.
+    pub fn replaced_by(&self, now: &Self) -> bool {
+        matches!((&self.0, &now.0), (Some(before), Some(after)) if before != after)
+    }
+}
+
 /// Runs supervision ticks every `interval` until a shutdown signal
 /// arrives, printing an outcome only when it differs from the previous
 /// tick so the log stays quiet while the daemon is healthy. Returns
 /// the last outcome.
+///
+/// `updated` says whether an update replaced this binary. The loop
+/// then ends: the service manager keeps the job alive, so it starts
+/// the new binary, and that one replaces a daemon of the old build.
 pub fn check_loop(
     manager: &DaemonLifecycleManager,
     installer: &dyn ServiceInstaller,
     interval: Duration,
     json: bool,
     stop: &std::sync::atomic::AtomicBool,
+    updated: &dyn Fn() -> bool,
 ) -> Result<Option<DaemonHealthCheckOutcome>, ServiceCommandError> {
     use std::sync::atomic::Ordering;
     let mut last: Option<DaemonHealthCheckOutcome> = None;
     while !stop.load(Ordering::SeqCst) {
+        if updated() {
+            break;
+        }
         let outcome = match dispatch(ServiceCommand::Check, manager, installer, Instant::now())? {
             ServiceCommandOutcome::Health(outcome) => outcome,
             _ => unreachable!("check yields a health outcome"),
@@ -787,6 +908,7 @@ mod tests {
             Duration::from_millis(20),
             false,
             &stop,
+            &|| false,
         )
         .expect("loop");
         stopper.join().expect("stopper");
@@ -817,9 +939,147 @@ mod tests {
             Duration::from_secs(60),
             false,
             &stop,
+            &|| false,
         )
         .expect("loop");
         assert_eq!(last, Some(DaemonHealthCheckOutcome::NotInstalled));
+    }
+
+    #[test]
+    fn the_check_loop_ends_when_an_update_replaced_the_binary() {
+        let installer = fake_installer();
+        installer.set_status_for_testing(ServiceStatus::Running);
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        // The first tick runs, the second look finds another binary.
+        let looks = std::sync::atomic::AtomicUsize::new(0);
+        let last = check_loop(
+            &manager,
+            installer.as_ref(),
+            Duration::from_millis(1),
+            false,
+            &stop,
+            &|| looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1,
+        )
+        .expect("loop");
+        assert_eq!(last, Some(DaemonHealthCheckOutcome::Running));
+        assert_eq!(looks.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_binary_stamp_changes_when_the_file_is_replaced_and_not_when_it_is_gone() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        let binary = temp.path().join("vapor");
+        std::fs::write(&binary, b"one").expect("write");
+        let before = BinaryStamp::of(&binary);
+        assert!(!before.replaced_by(&BinaryStamp::of(&binary)));
+
+        std::fs::write(&binary, b"another build").expect("write");
+        assert!(before.replaced_by(&BinaryStamp::of(&binary)));
+
+        std::fs::remove_file(&binary).expect("remove");
+        assert!(
+            !before.replaced_by(&BinaryStamp::of(&binary)),
+            "a file that is gone is not a new build to hand over to"
+        );
+    }
+
+    #[test]
+    fn lingering_is_the_default_only_where_no_desktop_keeps_a_session() {
+        assert!(linger_wanted(None, false), "a server: on by default");
+        assert!(!linger_wanted(None, true), "a desktop: not needed");
+        assert!(!linger_wanted(Some(false), false), "the user said off");
+        assert!(linger_wanted(Some(true), true), "the user said on");
+    }
+
+    #[test]
+    fn an_install_registers_the_supervisor_and_replaces_a_daemon_of_another_build() {
+        let installer = fake_installer();
+        let supervisor = fake_installer();
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(None));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+        install_with_supervisor(
+            ServiceCommand::Install,
+            &manager,
+            installer.as_ref(),
+            supervisor.as_ref(),
+            Some("vapord/0.0.0-older"),
+            Instant::now(),
+        )
+        .expect("install");
+        assert_eq!(
+            installer.operations(),
+            vec!["install", "start", "stop", "start"]
+        );
+        assert_eq!(supervisor.operations(), vec!["install"]);
+
+        // Auto-launch off: a bootstrap installs nothing, the supervisor
+        // included.
+        let installer = fake_installer();
+        let supervisor = fake_installer();
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(false)));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+        install_with_supervisor(
+            ServiceCommand::Bootstrap,
+            &manager,
+            installer.as_ref(),
+            supervisor.as_ref(),
+            None,
+            Instant::now(),
+        )
+        .expect("bootstrap");
+        assert!(installer.operations().is_empty());
+        assert!(supervisor.operations().is_empty());
+    }
+
+    #[test]
+    fn the_supervisor_is_registered_only_next_to_a_registered_daemon() {
+        let daemon = fake_installer();
+        let supervisor = fake_installer();
+        assert!(!ensure_supervisor(daemon.as_ref(), supervisor.as_ref()).expect("ensure"));
+        assert!(supervisor.operations().is_empty());
+
+        daemon.install_and_enable().expect("install");
+        assert!(ensure_supervisor(daemon.as_ref(), supervisor.as_ref()).expect("ensure"));
+        assert_eq!(supervisor.operations(), vec!["install"]);
+    }
+
+    #[test]
+    fn status_carries_the_health_a_check_would_find_and_changes_nothing() {
+        let installer = fake_installer();
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+        dispatch(
+            ServiceCommand::Install,
+            &manager,
+            installer.as_ref(),
+            Instant::now(),
+        )
+        .expect("install");
+        // The daemon exits on its own. A status read reports the exit
+        // and leaves the restart to the supervisor.
+        installer.set_status_for_testing(ServiceStatus::Stopped);
+        let before = installer.operations();
+        let outcome = dispatch(
+            ServiceCommand::Status,
+            &manager,
+            installer.as_ref(),
+            Instant::now(),
+        )
+        .expect("status");
+        let ServiceCommandOutcome::Status(report) = &outcome else {
+            panic!("status yields a report: {outcome:?}");
+        };
+        assert_eq!(
+            report.health,
+            DaemonHealthCheckOutcome::RestartDeferred(Duration::ZERO)
+        );
+        assert_eq!(report.crash_loop.consecutive_crashes, 0);
+        assert_eq!(installer.operations(), before);
+        let json = render_json(&outcome);
+        assert_eq!(json["health"], "restart-deferred");
+        assert_eq!(json["remainingSeconds"], 0.0);
     }
 
     #[test]
@@ -1150,6 +1410,7 @@ mod tests {
                 last_crash_at_ms: Some(1_750_000_000_000),
                 awaiting_restart: true,
             },
+            health: DaemonHealthCheckOutcome::CrashLoopPaused,
             supervisor_installed: true,
         };
         assert_eq!(
@@ -1157,7 +1418,8 @@ mod tests {
             concat!(
                 r#"{"autoLaunch":true,"crashLoop":{"awaitingRestart":true,"#,
                 r#""consecutiveCrashes":5,"lastCrashAtMs":1750000000000,"paused":true},"#,
-                r#""label":"sh.arn.vapor.daemon","status":"crash-loop-paused","supervisorInstalled":true}"#
+                r#""health":"crash-loop-paused","label":"sh.arn.vapor.daemon","#,
+                r#""status":"crash-loop-paused","supervisorInstalled":true}"#
             )
         );
     }

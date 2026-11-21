@@ -260,7 +260,6 @@ public enum VaporConstants {
     public static let running = "running"
     public static let notInstalled = "not-installed"
     public static let stoppedExpected = "stopped-expected"
-    public static let restartedAfterCrash = "restarted-after-crash"
     public static let restartDeferred = "restart-deferred"
     public static let crashLoopPaused = "crash-loop-paused"
   }

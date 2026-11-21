@@ -1,14 +1,16 @@
 import Foundation
 
-/// Periodic daemon supervision tick.
+/// Periodic read of the daemon's health.
 ///
 /// The app owns only the *timer*; each tick delegates to
-/// `DaemonLifecycleManager.checkDaemonHealth()`, which runs
-/// `vapor service check`: detection of unexpected daemon exits, crash
-/// registration, backoff, and restart policy all execute in the Rust
-/// lifecycle core against durable state. When the daemon is running the
-/// tick also reads `vapor status --json`, so the UI can show what the
-/// daemon is doing. The `onOutcome` callback carries both.
+/// `DaemonLifecycleManager.checkDaemonHealth()`, which reads
+/// `vapor service status`. The app restarts nothing: detection of
+/// unexpected daemon exits, crash registration, backoff, and restart
+/// policy all execute in the Rust lifecycle core, in the supervisor job
+/// that every install registers, so a crashed daemon comes back with
+/// the app closed too. When the daemon is running the tick also reads
+/// `vapor status --json`, so the UI can show what the daemon is doing.
+/// The `onOutcome` callback carries both.
 ///
 /// Tests drive `performHealthCheck()` directly; the timer itself is OS
 /// plumbing and is exercised manually per the UI-testing carve-out.
@@ -64,7 +66,7 @@ public final class DaemonHealthMonitor: @unchecked Sendable {
     }
   }
 
-  /// One supervision tick. Returns the outcome, or `nil` when the check
+  /// One health read. Returns the outcome, or `nil` when the read
   /// itself failed (e.g. the CLI could not be spawned): a failed tick
   /// is logged and retried on the next interval, never fatal.
   @discardableResult
@@ -74,11 +76,9 @@ public final class DaemonHealthMonitor: @unchecked Sendable {
       switch outcome {
       case .running, .stoppedExpected, .notInstalled:
         break
-      case .restartedAfterCrash:
-        logger.warning("Health tick detected an unexpected daemon exit; daemon restarted")
       case .restartDeferred(let remaining):
         logger.warning(
-          "Health tick detected an unexpected daemon exit; restart deferred",
+          "Health tick found an unexpected daemon exit; the supervisor restarts it",
           metadata: ["remaining_seconds": String(remaining)]
         )
       case .crashLoopPaused:
@@ -97,10 +97,10 @@ public final class DaemonHealthMonitor: @unchecked Sendable {
     }
   }
 
-  /// The daemon's own status when the supervision tick found it running.
+  /// The daemon's own status when the health read found it running.
   /// A failed read is logged and reported as `nil`; the next tick retries.
   private func liveStatus(for outcome: ServiceHealthOutcome) -> DaemonStatusSnapshot? {
-    guard outcome == .running || outcome == .restartedAfterCrash else {
+    guard outcome == .running else {
       return nil
     }
     do {

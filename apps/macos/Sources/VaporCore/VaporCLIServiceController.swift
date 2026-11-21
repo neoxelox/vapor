@@ -193,7 +193,9 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
   }
 
   public func checkDaemonHealth() throws -> ServiceHealthOutcome {
-    let arguments = ["service", "check", "--json"]
+    // `status` reads; `check` restarts, and that is the supervisor
+    // job's to run. Two callers of `check` could count one exit twice.
+    let arguments = ["service", "status", "--json"]
     let data = try runExpectingSuccess(arguments: arguments)
     let response: HealthResponse = try decode(data: data, arguments: arguments)
     switch response.health {
@@ -203,8 +205,6 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
       return .notInstalled
     case VaporConstants.ServiceHealth.stoppedExpected:
       return .stoppedExpected
-    case VaporConstants.ServiceHealth.restartedAfterCrash:
-      return .restartedAfterCrash
     case VaporConstants.ServiceHealth.restartDeferred:
       return .restartDeferred(response.remainingSeconds ?? 0)
     case VaporConstants.ServiceHealth.crashLoopPaused:

@@ -455,6 +455,48 @@ impl DaemonLifecycleManager {
         })
     }
 
+    /// What a supervision tick would find, with nothing changed: no
+    /// crash is counted and no daemon is started. A surface that only
+    /// shows the state reads this. The supervisor job is the one caller
+    /// of [`check_daemon_health`](Self::check_daemon_health), so an exit
+    /// is counted once however many surfaces look at it.
+    pub fn observe_daemon_health(
+        &self,
+        now: Instant,
+    ) -> Result<DaemonHealthCheckOutcome, DaemonLifecycleError> {
+        let status = self.installer.status()?;
+        self.observe_daemon_health_for(status, now)
+    }
+
+    /// [`observe_daemon_health`](Self::observe_daemon_health) for a
+    /// service status the caller probed already.
+    pub fn observe_daemon_health_for(
+        &self,
+        status: ServiceStatus,
+        now: Instant,
+    ) -> Result<DaemonHealthCheckOutcome, DaemonLifecycleError> {
+        self.with_inner(|inner| {
+            self.reload_locked(inner, now)?;
+            Ok(match status {
+                ServiceStatus::Running => DaemonHealthCheckOutcome::Running,
+                ServiceStatus::NotInstalled => DaemonHealthCheckOutcome::NotInstalled,
+                ServiceStatus::Stopped | ServiceStatus::CrashLoopPaused => {
+                    if !inner.daemon_should_be_running {
+                        DaemonHealthCheckOutcome::StoppedExpected
+                    } else if inner.crash_loop_guard.is_paused_indefinitely() {
+                        DaemonHealthCheckOutcome::CrashLoopPaused
+                    } else {
+                        // An exit the supervisor has not seen yet, or one
+                        // whose backoff runs. The restart is its to do.
+                        DaemonHealthCheckOutcome::RestartDeferred(
+                            inner.crash_loop_guard.remaining_delay(now),
+                        )
+                    }
+                }
+            })
+        })
+    }
+
     fn check_locked(
         &self,
         inner: &mut Inner,
@@ -1164,6 +1206,55 @@ mod tests {
         installer.set_status_for_testing(ServiceStatus::NotInstalled);
         let outcome = manager.check_daemon_health(Instant::now()).expect("check");
         assert_eq!(outcome, DaemonHealthCheckOutcome::NotInstalled);
+    }
+
+    #[test]
+    fn observing_an_exit_counts_no_crash_and_starts_nothing() {
+        let installer = Arc::new(InMemoryServiceInstaller::new(descriptor()));
+        let store = Arc::new(InMemoryLifecycleStateStore::new());
+        let clock = Arc::new(FixedWallClock::at(0));
+        let manager = durable_manager_with(installer.clone(), store.clone(), clock, check_policy());
+
+        let t0 = Instant::now();
+        manager.bootstrap_if_needed(t0).expect("bootstrap");
+        assert_eq!(
+            manager.observe_daemon_health(t0).expect("observe"),
+            DaemonHealthCheckOutcome::Running
+        );
+
+        // The daemon exits on its own. However often a surface looks,
+        // the exit is the supervisor's to count and to answer.
+        installer.set_status_for_testing(ServiceStatus::Stopped);
+        for second in 1..=3 {
+            let outcome = manager
+                .observe_daemon_health(t0 + Duration::from_secs(second))
+                .expect("observe");
+            assert_eq!(
+                outcome,
+                DaemonHealthCheckOutcome::RestartDeferred(Duration::ZERO)
+            );
+        }
+        assert_eq!(store.current().expect("state").consecutive_crashes, 0);
+        assert_eq!(installer.status().expect("status"), ServiceStatus::Stopped);
+
+        // The supervisor's check then counts it one time and restarts.
+        let outcome = manager
+            .check_daemon_health(t0 + Duration::from_secs(4))
+            .expect("check");
+        assert_eq!(outcome, DaemonHealthCheckOutcome::RestartedAfterCrash);
+        assert_eq!(store.current().expect("state").consecutive_crashes, 1);
+
+        // A stop on purpose reads as expected.
+        manager
+            .stop_daemon_for_termination(t0 + Duration::from_secs(5))
+            .expect("stop");
+        installer.set_status_for_testing(ServiceStatus::Stopped);
+        assert_eq!(
+            manager
+                .observe_daemon_health(t0 + Duration::from_secs(6))
+                .expect("observe"),
+            DaemonHealthCheckOutcome::StoppedExpected
+        );
     }
 
     #[test]

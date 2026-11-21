@@ -92,8 +92,9 @@ Status: pending and unblocked.
 ### Wave 9.5: First run and onboarding
 
 Status: pending. The runtime and the CLI side landed: an unconfigured
-install creates nothing, and `vapor profiles add` sets the first
-profile up with no restart.
+install creates nothing, and `vapor init` takes it to a running sync
+from a terminal, with the steps and the order that the app onboarding
+takes.
 
 - `macos.md` O-1 … O-4: the first-run flow: provider for the first
   profile, sign-in, roots, sync mode, start at login; the gate that
@@ -107,27 +108,29 @@ chose is the wrong first impression.
 
 ### Wave 10: macOS distribution hardening
 
+Status: pending. The installer is in place: `Vapor-macos-arm64.pkg`
+holds the app, the daemon, and the CLI, and links `vapor` onto the
+`PATH`.
+
+- `macos.md` M5-1 … M5-5: signed + notarized end-to-end verification
+  of the app and the installer on a clean macOS host every release
+  cycle, entitlements drift check, LaunchAgent/login-item stability
+  across upgrades (N-1 → N), rollback artifact preservation, and what
+  a removal leaves behind.
+
+### Wave 11: Headless and server use
+
 Status: pending.
 
-- `macos.md` M5-1 … M5-4: signed + notarized end-to-end verification
-  on a clean macOS host every release cycle, entitlements drift check,
-  LaunchAgent/login-item stability across upgrades (N-1 → N), rollback
-  artifact preservation.
+- `cli.md` L5-1 … L5-4: headless / server ergonomics
+  (`--user-activity`, Docker recipe, deployment recipes, the lingering
+  check in `vapor doctor`).
+- `cli.md` L1-8: the menu of cloud folders in `vapor init`, shared
+  with the app onboarding (`macos.md` O-1).
 
-### Wave 11: CLI distribution (macOS)
-
-Status: pending. Depends on Wave 10 (the macOS signing identity and
-the `release-macos` GitHub Environment are shared).
-
-- `cli.md` L5-1 … L5-3: headless / server ergonomics
-  (`--user-activity`, Docker recipe, deployment recipes).
-- `cli.md` L6-1 … L6-4 for `aarch64-apple-darwin`: build, strip + zstd
-  + SHA256, sign with Developer ID (shares the macOS trust chain),
-  publish alongside the macOS app bundle under the same GitHub Release
-  tag. The Mac builds are Apple silicon only.
-
-After this wave, the primary deliverable is complete: polished core +
-CLI + macOS app, all under one release tag.
+The CLI has no release of its own: it ships inside the installer of
+each platform. After this wave, the primary deliverable is complete:
+polished core + CLI + macOS app, in one installer.
 
 ## Deferred / optional: Windows and Linux (waves 12+)
 
@@ -140,7 +143,7 @@ implementations behind a stable trait surface, not a rewrite.
 
 ### Wave 12: Windows platform implementations (optional)
 
-- `core.md` C6-1 … C6-9: Windows native impls for every trait
+- `core.md` C6-1 … C6-10: Windows native impls for every trait
   (ReadDirectoryChangesW, Task Scheduler, Credential Manager,
   power/thermal signals, `GetLastInputInfo`, NTFS ADS, console-ctrl),
   the Windows distribution trust chain doc, and the named-pipe IPC
@@ -165,15 +168,17 @@ shim or the desktop Secret Service. Left before Linux ships a surface:
 - `core.md` C3-11 (Linux part): display-server idle, PSI.
 - `core.md` TR-10: the rest of the Linux soak.
 
-### Wave 14: Cross-OS CLI distribution (optional)
+### Wave 14: Install packages for Linux and Windows (optional)
 
-Depends on whichever of Waves 12, 13 has shipped.
+Depends on whichever of Waves 12, 13 has shipped. A platform ships
+install packages that hold the app, the CLI, and the daemon; there is
+no CLI download.
 
-- `cli.md` L6-1 remaining targets (`x86_64-unknown-linux-gnu`,
-  `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`,
-  `aarch64-pc-windows-msvc`).
-- `cli.md` L6-5: Windows EV-cert signing.
-- `cli.md` L6-6: GPG-signed Linux binaries + `Checksums.txt.asc`.
+- `core.md` C7-8: the Linux `.deb` and `.rpm` for x64 and ARM64. They
+  install on a server with no desktop, and they may ship before the
+  Linux app window exists (Wave 16), with the CLI and the daemon only.
+- `core.md` C6-11: the Windows installers for x64 and ARM64. They need
+  the Windows app (Wave 15).
 
 ### Wave 15: `apps/windows` app shell (optional)
 
@@ -182,7 +187,7 @@ Only if the project owner decides to ship a Windows GUI. Creates
 with their own plan + task list; picks the UI tech (WinUI 3, WPF, or
 Tauri, see `docs/plans/core.md §8`); the `release-windows` GitHub
 Environment (already created and protected) loaded with EV cert secrets
-and a `package` matrix entry in `release.yml`. The icon family is already
+and a `package` matrix entry in `release.yml` (`core.md` C6-11). The icon family is already
 in place under `assets/windows/` (ICO, PNG, tray glyphs, the MSIX asset
 set with its manifest fragment); see `assets/README.md`.
 
@@ -191,9 +196,10 @@ set with its manifest fragment); see `assets/README.md`.
 Only if the project owner decides to ship a Linux GUI. Creates
 `docs/plans/linux.md` and `docs/tasks/linux.md` as new surfaces; picks
 the UI tech (GTK4-rs, Qt, or Tauri); the `release-linux` GitHub
-Environment (already created and protected) loaded with GPG key secrets
-and a `package` matrix entry in `release.yml`; AppImage first, then
-`.deb` / `.rpm` / Flatpak / Snap as demand surfaces. The icon theme
+Environment (already created and protected) loaded with GPG key secrets;
+the app window joins the `.deb` and the `.rpm` of Wave 14, as an
+optional part that a server leaves out. Flatpak / Snap as demand
+surfaces. The icon theme
 tree, the desktop entry, and an icon install script are already in place
 under `assets/linux/`; see `assets/README.md`.
 

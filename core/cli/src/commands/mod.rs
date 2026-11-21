@@ -11,6 +11,7 @@ pub mod daemon_binary;
 pub mod decisions;
 pub mod doctor;
 pub mod ignored;
+pub mod init;
 pub mod ipc;
 pub mod profiles;
 pub mod redact;

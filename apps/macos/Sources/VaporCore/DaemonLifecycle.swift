@@ -13,12 +13,14 @@ public enum DaemonLifecycleActionResult: Equatable, Sendable {
   case notInstalled
 }
 
-/// Outcome of one `vapor service check` supervision tick.
+/// The health of the daemon job, as `vapor service status` reads it.
+/// The supervisor job does the restarts; the app only shows what it
+/// finds. `restartDeferred` covers an exit that the supervisor has not
+/// answered yet, with the time its backoff still runs.
 public enum ServiceHealthOutcome: Equatable, Sendable {
   case running
   case notInstalled
   case stoppedExpected
-  case restartedAfterCrash
   case restartDeferred(TimeInterval)
   case crashLoopPaused
 }
@@ -147,7 +149,8 @@ public protocol LaunchAgentControlling {
   func stopDaemon() throws
   /// Current service + crash-loop state (`vapor service status`).
   func status() throws -> ServiceStatusSnapshot
-  /// One supervision tick (`vapor service check`).
+  /// The health of the daemon job, read with nothing changed
+  /// (`vapor service status`).
   @discardableResult
   func checkDaemonHealth() throws -> ServiceHealthOutcome
   /// Clear a crash-loop pause (`vapor service acknowledge`).
@@ -265,10 +268,9 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
   // Process-shared so that "one lifecycle operation at a time" holds even
   // when the app swaps in a fresh manager on a config save: the health
   // monitor keeps a reference to the original manager, so a per-instance
-  // queue would let a periodic `vapor service check` run concurrently with
-  // a user-initiated install/uninstall/stop on a different queue: the
-  // check could then observe the daemon vanishing mid-uninstall and
-  // restart it (or register a spurious crash toward crash-loop pause).
+  // queue would let a periodic health read run in the middle of a
+  // user-initiated install/uninstall/stop on a different queue, and
+  // show a state that exists only halfway through it.
   private var stateQueue: DispatchQueue { Self.sharedStateQueue }
   private static let sharedStateQueue = DispatchQueue(
     label: "sh.arn.vapor.daemon-lifecycle.state"
@@ -394,9 +396,10 @@ public final class DaemonLifecycleManager: @unchecked Sendable {
     }
   }
 
-  /// One supervision tick, delegated to `vapor service check`
-  /// (detection, crash registration, and restart policy all run in the
-  /// Rust lifecycle core). Called periodically by `DaemonHealthMonitor`.
+  /// The health of the daemon job, read through `vapor service status`.
+  /// Nothing is restarted from here: detection, crash registration, and
+  /// restart policy run in the Rust lifecycle core, in the supervisor
+  /// job. Called periodically by `DaemonHealthMonitor`.
   @discardableResult
   public func checkDaemonHealth() throws -> ServiceHealthOutcome {
     try stateQueue.sync {

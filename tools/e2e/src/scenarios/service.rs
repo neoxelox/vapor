@@ -21,7 +21,7 @@ pub fn scenarios() -> Vec<Scenario> {
     vec![Scenario {
         id: "R01",
         name: "service-round-trip",
-        proves: "install → start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall against real launchd, then the headless supervisor restarting a killed daemon on its own",
+        proves: "install registers the daemon and its supervisor with real launchd; then, with the supervisor set aside, start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall; then the supervisor of a new install restarting a killed daemon on its own",
         needs: &[
             Need::NativeWatcher,
             Need::Filesystem,
@@ -55,6 +55,21 @@ impl Drop for LaunchAgentGuard {
         }
         kill_stragglers(&self.vapord_bin);
     }
+}
+
+/// Takes the supervisor job off launchd and removes its plist. The
+/// steps that walk the crash-loop guard run `service check` by hand,
+/// one at a time; the supervisor runs the same check on its own clock
+/// and would take each step first.
+fn set_supervisor_aside() {
+    let plist = supervisor_plist_path();
+    let _ = Command::new("launchctl")
+        .args(["bootout", &launchd_domain_target()])
+        .arg(&plist)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = fs::remove_file(&plist);
 }
 
 /// Kills every `vapord` whose executable is this repository's build,
@@ -197,12 +212,23 @@ fn service_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     // R1: a fresh runner reports not-installed.
     svc.expect("R1", &["status"], "status", "not-installed")?;
 
-    // R2: install writes the plist, the daemon runs inside the sandbox.
+    // R2: install writes the two plists, the daemon's and its
+    // supervisor's, and the daemon runs inside the sandbox.
     svc.expect("R2", &["install"], "result", "started")?;
     ensure!(
         launch_agent_plist_path().is_file(),
         "R2: LaunchAgent plist not written"
     );
+    ensure!(
+        supervisor_plist_path().is_file(),
+        "R2: every install registers the supervisor, and its plist is not written"
+    );
+    let status = svc.json("R2", &["status"])?;
+    ensure!(
+        status["supervisorInstalled"] == true,
+        "R2: status must report the supervisor: {status}"
+    );
+    set_supervisor_aside();
     svc.wait_status("running", Duration::from_secs(30), "R2")?;
     cli.wait_run_state("running", Duration::from_secs(30))?;
     svc.expect("R2", &["check"], "health", "running")?;
@@ -280,9 +306,9 @@ fn service_round_trip(ctx: &mut Ctx) -> Result<(), Failure> {
     svc.expect("R9", &["status"], "status", "not-installed")?;
     svc.expect("R9", &["check"], "health", "not-installed")?;
 
-    // R10: the headless supervisor. Installed alongside the daemon, it
-    // restarts a crashed daemon with nobody running `service check`.
-    svc.expect("R10", &["install", "--supervise"], "result", "started")?;
+    // R10: the supervisor. Installed with the daemon, it restarts a
+    // crashed daemon with nobody running `service check`.
+    svc.expect("R10", &["install"], "result", "started")?;
     ensure!(
         supervisor_plist_path().is_file(),
         "R10: supervisor plist not written"

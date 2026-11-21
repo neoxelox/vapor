@@ -23,6 +23,13 @@ stable and are never reused.
 - [ ] L1-7 `vapor profiles enable|disable|rename`: the rest of what the
       app's profile screens need (`macos.md` M4-1). `list`, `add`, and
       `remove` ship.
+- [ ] L1-8 A menu of the cloud's folders in `vapor init`, in place of
+      the typed folder: the user picks a folder that exists or makes a
+      new one. The sign-in already comes before the folder step for
+      it. Needs a short design first: an account with thousands of
+      folders, shared drives, and two folders with one name, which
+      Google Drive allows. The app onboarding gets the same menu
+      (`macos.md` O-1), from the same listing.
 - [ ] L5-1 `--user-activity=always|never|auto` global flag that sets the
       interpretation for hosts without HID signal (default `auto`:
       always-idle on headless, event-driven on desktop).
@@ -41,28 +48,22 @@ stable and are never reused.
 
 - [ ] L5-2 Dockerfile + example `docker-compose.yml` demonstrating
       `vapor run` in a container.
-- [ ] L5-3 `core/cli/README.md` deployment recipes: a systemd user unit
-      through `vapor service install --supervise`, and Docker.
+- [ ] L5-3 `core/cli/README.md` deployment recipes: a server set up
+      with `vapor init` and its flags (the systemd user unit, the
+      supervisor, lingering), and Docker (`vapor init --auto-launch
+      off`, then `vapor run`).
+- [ ] L5-4 `vapor doctor` on Linux says when lingering is off on a host
+      with no desktop: the daemon then stops at the last logout.
+      `vapor init` reports a refusal one time, in its summary; a later
+      run does not look again.
 
 ## Distribution
 
-Depends on: `docs/tasks/core.md` C6-8 and C7-7 (per-OS trust chains).
-The Mac app is built for Apple silicon; there is no Intel Mac build of
-the app, and no `x86_64-apple-darwin` CLI either.
-
-- [ ] L6-1 Release-pipeline jobs that build `vapor` per supported target
-      triple:
-      - `aarch64-apple-darwin`
-      - `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`
-      - `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`
-- [ ] L6-2 Strip + zstd-compress + SHA256 checksum each asset.
-- [ ] L6-3 Publish to the same GitHub Release tag as the macOS app bundle.
-- [ ] L6-4 Sign macOS binaries with Developer ID (shares the macOS trust
-      chain from `docs/operations/macos/distribution-trust-chain.md`).
-- [ ] L6-5 Sign Windows binaries with the EV cert from
-      `docs/operations/windows/distribution-trust-chain.md` when C6-8 lands.
-- [ ] L6-6 GPG-sign Linux binaries + publish `Checksums.txt.asc` when
-      C7-7 lands.
+The CLI has no download of its own: it ships inside the install
+package of each platform, which puts it on the `PATH` (`AGENTS.md`
+§7.5, `docs/specs/2026-11-21-platform-release-assets.md`). The macOS
+installer is in place. The Linux packages are `docs/tasks/core.md`
+C7-8, and the Windows installer is C6-11.
 
 ## Tests
 
@@ -74,8 +75,8 @@ Policy: `AGENTS.md §9`. Full taxonomy:
       field-by-field tests lock the shapes today.
 - [ ] LT-2 Exit codes are documented and stable. A `--help`-style
       snapshot or a direct exit-code assertion test per command.
-- [ ] LT-3 Binary size stays reasonable (single-digit MB stripped +
-      zstd'd). CI guard-rail, not a soft target.
+- [ ] LT-3 Binary size stays reasonable (single-digit MB stripped).
+      CI guard-rail, not a soft target.
 - [ ] LT-5 IPC client correctness tested against a fake daemon that
       speaks the IPC protocol from `docs/architecture/ipc-contracts.md`.
       Covers every IPC-backed command; tests the "no daemon running"

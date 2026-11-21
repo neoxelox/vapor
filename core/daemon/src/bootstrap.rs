@@ -114,7 +114,7 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
     }
     if profile_set.is_unconfigured() {
         logging::info(
-            "No sync profile is set up yet; the daemon syncs nothing until `vapor profiles add`",
+            "No sync profile is set up yet; the daemon syncs nothing until `vapor init`",
             &[],
         );
     }
