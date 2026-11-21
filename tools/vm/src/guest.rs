@@ -37,13 +37,24 @@ pub fn guest_results() -> String {
     format!("{GUEST_SHARES}/{RESULTS_SHARE}")
 }
 
+/// Who a guest is for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Session {
+    /// A guest of a run: it has no window, and it ends with the run.
+    Run,
+    /// A guest for a person. It has no time limit: it stays up until
+    /// someone stops it, also after the harness and the process that
+    /// started the harness are gone. With `window`, Tart shows its
+    /// screen on the host.
+    Manual { window: bool },
+}
+
 pub struct Guest {
     name: String,
     child: Option<Child>,
     stage: PathBuf,
     results: PathBuf,
-    /// Whether Tart shows the guest's screen in a window on the host.
-    window: bool,
+    session: Session,
 }
 
 impl Guest {
@@ -55,7 +66,7 @@ impl Guest {
         name: &str,
         stage: &Path,
         results: &Path,
-        window: bool,
+        session: Session,
     ) -> Result<Self, Failure> {
         tart::clone(source, name)?;
         let mut guest = Self {
@@ -63,7 +74,7 @@ impl Guest {
             child: None,
             stage: stage.to_path_buf(),
             results: results.to_path_buf(),
-            window,
+            session,
         };
         if let Err(failure) = guest.boot() {
             // A clone that never came up must not stay behind.
@@ -80,7 +91,7 @@ impl Guest {
             child: None,
             stage: stage.to_path_buf(),
             results: results.to_path_buf(),
-            window: false,
+            session: Session::Run,
         };
         if let Err(failure) = guest.boot() {
             let _ = guest.destroy();
@@ -103,7 +114,11 @@ impl Guest {
                 read_only: false,
             },
         ];
-        self.child = Some(tart::start(&self.name, &shares, &log, self.window)?);
+        let (window, detached) = match self.session {
+            Session::Run => (false, false),
+            Session::Manual { window } => (window, true),
+        };
+        self.child = Some(tart::start(&self.name, &shares, &log, window, detached)?);
         self.wait_ready()?;
         self.remount_shares()?;
         self.set_clock()

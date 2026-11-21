@@ -228,6 +228,13 @@ The guest still shares no clipboard and has no route to the Internet,
 and `tart exec` and the driver work on it as before. The user of the
 guest is `admin`.
 
+A manual guest has no time limit, with a window or without one. It
+stays up until the person closes the window, or until
+`./scripts/vm.sh --guest-stop`. It runs apart from the command that
+started it, so the end of that command, or of the session of an agent,
+does not close it. A manual guest that no longer runs is deleted at
+the next run or the next `--guest`.
+
 ## Scenario catalog
 
 `./scripts/vm.sh --list` is the source of truth. The first version:

@@ -178,9 +178,15 @@ pub fn configure(name: &str) -> Result<(), Failure> {
 /// Starts a VM with no sound, no shared clipboard, and a network that
 /// reaches the host only. It has no window either, unless `window`
 /// asks for Tart's own: that is for a person who wants to use a manual
-/// guest, never for a run. The child lives as long as the VM runs; its
-/// output goes to `log`.
-pub fn start(name: &str, shares: &[Share<'_>], log: &Path, window: bool) -> Result<Child, Failure> {
+/// guest, never for a run. A `detached` VM outlives the harness. The
+/// child lives as long as the VM runs; its output goes to `log`.
+pub fn start(
+    name: &str,
+    shares: &[Share<'_>],
+    log: &Path,
+    window: bool,
+    detached: bool,
+) -> Result<Child, Failure> {
     ours(name)?;
     let out = File::create(log)?;
     let err = out.try_clone()?;
@@ -202,6 +208,16 @@ pub fn start(name: &str, shares: &[Share<'_>], log: &Path, window: bool) -> Resu
         }
         command.arg("--dir").arg(spec);
     }
+    // A guest for a person must stay up for as long as that person
+    // wants it. In a process group of its own it does not end when the
+    // process that started the harness is stopped or times out.
+    #[cfg(unix)]
+    if detached {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = detached;
     command
         .stdin(Stdio::null())
         .stdout(out)

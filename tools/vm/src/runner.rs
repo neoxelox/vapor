@@ -18,7 +18,7 @@ use vapor_e2e::report::Verdict;
 use vapor_e2e::wait::wait_until;
 use vapor_e2e::{Failure, ensure};
 
-use crate::guest::{Guest, guest_results, guest_stage};
+use crate::guest::{Guest, Session, guest_results, guest_stage};
 use crate::scenario::{
     APP_PATH, Build, CLI_PATH, CLOUD_ROOT, Copy, Ctx, GuestKind, INSTALLER, LOCAL_ROOT, Scenario,
     Start,
@@ -404,7 +404,7 @@ fn start_guest(
     name: &str,
     paths: &Paths,
     results: &Path,
-    window: bool,
+    session: Session,
 ) -> Result<Guest, Failure> {
     let _store = StoreLock::take()?;
     if let Some(reason) = blocker(place) {
@@ -417,7 +417,7 @@ fn start_guest(
         "a place for a guest: Apple permits two macOS guests on one host, and the tier runs one guest of each kind",
         || blocker(place).is_none(),
     )?;
-    Guest::start(&prepared_name(place), name, &paths.stage, results, window)
+    Guest::start(&prepared_name(place), name, &paths.stage, results, session)
 }
 
 // -- The shared guest -------------------------------------------------
@@ -564,8 +564,8 @@ impl Run<'_> {
             return Vec::new();
         }
         let name = self.guest_name("shared");
-        let started =
-            start_guest(Place::Shared, &name, self.paths, self.dir, false).and_then(|guest| {
+        let started = start_guest(Place::Shared, &name, self.paths, self.dir, Session::Run)
+            .and_then(|guest| {
                 guest.sh_ok(&format!(
                     "sudo installer -pkg '{}/{INSTALLER}' -target / && test -d '{APP_PATH}'",
                     guest_stage()
@@ -602,7 +602,7 @@ impl Run<'_> {
             .iter()
             .map(|scenario| {
                 let name = self.guest_name(scenario.id);
-                match start_guest(Place::Fresh, &name, self.paths, self.dir, false) {
+                match start_guest(Place::Fresh, &name, self.paths, self.dir, Session::Run) {
                     Ok(mut guest) => {
                         let result =
                             run_scenario(scenario, &mut guest, self.copy, self.build, self.video);
@@ -659,6 +659,7 @@ pub fn run(options: &RunOptions) -> Result<bool, Failure> {
     let copy = Copy::load(&options.repo_root)?;
     let build = Build::load(&options.repo_root)?;
     stage(&paths)?;
+    remove_stopped_manual_guests(&paths)?;
     ensure_prepared(&paths)?;
 
     let id = run_id();
@@ -777,8 +778,24 @@ pub fn setup(repo_root: &Path) -> Result<(), Failure> {
     Ok(())
 }
 
+/// Deletes the manual guests of this checkout that no longer run: a
+/// person closed the window, or the Mac restarted. A manual guest that
+/// runs is never touched here; only its owner ends it.
+fn remove_stopped_manual_guests(paths: &Paths) -> Result<(), Failure> {
+    // Under the lock no guest is between its clone and its start.
+    let _store = StoreLock::take()?;
+    let prefix = paths.guest_name("manual-");
+    for vm in tart::list()?
+        .iter()
+        .filter(|vm| vm.is_ours() && vm.name.starts_with(&prefix) && !vm.is_running())
+    {
+        tart::delete(&vm.name)?;
+    }
+    Ok(())
+}
+
 /// Starts a guest with the build installed and the app started, and
-/// leaves it running for manual work.
+/// leaves it running for manual work. It has no time limit.
 pub fn manual_guest(repo_root: &Path, window: bool) -> Result<(), Failure> {
     let paths = Paths::new(repo_root)?;
     check_host()?;
@@ -786,13 +803,20 @@ pub fn manual_guest(repo_root: &Path, window: bool) -> Result<(), Failure> {
     let copy = Copy::load(repo_root)?;
     let build = Build::load(repo_root)?;
     stage(&paths)?;
+    remove_stopped_manual_guests(&paths)?;
     ensure_prepared(&paths)?;
 
     let id = run_id();
     let dir = paths.vm_root.join(format!("manual-{id}"));
     fs::create_dir_all(&dir)?;
     let name = paths.guest_name(&format!("manual-{id}"));
-    let mut guest = start_guest(Place::Shared, &name, &paths, &dir, window)?;
+    let mut guest = start_guest(
+        Place::Shared,
+        &name,
+        &paths,
+        &dir,
+        Session::Manual { window },
+    )?;
     let ready = (|| {
         let ctx = Ctx::new(&mut guest, &copy, &build, "session")?;
         ctx.install()?;
@@ -807,6 +831,9 @@ pub fn manual_guest(repo_root: &Path, window: bool) -> Result<(), Failure> {
     if window {
         println!(
             "  its screen is in a Tart window on this Mac: use the app in it as a user does. The guest user is `admin`"
+        );
+        println!(
+            "  the window has no time limit: it stays until it is closed, or until --guest-stop"
         );
     }
     println!("  a command in the guest:  tart exec {name} /usr/local/bin/vapor status");

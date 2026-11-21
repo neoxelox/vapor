@@ -103,9 +103,13 @@ With `--window` the screen of the guest shows in a window on the
 contributor's Mac, and a person uses the app in it as in a simulator.
 Start it only when the owner, or the person you work for, asks to see
 or to try the change themselves; never to look at it yourself, for
-that a screenshot is enough. Say that the window is up, leave the
-guest running while they use it, and delete it with `--guest-stop`
-when they are done.
+that a screenshot is enough. Say that the window is up, and leave the
+guest alone while they use it. It has no time limit: it ends when the
+person closes the window or tells you that they are done, and only
+then do you run `--guest-stop`. Never stop it on a timer, at the end
+of your turn, or because your own work is finished. A test of the
+option itself is the one case where you start and stop it yourself;
+say so in plain words before the window shows.
 
 It prints the name of the guest and the commands that work on it:
 

@@ -298,7 +298,7 @@ The host:
 
 | # | Decision |
 |---|---|
-| D21 | A manual guest opens a window on the contributor's Mac when a person asks to use it by hand: `./scripts/vm.sh --guest --window`. Only the manual guest, and only with the option. A run of the suite never opens a window. The clipboard stays unshared and the guest still has no route to the Internet. The owner asked for it: "so that i can test that feature/vapor myself in that vm ... to see how it looks inside the simulator" (2026-11-21). |
+| D21 | A manual guest opens a window on the contributor's Mac when a person asks to use it by hand: `./scripts/vm.sh --guest --window`. Only the manual guest, and only with the option. A run of the suite never opens a window. The clipboard stays unshared and the guest still has no route to the Internet. The owner asked for it: "so that i can test that feature/vapor myself in that vm ... to see how it looks inside the simulator" (2026-11-21). The guest has no time limit: it stays up "until i close the window or i say to you that im over the QA" (owner, 2026-11-21). |
 
 ## Design
 
