@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Virtual machine verification (Tier VM): builds the installer, then
 # installs it in a macOS guest made with Tart and acts on the app as a
-# user does. A run writes its screenshots, video, and report under
+# user does. A run writes its screenshots and its report under
 # `<repo>/.vapor/vm/`, and deletes every guest it made.
 #
 # The harness lives in `tools/vm` (crate `vapor-vm`) and the driver
@@ -19,7 +19,7 @@
 #                                   prepared guests; the image stays
 #
 # Run options (see `vapor-vm run --help`): --only V01,V10  --keep
-# --skip-build  --json <path>
+# --video  --skip-build  --json <path>
 #
 # Needs a Mac with Apple silicon, macOS 27, and Tart, which the
 # contributor installs by hand. This script never runs Homebrew.

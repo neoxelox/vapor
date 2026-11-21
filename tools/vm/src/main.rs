@@ -31,6 +31,10 @@ enum Cmd {
         /// Keep the guest of a failed scenario, stopped, for a look.
         #[arg(long)]
         keep: bool,
+        /// Record a video of each scenario. For a change that moves on
+        /// the screen; the screenshots cover a screen that does not.
+        #[arg(long)]
+        video: bool,
         /// Write the JSON report here (default: inside the run directory).
         #[arg(long)]
         json: Option<PathBuf>,
@@ -65,10 +69,16 @@ fn main() -> ExitCode {
         }
     };
     let outcome = match args.command {
-        Cmd::Run { only, keep, json } => runner::run(&RunOptions {
+        Cmd::Run {
+            only,
+            keep,
+            video,
+            json,
+        } => runner::run(&RunOptions {
             repo_root,
             only,
             keep,
+            video,
             json,
         }),
         Cmd::List => {

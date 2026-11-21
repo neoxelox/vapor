@@ -86,7 +86,7 @@ nothing.
 - A new control in a window gets an accessibility identifier in
   `apps/macos/Sources/VaporCore/AccessibilityID.swift`. A Tier 1 test
   fails when a scenario uses one that the app does not define.
-- The run keeps screenshots, a video, and the report under
+- The run keeps screenshots and the report under
   `.vapor/vm/run-<id>/`. Look at the screenshots before reporting.
 - Details and the manual guest: the `vapor-vm` skill.
 

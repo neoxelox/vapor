@@ -136,6 +136,10 @@ pub struct Ctx<'a> {
     guest_dir: String,
     host_dir: PathBuf,
     step: u32,
+    /// Whether the run asked for a video of the scenario. Most
+    /// scenarios show a screen that does not move, where the
+    /// screenshots say everything.
+    pub record_video: bool,
     /// How many video files the scenario started.
     videos: u32,
     pub notes: Vec<String>,
@@ -158,6 +162,7 @@ impl<'a> Ctx<'a> {
             guest_dir: format!("{}/{slug}", guest_results()),
             host_dir,
             step: 0,
+            record_video: false,
             videos: 0,
             notes: Vec::new(),
         })
@@ -179,10 +184,14 @@ impl<'a> Ctx<'a> {
 
     // -- Evidence ---------------------------------------------------
 
-    /// Starts a video of the screen. The first file of a scenario is
-    /// `scenario.mov`; a scenario that restarts the guest gets one
-    /// more file for each boot, because a restart ends the recording.
+    /// Starts a video of the screen when the run asked for one. The
+    /// first file of a scenario is `scenario.mov`; a scenario that
+    /// restarts the guest gets one more file for each boot, because a
+    /// restart ends the recording.
     pub fn start_video(&mut self) {
+        if !self.record_video {
+            return;
+        }
         self.videos += 1;
         let file = match self.videos {
             1 => "scenario.mov".to_string(),
@@ -197,6 +206,9 @@ impl<'a> Ctx<'a> {
     /// Ends the video. An interrupt makes `screencapture` finish the
     /// file.
     pub fn stop_video(&self) {
+        if !self.record_video {
+            return;
+        }
         let _ = self.guest.sh("pkill -INT -x screencapture");
         let _ = wait_until(Duration::from_secs(15), "the video to be written", || {
             !self.guest.succeeds("pgrep -x screencapture >/dev/null")
@@ -204,7 +216,8 @@ impl<'a> Ctx<'a> {
     }
 
     /// Restarts the guest's operating system, as a user restarts a
-    /// Mac, with a video before the restart and one after it.
+    /// Mac. A run that records has one video before the restart and
+    /// one after it.
     pub fn restart_guest(&mut self) -> Result<(), Failure> {
         self.stop_video();
         self.guest.reboot()?;

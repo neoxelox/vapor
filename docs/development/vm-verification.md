@@ -36,8 +36,8 @@ contributor holds nothing of a test.
   accessibility API of macOS and sends pointer clicks, the way a
   user's hand does.
 - **A scenario** proves one behaviour. It acts through the driver and
-  through the installed `vapor` CLI in the guest, and it keeps
-  screenshots and a video.
+  through the installed `vapor` CLI in the guest, and it keeps a
+  screenshot of each step.
 
 A scenario finds a control in a window by its accessibility
 identifier (`apps/macos/Sources/VaporCore/AccessibilityID.swift`), so a
@@ -130,6 +130,7 @@ judge.
 ./scripts/vm.sh --only V02,V11     # by id or name
 ./scripts/vm.sh --skip-build       # reuse dist/ and the debug binaries
 ./scripts/vm.sh --keep             # leave the guest of a failed scenario running
+./scripts/vm.sh --only V11 --video # also record a video of each scenario
 ./scripts/vm.sh --guest-stop       # delete every guest of this checkout
 ./scripts/vm.sh --list             # the catalog
 ./scripts/vm.sh --clean            # delete this checkout's guests and the prepared guests
@@ -155,10 +156,15 @@ Everything of a run is under `.vapor/vm/run-<id>/`, which
 |---|---|
 | `report.json` | Each scenario with its verdict, its reasons, and its notes. |
 | `<scenario>/NN-<step>.png` | A screenshot of the guest's screen at a named step. |
-| `<scenario>/scenario.mov` | A video of the scenario. A scenario that restarts the guest has `scenario-2.mov` for the time after the restart. |
+| `<scenario>/scenario.mov` | With `--video` only: a video of the scenario. A scenario that restarts the guest has `scenario-2.mov` for the time after the restart. |
 | `<scenario>/controls.json` | Every control of the app, written at a failure. |
 | `<scenario>/logs/`, `status.txt`, `launchd.txt` | The daemon's logs and state from the guest. |
 | `<guest>.tart.log` | What Tart printed for a guest. |
+
+A run records no video unless it gets `--video`. Most scenarios show a
+screen that does not move, and the screenshots say everything about
+it. Ask for a video when the change itself moves: a window that opens,
+a transition, a state that changes while you look.
 
 The harness closes the notifications of macOS before a screenshot, so
 they do not cover the app. The scenario that asserts a notification

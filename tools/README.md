@@ -11,8 +11,7 @@ and `test` cover them, but never ship in a release artifact.
 
 - `vm/`: `vapor-vm`, the Tier VM harness: installs the packaged app
   in a macOS virtual machine made with Tart and acts on it as a user
-  does, with screenshots and a video of each scenario under
-  `.vapor/vm/`. `vm/driver/` is the Swift tool that reads and clicks
+  does, with screenshots of each scenario under `.vapor/vm/`. `vm/driver/` is the Swift tool that reads and clicks
   the controls of the app inside the guest. Reuses the harness
   library. Entry point `./scripts/vm.sh`; process doc
   `docs/development/vm-verification.md`; procedure the `vapor-vm`

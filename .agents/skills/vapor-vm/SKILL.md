@@ -1,6 +1,6 @@
 ---
 name: vapor-vm
-description: Runs Vapor's Tier VM verification (the packaged installer installed in a macOS virtual machine made with Tart, the app driven as a user does through accessibility, with screenshots and a video of each scenario under the repo-local `.vapor/vm/`) through the `tools/vm` harness, as the scripted suite, a single scenario, or a manual guest; and adds a scenario for new behaviour of the app or the install. Use before reporting a change under `apps/macos` or to the packaging as done, to see a UI change in the real app, to reproduce an app or install bug, or when a scenario must be written. Needs a Mac with Apple silicon, macOS 27, and Tart with the guest image, which the contributor installs once.
+description: Runs Vapor's Tier VM verification (the packaged installer installed in a macOS virtual machine made with Tart, the app driven as a user does through accessibility, with screenshots of each scenario under the repo-local `.vapor/vm/`) through the `tools/vm` harness, as the scripted suite, a single scenario, or a manual guest; and adds a scenario for new behaviour of the app or the install. Use before reporting a change under `apps/macos` or to the packaging as done, to see a UI change in the real app, to reproduce an app or install bug, or when a scenario must be written. Needs a Mac with Apple silicon, macOS 27, and Tart with the guest image, which the contributor installs once.
 license: GPL-3.0-only
 ---
 
@@ -61,6 +61,7 @@ Full process doc: `docs/development/vm-verification.md`. Policy:
 ./scripts/vm.sh --skip-build       # reuse dist/ and the debug binaries
 ./scripts/vm.sh --only V02,V11     # by id or name
 ./scripts/vm.sh --keep             # leave the guest of a failure running
+./scripts/vm.sh --only V11 --video # also record a video of each scenario
 ./scripts/vm.sh --json out.json    # the report somewhere else
 ```
 
@@ -80,6 +81,12 @@ screenshot, `controls.json` (every control the app had), then
 `status.txt` and `logs/` from the guest. Look at the screenshots with
 the Read tool; they are the evidence, and a scenario that passes with
 a screen that looks wrong is still a finding.
+
+A run records no video unless it gets `--video`. Ask for one only
+when the change moves on the screen (a window that opens, a
+transition, a state that changes while you look); for a screen that
+does not move, the screenshots are the evidence, and a video of it is
+a still picture.
 
 The app reads the daemon's state on a 30-second timer. A scenario that
 waits for a state on the screen can take that long; that is not a

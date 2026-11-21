@@ -292,7 +292,7 @@ contributor's Mac. The harness is a Rust dev crate (`tools/vm`,
 `vapor-vm`) with a small Swift driver that works inside the guest
 through the accessibility API. A scenario finds a control in a window
 by its accessibility identifier, compares a text of the app with the
-English catalog, and keeps screenshots and a video under `.vapor/vm/`.
+English catalog, and keeps screenshots under `.vapor/vm/`.
 
 The tier proves how the installed app behaves. It does not judge how a
 screen looks: the project owner does that from the screenshots. It also

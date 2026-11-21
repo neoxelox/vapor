@@ -90,6 +90,9 @@ pub struct RunOptions {
     pub only: Vec<String>,
     /// Keep the guest of a failed scenario, stopped, for a look.
     pub keep: bool,
+    /// Record a video of each scenario, for a change that moves on
+    /// the screen.
+    pub video: bool,
     pub json: Option<PathBuf>,
 }
 
@@ -101,7 +104,7 @@ pub struct ScenarioResult {
     pub verdict: Verdict,
     pub reasons: Vec<String>,
     pub seconds: f64,
-    /// The scenario's directory of screenshots, video, and logs.
+    /// The scenario's directory of screenshots and logs.
     pub evidence: String,
     pub notes: Vec<String>,
 }
@@ -454,13 +457,14 @@ fn failed(scenario: &Scenario, reason: String, results: &Path) -> ScenarioResult
     }
 }
 
-/// Runs one scenario in `guest`, with its video and, on a failure, a
-/// screenshot and the list of controls.
+/// Runs one scenario in `guest`, with a video when the run asked for
+/// one and, on a failure, a screenshot and the list of controls.
 fn run_scenario(
     scenario: &Scenario,
     guest: &mut Guest,
     copy: &Copy,
     build: &Build,
+    video: bool,
 ) -> ScenarioResult {
     let started = Instant::now();
     let slug = scenario.slug();
@@ -483,6 +487,7 @@ fn run_scenario(
             return result;
         }
     };
+    ctx.record_video = video;
     let outcome = match scenario.guest {
         GuestKind::Shared(start) => reset(&ctx, start),
         GuestKind::Fresh => Ok(()),
@@ -523,6 +528,7 @@ struct Run<'a> {
     copy: &'a Copy,
     build: &'a Build,
     keep: bool,
+    video: bool,
 }
 
 impl Run<'_> {
@@ -576,7 +582,7 @@ impl Run<'_> {
         };
         let results: Vec<ScenarioResult> = scenarios
             .iter()
-            .map(|scenario| run_scenario(scenario, &mut guest, self.copy, self.build))
+            .map(|scenario| run_scenario(scenario, &mut guest, self.copy, self.build, self.video))
             .collect();
         let any_failed = results.iter().any(|result| result.verdict.is_red());
         self.finish(guest, any_failed);
@@ -591,7 +597,8 @@ impl Run<'_> {
                 let name = self.guest_name(scenario.id);
                 match start_guest(Place::Fresh, &name, self.paths, self.dir) {
                     Ok(mut guest) => {
-                        let result = run_scenario(scenario, &mut guest, self.copy, self.build);
+                        let result =
+                            run_scenario(scenario, &mut guest, self.copy, self.build, self.video);
                         self.finish(guest, result.verdict.is_red());
                         result
                     }
@@ -666,6 +673,7 @@ pub fn run(options: &RunOptions) -> Result<bool, Failure> {
         copy: &copy,
         build: &build,
         keep: options.keep,
+        video: options.video,
     };
     // The two groups run side by side; each waits for its own place.
     let mut results = if !shared.is_empty() && !fresh.is_empty() {

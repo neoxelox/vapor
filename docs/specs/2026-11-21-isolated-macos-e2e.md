@@ -276,7 +276,7 @@ The host:
 | D11 | Tart and the image of D5 are installed again on the design machine, and they stay there between runs. A removal after each run costs a pull of 19 minutes (owner, 2026-11-21). |
 | D12 | The contributor installs Tart by hand. The script of the tier checks for Tart, prints the commands when it is missing, and pulls the image itself. No script of the repository runs Homebrew (owner, 2026-11-21). |
 | D13 | A scenario states which guest it needs, and the need follows from what it tests. A scenario that tests the install, the first start, the start at login, or a removal gets a fresh clone. Scenarios that test screens and states of the installed app share one guest. The owner: "having a fresh clone or not depends on the tests" (2026-11-21). |
-| D14 | Screenshots and video go under the repo-local `.vapor/vm/`, one directory for each scenario: a PNG at each named step and one video. `./scripts/clean.sh` removes them, and nothing is committed. `.gitignore` already covers `.vapor/` (owner, 2026-11-21). |
+| D14 | Screenshots and video go under the repo-local `.vapor/vm/`, one directory for each scenario: a PNG at each named step and one video. `./scripts/clean.sh` removes them, and nothing is committed. `.gitignore` already covers `.vapor/` (owner, 2026-11-21). The video part is replaced by D19. |
 | D15 | The tier runs on request. An agent runs it before it reports a change under `apps/macos` or to the packaging as done. It is a leg of `./scripts/release.sh`. It is not a gate of a pull request, because a GitHub-hosted runner cannot run it. The manual handoff checklist of `AGENTS.md` §9.8 becomes the screenshots of the run and a list of what the owner judges (owner, 2026-11-21). |
 | D16 | The tier is Tier VM: the test tier that runs the product in a virtual machine. Its entry point is `./scripts/vm.sh`, its harness is `tools/vm`, its skill is `vapor-vm`, and its document is `docs/development/vm-verification.md` (owner, 2026-11-21). |
 | D17 | The first version tests Vapor on one guest: the newest macOS that Tart has an image for (D3). A second image at the minimum macOS that Vapor supports is out, and Linux guests are out (owner, 2026-11-21). |
@@ -286,6 +286,12 @@ The host:
 | # | Decision |
 |---|---|
 | D18 | D18 narrows D7: an item of the menu of the menu bar item is found by the text of its key in the English catalog, not by an identifier. macOS builds those items from the SwiftUI views and drops the identifier that a view sets. A control in a window is found by its identifier, as D7 says. The agent chose this under the delegation of D7 (2026-11-21). |
+
+### Round 5, 2026-11-21: after the first runs
+
+| # | Decision |
+|---|---|
+| D19 | D19 replaces the video part of D14: a run records no video by default. The owner saw the videos of the first runs: "some videos that im seeing of the vm its just a plain image" (2026-11-21). A run records a video of each scenario only when it gets `--video`, for a change that moves on the screen. The screenshots at each named step stay. |
 
 ## Design
 
@@ -429,7 +435,8 @@ written. The text above stays as the record of the design.
   plain `tart run` of a stopped guest opens a window and gives the
   guest the Internet.
 - **A video for each boot.** A restart of the guest ends the
-  recording, so the scenario of the start at login has two files.
+  recording, so the scenario of the start at login has two files
+  when a run records (D19).
 
 The scenarios also differ in two points. Quit runs on the shared guest:
 it needs no fresh Mac. One scenario covers both the error state and a
