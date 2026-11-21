@@ -121,7 +121,9 @@ once against a build without the change and passes with it.
 
 An agent verifies behaviour. The owner judges the look: the report of
 a change to the UI shows the screenshots that matter and says what to
-judge.
+judge. The pull request of such a change carries those screenshots in
+its description, and a video when the change moves, so the reviewer
+sees what changed.
 
 ## Running it
 

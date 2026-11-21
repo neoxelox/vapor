@@ -120,7 +120,10 @@ change that a user sees gives the owner:
 
 - the scenarios that ran and their verdicts;
 - the screenshots that show the change, by path, embedded in the
-  reply when the surface can show them;
+  reply when the surface can show them, and attached to the
+  description of the pull request (`vapor-pr`, Pictures);
+- a video only when the change moves on the screen
+  (`./scripts/vm.sh --video`);
 - a short list of what to judge: the layout, the wording, the
   alignment with the Apple Human Interface Guidelines.
 

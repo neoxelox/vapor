@@ -118,6 +118,36 @@ gh pr create --base main --title "<commit subject>" --label <type> \
   --body-file .context/pr-body.md
 ```
 
+**Pictures.** A change that a user sees gets pictures in the
+description, so the reviewer sees what changed (owner, 2026-11-21).
+Both kinds are optional: attach what helps a review, and nothing for a
+change with nothing to see.
+
+- Take them from a Tier VM run (`vapor-vm`): the screenshots that show
+  the change, and a video (`./scripts/vm.sh --video`) only when the
+  change moves on the screen. When the difference is small, add the
+  same screenshot from a run on `origin/main`, as before and after.
+- Look at each file before you attach it. An attachment of a public
+  repository is public. It shows a guest only, never a contributor's
+  machine (`AGENTS.md` §6.1).
+- Copy the files next to the body under `.context/`, reference each
+  one in the body as `![what it shows](./menu.png)`, and pass each one
+  with `--attach`. `gh` uploads the file and rewrites the reference.
+  The text after `#` is the alt text of an image:
+
+```sh
+gh pr create --base main --title "<commit subject>" --label <type> \
+  --body-file .context/pr-body.md \
+  --attach '.context/menu.png#The menu of the menu bar item'
+gh pr edit <number> --body-file .context/pr-body.md \
+  --attach '.context/menu.png#The menu of the menu bar item'   # later, or to replace one
+```
+
+- `--attach` needs a recent `gh`: 2.104 has it, and
+  `gh pr create --help` names it when it is there. With an older `gh`,
+  name the files and their scenarios in the description and say that
+  the pictures are not attached.
+
 The description, in Simplified Technical English (`AGENTS.md` §8.11),
 answers in this order:
 
@@ -139,7 +169,8 @@ Then, one short section each:
 - Migration or compatibility (pre-GA: "none required" when a format
   changed without migration, and where that is documented).
 - For UI changes, the Tier VM scenarios that ran with their verdicts,
-  the screenshots that show the change, and a list of what the owner
+  the pictures that show the change, attached so the description
+  renders them (see Pictures above), and a list of what the owner
   judges. An agent verifies behaviour and never the look
   (`AGENTS.md` §9.9).
 - The generated-with line the harness requires.
@@ -246,6 +277,8 @@ and leave the thread for the human to resolve.
   The merge is a squash, and the PR history shows each round.
 - Put every fix that is ready into one push. Each push costs a CI
   cycle.
+- When a fix changes what a picture in the description shows, attach
+  the new picture and remove the old reference from the body.
 - Run `vapor-validate` before the push, then `git push origin HEAD`.
 - After every push, repeat the CI and base checks of step 4. The
   review does not run again.

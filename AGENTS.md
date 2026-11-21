@@ -865,6 +865,11 @@ The invariants behind them:
   commit's subject. The owner merges, as a squash, the only method the
   repository allows, so that subject is the commit on `main`. Agents
   never merge.
+- A PR that changes what a user sees shows it. Its description
+  carries the screenshots of the change, from a Tier VM run (§9.9),
+  and a video when the change moves on the screen, so the reviewer
+  sees what changed. Both are optional, and a picture shows a guest
+  only, never a contributor's machine (owner, 2026-11-21).
 - Every PR gets one adversarial review by the agent's own subagents
   (owner, 2026-11-14). It starts the moment the PR opens and runs
   while CI runs, so it adds no time to the wait. One pass; the agent
