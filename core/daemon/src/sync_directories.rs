@@ -161,6 +161,24 @@ pub fn local_roots_nest(first: &Path, second: &Path) -> Option<String> {
     roots_nest(first, second, &crate::name_collision::folds_case_at)
 }
 
+/// Whether the local roots of two profiles are one folder.
+pub fn local_roots_are_one(first: &Path, second: &Path) -> bool {
+    let folds_case = &crate::name_collision::folds_case_at;
+    OverlapPath::of(first, folds_case).compared == OverlapPath::of(second, folds_case).compared
+}
+
+/// Whether the cloud roots of two `filesystem` profiles are one
+/// folder, or one inside the other. Returns how they overlap.
+pub fn filesystem_cloud_roots_overlap(first: &str, second: &str) -> Option<String> {
+    let folds_case = &crate::name_collision::folds_case_at;
+    let (first, second) = (Path::new(first), Path::new(second));
+    let one = OverlapPath::of(first, folds_case);
+    if one.compared == OverlapPath::of(second, folds_case).compared {
+        return Some(format!("both are {}", one.shown.display()));
+    }
+    roots_nest(first, second, folds_case)
+}
+
 fn roots_nest(first: &Path, second: &Path, folds_case: &dyn Fn(&Path) -> bool) -> Option<String> {
     let first = OverlapPath::of(first, folds_case);
     let second = OverlapPath::of(second, folds_case);

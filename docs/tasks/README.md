@@ -66,7 +66,8 @@ fixed what it found, and left a short list that is not built and a
 list of choices that wait for the owner.
 
 - Engine: `core.md` E-7, E-9, E-12 … E-16. The owner put E-7 off: no
-  shipping setup reaches it. E-12 and E-14 need the owner.
+  shipping setup reaches it. E-12 needs a design, and E-14 needs the
+  owner.
 - Providers: `core.md` P-1 … P-5, P-7. P-4 and P-5 need the owner: a
   Drive test account, and the Google verification decision.
 - Platform: `core.md` PL-1, PL-2.

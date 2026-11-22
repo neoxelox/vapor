@@ -514,9 +514,13 @@ fn plan(
     {
         return invalid(format!("invalid sync directories: {reason}"));
     }
-    if let Some(problem) =
-        vapor_daemon::profiles::nested_local_root_problem(existing, &local_resolved)
-    {
+    if let Some(problem) = vapor_daemon::profiles::neighbour_problem(
+        existing,
+        &provider,
+        &local_resolved,
+        &scope.cloud_root,
+        scope.sync_mode,
+    ) {
         return invalid(problem);
     }
     Ok(PlannedProfile {
@@ -1181,6 +1185,38 @@ mod tests {
         let error = add(&path, &storage(&temp), &nested, None, now())
             .expect_err("a folder inside another profile's folder");
         assert!(error.to_string().contains("overlaps"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            before,
+            "a refused add writes nothing"
+        );
+
+        // The same folder as a pull-only mirror of another cloud would
+        // remove the files of the first profile.
+        let mirror = AddRequest {
+            id: Some("mirror".to_string()),
+            local: first.local.clone(),
+            mode: Some("pull-only".to_string()),
+            ..request(&temp, "mirror")
+        };
+        let error = add(&path, &storage(&temp), &mirror, None, now())
+            .expect_err("a pull-only profile on a shared folder");
+        assert!(error.to_string().contains("`pull-only`"), "{error}");
+
+        // The same folder for a cloud folder inside the first one would
+        // copy each file without end.
+        let inside = AddRequest {
+            id: Some("inside".to_string()),
+            local: first.local.clone(),
+            cloud: Some(format!("{}/sub", first.cloud.clone().unwrap())),
+            ..request(&temp, "inside")
+        };
+        let error = add(&path, &storage(&temp), &inside, None, now())
+            .expect_err("a cloud folder inside the other cloud folder");
+        assert!(
+            error.to_string().contains("cloud folders overlap"),
+            "{error}"
+        );
         assert_eq!(
             std::fs::read_to_string(&path).expect("read"),
             before,

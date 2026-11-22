@@ -87,7 +87,7 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             id: "S63",
             name: "profiles-command-sets-an-install-up",
-            proves: "vapor profiles add sets a fresh install up with one command and no restart, and refuses when no terminal can ask and a folder is left out; it refuses a cloud folder inside the local folder, and a local folder inside the one of another profile; remove refuses while the daemon runs, then forgets the sync state and leaves the files on both sides",
+            proves: "vapor profiles add sets a fresh install up with one command and no restart, and refuses when no terminal can ask and a folder is left out; it refuses a cloud folder inside the local folder, a local folder inside the one of another profile, and a pull-only profile on the folder of another profile; remove refuses while the daemon runs, then forgets the sync state and leaves the files on both sides",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
             run: profiles_command_sets_an_install_up,
@@ -462,6 +462,33 @@ fn profiles_command_sets_an_install_up(ctx: &mut Ctx) -> Result<(), Failure> {
     ensure!(
         !nested_local.exists() && !nested_cloud.exists(),
         "a refused profile must create no folder"
+    );
+
+    // So is a pull-only profile on the folder of another profile: it
+    // would remove every file that its own cloud folder does not hold.
+    let mirror_cloud = home.dir.join("mirror-cloud");
+    let mirror = cli.run(&[
+        "profiles",
+        "add",
+        "--id",
+        "mirror",
+        "--provider",
+        "filesystem",
+        "--local",
+        &home.local.to_string_lossy(),
+        "--cloud",
+        &mirror_cloud.to_string_lossy(),
+        "--mode",
+        "pull-only",
+    ])?;
+    ensure!(
+        !mirror.success() && mirror.stderr.contains("`pull-only`"),
+        "a pull-only profile on a shared local folder must be refused with the reason: {}",
+        mirror.combined()
+    );
+    ensure!(
+        fs::read_to_string(home.config_path())? == before && !mirror_cloud.exists(),
+        "a refused profile must change nothing"
     );
 
     // The daemon holds the profile's state: remove waits for a stop.

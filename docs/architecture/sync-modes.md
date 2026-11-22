@@ -115,6 +115,9 @@ mode check: there is no operation that can bypass it.
   independent **`pull-only`** profiles, each mirroring the same cloud folder
   into a different local directory (or different clouds), to maintain several
   read-only backups/copies, while an unrelated profile stays `two-way`.
+  A `pull-only` profile needs a local directory of its own: it removes every
+  file that its cloud folder does not hold, so it is refused on a directory
+  that another profile uses.
 - Per-profile isolation follows the existing multi-profile rules
   (`data-flow.md §Multi-profile watch coordination`): one watcher per
   canonical local root, per-profile queues, shared workgate/throttle. A

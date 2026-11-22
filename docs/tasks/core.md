@@ -33,18 +33,14 @@ are never reused.
       the watcher still delivers events under the path the daemon holds.
       The filesystem provider refuses every path under a cloud root that
       was respelled, until a restart.
-- [ ] E-12 Decide the limits of two profiles on one local folder. Two
-      cases lose or multiply data today, and neither is refused. A
-      `pull-only` profile removes every file that its own cloud folder
-      does not hold: the files that the other profile downloads go to
-      the trash, and a `two-way` partner then deletes them in its
-      cloud. Two profiles whose cloud folders are one inside the other
-      (`/Vapor` and `/Vapor/sub` of one account, or two nested folders
-      of the `filesystem` provider) copy each file one level deeper
-      without end. The first case waits for the owner (the open points
-      of `docs/specs/2026-11-14-full-review.md`). The second needs the
-      account of each profile, which a path does not give for Google
-      Drive: two accounts may both use `/Vapor`.
+- [ ] E-12 Refuse two Google Drive profiles that share a local folder
+      when their cloud folders are one folder, or one inside the other
+      (`/Vapor` and `/Vapor/sub` of one account). Each file is copied
+      one level deeper without end. The `filesystem` provider refuses
+      such a pair by its paths. For Drive a path does not say whether
+      two folders are one, because two accounts may both use `/Vapor`:
+      the check needs the identity of each cloud folder and the chain
+      of its parents, which the provider trait does not give today.
 - [ ] E-13 Take the copy of a discard off the tick thread. A file that
       Vapor removes on a volume that refuses a trash folder is copied
       to the trash of the runtime directory by the tick thread, for as

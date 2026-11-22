@@ -1,6 +1,6 @@
 # Full review of the repository, and what it changed
 
-Status: implemented 2026-11-15; round 8 implemented 2026-11-22
+Status: implemented 2026-11-15; rounds 8 and 9 implemented 2026-11-22
 
 ## Goal
 
@@ -277,10 +277,21 @@ The owner took each recommendation (owner, 2026-11-22).
 
 | # | Decision |
 |---|---|
-| D57 | Two profiles may have the same local folder. Each one sends that folder to its own cloud. |
+| D57 | Two profiles may have the same local folder. Each one sends that folder to its own cloud. Limited by D61 and D62. |
 | D58 | A profile whose local folder is inside the local folder of another profile, or around it, is refused. The later one of the two in `vapor.json` is suspended with the reason in `vapor status`, and `vapor profiles add` refuses to write such a profile. What one profile downloads the other would upload, and a mirror in one could delete through the other. |
 | D59 | After a full cloud, `vapor reconcile` and the app's Sync now try the waiting uploads at once. The automatic retry stays at 15 minutes. |
 | D60 | The question for two local names that the cloud folder folds together is not built now. It takes a local volume that keeps the two spellings apart and a cloud folder that folds them, which a Mac with the default volume and Google Drive never have. When it is built, it reuses the `unsyncable-name` question: the file stays on this device, and a rename fixes it. |
+
+### Round 9, 2026-11-22: the limits of a shared local folder
+
+The review of the round 8 pull request found two pairs of profiles
+that D57 allowed and that lose or multiply files. The owner took each
+recommendation (owner, 2026-11-22).
+
+| # | Decision |
+|---|---|
+| D61 | A `pull-only` profile does not share its local folder with another profile. It removes every file that its own cloud folder does not hold, so it would remove the files of the other profile, and a `two-way` partner would then delete them in its cloud. The later profile of the pair in `vapor.json` is suspended with the reason in `vapor status`, and `vapor profiles add` refuses to write it. D61 limits D57. |
+| D62 | Two `filesystem` profiles that share a local folder are refused when their cloud folders are one folder, or one inside the other: each file would be copied into the other folder without end. The later profile of the pair does not run. For Google Drive this check is not built: two accounts can both use `/Vapor`, so a path does not say whether two folders are one. That check is a design of its own (`docs/tasks/core.md` E-12). D62 limits D57. |
 
 ## Design
 
@@ -418,12 +429,16 @@ Found while the fixes were built, and fixed in the same change:
   user's pause outlives a hold, and the IPC schema went to version 5
   so that an older daemon cannot widen a request for one profile. The
   pull request lists each finding with its verdict.
+- Round 9 (2026-11-22): unit tests cover each pair of sync modes on
+  one folder and each pair of cloud folders, in the daemon and in
+  `vapor profiles add`. S63 covers the refusal of a `pull-only`
+  profile on the folder of another profile.
 
 ## Open points
 
-Round 7 settled the choices that the build made (D39 to D56), and
-round 8 the follow-ups that needed one (D57 to D60). What is still
-open:
+Round 7 settled the choices that the build made (D39 to D56),
+round 8 the follow-ups that needed one (D57 to D60), and round 9 the
+limits of a shared local folder (D61, D62). What is still open:
 
 1. **Two profiles whose local folders overlap are not refused.** One
    profile whose cloud folder is inside its local folder is. What an
@@ -437,13 +452,11 @@ open:
 3. **The Google verification path for the Drive scope.** It gates
    general availability of the Drive provider
    (`docs/tasks/core.md` P-5).
-4. **D57 has two limits that are not decided.** The review of the
-   round 8 pull request found them (`docs/tasks/core.md` E-12). A
-   `pull-only` profile on a shared local folder removes the files of
-   the other profile, and a `two-way` partner then deletes them in its
-   cloud. Two profiles on one local folder whose cloud folders are one
-   inside the other copy files without end. Neither is refused today,
-   and neither was refused before D57. The documents warn about both.
+4. **Two Google Drive profiles on one local folder whose cloud
+   folders are one folder, or one inside the other, are not refused**
+   (`docs/tasks/core.md` E-12). Round 9 decided the rule (D62) and
+   built it for the `filesystem` provider. For Drive the check needs
+   the identity of each cloud folder, not its path.
 5. **A local folder that holds only ignored files after a rename in
    the cloud stays** (`docs/tasks/core.md` E-14). Which ignored files
    may go with their folder is a choice.

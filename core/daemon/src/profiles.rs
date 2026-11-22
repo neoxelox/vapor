@@ -164,37 +164,79 @@ pub fn resolve_profile_set_from(config: &VaporConfig) -> ProfileSet {
             enabled: profile.enabled.unwrap_or(true),
         });
     }
-    refuse_nested_local_roots(&mut set.profiles);
+    refuse_profiles_that_cannot_be_neighbours(&mut set.profiles);
     set
 }
 
-/// Why `local_root` cannot be the local folder of one more profile next
-/// to `profiles`: it lies inside the local folder of one that runs, or
-/// around it. What one of the two downloads the other would upload,
-/// and a mirror in one could delete through the other. The same folder
-/// is another thing: two profiles may share it, and each sends it to
-/// its own cloud.
-pub fn nested_local_root_problem(
+/// Why a profile with these folders cannot run next to `profiles`.
+///
+/// Its local folder lies inside the local folder of one that runs, or
+/// around it: what one of the two downloads the other would upload.
+///
+/// Two profiles may share one local folder, and each sends it to its
+/// own cloud. Two pairs cannot:
+///
+/// - One of the two is `pull-only`. That profile removes every file
+///   that its own cloud folder does not hold, the files of the other
+///   profile included, and a two-way partner then deletes them in its
+///   cloud.
+/// - Both are `filesystem` profiles whose cloud folders are one
+///   folder, or one inside the other. Each file would be copied into
+///   the other folder, one level deeper each time.
+pub fn neighbour_problem(
     profiles: &[ResolvedProfile],
+    provider_kind: &str,
     local_root: &std::path::Path,
+    cloud_root: &str,
+    sync_mode: vapor_shared::SyncMode,
 ) -> Option<String> {
     profiles
         .iter()
         .filter(|profile| profile.enabled && profile.invalid.is_none())
         .find_map(|profile| {
             let other = profile.scope.local_root.as_deref()?;
-            let reason = sync_directories::local_roots_nest(other, local_root)?;
-            Some(format!(
-                "its local folder overlaps the one of profile `{}`: {reason}. Give the two \
-                 profiles folders that are apart, or the same folder",
-                profile.id
-            ))
+            if let Some(reason) = sync_directories::local_roots_nest(other, local_root) {
+                return Some(format!(
+                    "its local folder overlaps the one of profile `{}`: {reason}. Give the two \
+                     profiles folders that are apart, or the same folder",
+                    profile.id
+                ));
+            }
+            if !sync_directories::local_roots_are_one(other, local_root) {
+                return None;
+            }
+            let pull_only = vapor_shared::SyncMode::PullOnly;
+            if sync_mode == pull_only || profile.scope.sync_mode == pull_only {
+                return Some(format!(
+                    "it shares its local folder with profile `{}`, and one of the two is \
+                     `pull-only`. A pull-only profile removes every file that its own cloud \
+                     folder does not hold, so it would remove the files of the other profile. \
+                     Give the pull-only profile a local folder of its own",
+                    profile.id
+                ));
+            }
+            let filesystem = constants::provider::FILESYSTEM;
+            if provider_kind == filesystem
+                && profile.provider_kind == filesystem
+                && let Some(reason) = sync_directories::filesystem_cloud_roots_overlap(
+                    &profile.scope.cloud_root,
+                    cloud_root,
+                )
+            {
+                return Some(format!(
+                    "it shares its local folder with profile `{}`, and their cloud folders \
+                     overlap: {reason}. Each file would be copied into the other folder \
+                     without end. Give the two profiles cloud folders that are apart",
+                    profile.id
+                ));
+            }
+            None
         })
 }
 
-/// The later profile of a pair whose local folders nest is the one
+/// The later profile of a pair that cannot be neighbours is the one
 /// that does not run.
-fn refuse_nested_local_roots(profiles: &mut [ResolvedProfile]) {
+fn refuse_profiles_that_cannot_be_neighbours(profiles: &mut [ResolvedProfile]) {
     for index in 0..profiles.len() {
         let (earlier, rest) = profiles.split_at_mut(index);
         let profile = &mut rest[0];
@@ -205,7 +247,13 @@ fn refuse_nested_local_roots(profiles: &mut [ResolvedProfile]) {
             continue;
         };
         // The runtime logs the reason when it suspends the profile.
-        if let Some(problem) = nested_local_root_problem(earlier, &local_root) {
+        if let Some(problem) = neighbour_problem(
+            earlier,
+            &profile.provider_kind,
+            &local_root,
+            &profile.scope.cloud_root,
+            profile.scope.sync_mode,
+        ) {
             profile.invalid = Some(problem);
         }
     }
@@ -527,6 +575,64 @@ mod tests {
             ..VaporConfig::default()
         };
         assert_eq!(resolve_profiles(&config)[1].invalid, None);
+    }
+
+    #[test]
+    fn two_profiles_on_one_folder_run_unless_the_pair_loses_or_multiplies_files() {
+        // The second profile of each pair shares the local folder of
+        // the first one. Returns why the second one does not run.
+        let second_of = |first: (&str, &str, &str), second: (&str, &str, &str)| {
+            let profile = |id: &str, (provider, mode, cloud): (&str, &str, &str)| ProfileConfig {
+                id: id.to_string(),
+                provider: Some(provider.to_string()),
+                local_root: Some(rooted("/tmp/vapor-shared/docs")),
+                cloud_root: Some(if provider == constants::provider::FILESYSTEM {
+                    rooted(cloud)
+                } else {
+                    cloud.to_string()
+                }),
+                sync_mode: Some(mode.to_string()),
+                ..ProfileConfig::default()
+            };
+            let config = VaporConfig {
+                profiles: vec![profile("first", first), profile("second", second)],
+                ..VaporConfig::default()
+            };
+            let profiles = resolve_profiles(&config);
+            assert_eq!(profiles[0].invalid, None, "the earlier profile runs");
+            profiles[1].invalid.clone()
+        };
+        let (fs, drive) = (constants::provider::FILESYSTEM, constants::provider::GDRIVE);
+        let (a, b) = ("/tmp/vapor-shared-cloud/a", "/tmp/vapor-shared-cloud/b");
+
+        // Each one sends the folder to its own cloud.
+        assert_eq!(second_of((fs, "two-way", a), (fs, "two-way", b)), None);
+        assert_eq!(second_of((fs, "two-way", a), (fs, "push-only", b)), None);
+        assert_eq!(second_of((fs, "push-only", a), (fs, "push-only", b)), None);
+
+        // A pull-only profile would remove the files of the other one.
+        for (first, second) in [("two-way", "pull-only"), ("pull-only", "two-way")] {
+            let reason = second_of((fs, first, a), (fs, second, b)).expect("refused");
+            assert!(reason.contains("`pull-only`"), "{reason}");
+            assert!(reason.contains("profile `first`"), "{reason}");
+        }
+        let reason = second_of((drive, "two-way", "/A"), (drive, "pull-only", "/B"));
+        assert!(reason.is_some(), "the provider makes no difference here");
+
+        // Cloud folders that are one folder, or one inside the other,
+        // would copy each file without end.
+        let nested = "/tmp/vapor-shared-cloud/a/sub";
+        for cloud in [a, nested] {
+            let reason = second_of((fs, "two-way", a), (fs, "two-way", cloud)).expect("refused");
+            assert!(reason.contains("cloud folders overlap"), "{reason}");
+        }
+        // A path does not say whether two Drive folders are one: two
+        // accounts can both have `/Vapor`.
+        assert_eq!(
+            second_of((drive, "two-way", "/Vapor"), (drive, "two-way", "/Vapor")),
+            None
+        );
+        assert_eq!(second_of((fs, "two-way", a), (drive, "two-way", a)), None);
     }
 
     #[test]
