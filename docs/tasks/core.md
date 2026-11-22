@@ -165,6 +165,17 @@ what a task costs a user.
       not true, and a person cannot tell a wait from a stop. Report a
       folder that waits for its scan as waiting work, with the time of
       the scan.
+- [ ] E-33 A burst waits 30 seconds before its first file moves, on a
+      device that is idle and plugged in. 1 500 new files: no queued
+      work for 30 s, then 1 384 intents, and the files were in the
+      cloud about 45 s after they were written. A project of 603
+      small files (6 MB) took 36 s and a library of 209 files (151 MB)
+      took 34 s, while 1 GiB in one file takes 11 s. The wait is
+      `DEFERRED_RECONCILE_DELAY_MILLIS` (30 000), with a release after
+      5 s of quiet that these runs did not get. The delay protects a
+      device under load; on an idle one it only costs time. Start the
+      scan when the burst has been quiet for a second or two in
+      `Idle`, and keep the long delay for the throttled states.
 - [ ] E-14 The mass-delete guard asks during ordinary developer work,
       and then holds every later deletion. Git's own maintenance
       removed about 1 000 loose objects: "895 of the 3231 files it
@@ -324,6 +335,18 @@ what a task costs a user.
       the download apart, then raise what runs in parallel within the
       rate limits of the API. Found with the dedicated test account in
       a Mac guest, 2026-11-22.
+- [ ] P-10 A change from another device waits for the next poll of
+      the cloud: each 5 s in `Idle`, each 15 s in `Light`, and each
+      60 s in `Throttled` (`REMOTE_POLL_*_SECONDS`). Measured on
+      Google Drive in `Idle`: one save took 5 s to 11 s from device to
+      device. Not measured: a person at the receiving device puts it
+      in `Throttled`, so by the constants a change then takes up to a
+      minute to arrive, on the device that is in use. One poll is one
+      small request. Poll sooner when something says a change is
+      near (this device just uploaded, the app is open, a poll just
+      brought changes), and measure what the poll costs before the
+      60 s stays. Check the filesystem provider too: its watcher sees
+      a change at once, and the daemon reads it at the same cadence.
 - [ ] P-9 Two uploads of one Google Drive file that commit at the same
       moment both pass, and one edit is lost with no conflict copy.
       Two profiles of one daemon on one Drive folder each changed
@@ -395,6 +418,14 @@ what a task costs a user.
       nothing uses it, and a newer cargo warns about an unused
       dependency in the lint job there. The warning does not fail the
       job today.
+- [ ] PL-5 A crashed daemon is down for up to 30 seconds. After
+      `kill -9` a new daemon ran 24 s later: the supervisor looks each
+      30 s (`HEALTH_TICK_INTERVAL_SECONDS`), and the first restart is
+      "at once" only from that look on. Notice the exit when it
+      happens (wait on the process, or let the service manager start
+      the daemon and keep the crash-loop guard at its start), with the
+      crash-loop limits as they are. Found in the Mac guest,
+      2026-11-22.
 - [ ] PL-4 A daemon with one blocked worker cannot be stopped, and no
       part of Vapor notices that it is dead. The shutdown joins every
       worker with no limit, so a worker in a system call that never
@@ -563,6 +594,23 @@ runners. What remains before Linux ships a surface:
       a run reports, and which of them gate a release. Each fix of a
       finding of the session adds its case to Tier 1 or Tier E2E
       first; the soak model does not produce any of them today.
+- [ ] PT-3 Measure in the perf gate what a user waits for, so a slower
+      build fails the gate. `scripts/perf.sh` checks CPU and memory of
+      a soak cell today and no latency. The cases, with what the
+      session of 2026-11-22 measured in a Mac guest (4 CPUs) between
+      two local folders: one save on an idle device, each direction
+      (1.3 s to 1.75 s); one save with a user at the device (1.4 s,
+      2.0 s at most); one save next to a busy project (54 s to 307 s,
+      E-13); the time until the first file of a burst moves and until
+      the burst is done (30 s and 45 s for 1 500 files, E-33); small
+      files a second up, and deletions a second (160, and 115 to hold
+      and 175 to apply, E-25); one large file (94 MiB/s up, 158 down);
+      the restart after a kill (24 s, PL-5). Add a save of a file type
+      that gets the default 4 s debounce window, which the session did
+      not time. Budgets come from the CI runner, not from the guest.
+      The same cases for Google Drive join with its leg (TR-8): one
+      save from device to device (5 s to 11 s) and small files a
+      second (2, P-8).
 - [ ] PT-1 Tune the soak cell `scripts/perf.sh` gates on (duration,
       seed, load) using release baseline history once per-OS baselines
       exist; gate SLO-1 on the `quiet` phases. Give the thresholds that
