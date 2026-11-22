@@ -277,20 +277,6 @@ runners. What remains before Linux ships a surface:
       Drive-side scenarios land before or with it. Until then the leg
       is empty (every scenario declares the filesystem provider) and
       the gate refuses without credentials.
-- [~] TR-13 Run the soak and the perf cell at full length on the engine
-      as it is now. The record held no such run since the changes of
-      the 2026-11-14 review to deletions, spelling, and the throttle:
-      that change ran three soak cells of five minutes each, the last
-      soak runs on GitHub (2026-09-15) were red, and `perf.yml` has no
-      run there. Done on 2026-11-22 on a contributor Mac: the five
-      cells of the release gate at 45 minutes each with no violation,
-      and `./scripts/perf.sh` with every SLO check passed. One run of
-      `soak.yml` on GitHub the same day: seven of nine cells clean,
-      and two red from defects of the driver that the new seed met (a
-      crash while the cloud volume is full, and a mass-deletion
-      question that opens while the driver waits for a quiet queue).
-      Both are fixed. Open: one run of `soak.yml` on GitHub with every
-      cell green.
 - [ ] PT-1 Tune the soak cell `scripts/perf.sh` gates on (duration,
       seed, load) using release baseline history once per-OS baselines
       exist; gate SLO-1 on the `quiet` phases. Give the thresholds that

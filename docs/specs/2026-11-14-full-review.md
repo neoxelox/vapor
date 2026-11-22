@@ -433,6 +433,14 @@ Found while the fixes were built, and fixed in the same change:
   one folder and each pair of cloud folders, in the daemon and in
   `vapor profiles add`. S63 covers the refusal of a `pull-only`
   profile on the folder of another profile.
+- Tier S and Tier 2 at full length (2026-11-22), the first such run
+  since the review: the five cells of the release gate at 45 minutes
+  each on a Mac, `./scripts/perf.sh` with every SLO check passed
+  (CPU average 1.0%, memory 17 MiB), and one run of `soak.yml` on
+  GitHub with all nine cells green on the release build (macOS and
+  Ubuntu). No violation in any cell. An earlier run of `soak.yml` the
+  same day had two red cells, both from defects of the soak driver,
+  which are fixed. No run used a real Google Drive account.
 
 ## Open points
 
