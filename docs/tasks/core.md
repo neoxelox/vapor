@@ -135,6 +135,11 @@ are never reused.
       of `launchctl print`, which Apple does not keep stable. The
       installer matches that text today to tell a loaded job from a
       missing one.
+- [ ] PL-4 Declare the `notify` dependency of `core/platform` only for
+      the targets that build its backend (macOS and Linux). On Windows
+      nothing uses it, and a newer cargo warns about an unused
+      dependency in the lint job there. The warning does not fail the
+      job today.
 - [ ] CT-5 Every `core/platform` trait ships with (a) an in-memory
       fake, (b) a parameterized contract-test suite, and (c) native
       implementations wired into that suite on every shipping OS.
@@ -304,3 +309,10 @@ runners. What remains before Linux ships a surface:
       layout (six documents), and the test tiers (five places). The
       other places link to the owner. The toolchain baseline and the
       script list have one owner each already.
+- [ ] D-2 Bring the Rust toolchain of the contributor Mac in step with
+      the one that CI installs, and say in
+      `docs/development/toolchain-baseline.md` how to check it. CI
+      takes the latest stable at each run. A local toolchain that is
+      some months older passes `./scripts/lint.sh` on code that CI
+      rejects for a new deprecation, which cost one CI cycle on
+      2026-11-22.

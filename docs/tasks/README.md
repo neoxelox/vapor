@@ -70,7 +70,7 @@ list of choices that wait for the owner.
   owner.
 - Providers: `core.md` P-1 … P-5, P-7. P-4 and P-5 need the owner: a
   Drive test account, and the Google verification decision.
-- Platform: `core.md` PL-1, PL-2.
+- Platform: `core.md` PL-1, PL-2, PL-4.
 - The soak and the perf cell at full length: `core.md` TR-13.
 - The open points of the spec: each one is a question with the choice
   the build made in the meantime.

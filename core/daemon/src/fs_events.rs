@@ -173,9 +173,9 @@ pub struct SharedEventPathFilter {
     /// When a rebuild that failed is tried again. While it is set the
     /// rules in force are out of date, like while a rebuild runs.
     retry_at: std::sync::Mutex<Option<std::time::Instant>>,
-    /// Makes the next rebuilds fail, to test what a failure does.
+    /// Makes the next rebuild fail, to test what a failure does.
     #[cfg(test)]
-    fail_next_rebuilds: std::sync::atomic::AtomicU32,
+    fail_next_rebuild: AtomicBool,
 }
 
 impl std::fmt::Debug for SharedEventPathFilter {
@@ -208,7 +208,7 @@ impl SharedEventPathFilter {
             first_rules_landed: AtomicBool::new(false),
             retry_at: std::sync::Mutex::new(None),
             #[cfg(test)]
-            fail_next_rebuilds: std::sync::atomic::AtomicU32::new(0),
+            fail_next_rebuild: AtomicBool::new(false),
         }
     }
 
@@ -400,12 +400,7 @@ impl SharedEventPathFilter {
                 .clone();
             let number = self.rebuilds_started.fetch_add(1, Ordering::AcqRel) + 1;
             #[cfg(test)]
-            let fail = self
-                .fail_next_rebuilds
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |left| {
-                    left.checked_sub(1)
-                })
-                .is_ok();
+            let fail = self.fail_next_rebuild.swap(false, Ordering::AcqRel);
             *rebuild = Some((
                 number,
                 crate::provider_jobs::ProviderCall::start(mode, "ignore-rules", move || {
@@ -1066,7 +1061,7 @@ mod tests {
         // The first read of the ignore files fails. Nothing may be
         // released on the rules of the settings alone: the name that
         // the ignore file hides is not hidden yet.
-        path_filter.fail_next_rebuilds.store(1, Ordering::Release);
+        path_filter.fail_next_rebuild.store(true, Ordering::Release);
         drive_rebuild_on_a_worker(&path_filter);
         assert!(!path_filter.should_ignore(&secret));
         assert!(!path_filter.rules_ready(), "the first rules are not in");
@@ -1089,7 +1084,7 @@ mod tests {
         fs::write(watch_root.join(".gitignore"), "secret.txt\nother.txt\n")
             .expect("rewrite .gitignore");
         path_filter.request_reload();
-        path_filter.fail_next_rebuilds.store(1, Ordering::Release);
+        path_filter.fail_next_rebuild.store(true, Ordering::Release);
         let landed_before = path_filter.rebuilds_landed();
         drive_rebuild_on_a_worker(&path_filter);
         assert!(path_filter.rebuild_pending());
