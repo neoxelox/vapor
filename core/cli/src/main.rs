@@ -86,12 +86,18 @@ enum Command {
     },
     /// Pause syncing. Changes are still recorded and sync on resume.
     Pause {
+        /// Pause this profile only. Without it, every profile pauses.
+        #[arg(long)]
+        profile: Option<String>,
         /// Print JSON.
         #[arg(long)]
         json: bool,
     },
     /// Resume syncing.
     Resume {
+        /// Resume this profile only. Without it, every profile resumes.
+        #[arg(long)]
+        profile: Option<String>,
         /// Print JSON.
         #[arg(long)]
         json: bool,
@@ -99,6 +105,10 @@ enum Command {
     /// Compare both folders now and sync the differences, without
     /// waiting for the device to go idle.
     Reconcile {
+        /// Compare the folders of this profile only. Without it, every
+        /// profile compares its folders.
+        #[arg(long)]
+        profile: Option<String>,
         /// Print JSON.
         #[arg(long)]
         json: bool,
@@ -558,9 +568,15 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
         }
         Command::Service { action } => dispatch_service(action),
         Command::Status { json } => dispatch_status(json),
-        Command::Pause { json } => dispatch_ack_json("pause", ipc_cmd::pause(), json),
-        Command::Resume { json } => dispatch_ack_json("resume", ipc_cmd::resume(), json),
-        Command::Reconcile { json } => dispatch_ack_json("reconcile", ipc_cmd::reconcile(), json),
+        Command::Pause { profile, json } => {
+            dispatch_ack_json("pause", ipc_cmd::pause(profile.as_deref()), json)
+        }
+        Command::Resume { profile, json } => {
+            dispatch_ack_json("resume", ipc_cmd::resume(profile.as_deref()), json)
+        }
+        Command::Reconcile { profile, json } => {
+            dispatch_ack_json("reconcile", ipc_cmd::reconcile(profile.as_deref()), json)
+        }
         Command::Timeline { json } => dispatch_timeline(json),
         Command::Diagnostics { json } => dispatch_diagnostics(json),
         Command::Logs { tail } => dispatch_logs(tail),

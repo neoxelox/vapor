@@ -663,6 +663,44 @@ impl DurableStateDb {
         Ok(changed > 0)
     }
 
+    /// Ends the wait of every upload that waits for room in the cloud:
+    /// each one that is due later than `now` is due now. Returns how
+    /// many were waiting. The stored error is what marks such a row,
+    /// so a row that failed for another reason since keeps its wait.
+    pub fn end_wait_for_cloud_room(&mut self, now: SystemTime) -> Result<usize, StateDbError> {
+        let now_ms = system_time_to_millis(now)?;
+        Ok(self.connection.execute(
+            "UPDATE queue_intents SET available_at_ms = ?
+             WHERE state = ? AND available_at_ms > ?
+               AND substr(last_error, 1, ?) = ?",
+            params![
+                now_ms,
+                STATE_PENDING,
+                now_ms,
+                constants::engine::CLOUD_FULL_WAIT_PREFIX.len() as i64,
+                constants::engine::CLOUD_FULL_WAIT_PREFIX
+            ],
+        )?)
+    }
+
+    /// The provider's message of one upload that waits for room in the
+    /// cloud, when there is one: a daemon that starts reads from the
+    /// queue that the cloud was full.
+    pub fn wait_for_cloud_room_message(&self) -> Result<Option<String>, StateDbError> {
+        let prefix = constants::engine::CLOUD_FULL_WAIT_PREFIX;
+        let row: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT last_error FROM queue_intents
+                 WHERE state = ? AND substr(last_error, 1, ?) = ?
+                 ORDER BY id LIMIT 1",
+                params![STATE_PENDING, prefix.len() as i64, prefix],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(row.map(|text| text[prefix.len()..].to_string()))
+    }
+
     pub fn requeue_leased(
         &mut self,
         id: i64,
@@ -1394,6 +1432,56 @@ impl DurableStateDb {
             )
             .optional()?
             .is_some())
+    }
+
+    /// The row of every synced file under the folder `directory`.
+    pub fn sync_index_rows_under(
+        &self,
+        directory: &Path,
+    ) -> Result<Vec<SyncIndexEntry>, StateDbError> {
+        let (lower, upper) = rows_under_bounds(directory)?;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT path_text, content_hash, size_bytes, local_modified_at_ms,
+                    remote_modified_at_ms, last_op_id, updated_at_ms
+             FROM sync_index WHERE path_text >= ? AND path_text < ?",
+        )?;
+        let rows = statement.query_map(params![lower, upper], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (
+                path_text,
+                content_hash,
+                size_bytes,
+                local_modified_at_ms,
+                remote_modified_at_ms,
+                last_op_id,
+                updated_at_ms,
+            ) = row?;
+            entries.push(SyncIndexEntry {
+                path: path_from_text(path_text),
+                content_hash,
+                size_bytes: u64::try_from(size_bytes).unwrap_or(0),
+                local_modified_at: local_modified_at_ms
+                    .map(millis_to_system_time)
+                    .transpose()?,
+                remote_modified_at: remote_modified_at_ms
+                    .map(millis_to_system_time)
+                    .transpose()?,
+                last_op_id,
+                updated_at: millis_to_system_time(updated_at_ms)?,
+            });
+        }
+        Ok(entries)
     }
 
     /// The names directly inside `directory` that the sync index holds
@@ -2986,6 +3074,58 @@ mod tests {
         assert_eq!(replayed.path, path);
         assert_eq!(replayed.kind, PendingIntentKind::Delete);
         assert_eq!(replayed.attempt_count, 0);
+    }
+
+    #[test]
+    fn only_the_uploads_that_wait_for_room_in_the_cloud_end_their_wait() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut database =
+            DurableStateDb::open(temp_dir.path().join("state/vapor.sqlite")).expect("open");
+        let waits_for_room = PathBuf::from("/tmp/vapor-root/big.bin");
+        let rate_limited = PathBuf::from("/tmp/vapor-root/other.bin");
+        let room_message = format!(
+            "{}the volume is full (big.bin)",
+            constants::engine::CLOUD_FULL_WAIT_PREFIX
+        );
+        for (path, message) in [
+            (&waits_for_room, room_message.as_str()),
+            (&rate_limited, "rate limited"),
+        ] {
+            database
+                .enqueue_intent(path, PendingIntentKind::Upload, timestamp_ms(100))
+                .expect("enqueue");
+            let leased = database
+                .lease_next_ready(timestamp_ms(100))
+                .expect("lease")
+                .expect("leased");
+            database
+                .requeue_leased(leased.id, timestamp_ms(900_000), Some(message))
+                .expect("requeue");
+        }
+        assert_eq!(
+            database.wait_for_cloud_room_message().expect("message"),
+            Some("the volume is full (big.bin)".to_string())
+        );
+
+        assert_eq!(
+            database
+                .end_wait_for_cloud_room(timestamp_ms(200))
+                .expect("end the wait"),
+            1
+        );
+
+        let due = database
+            .lease_next_ready(timestamp_ms(200))
+            .expect("lease")
+            .expect("the upload that waited for room is due");
+        assert_eq!(due.path, waits_for_room);
+        assert!(
+            database
+                .lease_next_ready(timestamp_ms(200))
+                .expect("lease")
+                .is_none(),
+            "a row that waits for another reason keeps its wait"
+        );
     }
 
     #[test]

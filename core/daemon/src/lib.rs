@@ -34,6 +34,7 @@ pub mod executor;
 pub mod fs_events;
 pub mod ipc_server;
 pub mod ipc_service;
+pub(crate) mod local_hash;
 pub mod logging;
 pub mod metrics;
 pub mod multi_runtime;

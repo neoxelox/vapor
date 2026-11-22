@@ -16,57 +16,55 @@ are never reused.
 
 ## Sync engine
 
-- [ ] E-1 Build the first set of ignore rules on a worker. A rule
-      change already rebuilds on a worker, but the first build, which
-      walks the tree for ignore files, runs while a profile is
-      composed. Move it to a worker and hold the release of intents
-      until the rules are in.
-- [ ] E-2 Close the cloud-side window of a swapped root. The local root
-      is read again before any lease and before each cloud deletion.
-      The cloud root is checked each 15 seconds only, so a cloud root
-      that is swapped can make local files look deleted for that long.
-      Those files go to the trash, so nothing is lost, but the check
-      belongs before each local removal too.
-- [ ] E-3 Decide what two profiles with overlapping local roots mean,
-      and refuse the pair if the answer is "nothing safe". One profile
-      whose cloud folder sits inside its local folder is refused today;
-      two profiles whose local folders overlap are not. This waits for
-      the owner (`docs/specs/2026-11-14-full-review.md`, open points).
-- [ ] E-4 Remove a local folder that a cloud-side rename or removal
-      emptied. On a volume that keeps spellings apart, or for any
-      rename of a folder in the cloud that the reconcile walk finds,
-      the files move and the old local folder stays behind, empty.
-- [ ] E-5 `Pause`, `Resume`, and `Reconcile` for one profile: a profile
-      argument on the three IPC controls and `--profile` on the three
-      commands. Today each one acts on every profile.
-- [ ] E-6 Take the last two pieces of provider and hash work off the
-      tick thread (`AGENTS.md` §3 names them as the exceptions): the
-      planner and the reconcile walk hash a file of up to 8 MiB in line,
-      and the re-baseline of an expired changes cursor polls in line.
 - [ ] E-7 Ask when a case-sensitive local root holds `a.txt` and
       `A.txt` and the cloud folder folds case. Today the second upload
       waits for the name to go and is tried again without end; it needs a
-      decision, like the name collision in the other direction.
-- [ ] E-8 Check a profile's provider and roots before its local root is
-      created and adopted. A profile with an unknown provider or with
-      overlapping roots is suspended, and its local folder is made first.
+      decision, like the name collision in the other direction. It takes
+      a local volume that keeps the two spellings apart and a cloud
+      folder that folds them: the filesystem provider on such a volume.
+      A local root on the default macOS volume cannot hold the two
+      names, and Google Drive keeps them apart.
+      The owner put this off (2026-11-22), because no shipping setup
+      reaches it; when it is built, the question is the one a name that
+      cannot be synced gets today.
 - [ ] E-9 Follow a sync root whose own spelling changes while the
       daemon runs (`vapor` renamed to `Vapor` on a volume that folds
       case). Names below the root compare right; not checked is whether
       the watcher still delivers events under the path the daemon holds.
       The filesystem provider refuses every path under a cloud root that
       was respelled, until a restart.
-- [ ] E-10 Hold the watcher events of a folder while the rules of an
-      ignore file that just appeared in it load. A folder that moves in
-      whole waits for its rules, and so does a folder that the reconcile
-      walk meets. Files written one by one next to a new `.gitignore`
-      can still be queued under the old rules in the seconds before the
-      reload lands. A rule reload that fails also leaves the folders
-      that wait for it unreported until the next reload.
-- [ ] C8-71 Per-path detail on timeline `conflict` events (today the
-      event carries only the per-tick count), so app notifications can
-      name the conflicted file without an immediate list scan. Needed
-      by `macos.md` M3-8.
+- [ ] E-12 Refuse two Google Drive profiles that share a local folder
+      when their cloud folders are one folder, or one inside the other
+      (`/Vapor` and `/Vapor/sub` of one account). Each file is copied
+      one level deeper without end. The `filesystem` provider refuses
+      such a pair by its paths. For Drive a path does not say whether
+      two folders are one, because two accounts may both use `/Vapor`:
+      the check needs the identity of each cloud folder and the chain
+      of its parents, which the provider trait does not give today.
+- [ ] E-13 Take the copy of a discard off the tick thread. A file that
+      Vapor removes on a volume that refuses a trash folder is copied
+      to the trash of the runtime directory by the tick thread, for as
+      long as the copy takes. It is the one read of file content that
+      `AGENTS.md` §3 still has on that thread.
+- [ ] E-14 Decide what to do with a local folder that a rename in the
+      cloud emptied of synced files and that still holds ignored
+      files. An empty folder is removed. A folder with a `.DS_Store`
+      in it stays for good, and so does one with a `node_modules`
+      folder, which must stay. The rule has to tell the two apart.
+- [ ] E-15 Try again a profile whose composition failed for a reason
+      that can pass. A profile whose state database cannot be opened
+      at the start (a full disk, a lock) is suspended until the
+      configuration changes or the daemon restarts. Only a profile
+      that ran and then failed is composed again after 1, 5, and 30
+      minutes.
+- [ ] E-16 Make the check of the cloud root that guards a local
+      removal cheaper and faster. Each cloud deletion reads the
+      identity of the cloud root by itself: on Google Drive that is one
+      request for each part of `cloudRoot`, for each file of a burst.
+      A removal that finds the root in doubt asks the runtime for a
+      root check at once, but only the local check runs at once; the
+      cloud check keeps its cadence, so the hold comes up to 45
+      seconds later (no file is removed in that time).
 
 ## Providers
 
@@ -93,10 +91,14 @@ are never reused.
       verification, or a narrower scope with what it costs. It gates
       general availability of the Drive provider and waits for the
       owner.
-- [ ] P-6 Charge the bandwidth bucket for what a Drive resumable chunk
-      really sends. A chunk is 256 KiB at least, so a grant below that
-      sends more than it was given, and the excess is not taken from the
-      bucket.
+- [ ] P-7 Give a removal that the `filesystem` feed derives from an
+      older event the time of the poll. An object that is gone when
+      the feed reads its create or write event becomes a removal with
+      the time of the newest event of the batch. When the removal
+      event of the watcher is in a later batch, that time is older
+      than the last sync, and the engine drops the removal until the
+      next whole-scope scan. The feed needs the clock of the daemon
+      for this, which the provider does not get today.
 
 ## Platform layer
 
@@ -133,6 +135,11 @@ are never reused.
       of `launchctl print`, which Apple does not keep stable. The
       installer matches that text today to tell a loaded job from a
       missing one.
+- [ ] PL-4 Declare the `notify` dependency of `core/platform` only for
+      the targets that build its backend (macOS and Linux). On Windows
+      nothing uses it, and a newer cargo warns about an unused
+      dependency in the lint job there. The warning does not fail the
+      job today.
 - [ ] CT-5 Every `core/platform` trait ships with (a) an in-memory
       fake, (b) a parameterized contract-test suite, and (c) native
       implementations wired into that suite on every shipping OS.
@@ -281,15 +288,6 @@ runners. What remains before Linux ships a surface:
       bounds, burst admission) already cover the regression-catching
       role on every PR.
 
-## Operations
-
-- [ ] R-1 Write the incident runbooks `AGENTS.md §12` mandates under
-      `docs/operations/`: daemon crash loops, auth/token refresh
-      failures, provider rate-limit storms, a state database that was
-      set aside, reconcile backlog non-convergence. Only the release
-      incident playbook exists today. Each runbook needs detection,
-      mitigation, user-visible state, and recovery verification.
-
 ## Documents
 
 - [ ] D-1 One owner for each fact that several documents repeat: the
@@ -297,3 +295,10 @@ runners. What remains before Linux ships a surface:
       layout (six documents), and the test tiers (five places). The
       other places link to the owner. The toolchain baseline and the
       script list have one owner each already.
+- [ ] D-2 Bring the Rust toolchain of the contributor Mac in step with
+      the one that CI installs, and say in
+      `docs/development/toolchain-baseline.md` how to check it. CI
+      takes the latest stable at each run. A local toolchain that is
+      some months older passes `./scripts/lint.sh` on code that CI
+      rejects for a new deprecation, which cost one CI cycle on
+      2026-11-22.

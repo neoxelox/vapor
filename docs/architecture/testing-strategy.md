@@ -49,8 +49,11 @@ Target modules with heavy coverage expected in `core/daemon`:
 - `executor.rs`: stage transitions; permit handoff; admission capacity
   math; provider-job dispatch/harvest (the pool runs inline:
   synchronously at dispatch, in tests so ticks stay deterministic;
-  one dedicated test exercises the threaded production mode
-  end-to-end).
+  the tests that turn the worker threads on also assert that the
+  thread that drives the ticks read no file content).
+- `local_hash.rs`: which local files a worker reads (the quick check
+  and the size decide); a hash is not used for a file that changed
+  after it was read.
 - `provider_jobs.rs`: pool modes (inline vs worker threads); probe
   shapes; transfer hold/resume; generation-based cancellation.
 - `path_filter.rs`: gitignore/vaporignore precedence; nested discovery;

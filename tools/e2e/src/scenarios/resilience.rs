@@ -76,6 +76,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: cloud_root_vanishes,
         },
         Scenario {
+            id: "S75",
+            name: "swapped-cloud-root-removes-nothing",
+            proves: "an empty folder where the adopted cloud root was never becomes deletions on this device, also when a sync is asked for before the next check of the root: no local file goes to the trash, a root-replaced decision opens, and reattach sends the local files to the new folder",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: swapped_cloud_root_removes_nothing,
+        },
+        Scenario {
             id: "S43",
             name: "local-root-replaced",
             proves: "an empty folder appearing where the adopted local root was opens a root-replaced decision and syncs nothing; reattach merges the cloud into it with no deletion anywhere",
@@ -555,6 +563,65 @@ fn local_root_replaced(ctx: &mut Ctx) -> Result<(), Failure> {
         parked.join("kept.txt").is_file(),
         "the parked volume is untouched"
     );
+    ctx.allow_warning("Sync root replaced");
+    Ok(())
+}
+
+fn swapped_cloud_root_removes_nothing(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let names: Vec<String> = (0..5).map(|index| format!("kept-{index}.txt")).collect();
+    let mark = ctx.mark();
+    for name in &names {
+        write_file(&home.local.join(name), format!("kept: {name}\n"))?;
+    }
+    ctx.converge_from(&mark, names.len() as i64, CONVERGE_TIMEOUT)?;
+    for name in &names {
+        ctx.wait_exists(&home.cloud.join(name), CONVERGE_TIMEOUT)?;
+    }
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    // The volume goes away, and an empty folder is at its mount point.
+    // In that folder every file is "gone" from the cloud. The user
+    // asks for a sync at once, before the next check of the root.
+    let parked = ctx.sandbox.root.join("parked-cloud");
+    fs::rename(&home.cloud, &parked)?;
+    fs::create_dir_all(&home.cloud)?;
+    let cli = ctx.cli();
+    cli.reconcile()?;
+    let decision = wait_open_decision(&cli, "root-replaced", Duration::from_secs(60))?;
+    ensure!(
+        decision["evidence"]["side"] == "cloud",
+        "wrong side: {decision}"
+    );
+    // Nothing moves while the question is open.
+    std::thread::sleep(Duration::from_secs(5));
+    for name in &names {
+        ensure!(
+            home.local.join(name).is_file(),
+            "{name} left this device because its cloud folder was swapped"
+        );
+    }
+    let trash = cli.json(&["trash", "list", "--json"])?;
+    ensure!(
+        trash["entries"].as_array().is_some_and(Vec::is_empty),
+        "a swapped cloud folder put files in the trash: {trash}"
+    );
+
+    // The user says that the new folder is the cloud folder now.
+    let id = decision["id"].as_i64().unwrap_or_default().to_string();
+    cli.ok(&["decisions", "resolve", &id, "--choose", "reattach"])?;
+    cli.wait_run_state("running", Duration::from_secs(60))?;
+    for name in &names {
+        ctx.wait_exists(&home.cloud.join(name), Duration::from_secs(60))?;
+    }
+    ctx.settle(CONVERGE_TIMEOUT)?;
+    for name in &names {
+        ensure!(
+            home.local.join(name).is_file() && parked.join(name).is_file(),
+            "{name} is gone from this device or from the parked volume"
+        );
+    }
     ctx.allow_warning("Sync root replaced");
     Ok(())
 }

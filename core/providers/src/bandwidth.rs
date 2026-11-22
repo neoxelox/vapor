@@ -109,12 +109,53 @@ impl BandwidthShaper {
         };
         self.tokens = (self.tokens + unused as f64).min(rate as f64);
     }
+
+    /// Takes `extra` bytes that a step moved beyond its grant: a
+    /// session that cannot send less than a whole chunk (256 KiB for a
+    /// Google Drive resumable upload) sends the chunk whatever the
+    /// grant was. The bucket goes into debt, and the next grant waits
+    /// until the refill has paid it, so the rate holds over time.
+    pub fn charge(&mut self, extra: u64) {
+        if self.rate_bytes_per_sec.is_some() {
+            self.tokens -= extra as f64;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn bytes_moved_beyond_a_grant_are_paid_before_the_next_grant() {
+        let mut shaper = BandwidthShaper::with_rate(1_000);
+        let t0 = Instant::now();
+        assert_eq!(shaper.grant_or_wait(10_000, 250, t0), Ok(1_000));
+        // The step moved 3 000 bytes on a grant of 1 000.
+        shaper.charge(2_000);
+        let wait = shaper
+            .grant_or_wait(10_000, 250, t0)
+            .expect_err("the bucket is in debt");
+        assert!(
+            (2_240..=2_260).contains(&wait.as_millis()),
+            "the debt and the useful amount refill first, got {wait:?}"
+        );
+        // Two seconds pay the debt; no grant yet.
+        assert!(
+            shaper
+                .grant_or_wait(10_000, 250, t0 + Duration::from_secs(2))
+                .is_err()
+        );
+        assert_eq!(
+            shaper.grant_or_wait(10_000, 250, t0 + Duration::from_secs(3)),
+            Ok(1_000)
+        );
+        // A shaper with no rate keeps no account.
+        let mut unlimited = BandwidthShaper::unlimited();
+        unlimited.charge(1_000_000);
+        assert_eq!(unlimited.grant_or_wait(5_000, 250, t0), Ok(5_000));
+    }
 
     #[test]
     fn a_dry_bucket_says_how_long_until_a_useful_grant() {

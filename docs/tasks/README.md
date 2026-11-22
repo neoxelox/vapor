@@ -65,10 +65,12 @@ Status: open. The review (`docs/specs/2026-11-14-full-review.md`)
 fixed what it found, and left a short list that is not built and a
 list of choices that wait for the owner.
 
-- Engine: `core.md` E-1 … E-5.
-- Providers: `core.md` P-1 … P-5. P-4 and P-5 need the owner: a Drive
-  test account, and the Google verification decision.
-- Platform: `core.md` PL-1, PL-2.
+- Engine: `core.md` E-7, E-9, E-12 … E-16. The owner put E-7 off: no
+  shipping setup reaches it. E-12 needs a design, and E-14 needs the
+  owner.
+- Providers: `core.md` P-1 … P-5, P-7. P-4 and P-5 need the owner: a
+  Drive test account, and the Google verification decision.
+- Platform: `core.md` PL-1, PL-2, PL-4.
 - The open points of the spec: each one is a question with the choice
   the build made in the meantime.
 
@@ -83,9 +85,7 @@ Status: pending and unblocked.
   decisions pane (conflicts included), the trash pane, the root-state
   display, notifications, the ignored-paths view, the state before
   the first read of the daemon, late answers to an action, and the
-  two controls for auto-launch. `core.md` C8-71
-  (per-path timeline detail) is the one open core dependency, only for
-  naming files inside notifications.
+  two controls for auto-launch.
 - `macos.md` M4-1 … M4-5: profiles UX: create, rename, select, enable,
   disable, and delete flows; profile-scoped settings (including the
   per-profile `syncMode` selector and its one-way question); safe
@@ -208,10 +208,10 @@ under `assets/linux/`; see `assets/README.md`.
 
 ## Runs continuously: tests, tools, operations
 
-Not a wave. `core.md` "Tests and tools" and "Operations" hold work
+Not a wave. `core.md` "Tests and tools" holds work
 that lands when its trigger comes: the Drive leg of the harness when
 the test account exists (TR-8, TR-12), fuzz and `loom` in the Tier 2
-gate (CT-9, CT-10), the runbooks (R-1). The standing invariants that
+gate (CT-9, CT-10). The standing invariants that
 every change must keep (crash and restart recovery, throttle
 discipline, a light watcher callback, echo suppression, the conflict
 policy, scope safety) are rules, not tasks: `AGENTS.md` §9.2 and §11

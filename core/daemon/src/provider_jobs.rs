@@ -112,7 +112,19 @@ pub(crate) struct ProbeRequest {
     /// expanded into per-entry intents without provider I/O on the tick
     /// thread.
     pub want_subtree_listing: bool,
+    /// Local files to read when the stat finds no object: a cloud
+    /// deletion applies to a local file only while the file holds the
+    /// bytes last synced, and the tick thread reads no file.
+    pub local_hashes_if_absent: Option<crate::local_hash::TouchedFileCheck>,
+    /// The cloud root to read the identity of, after the stat and only
+    /// when the stat found no object (or none was asked for): "no
+    /// object" is a deletion only in the folder the profile adopted. A
+    /// root that was swapped holds none of the files.
+    pub cloud_root_identity_of: Option<String>,
 }
+
+/// What a provider answered for the identity of the cloud root.
+pub(crate) type CloudRootIdentity = Result<Option<String>, ProviderError>;
 
 pub(crate) struct ProbeResult {
     /// `None` when the probe did not request a stat.
@@ -123,6 +135,11 @@ pub(crate) struct ProbeResult {
     /// reported a directory. Entries are ordered parents before
     /// children; the listing is capped at [`SUBTREE_LISTING_CAP`].
     pub subtree: Option<Result<Vec<RemoteEntry>, ProviderError>>,
+    /// What `local_hashes_if_absent` asked for; empty otherwise.
+    pub local_hashes: crate::local_hash::LocalHashes,
+    /// `Some` when `cloud_root_identity_of` asked and the identity was
+    /// read.
+    pub cloud_root_identity: Option<CloudRootIdentity>,
 }
 
 /// Upper bound on entries one subtree probe collects. A directory
@@ -154,12 +171,22 @@ pub(crate) enum ProviderJobKind {
     },
     /// `begin_upload` + step loop.
     Upload(UploadRequest),
-    /// `begin_download` + step loop.
-    Download(DownloadRequest),
+    /// `begin_download` + step loop. When the download completes, the
+    /// worker also reads the local file it displaces, if `displaced`
+    /// asks for that.
+    Download {
+        request: DownloadRequest,
+        displaced: Option<crate::local_hash::DisplacedFileCheck>,
+        /// The cloud root to read the identity of when the object is
+        /// not there. A mirror removes the local file then, and "not
+        /// there" must be said by the folder the profile adopted.
+        cloud_root_if_missing: Option<String>,
+    },
     /// Re-dispatched held session.
     ResumeTransfer {
         session: Box<dyn TransferSession>,
         direction: TransferDirection,
+        displaced: Option<crate::local_hash::DisplacedFileCheck>,
     },
     /// The content hash of a local file before its upload: disk reads
     /// and digest work that must not run on the tick thread.
@@ -179,12 +206,23 @@ pub(crate) enum ProviderJobOutcome {
         session: Box<dyn TransferSession>,
         resume_after: Option<Duration>,
     },
-    TransferCompleted(TransferOutcome),
+    TransferCompleted {
+        outcome: TransferOutcome,
+        /// The hash of the local file a download displaces, when its
+        /// job asked for it and only the content could say whether the
+        /// file equals the payload or the bytes last synced.
+        displaced: Option<crate::local_hash::LocalFileHash>,
+    },
     /// The local file is hashed (or could not be read).
     Hashed(std::io::Result<String>),
     /// Hashing stopped at a step boundary because the throttle no
     /// longer allows it; the executor dispatches it again when it does.
     HashHeld(crate::executor::StreamingFileHash),
+    /// A download found no object to fetch, and its job asked for the
+    /// identity of the cloud root in that case.
+    DownloadSourceMissing {
+        cloud_root_identity: CloudRootIdentity,
+    },
     /// The session (or its begin call) failed; any session was already
     /// aborted worker-side.
     TransferFailed {
@@ -541,7 +579,13 @@ fn run_job(job: QueuedJob, gates: &TransferGates) -> CompletedJob {
         };
     }
     let outcome = match kind {
-        ProviderJobKind::Probe(request) => ProviderJobOutcome::Probe(run_probe(&context, request)),
+        ProviderJobKind::Probe(request) => {
+            let may_hash = || {
+                gates.generation.load(Ordering::SeqCst) == generation
+                    && gates.allow_hashing.load(Ordering::Relaxed)
+            };
+            ProviderJobOutcome::Probe(run_probe(&context, request, &may_hash))
+        }
         ProviderJobKind::RemoteDelete { remote_path, op_id } => {
             ProviderJobOutcome::RemoteDelete(context.provider.delete(&remote_path, &op_id))
         }
@@ -574,22 +618,41 @@ fn run_job(job: QueuedJob, gates: &TransferGates) -> CompletedJob {
                 phase: TransferPhase::Begin,
             },
         },
-        ProviderJobKind::Download(request) => match context.provider.begin_download(request) {
-            Ok(session) => run_transfer(
-                &context,
-                gates,
-                generation,
-                session,
-                TransferDirection::Download,
+        ProviderJobKind::Download {
+            request,
+            displaced,
+            cloud_root_if_missing,
+        } => match context.provider.begin_download(request) {
+            Ok(session) => with_displaced_hash(
+                run_transfer(
+                    &context,
+                    gates,
+                    generation,
+                    session,
+                    TransferDirection::Download,
+                ),
+                displaced,
             ),
-            Err(error) => ProviderJobOutcome::TransferFailed {
-                error,
-                phase: TransferPhase::Begin,
+            Err(error) => match cloud_root_if_missing {
+                Some(cloud_root) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
+                    ProviderJobOutcome::DownloadSourceMissing {
+                        cloud_root_identity: context.provider.root_identity(&cloud_root),
+                    }
+                }
+                _ => ProviderJobOutcome::TransferFailed {
+                    error,
+                    phase: TransferPhase::Begin,
+                },
             },
         },
-        ProviderJobKind::ResumeTransfer { session, direction } => {
-            run_transfer(&context, gates, generation, session, direction)
-        }
+        ProviderJobKind::ResumeTransfer {
+            session,
+            direction,
+            displaced,
+        } => with_displaced_hash(
+            run_transfer(&context, gates, generation, session, direction),
+            displaced,
+        ),
     };
     CompletedJob {
         intent_id,
@@ -598,7 +661,26 @@ fn run_job(job: QueuedJob, gates: &TransferGates) -> CompletedJob {
     }
 }
 
-fn run_probe(context: &JobContext, request: ProbeRequest) -> ProbeResult {
+/// Reads the local file a completed download displaces, so the apply
+/// on the tick thread compares bytes it never reads.
+fn with_displaced_hash(
+    outcome: ProviderJobOutcome,
+    check: Option<crate::local_hash::DisplacedFileCheck>,
+) -> ProviderJobOutcome {
+    match (outcome, check) {
+        (ProviderJobOutcome::TransferCompleted { outcome, .. }, Some(check)) => {
+            let displaced = check.run(outcome.bytes_total);
+            ProviderJobOutcome::TransferCompleted { outcome, displaced }
+        }
+        (outcome, _) => outcome,
+    }
+}
+
+fn run_probe(
+    context: &JobContext,
+    request: ProbeRequest,
+    may_hash: &dyn Fn() -> bool,
+) -> ProbeResult {
     let stat = request
         .want_stat
         .then(|| context.provider.stat(&request.remote_path));
@@ -624,10 +706,24 @@ fn run_probe(context: &JobContext, request: ProbeRequest) -> ProbeResult {
         }
         _ => None,
     };
+    let local_hashes = match (&stat, &request.local_hashes_if_absent) {
+        (Some(Ok(None)), Some(check)) => check.run(may_hash),
+        _ => crate::local_hash::LocalHashes::default(),
+    };
+    // After the stat: a root swapped between the two calls is caught,
+    // which the other order would miss.
+    let cloud_root_identity = match (&stat, &request.cloud_root_identity_of) {
+        (None | Some(Ok(None)), Some(cloud_root)) => {
+            Some(context.provider.root_identity(cloud_root))
+        }
+        _ => None,
+    };
     ProbeResult {
         stat,
         content_hash,
         subtree,
+        local_hashes,
+        cloud_root_identity,
     }
 }
 
@@ -741,6 +837,10 @@ fn run_transfer(
                 // nothing from the bucket.
                 if !probing {
                     refund(context, direction, grant.saturating_sub(bytes_transferred));
+                    // A session that cannot send less than a whole chunk
+                    // moved more than its grant: the bucket pays for
+                    // those bytes too.
+                    charge(context, direction, bytes_transferred.saturating_sub(grant));
                 }
                 if bytes_transferred == 0 {
                     zero_progress_steps += 1;
@@ -761,6 +861,13 @@ fn run_transfer(
             }
             Ok(TransferStep::Completed(outcome)) => {
                 let done = context.clock.now();
+                if !probing {
+                    // What was left is what this step moved, at most
+                    // the whole object: a source that shrank during the
+                    // transfer moved less than was left.
+                    let moved = left_before.unwrap_or(0).min(outcome.bytes_total);
+                    charge(context, direction, moved.saturating_sub(grant));
+                }
                 // The step that ends a transfer also finishes it at
                 // the provider, and a provider that sends a small file
                 // in one request sends it here: the time covers more
@@ -772,7 +879,10 @@ fn run_transfer(
                     done,
                     crate::bandwidth::StepReading::AtLeast,
                 );
-                return ProviderJobOutcome::TransferCompleted(outcome);
+                return ProviderJobOutcome::TransferCompleted {
+                    outcome,
+                    displaced: None,
+                };
             }
             Err(error) => {
                 // A failed step moved zero bytes: refund the whole grant
@@ -795,6 +905,13 @@ fn refund(context: &JobContext, direction: TransferDirection, unused: u64) {
         return;
     }
     context.bandwidth.shaper(direction).refund(unused);
+}
+
+fn charge(context: &JobContext, direction: TransferDirection, extra: u64) {
+    if extra == 0 {
+        return;
+    }
+    context.bandwidth.shaper(direction).charge(extra);
 }
 
 #[cfg(test)]
@@ -1011,6 +1128,66 @@ mod tests {
         ));
     }
 
+    /// A session that sends a whole chunk whatever the grant was, as a
+    /// resumable upload to Google Drive does.
+    struct WholeChunkSession {
+        left: u64,
+    }
+
+    const CHUNK_BYTES: u64 = 256 * 1024;
+
+    impl TransferSession for WholeChunkSession {
+        fn step(&mut self, _max_bytes: u64) -> Result<TransferStep, ProviderError> {
+            let moved = CHUNK_BYTES.min(self.left);
+            self.left -= moved;
+            Ok(TransferStep::Progressed {
+                bytes_transferred: moved,
+            })
+        }
+        fn step_bytes(&self) -> u64 {
+            CHUNK_BYTES
+        }
+        fn remaining_bytes(&self) -> Option<u64> {
+            Some(self.left.max(1))
+        }
+        fn abort(&mut self) {}
+    }
+
+    #[test]
+    fn a_step_that_moves_more_than_its_grant_is_paid_for_before_the_next_step() {
+        let provider: Arc<dyn Provider> = Arc::new(StubProvider::new());
+        let context = context(provider);
+        // 64 000 bytes a second: a quarter of one chunk.
+        context.bandwidth.pin_capacity_kbps(512);
+        context.bandwidth.apply_ceiling(100, context.clock.now());
+        let gates = TransferGates::new();
+
+        let outcome = run_transfer(
+            &context,
+            &gates,
+            gates.generation.load(Ordering::SeqCst),
+            Box::new(WholeChunkSession {
+                left: 4 * CHUNK_BYTES,
+            }),
+            TransferDirection::Upload,
+        );
+
+        // The first grant is one second of rate at most, and the step
+        // sent a whole chunk on it. The session holds until the refill
+        // has paid for the three quarters that no grant covered.
+        let ProviderJobOutcome::TransferHeld {
+            resume_after: Some(wait),
+            ..
+        } = outcome
+        else {
+            panic!("the transfer holds for the bucket");
+        };
+        assert!(
+            wait >= Duration::from_secs(3),
+            "about 198 KiB of debt at 64 000 bytes a second, got {wait:?}"
+        );
+    }
+
     #[test]
     fn threaded_provider_call_delivers_its_result_and_reports_panics() {
         let waker = Arc::new(TickWaker::default());
@@ -1058,6 +1235,8 @@ mod tests {
                 want_stat: true,
                 hash: ProbeHash::Never,
                 want_subtree_listing: false,
+                local_hashes_if_absent: None,
+                cloud_root_identity_of: None,
             }),
         );
         let completed = pool.harvest();

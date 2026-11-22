@@ -26,7 +26,7 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             id: "S11",
             name: "keep-both-conflict",
-            proves: "a path that diverged on both sides while the daemon was down keeps both payloads via a ~conflict copy",
+            proves: "a path that diverged on both sides while the daemon was down keeps both payloads via a ~conflict copy, and the timeline names the file",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
             run: keep_both_conflict,
@@ -188,6 +188,22 @@ fn keep_both_conflict(ctx: &mut Ctx) -> Result<(), Failure> {
         tree_contains_content(&home.local, b"edited in cloud while down\n")
             || tree_contains_content(&home.cloud, b"edited in cloud while down\n"),
         "the cloud edit was lost"
+    );
+    // The timeline names the conflicted file, so a notification can too.
+    let timeline = ctx.cli().json(&["timeline", "--json"])?;
+    let named = timeline["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|entry| {
+            entry["kind"] == "conflict"
+                && entry["message"]
+                    .as_str()
+                    .is_some_and(|message| message.ends_with("doc.txt"))
+        });
+    ensure!(
+        named,
+        "no conflict entry on the timeline names doc.txt: {timeline}"
     );
     ctx.allow_warning("Resolved concurrent divergence by keeping both versions");
     Ok(())

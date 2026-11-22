@@ -153,6 +153,54 @@ pub fn filesystem_roots_overlap(local_root: &Path, cloud_root: &str) -> Option<S
     )
 }
 
+/// Whether the local roots of two profiles nest: one lies inside the
+/// other. Returns the reason to refuse the pair. The same folder for
+/// both is no nesting: two profiles may share a local root, and each
+/// sends it to its own cloud.
+pub fn local_roots_nest(first: &Path, second: &Path) -> Option<String> {
+    roots_nest(first, second, &crate::name_collision::folds_case_at)
+}
+
+/// Whether the local roots of two profiles are one folder.
+pub fn local_roots_are_one(first: &Path, second: &Path) -> bool {
+    let folds_case = &crate::name_collision::folds_case_at;
+    OverlapPath::of(first, folds_case).compared == OverlapPath::of(second, folds_case).compared
+}
+
+/// Whether the cloud roots of two `filesystem` profiles are one
+/// folder, or one inside the other. Returns how they overlap.
+pub fn filesystem_cloud_roots_overlap(first: &str, second: &str) -> Option<String> {
+    let folds_case = &crate::name_collision::folds_case_at;
+    let (first, second) = (Path::new(first), Path::new(second));
+    let one = OverlapPath::of(first, folds_case);
+    if one.compared == OverlapPath::of(second, folds_case).compared {
+        return Some(format!("both are {}", one.shown.display()));
+    }
+    roots_nest(first, second, folds_case)
+}
+
+fn roots_nest(first: &Path, second: &Path, folds_case: &dyn Fn(&Path) -> bool) -> Option<String> {
+    let first = OverlapPath::of(first, folds_case);
+    let second = OverlapPath::of(second, folds_case);
+    if first.compared == second.compared {
+        None
+    } else if second.compared.starts_with(&first.compared) {
+        Some(format!(
+            "{} is inside {}",
+            second.shown.display(),
+            first.shown.display()
+        ))
+    } else if first.compared.starts_with(&second.compared) {
+        Some(format!(
+            "{} is inside {}",
+            first.shown.display(),
+            second.shown.display()
+        ))
+    } else {
+        None
+    }
+}
+
 /// `folds_case` says whether the volume of a folder that exists folds
 /// names; it is asked about the deepest ancestor that exists.
 fn roots_overlap(
@@ -223,6 +271,14 @@ impl OverlapPath {
                     ancestor = parent;
                 }
                 _ => {
+                    // A `..` after a folder that does not exist yet has
+                    // no name to carry over. Once the folder is made,
+                    // `..` leads back out of it, so the path is read
+                    // that way.
+                    let plain = without_dot_components(path);
+                    if plain != path {
+                        return Self::of(&plain, folds_case);
+                    }
                     return Self {
                         shown: path.to_path_buf(),
                         compared: path.to_path_buf(),
@@ -231,6 +287,23 @@ impl OverlapPath {
             }
         }
     }
+}
+
+/// `path` with each `.` dropped and each `..` taken with the name
+/// before it, by the text alone.
+fn without_dot_components(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut plain = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                plain.pop();
+            }
+            other => plain.push(other.as_os_str()),
+        }
+    }
+    plain
 }
 
 /// The full path a root value names: `~` expands against the home
@@ -335,6 +408,30 @@ mod tests {
         let scope = resolve_scope(&config, Some(home.as_path()));
 
         assert_eq!(scope.cloud_root, "/Backups/Vapor");
+    }
+
+    #[test]
+    fn local_roots_nest_when_one_is_inside_the_other_and_not_when_they_are_equal_or_apart() {
+        let temp = TempDir::new().expect("temp dir");
+        let base = vapor_shared::paths::canonicalize(temp.path()).expect("canonical base");
+        let docs = base.join("Docs");
+        std::fs::create_dir_all(&docs).expect("docs");
+
+        assert!(local_roots_nest(&docs, &docs).is_none(), "one folder");
+        assert!(
+            local_roots_nest(&docs, &base.join("Docs2")).is_none(),
+            "a name that only starts the same is another folder"
+        );
+        let inside = local_roots_nest(&docs, &docs.join("work")).expect("inside");
+        assert!(inside.contains("is inside"), "{inside}");
+        assert!(local_roots_nest(&docs.join("work"), &docs).is_some());
+        // A `..` after a folder that does not exist yet still leads to
+        // the folder it names.
+        assert!(
+            local_roots_nest(&docs, &base.join("new/../Docs/work")).is_some(),
+            "the path names a folder inside Docs"
+        );
+        assert!(local_roots_nest(&docs, &base.join("new/../Other")).is_none());
     }
 
     #[test]

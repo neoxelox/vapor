@@ -166,6 +166,16 @@ pub struct SharedEventPathFilter {
     /// a file the old rules hid is in scope now, and nothing else
     /// would notice it until it changes.
     rules_generation: std::sync::atomic::AtomicU64,
+    /// Whether the ignore files of the tree were read one time. Until
+    /// then the rules in force are the ones `vapor.json` gives, and
+    /// nothing is released on their word alone.
+    first_rules_landed: AtomicBool,
+    /// When a rebuild that failed is tried again. While it is set the
+    /// rules in force are out of date, like while a rebuild runs.
+    retry_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Makes the next rebuild fail, to test what a failure does.
+    #[cfg(test)]
+    fail_next_rebuild: AtomicBool,
 }
 
 impl std::fmt::Debug for SharedEventPathFilter {
@@ -178,19 +188,66 @@ impl std::fmt::Debug for SharedEventPathFilter {
 }
 
 impl SharedEventPathFilter {
+    /// The rules `vapor.json` gives are in force at once. The ignore
+    /// files of the tree are read by the first [`Self::drive_rebuild`],
+    /// which the daemon runs on a worker: the walk for them can take
+    /// long in a large tree, and a profile is composed on the tick
+    /// thread. [`Self::rules_ready`] says when they are in.
     pub fn new(watch_root: &Path, options: EventPathFilterOptions) -> Self {
-        let filter = EventPathFilter::for_watch_root(watch_root, &options);
+        let filter = EventPathFilter::without_ignore_files(watch_root, &options);
         Self {
             watch_root: watch_root.to_path_buf(),
             options: RwLock::new(options),
             filter: RwLock::new(filter),
-            reload_requested: AtomicBool::new(false),
+            reload_requested: AtomicBool::new(true),
             rebuild: std::sync::Mutex::new(None),
             rebuilds_started: std::sync::atomic::AtomicU64::new(0),
             rebuilds_landed: std::sync::atomic::AtomicU64::new(0),
             awaited_ignore_files: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             rules_generation: std::sync::atomic::AtomicU64::new(0),
+            first_rules_landed: AtomicBool::new(false),
+            retry_at: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            fail_next_rebuild: AtomicBool::new(false),
         }
+    }
+
+    /// [`Self::new`] with the ignore files read before it returns, for
+    /// a caller with no tick loop to drive the first rebuild.
+    pub fn with_ignore_files_read(watch_root: &Path, options: EventPathFilterOptions) -> Self {
+        let filter = Self::new(watch_root, options);
+        filter.rebuild_if_requested();
+        filter
+    }
+
+    /// Whether the ignore files of the tree were read one time.
+    pub fn rules_ready(&self) -> bool {
+        self.first_rules_landed.load(Ordering::Acquire)
+    }
+
+    /// Whether a rebuild was asked for, runs, or failed and waits for
+    /// its next try: the rules in force may not be the rules of the
+    /// ignore files as they are now.
+    pub fn rebuild_pending(&self) -> bool {
+        self.reload_requested.load(Ordering::Acquire)
+            || self
+                .rebuild
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some()
+            || self
+                .retry_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some()
+    }
+
+    /// The number of the last rebuild that put its rules in force. Each
+    /// runtime that reads this filter compares it with the number it
+    /// saw last: profiles with one local root share the filter, and
+    /// each one has its own folders that wait for a rebuild.
+    pub(crate) fn rebuilds_landed(&self) -> u64 {
+        self.rebuilds_landed.load(Ordering::Acquire)
     }
 
     /// Whether the rules in force were read from the ignore file at
@@ -312,14 +369,29 @@ impl SharedEventPathFilter {
     /// a finished one in force, and starts one when a reload was
     /// requested and none runs. With a threaded `mode` the walk and the
     /// compilation run on a worker and land on a later call; inline,
-    /// they finish in this call. Returns whether new rules went in
-    /// force.
-    pub(crate) fn drive_rebuild(&self, mode: &crate::provider_jobs::ProviderCallMode) -> bool {
+    /// they finish in this call. A rebuild that fails lands nothing
+    /// and is tried again later: [`Self::rebuild_pending`] stays true,
+    /// so nothing is released on the word of rules that may be out of
+    /// date.
+    pub(crate) fn drive_rebuild(&self, mode: &crate::provider_jobs::ProviderCallMode) {
         let mut rebuild = self
             .rebuild
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if rebuild.is_none() && self.reload_requested.swap(false, Ordering::AcqRel) {
+        let retry_due = {
+            let mut retry_at = self
+                .retry_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let due = retry_at.is_some_and(|at| std::time::Instant::now() >= at);
+            if due {
+                *retry_at = None;
+            }
+            due
+        };
+        let requested = self.reload_requested.load(Ordering::Acquire);
+        if rebuild.is_none() && (requested || retry_due) {
+            self.reload_requested.store(false, Ordering::Release);
             let watch_root = self.watch_root.clone();
             let options = self
                 .options
@@ -327,9 +399,13 @@ impl SharedEventPathFilter {
                 .expect("SharedEventPathFilter options lock poisoned")
                 .clone();
             let number = self.rebuilds_started.fetch_add(1, Ordering::AcqRel) + 1;
+            #[cfg(test)]
+            let fail = self.fail_next_rebuild.swap(false, Ordering::AcqRel);
             *rebuild = Some((
                 number,
                 crate::provider_jobs::ProviderCall::start(mode, "ignore-rules", move || {
+                    #[cfg(test)]
+                    assert!(!fail, "a rebuild that a test made fail");
                     EventPathFilter::for_watch_root(&watch_root, &options)
                 }),
             ));
@@ -338,23 +414,37 @@ impl SharedEventPathFilter {
             .as_mut()
             .and_then(|(number, call)| call.take().map(|outcome| (*number, outcome)))
         else {
-            return false;
+            return;
         };
         *rebuild = None;
-        self.rebuilds_landed.store(number, Ordering::Release);
         let rebuilt = match outcome {
             Ok(rebuilt) => rebuilt,
             Err(panic) => {
                 logging::warning(
-                    "Could not rebuild the ignore rules; the rules in force stay",
+                    "Could not read the ignore rules; no local change is released until they are read",
                     &[
                         ("watch_root", self.watch_root.display().to_string()),
                         ("error", panic),
+                        (
+                            "retry_in_seconds",
+                            constants::engine::IGNORE_RULES_RETRY_SECONDS.to_string(),
+                        ),
                     ],
                 );
-                return false;
+                *self
+                    .retry_at
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(
+                    std::time::Instant::now()
+                        + std::time::Duration::from_secs(
+                            constants::engine::IGNORE_RULES_RETRY_SECONDS,
+                        ),
+                );
+                return;
             }
         };
+        self.rebuilds_landed.store(number, Ordering::Release);
+        let first = !self.first_rules_landed.swap(true, Ordering::AcqRel);
         let changed = {
             let mut filter = self
                 .filter
@@ -364,23 +454,27 @@ impl SharedEventPathFilter {
             *filter = rebuilt;
             changed
         };
-        if changed {
+        // The first rules replace nothing that was acted on, so they
+        // free nothing a reconcile would have to find.
+        if changed && !first {
             self.rules_generation.fetch_add(1, Ordering::AcqRel);
         }
         logging::info(
             "Reloaded the ignore rules",
             &[
                 ("watch_root", self.watch_root.display().to_string()),
+                ("first", first.to_string()),
                 ("rules_changed", changed.to_string()),
             ],
         );
-        true
     }
 
     /// Rebuilds the filter in this call when a reload was requested;
-    /// returns whether a rebuild happened.
+    /// returns whether a rebuild put its rules in force.
     pub fn rebuild_if_requested(&self) -> bool {
-        self.drive_rebuild(&crate::provider_jobs::ProviderCallMode::Inline)
+        let before = self.rebuilds_landed();
+        self.drive_rebuild(&crate::provider_jobs::ProviderCallMode::Inline);
+        self.rebuilds_landed() != before
     }
 }
 
@@ -407,7 +501,10 @@ impl FsEventsWatcher {
         filter_options: EventPathFilterOptions,
     ) -> Result<Self, FsEventsWatcherError> {
         let watch_root = normalize_watch_root(watch_root.into())?;
-        let path_filter = Arc::new(SharedEventPathFilter::new(&watch_root, filter_options));
+        let path_filter = Arc::new(SharedEventPathFilter::with_ignore_files_read(
+            &watch_root,
+            filter_options,
+        ));
         Self::start_with_shared_filter(watch_root, recorder, path_filter)
     }
 
@@ -905,11 +1002,110 @@ mod tests {
     }
 
     #[test]
+    fn the_ignore_files_are_read_by_the_first_rebuild_not_by_the_constructor() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        fs::create_dir_all(&watch_root).expect("create watch root");
+        fs::write(watch_root.join(".gitignore"), "generated/\n").expect("write .gitignore");
+        let options = EventPathFilterOptions {
+            pre_user_rules: vec!["*.tmp".to_string()],
+            post_user_rules: Vec::new(),
+            ..EventPathFilterOptions::default()
+        };
+
+        let path_filter = SharedEventPathFilter::new(&watch_root, options);
+        // The rules of the settings hold at once; the ignore files wait
+        // for the rebuild, and the filter says so.
+        assert!(path_filter.should_ignore(&watch_root.join("scratch.tmp")));
+        assert!(!path_filter.should_ignore(&watch_root.join("generated/app.js")));
+        assert!(!path_filter.rules_ready());
+        assert!(path_filter.rebuild_pending());
+
+        assert!(path_filter.rebuild_if_requested());
+        assert!(path_filter.rules_ready());
+        assert!(!path_filter.rebuild_pending());
+        assert!(path_filter.should_ignore(&watch_root.join("generated/app.js")));
+        assert_eq!(
+            path_filter.rules_generation(),
+            0,
+            "the first rules replace nothing that was acted on"
+        );
+    }
+
+    /// Runs the rebuild that is due on a worker thread, where a panic
+    /// is caught as it is in the daemon, and waits for its end. Bounded
+    /// by count: the loop ends as soon as the worker delivers.
+    fn drive_rebuild_on_a_worker(path_filter: &SharedEventPathFilter) {
+        let mode = crate::provider_jobs::ProviderCallMode::Threaded { waker: None };
+        for _ in 0..10_000_000 {
+            path_filter.drive_rebuild(&mode);
+            let in_flight = path_filter.rebuild.lock().expect("rebuild").is_some();
+            if !in_flight && !path_filter.reload_requested.load(Ordering::Acquire) {
+                return;
+            }
+            std::thread::yield_now();
+        }
+        panic!("the rebuild never finished");
+    }
+
+    #[test]
+    fn a_rebuild_that_fails_keeps_the_wait_and_is_tried_again() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        fs::create_dir_all(&watch_root).expect("create watch root");
+        fs::write(watch_root.join(".gitignore"), "secret.txt\n").expect("write .gitignore");
+        let path_filter =
+            SharedEventPathFilter::new(&watch_root, EventPathFilterOptions::default());
+        let secret = watch_root.join("secret.txt");
+
+        // The first read of the ignore files fails. Nothing may be
+        // released on the rules of the settings alone: the name that
+        // the ignore file hides is not hidden yet.
+        path_filter.fail_next_rebuild.store(true, Ordering::Release);
+        drive_rebuild_on_a_worker(&path_filter);
+        assert!(!path_filter.should_ignore(&secret));
+        assert!(!path_filter.rules_ready(), "the first rules are not in");
+        assert!(path_filter.rebuild_pending(), "the wait goes on");
+        assert_eq!(path_filter.rebuilds_landed(), 0);
+
+        // Before the retry is due nothing starts.
+        drive_rebuild_on_a_worker(&path_filter);
+        assert!(!path_filter.rules_ready());
+
+        // The retry is due, and this time the read works.
+        *path_filter.retry_at.lock().expect("retry") = Some(std::time::Instant::now());
+        drive_rebuild_on_a_worker(&path_filter);
+        assert!(path_filter.rules_ready());
+        assert!(!path_filter.rebuild_pending());
+        assert!(path_filter.should_ignore(&secret));
+
+        // A reload that fails keeps the wait too, and the rules in
+        // force stay until the retry lands.
+        fs::write(watch_root.join(".gitignore"), "secret.txt\nother.txt\n")
+            .expect("rewrite .gitignore");
+        path_filter.request_reload();
+        path_filter.fail_next_rebuild.store(true, Ordering::Release);
+        let landed_before = path_filter.rebuilds_landed();
+        drive_rebuild_on_a_worker(&path_filter);
+        assert!(path_filter.rebuild_pending());
+        assert!(path_filter.should_ignore(&secret));
+        assert!(!path_filter.should_ignore(&watch_root.join("other.txt")));
+        assert_eq!(path_filter.rebuilds_landed(), landed_before);
+        *path_filter.retry_at.lock().expect("retry") = Some(std::time::Instant::now());
+        drive_rebuild_on_a_worker(&path_filter);
+        assert!(path_filter.should_ignore(&watch_root.join("other.txt")));
+        assert!(
+            path_filter.rebuilds_landed() > landed_before,
+            "every reader of the filter sees that a rebuild landed"
+        );
+    }
+
+    #[test]
     fn observing_an_ignore_file_change_requests_a_filter_reload() {
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         fs::create_dir_all(&watch_root).expect("create watch root");
-        let path_filter = SharedEventPathFilter::new(
+        let path_filter = SharedEventPathFilter::with_ignore_files_read(
             &watch_root,
             EventPathFilterOptions {
                 pre_user_rules: Vec::new(),

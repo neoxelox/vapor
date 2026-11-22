@@ -606,19 +606,20 @@ impl Provider for FilesystemProvider {
                 request.remote_path
             ))
         })?;
+        // A full volume can refuse the folder or the temp file, before
+        // the first byte is written. That is the cloud being full too.
         fs::create_dir_all(parent).map_err(|error| {
+            if error.kind() == io::ErrorKind::StorageFull {
+                return upload_write_error(&request.remote_path, "create", &error);
+            }
             ProviderError::transient(format!(
                 "cannot create remote parent directory for {}: {error}",
                 request.remote_path
             ))
         })?;
         let temp_path = parent.join(temp_file_name(&request.op_id));
-        let temp = fs::File::create(&temp_path).map_err(|error| {
-            ProviderError::transient(format!(
-                "cannot create temp file for {}: {error}",
-                request.remote_path
-            ))
-        })?;
+        let temp = fs::File::create(&temp_path)
+            .map_err(|error| upload_write_error(&request.remote_path, "create", &error))?;
 
         // Resolve the precondition into a phase. `HashEquals` opens the
         // target now (cheap) and defers the actual read to budgeted

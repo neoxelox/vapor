@@ -514,6 +514,15 @@ fn plan(
     {
         return invalid(format!("invalid sync directories: {reason}"));
     }
+    if let Some(problem) = vapor_daemon::profiles::neighbour_problem(
+        existing,
+        &provider,
+        &local_resolved,
+        &scope.cloud_root,
+        scope.sync_mode,
+    ) {
+        return invalid(problem);
+    }
     Ok(PlannedProfile {
         id,
         name: request.name.clone().filter(|name| !name.trim().is_empty()),
@@ -1158,6 +1167,69 @@ mod tests {
             assert!(error.to_string().contains(expected), "{error}");
         }
         assert!(!path.exists(), "a refused add writes nothing");
+    }
+
+    #[test]
+    fn add_refuses_a_local_folder_inside_the_folder_of_another_profile() {
+        let temp = TempDir::new().expect("temp");
+        let path = config_path(&temp);
+        let first = request(&temp, "home");
+        add(&path, &storage(&temp), &first, None, now()).expect("first");
+        let before = std::fs::read_to_string(&path).expect("read");
+
+        let nested = AddRequest {
+            id: Some("work".to_string()),
+            local: Some(format!("{}/work", first.local.clone().unwrap())),
+            ..request(&temp, "work")
+        };
+        let error = add(&path, &storage(&temp), &nested, None, now())
+            .expect_err("a folder inside another profile's folder");
+        assert!(error.to_string().contains("overlaps"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            before,
+            "a refused add writes nothing"
+        );
+
+        // The same folder as a pull-only mirror of another cloud would
+        // remove the files of the first profile.
+        let mirror = AddRequest {
+            id: Some("mirror".to_string()),
+            local: first.local.clone(),
+            mode: Some("pull-only".to_string()),
+            ..request(&temp, "mirror")
+        };
+        let error = add(&path, &storage(&temp), &mirror, None, now())
+            .expect_err("a pull-only profile on a shared folder");
+        assert!(error.to_string().contains("`pull-only`"), "{error}");
+
+        // The same folder for a cloud folder inside the first one would
+        // copy each file without end.
+        let inside = AddRequest {
+            id: Some("inside".to_string()),
+            local: first.local.clone(),
+            cloud: Some(format!("{}/sub", first.cloud.clone().unwrap())),
+            ..request(&temp, "inside")
+        };
+        let error = add(&path, &storage(&temp), &inside, None, now())
+            .expect_err("a cloud folder inside the other cloud folder");
+        assert!(
+            error.to_string().contains("cloud folders overlap"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            before,
+            "a refused add writes nothing"
+        );
+
+        // The same folder for a second cloud is allowed.
+        let shared = AddRequest {
+            id: Some("backup".to_string()),
+            local: first.local.clone(),
+            ..request(&temp, "backup")
+        };
+        add(&path, &storage(&temp), &shared, None, now()).expect("the same folder");
     }
 
     #[test]

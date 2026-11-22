@@ -104,6 +104,22 @@ pub fn scenarios() -> Vec<Scenario> {
             run: two_profiles_isolated,
         },
         Scenario {
+            id: "S74",
+            name: "nested-profile-does-not-run",
+            proves: "a profile in vapor.json whose local folder is inside the one of an earlier profile does not run: vapor status lists it as suspended with the reason, neither of its folders is created, and the earlier profile syncs",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: nested_profile_does_not_run,
+        },
+        Scenario {
+            id: "S71",
+            name: "pause-one-profile",
+            proves: "vapor pause --profile stops one profile while the other keeps syncing, resume --profile lets its file through, reconcile --profile is accepted, and a name with no profile behind it is refused with the names there are",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: pause_one_profile,
+        },
+        Scenario {
             id: "S31",
             name: "mass-delete-decision-apply",
             proves: "a burst of local deletions is held whole behind a mass-delete decision while other work continues; vapor decisions resolve --choose apply releases it",
@@ -139,6 +155,14 @@ pub fn scenarios() -> Vec<Scenario> {
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
             run: trash_keeps_cloud_deletions,
+        },
+        Scenario {
+            id: "S72",
+            name: "sync-now-after-a-full-cloud",
+            proves: "an upload that finds the cloud folder's volume full is not failed: the profile reports that uploads wait; once there is room, vapor reconcile tries the waiting upload at once, with no wait for the next automatic try",
+            needs: &[Need::NativeWatcher, Need::Filesystem, Need::DiskImage],
+            expect: Expect::Pass,
+            run: sync_now_after_a_full_cloud,
         },
         Scenario {
             id: "S49",
@@ -597,6 +621,162 @@ fn two_profiles_isolated(ctx: &mut Ctx) -> Result<(), Failure> {
     Ok(())
 }
 
+fn nested_profile_does_not_run(ctx: &mut Ctx) -> Result<(), Failure> {
+    let outer_local = ctx.sandbox.root.join("outer-local");
+    let outer_cloud = ctx.sandbox.root.join("cloud").join("Outer");
+    let inner_local = outer_local.join("inner");
+    let inner_cloud = ctx.sandbox.root.join("cloud").join("Inner");
+    // A file edited by hand: `vapor profiles add` refuses this pair.
+    let profiles = serde_json::json!([
+        {
+            "id": "outer",
+            "enabled": true,
+            "localRoot": outer_local.to_string_lossy(),
+            "cloudRoot": outer_cloud.to_string_lossy(),
+        },
+        {
+            "id": "inner",
+            "enabled": true,
+            "localRoot": inner_local.to_string_lossy(),
+            "cloudRoot": inner_cloud.to_string_lossy(),
+        }
+    ]);
+    ctx.cli().config_set("profiles", &profiles.to_string())?;
+    // The state of the whole daemon is the worst one of its profiles,
+    // so it does not say `running` here.
+    let home = ctx.primary.clone();
+    let kind = ctx.paths.daemon_kind;
+    ctx.start_daemon_in(&home, kind, false)?;
+    ctx.allow_warning("Suspending a profile that cannot run as configured");
+    let cli = ctx.cli();
+    let profile = |id: &str| {
+        cli.status()?
+            .profiles
+            .into_iter()
+            .find(|profile| profile.id == id)
+    };
+    ctx.wait_until(CONVERGE_TIMEOUT, "outer to run", || {
+        profile("outer").is_some_and(|outer| outer.run.state == "running")
+    })?;
+    let inner = profile("inner").ok_or_else(|| Failure::new("status does not list inner"))?;
+    ensure!(
+        inner.suspended,
+        "the nested profile must not run: {:?}",
+        inner.run
+    );
+    ensure!(
+        inner
+            .run
+            .reason
+            .contains("overlaps the one of profile `outer`"),
+        "the reason does not name the other profile: {}",
+        inner.run.reason
+    );
+
+    write_file(&outer_local.join("note.txt"), "outer payload\n")?;
+    ctx.wait_exists(&outer_cloud.join("note.txt"), CONVERGE_TIMEOUT)?;
+    ensure!(
+        !inner_local.exists() && !inner_cloud.exists(),
+        "a profile that does not run made one of its folders"
+    );
+
+    let oracle = crate::oracle::TreeOracle::new(&crate::oracle::OracleOptions {
+        extra_ignore_rules: Vec::new(),
+        compare_mode: cfg!(unix),
+    })?;
+    let report = oracle.compare(&outer_local, &outer_cloud)?;
+    ensure!(report.is_clean(), "profile outer: {}", report.summary(10));
+    ctx.set_oracle(OracleMode::Skip(
+        "the profiles use their own roots; the one that runs is compared above".to_string(),
+    ));
+    Ok(())
+}
+
+fn pause_one_profile(ctx: &mut Ctx) -> Result<(), Failure> {
+    let alpha_local = ctx.sandbox.root.join("alpha-local");
+    let alpha_cloud = ctx.sandbox.root.join("cloud").join("Alpha");
+    let beta_local = ctx.sandbox.root.join("beta-local");
+    let beta_cloud = ctx.sandbox.root.join("cloud").join("Beta");
+    let profiles = serde_json::json!([
+        {
+            "id": "alpha",
+            "name": "Alpha",
+            "enabled": true,
+            "localRoot": alpha_local.to_string_lossy(),
+            "cloudRoot": alpha_cloud.to_string_lossy(),
+        },
+        {
+            "id": "beta",
+            "name": "Beta",
+            "enabled": true,
+            "localRoot": beta_local.to_string_lossy(),
+            "cloudRoot": beta_cloud.to_string_lossy(),
+        }
+    ]);
+    ctx.cli().config_set("profiles", &profiles.to_string())?;
+    ctx.start_daemon()?;
+    let cli = ctx.cli();
+    let run_state_of = |id: &str| -> Option<String> {
+        cli.status()?
+            .profiles
+            .into_iter()
+            .find(|profile| profile.id == id)
+            .map(|profile| profile.run.state)
+    };
+
+    // A name with no profile behind it changes nothing, and the answer
+    // lists the names there are.
+    let unknown = cli.run(&["pause", "--profile", "gamma", "--json"])?;
+    ensure!(
+        !unknown.success(),
+        "a pause for a profile that does not exist was accepted"
+    );
+    ensure!(
+        unknown.stdout.contains("alpha") && unknown.stdout.contains("beta"),
+        "the refusal does not list the profiles: {}",
+        unknown.combined()
+    );
+
+    cli.ok(&["pause", "--profile", "alpha"])?;
+    ctx.wait_until(CONVERGE_TIMEOUT, "alpha to report paused", || {
+        run_state_of("alpha").as_deref() == Some("paused")
+    })?;
+    ensure!(
+        run_state_of("beta").as_deref() == Some("running"),
+        "the pause of alpha reached beta: {:?}",
+        run_state_of("beta")
+    );
+
+    write_file(&alpha_local.join("a.txt"), "alpha payload\n")?;
+    write_file(&beta_local.join("b.txt"), "beta payload\n")?;
+    ctx.wait_exists(&beta_cloud.join("b.txt"), CONVERGE_TIMEOUT)?;
+    // The comparison of beta's folders is beta's alone.
+    cli.ok(&["reconcile", "--profile", "beta"])?;
+    ensure!(
+        !alpha_cloud.join("a.txt").exists(),
+        "the paused profile synced a file"
+    );
+
+    cli.ok(&["resume", "--profile", "alpha"])?;
+    ctx.wait_exists(&alpha_cloud.join("a.txt"), CONVERGE_TIMEOUT)?;
+
+    let oracle = crate::oracle::TreeOracle::new(&crate::oracle::OracleOptions {
+        extra_ignore_rules: Vec::new(),
+        compare_mode: cfg!(unix),
+    })?;
+    for (label, local, cloud) in [
+        ("alpha", &alpha_local, &alpha_cloud),
+        ("beta", &beta_local, &beta_cloud),
+    ] {
+        let report = oracle.compare(local, cloud)?;
+        ensure!(report.is_clean(), "profile {label}: {}", report.summary(10));
+    }
+    ctx.set_oracle(OracleMode::Skip(
+        "profiles use their own roots; compared explicitly above".to_string(),
+    ));
+    Ok(())
+}
+
 /// The one open mass-delete decision, once the daemon has opened it.
 fn wait_open_mass_deletion(cli: &crate::cli::Cli, timeout: Duration) -> Result<i64, Failure> {
     let mut found = None;
@@ -1012,6 +1192,63 @@ fn trash_on_the_sync_root_volume(ctx: &mut Ctx) -> Result<(), Failure> {
         after["entries"].as_array().is_some_and(Vec::is_empty),
         "a restored entry must leave the trash: {after}"
     );
+    ctx.keep_alive(Box::new(image));
+    Ok(())
+}
+
+fn sync_now_after_a_full_cloud(ctx: &mut Ctx) -> Result<(), Failure> {
+    use std::io::Write;
+
+    let mut home = ctx.primary.clone();
+    // The cloud folder sits on a small volume of its own, next to a
+    // filler file that is not part of the sync scope.
+    let image = DiskImage::create(&ctx.sandbox.root, "cloud-volume", 64, ImageFs::Apfs)?;
+    home.cloud = image.mount_point.join("cloud");
+    ctx.register_home(home.clone());
+    ctx.configure_scope(&home)?;
+    ctx.start_daemon()?;
+    ctx.settle_home(&home, Duration::from_secs(3), Duration::from_secs(60))?;
+    ctx.allow_warning("The cloud has no room");
+
+    let filler = image.mount_point.join("filler.bin");
+    let mut file = fs::File::create(&filler)?;
+    let chunk = vec![0xA5u8; 1024 * 1024];
+    let mut filled = 0usize;
+    while file.write_all(&chunk).is_ok() {
+        filled += 1;
+        ensure!(filled < 128, "a 64 MiB volume took more than 128 MiB");
+    }
+    let _ = file.sync_all();
+    drop(file);
+
+    let local = home.local.join("docs/big.bin");
+    let cloud = home.cloud.join("docs/big.bin");
+    write_file(&local, vec![0x5Au8; 2 * 1024 * 1024])?;
+    let cli = ctx.cli();
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "the profile to say that uploads wait",
+        || {
+            cli.status()
+                .is_some_and(|status| status.run.reason.contains("uploads wait"))
+        },
+    )?;
+    ensure!(
+        !cloud.exists(),
+        "an upload got through to a volume with no room"
+    );
+    ensure!(
+        ctx.db().failed_intents().unwrap_or(0) == 0,
+        "a full cloud must make the upload wait, not fail"
+    );
+
+    // Room comes back. The next automatic try is 15 minutes away; the
+    // request is what brings the upload forward.
+    fs::remove_file(&filler)?;
+    cli.reconcile()?;
+    ctx.wait_same_content(&local, &cloud, CONVERGE_TIMEOUT)?;
+    cli.wait_run_state("running", CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
     ctx.keep_alive(Box::new(image));
     Ok(())
 }

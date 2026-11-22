@@ -162,7 +162,17 @@ with the sign-in and the background service; `remove`
 needs the daemon stopped, forgets the profile's sync state and
 sign-in, keeps its trash, and leaves the files on both sides. Each
 entry runs as an isolated pipeline with its own state database, trash,
-and queue:
+and queue. Two profiles may have the same `localRoot`, each with its
+own cloud folder. Two pairs on one folder are refused: one with a
+`pull-only` profile, which removes every file that its own cloud
+folder does not hold, and two `filesystem` profiles whose cloud
+folders are one folder or one inside the other. With Google Drive,
+give two profiles that share a folder cloud folders that are apart:
+Vapor does not check that yet. A `localRoot` inside the one of another
+profile is refused too. For each refused pair, `vapor profiles add`
+does not write the profile, and in a file edited by hand the later
+profile of the pair does not run and `vapor status` gives the reason.
+
 
 | Field | Required | Meaning |
 | --- | --- | --- |

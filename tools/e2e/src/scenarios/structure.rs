@@ -29,6 +29,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: local_rename_is_a_move,
         },
         Scenario {
+            id: "S73",
+            name: "cloud-folder-rename-leaves-no-empty-folder",
+            proves: "a synced folder that is renamed in the cloud while Vapor does not run: the next start moves its files on this device and removes the old folder, which the move left empty",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: cloud_folder_rename_leaves_no_empty_folder,
+        },
+        Scenario {
             id: "S48",
             name: "cloud-rename-is-a-move",
             proves: "renaming a synced file in the cloud renames the local file in place (same inode, no download) and leaves nothing in the trash",
@@ -390,6 +398,43 @@ fn local_rename_is_a_move(ctx: &mut Ctx) -> Result<(), Failure> {
     ensure!(
         log.contains("Moved the cloud object instead of re-uploading"),
         "the daemon log must record the move"
+    );
+    Ok(())
+}
+
+fn cloud_folder_rename_leaves_no_empty_folder(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let first = start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("albums/first.txt"), "the first photo\n")?;
+    write_file(
+        &home.local.join("albums/second.txt"),
+        "the second photo, a longer one\n",
+    )?;
+    ctx.converge_from(&mark, 2, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("albums/second.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    // Another device renames the folder while Vapor does not run. No
+    // event says that the old folder went away: the scan of the next
+    // start finds the files under the new name.
+    ctx.stop_daemon(first)?;
+    fs::rename(home.cloud.join("albums"), home.cloud.join("archive"))?;
+    ctx.start_daemon()?;
+    ctx.wait_exists(
+        &home.local.join("archive/first.txt"),
+        Duration::from_secs(90),
+    )?;
+    ctx.wait_exists(
+        &home.local.join("archive/second.txt"),
+        Duration::from_secs(90),
+    )?;
+    // The cloud has no `albums` any more, and the local one is empty.
+    ctx.wait_absent(&home.local.join("albums"), Duration::from_secs(90))?;
+    ctx.settle(Duration::from_secs(60))?;
+    ensure!(
+        read_string(&home.local.join("archive/first.txt"))? == "the first photo\n",
+        "the file under the new folder name has another content"
     );
     Ok(())
 }

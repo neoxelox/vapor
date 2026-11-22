@@ -40,7 +40,7 @@ use crate::metrics::MetricsSampler;
 use crate::path_filter::EventPathFilterOptions;
 use crate::profiles::ResolvedProfile;
 use crate::runtime::{DaemonRuntime, DaemonRuntimeError, TickWaker, is_shutdown_requested};
-use crate::runtime_control::RuntimeControl;
+use crate::runtime_control::{ControlRequest, RuntimeControl};
 use crate::state_db::DurableStateDb;
 use crate::sync_directories::SyncScope;
 use crate::throttle::ThrottleCaps;
@@ -184,6 +184,9 @@ pub struct MultiProfileRuntime {
     transfer_workers: bool,
     /// The user paused the daemon and did not resume it yet.
     paused_by_user: bool,
+    /// The profiles the user paused one by one. A profile that is
+    /// composed again while its name is here starts paused.
+    paused_profiles: std::collections::BTreeSet<String>,
     /// What stops `vapor.json` from giving the profiles it means to,
     /// for the status of a daemon with no profile.
     config_problems: Vec<String>,
@@ -274,9 +277,11 @@ impl MultiProfileRuntime {
             slot.runtime
                 .enable_transfer_workers(Some(self.tick_waker.clone()));
         }
-        // `vapor pause` is for the whole daemon. A profile that joins
-        // while it holds starts paused, like the ones that were there.
-        if self.paused_by_user {
+        // `vapor pause` with no profile is for the whole daemon. A
+        // profile that joins while it holds starts paused, like the
+        // ones that were there, and so does one the user paused by
+        // name and that is composed again.
+        if self.paused_by_user || self.paused_profiles.contains(&slot.profile.id) {
             slot.control.request_pause();
         }
     }
@@ -400,6 +405,7 @@ impl MultiProfileRuntime {
             last_missing_root_check_inst: None,
             transfer_workers: false,
             paused_by_user: false,
+            paused_profiles: std::collections::BTreeSet::new(),
             config_problems: Vec::new(),
         })
     }
@@ -1097,17 +1103,22 @@ impl MultiProfileRuntime {
         }
     }
 
-    /// Broadcast pending external control requests to every profile
-    /// (pause/resume/flush/reconcile are daemon-wide actions). Returns
-    /// whether any request was forwarded (a status-publish trigger).
+    /// Hands pending external control requests on: one with no profile
+    /// to every profile, one that names a profile to that profile.
+    /// Returns whether any request was forwarded (a status-publish
+    /// trigger).
     fn forward_external_control(&mut self) -> bool {
         let Some(external) = self.external_control.as_ref() else {
             return false;
         };
         let pause = external.take_pause_request();
         let reconcile = external.take_reconcile_request();
+        let for_profile = external.take_profile_requests();
         if let Some(pause) = pause {
             self.paused_by_user = pause;
+            // The whole daemon was just paused or resumed: what was
+            // said about single profiles before no longer holds.
+            self.paused_profiles.clear();
         }
         for slot in &self.slots {
             match pause {
@@ -1119,7 +1130,35 @@ impl MultiProfileRuntime {
                 slot.control.request_reconcile();
             }
         }
-        pause.is_some() || reconcile
+        for (profile, request) in &for_profile {
+            match request {
+                ControlRequest::Pause => {
+                    self.paused_profiles.insert(profile.clone());
+                }
+                ControlRequest::Resume => {
+                    if self.paused_by_user {
+                        // One profile leaves a pause of the whole
+                        // daemon: the others stay paused, by name.
+                        self.paused_by_user = false;
+                        self.paused_profiles = self
+                            .slots
+                            .iter()
+                            .map(|slot| slot.profile.id.clone())
+                            .collect();
+                    }
+                    self.paused_profiles.remove(profile);
+                }
+                ControlRequest::Reconcile => {}
+            }
+            if let Some(slot) = self.slots.iter().find(|slot| &slot.profile.id == profile) {
+                match request {
+                    ControlRequest::Pause => slot.control.request_pause(),
+                    ControlRequest::Resume => slot.control.request_resume(),
+                    ControlRequest::Reconcile => slot.control.request_reconcile(),
+                }
+            }
+        }
+        pause.is_some() || reconcile || !for_profile.is_empty()
     }
 
     /// One status snapshot for the whole daemon: the most
@@ -1396,6 +1435,52 @@ fn compose_slot(
         );
         return suspended_placeholder(composer, profile, reason);
     }
+    // The roots and the provider are checked before anything of the
+    // profile is touched: the first contact with a local root creates
+    // and adopts it, and a profile that cannot run must leave no folder
+    // behind. Overlapping roots on a filesystem-backed profile feed the
+    // engine its own provider writes (and can strict-mirror over
+    // content the user never chose).
+    if profile.provider_kind.trim() == vapor_shared::constants::provider::FILESYSTEM
+        && let Some(local_root) = profile.scope.local_root.as_deref()
+        && let Some(reason) = crate::sync_directories::filesystem_roots_overlap(
+            local_root,
+            profile.scope.cloud_root.as_str(),
+        )
+    {
+        let reason = format!("invalid sync directories: {reason}");
+        logging::error(
+            "Suspending profile whose local and cloud sync directories overlap",
+            &[
+                ("profile_id", profile.id.clone()),
+                ("reason", reason.clone()),
+            ],
+        );
+        return suspended_placeholder(composer, profile, reason);
+    }
+    // An invalid provider must NOT fall back to a functioning stub:
+    // the stub reports empty enumerations, so a startup reconcile
+    // on a pull-only profile would classify the whole local root as
+    // local-only and strict-mirror-delete it. The profile is suspended
+    // instead: it surfaces in status and performs zero sync work.
+    let provider =
+        match vapor_providers::select_provider_for_profile(&profile.provider_kind, &profile.id) {
+            Ok(provider) => provider,
+            Err(error) => {
+                let reason = format!(
+                    "invalid provider '{}': {}",
+                    profile.provider_kind, error.message
+                );
+                logging::error(
+                    "Profile has an invalid provider; suspending it until the config is fixed",
+                    &[
+                        ("profile_id", profile.id.clone()),
+                        ("reason", reason.clone()),
+                    ],
+                );
+                return suspended_placeholder(composer, profile, reason);
+            }
+        };
     let database_path = composer.database_path(&profile.id);
     // Per-profile startup failures suspend that profile, never the
     // whole daemon (which would stop every healthy profile and feed
@@ -1412,58 +1497,6 @@ fn compose_slot(
             );
             let reason = format!("the state database cannot be opened: {error}");
             return suspended_placeholder(composer, profile, reason);
-        }
-    };
-    // Overlapping roots on a filesystem-backed profile feed the
-    // engine its own provider writes (and can strict-mirror over
-    // content the user never chose). Checked before provider
-    // construction so the suspended profile never even ensures
-    // (creates) the misconfigured cloud root.
-    let overlap_failure = if profile.provider_kind.trim()
-        == vapor_shared::constants::provider::FILESYSTEM
-        && let Some(local_root) = profile.scope.local_root.as_deref()
-    {
-        crate::sync_directories::filesystem_roots_overlap(
-            local_root,
-            profile.scope.cloud_root.as_str(),
-        )
-        .map(|reason| format!("invalid sync directories: {reason}"))
-    } else {
-        None
-    };
-    // An invalid provider must NOT fall back to a functioning stub:
-    // the stub reports empty enumerations, so a startup reconcile
-    // on a pull-only profile would classify the whole local root as
-    // local-only and strict-mirror-delete it. Suspend the profile
-    // instead: it surfaces in status but performs zero sync work.
-    // Overlapping roots suspend the same way (the inert stub
-    // performs no filesystem work).
-    let (provider, provider_failure) = if let Some(reason) = overlap_failure {
-        logging::error(
-            "Suspending profile whose local and cloud sync directories overlap",
-            &[
-                ("profile_id", profile.id.clone()),
-                ("reason", reason.clone()),
-            ],
-        );
-        (vapor_providers::suspended_provider(), Some(reason))
-    } else {
-        match vapor_providers::select_provider_for_profile(&profile.provider_kind, &profile.id) {
-            Ok(provider) => (provider, None),
-            Err(error) => {
-                let reason = format!(
-                    "invalid provider '{}': {}",
-                    profile.provider_kind, error.message
-                );
-                logging::error(
-                    "Profile has an invalid provider; suspending it until the config is fixed",
-                    &[
-                        ("profile_id", profile.id.clone()),
-                        ("reason", reason.clone()),
-                    ],
-                );
-                (vapor_providers::suspended_provider(), Some(reason))
-            }
         }
     };
     let app = DaemonApp::new_with_shared_workgate(
@@ -1538,12 +1571,10 @@ fn compose_slot(
         composer.shared_bandwidth.clone(),
         composer.idle_notifier.clone(),
     );
-    // A suspended-at-composition profile never schedules a reconcile
-    // or starts a watcher; it only surfaces its Error state.
-    let mut failed = provider_failure;
-    if failed.is_none()
-        && let Err(error) = runtime.schedule_startup_reconcile(now)
-    {
+    // A profile whose startup reconcile cannot be scheduled starts no
+    // watcher; it only surfaces its Error state.
+    let mut failed = None;
+    if let Err(error) = runtime.schedule_startup_reconcile(now) {
         let reason = format!("could not schedule startup reconcile: {error:?}");
         logging::error(
             "Suspending profile whose startup reconcile could not be scheduled",
@@ -1554,8 +1585,6 @@ fn compose_slot(
         );
         runtime.set_error_state(reason.clone());
         failed = Some(reason);
-    } else if let Some(reason) = &failed {
-        runtime.set_error_state(reason.clone());
     }
     let control = Arc::new(RuntimeControl::new());
     runtime.attach_control(control.clone());
@@ -2376,6 +2405,74 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_that_cannot_run_creates_no_local_folder() {
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        // Neither local folder exists yet. One profile names a provider
+        // that does not exist; the other puts its cloud folder inside
+        // its local folder.
+        let unknown_local = temp.path().join("unknown-local");
+        let nested_local = temp.path().join("nested-local");
+        let profile = |id: &str, provider: &str, local: &Path, cloud: PathBuf| ResolvedProfile {
+            id: id.to_string(),
+            name: id.to_string(),
+            provider_kind: provider.to_string(),
+            scope: SyncScope {
+                local_root: Some(local.to_path_buf()),
+                cloud_root: cloud.to_string_lossy().into_owned(),
+                sync_mode: SyncMode::TwoWay,
+            },
+            enabled: true,
+            invalid: None,
+        };
+        let profiles = vec![
+            profile(
+                "unknown",
+                "gdrvie",
+                &unknown_local,
+                temp.path().join("unknown-cloud"),
+            ),
+            profile(
+                "nested",
+                "filesystem",
+                &nested_local,
+                nested_local.join("cloud"),
+            ),
+        ];
+
+        let mut multi = MultiProfileRuntime::start_with_state_root(
+            profiles,
+            EventPathFilterOptions::default(),
+            Arc::new(StaticMetricsSampler::default()),
+            clock.clone(),
+            "testdev",
+            false,
+            Some(temp.path().join("state")),
+            crate::resource_budget::EffectiveBudgetConfig::resolve(
+                &vapor_shared::config::VaporConfig::default(),
+            ),
+            crate::safeguards::MassDeleteGuardSettings::default(),
+        )
+        .expect("multi runtime");
+
+        assert_eq!(multi.failed_profile_count(), 2);
+        let mut now_ms = 0;
+        for _ in 0..4 {
+            now_ms += 6_000;
+            clock.advance(Duration::from_millis(6_000));
+            multi.tick_all(timestamp_ms(now_ms));
+        }
+        assert!(
+            !unknown_local.exists(),
+            "a profile with no provider made its local folder"
+        );
+        assert!(
+            !nested_local.exists(),
+            "a profile with overlapping folders made its local folder"
+        );
+    }
+
+    #[test]
     fn invalid_provider_suspends_the_profile_instead_of_mirror_deleting_its_local_root() {
         let temp = TempDir::new().expect("temp dir");
         let clock = Arc::new(ManualClock::at_now());
@@ -3076,6 +3173,191 @@ mod tests {
         control.request_resume();
         fixture.converge(16);
         assert!(fixture.cloud_roots["only"].join("waits.txt").exists());
+    }
+
+    #[test]
+    fn a_pause_for_one_profile_leaves_the_others_syncing() {
+        let mut fixture = MultiFixture::new(&[
+            ("work", SyncMode::TwoWay, false),
+            ("home", SyncMode::TwoWay, false),
+        ]);
+        let control = Arc::new(RuntimeControl::new());
+        fixture.multi.attach_control(control.clone());
+        fixture.tick(6_000);
+        let run_state = |fixture: &mut MultiFixture, id: &str| {
+            fixture
+                .multi
+                .runtime_for(id)
+                .expect("runtime")
+                .app()
+                .snapshot()
+                .run_state
+        };
+
+        control.request_for_profile("work", ControlRequest::Pause);
+        fixture.tick(6_000);
+        assert_eq!(run_state(&mut fixture, "work"), RunState::Paused);
+        assert_eq!(run_state(&mut fixture, "home"), RunState::Running);
+
+        for id in ["work", "home"] {
+            let file = fixture.local_roots[id].join("note.txt");
+            std::fs::write(&file, b"note").expect("seed");
+            fixture.record_local_event(id, &file, WatchEventKind::Created);
+        }
+        fixture.converge(16);
+        assert!(fixture.cloud_roots["home"].join("note.txt").exists());
+        assert!(
+            !fixture.cloud_roots["work"].join("note.txt").exists(),
+            "the paused profile admits no work"
+        );
+
+        control.request_for_profile("work", ControlRequest::Resume);
+        fixture.converge(16);
+        assert!(fixture.cloud_roots["work"].join("note.txt").exists());
+    }
+
+    #[test]
+    fn one_profile_can_leave_a_pause_of_the_whole_daemon() {
+        let mut fixture = MultiFixture::new(&[
+            ("work", SyncMode::TwoWay, false),
+            ("home", SyncMode::TwoWay, false),
+        ]);
+        let control = Arc::new(RuntimeControl::new());
+        fixture.multi.attach_control(control.clone());
+        fixture.tick(6_000);
+
+        control.request_pause();
+        fixture.tick(6_000);
+        control.request_for_profile("home", ControlRequest::Resume);
+        fixture.tick(6_000);
+
+        for id in ["work", "home"] {
+            let file = fixture.local_roots[id].join("note.txt");
+            std::fs::write(&file, b"note").expect("seed");
+            fixture.record_local_event(id, &file, WatchEventKind::Created);
+        }
+        fixture.converge(16);
+        assert!(fixture.cloud_roots["home"].join("note.txt").exists());
+        assert!(
+            !fixture.cloud_roots["work"].join("note.txt").exists(),
+            "the other profile stays paused"
+        );
+
+        // A resume of the whole daemon ends every pause.
+        control.request_resume();
+        fixture.converge(16);
+        assert!(fixture.cloud_roots["work"].join("note.txt").exists());
+    }
+
+    /// Makes the provider of `id` panic, so that the profile is
+    /// suspended. A paused profile calls no provider, so this is for a
+    /// profile that runs.
+    fn suspend(fixture: &mut MultiFixture, id: &str) {
+        fixture
+            .multi
+            .runtime_for(id)
+            .expect("runtime")
+            .replace_provider_for_testing(Box::new(PanickingProvider));
+        fixture.tick(6_000);
+        fixture.tick(6_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 1);
+    }
+
+    fn run_state_of(fixture: &mut MultiFixture, id: &str) -> RunState {
+        fixture
+            .multi
+            .runtime_for(id)
+            .expect("runtime")
+            .app()
+            .snapshot()
+            .run_state
+    }
+
+    #[test]
+    fn a_pause_by_name_of_a_suspended_profile_holds_when_it_is_composed_again() {
+        let mut fixture = MultiFixture::new(&[
+            ("work", SyncMode::TwoWay, false),
+            ("home", SyncMode::TwoWay, false),
+        ]);
+        let control = Arc::new(RuntimeControl::new());
+        fixture.multi.attach_control(control.clone());
+        fixture.tick(6_000);
+        suspend(&mut fixture, "work");
+
+        // The request names a profile that does not run now.
+        control.request_for_profile("work", ControlRequest::Pause);
+        fixture.tick(6_000);
+        fixture.tick(61_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0, "composed again");
+        fixture.tick(6_000);
+
+        assert_eq!(run_state_of(&mut fixture, "work"), RunState::Paused);
+        assert_eq!(run_state_of(&mut fixture, "home"), RunState::Running);
+    }
+
+    #[test]
+    fn a_resume_of_everything_reaches_a_profile_that_is_suspended() {
+        let mut fixture = MultiFixture::new(&[
+            ("work", SyncMode::TwoWay, false),
+            ("home", SyncMode::TwoWay, false),
+        ]);
+        let control = Arc::new(RuntimeControl::new());
+        fixture.multi.attach_control(control.clone());
+        fixture.tick(6_000);
+        suspend(&mut fixture, "work");
+        control.request_for_profile("work", ControlRequest::Pause);
+        fixture.tick(6_000);
+
+        // The resume comes while the profile does not run. The profile
+        // that is composed later must not remember the old pause.
+        control.request_resume();
+        fixture.tick(61_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0, "composed again");
+        fixture.tick(6_000);
+
+        assert_eq!(run_state_of(&mut fixture, "work"), RunState::Running);
+    }
+
+    #[test]
+    fn a_reconcile_for_one_profile_is_for_that_profile_alone() {
+        let mut fixture = MultiFixture::new(&[
+            ("work", SyncMode::TwoWay, false),
+            ("home", SyncMode::TwoWay, false),
+        ]);
+        let control = Arc::new(RuntimeControl::new());
+        fixture.multi.attach_control(control.clone());
+        fixture.tick(6_000);
+        fixture.converge(16);
+        let requests_of = |fixture: &MultiFixture, id: &str| {
+            fixture
+                .multi
+                .timeline()
+                .snapshot(None)
+                .into_iter()
+                .filter(|event| {
+                    event.kind == constants::timeline::KIND_RECONCILE
+                        && event.profile_id == id
+                        && event.message.contains("requested by the user")
+                })
+                .count()
+        };
+        assert_eq!(requests_of(&fixture, "work"), 0);
+
+        control.request_for_profile("work", ControlRequest::Reconcile);
+        fixture.tick(6_000);
+
+        assert_eq!(requests_of(&fixture, "work"), 1);
+        assert_eq!(
+            requests_of(&fixture, "home"),
+            0,
+            "the request named one profile"
+        );
+
+        // A request with no profile is for every profile.
+        control.request_reconcile();
+        fixture.tick(6_000);
+        assert_eq!(requests_of(&fixture, "work"), 2);
+        assert_eq!(requests_of(&fixture, "home"), 1);
     }
 
     #[test]

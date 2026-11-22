@@ -93,7 +93,14 @@ pub enum Method {
 #[serde(tag = "kind", content = "payload")]
 pub enum Request {
     Hello(Hello),
-    Call { method: Method },
+    Call {
+        method: Method,
+        /// The profile a control request is for (`Pause`, `Resume`,
+        /// `Reconcile`). Left out, the request is for every profile.
+        /// The other methods take none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+    },
 }
 
 /// Successful response payloads, indexed by which method they answer.
@@ -419,10 +426,38 @@ mod tests {
     fn request_envelope_round_trips_status_call() {
         let req = Request::Call {
             method: Method::Status,
+            profile: None,
         };
         let bytes = serde_json::to_vec(&req).expect("serialize");
         let decoded: Request = serde_json::from_slice(&bytes).expect("deserialize");
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn a_call_names_a_profile_only_when_it_is_for_one() {
+        // A call for every profile has the shape it always had, so a
+        // peer that knows no profile argument reads and writes it.
+        let for_all = Request::Call {
+            method: Method::Pause,
+            profile: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&for_all).expect("serialize"),
+            r#"{"kind":"Call","payload":{"method":"Pause"}}"#
+        );
+        let decoded: Request =
+            serde_json::from_str(r#"{"kind":"Call","payload":{"method":"Pause"}}"#)
+                .expect("deserialize");
+        assert_eq!(decoded, for_all);
+
+        let for_one = Request::Call {
+            method: Method::Pause,
+            profile: Some("work".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_string(&for_one).expect("serialize"),
+            r#"{"kind":"Call","payload":{"method":"Pause","profile":"work"}}"#
+        );
     }
 
     #[test]
@@ -460,7 +495,7 @@ mod tests {
         // Field-omission tolerance: a peer that omits fields added later
         // is read with defaults instead of failing.
         let raw = r#"{
-            "schemaVersion": 4,
+            "schemaVersion": 5,
             "provider": "filesystem",
             "run": {"state": "running"},
             "throttle": {"state": "idle", "reason": "idle"}

@@ -47,8 +47,8 @@ decision waits; the sign-in notice has a Sign In button.
       `conflict` timeline events, opening the M3-9 pane. Timeline events
       are the trigger, never the ledger: the pane always lists from
       `vapor decisions list`, so the timeline's cap can never hide a
-      conflict. Naming the file inside the notification depends on
-      `core.md` C8-71.
+      conflict. The event's message names the file, and says how many
+      more when one tick made several.
 - [ ] M3-9 Decisions pane: every question waiting on the user, driving
       `vapor decisions list --json` / `show` / `resolve --json`
       (`docs/architecture/data-flow.md` §Decisions): one row per open
@@ -131,8 +131,10 @@ Exit gate:
       untouched (`vapor profiles remove --json`: it keeps the trash and
       names its folder).
 - [ ] M4-4 UI flows for multi-provider fan-out (same local root → multiple
-      providers/accounts). Waits for `core.md` E-3, which decides what
-      overlapping local roots mean.
+      providers/accounts). The runtime allows two profiles on one local
+      folder and refuses local folders that lie one inside the other
+      (`docs/architecture/data-flow.md`, "Multi-profile watch
+      coordination").
 - [ ] M4-5 Strict-mirror safety UX for the one-way modes. The daemon
       already holds a one-way profile behind a `one-way-mode` decision
       until its warning is acknowledged, so the app's part is to show
