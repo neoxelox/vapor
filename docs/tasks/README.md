@@ -65,10 +65,10 @@ Status: open. The review (`docs/specs/2026-11-14-full-review.md`)
 fixed what it found, and left a short list that is not built and a
 list of choices that wait for the owner.
 
-- Engine: `core.md` E-7, E-9. The owner put E-7 off: no shipping
-  setup reaches it.
-- Providers: `core.md` P-1 … P-5. P-4 and P-5 need the owner: a Drive
-  test account, and the Google verification decision.
+- Engine: `core.md` E-7, E-9, E-12 … E-16. The owner put E-7 off: no
+  shipping setup reaches it. E-12 and E-14 need the owner.
+- Providers: `core.md` P-1 … P-5, P-7. P-4 and P-5 need the owner: a
+  Drive test account, and the Google verification decision.
 - Platform: `core.md` PL-1, PL-2.
 - The soak and the perf cell at full length: `core.md` TR-13.
 - The open points of the spec: each one is a question with the choice

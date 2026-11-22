@@ -127,8 +127,6 @@ pub struct StagedExecutorReport {
     /// during this advance. The upload went back to the queue to be
     /// tried later; the runtime tells the user.
     pub cloud_storage_full: Option<String>,
-    /// The uploads this advance put back to wait for room in the cloud.
-    pub waiting_for_cloud_room: Vec<i64>,
     /// Provider calls that failed because the cloud sync root itself is
     /// gone. The runtime reacts by blocking admission and re-ensuring
     /// the root (self-healing), so these intents retry rather than fail.
@@ -2154,11 +2152,14 @@ impl StagedExecutor {
             if report.cloud_storage_full.is_none() {
                 report.cloud_storage_full = Some(error.message.clone());
             }
-            report.waiting_for_cloud_room.push(intent.id);
             state_db.requeue_leased(
                 intent.id,
                 now + Duration::from_secs(constants::engine::CLOUD_FULL_RETRY_SECONDS),
-                Some(&error.message),
+                Some(&format!(
+                    "{}{}",
+                    constants::engine::CLOUD_FULL_WAIT_PREFIX,
+                    error.message
+                )),
             )?;
             report.retried += 1;
             return Ok(());
@@ -3463,7 +3464,16 @@ fn apply_local_move(
     {
         return PlanOutcome::Download(plan);
     }
-    if fs::rename(&source.path, &plan.local_path).is_err() {
+    // A hash probe may have run since the candidate was chosen. A
+    // source that changed in that time is not the cloud object any
+    // more, and a file that appeared at the target must not be
+    // replaced: the download takes over, and it keeps both.
+    let source_untouched = fs::symlink_metadata(&source.path).is_ok_and(|metadata| {
+        metadata.is_file() && source.matches_local(metadata.len(), metadata.modified().ok())
+    });
+    if !source_untouched
+        || vapor_platform::fs_ops::atomic_noclobber_rename(&source.path, &plan.local_path).is_err()
+    {
         return PlanOutcome::Download(plan);
     }
     let _ = env.tags.remove(&source.path);
@@ -3546,22 +3556,16 @@ fn continue_apply_remote_delete(
             };
         }
     }
-    // A root recovery drops queued deletions while this one may be in
-    // flight; the dropped row is the answer.
-    match state_db.intent_is_queued(intent.id) {
-        Ok(true) => {}
-        Ok(false) => return PlanOutcome::Noop("deletion withdrawn while its probe ran"),
-        Err(error) => {
-            return PlanOutcome::Fail {
-                failure: RetryFailureKind::Transient,
-                message: format!("cannot re-read the deletion intent: {error}"),
-            };
-        }
+    if let Some(outcome) = removal_must_not_go_on(state_db, intent, probe) {
+        return outcome;
     }
-    // "No object" came from whatever folder is at the cloud root now.
-    // In a root that was swapped, every file is "gone".
-    if !cloud_root_is_adopted(state_db, probe.cloud_root_identity.as_ref()) {
-        return PlanOutcome::CloudRootSuspect;
+    if probe.local_hashes.cut_short() {
+        // Not every touched file was read. Deciding now would keep a
+        // file only because nobody looked at it.
+        return PlanOutcome::Fail {
+            failure: RetryFailureKind::Transient,
+            message: "the check of the local files stopped while hashing is on hold".to_string(),
+        };
     }
     match deletion_loses_to_local_state(state_db, intent, &probe.local_hashes) {
         Ok(Some(reason)) => return PlanOutcome::Noop(reason),
@@ -3662,8 +3666,8 @@ fn continue_mirror_remote_delete(
     probe: &ProbeResult,
     now: SystemTime,
 ) -> PlanOutcome {
-    if !cloud_root_is_adopted(state_db, probe.cloud_root_identity.as_ref()) {
-        return PlanOutcome::CloudRootSuspect;
+    if let Some(outcome) = removal_must_not_go_on(state_db, intent, probe) {
+        return outcome;
     }
     let outcome =
         apply_remote_delete_locally(env, state_db, &intent.path, &LocalHashes::default(), now);
@@ -3671,6 +3675,53 @@ fn continue_mirror_remote_delete(
         forget_deleted_path(state_db, &intent.path);
     }
     outcome
+}
+
+/// What stops the local removal that a cloud deletion asked for, once
+/// its probe is back: the deletion was withdrawn, the provider refused
+/// the read of the cloud root for a reason of its own, or the cloud
+/// root is not known to be the folder the profile adopted.
+fn removal_must_not_go_on(
+    state_db: &DurableStateDb,
+    intent: &DurableIntentRecord,
+    probe: &ProbeResult,
+) -> Option<PlanOutcome> {
+    // A root recovery drops queued deletions while this one may be in
+    // flight; the dropped row is the answer.
+    match state_db.intent_is_queued(intent.id) {
+        Ok(true) => {}
+        Ok(false) => return Some(PlanOutcome::Noop("deletion withdrawn while its probe ran")),
+        Err(error) => {
+            return Some(PlanOutcome::Fail {
+                failure: RetryFailureKind::Transient,
+                message: format!("cannot re-read the deletion intent: {error}"),
+            });
+        }
+    }
+    // A rate limit or a refused sign-in says nothing about the root.
+    // It takes the path of every other provider call, with the
+    // slowdown or the sign-in hold that belongs to it.
+    if let Some(Err(error)) = probe.cloud_root_identity.as_ref()
+        && matches!(
+            error.kind,
+            vapor_shared::ProviderErrorKind::RateLimited { .. }
+                | vapor_shared::ProviderErrorKind::Authentication
+        )
+    {
+        return Some(PlanOutcome::Fail {
+            failure: error.kind.retry_classification(),
+            message: format!(
+                "cannot confirm the cloud folder before removing the local copy: {}",
+                error.message
+            ),
+        });
+    }
+    // "No object" came from whatever folder is at the cloud root now.
+    // In a root that was swapped, every file is "gone".
+    if !cloud_root_is_adopted(state_db, probe.cloud_root_identity.as_ref()) {
+        return Some(PlanOutcome::CloudRootSuspect);
+    }
+    None
 }
 
 /// Whether the cloud root is the folder the profile adopted, from the
@@ -6363,6 +6414,209 @@ mod tests {
 
     /// A synced local file whose cloud copy is gone, with the deletion
     /// leased and started.
+    /// A synced local file, and the cloud object that another device
+    /// renamed it to: the download of the new name can be a local move.
+    /// Returns the local file and the download target.
+    fn start_download_of_a_file_renamed_in_the_cloud(fixture: &mut Fixture) -> (PathBuf, PathBuf) {
+        let body = b"the synced body of the file";
+        let source = fixture.local_root.join("old-name.txt");
+        std::fs::write(&source, body).expect("seed local");
+        let cloud_object = fixture.cloud_root.join("new-name.txt");
+        std::fs::write(&cloud_object, body).expect("seed cloud");
+        let modified_at = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+        };
+        fixture
+            .state_db
+            .set_sync_index(
+                &source,
+                &hash_hex_of_bytes(body),
+                body.len() as u64,
+                modified_at(&source),
+                modified_at(&cloud_object),
+                "op-past",
+                timestamp_ms(0),
+            )
+            .expect("seed sync index");
+        let target = fixture.local_root.join("new-name.txt");
+        let intent = fixture.enqueue_and_lease(&target, PendingIntentKind::Download);
+        assert_eq!(
+            fixture
+                .executor
+                .try_start(&mut fixture.app, intent, timestamp_ms(0)),
+            StartDecision::Started
+        );
+        (source, target)
+    }
+
+    /// Whether some file under `root` holds exactly `bytes`.
+    fn some_file_holds(root: &Path, bytes: &[u8]) -> bool {
+        std::fs::read_dir(root)
+            .expect("read root")
+            .flatten()
+            .any(|entry| std::fs::read(entry.path()).is_ok_and(|found| found == bytes))
+    }
+
+    #[test]
+    fn a_file_renamed_in_the_cloud_is_moved_locally() {
+        let mut fixture = Fixture::new();
+        let (source, target) = start_download_of_a_file_renamed_in_the_cloud(&mut fixture);
+
+        let report = fixture.run_to_quiescence(12);
+
+        assert_eq!((report.completed, report.failed), (1, 0));
+        assert!(!source.exists(), "the file moved, it was not downloaded");
+        assert!(target.is_file());
+    }
+
+    /// Wraps the filesystem provider and runs `meddle` while the hash
+    /// of a cloud object is read: the window between the choice of a
+    /// local file to move and the move itself.
+    struct MeddlingProvider {
+        inner: FilesystemProvider,
+        meddle: Box<dyn Fn() + Send + Sync>,
+        /// When set, the read of the cloud root's identity fails so.
+        identity_refusal: Arc<std::sync::Mutex<Option<ProviderError>>>,
+    }
+
+    impl vapor_providers::Provider for MeddlingProvider {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+        fn capabilities(&self) -> vapor_providers::ProviderCapabilities {
+            self.inner.capabilities()
+        }
+        fn ensure_cloud_root(&self, dir: &str) -> Result<(), vapor_providers::ProviderError> {
+            self.inner.ensure_cloud_root(dir)
+        }
+        fn enumerate(
+            &self,
+            directory: &RemotePath,
+        ) -> Result<Vec<vapor_providers::RemoteEntry>, vapor_providers::ProviderError> {
+            self.inner.enumerate(directory)
+        }
+        fn stat(
+            &self,
+            path: &RemotePath,
+        ) -> Result<Option<vapor_providers::RemoteEntry>, vapor_providers::ProviderError> {
+            self.inner.stat(path)
+        }
+        fn content_hash(
+            &self,
+            path: &RemotePath,
+        ) -> Result<String, vapor_providers::ProviderError> {
+            (self.meddle)();
+            self.inner.content_hash(path)
+        }
+        fn root_identity(
+            &self,
+            cloud_root: &str,
+        ) -> Result<Option<String>, vapor_providers::ProviderError> {
+            match self.identity_refusal.lock().expect("refusal").clone() {
+                Some(error) => Err(error),
+                None => self.inner.root_identity(cloud_root),
+            }
+        }
+        fn adopt_root(
+            &self,
+            cloud_root: &str,
+            device_id: &str,
+        ) -> Result<Option<String>, vapor_providers::ProviderError> {
+            self.inner.adopt_root(cloud_root, device_id)
+        }
+        fn begin_upload(
+            &self,
+            request: vapor_providers::UploadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, vapor_providers::ProviderError>
+        {
+            self.inner.begin_upload(request)
+        }
+        fn begin_download(
+            &self,
+            request: vapor_providers::DownloadRequest,
+        ) -> Result<Box<dyn vapor_providers::TransferSession>, vapor_providers::ProviderError>
+        {
+            self.inner.begin_download(request)
+        }
+        fn delete(
+            &self,
+            path: &RemotePath,
+            op_id: &str,
+        ) -> Result<(), vapor_providers::ProviderError> {
+            self.inner.delete(path, op_id)
+        }
+        fn poll_changes(
+            &self,
+            cursor: Option<&str>,
+            max: usize,
+        ) -> Result<vapor_providers::ChangesPoll, vapor_providers::ProviderError> {
+            self.inner.poll_changes(cursor, max)
+        }
+    }
+
+    /// A fixture whose provider writes `bytes` to `name` in the local
+    /// root while the hash of a cloud object is read.
+    fn fixture_with_a_user_write_during_the_hash(
+        name: &'static str,
+        bytes: &'static [u8],
+    ) -> Fixture {
+        let local_root: Arc<std::sync::Mutex<Option<PathBuf>>> = Arc::default();
+        let seen = local_root.clone();
+        let fixture = Fixture::with_provider(move |cloud_root| {
+            Box::new(MeddlingProvider {
+                inner: FilesystemProvider::with_root(cloud_root).expect("provider"),
+                meddle: Box::new(move || {
+                    if let Some(root) = seen.lock().expect("root").as_ref() {
+                        std::fs::write(root.join(name), bytes).expect("user write");
+                    }
+                }),
+                identity_refusal: Arc::default(),
+            })
+        });
+        *local_root.lock().expect("root") = Some(fixture.local_root.clone());
+        fixture
+    }
+
+    #[test]
+    fn a_file_that_appears_at_the_target_of_a_local_move_is_never_replaced() {
+        let user_bytes = b"written by the user at the target";
+        let mut fixture = fixture_with_a_user_write_during_the_hash("new-name.txt", user_bytes);
+        let (source, _target) = start_download_of_a_file_renamed_in_the_cloud(&mut fixture);
+
+        let report = fixture.run_to_quiescence(24);
+
+        assert_eq!(report.failed, 0);
+        assert!(
+            some_file_holds(&fixture.local_root, user_bytes),
+            "the move replaced the file the user wrote at its target"
+        );
+        assert!(source.is_file(), "nothing moved; the download took over");
+    }
+
+    #[test]
+    fn a_source_that_changes_before_a_local_move_is_not_moved() {
+        let edited = b"an edit that never reached the cloud, longer than the body";
+        let mut fixture = fixture_with_a_user_write_during_the_hash("old-name.txt", edited);
+        let (source, target) = start_download_of_a_file_renamed_in_the_cloud(&mut fixture);
+
+        let report = fixture.run_to_quiescence(24);
+
+        assert_eq!((report.completed, report.failed), (1, 0));
+        assert_eq!(std::fs::read(&source).expect("source"), edited);
+        // The cloud object came down by itself, and the index records
+        // what it holds.
+        let body = std::fs::read(&target).expect("target");
+        assert_ne!(body, edited);
+        let row = fixture
+            .state_db
+            .sync_index(&target)
+            .expect("index")
+            .expect("row");
+        assert_eq!(row.content_hash, hash_hex_of_bytes(&body));
+    }
+
     fn start_cloud_deletion_of_a_synced_file(fixture: &mut Fixture) -> PathBuf {
         let local_file = fixture.local_root.join("report.txt");
         std::fs::write(&local_file, b"synced body").expect("seed local");
@@ -6437,6 +6691,59 @@ mod tests {
                 0,
                 "{mode:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_cloud_deletion_removes_nothing_while_the_cloud_root_cannot_be_read() {
+        use vapor_shared::ProviderErrorKind;
+        let cases = [
+            (ProviderError::transient("the network is down"), true),
+            (
+                ProviderError::new(ProviderErrorKind::NotFound, "no such folder"),
+                true,
+            ),
+            // A rate limit says nothing about the root: the intent
+            // takes the retry path of every other provider call.
+            (
+                ProviderError::new(
+                    ProviderErrorKind::RateLimited { retry_after: None },
+                    "slow down",
+                ),
+                false,
+            ),
+        ];
+        for (error, root_is_in_doubt) in cases {
+            for mode in [
+                vapor_shared::SyncMode::TwoWay,
+                vapor_shared::SyncMode::PullOnly,
+            ] {
+                let refusal: Arc<std::sync::Mutex<Option<ProviderError>>> = Arc::default();
+                let handle = refusal.clone();
+                let mut fixture = Fixture::with_provider(move |cloud_root| {
+                    Box::new(MeddlingProvider {
+                        inner: FilesystemProvider::with_root(cloud_root).expect("provider"),
+                        meddle: Box::new(|| {}),
+                        identity_refusal: refusal,
+                    })
+                });
+                fixture.sync_mode = mode;
+                fixture.adopt_cloud_root();
+                let local_file = start_cloud_deletion_of_a_synced_file(&mut fixture);
+                *handle.lock().expect("refusal") = Some(error.clone());
+
+                let report = fixture.run_to_quiescence(8);
+
+                let case = format!("{mode:?}, {}", error.message);
+                assert!(local_file.exists(), "{case}: the file stays");
+                assert_eq!((report.completed, report.failed), (0, 0), "{case}");
+                assert_eq!(report.cloud_root_suspect, root_is_in_doubt, "{case}");
+                assert_eq!(
+                    fixture.state_db.list_queue_intents(4).expect("queue").len(),
+                    1,
+                    "{case}: the deletion waits in the queue"
+                );
+            }
         }
     }
 

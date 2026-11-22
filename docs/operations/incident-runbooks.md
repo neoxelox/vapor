@@ -81,10 +81,11 @@ Detection:
 Mitigation:
 
 1. Run `vapor auth login --profile <id>`, or select Sign In in the app.
-2. When the error code is `invalid_client`, the build has no OAuth
-   client or a wrong one. `vapor doctor` shows it in the
-   `gdrive-oauth-client` row. A sign-in cannot fix that; the build or
-   its environment has to.
+2. When the error code is `invalid_client`, the build has a wrong
+   OAuth client. A sign-in cannot fix that; the build or its
+   environment has to. A build with no OAuth client at all asks for no
+   token: the profile is suspended, and `vapor doctor` shows the cause
+   in the `gdrive-oauth-client` row.
 3. When the hold comes back each week, the OAuth client is in Testing
    status at Google, which ends every sign-in after 7 days.
 4. When the endpoint answers with a server error or a rate limit, the
@@ -165,11 +166,14 @@ Detection:
 Mitigation:
 
 1. Do nothing to the folders. The reconcile compares both sides and
-   builds the sync index again. With no index row nothing is deleted
-   on either side, and equal files converge with no transfer.
+   builds the sync index again. In a `two-way` profile nothing is
+   deleted on either side with no index row, and equal files converge
+   with no transfer.
 2. A profile in `pull-only` or `push-only` asks for its confirmation
    again, because the confirmation was in the old database. Answer it
-   with `vapor decisions`.
+   with `vapor decisions`. A one-way profile needs no index row to
+   remove what its source does not hold: after the answer the mirror
+   goes on as before.
 3. Keep the file that was set aside when the cause is not known. Look
    inside it with `sqlite3 -readonly <path>`. The daemon removes it
    after 30 days.
@@ -178,15 +182,15 @@ Mitigation:
 
 User-visible state:
 
-- Sync continues during the reconcile. A deletion that was made while
-  the index was gone is not carried over: the file comes back from the
-  other side.
+- Sync continues during the reconcile. In a `two-way` profile a
+  deletion that was made while the index was gone is not carried over:
+  the file comes back from the other side.
 - A one-way profile holds until its question is answered.
 
 Recovery verification:
 
-- The reconcile in `vapor status` is `idle` again and the queue count
-  is zero.
+- `vapor status` shows no `Scan:` line any more (`reconcile.state` is
+  `idle` in `--json`), and the queue count is zero.
 - The next start sets no file aside.
 
 ## 5) Reconcile backlog that does not converge
@@ -207,7 +211,7 @@ Mitigation, by what the items say:
 | `held` | the item waits for a decision | `vapor decisions list`, then `vapor decisions resolve <id> --choose <option>` |
 | `retrying` | a transient failure or a rate limit | check the network; for a rate limit, runbook 3 |
 | `waiting-to-hash`, `waiting-to-upload`, `waiting-to-download` | the throttle admits less work now | read the throttle line of `vapor status`; only `suspended` (a critically hot device) stops sync |
-| run state `error` | the profile is on hold | the reason names the cause: a missing or replaced folder (a decision), a sign-in (runbook 2), a full cloud (free space, then `vapor reconcile` tries the waiting uploads at once; with no request they are tried each 15 minutes), a cloud folder that cannot be reached |
+| run state `error` | the profile is on hold | the reason names the cause: a missing or replaced folder (a decision), a sign-in (runbook 2), a full cloud (free space, then `vapor reconcile` tries the waiting uploads at once, after a restart too; with no request they are tried each 15 minutes), a cloud folder that cannot be reached |
 | run state `paused` | a user paused sync | `vapor resume`, with `--profile <id>` for one profile |
 | a `failed` count above zero | items failed for good | the daemon log has an ERROR line for each, with the path and the error |
 
@@ -226,5 +230,6 @@ User-visible state:
 
 Recovery verification:
 
-- The queue count is zero and the reconcile is `idle`.
+- The queue count is zero, and `vapor status` shows no `Scan:` line
+  (`reconcile.state` is `idle` in `--json`).
 - A file that differed is the same on both sides.

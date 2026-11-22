@@ -34,16 +34,17 @@ rules below are pre-GA; backward-compat guarantees tighten at GA.
 
 Source of truth: `core/shared/src/constants.rs::ipc`
 (`SCHEMA_VERSION_CURRENT`, `SCHEMA_VERSION_MIN_SUPPORTED`) and the payload types in
-`core/ipc/src/protocol.rs`. The current version is 4 and the floor is 4:
-no build speaks an older shape. `CHANGELOG.md` records what each version
-changed.
+`core/ipc/src/protocol.rs`. The current version is 5 and the floor is 5:
+no build speaks an older shape. Version 5 lets a control `Call` name
+one profile. A version 4 daemon would not read the name and would act
+on every profile, so the two do not talk: the handshake refuses the
+pair.
 
 A field added inside a version is optional, so a peer of the same
-version that predates it reads the frame. Version 4 has these:
-`resources.bandwidth.uploadCapacityKbps` and `downloadCapacityKbps`,
-`ignoredPaths` on a profile row, `truncated` on the timeline answer,
-the run state `unconfigured`, and `profile` on the payload of a
-control `Call`.
+version that predates it reads the frame. That is right for an answer,
+where a field the reader does not know is only not shown. A field
+that narrows a request takes a new version, because a peer that does
+not read it does more than was asked.
 
 ### Handshake
 
@@ -125,7 +126,7 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
 
 ```json
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "daemon": "vapord/0.2.0-alpha.3",
   "provider": "gdrive",
   "run": { "state": "running", "reason": "watching ~/Vapor" },
@@ -210,7 +211,14 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
   `Resume` with no profile ends every pause. A `Resume` for one
   profile while the whole daemon is paused resumes that profile and
   leaves the others paused. A profile that was paused by name and is
-  composed again (a retry, a configuration reload) starts paused.
+  composed again (a retry, a configuration reload) starts paused. A
+  request for every profile replaces the requests for one profile
+  that came before it and were not applied yet. A `Pause` or a
+  `Resume` for a profile that does not run now (it is suspended) is
+  accepted and holds when the profile runs again; a `Reconcile` for it
+  is not accepted, and the `note` gives the reason the profile does
+  not run. A profile with `enabled: false` is not a profile the daemon
+  has.
 - A `Call` that names a method the daemon does not know is answered
   with the `MethodNotFound` error and the name.
 

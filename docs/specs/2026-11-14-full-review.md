@@ -402,7 +402,22 @@ Found while the fixes were built, and fixed in the same change:
   S72 covers the try at once after a full cloud, on a disk image that
   is filled and freed. Both fail on the build before the change. Unit
   tests cover the later profile of a nested pair, which does not run,
-  and the pair that shares one folder, which does.
+  and the pair that shares one folder, which does. S73, S74, and S75
+  cover a folder renamed in the cloud while Vapor does not run, a
+  nested profile in a file edited by hand, and a swapped cloud root;
+  each fails on the build before the change. On that build S75 sends
+  the local files to the trash.
+- The adversarial review of the round 8 pull request: three
+  reviewers (engine data safety; profiles, controls, and IPC; tools
+  and documents). They found no path in the changed code that loses
+  data. The fixes that came from it: a local move checks its source
+  and its target again after the hash probe (older than the pull
+  request; it could replace a file written at the target), a first
+  read of the ignore files that fails keeps the gate closed, the try
+  on request finds the waiting uploads after a restart (D59), a
+  user's pause outlives a hold, and the IPC schema went to version 5
+  so that an older daemon cannot widen a request for one profile. The
+  pull request lists each finding with its verdict.
 
 ## Open points
 
@@ -422,6 +437,16 @@ open:
 3. **The Google verification path for the Drive scope.** It gates
    general availability of the Drive provider
    (`docs/tasks/core.md` P-5).
+4. **D57 has two limits that are not decided.** The review of the
+   round 8 pull request found them (`docs/tasks/core.md` E-12). A
+   `pull-only` profile on a shared local folder removes the files of
+   the other profile, and a `two-way` partner then deletes them in its
+   cloud. Two profiles on one local folder whose cloud folders are one
+   inside the other copy files without end. Neither is refused today,
+   and neither was refused before D57. The documents warn about both.
+5. **A local folder that holds only ignored files after a rename in
+   the cloud stays** (`docs/tasks/core.md` E-14). Which ignored files
+   may go with their folder is a choice.
 
 Not built, with the task that tracks each one:
 

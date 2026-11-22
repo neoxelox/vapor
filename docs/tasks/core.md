@@ -33,6 +33,42 @@ are never reused.
       the watcher still delivers events under the path the daemon holds.
       The filesystem provider refuses every path under a cloud root that
       was respelled, until a restart.
+- [ ] E-12 Decide the limits of two profiles on one local folder. Two
+      cases lose or multiply data today, and neither is refused. A
+      `pull-only` profile removes every file that its own cloud folder
+      does not hold: the files that the other profile downloads go to
+      the trash, and a `two-way` partner then deletes them in its
+      cloud. Two profiles whose cloud folders are one inside the other
+      (`/Vapor` and `/Vapor/sub` of one account, or two nested folders
+      of the `filesystem` provider) copy each file one level deeper
+      without end. The first case waits for the owner (the open points
+      of `docs/specs/2026-11-14-full-review.md`). The second needs the
+      account of each profile, which a path does not give for Google
+      Drive: two accounts may both use `/Vapor`.
+- [ ] E-13 Take the copy of a discard off the tick thread. A file that
+      Vapor removes on a volume that refuses a trash folder is copied
+      to the trash of the runtime directory by the tick thread, for as
+      long as the copy takes. It is the one read of file content that
+      `AGENTS.md` §3 still has on that thread.
+- [ ] E-14 Decide what to do with a local folder that a rename in the
+      cloud emptied of synced files and that still holds ignored
+      files. An empty folder is removed. A folder with a `.DS_Store`
+      in it stays for good, and so does one with a `node_modules`
+      folder, which must stay. The rule has to tell the two apart.
+- [ ] E-15 Try again a profile whose composition failed for a reason
+      that can pass. A profile whose state database cannot be opened
+      at the start (a full disk, a lock) is suspended until the
+      configuration changes or the daemon restarts. Only a profile
+      that ran and then failed is composed again after 1, 5, and 30
+      minutes.
+- [ ] E-16 Make the check of the cloud root that guards a local
+      removal cheaper and faster. Each cloud deletion reads the
+      identity of the cloud root by itself: on Google Drive that is one
+      request for each part of `cloudRoot`, for each file of a burst.
+      A removal that finds the root in doubt asks the runtime for a
+      root check at once, but only the local check runs at once; the
+      cloud check keeps its cadence, so the hold comes up to 45
+      seconds later (no file is removed in that time).
 
 ## Providers
 
@@ -59,6 +95,14 @@ are never reused.
       verification, or a narrower scope with what it costs. It gates
       general availability of the Drive provider and waits for the
       owner.
+- [ ] P-7 Give a removal that the `filesystem` feed derives from an
+      older event the time of the poll. An object that is gone when
+      the feed reads its create or write event becomes a removal with
+      the time of the newest event of the batch. When the removal
+      event of the watcher is in a later batch, that time is older
+      than the last sync, and the engine drops the removal until the
+      next whole-scope scan. The feed needs the clock of the daemon
+      for this, which the provider does not get today.
 
 ## Platform layer
 
@@ -239,33 +283,13 @@ runners. What remains before Linux ships a surface:
       soak runs on GitHub (2026-09-15) were red, and `perf.yml` has no
       run there. Done on 2026-11-22 on a contributor Mac: the five
       cells of the release gate at 45 minutes each with no violation,
-      and `./scripts/perf.sh` with every SLO check passed. The
-      all-faults cell found three defects in the driver and its model
-      and none in the product; they are fixed. Open: one run of
-      `soak.yml` on GitHub.
-- [ ] TR-14 Put the filler of the soak's disk-full fault outside the
-      cloud root, on the same volume. It sits inside the root today, so
-      the daemon downloads it (some hundred MiB) and then moves its
-      local copy to the trash when the fault ends. That costs the phase
-      its time and tests nothing: a full cloud volume is other people's
-      data, which Vapor does not sync.
-- [ ] TR-15 Make the vanished-root fault of the soak fire in the cell
-      that has the cloud root on a disk image. The driver parks the
-      root with a rename into the sandbox, which is another volume
-      there, so the rename fails and the fault is skipped with no
-      note: it fired in none of the 9 phases of a run, against a 35%
-      chance in each. Park the root next to itself, on its own volume.
-- [ ] TR-16 Make the large-file cell of the soak fire its faults. In
-      45 minutes it made 54 operations and fired no fault: the chance
-      of a fault is per operation, and files of tens of megabytes
-      leave few operations. Fire `crash-mid-transfer` for each phase
-      of this load, or raise the chance with the size of the files.
-- [ ] TR-17 Make the soak ask for a sync after some of its disk-full
-      phases. The driver waits for the automatic try each time (15
-      minutes, and one more for the run state), so three such faults
-      take most of a 45-minute cell, and the try that `vapor
-      reconcile` brings forward runs in no soak. Ask in about half of
-      the phases, so that both tries are covered.
+      and `./scripts/perf.sh` with every SLO check passed. One run of
+      `soak.yml` on GitHub the same day: seven of nine cells clean,
+      and two red from defects of the driver that the new seed met (a
+      crash while the cloud volume is full, and a mass-deletion
+      question that opens while the driver waits for a quiet queue).
+      Both are fixed. Open: one run of `soak.yml` on GitHub with every
+      cell green.
 - [ ] PT-1 Tune the soak cell `scripts/perf.sh` gates on (duration,
       seed, load) using release baseline history once per-OS baselines
       exist; gate SLO-1 on the `quiet` phases. Give the thresholds that

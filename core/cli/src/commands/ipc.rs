@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn render_status_includes_every_stable_field() {
         let status = StatusResponse {
-            schema_version: 4,
+            schema_version: 5,
             daemon: "vapord/0.2.0-alpha.3".to_string(),
             provider: "filesystem".to_string(),
             run: StateReason {
@@ -470,7 +470,7 @@ mod tests {
         assert!(rendered.contains("Throttle: idle (idle, plugged in, and cool)"));
         assert!(rendered.contains("Provider: filesystem"));
         assert!(rendered.contains("Daemon: vapord/0.2.0-alpha.3"));
-        assert!(rendered.contains("IPC schema: 4"));
+        assert!(rendered.contains("IPC schema: 5"));
         assert!(rendered.contains("Queue: 3 queued, 1 failed"));
         assert!(rendered.contains("Strict mirror: 1 reverts, 1 deletes"));
         assert!(rendered.contains("Decisions waiting for you: 2 (vapor decisions list)"));
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn render_diagnostics_explains_why_work_is_stuck() {
         let diagnostics = DiagnosticsResponse {
-            schema_version: 4,
+            schema_version: 5,
             items: vec![vapor_ipc::WorkItem {
                 id: 42,
                 profile_id: "default".to_string(),
@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn status_json_shape_is_stable() {
         let status = StatusResponse {
-            schema_version: 4,
+            schema_version: 5,
             daemon: "vapord/0.0.0-test".to_string(),
             provider: "filesystem".to_string(),
             run: StateReason {
@@ -588,7 +588,7 @@ mod tests {
         assert_eq!(
             rendered,
             r#"{
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "daemon": "vapord/0.0.0-test",
   "provider": "filesystem",
   "run": {
@@ -680,7 +680,7 @@ mod tests {
     #[test]
     fn diagnostics_json_shape_is_stable() {
         let diagnostics = DiagnosticsResponse {
-            schema_version: 4,
+            schema_version: 5,
             items: vec![vapor_ipc::WorkItem {
                 id: 42,
                 profile_id: "default".to_string(),
@@ -699,7 +699,7 @@ mod tests {
         assert_eq!(
             serde_json::to_string_pretty(&diagnostics).expect("serialize"),
             r#"{
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "items": [
     {
       "id": 42,
@@ -723,14 +723,14 @@ mod tests {
     #[test]
     fn ack_json_shape_is_stable() {
         let ack = vapor_ipc::AckResponse {
-            schema_version: 4,
+            schema_version: 5,
             accepted: true,
             note: "reconcile requested".to_string(),
         };
         assert_eq!(
             serde_json::to_string_pretty(&ack).expect("serialize"),
             r#"{
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "accepted": true,
   "note": "reconcile requested"
 }"#
@@ -740,7 +740,7 @@ mod tests {
     #[test]
     fn timeline_json_shape_is_stable() {
         let timeline = TimelineResponse {
-            schema_version: 4,
+            schema_version: 5,
             entries: vec![vapor_ipc::TimelineEntry {
                 timestamp_ms: 1_700_000_000_000,
                 kind: "throttle".to_string(),
@@ -753,7 +753,7 @@ mod tests {
         assert_eq!(
             rendered,
             r#"{
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "entries": [
     {
       "timestampMs": 1700000000000,

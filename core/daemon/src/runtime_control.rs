@@ -67,13 +67,25 @@ impl RuntimeControl {
 
     /// Mark "pause requested". Idempotent.
     pub fn request_pause(&self) {
-        self.with_inner(|inner| inner.pause_request = Some(true));
-        self.notify_waker();
+        self.request_pause_or_resume(true);
     }
 
     /// Mark "resume requested". Idempotent.
     pub fn request_resume(&self) {
-        self.with_inner(|inner| inner.pause_request = Some(false));
+        self.request_pause_or_resume(false);
+    }
+
+    /// A pause or a resume for every profile replaces what was asked
+    /// of single profiles before it. The reader applies this request
+    /// first and the ones that name a profile after it, so the ones
+    /// that are still in the list are the ones that came later.
+    fn request_pause_or_resume(&self, pause: bool) {
+        self.with_inner(|inner| {
+            inner.pause_request = Some(pause);
+            inner
+                .for_profile
+                .retain(|(_, request)| *request == ControlRequest::Reconcile);
+        });
         self.notify_waker();
     }
 
@@ -106,6 +118,30 @@ impl RuntimeControl {
     fn with_inner<R>(&self, body: impl FnOnce(&mut RuntimeControlInner) -> R) -> R {
         let mut guard = self.inner.lock().expect("RuntimeControl mutex poisoned");
         body(&mut guard)
+    }
+}
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    #[test]
+    fn a_request_for_every_profile_replaces_the_earlier_ones_for_one_profile() {
+        let control = RuntimeControl::new();
+        control.request_for_profile("work", ControlRequest::Pause);
+        control.request_for_profile("work", ControlRequest::Reconcile);
+        control.request_resume();
+        control.request_for_profile("home", ControlRequest::Pause);
+
+        assert_eq!(control.take_pause_request(), Some(false));
+        assert_eq!(
+            control.take_profile_requests(),
+            vec![
+                ("work".to_string(), ControlRequest::Reconcile),
+                ("home".to_string(), ControlRequest::Pause),
+            ],
+            "the pause of work came before the resume of everything, and is gone"
+        );
     }
 }
 

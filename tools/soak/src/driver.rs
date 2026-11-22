@@ -210,7 +210,14 @@ impl Driver {
             .collect()
     }
 
-    pub fn provision(cfg: Config) -> Result<Self, Failure> {
+    pub fn provision(mut cfg: Config) -> Result<Self, Failure> {
+        // A load with few operations in a phase would fire no per-op
+        // fault in a whole run. Its chance rises so that about one
+        // fires in each churn phase.
+        cfg.faults.per_op_percent = cfg
+            .faults
+            .per_op_percent
+            .max(100 / Self::base_ops(&cfg.load.name) as u64);
         if !cfg.skip_build {
             runner::build_product_profile(&cfg.repo_root, cfg.release)?;
         }
@@ -322,15 +329,50 @@ impl Driver {
         self.daemon = Some(daemon);
         self.health.reset_process();
         self.confirm_one_way_mode()?;
-        // A daemon started while the cloud root is parked or locked
-        // blocks (Error) until the root is usable again.
+        self.wait_started(STARTUP_TIMEOUT)
+    }
+
+    /// Waits for a daemon that just started, or that a fault just let
+    /// go, to report the state the driver expects. A daemon started
+    /// while the cloud root is parked or locked blocks (Error) until
+    /// the root is usable again. One whose uploads found the cloud
+    /// volume full says Error with the `uploads wait` reason, which a
+    /// poll can meet before it ever sees `running`.
+    fn wait_started(&self, timeout: Duration) -> Result<(), Failure> {
         let expected = if self.cloud_unavailable() {
             "error"
         } else {
             "running"
         };
-        self.cli.wait_run_state(expected, STARTUP_TIMEOUT)?;
-        Ok(())
+        wait::wait_until(
+            timeout,
+            &format!("the daemon to report run_state={expected}"),
+            || {
+                self.cli.status().is_some_and(|status| {
+                    status.run.state == expected
+                        || (self.uploads_may_wait()
+                            && status.run.state == "error"
+                            && status.run.reason.starts_with(UPLOADS_WAIT_REASON))
+                })
+            },
+        )
+    }
+
+    /// The filler of the disk-full fault: on the volume of the cloud
+    /// root and outside the root, because a full cloud volume is other
+    /// people's data, which Vapor does not sync.
+    fn filler_path(&self) -> Option<PathBuf> {
+        self.image
+            .as_ref()
+            .map(|image| image.mount_point.join(".soak-filler.bin"))
+    }
+
+    /// The cloud volume is full now, or was until a moment ago.
+    fn uploads_may_wait(&self) -> bool {
+        self.filler_path().is_some_and(|filler| filler.exists())
+            || self
+                .cloud_full_hold_until
+                .is_some_and(|until| Instant::now() < until)
     }
 
     /// A profile in a one-way mode holds until the user confirms the
@@ -582,13 +624,18 @@ impl Driver {
         Ok(())
     }
 
-    fn ops_for(&self, kind: PhaseKind) -> usize {
-        let base = match self.cfg.load.name.as_str() {
+    /// The operations of one churn phase of this load.
+    fn base_ops(load_name: &str) -> usize {
+        match load_name {
             "bulk" => 1_500,
             "large" => 6,
             "trickle" => 40,
             _ => 120,
-        };
+        }
+    }
+
+    fn ops_for(&self, kind: PhaseKind) -> usize {
+        let base = Self::base_ops(&self.cfg.load.name);
         match kind {
             PhaseKind::Seed => base.max(20),
             PhaseKind::Quiet => 0,
@@ -1069,7 +1116,19 @@ impl Driver {
             while Instant::now() < quiet_until {
                 std::thread::sleep(wait::POLL_INTERVAL);
                 self.write_status(false)?;
-                if self.db.enqueue_high_water() != high_water || !self.db.queue_drained() {
+                // A guard that trips now holds its deletions, and a held
+                // deletion is not in the queue. The answer is what puts
+                // it back, so a window with an answer in it was not
+                // quiet.
+                let answered = if self.db.held_intents().unwrap_or(0) > 0 {
+                    self.answer_decisions()?
+                } else {
+                    0
+                };
+                if answered > 0
+                    || self.db.enqueue_high_water() != high_water
+                    || !self.db.queue_drained()
+                {
                     still_quiet = false;
                     break;
                 }
@@ -1099,6 +1158,7 @@ impl Driver {
             "running"
         };
         let started = Instant::now();
+        let mut said_waiting = false;
         loop {
             let run = self.cli.status().map(|status| status.run);
             if run.as_ref().map(|run| run.state.as_str()) == Some(expected) {
@@ -1118,6 +1178,15 @@ impl Driver {
                     run.map(|run| run.state)
                 )));
             }
+            if waits_for_room && !said_waiting {
+                self.note(
+                    "uploads wait for room in the cloud; the daemon tries them again within 15 minutes",
+                );
+                said_waiting = true;
+            }
+            // The wait can last a retry interval. A watcher of the
+            // status file must see a run that is alive.
+            self.write_status(false)?;
             std::thread::sleep(wait::POLL_INTERVAL);
         }
     }
@@ -1130,9 +1199,9 @@ impl Driver {
     /// the root is restored. Any other open decision is a finding: the
     /// driver does not know the right answer, and the run must not
     /// guess.
-    fn answer_decisions(&mut self) -> Result<(), Failure> {
+    fn answer_decisions(&mut self) -> Result<usize, Failure> {
         let Ok(report) = self.cli.json(&["decisions", "list", "--json"]) else {
-            return Ok(());
+            return Ok(0);
         };
         let open: Vec<serde_json::Value> = report["decisions"]
             .as_array()
@@ -1141,6 +1210,7 @@ impl Driver {
             .filter(|decision| decision["choice"].is_null())
             .cloned()
             .collect();
+        let mut answered = 0;
         for decision in open {
             let id = decision["id"].as_i64().unwrap_or_default();
             let kind = decision["kind"].as_str().unwrap_or_default().to_string();
@@ -1171,8 +1241,9 @@ impl Driver {
             );
             self.cli
                 .ok(&["decisions", "resolve", &id.to_string(), "--choose", "apply"])?;
+            answered += 1;
         }
-        Ok(())
+        Ok(answered)
     }
 
     fn scan_daemon_log(&mut self) -> (Vec<String>, Vec<String>) {
@@ -1310,7 +1381,14 @@ impl Driver {
     ) -> Result<(), Failure> {
         match fault {
             FaultKind::CloudRootVanish => {
-                let parked = self.sandbox.root.join("parked-cloud");
+                // Next to the root, so the rename stays on one volume
+                // when the root is on a disk image.
+                let parked = self
+                    .home
+                    .cloud
+                    .parent()
+                    .unwrap_or(&self.sandbox.root)
+                    .join("parked-cloud");
                 if self.home.cloud.exists() && fs::rename(&self.home.cloud, &parked).is_ok() {
                     self.cloud_parked = Some(parked);
                     self.note("cloud-root-vanish: cloud root parked for this phase");
@@ -1338,8 +1416,10 @@ impl Driver {
                     faults.push(format!("throttle-walk:{}", station.label()));
                 }
             }
-            FaultKind::DiskFull if self.image.is_some() && !self.cloud_unavailable() => {
-                let filler = self.home.cloud.join(".soak-filler.bin");
+            FaultKind::DiskFull => {
+                let Some(filler) = self.filler_path() else {
+                    return Ok(());
+                };
                 let mut file = fs::File::create(&filler)?;
                 use std::io::Write;
                 let chunk = vec![0xA5u8; 1024 * 1024];
@@ -1385,8 +1465,7 @@ impl Driver {
                     // The daemon notices on its root-check cadence and
                     // lifts the hold on its own; give it that long.
                     if self.daemon_pid().is_some() {
-                        self.cli
-                            .wait_run_state("running", Duration::from_secs(90))?;
+                        self.wait_started(Duration::from_secs(90))?;
                     }
                 }
             }
@@ -1400,8 +1479,7 @@ impl Driver {
                     // An unreadable root is retried at the ensure cadence,
                     // never asked about; the daemon recovers on its own.
                     if self.daemon_pid().is_some() {
-                        self.cli
-                            .wait_run_state("running", Duration::from_secs(90))?;
+                        self.wait_started(Duration::from_secs(90))?;
                     }
                 }
             }
@@ -1411,14 +1489,21 @@ impl Driver {
                 }
             }
             FaultKind::DiskFull => {
-                let filler = self.home.cloud.join(".soak-filler.bin");
-                if filler.exists() {
+                if let Some(filler) = self.filler_path().filter(|filler| filler.exists()) {
                     fs::remove_file(&filler)?;
                     self.note("disk-full: filler removed");
                     // One retry interval, the minute the run state
                     // keeps saying so, and a margin for the tick.
                     let hold = vapor_shared::constants::engine::CLOUD_FULL_RETRY_SECONDS + 90;
                     self.cloud_full_hold_until = Some(Instant::now() + Duration::from_secs(hold));
+                    // Half of the time the user does not wait: a sync
+                    // request tries the waiting uploads at once.
+                    if self.rng.chance(50) && self.cli.reconcile().is_ok() {
+                        self.note(
+                            "disk-full: asked for a sync, so the waiting uploads are tried now",
+                        );
+                        self.record_fault_event("disk-full", "sync requested".to_string());
+                    }
                 }
             }
             _ => {}

@@ -495,7 +495,7 @@ mod tests {
         // Field-omission tolerance: a peer that omits fields added later
         // is read with defaults instead of failing.
         let raw = r#"{
-            "schemaVersion": 4,
+            "schemaVersion": 5,
             "provider": "filesystem",
             "run": {"state": "running"},
             "throttle": {"state": "idle", "reason": "idle"}

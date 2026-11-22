@@ -3249,6 +3249,117 @@ mod tests {
         assert!(fixture.cloud_roots["work"].join("note.txt").exists());
     }
 
+    /// Makes the provider of `id` panic, so that the profile is
+    /// suspended. A paused profile calls no provider, so this is for a
+    /// profile that runs.
+    fn suspend(fixture: &mut MultiFixture, id: &str) {
+        fixture
+            .multi
+            .runtime_for(id)
+            .expect("runtime")
+            .replace_provider_for_testing(Box::new(PanickingProvider));
+        fixture.tick(6_000);
+        fixture.tick(6_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 1);
+    }
+
+    fn run_state_of(fixture: &mut MultiFixture, id: &str) -> RunState {
+        fixture
+            .multi
+            .runtime_for(id)
+            .expect("runtime")
+            .app()
+            .snapshot()
+            .run_state
+    }
+
+    #[test]
+    fn a_pause_by_name_of_a_suspended_profile_holds_when_it_is_composed_again() {
+        let mut fixture = MultiFixture::new(&[
+            ("work", SyncMode::TwoWay, false),
+            ("home", SyncMode::TwoWay, false),
+        ]);
+        let control = Arc::new(RuntimeControl::new());
+        fixture.multi.attach_control(control.clone());
+        fixture.tick(6_000);
+        suspend(&mut fixture, "work");
+
+        // The request names a profile that does not run now.
+        control.request_for_profile("work", ControlRequest::Pause);
+        fixture.tick(6_000);
+        fixture.tick(61_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0, "composed again");
+        fixture.tick(6_000);
+
+        assert_eq!(run_state_of(&mut fixture, "work"), RunState::Paused);
+        assert_eq!(run_state_of(&mut fixture, "home"), RunState::Running);
+    }
+
+    #[test]
+    fn a_resume_of_everything_reaches_a_profile_that_is_suspended() {
+        let mut fixture = MultiFixture::new(&[
+            ("work", SyncMode::TwoWay, false),
+            ("home", SyncMode::TwoWay, false),
+        ]);
+        let control = Arc::new(RuntimeControl::new());
+        fixture.multi.attach_control(control.clone());
+        fixture.tick(6_000);
+        suspend(&mut fixture, "work");
+        control.request_for_profile("work", ControlRequest::Pause);
+        fixture.tick(6_000);
+
+        // The resume comes while the profile does not run. The profile
+        // that is composed later must not remember the old pause.
+        control.request_resume();
+        fixture.tick(61_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0, "composed again");
+        fixture.tick(6_000);
+
+        assert_eq!(run_state_of(&mut fixture, "work"), RunState::Running);
+    }
+
+    #[test]
+    fn a_reconcile_for_one_profile_is_for_that_profile_alone() {
+        let mut fixture = MultiFixture::new(&[
+            ("work", SyncMode::TwoWay, false),
+            ("home", SyncMode::TwoWay, false),
+        ]);
+        let control = Arc::new(RuntimeControl::new());
+        fixture.multi.attach_control(control.clone());
+        fixture.tick(6_000);
+        fixture.converge(16);
+        let requests_of = |fixture: &MultiFixture, id: &str| {
+            fixture
+                .multi
+                .timeline()
+                .snapshot(None)
+                .into_iter()
+                .filter(|event| {
+                    event.kind == constants::timeline::KIND_RECONCILE
+                        && event.profile_id == id
+                        && event.message.contains("requested by the user")
+                })
+                .count()
+        };
+        assert_eq!(requests_of(&fixture, "work"), 0);
+
+        control.request_for_profile("work", ControlRequest::Reconcile);
+        fixture.tick(6_000);
+
+        assert_eq!(requests_of(&fixture, "work"), 1);
+        assert_eq!(
+            requests_of(&fixture, "home"),
+            0,
+            "the request named one profile"
+        );
+
+        // A request with no profile is for every profile.
+        control.request_reconcile();
+        fixture.tick(6_000);
+        assert_eq!(requests_of(&fixture, "work"), 2);
+        assert_eq!(requests_of(&fixture, "home"), 1);
+    }
+
     #[test]
     fn a_profile_that_composes_and_fails_again_waits_longer_each_time() {
         let mut fixture = MultiFixture::new(&[("only", SyncMode::TwoWay, false)]);

@@ -86,9 +86,19 @@ fn hash_small_file(path: &Path, algorithm: HashAlgorithm) -> Option<LocalFileHas
 
 /// What a worker read for one probe, by path.
 #[derive(Debug, Default)]
-pub(crate) struct LocalHashes(HashMap<PathBuf, LocalFileHash>);
+pub(crate) struct LocalHashes {
+    hashes: HashMap<PathBuf, LocalFileHash>,
+    cut_short: bool,
+}
 
 impl LocalHashes {
+    /// The reads stopped before every file had its answer, because
+    /// hashing went on hold. A file with no answer here is not a file
+    /// that changed: the caller asks again later.
+    pub fn cut_short(&self) -> bool {
+        self.cut_short
+    }
+
     /// The hash of the file at `path`, when a worker read the file that
     /// has this size and modification time.
     pub fn hash_of(
@@ -97,7 +107,7 @@ impl LocalHashes {
         size_bytes: u64,
         modified_at: Option<SystemTime>,
     ) -> Option<&str> {
-        self.0.get(path)?.of_file_with(size_bytes, modified_at)
+        self.hashes.get(path)?.of_file_with(size_bytes, modified_at)
     }
 }
 
@@ -111,9 +121,12 @@ pub(crate) struct TouchedFileCheck {
 impl TouchedFileCheck {
     /// Reads each file that has the size its row recorded and another
     /// modification time: the one case where only the content says
-    /// whether the file changed since the last sync.
-    pub fn run(&self) -> LocalHashes {
+    /// whether the file changed since the last sync. `may_read` is
+    /// asked before each file: a folder can hold many such files, and
+    /// the throttle state can put hashing on hold part of the way.
+    pub fn run(&self, may_read: &dyn Fn() -> bool) -> LocalHashes {
         let mut hashes = HashMap::new();
+        let mut cut_short = false;
         for row in &self.rows {
             let Some((size_bytes, modified_at)) = file_state(&row.path) else {
                 continue;
@@ -121,11 +134,15 @@ impl TouchedFileCheck {
             if size_bytes != row.size_bytes || row.matches_local(size_bytes, Some(modified_at)) {
                 continue;
             }
+            if !may_read() {
+                cut_short = true;
+                break;
+            }
             if let Some(hash) = hash_small_file(&row.path, self.algorithm) {
                 hashes.insert(row.path.clone(), hash);
             }
         }
-        LocalHashes(hashes)
+        LocalHashes { hashes, cut_short }
     }
 }
 
@@ -282,12 +299,19 @@ mod tests {
             algorithm: HashAlgorithm::Sha256,
         };
         let reads_before = content_reads_on_this_thread();
-        let hashes = check.run();
+        let hashes = check.run(&|| true);
         assert_eq!(
             content_reads_on_this_thread() - reads_before,
             1,
             "only the touched file is read"
         );
+        assert!(!hashes.cut_short());
+
+        // With hashing on hold nothing is read, and the answer says so.
+        let reads_before = content_reads_on_this_thread();
+        let held = check.run(&|| false);
+        assert_eq!(content_reads_on_this_thread() - reads_before, 0);
+        assert!(held.cut_short());
 
         let (size, modified_at) = state_of(&touched);
         assert_eq!(
@@ -309,7 +333,7 @@ mod tests {
             rows: vec![index_row(&file, b"first", None)],
             algorithm: HashAlgorithm::Sha256,
         }
-        .run();
+        .run(&|| true);
         let (size, modified_at) = state_of(&file);
         assert!(hashes.hash_of(&file, size, modified_at).is_some());
 

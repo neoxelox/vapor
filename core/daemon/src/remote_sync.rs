@@ -90,6 +90,11 @@ pub struct RemotePoller {
     /// taken, and a change between the two would be in neither. The
     /// wait ends with the answer of that poll, whatever it is.
     awaiting_cursor: bool,
+    /// The wait ended with a poll that failed, so a walk may have
+    /// started with no cursor. The baseline that answers later is
+    /// newer than the listings of that walk, and a change between the
+    /// two is in neither: one more whole-scope reconcile finds it.
+    walk_may_predate_cursor: bool,
 }
 
 impl RemotePoller {
@@ -109,6 +114,16 @@ impl RemotePoller {
             discard_history: false,
             refused_sign_in: None,
             awaiting_cursor: true,
+            walk_may_predate_cursor: false,
+        }
+    }
+
+    /// A poll gave no answer. The reconcile must not wait for a feed
+    /// that may stay away, so the wait ends here.
+    fn end_wait_without_cursor(&mut self) {
+        if self.awaiting_cursor {
+            self.awaiting_cursor = false;
+            self.walk_may_predate_cursor = true;
         }
     }
 
@@ -293,8 +308,7 @@ impl RemotePoller {
                 None
             }
             Ok(Err(error)) => {
-                // A poll that fails must not hold the reconcile.
-                self.awaiting_cursor = false;
+                self.end_wait_without_cursor();
                 logging::warning(
                     "Remote changes poll failed; will retry on the next cadence",
                     &[
@@ -305,7 +319,7 @@ impl RemotePoller {
                 None
             }
             Err(panic) => {
-                self.awaiting_cursor = false;
+                self.end_wait_without_cursor();
                 logging::error(
                     "Remote changes poll panicked; will retry on the next cadence",
                     &[("panic", panic)],
@@ -334,7 +348,7 @@ impl RemotePoller {
                 // A poll with no cursor asks for a baseline, which
                 // cannot expire: a provider bug. The next cadence asks
                 // again.
-                self.awaiting_cursor = false;
+                self.end_wait_without_cursor();
                 logging::error(
                     "Provider reported CursorExpired for a baseline poll; deferring re-baseline",
                     &[],
@@ -377,6 +391,22 @@ impl RemotePoller {
             }
             ChangesPoll::Page(page) => {
                 self.awaiting_cursor = false;
+                // A page for a poll with a cursor holds every change
+                // since that cursor, so only a baseline leaves a gap.
+                if std::mem::take(&mut self.walk_may_predate_cursor) && self.cursor.is_none() {
+                    logging::info(
+                        "The changes feed has its cursor after a poll that failed; scheduling one more whole-scope reconcile",
+                        &[("cursor_key", self.cursor_state_key.clone())],
+                    );
+                    report.enqueued_intents += state_db.enqueue_intents_coalesced(
+                        &[(
+                            local_root.to_path_buf(),
+                            PendingIntentKind::ReconcileSubtree,
+                            now,
+                        )],
+                        crate::safeguards::IntentSource::Fresh,
+                    )?;
+                }
                 report.observed_changes = page.changes.len();
                 // A full page means more changes are pending right now.
                 // Keep draining on the next tick (one page per tick stays
@@ -956,6 +986,58 @@ mod tests {
                 .remote_echoes
                 .matches_write("ours.txt", Some("op-mine"), None, ts(10))
         );
+    }
+
+    #[test]
+    fn a_baseline_after_a_poll_that_failed_schedules_one_more_reconcile() {
+        let mut fixture = Fixture::new();
+        assert!(fixture.poller.awaits_cursor());
+
+        // The first poll of this start fails (the device is offline).
+        // The reconcile must not wait for the feed, so the wait ends.
+        let mut report = RemotePollReport::default();
+        let failed = fixture.poller.unwrap_poll(
+            Ok(Err(ProviderError::transient("the network is down"))),
+            &mut report,
+        );
+        assert!(failed.is_none());
+        assert!(!fixture.poller.awaits_cursor());
+
+        // A walk may run now, with no cursor. The baseline that answers
+        // later is newer than its listings.
+        let baseline = fixture.poll(ts(10));
+        assert!(baseline.polled);
+        assert_eq!(
+            baseline.enqueued_intents, 1,
+            "one more whole-scope reconcile covers the time between"
+        );
+        let intent = fixture
+            .state_db
+            .lease_next_ready(ts(20))
+            .expect("lease")
+            .expect("intent");
+        assert_eq!(intent.kind, PendingIntentKind::ReconcileSubtree);
+        assert_eq!(intent.path, fixture.local_root);
+
+        // It is asked for one time.
+        let next = fixture.poll(ts(30));
+        assert_eq!(next.enqueued_intents, 0);
+    }
+
+    #[test]
+    fn a_poll_that_fails_with_a_cursor_in_hand_schedules_no_reconcile() {
+        let mut fixture = Fixture::new();
+        fixture.poll(ts(0)); // baseline
+        let mut report = RemotePollReport::default();
+        fixture.poller.unwrap_poll(
+            Ok(Err(ProviderError::transient("the network is down"))),
+            &mut report,
+        );
+
+        let next = fixture.poll(ts(10));
+
+        assert!(next.polled);
+        assert_eq!(next.enqueued_intents, 0);
     }
 
     #[test]

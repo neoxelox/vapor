@@ -104,6 +104,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: two_profiles_isolated,
         },
         Scenario {
+            id: "S74",
+            name: "nested-profile-does-not-run",
+            proves: "a profile in vapor.json whose local folder is inside the one of an earlier profile does not run: vapor status lists it as suspended with the reason, neither of its folders is created, and the earlier profile syncs",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: nested_profile_does_not_run,
+        },
+        Scenario {
             id: "S71",
             name: "pause-one-profile",
             proves: "vapor pause --profile stops one profile while the other keeps syncing, resume --profile lets its file through, reconcile --profile is accepted, and a name with no profile behind it is refused with the names there are",
@@ -609,6 +617,77 @@ fn two_profiles_isolated(ctx: &mut Ctx) -> Result<(), Failure> {
     }
     ctx.set_oracle(OracleMode::Skip(
         "profiles use their own roots; compared explicitly above".to_string(),
+    ));
+    Ok(())
+}
+
+fn nested_profile_does_not_run(ctx: &mut Ctx) -> Result<(), Failure> {
+    let outer_local = ctx.sandbox.root.join("outer-local");
+    let outer_cloud = ctx.sandbox.root.join("cloud").join("Outer");
+    let inner_local = outer_local.join("inner");
+    let inner_cloud = ctx.sandbox.root.join("cloud").join("Inner");
+    // A file edited by hand: `vapor profiles add` refuses this pair.
+    let profiles = serde_json::json!([
+        {
+            "id": "outer",
+            "enabled": true,
+            "localRoot": outer_local.to_string_lossy(),
+            "cloudRoot": outer_cloud.to_string_lossy(),
+        },
+        {
+            "id": "inner",
+            "enabled": true,
+            "localRoot": inner_local.to_string_lossy(),
+            "cloudRoot": inner_cloud.to_string_lossy(),
+        }
+    ]);
+    ctx.cli().config_set("profiles", &profiles.to_string())?;
+    // The state of the whole daemon is the worst one of its profiles,
+    // so it does not say `running` here.
+    let home = ctx.primary.clone();
+    let kind = ctx.paths.daemon_kind;
+    ctx.start_daemon_in(&home, kind, false)?;
+    ctx.allow_warning("Suspending a profile that cannot run as configured");
+    let cli = ctx.cli();
+    let profile = |id: &str| {
+        cli.status()?
+            .profiles
+            .into_iter()
+            .find(|profile| profile.id == id)
+    };
+    ctx.wait_until(CONVERGE_TIMEOUT, "outer to run", || {
+        profile("outer").is_some_and(|outer| outer.run.state == "running")
+    })?;
+    let inner = profile("inner").ok_or_else(|| Failure::new("status does not list inner"))?;
+    ensure!(
+        inner.suspended,
+        "the nested profile must not run: {:?}",
+        inner.run
+    );
+    ensure!(
+        inner
+            .run
+            .reason
+            .contains("overlaps the one of profile `outer`"),
+        "the reason does not name the other profile: {}",
+        inner.run.reason
+    );
+
+    write_file(&outer_local.join("note.txt"), "outer payload\n")?;
+    ctx.wait_exists(&outer_cloud.join("note.txt"), CONVERGE_TIMEOUT)?;
+    ensure!(
+        !inner_local.exists() && !inner_cloud.exists(),
+        "a profile that does not run made one of its folders"
+    );
+
+    let oracle = crate::oracle::TreeOracle::new(&crate::oracle::OracleOptions {
+        extra_ignore_rules: Vec::new(),
+        compare_mode: cfg!(unix),
+    })?;
+    let report = oracle.compare(&outer_local, &outer_cloud)?;
+    ensure!(report.is_clean(), "profile outer: {}", report.summary(10));
+    ctx.set_oracle(OracleMode::Skip(
+        "the profiles use their own roots; the one that runs is compared above".to_string(),
     ));
     Ok(())
 }

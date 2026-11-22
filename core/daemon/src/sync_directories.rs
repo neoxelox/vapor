@@ -253,6 +253,14 @@ impl OverlapPath {
                     ancestor = parent;
                 }
                 _ => {
+                    // A `..` after a folder that does not exist yet has
+                    // no name to carry over. Once the folder is made,
+                    // `..` leads back out of it, so the path is read
+                    // that way.
+                    let plain = without_dot_components(path);
+                    if plain != path {
+                        return Self::of(&plain, folds_case);
+                    }
                     return Self {
                         shown: path.to_path_buf(),
                         compared: path.to_path_buf(),
@@ -261,6 +269,23 @@ impl OverlapPath {
             }
         }
     }
+}
+
+/// `path` with each `.` dropped and each `..` taken with the name
+/// before it, by the text alone.
+fn without_dot_components(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut plain = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                plain.pop();
+            }
+            other => plain.push(other.as_os_str()),
+        }
+    }
+    plain
 }
 
 /// The full path a root value names: `~` expands against the home
@@ -365,6 +390,30 @@ mod tests {
         let scope = resolve_scope(&config, Some(home.as_path()));
 
         assert_eq!(scope.cloud_root, "/Backups/Vapor");
+    }
+
+    #[test]
+    fn local_roots_nest_when_one_is_inside_the_other_and_not_when_they_are_equal_or_apart() {
+        let temp = TempDir::new().expect("temp dir");
+        let base = vapor_shared::paths::canonicalize(temp.path()).expect("canonical base");
+        let docs = base.join("Docs");
+        std::fs::create_dir_all(&docs).expect("docs");
+
+        assert!(local_roots_nest(&docs, &docs).is_none(), "one folder");
+        assert!(
+            local_roots_nest(&docs, &base.join("Docs2")).is_none(),
+            "a name that only starts the same is another folder"
+        );
+        let inside = local_roots_nest(&docs, &docs.join("work")).expect("inside");
+        assert!(inside.contains("is inside"), "{inside}");
+        assert!(local_roots_nest(&docs.join("work"), &docs).is_some());
+        // A `..` after a folder that does not exist yet still leads to
+        // the folder it names.
+        assert!(
+            local_roots_nest(&docs, &base.join("new/../Docs/work")).is_some(),
+            "the path names a folder inside Docs"
+        );
+        assert!(local_roots_nest(&docs, &base.join("new/../Other")).is_none());
     }
 
     #[test]

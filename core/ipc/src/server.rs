@@ -661,7 +661,7 @@ mod tests {
         let payload = br#"{
             "kind": "Hello",
             "payload": {
-                "schemaVersion": 4,
+                "schemaVersion": 5,
                 "supportedMinVersion": 4,
                 "clientId": "vapor-cli/future",
                 "futureField": "not yet defined"

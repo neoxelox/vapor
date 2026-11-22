@@ -368,6 +368,9 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S70 | vapor init takes a fresh install to a running sync with one command and no terminal, refuses when a folder is left out, and a second run changes nothing and says initialized |
 | S71 | `vapor pause --profile` stops one profile while the other keeps syncing, `resume --profile` lets its file through, `reconcile --profile` is accepted, and a name with no profile behind it is refused with the names there are |
 | S72 | an upload that finds the cloud folder's volume full is not failed: the profile reports that uploads wait; once there is room, `vapor reconcile` tries the waiting upload at once, with no wait for the next automatic try (needs a disk image) |
+| S73 | a synced folder that is renamed in the cloud while Vapor does not run: the next start moves its files on this device and removes the old folder, which the move left empty |
+| S74 | a profile in `vapor.json` whose local folder is inside the one of an earlier profile does not run: `vapor status` lists it as suspended with the reason, neither of its folders is created, and the earlier profile syncs |
+| S75 | an empty folder where the adopted cloud root was never becomes deletions on this device, also when a sync is asked for before the next check of the root: no local file goes to the trash, a `root-replaced` decision opens, and `reattach` sends the local files to the new folder |
 | R01 | install registers the daemon and its supervisor with real launchd; then, with the supervisor set aside, start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall; then the supervisor of a new install restarting a killed daemon on its own (`--full`, disposable runners only) |
 
 ## Extending the harness

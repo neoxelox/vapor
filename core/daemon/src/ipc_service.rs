@@ -165,19 +165,36 @@ impl DaemonIpcService {
             }
             return Self::ack(true, note);
         };
-        let known: Vec<String> = self
-            .snapshot()
-            .profiles
-            .into_iter()
-            .map(|status| status.id)
-            .collect();
-        if !known.iter().any(|id| id == profile) {
-            let listed = if known.is_empty() {
-                "the daemon has no profile".to_string()
+        let profiles = self.snapshot().profiles;
+        let Some(status) = profiles.iter().find(|status| status.id == profile) else {
+            let listed = if profiles.is_empty() {
+                "the daemon has no enabled profile".to_string()
             } else {
-                format!("the profiles are: {}", known.join(", "))
+                let known: Vec<&str> = profiles.iter().map(|status| status.id.as_str()).collect();
+                format!("the enabled profiles are: {}", known.join(", "))
             };
             return Self::ack(false, format!("no profile '{profile}'; {listed}"));
+        };
+        if status.suspended {
+            // The profile does not run, so nothing scans now. A pause
+            // or a resume is kept for the time it runs again.
+            if request == ControlRequest::Reconcile {
+                return Self::ack(
+                    false,
+                    format!(
+                        "profile '{profile}' does not run now ({}); it scans when it runs again",
+                        status.run.reason
+                    ),
+                );
+            }
+            self.control.request_for_profile(profile, request);
+            return Self::ack(
+                true,
+                format!(
+                    "profile '{profile}' does not run now ({}); the request holds when it runs again",
+                    status.run.reason
+                ),
+            );
         }
         self.control.request_for_profile(profile, request);
         Self::ack(true, format!("profile '{profile}': {note}"))
@@ -371,6 +388,38 @@ mod tests {
     }
 
     #[test]
+    fn a_request_for_a_profile_that_does_not_run_says_so() {
+        let control = Arc::new(RuntimeControl::new());
+        let mut published = snapshot("running", ThrottleState::Idle, "idle");
+        published.profiles = vec![ProfileStatus {
+            id: "work".to_string(),
+            suspended: true,
+            run: StateReason {
+                state: "error".to_string(),
+                reason: "its local folder overlaps the one of profile `home`".to_string(),
+            },
+            ..ProfileStatus::default()
+        }];
+        let service = DaemonIpcService::new(published, control.clone());
+
+        // Nothing can scan a profile that does not run.
+        let ack = service.reconcile(Some("work"));
+        assert!(!ack.accepted);
+        assert!(ack.note.contains("does not run now"), "{}", ack.note);
+        assert!(ack.note.contains("overlaps"), "{}", ack.note);
+        assert!(control.take_profile_requests().is_empty());
+
+        // A pause is kept for the time the profile runs again.
+        let ack = service.pause(Some("work"));
+        assert!(ack.accepted, "{}", ack.note);
+        assert!(ack.note.contains("does not run now"), "{}", ack.note);
+        assert_eq!(
+            control.take_profile_requests(),
+            vec![("work".to_string(), ControlRequest::Pause)]
+        );
+    }
+
+    #[test]
     fn status_response_uses_published_snapshot() {
         let service = DaemonIpcService::new(
             snapshot("running", ThrottleState::Idle, "idle, plugged in, and cool"),
@@ -437,7 +486,7 @@ mod tests {
         );
         assert_eq!(entries.last().expect("newest").timestamp_ms, 19_999);
         let response = TimelineResponse {
-            schema_version: 4,
+            schema_version: 5,
             entries,
             truncated: true,
         };

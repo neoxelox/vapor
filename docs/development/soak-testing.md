@@ -92,18 +92,24 @@ that stopped part of the way.
 | `freeze` | SIGSTOP for 3 to 15 s, then SIGCONT | between operations |
 | `pause-resume` | `vapor pause`, a few operations, `vapor resume` | between operations |
 | `config-reload` | `resourceLimits.bandwidthPercent` to 5 and back through `vapor config set` | between operations |
-| `cloud-root-vanish` | the cloud root is renamed away for the phase and restored after it | per phase |
+| `cloud-root-vanish` | the cloud root is renamed to a folder next to it for the phase, on its own volume, and restored after it | per phase |
 | `cloud-root-permissions` | every permission is taken off the cloud root for the phase and given back after it: the root is there but unreadable, sync blocks with no question asked, and the daemon recovers on its own | per phase |
 | `throttle-walk` | with `--throttle walk`, the throttle inputs file is set to idle, battery, user-active, or overloaded for the phase | per phase |
-| `disk-full` | with `--cloud-image-mb`, the cloud volume is filled to the last block for the phase; not in a phase that has the cloud root parked or unreadable | per phase |
+| `disk-full` | with `--cloud-image-mb`, a filler file outside the cloud root fills its volume to the last block for the phase. After half of these phases the driver asks for a sync (`vapor reconcile`), as a user who freed space does | per phase |
 
-`none`, `crash`, `all`, or a comma-separated list. Extra operations a
+`none`, `crash`, `all`, or a comma-separated list. A fault that fires
+between operations has a chance of 2% after each operation. A load
+with few operations in a phase (`large`) gets a higher chance, so that
+about one such fault fires in a churn phase. Extra operations a
 fault performs stay on the phase's side and path subset, so the
 one-writer rule holds through a fault. After a crash the driver
 restarts the daemon itself (the driver starts its own daemon, with no service and so no supervisor); the
 mass-delete guard holding a subtree removal is answered with `vapor
 decisions resolve <id> --choose apply` and recorded as a `guard-trip`,
-since that is the product working as designed. While the driver has
+since that is the product working as designed. The guard can trip
+while the driver waits for a quiet queue; a held removal is not in the
+queue, so the driver looks for held work before it calls a queue
+quiet. While the driver has
 the cloud root parked, the daemon holds the profile with a
 `root-missing` question; the driver expects that state, leaves the
 question alone, and after restoring the root waits for the daemon to
@@ -117,7 +123,11 @@ reason that starts with `uploads wait` until the uploads that waited
 went through (`docs/architecture/data-flow.md`, "What stops a whole
 profile"). So after a `disk-full` phase the driver waits for that hold
 to end before it asks for convergence, and the phase gets its converge
-deadline from then on. Any other `error` state fails the run as before.
+deadline from then on. A sync request ends the hold at once, which is
+what the driver sends after half of these phases. A daemon that
+restarts while the volume is full goes to that state at once, and the
+driver takes it as started. Any other `error` state fails the run as
+before.
 
 ## Throttle walk
 

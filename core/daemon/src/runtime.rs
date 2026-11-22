@@ -39,6 +39,10 @@ pub const DEFAULT_PROFILE_ID: &str = constants::profile::DEFAULT_PROFILE_ID;
 /// a structurally broken database fails fast after this many attempts.
 const MAX_CONSECUTIVE_TICK_ERRORS: u32 = 5;
 
+/// Why nothing moves before the first ignore rules are in.
+const IGNORE_RULES_NOT_READ: &str =
+    "reading the ignore files of the folder; no work starts before the rules are in";
+
 /// What the whole-scope reconcile is doing, as `vapor status` reports
 /// it.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -434,6 +438,9 @@ pub struct DaemonRuntime {
     /// The generation of the ignore rules this runtime has reconciled
     /// for (`SharedEventPathFilter::rules_generation`).
     seen_rules_generation: u64,
+    /// The number of the last ignore-rule rebuild whose landing this
+    /// runtime acted on.
+    seen_rules_landed: u64,
     /// How many local entries the ignore rules hid from the last
     /// whole-scope scan that finished. `None` until one has.
     ignored_paths: Option<u64>,
@@ -441,10 +448,10 @@ pub struct DaemonRuntime {
     /// when it last said so. Uploads wait and come back on their own;
     /// status says why until an upload gets through again.
     cloud_full: Option<(String, Instant)>,
-    /// The uploads that wait for room in the cloud, by intent id. A
-    /// user who asks for sync now may have just made the room, so the
-    /// request tries them at once.
-    waiting_for_cloud_room: std::collections::BTreeSet<i64>,
+    /// The user paused this profile. A hold that comes and goes while
+    /// the pause is on (a root that went away, a full cloud) changes
+    /// what the state says, and never ends the pause.
+    user_paused: bool,
     /// A profile of the daemon has not had the answer of its first
     /// cloud-root probe yet. That answer is the start of the profile,
     /// not the end of an outage.
@@ -841,8 +848,6 @@ impl DaemonRuntime {
         if let Some(message) = &staged_report.cloud_storage_full {
             self.mark_cloud_full(message, now);
         }
-        self.waiting_for_cloud_room
-            .extend(staged_report.waiting_for_cloud_room.iter().copied());
         self.reconcile_unsyncable_names(&staged_report.unsyncable_names, false, now)?;
         if let Some(message) = &staged_report.authentication_required {
             self.mark_sign_in_required(message, now);
@@ -1112,8 +1117,6 @@ impl DaemonRuntime {
                 if let Some(message) = &admission_report.cloud_storage_full {
                     self.mark_cloud_full(message, now);
                 }
-                self.waiting_for_cloud_room
-                    .extend(admission_report.waiting_for_cloud_room.iter().copied());
                 self.reconcile_unsyncable_names(&admission_report.unsyncable_names, false, now)?;
                 if let Some(message) = &admission_report.authentication_required {
                     self.mark_sign_in_required(message, now);
@@ -1131,12 +1134,6 @@ impl DaemonRuntime {
         Ok(report)
     }
 
-    /// Moves an ignore-rule rebuild forward (an ignore file changed, or
-    /// a rule key in `vapor.json`). The tree walk and the compilation
-    /// run on a worker; the rules in force stay until the new ones are
-    /// in. When the new rules decide a path another way, a whole-scope
-    /// reconcile follows: a file the old rules hid is in scope now, and
-    /// nothing else would notice it until it changes.
     /// Whether a reconcile walk has to wait for the changes feed: the
     /// provider has a feed, a poll may run now, and the poller has no
     /// cursor that a poll confirmed. Without a feed, or while no poll
@@ -1153,6 +1150,12 @@ impl DaemonRuntime {
             && self.app.remote_poll_allowed()
     }
 
+    /// Moves an ignore-rule rebuild forward (an ignore file changed, or
+    /// a rule key in `vapor.json`). The tree walk and the compilation
+    /// run on a worker; the rules in force stay until the new ones are
+    /// in. When the new rules decide a path another way, a whole-scope
+    /// reconcile follows: a file the old rules hid is in scope now, and
+    /// nothing else would notice it until it changes.
     fn reload_path_filter_if_requested(
         &mut self,
         now: SystemTime,
@@ -1160,12 +1163,15 @@ impl DaemonRuntime {
         let Some(path_filter) = self.path_filter.clone() else {
             return Ok(());
         };
-        // A rebuild that failed ends the wait as well: the rules in
-        // force are the rules there are, and a folder must not wait for
-        // ever.
-        if path_filter.drive_rebuild(&self.provider_call_mode)
-            != crate::fs_events::RulesRebuild::None
-        {
+        path_filter.drive_rebuild(&self.provider_call_mode);
+        // Profiles with one local root share the filter, and any of
+        // them can be the one whose call puts a rebuild in force. So
+        // each one reads the number of the last rebuild that landed. A
+        // rebuild that failed lands nothing: the folders keep waiting,
+        // and the filter tries again.
+        let landed = path_filter.rebuilds_landed();
+        if landed != self.seen_rules_landed {
+            self.seen_rules_landed = landed;
             for (folder, observed_at) in std::mem::take(&mut self.folders_waiting_for_rules) {
                 let reported = self.report_subtree_events(&folder, observed_at);
                 logging::info(
@@ -1758,9 +1764,10 @@ impl DaemonRuntime {
             cloud_root_ready,
             local_root_changed: false,
             seen_rules_generation: 0,
+            seen_rules_landed: 0,
             ignored_paths: None,
             cloud_full: None,
-            waiting_for_cloud_room: std::collections::BTreeSet::new(),
+            user_paused: false,
             first_cloud_probe_pending,
             last_cloud_root_attempt_inst: None,
             sign_in_hold: false,
@@ -1804,6 +1811,7 @@ impl DaemonRuntime {
             runtime.mark_sign_in_required(&message, now);
         }
         runtime.hold_until_one_way_is_acknowledged(now)?;
+        runtime.recall_uploads_that_wait_for_room()?;
         if !cloud_root_ready && !first_cloud_probe_pending {
             runtime.last_cloud_root_attempt_inst = Some(runtime.clock.now());
         }
@@ -2031,8 +2039,7 @@ impl DaemonRuntime {
                 .as_ref()
                 .is_some_and(|filter| !filter.rules_ready())
             {
-                "reading the ignore files of the folder; no work starts before the rules are in"
-                    .to_string()
+                IGNORE_RULES_NOT_READ.to_string()
             } else if self.startup_reconstruction_barrier {
                 "waiting for the startup reconstruction reconcile".to_string()
             } else if retrying {
@@ -2256,7 +2263,6 @@ impl DaemonRuntime {
             return;
         }
         self.cloud_full = None;
-        self.waiting_for_cloud_room.clear();
         logging::info(
             "Uploads get through again; the cloud has room",
             &[("profile_id", self.profile_id.clone())],
@@ -2352,6 +2358,17 @@ impl DaemonRuntime {
         if let Some(reason) = &self.reconcile_wait_reason {
             return ReconcileStatus::Waiting {
                 reason: reason.clone(),
+            };
+        }
+        // The scan of a start waits for the ignore rules, and a tree
+        // that is slow to read must not look like a profile at rest.
+        if self
+            .path_filter
+            .as_ref()
+            .is_some_and(|filter| !filter.rules_ready())
+        {
+            return ReconcileStatus::Waiting {
+                reason: IGNORE_RULES_NOT_READ.to_string(),
             };
         }
         ReconcileStatus::Idle
@@ -2596,6 +2613,12 @@ impl DaemonRuntime {
             // Downloads and deletions go on; the state says what waits.
             self.app
                 .set_run_state(RunState::Error, format!("uploads wait: {message}"));
+            return;
+        }
+        if self.user_paused {
+            // A hold that sat over the pause is gone. The pause is not.
+            self.app
+                .set_run_state(RunState::Paused, "user paused via vapor pause");
             return;
         }
         match self.sync_scope.local_root.as_ref() {
@@ -3135,6 +3158,7 @@ impl DaemonRuntime {
         }
 
         if let Some(pause) = pause_request {
+            self.user_paused = pause;
             if pause {
                 self.app
                     .set_run_state(RunState::Paused, "user paused via vapor pause");
@@ -3172,6 +3196,17 @@ impl DaemonRuntime {
         Ok(())
     }
 
+    /// Uploads that waited for room in the cloud when the daemon
+    /// stopped still wait: the queue rows say so. The state says it
+    /// from the start, not only when the next upload meets the full
+    /// cloud.
+    fn recall_uploads_that_wait_for_room(&mut self) -> Result<(), DaemonRuntimeError> {
+        if let Some(message) = self.state_db.wait_for_cloud_room_message()? {
+            self.cloud_full = Some((message, self.clock.now()));
+        }
+        Ok(())
+    }
+
     /// The user asked for sync now while uploads wait for room in the
     /// cloud. The user may have just made that room, so the uploads are
     /// tried at once and the state stops saying that they wait. A cloud
@@ -3180,13 +3215,10 @@ impl DaemonRuntime {
         &mut self,
         now: SystemTime,
     ) -> Result<(), DaemonRuntimeError> {
-        if self.cloud_full.take().is_none() {
+        let released = self.state_db.end_wait_for_cloud_room(now)?;
+        if self.cloud_full.take().is_none() && released == 0 {
             return Ok(());
         }
-        let waiting: Vec<i64> = std::mem::take(&mut self.waiting_for_cloud_room)
-            .into_iter()
-            .collect();
-        let released = self.state_db.end_wait_of(&waiting, now)?;
         logging::info(
             "Trying the uploads that wait for room in the cloud, on the user's request",
             &[
@@ -10767,6 +10799,82 @@ mod tests {
         assert_eq!(
             fixture.runtime.state_db().failed_depth().expect("failed"),
             0
+        );
+    }
+
+    #[test]
+    fn a_request_for_sync_now_finds_the_waiting_uploads_after_a_restart() {
+        let (mut fixture, cloud_full) = BidirectionalFixture::new_with_cloud_full_switch();
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+        fixture.tick(6_000);
+        cloud_full.store(true, std::sync::atomic::Ordering::SeqCst);
+        let local = fixture.watch_root.join("report.txt");
+        std::fs::write(&local, b"waits for room").expect("local file");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(4);
+        assert!(!fixture.cloud_root.join("report.txt").exists());
+
+        // A restart keeps the queue and nothing of the memory. The
+        // daemon that starts reads from the queue that uploads wait.
+        fixture.runtime.cloud_full = None;
+        fixture
+            .runtime
+            .recall_uploads_that_wait_for_room()
+            .expect("recall");
+        let recalled = fixture.runtime.cloud_full.as_ref().expect("recalled");
+        assert!(
+            recalled.0.contains("the cloud storage is full"),
+            "{recalled:?}"
+        );
+        assert!(
+            !recalled
+                .0
+                .contains(constants::engine::CLOUD_FULL_WAIT_PREFIX.trim_end()),
+            "the state repeats the provider's message, not the mark of the queue row"
+        );
+
+        // Even with no memory of the full cloud, the request finds the
+        // waiting upload in the queue.
+        fixture.runtime.cloud_full = None;
+        cloud_full.store(false, std::sync::atomic::Ordering::SeqCst);
+        control.request_reconcile();
+        fixture.converge(8);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("report.txt")).expect("uploaded"),
+            b"waits for room"
+        );
+        assert!(fixture.runtime.cloud_full.is_none());
+    }
+
+    #[test]
+    fn a_hold_that_comes_and_goes_does_not_end_the_users_pause() {
+        let mut fixture = BidirectionalFixture::new();
+        let control = Arc::new(crate::runtime_control::RuntimeControl::new());
+        fixture.runtime.attach_control(control.clone());
+        fixture.tick(6_000);
+        control.request_pause();
+        fixture.tick(250);
+        assert_eq!(fixture.runtime.app().snapshot().run_state, RunState::Paused);
+
+        // A hold sits over the pause for a while (a cloud root that
+        // went away), and then it is gone.
+        fixture
+            .runtime
+            .app
+            .set_run_state(RunState::Error, "the cloud folder is missing");
+        fixture
+            .runtime
+            .restore_run_state_after_root_recovery("the cloud folder is back");
+
+        let snapshot = fixture.runtime.app().snapshot();
+        assert_eq!(snapshot.run_state, RunState::Paused, "{snapshot:?}");
+
+        control.request_resume();
+        fixture.tick(250);
+        assert_eq!(
+            fixture.runtime.app().snapshot().run_state,
+            RunState::Running
         );
     }
 

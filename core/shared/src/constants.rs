@@ -784,14 +784,15 @@ pub mod ipc {
     /// Windows / Linux apps, the daemon). Bump on any backwards-
     /// incompatible payload shape change. Pre-GA the sliding tolerance
     /// is `|N - M| <= 1`; see `docs/architecture/ipc-contracts.md`.
-    pub const SCHEMA_VERSION_CURRENT: u32 = 4;
+    pub const SCHEMA_VERSION_CURRENT: u32 = 5;
     /// Minimum peer schema version this build can interoperate with.
     /// Together with [`SCHEMA_VERSION_CURRENT`] this defines the local
     /// support window; the handshake fails when both sides cannot find
-    /// an overlapping version. Version 4 regrouped the status payload
-    /// (`run`, `throttle`, `reconcile`, `resources`, `mirror`), so a
-    /// version 3 peer would misread it: the window starts at 4.
-    pub const SCHEMA_VERSION_MIN_SUPPORTED: u32 = 4;
+    /// an overlapping version. Version 5 lets a control request name
+    /// one profile. A version 4 daemon would not read the name and
+    /// would pause, resume, or scan every profile, so the window
+    /// starts at 5.
+    pub const SCHEMA_VERSION_MIN_SUPPORTED: u32 = 5;
     /// Maximum size of a single IPC frame in bytes. Frames whose
     /// declared length exceeds this cap are rejected before any
     /// deserialization attempt.
@@ -1070,6 +1071,11 @@ pub mod engine {
     /// initial attempt failed. Sync work stays blocked (and
     /// intents accumulate durably) between attempts.
     pub const CLOUD_ROOT_ENSURE_RETRY_SECONDS: u64 = 60;
+    /// A read of the ignore files that failed is tried again after
+    /// this long. Until it works, no local change is released: a name
+    /// that an ignore file hides must not sync on the word of rules
+    /// that are out of date.
+    pub const IGNORE_RULES_RETRY_SECONDS: u64 = 60;
     /// How often a running daemon re-checks both sync roots (present,
     /// and carrying the identity the profile adopted).
     pub const ROOT_CHECK_INTERVAL_SECONDS: u64 = 15;
@@ -1077,6 +1083,10 @@ pub mod engine {
     /// this long. Freeing space takes a person, so a faster retry only
     /// spends requests.
     pub const CLOUD_FULL_RETRY_SECONDS: u64 = 15 * 60;
+    /// How the stored error of an upload that waits for room in the
+    /// cloud starts. The queue row is the record of the wait, so a
+    /// request for sync finds the waiting uploads after a restart too.
+    pub const CLOUD_FULL_WAIT_PREFIX: &str = "waits for room in the cloud: ";
     /// After a path-scoped decision is applied, the reconcile walk gives
     /// the answer this long to land before it may ask about the same
     /// path again.

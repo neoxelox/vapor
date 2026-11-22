@@ -204,14 +204,8 @@ fn refuse_nested_local_roots(profiles: &mut [ResolvedProfile]) {
         let Some(local_root) = profile.scope.local_root.clone() else {
             continue;
         };
+        // The runtime logs the reason when it suspends the profile.
         if let Some(problem) = nested_local_root_problem(earlier, &local_root) {
-            logging::error(
-                "A profile cannot run next to another one",
-                &[
-                    ("profile_id", profile.id.clone()),
-                    ("problem", problem.clone()),
-                ],
-            );
             profile.invalid = Some(problem);
         }
     }

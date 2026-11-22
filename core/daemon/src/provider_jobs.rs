@@ -579,7 +579,13 @@ fn run_job(job: QueuedJob, gates: &TransferGates) -> CompletedJob {
         };
     }
     let outcome = match kind {
-        ProviderJobKind::Probe(request) => ProviderJobOutcome::Probe(run_probe(&context, request)),
+        ProviderJobKind::Probe(request) => {
+            let may_hash = || {
+                gates.generation.load(Ordering::SeqCst) == generation
+                    && gates.allow_hashing.load(Ordering::Relaxed)
+            };
+            ProviderJobOutcome::Probe(run_probe(&context, request, &may_hash))
+        }
         ProviderJobKind::RemoteDelete { remote_path, op_id } => {
             ProviderJobOutcome::RemoteDelete(context.provider.delete(&remote_path, &op_id))
         }
@@ -670,7 +676,11 @@ fn with_displaced_hash(
     }
 }
 
-fn run_probe(context: &JobContext, request: ProbeRequest) -> ProbeResult {
+fn run_probe(
+    context: &JobContext,
+    request: ProbeRequest,
+    may_hash: &dyn Fn() -> bool,
+) -> ProbeResult {
     let stat = request
         .want_stat
         .then(|| context.provider.stat(&request.remote_path));
@@ -697,7 +707,7 @@ fn run_probe(context: &JobContext, request: ProbeRequest) -> ProbeResult {
         _ => None,
     };
     let local_hashes = match (&stat, &request.local_hashes_if_absent) {
-        (Some(Ok(None)), Some(check)) => check.run(),
+        (Some(Ok(None)), Some(check)) => check.run(may_hash),
         _ => crate::local_hash::LocalHashes::default(),
     };
     // After the stat: a root swapped between the two calls is caught,
@@ -852,11 +862,11 @@ fn run_transfer(
             Ok(TransferStep::Completed(outcome)) => {
                 let done = context.clock.now();
                 if !probing {
-                    charge(
-                        context,
-                        direction,
-                        left_before.unwrap_or(0).saturating_sub(grant),
-                    );
+                    // What was left is what this step moved, at most
+                    // the whole object: a source that shrank during the
+                    // transfer moved less than was left.
+                    let moved = left_before.unwrap_or(0).min(outcome.bytes_total);
+                    charge(context, direction, moved.saturating_sub(grant));
                 }
                 // The step that ends a transfer also finishes it at
                 // the provider, and a provider that sends a small file
