@@ -97,6 +97,8 @@ hang.
 ```
 ./scripts/vm.sh --guest [--skip-build]
 ./scripts/vm.sh --guest --window     # only when a person asks to try it by hand
+./scripts/vm.sh --guest --second     # in the place of the fresh guests, for a long session
+./scripts/vm.sh --guest --internet   # with a route to the Internet, for a real cloud provider
 ```
 
 With `--window` the screen of the guest shows in a window on the
@@ -125,6 +127,18 @@ After a change to the app, stop the guest and start a new one: the
 guest has the build that was staged when it started. The manual guest
 takes the place of the shared guest, so a suite run waits until it is
 gone. Finish with `./scripts/vm.sh --guest-stop`.
+
+With `--second` the guest takes the place of the fresh guests. Use it
+when the session is long or when another checkout works on the app:
+the scenarios of the installed app and another manual guest still
+run, and only the scenarios of the install wait.
+
+With `--internet` the guest has a route to the Internet. Use it only
+to test a real cloud provider, and only with the dedicated test
+account, never with the owner's own. A sign-in needs a person: start
+the guest with `--window` too, say that the window is up, and let the
+owner sign in. Without the option a guest is offline, and a run of
+the suite is always offline.
 
 ## Reporting a UI change
 

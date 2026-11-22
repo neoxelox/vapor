@@ -310,3 +310,13 @@ Policy: `AGENTS.md §9`. Full taxonomy:
       "Throttled" where an idle Mac shows "Syncing". Find a way to
       show the idle pace too, for example a wait until the daemon
       counts the user as away before the scenario looks.
+- [ ] MT-6 Tier VM scenarios against a real cloud provider. A manual
+      guest can have the Internet (`./scripts/vm.sh --guest
+      --internet`), and a run of the suite cannot. A Google Drive leg
+      needs the dedicated test account and a folder of its own for
+      each run. The sign-in no longer needs a person each time: the
+      token of the account is in the gitignored `.env` as
+      `VAPOR_E2E_GDRIVE_TOKEN` (`core.md` TR-8), and `vapor auth login
+      --token -` takes it inside a guest. Decide with the
+      owner whether it is a leg of `./scripts/release.sh` next to the
+      Drive leg of Tier E2E (`core.md` TR-8).

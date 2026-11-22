@@ -808,8 +808,11 @@ invariants:
   directories (the staged build, read-only, and the run's directory),
   has no window, no sound, no shared clipboard, and no route to the
   Internet. A manual guest shows a window only when a person asked to
-  use it by hand (`./scripts/vm.sh --guest --window`). The harness changes only VMs named `vapor-vm-*`, and a
-  checkout only its own.
+  use it by hand (`./scripts/vm.sh --guest --window`). A manual guest
+  has a route to the Internet only when it is started to test a real
+  cloud provider (`./scripts/vm.sh --guest --internet`); a run of the
+  suite never has one (owner, 2026-11-22). The harness changes only
+  VMs named `vapor-vm-*`, and a checkout only its own.
 - A run deletes every guest it made; only `--keep` leaves one, on
   request. What stays on the host is the evidence under the repo-local
   `.vapor/vm/` (removed by `./scripts/clean.sh`), one empty lock file

@@ -264,6 +264,16 @@ impl Place {
         }
     }
 
+    /// The start of the name of a manual guest in this place, after
+    /// the tag of its checkout. The name alone has to say the place,
+    /// because a run of another checkout reads it with [`Place::of`].
+    fn manual_prefix(self) -> &'static str {
+        match self {
+            Place::Shared => "manual-",
+            Place::Fresh => "manual2-",
+        }
+    }
+
     /// The place a VM of the tier takes, read from its name.
     fn of(name: &str) -> Option<Place> {
         let rest = name.strip_prefix(VM_PREFIX)?;
@@ -784,19 +794,28 @@ pub fn setup(repo_root: &Path) -> Result<(), Failure> {
 fn remove_stopped_manual_guests(paths: &Paths) -> Result<(), Failure> {
     // Under the lock no guest is between its clone and its start.
     let _store = StoreLock::take()?;
-    let prefix = paths.guest_name("manual-");
-    for vm in tart::list()?
-        .iter()
-        .filter(|vm| vm.is_ours() && vm.name.starts_with(&prefix) && !vm.is_running())
-    {
+    let prefixes = Place::ALL.map(|place| paths.guest_name(place.manual_prefix()));
+    for vm in tart::list()?.iter().filter(|vm| {
+        vm.is_ours()
+            && !vm.is_running()
+            && prefixes.iter().any(|prefix| vm.name.starts_with(prefix))
+    }) {
         tart::delete(&vm.name)?;
     }
     Ok(())
 }
 
 /// Starts a guest with the build installed and the app started, and
-/// leaves it running for manual work. It has no time limit.
-pub fn manual_guest(repo_root: &Path, window: bool) -> Result<(), Failure> {
+/// leaves it running for manual work. It has no time limit. With
+/// `second` it takes the place of the fresh guests, so the scenarios
+/// of the installed app and another manual guest still have theirs.
+/// With `internet` it has a route to the Internet.
+pub fn manual_guest(
+    repo_root: &Path,
+    window: bool,
+    second: bool,
+    internet: bool,
+) -> Result<(), Failure> {
     let paths = Paths::new(repo_root)?;
     check_host()?;
     check_image()?;
@@ -809,13 +828,14 @@ pub fn manual_guest(repo_root: &Path, window: bool) -> Result<(), Failure> {
     let id = run_id();
     let dir = paths.vm_root.join(format!("manual-{id}"));
     fs::create_dir_all(&dir)?;
-    let name = paths.guest_name(&format!("manual-{id}"));
+    let place = if second { Place::Fresh } else { Place::Shared };
+    let name = paths.guest_name(&format!("{}{id}", place.manual_prefix()));
     let mut guest = start_guest(
-        Place::Shared,
+        place,
         &name,
         &paths,
         &dir,
-        Session::Manual { window },
+        Session::Manual { window, internet },
     )?;
     let ready = (|| {
         let ctx = Ctx::new(&mut guest, &copy, &build, "session")?;
@@ -828,6 +848,9 @@ pub fn manual_guest(repo_root: &Path, window: bool) -> Result<(), Failure> {
         return Err(failure);
     }
     println!("[vm] the guest `{name}` runs with this build installed and the app started.");
+    if internet {
+        println!("  it has a route to the Internet, for a test with a real cloud provider");
+    }
     if window {
         println!(
             "  its screen is in a Tart window on this Mac: use the app in it as a user does. The guest user is `admin`"
@@ -907,6 +930,11 @@ mod tests {
             Place::of("vapor-vm-1a2b3c4d-run-17-99-v03"),
             Some(Place::Fresh)
         );
+        // A manual guest says its place in its name.
+        for place in Place::ALL {
+            let name = format!("vapor-vm-1a2b3c4d-{}17-99", place.manual_prefix());
+            assert_eq!(Place::of(&name), Some(place));
+        }
         // A prepared guest never runs during a run, and a VM of
         // someone else takes no place of the tier.
         assert_eq!(Place::of(&prepared_name(Place::Shared)), None);

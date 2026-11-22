@@ -62,7 +62,9 @@ that catalog too, never from a sentence in the scenario.
    (`--guest --window`).
 4. **A guest has no route to the Internet.** Its network reaches the
    host only. One limit stays: a service that the host itself offers
-   on that network is reachable from the guest.
+   on that network is reachable from the guest. The one exception is
+   a manual guest that was started to test a real cloud provider
+   (`--guest --internet`). A run of the suite never has the Internet.
 5. **A run never downloads.** With no image in Tart's store it stops
    and names `./scripts/vm.sh --setup`, the one command that uses the
    network.
@@ -211,6 +213,8 @@ For a look at a change while it is built:
 ```sh
 ./scripts/vm.sh --guest            # a guest with the build installed, app started
 ./scripts/vm.sh --guest --window   # the same, with its screen in a window on this Mac
+./scripts/vm.sh --guest --second   # the same, in the place of the fresh guests
+./scripts/vm.sh --guest --internet # the same, with a route to the Internet
 ./scripts/vm.sh --guest-stop       # stop and delete every guest of this checkout
 ```
 
@@ -219,6 +223,17 @@ a command, the driver for the controls, and `screencapture` for a
 screenshot, which lands in `.vapor/vm/manual-<id>/`. The guest takes
 the place of the shared guest until it is stopped, and a run of the
 suite waits for that place.
+
+With `--second`, the guest takes the place of the fresh guests
+instead. Use it for a long session: the scenarios of the installed
+app, and a manual guest of another checkout, still have their place.
+The scenarios of the install wait until it is stopped.
+
+With `--internet`, the guest is on Tart's shared network and reaches
+the Internet through the host. It is for a test with a real cloud
+provider, such as a Google Drive sign-in with the dedicated test
+account. The guest can then also reach the local network of the host.
+Without the option the guest stays on the host-only network.
 
 With `--window`, Tart shows the screen of the guest in a window, and a
 person uses the app in it with the pointer and the keyboard, as in a
@@ -234,6 +249,14 @@ stays up until the person closes the window, or until
 started it, so the end of that command, or of the session of an agent,
 does not close it. A manual guest that no longer runs is deleted at
 the next run or the next `--guest`.
+
+### Workloads for a manual guest
+
+`tools/vm/workloads/` holds scripts that use the installed product
+hard inside a manual guest: edge cases, conflicts, lifecycle faults, a
+coding workload with git, real `npm` installs, and a workload that
+moves folders. A person or an agent starts them by hand; no run of the
+suite uses them. Its `README.md` says how.
 
 ## Scenario catalog
 

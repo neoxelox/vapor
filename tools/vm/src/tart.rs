@@ -175,16 +175,19 @@ pub fn configure(name: &str) -> Result<(), Failure> {
     .map(drop)
 }
 
-/// Starts a VM with no sound, no shared clipboard, and a network that
-/// reaches the host only. It has no window either, unless `window`
+/// Starts a VM with no sound and no shared clipboard. Its network
+/// reaches the host only, unless `internet` asks for Tart's shared
+/// network: that is for a manual guest that tests a real cloud
+/// provider, never for a run. It has no window either, unless `window`
 /// asks for Tart's own: that is for a person who wants to use a manual
-/// guest, never for a run. A `detached` VM outlives the harness. The
-/// child lives as long as the VM runs; its output goes to `log`.
+/// guest. A `detached` VM outlives the harness. The child lives as
+/// long as the VM runs; its output goes to `log`.
 pub fn start(
     name: &str,
     shares: &[Share<'_>],
     log: &Path,
     window: bool,
+    internet: bool,
     detached: bool,
 ) -> Result<Child, Failure> {
     ours(name)?;
@@ -195,12 +198,10 @@ pub fn start(
     if !window {
         command.arg("--no-graphics");
     }
-    command.args([
-        "--no-audio",
-        "--no-clipboard",
-        "--net-host",
-        "--suspendable",
-    ]);
+    command.args(["--no-audio", "--no-clipboard", "--suspendable"]);
+    if !internet {
+        command.arg("--net-host");
+    }
     for share in shares {
         let mut spec = format!("{}:{}", share.name, share.path.display());
         if share.read_only {

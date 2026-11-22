@@ -45,8 +45,9 @@ pub enum Session {
     /// A guest for a person. It has no time limit: it stays up until
     /// someone stops it, also after the harness and the process that
     /// started the harness are gone. With `window`, Tart shows its
-    /// screen on the host.
-    Manual { window: bool },
+    /// screen on the host. With `internet`, it has a route to the
+    /// Internet, to test a real cloud provider.
+    Manual { window: bool, internet: bool },
 }
 
 pub struct Guest {
@@ -114,11 +115,13 @@ impl Guest {
                 read_only: false,
             },
         ];
-        let (window, detached) = match self.session {
-            Session::Run => (false, false),
-            Session::Manual { window } => (window, true),
+        let (window, internet, detached) = match self.session {
+            Session::Run => (false, false, false),
+            Session::Manual { window, internet } => (window, internet, true),
         };
-        self.child = Some(tart::start(&self.name, &shares, &log, window, detached)?);
+        self.child = Some(tart::start(
+            &self.name, &shares, &log, window, internet, detached,
+        )?);
         self.wait_ready()?;
         self.remount_shares()?;
         self.set_clock()
