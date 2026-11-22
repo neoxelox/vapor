@@ -28,6 +28,14 @@ VDIR = os.environ.get("VT_VDIR", HOME + "/.vapor")
 DB = os.environ.get("VT_DB", VDIR + "/state/vapor.sqlite")
 OUT = os.environ.get("VT_OUT", "/Volumes/My Shared Files/results/out")
 
+# The read-only share that only a Tier VM guest has. The workloads
+# kill the daemon, move sync roots, and answer questions: on a machine
+# with a real install that is damage, so nothing here runs outside a
+# guest.
+GUEST_STAGE = "/Volumes/My Shared Files/stage"
+if not os.path.isdir(GUEST_STAGE):
+    sys.exit(f"vt: {GUEST_STAGE} is missing: this is not a Tier VM guest. The workloads run only inside one.")
+
 # Names Vapor never syncs, whatever the rules say (ignore-rules.md).
 INTERNAL_FILES = (".vapor-root",)
 INTERNAL_GLOBS = (".vapor-tmp-*", "*.vapor-meta.json")
@@ -154,9 +162,10 @@ def wait_quiet(timeout=600, quiet=10, verbose=True, label="", allow_stuck=True):
                     still = False
                     break
             if still:
-                s = vapor_json("status") or {}
-                rec = (s.get("reconcile") or {}).get("state")
-                if rec in (None, "idle") and (s.get("queued") in (0, None, base)):
+                # A daemon that does not answer is not a quiet daemon.
+                s = vapor_json("status")
+                rec = ((s or {}).get("reconcile") or {}).get("state")
+                if s is not None and rec == "idle" and s.get("queued") in (0, base):
                     el = time.time() - start
                     st = status_line()
                     st["stuck"] = stuck
@@ -228,7 +237,9 @@ def sha(path):
                     break
                 h.update(b)
     except OSError as e:
-        return f"ERR:{e.errno}"
+        # The path is in the marker, so a file that cannot be read on
+        # both sides never compares equal.
+        return f"ERR:{e.errno}:{path}"
     return h.hexdigest()
 
 

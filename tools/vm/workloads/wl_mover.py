@@ -356,7 +356,8 @@ def check(a):
         "model_files": len(model), "tree_files": len(tree), "missing": len(missing), "extra": len(extra), "wrong": len(wrong),
         "payloads_lost": len(lost), "payloads_nobody_wrote": len(unknown),
         "samples": {"missing": missing[:10], "extra": [spelled[k] for k in extra[:10]], "wrong": [spelled[k] for k in wrong[:10]]},
-        "ok": not (missing or extra or wrong),
+        # An empty model is a wrong name, not a clean result.
+        "ok": bool(model) and not (missing or extra or wrong),
     }
     print(json.dumps(out, indent=1))
 

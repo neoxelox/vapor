@@ -248,7 +248,7 @@ fn stage_driver(paths: &Paths) -> Result<(), Failure> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Place {
     /// The guest that the scenarios of the installed app share, and
-    /// the manual guest.
+    /// the manual guest unless it asks for the other place.
     Shared,
     /// The fresh guests, one after the other.
     Fresh,

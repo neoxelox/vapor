@@ -227,7 +227,10 @@ suite waits for that place.
 With `--second`, the guest takes the place of the fresh guests
 instead. Use it for a long session: the scenarios of the installed
 app, and a manual guest of another checkout, still have their place.
-The scenarios of the install wait until it is stopped.
+A scenario of the install waits 10 minutes for the place and then
+fails, as a scenario of the app does behind a default manual guest.
+A full run of another checkout is slow next to it for the same
+reason: stop the guest before that run.
 
 With `--internet`, the guest is on Tart's shared network and reaches
 the Internet through the host. It is for a test with a real cloud
@@ -239,8 +242,9 @@ With `--window`, Tart shows the screen of the guest in a window, and a
 person uses the app in it with the pointer and the keyboard, as in a
 simulator. It is for the project owner, or for a contributor who wants
 to try a change by hand: an agent starts it only when it is asked to.
-The guest still shares no clipboard and has no route to the Internet,
-and `tart exec` and the driver work on it as before. The user of the
+The guest still shares no clipboard, and it has no route to the
+Internet unless it also got `--internet`. `tart exec` and the driver
+work on it as before. The user of the
 guest is `admin`.
 
 A manual guest has no time limit, with a window or without one. It
@@ -305,7 +309,8 @@ that waits for a state on the screen waits up to one read.
 - **The look.** A scenario proves that a control exists and what it
   says. Whether the screen looks right is the owner's judgement, from
   the screenshots.
-- **The Google sign-in.** The guest has no network.
+- **The Google sign-in in a scenario.** A guest of a run has no
+  network. A manual guest with `--internet` can sign in.
 - **Gatekeeper and notarization.** The image has Gatekeeper and System
   Integrity Protection off, and a local build is signed ad hoc.
 - **An upgrade** from an older release, and what a removal leaves.

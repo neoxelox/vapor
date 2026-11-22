@@ -83,12 +83,14 @@ one session, and what it did wrong is in the task files. The owner
 decides the order; this is the order by what a user loses.
 
 - An edit that is lost, wrong content under a name, or a deleted
-  file that comes back: `core.md` P-9, E-30, E-11, E-12.
+  file that comes back or stays deleted: `core.md` P-9, E-30, E-11,
+  E-12, E-32.
 - Sync that waits or stops, or a status that hides it: `core.md`
   E-13, E-31, E-14, E-15, E-17, E-18, E-19, P-7, PL-4, and `cli.md`
   L2-8. E-14 needs a design with the owner.
 - Waste on disk and in the cloud: `core.md` E-16, E-20, E-22.
-- The rest: `core.md` E-21, E-23 … E-29, P-8, `cli.md` L1-9 … L1-11.
+- The rest: `core.md` E-21, E-23 … E-26, E-28, E-29, P-8, `cli.md`
+  L1-9 … L1-11, `macos.md` O-5, MT-7.
 - A run that repeats the session: `core.md` TR-13. Real providers in a
   guest: `macos.md` MT-6.
 

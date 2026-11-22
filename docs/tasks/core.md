@@ -74,9 +74,10 @@ filesystem provider, two-way): about 200 edge cases in both
 directions, conflict and race cases, lifecycle faults, a coding
 workload with a real git repository, real `npm ci` and
 `rm -rf node_modules` cycles, and a workload that moves folders. What
-passed is in the report of the session. Each task below was seen in
-the installed product. `docs/tasks/README.md` has the order by what a
-task costs a user.
+passed is in the description of the pull request that added these
+tasks. Each task below was seen in the installed product, and E-32 in
+a CI run of that pull request. `docs/tasks/README.md` has the order by
+what a task costs a user.
 
 - [ ] E-30 Work inside a folder in the seconds after the folder was
       renamed by capitals only goes wrong in three ways, with one
@@ -96,21 +97,25 @@ task costs a user.
       rename has landed.
 - [ ] E-11 An event in the cloud that changes no bytes turns a waiting
       local edit into a conflict, and the old bytes get the name. A
-      file that came from the cloud, a local edit not uploaded yet (a
-      pause, a backlog, a failed upload), and a `chmod`, a `chflags`,
-      or a rewrite with the same bytes of the cloud copy: Vapor moves
-      the edit to a `~conflict-` copy and downloads the old content
-      under the name, on both sides. Reproduced 6 times in 6. The
-      feed drops such an event only when the object carries this
-      device's op-id (`remote_sync.rs`, `is_durable_self_write_echo`);
-      an object that another device or tool wrote never does, so its
-      size and mtime are not compared with the sync index. Fix both
-      places: an event whose size and remote mtime equal the index row
-      is no change, and a download that finds the local file changed
-      while the remote still equals the last synced state is an
-      upload, not a conflict. Check what the Google Drive feed sends
-      for a change of metadata only (a share, a star, a view): the
-      same path may run there.
+      file that another tool put in the cloud folder, a local edit not
+      uploaded yet (a pause, a backlog, a failed upload), and a
+      `chmod`, a `chflags`, or a rewrite with the same bytes of the
+      cloud copy: Vapor moves the edit to a `~conflict-` copy and
+      downloads the old content under the name, on both sides.
+      Reproduced 6 times in 6 on the filesystem provider. The feed
+      drops an event as "no change" when its hash equals the index, or
+      when its op-id equals the op-id the index recorded and the size
+      and mtime agree (`remote_sync.rs`, `is_durable_self_write_echo`).
+      An object that no Vapor wrote has no op-id: the index holds an
+      empty one, the event holds none, the two do not compare equal,
+      and the size and mtime are never looked at. The filesystem feed
+      sends no hash, so nothing else catches it. Fix both places: an
+      event whose size and remote mtime equal the index row is no
+      change, with or without an op-id, and a download that finds the
+      local file changed while the remote still equals the last synced
+      state is an upload, not a conflict. The Google Drive feed sends
+      a hash, which should drop the same event there; that was not
+      run.
 - [ ] E-12 A file edited while an ignore rule hid it becomes a conflict
       when the rule goes, and the old bytes get the name. `a.secret`
       synced, `*.secret` was added to `postIgnoreRules`, the file
@@ -122,16 +127,35 @@ task costs a user.
 - [ ] E-13 After one burst, a whole top-level folder stops syncing
       until it is quiet, for up to 10 minutes. A storm (200 paths in
       2 s: a branch switch, a formatter, an install) is compacted into
-      one deferred reconcile of the first folder below the sync root,
-      not of the folder where the burst is, and each new event in it
-      pushes the reconcile back (`DEFERRED_RECONCILE_MAX_DELAY_MILLIS`
-      is 600 000). Measured with one busy project in `code/demo`: a
-      save in another project, `code/other-project`, took 1.4 s before
-      the burst and 54 s to 307 s after it, until the busy project
-      stopped; a save outside `code/` took 1.5 s all the time. Compact
-      the smallest folder that holds the burst, keep single saves
-      flowing next to it, and bound the wait by seconds while the
-      device is idle.
+      one deferred reconcile, and each new event in the compacted
+      folder pushes the reconcile back
+      (`DEFERRED_RECONCILE_MAX_DELAY_MILLIS` is 600 000). The detector
+      takes the deepest folder over the threshold (`storm.rs`), but
+      the run compacted the parent of both projects: the log says
+      `subtree=<root>/code` with the burst in `code/demo`. A likely
+      path: the windows of the ancestors keep the paths of the burst
+      for 2 s, the events of the compacted folder no longer reach the
+      detector, and one event next to it then trips the common parent.
+      Measured with one busy project in `code/demo`: a save in another
+      project, `code/other-project`, took 1.4 s before the burst and
+      54 s to 307 s after it, until the busy project stopped; a save
+      outside `code/` took 1.5 s all the time. Keep a compaction from
+      growing to a parent because of the burst it already took, keep
+      single saves flowing next to a compacted folder, and bound the
+      wait by seconds while the device is idle.
+- [ ] E-32 A deletion that waits in its move-settle delay when the
+      mass-delete guard trips is not held with the burst, and
+      `discard` then restores the others and not that one. Seen in CI
+      on `ubuntu-latest`, e2e scenario S40: 12 cloud deletions, one of
+      them "Intent deferred during planning ... a queued download may
+      be this file renamed in the cloud delay_ms=3000", the guard
+      tripped 3.7 s later and held 11, `discard` said "11 deletion(s)
+      dropped, 11 restore(s) enqueued", and the oracle found
+      "victim-01.txt: present locally, missing in the cloud root". The
+      file that the user chose to keep stays deleted in the cloud. S40
+      fails when the timing falls that way, so it is a flaky test
+      under `AGENTS.md` §9.6 until this is fixed. Hold a deferred
+      deletion of the same direction with the burst.
 - [ ] E-31 While a compacted folder waits for its deferred reconcile,
       `vapor status` says that nothing is left to do: "Queue: 0
       queued" and `reconcile.state: idle`. 1 500 new files showed no
@@ -228,9 +252,11 @@ task costs a user.
       no question, no warning, and no line in `vapor ignored`.
 - [ ] E-24 A `touch` in the cloud downloads the file again and rewrites
       the local copy, and a `chmod` in the cloud reaches this device
-      while a `chmod` here never reaches the cloud. Compare the
-      content first; then decide with the owner whether a change of
-      mode alone syncs, and make both directions agree.
+      while a `chmod` here never reaches the cloud. `data-flow.md`
+      says that a change of mode alone does not sync; the cloud side
+      does it by accident, through that download. Compare the content
+      before a download, and make both directions do what the document
+      says.
 - [ ] E-25 Small files move at about 160 a second with nothing near a
       ceiling. `npm ci` wrote 10 493 files (126 MB) in 2.8 s; the
       upload took 65 s at 23% of one core in `Idle`. Holding 10 493
@@ -242,10 +268,6 @@ task costs a user.
       opens a `conflict` question: "report.txt is gone, but its
       conflict copy is still here". Ask only for a copy that this
       profile made or that has a file under the original name.
-- [ ] E-27 The first start writes the whole default `preIgnoreRules`
-      list into `vapor.json`, so a later build with a better list does
-      not reach that install. Write the key only when the user changes
-      it.
 - [ ] E-28 Log noise in a healthy run. "Updated throttle state ...
       reason=system CPU load is 69%" comes once a second while the
       percentage moves; "Filesystem provider ensured cloud root" comes
@@ -538,8 +560,8 @@ runners. What remains before Linux ships a surface:
       real `npm ci` and `rm -rf` cycles from an offline cache, a
       workload that moves folders, and the Google Drive cases. Needs a
       short design: whether they stay scripts or join the harness, how
-      a run reports, and which of them gate a release. Each fix of
-      E-11 to E-25, P-7, and PL-4 adds its case to Tier 1 or Tier E2E
+      a run reports, and which of them gate a release. Each fix of a
+      finding of the session adds its case to Tier 1 or Tier E2E
       first; the soak model does not produce any of them today.
 - [ ] PT-1 Tune the soak cell `scripts/perf.sh` gates on (duration,
       seed, load) using release baseline history once per-OS baselines

@@ -182,7 +182,8 @@ impl Guest {
     }
 
     /// A guest that was suspended resumes with the clock of the moment
-    /// it was suspended, and it has no network to correct it.
+    /// it was suspended, and a guest of a run has no network to correct
+    /// it.
     fn set_clock(&self) -> Result<(), Failure> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)

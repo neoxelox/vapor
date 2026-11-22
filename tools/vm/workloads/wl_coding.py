@@ -268,7 +268,10 @@ class Project:
         self.log("git_commit", code=code)
 
     def resync_model(self):
-        """After git changed the working tree, the tree is the model."""
+        """After git changed the working tree, the tree is the model. A
+        version that sync put back before the switch is committed with
+        the rest and is not reported: the check before each touch
+        covers the time between two switches only."""
         code, out = self.git("ls-files", "-z")
         model = {}
         for rel in out.split("\0"):
@@ -386,7 +389,7 @@ def check(args):
     wrong, missing = [], []
     for rel, want in p.model.items():
         got = vt.sha(p.full(rel))
-        if got.startswith("ERR"):
+        if got.startswith("ERR:"):
             missing.append(rel)
         elif got != want:
             wrong.append(rel)
@@ -422,7 +425,17 @@ def check(args):
             "fsck_code": fsck.returncode,
             "fsck": (fsck.stdout + fsck.stderr).strip().splitlines()[:8],
         }
-    out["ok"] = not (missing or wrong or extra)
+    git_ok = all(
+        isinstance(out.get(f"git_{label}"), dict)
+        and out[f"git_{label}"]["status_code"] == 0
+        and out[f"git_{label}"]["dirty"] == 0
+        and out[f"git_{label}"]["fsck_code"] == 0
+        and not out[f"git_{label}"]["fsck"]
+        for label in ("written", "other")
+    ) and out["git_written"]["head"] == out["git_other"]["head"] if os.path.isdir(p.full(".git")) else True
+    out["git_ok"] = git_ok
+    # An empty model is a wrong project name, not a clean result.
+    out["ok"] = bool(p.model) and git_ok and not (missing or wrong or extra)
     print(json.dumps(out, indent=1))
 
 

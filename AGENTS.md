@@ -811,7 +811,8 @@ invariants:
   use it by hand (`./scripts/vm.sh --guest --window`). A manual guest
   has a route to the Internet only when it is started to test a real
   cloud provider (`./scripts/vm.sh --guest --internet`); a run of the
-  suite never has one (owner, 2026-11-22). The harness changes only
+  suite never has one (owner, 2026-11-22). Such a test uses the
+  dedicated test account of §9.8, never the owner's own. The harness changes only
   VMs named `vapor-vm-*`, and a checkout only its own.
 - A run deletes every guest it made; only `--keep` leaves one, on
   request. What stays on the host is the evidence under the repo-local
@@ -927,6 +928,8 @@ for what is already granted nor acts on what is not.
   review.
 - Only when the owner asks for that specific action: push a branch,
   open a PR, cut or rehearse a release, run e2e against Google Drive,
+  start a Tier VM guest with the Internet (`./scripts/vm.sh --guest
+  --internet`) or test a real cloud provider in one,
   install or remove Tart (a removal with `HOMEBREW_NO_AUTOREMOVE=1`,
   so Homebrew removes nothing else), pull the guest image
   (`./scripts/vm.sh --setup`), change repository settings, release

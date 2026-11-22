@@ -13,6 +13,10 @@
 set -u
 R='/Volumes/My Shared Files/results'
 T="$R/tools"
+if [ ! -d '/Volumes/My Shared Files/stage' ]; then
+  echo "wl_npm: this is not a Tier VM guest. The workloads run only inside one."
+  exit 2
+fi
 APP="${APP:-$HOME/Vapor/webapp}"
 CACHE="$HOME/fixtures/npm-cache"
 NPM=(npm --offline --cache "$CACHE" --no-audit --no-fund --ignore-scripts --loglevel=error)
@@ -52,13 +56,13 @@ case "${1:-}" in
     printf 'export const app = "webapp";\n' > "$APP/src/index.ts"
     echo "setup done: $(du -sh "$CACHE" | cut -f1) cache; node $(node --version), npm $(npm --version)"
     ;;
-  ci) cd "$APP" && step "npm ci" "${NPM[@]}" ci; quiet ;;
-  rm) cd "$APP" && step "rm -rf node_modules" rm -rf node_modules; quiet ;;
-  uninstall) shift; cd "$APP" && step "npm uninstall $*" "${NPM[@]}" uninstall "$@"; quiet ;;
-  install) shift; cd "$APP" && step "npm install $*" "${NPM[@]}" install "$@"; quiet ;;
+  ci) cd "$APP" || exit 1; step "npm ci" "${NPM[@]}" ci; quiet ;;
+  rm) cd "$APP" || exit 1; step "rm -rf node_modules" rm -rf node_modules; quiet ;;
+  uninstall) shift; cd "$APP" || exit 1; step "npm uninstall $*" "${NPM[@]}" uninstall "$@"; quiet ;;
+  install) shift; cd "$APP" || exit 1; step "npm install $*" "${NPM[@]}" install "$@"; quiet ;;
   cycle)
     n="${2:-3}"; mode="${3:-wait}"
-    cd "$APP"
+    cd "$APP" || exit 1
     for i in $(seq 1 "$n"); do
       step "cycle $i: npm ci" "${NPM[@]}" ci
       [ "$mode" = wait ] && quiet || sleep "${GAP:-3}"

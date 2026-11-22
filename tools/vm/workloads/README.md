@@ -7,13 +7,18 @@ the tools of the heavy-user session of 2026-11-22. They are not a
 tier and no script of the repository runs them; making them a run
 that anyone can repeat is open work (`docs/tasks/core.md`).
 
-They never ship, and they run only inside a guest: they write to
-`~/Vapor`, `~/CloudDrive`, and `~/.vapor` of the user they run as.
+They never ship, and they run only inside a guest. They kill the
+daemon, move the sync roots away, answer every `mass-delete` question
+with `apply`, and write to `~/Vapor`, `~/CloudDrive`, and `~/.vapor`
+of the user they run as: on a machine with a real install that is
+damage. `vt.py`, which the others import, and `wl_npm.sh` refuse to
+start where the read-only share of a guest is missing.
 
 ## How to run them
 
 ```sh
 ./scripts/vm.sh --guest --second            # a guest, in the place of the fresh guests
+mkdir -p .vapor/vm/manual-<id>/tools
 cp tools/vm/workloads/* .vapor/vm/manual-<id>/tools/   # the guest sees this folder
 tools/vm/workloads/in-guest.sh 'vapor init --provider filesystem --local ~/Vapor --cloud ~/CloudDrive/Vapor'
 tools/vm/workloads/in-guest.sh 'python3 "$R/tools/vt.py" mon start'
@@ -72,6 +77,9 @@ The guest image has Python 3, git, node, npm, and sqlite3.
   lost edit.
 - `vt.py wait` reads one profile: the implicit one, or the one named
   by `VT_PROFILE`.
+- `wl_coding.py` takes the tree as its model after each branch switch.
+  A version that sync put back just before a switch is committed with
+  the rest and is not reported.
 - The daemon does not show a folder that waits for its deferred scan
   as queued work, so `wait` can return before a burst has started to
   move. Compare the trees, do not trust the quiet.

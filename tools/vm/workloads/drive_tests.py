@@ -52,7 +52,9 @@ def tree(root, sub=""):
             p = os.path.join(d, f)
             if os.path.islink(p) or not os.path.isfile(p):
                 continue
-            out[os.path.relpath(p, base)] = hashlib.sha256(r(p) or b"").hexdigest()
+            data = r(p)
+            # A file that cannot be read never compares equal to another.
+            out[os.path.relpath(p, base)] = hashlib.sha256(data).hexdigest() if data is not None else f"unreadable:{p}"
     return out
 
 
