@@ -17,8 +17,10 @@ incident scenarios) live in per-platform subdirectories.
 - **Configuring provider auth / Keychain / secret store?** Read
   `provider-auth-operations.md`; secret-store mechanics per OS live in
   `docs/architecture/platform-abstractions.md` under `SecretStore`.
-- **Diagnosing a production issue?** `runtime-logging-and-localization.md`
-  documents log paths, redaction rules, and language fallback behavior.
+- **Diagnosing a production issue?** `incident-runbooks.md` has the
+  runbook for each runtime incident, and
+  `runtime-logging-and-localization.md` documents log paths, redaction
+  rules, and language fallback behavior.
 - **Shipping on a new platform?** The `distribution-trust-chain.md`
   index shows what each platform needs.
 
@@ -33,6 +35,11 @@ incident scenarios) live in per-platform subdirectories.
 - `release-incident-playbook.md`: detection / mitigation / verification
   steps for common release-time failures (signing, notarization,
   publishing).
+- `incident-runbooks.md`: the runtime incidents: a daemon crash loop,
+  a refused sign-in, a provider rate-limit storm, a state database
+  that was set aside, and a backlog that does not converge. Each one
+  with detection, mitigation, the state a user sees, and the check
+  that proves recovery.
 - `provider-auth-operations.md`: OAuth (PKCE) flow, the built-in
   OAuth client and where its values come from, consent-screen status
   and token lifetime, refresh policy, and the sign-in hold a refused

@@ -153,6 +153,36 @@ pub fn filesystem_roots_overlap(local_root: &Path, cloud_root: &str) -> Option<S
     )
 }
 
+/// Whether the local roots of two profiles nest: one lies inside the
+/// other. Returns the reason to refuse the pair. The same folder for
+/// both is no nesting: two profiles may share a local root, and each
+/// sends it to its own cloud.
+pub fn local_roots_nest(first: &Path, second: &Path) -> Option<String> {
+    roots_nest(first, second, &crate::name_collision::folds_case_at)
+}
+
+fn roots_nest(first: &Path, second: &Path, folds_case: &dyn Fn(&Path) -> bool) -> Option<String> {
+    let first = OverlapPath::of(first, folds_case);
+    let second = OverlapPath::of(second, folds_case);
+    if first.compared == second.compared {
+        None
+    } else if second.compared.starts_with(&first.compared) {
+        Some(format!(
+            "{} is inside {}",
+            second.shown.display(),
+            first.shown.display()
+        ))
+    } else if first.compared.starts_with(&second.compared) {
+        Some(format!(
+            "{} is inside {}",
+            first.shown.display(),
+            second.shown.display()
+        ))
+    } else {
+        None
+    }
+}
+
 /// `folds_case` says whether the volume of a folder that exists folds
 /// names; it is asked about the deepest ancestor that exists.
 fn roots_overlap(

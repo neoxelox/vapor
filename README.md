@@ -105,9 +105,9 @@ In flight and coming next:
 | --- | --- | --- |
 | `vapor init` | `--provider <provider>`, `--local <path>`, `--cloud <path>`, `--mode <mode>`, `--token -`, `--auto-launch <on\|off>`, `--linger <on\|off>` (Linux), `--json` | Sets Vapor up: the cloud, the sign-in, the two folders, and the background service. A terminal asks for each answer; a script gives them as flags and has to give `--local` and `--cloud`. A later run does only what is left. Exits with 1 while a step waits for you. |
 | `vapor status` | `--json` | Shows what sync is doing and why: run state, throttle, queue, open questions. |
-| `vapor pause` | `--json` | Pauses sync. Changes are still recorded and sync on resume. |
-| `vapor resume` | `--json` | Resumes sync. |
-| `vapor reconcile` | `--json` | Compares both folders now and syncs the differences. |
+| `vapor pause` | `--profile <id>`, `--json` | Pauses sync, for every profile or for one. Changes are still recorded and sync on resume. |
+| `vapor resume` | `--profile <id>`, `--json` | Resumes sync, for every profile or for one. |
+| `vapor reconcile` | `--profile <id>`, `--json` | Compares both folders now and syncs the differences, for every profile or for one. |
 | `vapor profiles list` | `--json` | Lists the sync profiles: the folders, the cloud, the direction. |
 | `vapor profiles add` | `--id <id>`, `--name <name>`, `--provider <provider>`, `--local <path>`, `--cloud <path>`, `--mode <mode>`, `--json` | Adds a profile. On a terminal it asks for what you leave out; a script has to give `--local` and `--cloud`. The first one starts syncing at once. `vapor init` runs it for a fresh install, with the sign-in and the background service. |
 | `vapor profiles remove <id>` | `--yes`, `--json` | Stops syncing a profile and forgets its sync state and sign-in. The files on both sides stay. Needs the daemon stopped. |

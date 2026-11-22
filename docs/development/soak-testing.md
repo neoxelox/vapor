@@ -72,6 +72,15 @@ The model adopts what the daemon legitimately creates (conflict
 copies, a restored file) after a clean phase, so later phases can
 touch those files too.
 
+An operation of the workload that fails (a full volume refuses a move,
+a file is not where the generator expected it) is logged as skipped
+and leaves the model as it was. Recording it would invent a loss at a
+path the file never reached, or hide one: a delete that finds no file
+must not make the model forget the file. Two operations can fail after
+a part of their work, and only that part is recorded: a restore that
+removed its file and could not write it back, and a subtree removal
+that stopped part of the way.
+
 ## Faults
 
 `--faults` selects what the driver does to the daemon and its world:
@@ -86,7 +95,7 @@ touch those files too.
 | `cloud-root-vanish` | the cloud root is renamed away for the phase and restored after it | per phase |
 | `cloud-root-permissions` | every permission is taken off the cloud root for the phase and given back after it: the root is there but unreadable, sync blocks with no question asked, and the daemon recovers on its own | per phase |
 | `throttle-walk` | with `--throttle walk`, the throttle inputs file is set to idle, battery, user-active, or overloaded for the phase | per phase |
-| `disk-full` | with `--cloud-image-mb`, the cloud volume is filled to the last block for the phase | per phase |
+| `disk-full` | with `--cloud-image-mb`, the cloud volume is filled to the last block for the phase; not in a phase that has the cloud root parked or unreadable | per phase |
 
 `none`, `crash`, `all`, or a comma-separated list. Extra operations a
 fault performs stay on the phase's side and path subset, so the
@@ -101,6 +110,14 @@ question alone, and after restoring the root waits for the daemon to
 lift the hold on its own. Any other decision the daemon opens fails
 the run: the driver does not know the right answer and never guesses.
 A daemon that re-creates the parked root is a finding.
+
+An upload that finds the cloud volume full waits one retry interval
+(15 minutes) with no attempt spent, and the run state is `error` with a
+reason that starts with `uploads wait` until the uploads that waited
+went through (`docs/architecture/data-flow.md`, "What stops a whole
+profile"). So after a `disk-full` phase the driver waits for that hold
+to end before it asks for convergence, and the phase gets its converge
+deadline from then on. Any other `error` state fails the run as before.
 
 ## Throttle walk
 

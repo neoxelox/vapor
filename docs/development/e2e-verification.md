@@ -306,7 +306,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S08 | a healthy run across two restarts emits no ERROR line and no warning |
 | S09 | an over-budget `VAPOR_DIR` relocates the IPC socket; status and doctor still work |
 | S10 | uploads land byte for byte, a cloud-born file downloads through reconcile, POSIX modes survive |
-| S11 | a path that diverged on both sides while the daemon was down keeps both payloads |
+| S11 | a path that diverged on both sides while the daemon was down keeps both payloads, and the `conflict` timeline entry names the file |
 | S12 | pull-only materializes cloud content locally and removes a local-only file without uploading |
 | S13 | diagnostics answers over IPC; `vapor report` exports config, logs, live captures, manifest |
 | S14 | ignored names never sync in either direction and never manufacture a conflict copy |
@@ -358,7 +358,7 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S60 | after a keep-both conflict whose download outlasts the debounce window, the version that won stays in the cloud and both versions end on both sides |
 | S61 | a home with no sync scope starts a daemon that syncs nothing and creates no folder, and status says unconfigured and names the command; setting the two roots, one config set each, starts the profile with no restart |
 | S62 | setting pull-only prints what the mode does; the daemon then syncs nothing, in either direction, and status says the mode needs a confirmation; after the decision is answered enable the mirror runs |
-| S63 | vapor profiles add sets a fresh install up with one command and no restart, and refuses when no terminal can ask and a folder is left out; it refuses a cloud folder inside the local folder; remove refuses while the daemon runs, then forgets the sync state and leaves the files on both sides |
+| S63 | vapor profiles add sets a fresh install up with one command and no restart, and refuses when no terminal can ask and a folder is left out; it refuses a cloud folder inside the local folder, and a local folder inside the one of another profile; remove refuses while the daemon runs, then forgets the sync state and leaves the files on both sides |
 | S64 | a folder rule hides a folder and not a file of that name; a negation under an excluded folder stays excluded for the watcher as it does for the walk; a file that a rule change frees syncs with no restart and no reconcile request |
 | S65 | vapor report replaces every folder path and file name by a code in the config, the logs, and the live state, and says so; --keep-paths keeps them and says that the report is not for a public issue |
 | S66 | vapor status counts the paths that the ignore rules keep out of sync, and vapor ignored lists each one with its rule, a folder one time and never a file that only shares a folder rule's name |
@@ -366,6 +366,8 @@ expected to fail until the named work lands (`docs/tasks/core.md`).
 | S68 | a file that left both folders while the daemon was down, and that is put back on this device with the same bytes, is uploaded and never moved to the trash |
 | S69 | a folder that moves into the sync root with a .gitignore of its own syncs by those rules: the files the rules hide never reach the cloud |
 | S70 | vapor init takes a fresh install to a running sync with one command and no terminal, refuses when a folder is left out, and a second run changes nothing and says initialized |
+| S71 | `vapor pause --profile` stops one profile while the other keeps syncing, `resume --profile` lets its file through, `reconcile --profile` is accepted, and a name with no profile behind it is refused with the names there are |
+| S72 | an upload that finds the cloud folder's volume full is not failed: the profile reports that uploads wait; once there is room, `vapor reconcile` tries the waiting upload at once, with no wait for the next automatic try (needs a disk image) |
 | R01 | install registers the daemon and its supervisor with real launchd; then, with the supervisor set aside, start → status → crash-loop supervision through backoff and pause → acknowledge → stop → uninstall; then the supervisor of a new install restarting a killed daemon on its own (`--full`, disposable runners only) |
 
 ## Extending the harness

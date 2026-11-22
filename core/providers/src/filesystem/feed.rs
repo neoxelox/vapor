@@ -221,7 +221,14 @@ impl ChangesFeed {
             .lock()
             .expect("changes feed receiver mutex poisoned");
         let mut ring = self.ring.lock().expect("changes feed ring mutex poisoned");
-        for event in receiver.try_iter() {
+        let events: Vec<WatchEvent> = receiver.try_iter().collect();
+        // The newest thing the watcher said in this batch: the time an
+        // object that is gone now was last known to be there, at the
+        // least.
+        let Some(newest) = events.iter().map(|event| event.observed_at).max() else {
+            return;
+        };
+        for event in events {
             logging::debug(
                 "Changes-feed watcher event",
                 &[
@@ -262,7 +269,7 @@ impl ChangesFeed {
                 );
                 continue;
             }
-            if let Some(change) = normalize_watch_event(root, tags, event) {
+            if let Some(change) = normalize_watch_event(root, tags, event, newest) {
                 ring.push(change);
             }
         }
@@ -333,11 +340,13 @@ fn report_directory_files(
 /// Maps a raw watch event onto a feed change. `None` drops the event:
 /// paths outside the root, the root itself, internal temp/side-files,
 /// symlinks, and directory events (directories materialize through
-/// their children or reconcile).
+/// their children or reconcile). `newest` is the time of the newest
+/// event read in the same batch.
 fn normalize_watch_event(
     root: &Path,
     tags: &OpIdTagStore,
     event: WatchEvent,
+    newest: SystemTime,
 ) -> Option<RemoteChange> {
     let name_os = event.path.file_name()?;
     let Some(name) = name_os.to_str() else {
@@ -397,10 +406,23 @@ fn normalize_watch_event(
             if error.kind() == io::ErrorKind::NotFound
                 || error.kind() == io::ErrorKind::NotADirectory =>
         {
+            // A removal event carries the time the removal was seen.
+            // Any other event of an object that is gone now was read
+            // too late: it says that the object was there at that time,
+            // and the removal came after it. The engine drops a removal
+            // that is older than the last sync of its path, so the time
+            // of a create or a write must not stand in for the time of
+            // the removal. Such a change gets the time of the newest
+            // event of its batch, which is no earlier than its own.
+            let observed_at = if event.kind == WatchEventKind::Removed {
+                event.observed_at
+            } else {
+                newest
+            };
             Some(RemoteChange {
                 path: remote_path,
                 kind: RemoteChangeKind::Removed,
-                observed_at: event.observed_at,
+                observed_at,
                 op_id: None,
                 content_hash: None,
                 size_bytes: None,
@@ -505,6 +527,42 @@ mod tests {
         );
         assert_eq!(page.changes.len(), 1);
         assert_eq!(page.changes[0].kind, RemoteChangeKind::Removed);
+    }
+
+    #[test]
+    fn an_old_event_of_an_object_that_is_gone_is_not_an_old_removal() {
+        let (dir, feed, handle, tags) = feed_fixture();
+        let root = dir.path();
+        let baseline = expect_page(feed.poll(root, &tags, None, 100).expect("baseline"));
+
+        // The feed is read after the object went: the events of its
+        // upload are still unread, and the event of its removal follows
+        // them in the same batch.
+        handle.emit_created(root.join("report.txt"), ts(0));
+        handle.emit_modified(root.join("report.txt"), ts(5));
+        handle.emit_removed(root.join("report.txt"), ts(9_000));
+        // A removal that was seen at its own time keeps that time.
+        handle.emit_removed(root.join("other.txt"), ts(40));
+        let page = expect_page(
+            feed.poll(root, &tags, Some(&baseline.next_cursor), 100)
+                .expect("poll"),
+        );
+
+        let times: Vec<(&str, RemoteChangeKind, SystemTime)> = page
+            .changes
+            .iter()
+            .map(|change| (change.path.as_str(), change.kind, change.observed_at))
+            .collect();
+        assert_eq!(
+            times,
+            vec![
+                ("report.txt", RemoteChangeKind::Removed, ts(9_000)),
+                ("report.txt", RemoteChangeKind::Removed, ts(9_000)),
+                ("report.txt", RemoteChangeKind::Removed, ts(9_000)),
+                ("other.txt", RemoteChangeKind::Removed, ts(40)),
+            ],
+            "no removal of report.txt is older than the last time it was known to be there"
+        );
     }
 
     #[test]

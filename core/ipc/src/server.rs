@@ -23,15 +23,18 @@ use crate::protocol::{
 pub trait Service: Send + Sync {
     fn status(&self) -> StatusResponse;
 
-    fn pause(&self) -> AckResponse {
+    /// `profile` names the one profile the request is for; `None` is
+    /// every profile. A profile the daemon does not have gets an ack
+    /// that is not accepted, with the reason in its note.
+    fn pause(&self, _profile: Option<&str>) -> AckResponse {
         unsupported_ack("pause")
     }
 
-    fn resume(&self) -> AckResponse {
+    fn resume(&self, _profile: Option<&str>) -> AckResponse {
         unsupported_ack("resume")
     }
 
-    fn reconcile(&self) -> AckResponse {
+    fn reconcile(&self, _profile: Option<&str>) -> AckResponse {
         unsupported_ack("reconcile")
     }
 
@@ -204,8 +207,8 @@ where
                 ));
                 send_response(writer, response)?;
             }
-            Request::Call { method } => {
-                let response = dispatch_method(service, method);
+            Request::Call { method, profile } => {
+                let response = dispatch_method(service, method, profile.as_deref());
                 send_response(writer, response)?;
             }
         }
@@ -232,12 +235,12 @@ fn read_next_frame<R: Read, W: Write>(
     }
 }
 
-fn dispatch_method(service: &dyn Service, method: Method) -> Response {
+fn dispatch_method(service: &dyn Service, method: Method, profile: Option<&str>) -> Response {
     match method {
         Method::Status => Response::Ok(ResponseBody::Status(service.status())),
-        Method::Pause => Response::Ok(ResponseBody::Ack(service.pause())),
-        Method::Resume => Response::Ok(ResponseBody::Ack(service.resume())),
-        Method::Reconcile => Response::Ok(ResponseBody::Ack(service.reconcile())),
+        Method::Pause => Response::Ok(ResponseBody::Ack(service.pause(profile))),
+        Method::Resume => Response::Ok(ResponseBody::Ack(service.resume(profile))),
+        Method::Reconcile => Response::Ok(ResponseBody::Ack(service.reconcile(profile))),
         Method::Timeline => Response::Ok(ResponseBody::Timeline(service.timeline())),
         Method::Diagnostics => Response::Ok(ResponseBody::Diagnostics(service.diagnostics())),
     }
@@ -413,6 +416,7 @@ mod tests {
             &mut request_buf,
             &Request::Call {
                 method: Method::Status,
+                profile: None,
             },
         );
 
@@ -575,6 +579,7 @@ mod tests {
             &mut request_buf,
             &Request::Call {
                 method: Method::Status,
+                profile: None,
             },
         );
 
@@ -599,6 +604,7 @@ mod tests {
             &mut request_buf,
             &Request::Call {
                 method: Method::Status,
+                profile: None,
             },
         );
 
@@ -667,6 +673,7 @@ mod tests {
             &mut request_buf,
             &Request::Call {
                 method: Method::Status,
+                profile: None,
             },
         );
 

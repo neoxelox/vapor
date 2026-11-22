@@ -162,7 +162,12 @@ with the sign-in and the background service; `remove`
 needs the daemon stopped, forgets the profile's sync state and
 sign-in, keeps its trash, and leaves the files on both sides. Each
 entry runs as an isolated pipeline with its own state database, trash,
-and queue:
+and queue. Two profiles may have the same `localRoot`, each with its
+own cloud folder. A `localRoot` inside the one of another profile is
+refused: `vapor profiles add` does not write it, and in a file edited
+by hand the later profile of the pair does not run and `vapor status`
+gives the reason.
+
 
 | Field | Required | Meaning |
 | --- | --- | --- |

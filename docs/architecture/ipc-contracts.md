@@ -42,7 +42,8 @@ A field added inside a version is optional, so a peer of the same
 version that predates it reads the frame. Version 4 has these:
 `resources.bandwidth.uploadCapacityKbps` and `downloadCapacityKbps`,
 `ignoredPaths` on a profile row, `truncated` on the timeline answer,
-and the run state `unconfigured`.
+the run state `unconfigured`, and `profile` on the payload of a
+control `Call`.
 
 ### Handshake
 
@@ -202,6 +203,14 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
   answers with an `Ack`. Settings are not an IPC control: `vapor config
   set`, the app, and `vapor service` write `vapor.json`, and the daemon
   reloads it.
+- A control is for every profile, or for one: the `Call` payload takes
+  an optional `profile` (`{"method": "Pause", "profile": "work"}`).
+  A name the daemon has no profile for changes nothing: the `Ack` has
+  `accepted: false`, and its `note` lists the profiles there are. A
+  `Resume` with no profile ends every pause. A `Resume` for one
+  profile while the whole daemon is paused resumes that profile and
+  leaves the others paused. A profile that was paused by name and is
+  composed again (a retry, a configuration reload) starts paused.
 - A `Call` that names a method the daemon does not know is answered
   with the `MethodNotFound` error and the name.
 
@@ -211,7 +220,9 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
   `{timestampMs, kind, message, profileId}`, newest last, and
   `truncated`.
 - `kind` is one of `run-state`, `throttle`, `profile`, `config`,
-  `decision`, `conflict`, `collision`, `mirror`, `cloud-delete` (a file
+  `decision`, `conflict` (a file Vapor kept both versions of; the
+  message names it, and says how many more when a tick made several),
+  `collision`, `mirror`, `cloud-delete` (a file
   Vapor removed in the cloud, with the cause), `failure`, `reconcile`,
   `feed`, `cloud-root`, `sign-in`, and `cloud-full`
   (`constants::timeline`).

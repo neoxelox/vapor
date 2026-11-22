@@ -126,19 +126,21 @@ pub fn status() -> Result<StatusResponse, IpcCliError> {
     client.status().map_err(IpcCliError::from)
 }
 
-pub fn pause() -> Result<AckResponse, IpcCliError> {
+/// The three controls act on every profile, or on the one that
+/// `profile` names.
+pub fn pause(profile: Option<&str>) -> Result<AckResponse, IpcCliError> {
     let mut client = connect()?;
-    client.pause().map_err(IpcCliError::from)
+    client.pause(profile).map_err(IpcCliError::from)
 }
 
-pub fn resume() -> Result<AckResponse, IpcCliError> {
+pub fn resume(profile: Option<&str>) -> Result<AckResponse, IpcCliError> {
     let mut client = connect()?;
-    client.resume().map_err(IpcCliError::from)
+    client.resume(profile).map_err(IpcCliError::from)
 }
 
-pub fn reconcile() -> Result<AckResponse, IpcCliError> {
+pub fn reconcile(profile: Option<&str>) -> Result<AckResponse, IpcCliError> {
     let mut client = connect()?;
-    client.reconcile().map_err(IpcCliError::from)
+    client.reconcile(profile).map_err(IpcCliError::from)
 }
 
 pub fn timeline() -> Result<TimelineResponse, IpcCliError> {

@@ -173,6 +173,20 @@ impl Model {
         }
     }
 
+    /// Records an operation that failed on `side`. A failed operation
+    /// changed nothing, so the model stays as it was: to record it
+    /// would invent a loss (a move that never happened leaves the file
+    /// where it was) or hide one (a delete that found no file says the
+    /// file was missing already). Two operations can fail after a part
+    /// of their work, and `went_away` names the files that part
+    /// removed: a restore that could not write its file back, and a
+    /// subtree removal that stopped part of the way.
+    pub fn record_failed(&mut self, side: Side, went_away: &[String]) {
+        for path in went_away {
+            self.record(side, &Op::Delete { path: path.clone() }, None);
+        }
+    }
+
     /// Records a deliberate same-path edit on both sides.
     pub fn record_contested(&mut self, path: &str, local: Expected, cloud: Expected) {
         self.known_hashes.insert(local.sha256.clone());
@@ -448,6 +462,35 @@ mod tests {
         let full = root.join(path);
         fs::create_dir_all(full.parent().unwrap()).unwrap();
         fs::write(full, bytes).unwrap();
+    }
+
+    #[test]
+    fn an_operation_that_failed_leaves_the_model_as_it_was() {
+        let mut model = Model::new(1, SyncMode::TwoWay);
+        for path in ["a.txt", "tree/b.txt", "tree/c.txt"] {
+            let (_, facts) = expected(path, 1, 100, Side::Local);
+            model.record(
+                Side::Local,
+                &Op::Create {
+                    path: path.to_string(),
+                    size: SizeClass::Small,
+                },
+                Some(facts),
+            );
+        }
+
+        // A move the disk refused, and a delete that found no file:
+        // neither happened, so the model expects what it expected.
+        model.record_failed(Side::Cloud, &[]);
+        assert!(model.files.contains_key("a.txt"));
+        assert_eq!(model.files.len(), 3);
+
+        // A subtree removal that stopped after one file removed that
+        // file and no other.
+        model.record_failed(Side::Cloud, &["tree/b.txt".to_string()]);
+        assert!(!model.files.contains_key("tree/b.txt"));
+        assert!(model.files.contains_key("tree/c.txt"));
+        assert!(model.files.contains_key("a.txt"));
     }
 
     #[test]

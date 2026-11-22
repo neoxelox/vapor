@@ -1,6 +1,6 @@
 # Full review of the repository, and what it changed
 
-Status: implemented 2026-11-15
+Status: implemented 2026-11-15; round 8 implemented 2026-11-22
 
 ## Goal
 
@@ -254,7 +254,7 @@ recommendation. Each decision below is the owner's
 |---|---|
 | D39 | With no terminal, `vapor profiles add` refuses unless both `--local` and `--cloud` are given. A suggestion that nobody saw is no choice (D5). On a terminal the command asks, and offers `~/Vapor` and `/Vapor`. The build took the suggestions before; D39 changes that. |
 | D40 | The LaunchAgent keeps `ProcessType: Background`. Hashing is about 2.7 times slower under that policy, and device impact comes first. The work on the Mac app measures real sync speed, and the owner decides again then. |
-| D41 | `AGENTS.md` §3 names two bounded exceptions to "no provider I/O and no hashing on the tick thread": a file of up to 8 MiB is hashed in line, and the re-baseline of an expired changes cursor polls in line. Removing them is the first task after the merge (`docs/tasks/core.md` E-6). |
+| D41 | `AGENTS.md` §3 names two bounded exceptions to "no provider I/O and no hashing on the tick thread": a file of up to 8 MiB is hashed in line, and the re-baseline of an expired changes cursor polls in line. Removing them is the first task after the merge (`docs/tasks/core.md` E-6). Both were removed on 2026-11-22. |
 | D42 | A daemon whose profiles are all suspended stays up. It retries them on the schedule of D16 and answers `vapor status`. It does not exit. |
 | D43 | The run state for "no usable profile" is named `unconfigured`. It is part of the `--json` contract. |
 | D44 | Neither root has a default. A `localRoot` with no `cloudRoot` is no profile. |
@@ -270,6 +270,17 @@ recommendation. Each decision below is the owner's
 | D54 | The CLI gets no Intel Mac build either (D33). |
 | D55 | The short `Unreleased` list of the changelog stands as the agent wrote it (D26). |
 | D56 | Linux and Windows read no interface speed for now. It is not a design choice: neither is a shipping surface yet, and the figure is only the start of the bandwidth ceiling. There the first transfer step of each direction runs with no limit, and the ceiling holds from the first measurement on. The owner accepts this on the condition that the work has its tasks: `docs/tasks/core.md` PL-3 (Linux) and C6-4 (Windows). |
+
+### Round 8, 2026-11-22: the follow-ups that needed a choice
+
+The owner took each recommendation (owner, 2026-11-22).
+
+| # | Decision |
+|---|---|
+| D57 | Two profiles may have the same local folder. Each one sends that folder to its own cloud. |
+| D58 | A profile whose local folder is inside the local folder of another profile, or around it, is refused. The later one of the two in `vapor.json` is suspended with the reason in `vapor status`, and `vapor profiles add` refuses to write such a profile. What one profile downloads the other would upload, and a mirror in one could delete through the other. |
+| D59 | After a full cloud, `vapor reconcile` and the app's Sync now try the waiting uploads at once. The automatic retry stays at 15 minutes. |
+| D60 | The question for two local names that the cloud folder folds together is not built now. It takes a local volume that keeps the two spellings apart and a cloud folder that folds them, which a Mac with the default volume and Google Drive never have. When it is built, it reuses the `unsyncable-name` question: the file stays on this device, and a rename fixes it. |
 
 ## Design
 
@@ -386,19 +397,28 @@ Found while the fixes were built, and fixed in the same change:
   build before GA has users), and a count in `REVIEW.md`, which is
   removed with the merge. The pull request lists each finding with its
   verdict.
+- Round 8 (2026-11-22): Tier E2E scenario S63 now covers the refusal
+  of a local folder inside the one of another profile, and the new
+  S72 covers the try at once after a full cloud, on a disk image that
+  is filled and freed. Both fail on the build before the change. Unit
+  tests cover the later profile of a nested pair, which does not run,
+  and the pair that shares one folder, which does.
 
 ## Open points
 
-Round 7 settled the choices that the build made (D39 to D56). What is
-still open:
+Round 7 settled the choices that the build made (D39 to D56), and
+round 8 the follow-ups that needed one (D57 to D60). What is still
+open:
 
 1. **Two profiles whose local folders overlap are not refused.** One
    profile whose cloud folder is inside its local folder is. What an
    overlap between profiles should mean is not decided
-   (`docs/tasks/core.md` E-3).
+   (`docs/tasks/core.md` E-3). Decided in round 8 (D57, D58) and built
+   on 2026-11-22.
 2. **The cloud-side window of a swapped root is open for 15 seconds.**
    A local file that a cloud deletion removes in that window goes to
-   the trash (`docs/tasks/core.md` E-2).
+   the trash (`docs/tasks/core.md` E-2). Closed on 2026-11-22: a worker
+   reads the identity of the cloud root before each such removal.
 3. **The Google verification path for the Drive scope.** It gates
    general availability of the Drive provider
    (`docs/tasks/core.md` P-5).
@@ -409,17 +429,11 @@ Not built, with the task that tracks each one:
 |---|---|---|
 | A local name for the second of two Drive files with one name | One of the two syncs, and a warning names the other | `docs/tasks/core.md` P-1 |
 | The Drive file id in the sync index | A cloud deletion made while the daemon was down is found by the startup scan | `docs/tasks/core.md` P-2 |
-| Hashing of small files and the cursor re-baseline off the tick thread | Both run in line, bounded | `docs/tasks/core.md` E-6 |
-| A question for two local names that the cloud folder folds together | The second upload waits and is tried again | `docs/tasks/core.md` E-7 |
-| The checks of a profile before its local root is made | An invalid profile is suspended after its folder is made | `docs/tasks/core.md` E-8 |
+| A question for two local names that the cloud folder folds together | The second upload waits and is tried again; left for later (D60) | `docs/tasks/core.md` E-7 |
 | A sync root whose own spelling changes while the daemon runs | Names below the root compare right; the watcher path is not checked | `docs/tasks/core.md` E-9 |
-| A hold on the events of a folder while its new ignore file loads | A folder that moves in whole waits; files written one by one do not | `docs/tasks/core.md` E-10 |
-| The bandwidth charge of a Drive chunk below 256 KiB | The excess is not taken from the bucket | `docs/tasks/core.md` P-6 |
 | Proxy settings and system root certificates in the HTTP transport | A network that inspects TLS cannot sync | `docs/tasks/core.md` P-3 |
 | A live check of the Drive changes | Built from the API documents | `docs/tasks/core.md` P-4 |
 | The Google verification decision | The client can serve 100 users | `docs/tasks/core.md` P-5 |
-| The first ignore-rule build on a worker | A rule change rebuilds on a worker; the first build does not | `docs/tasks/core.md` E-1 |
-| A profile argument for pause, resume, and reconcile | Each one acts on every profile | `docs/tasks/core.md` E-5 |
 | The macOS system trash through `NSFileManager` | A rename into `~/.Trash`, with no Put Back | `docs/tasks/core.md` PL-1 |
 | A launchd job state that does not come from `launchctl print` text | The installer matches that text | `docs/tasks/core.md` PL-2 |
 | The first-run flow of the Mac app, its sync mode control, and its ignored-paths view | The runtime and the CLI side are in | `docs/tasks/macos.md` O-1 to O-4, M4-2, M4-5, M3-14 |

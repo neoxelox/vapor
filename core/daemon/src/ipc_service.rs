@@ -19,7 +19,7 @@ use vapor_shared::ThrottleState;
 use vapor_shared::constants;
 
 use crate::DaemonApp;
-use crate::runtime_control::RuntimeControl;
+use crate::runtime_control::{ControlRequest, RuntimeControl};
 use crate::timeline::TimelineBuffer;
 
 /// Snapshot of the runtime's view that the IPC server hands out.
@@ -148,6 +148,41 @@ impl DaemonIpcService {
             .clone()
     }
 
+    /// Hands a control request to the runtime: for every profile, or
+    /// for the one that `profile` names. A name the daemon has no
+    /// profile for is not accepted, and the note lists the ones it has.
+    fn control_request(
+        &self,
+        profile: Option<&str>,
+        request: ControlRequest,
+        note: &str,
+    ) -> AckResponse {
+        let Some(profile) = profile else {
+            match request {
+                ControlRequest::Pause => self.control.request_pause(),
+                ControlRequest::Resume => self.control.request_resume(),
+                ControlRequest::Reconcile => self.control.request_reconcile(),
+            }
+            return Self::ack(true, note);
+        };
+        let known: Vec<String> = self
+            .snapshot()
+            .profiles
+            .into_iter()
+            .map(|status| status.id)
+            .collect();
+        if !known.iter().any(|id| id == profile) {
+            let listed = if known.is_empty() {
+                "the daemon has no profile".to_string()
+            } else {
+                format!("the profiles are: {}", known.join(", "))
+            };
+            return Self::ack(false, format!("no profile '{profile}'; {listed}"));
+        }
+        self.control.request_for_profile(profile, request);
+        Self::ack(true, format!("profile '{profile}': {note}"))
+    }
+
     fn ack(accepted: bool, note: impl Into<String>) -> AckResponse {
         let (current, _) = daemon_supported_versions();
         AckResponse {
@@ -191,20 +226,26 @@ impl Service for DaemonIpcService {
         }
     }
 
-    fn pause(&self) -> AckResponse {
-        self.control.request_pause();
-        Self::ack(true, "pause requested; runtime will apply on next tick")
+    fn pause(&self, profile: Option<&str>) -> AckResponse {
+        self.control_request(
+            profile,
+            ControlRequest::Pause,
+            "pause requested; runtime will apply on next tick",
+        )
     }
 
-    fn resume(&self) -> AckResponse {
-        self.control.request_resume();
-        Self::ack(true, "resume requested; runtime will apply on next tick")
+    fn resume(&self, profile: Option<&str>) -> AckResponse {
+        self.control_request(
+            profile,
+            ControlRequest::Resume,
+            "resume requested; runtime will apply on next tick",
+        )
     }
 
-    fn reconcile(&self) -> AckResponse {
-        self.control.request_reconcile();
-        Self::ack(
-            true,
+    fn reconcile(&self, profile: Option<&str>) -> AckResponse {
+        self.control_request(
+            profile,
+            ControlRequest::Reconcile,
             "reconcile requested; the scan runs under any throttle state but suspended and deferred work is released",
         )
     }
@@ -295,6 +336,41 @@ mod tests {
     }
 
     #[test]
+    fn a_control_request_for_a_profile_reaches_that_profile_or_is_not_accepted() {
+        let control = Arc::new(RuntimeControl::new());
+        let mut published = snapshot("running", ThrottleState::Idle, "idle");
+        published.profiles = ["work", "home"]
+            .into_iter()
+            .map(|id| ProfileStatus {
+                id: id.to_string(),
+                ..ProfileStatus::default()
+            })
+            .collect();
+        let service = DaemonIpcService::new(published, control.clone());
+
+        let ack = service.pause(Some("work"));
+        assert!(ack.accepted, "{}", ack.note);
+        assert!(ack.note.contains("'work'"), "{}", ack.note);
+        assert_eq!(
+            control.take_profile_requests(),
+            vec![("work".to_string(), ControlRequest::Pause)]
+        );
+        assert_eq!(
+            control.take_pause_request(),
+            None,
+            "the other profiles got no request"
+        );
+
+        // A name with no profile behind it changes nothing, and the
+        // note says which names there are.
+        let ack = service.reconcile(Some("wrok"));
+        assert!(!ack.accepted);
+        assert!(ack.note.contains("work, home"), "{}", ack.note);
+        assert!(control.take_profile_requests().is_empty());
+        assert!(!control.take_reconcile_request());
+    }
+
+    #[test]
     fn status_response_uses_published_snapshot() {
         let service = DaemonIpcService::new(
             snapshot("running", ThrottleState::Idle, "idle, plugged in, and cool"),
@@ -313,7 +389,7 @@ mod tests {
             snapshot("running", ThrottleState::Idle, "idle"),
             control.clone(),
         );
-        let ack = service.pause();
+        let ack = service.pause(None);
         assert!(ack.accepted);
         assert_eq!(control.take_pause_request(), Some(true));
     }
@@ -325,7 +401,7 @@ mod tests {
             snapshot("paused", ThrottleState::Idle, "user pause"),
             control.clone(),
         );
-        let ack = service.resume();
+        let ack = service.resume(None);
         assert!(ack.accepted);
         assert_eq!(control.take_pause_request(), Some(false));
     }
@@ -337,7 +413,7 @@ mod tests {
             snapshot("running", ThrottleState::Idle, "idle"),
             control.clone(),
         );
-        let _ = service.reconcile();
+        let _ = service.reconcile(None);
         assert!(control.take_reconcile_request());
     }
 

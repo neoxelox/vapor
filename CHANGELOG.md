@@ -47,6 +47,7 @@ in its pull request and in the documents under `docs/`.
 - A negation under an ignored folder follows git: it does not show the file again. A rule that ends in `/` matches folders only.
 - A crash inside one profile stops that profile only. Vapor tries it again after 1, 5, and 30 minutes.
 - The Mac app is built for Apple silicon. There is no Intel Mac build.
+- `vapor pause`, `resume`, and `reconcile` take `--profile`, and `reconcile` tries at once the uploads that wait for room in the cloud. A profile whose local folder is inside another profile's is refused, and a cloud folder that was swapped never removes a local file.
 
 ### Fixed
 

@@ -142,7 +142,7 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 
 - The fs-watch callback (FSEvents on macOS, ReadDirectoryChangesW on Windows, inotify on Linux) may only normalize/filter/record event metadata.
 - No DB/hash/network work in callback.
-- No provider I/O and no file hashing on the tick thread: transfers, probes, deletes, hashes, the changes poll, reconcile directory listings, and the cloud-root checks all run on worker threads and are harvested by a later tick. Two bounded exceptions remain, both open work in `docs/tasks/core.md`: the planner and the reconcile walk hash a file of up to 8 MiB in line, and the rare re-baseline of an expired changes cursor polls in line (owner, 2026-11-15).
+- No provider I/O and no file hashing on the tick thread: transfers, probes, deletes, hashes, the changes poll and its re-baseline, reconcile directory listings, and the cloud-root checks all run on worker threads and are harvested by a later tick. The tick thread reads no file content: a worker reads the file, and the tick thread uses the answer only while the file has the size and the modification time the worker saw.
 - All expensive work must be throttle-state gated.
 - Throttle states: `Idle`, `Light`, `Throttled`, `Suspended`.
 - A throttle state makes sync slower. Only `Suspended` stops it, and a condition that can last never gives `Suspended`: a device on battery, a user at the device, and Low Power Mode slow sync down and never stop it. Critical thermal pressure is what suspends (owner, 2026-11-14).
@@ -969,8 +969,8 @@ Maintain runbooks under `docs/operations/` for:
 
 Each runbook must include detection, mitigation, user-visible state, and recovery verification.
 
-The runbooks that do not exist yet are open work in
-`docs/tasks/core.md`.
+The five are in `docs/operations/incident-runbooks.md`. Release
+failures have `docs/operations/release-incident-playbook.md`.
 
 ## 13) Skills index
 

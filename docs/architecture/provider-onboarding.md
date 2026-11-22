@@ -38,8 +38,9 @@ user must fix (include the fixing command in the message).
 `CloudRootUnavailable` means the cloud root itself is gone: the engine
 holds the profile and checks the root again, and no intent fails for
 it. `StorageFull` means the cloud has no room for an upload: the upload
-waits and is tried again each 15 minutes without spending an attempt,
-and downloads and deletions continue.
+waits and is tried again each 15 minutes without spending an attempt
+(at once when the user asks for a sync), and downloads and deletions
+continue.
 
 ## Capability flags
 

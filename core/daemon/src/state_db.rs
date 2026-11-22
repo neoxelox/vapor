@@ -663,6 +663,25 @@ impl DurableStateDb {
         Ok(changed > 0)
     }
 
+    /// Ends the wait of the pending intents in `ids`: each one that is
+    /// due later than `now` is due now. Returns how many were waiting.
+    pub fn end_wait_of(&mut self, ids: &[i64], now: SystemTime) -> Result<usize, StateDbError> {
+        let now_ms = system_time_to_millis(now)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut released = 0usize;
+        for id in ids {
+            released += transaction.execute(
+                "UPDATE queue_intents SET available_at_ms = ?
+                 WHERE id = ? AND state = ? AND available_at_ms > ?",
+                params![now_ms, id, STATE_PENDING, now_ms],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(released)
+    }
+
     pub fn requeue_leased(
         &mut self,
         id: i64,
@@ -1394,6 +1413,56 @@ impl DurableStateDb {
             )
             .optional()?
             .is_some())
+    }
+
+    /// The row of every synced file under the folder `directory`.
+    pub fn sync_index_rows_under(
+        &self,
+        directory: &Path,
+    ) -> Result<Vec<SyncIndexEntry>, StateDbError> {
+        let (lower, upper) = rows_under_bounds(directory)?;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT path_text, content_hash, size_bytes, local_modified_at_ms,
+                    remote_modified_at_ms, last_op_id, updated_at_ms
+             FROM sync_index WHERE path_text >= ? AND path_text < ?",
+        )?;
+        let rows = statement.query_map(params![lower, upper], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })?;
+        let mut entries = Vec::new();
+        for row in rows {
+            let (
+                path_text,
+                content_hash,
+                size_bytes,
+                local_modified_at_ms,
+                remote_modified_at_ms,
+                last_op_id,
+                updated_at_ms,
+            ) = row?;
+            entries.push(SyncIndexEntry {
+                path: path_from_text(path_text),
+                content_hash,
+                size_bytes: u64::try_from(size_bytes).unwrap_or(0),
+                local_modified_at: local_modified_at_ms
+                    .map(millis_to_system_time)
+                    .transpose()?,
+                remote_modified_at: remote_modified_at_ms
+                    .map(millis_to_system_time)
+                    .transpose()?,
+                last_op_id,
+                updated_at: millis_to_system_time(updated_at_ms)?,
+            });
+        }
+        Ok(entries)
     }
 
     /// The names directly inside `directory` that the sync index holds

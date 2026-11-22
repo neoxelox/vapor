@@ -181,6 +181,20 @@ fn ignoring_rule(
 
 impl EventPathFilter {
     pub fn for_watch_root(watch_root: &Path, options: &EventPathFilterOptions) -> Self {
+        Self::build(watch_root, options, true)
+    }
+
+    /// The rules `vapor.json` gives, with no ignore file read: what is
+    /// in force until the walk for the ignore files of the tree is
+    /// done.
+    pub(crate) fn without_ignore_files(
+        watch_root: &Path,
+        options: &EventPathFilterOptions,
+    ) -> Self {
+        Self::build(watch_root, options, false)
+    }
+
+    fn build(watch_root: &Path, options: &EventPathFilterOptions, read_ignore_files: bool) -> Self {
         let mut rules = Vec::new();
 
         append_user_rules(&mut rules, &options.pre_user_rules);
@@ -189,7 +203,7 @@ impl EventPathFilter {
         let mut vaporignore_file_count = 0usize;
         let mut ignore_files = std::collections::BTreeMap::new();
 
-        if options.use_gitignore {
+        if read_ignore_files && options.use_gitignore {
             gitignore_file_count = append_rules_from_file_tree(
                 &mut rules,
                 watch_root,
@@ -198,7 +212,7 @@ impl EventPathFilter {
             );
         }
 
-        if options.use_vaporignore {
+        if read_ignore_files && options.use_vaporignore {
             vaporignore_file_count = append_rules_from_file_tree(
                 &mut rules,
                 watch_root,
@@ -213,6 +227,7 @@ impl EventPathFilter {
             "Initialized filesystem path filter",
             &[
                 ("watch_root", watch_root.display().to_string()),
+                ("ignore_files_read", read_ignore_files.to_string()),
                 ("rule_count", rules.len().to_string()),
                 ("use_gitignore", options.use_gitignore.to_string()),
                 ("use_vaporignore", options.use_vaporignore.to_string()),

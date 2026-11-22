@@ -166,6 +166,21 @@ pub struct SharedEventPathFilter {
     /// a file the old rules hid is in scope now, and nothing else
     /// would notice it until it changes.
     rules_generation: std::sync::atomic::AtomicU64,
+    /// Whether the ignore files of the tree were read one time. Until
+    /// then the rules in force are the ones `vapor.json` gives, and
+    /// nothing is released on their word alone.
+    first_rules_landed: AtomicBool,
+}
+
+/// What one call of [`SharedEventPathFilter::drive_rebuild`] finished.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RulesRebuild {
+    /// No rebuild finished in this call.
+    None,
+    /// The rebuilt rules are in force.
+    Landed,
+    /// The rebuild failed; the rules in force stay.
+    Failed,
 }
 
 impl std::fmt::Debug for SharedEventPathFilter {
@@ -178,19 +193,49 @@ impl std::fmt::Debug for SharedEventPathFilter {
 }
 
 impl SharedEventPathFilter {
+    /// The rules `vapor.json` gives are in force at once. The ignore
+    /// files of the tree are read by the first [`Self::drive_rebuild`],
+    /// which the daemon runs on a worker: the walk for them can take
+    /// long in a large tree, and a profile is composed on the tick
+    /// thread. [`Self::rules_ready`] says when they are in.
     pub fn new(watch_root: &Path, options: EventPathFilterOptions) -> Self {
-        let filter = EventPathFilter::for_watch_root(watch_root, &options);
+        let filter = EventPathFilter::without_ignore_files(watch_root, &options);
         Self {
             watch_root: watch_root.to_path_buf(),
             options: RwLock::new(options),
             filter: RwLock::new(filter),
-            reload_requested: AtomicBool::new(false),
+            reload_requested: AtomicBool::new(true),
             rebuild: std::sync::Mutex::new(None),
             rebuilds_started: std::sync::atomic::AtomicU64::new(0),
             rebuilds_landed: std::sync::atomic::AtomicU64::new(0),
             awaited_ignore_files: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             rules_generation: std::sync::atomic::AtomicU64::new(0),
+            first_rules_landed: AtomicBool::new(false),
         }
+    }
+
+    /// [`Self::new`] with the ignore files read before it returns, for
+    /// a caller with no tick loop to drive the first rebuild.
+    pub fn with_ignore_files_read(watch_root: &Path, options: EventPathFilterOptions) -> Self {
+        let filter = Self::new(watch_root, options);
+        filter.rebuild_if_requested();
+        filter
+    }
+
+    /// Whether the ignore files of the tree were read one time.
+    pub fn rules_ready(&self) -> bool {
+        self.first_rules_landed.load(Ordering::Acquire)
+    }
+
+    /// Whether a rebuild was asked for or runs: the rules in force may
+    /// not be the rules of the ignore files as they are now.
+    pub fn rebuild_pending(&self) -> bool {
+        self.reload_requested.load(Ordering::Acquire)
+            || self
+                .rebuild
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some()
     }
 
     /// Whether the rules in force were read from the ignore file at
@@ -312,9 +357,11 @@ impl SharedEventPathFilter {
     /// a finished one in force, and starts one when a reload was
     /// requested and none runs. With a threaded `mode` the walk and the
     /// compilation run on a worker and land on a later call; inline,
-    /// they finish in this call. Returns whether new rules went in
-    /// force.
-    pub(crate) fn drive_rebuild(&self, mode: &crate::provider_jobs::ProviderCallMode) -> bool {
+    /// they finish in this call.
+    pub(crate) fn drive_rebuild(
+        &self,
+        mode: &crate::provider_jobs::ProviderCallMode,
+    ) -> RulesRebuild {
         let mut rebuild = self
             .rebuild
             .lock()
@@ -338,10 +385,13 @@ impl SharedEventPathFilter {
             .as_mut()
             .and_then(|(number, call)| call.take().map(|outcome| (*number, outcome)))
         else {
-            return false;
+            return RulesRebuild::None;
         };
         *rebuild = None;
         self.rebuilds_landed.store(number, Ordering::Release);
+        // A first rebuild that fails still ends the wait for it: the
+        // rules in force are the rules there are.
+        let first = !self.first_rules_landed.swap(true, Ordering::AcqRel);
         let rebuilt = match outcome {
             Ok(rebuilt) => rebuilt,
             Err(panic) => {
@@ -352,7 +402,7 @@ impl SharedEventPathFilter {
                         ("error", panic),
                     ],
                 );
-                return false;
+                return RulesRebuild::Failed;
             }
         };
         let changed = {
@@ -364,23 +414,26 @@ impl SharedEventPathFilter {
             *filter = rebuilt;
             changed
         };
-        if changed {
+        // The first rules replace nothing that was acted on, so they
+        // free nothing a reconcile would have to find.
+        if changed && !first {
             self.rules_generation.fetch_add(1, Ordering::AcqRel);
         }
         logging::info(
             "Reloaded the ignore rules",
             &[
                 ("watch_root", self.watch_root.display().to_string()),
+                ("first", first.to_string()),
                 ("rules_changed", changed.to_string()),
             ],
         );
-        true
+        RulesRebuild::Landed
     }
 
     /// Rebuilds the filter in this call when a reload was requested;
-    /// returns whether a rebuild happened.
+    /// returns whether a rebuild finished.
     pub fn rebuild_if_requested(&self) -> bool {
-        self.drive_rebuild(&crate::provider_jobs::ProviderCallMode::Inline)
+        self.drive_rebuild(&crate::provider_jobs::ProviderCallMode::Inline) != RulesRebuild::None
     }
 }
 
@@ -407,7 +460,10 @@ impl FsEventsWatcher {
         filter_options: EventPathFilterOptions,
     ) -> Result<Self, FsEventsWatcherError> {
         let watch_root = normalize_watch_root(watch_root.into())?;
-        let path_filter = Arc::new(SharedEventPathFilter::new(&watch_root, filter_options));
+        let path_filter = Arc::new(SharedEventPathFilter::with_ignore_files_read(
+            &watch_root,
+            filter_options,
+        ));
         Self::start_with_shared_filter(watch_root, recorder, path_filter)
     }
 
@@ -905,11 +961,42 @@ mod tests {
     }
 
     #[test]
+    fn the_ignore_files_are_read_by_the_first_rebuild_not_by_the_constructor() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let watch_root = temp_dir.path().join("watch");
+        fs::create_dir_all(&watch_root).expect("create watch root");
+        fs::write(watch_root.join(".gitignore"), "generated/\n").expect("write .gitignore");
+        let options = EventPathFilterOptions {
+            pre_user_rules: vec!["*.tmp".to_string()],
+            post_user_rules: Vec::new(),
+            ..EventPathFilterOptions::default()
+        };
+
+        let path_filter = SharedEventPathFilter::new(&watch_root, options);
+        // The rules of the settings hold at once; the ignore files wait
+        // for the rebuild, and the filter says so.
+        assert!(path_filter.should_ignore(&watch_root.join("scratch.tmp")));
+        assert!(!path_filter.should_ignore(&watch_root.join("generated/app.js")));
+        assert!(!path_filter.rules_ready());
+        assert!(path_filter.rebuild_pending());
+
+        assert!(path_filter.rebuild_if_requested());
+        assert!(path_filter.rules_ready());
+        assert!(!path_filter.rebuild_pending());
+        assert!(path_filter.should_ignore(&watch_root.join("generated/app.js")));
+        assert_eq!(
+            path_filter.rules_generation(),
+            0,
+            "the first rules replace nothing that was acted on"
+        );
+    }
+
+    #[test]
     fn observing_an_ignore_file_change_requests_a_filter_reload() {
         let temp_dir = TempDir::new().expect("temp dir");
         let watch_root = temp_dir.path().join("watch");
         fs::create_dir_all(&watch_root).expect("create watch root");
-        let path_filter = SharedEventPathFilter::new(
+        let path_filter = SharedEventPathFilter::with_ignore_files_read(
             &watch_root,
             EventPathFilterOptions {
                 pre_user_rules: Vec::new(),

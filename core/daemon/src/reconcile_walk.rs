@@ -41,6 +41,7 @@ use vapor_shared::{ProviderErrorKind, SyncMode};
 
 use crate::event_intents::PendingIntentKind;
 use crate::fs_events::SharedEventPathFilter;
+use crate::local_hash::{SetAsideFile, SetAsideVerdict};
 use crate::provider_jobs::{ProviderCall, ProviderCallMode};
 use crate::state_db::{DurableStateDb, StateDbError};
 
@@ -100,6 +101,11 @@ pub struct ReconcileWalker {
     /// The subtree being reconciled (== scope_root for whole-scope).
     subtree_root: PathBuf,
     pending_enumeration: Option<PendingEnumeration>,
+    /// Files the directory just compared holds under a set-aside name.
+    set_aside_found: Vec<SetAsideFile>,
+    /// The comparison of those files with their originals, on its own
+    /// thread: the walk reads no file content on the tick thread.
+    pending_set_aside: Option<ProviderCall<Vec<SetAsideVerdict>>>,
     /// Two-way file/directory type mismatches found by this walk; the
     /// runtime surfaces them on the timeline so the user can act.
     type_mismatches: Vec<PathBuf>,
@@ -151,6 +157,8 @@ impl ReconcileWalker {
             subtree_root: subtree_root.to_path_buf(),
             path_filter,
             pending_enumeration: None,
+            set_aside_found: Vec::new(),
+            pending_set_aside: None,
             type_mismatches: Vec::new(),
             unsyncable_names: Vec::new(),
             name_collisions: Vec::new(),
@@ -276,33 +284,23 @@ impl ReconcileWalker {
     /// walk. One that the walk finds was left by a crash or a failed
     /// apply, and it may hold an edit that exists nowhere else. It
     /// comes back as a conflict copy and uploads like one. Bytes that
-    /// equal the file now at the original name are dropped instead.
+    /// equal the file now at the original name are dropped instead;
+    /// `verdict` is that comparison, made off the tick thread.
     fn recover_set_aside_file(
         &mut self,
         state_db: &mut DurableStateDb,
-        aside: &Path,
-        original_name: Option<&str>,
+        verdict: &SetAsideVerdict,
         now: SystemTime,
     ) -> Result<(), WalkError> {
+        let aside = verdict.file.aside.as_path();
         let Ok(metadata) = fs::symlink_metadata(aside) else {
             return Ok(());
         };
         if !metadata.is_file() {
             return Ok(());
         }
-        let original = aside.with_file_name(original_name.unwrap_or("recovered-file"));
-        let same_as_original = original_name.is_some()
-            && metadata.len() <= vapor_shared::constants::engine::HASH_STAGE_STEP_BYTES
-            && fs::symlink_metadata(&original)
-                .is_ok_and(|current| current.is_file() && current.len() == metadata.len())
-            && matches!(
-                (
-                    vapor_providers::filesystem::hash_hex_of_file(aside),
-                    vapor_providers::filesystem::hash_hex_of_file(&original),
-                ),
-                (Ok(left), Ok(right)) if left == right
-            );
-        if same_as_original {
+        let original = crate::local_hash::set_aside_original_path(&verdict.file);
+        if verdict.still_same_as(&original) {
             let _ = fs::remove_file(aside);
             return Ok(());
         }
@@ -544,6 +542,18 @@ impl ReconcileWalker {
         should_continue: &dyn Fn() -> bool,
     ) -> Result<bool, WalkError> {
         for _ in 0..max_directories {
+            if let Some(call) = self.pending_set_aside.as_mut() {
+                let Some(result) = call.take() else {
+                    // Still comparing on its thread.
+                    return Ok(false);
+                };
+                self.pending_set_aside = None;
+                // A comparison that panicked leaves the files where
+                // they are; the next walk meets them again.
+                for verdict in result.unwrap_or_default() {
+                    self.recover_set_aside_file(state_db, &verdict, now)?;
+                }
+            }
             if self.pending_enumeration.is_none() {
                 let Some(directory) = self.pending_dirs.pop_front() else {
                     return Ok(true);
@@ -604,11 +614,19 @@ impl ReconcileWalker {
                 now,
             )?;
             self.stats.directories_compared += 1;
+            if !self.set_aside_found.is_empty() {
+                let found = std::mem::take(&mut self.set_aside_found);
+                self.pending_set_aside = Some(ProviderCall::start(mode, "set-aside", move || {
+                    crate::local_hash::compare_set_aside_files(found)
+                }));
+            }
             if !should_continue() {
-                return Ok(self.pending_dirs.is_empty());
+                break;
             }
         }
-        Ok(self.pending_dirs.is_empty() && self.pending_enumeration.is_none())
+        Ok(self.pending_dirs.is_empty()
+            && self.pending_enumeration.is_none()
+            && self.pending_set_aside.is_none())
     }
 
     fn compare_directory(
@@ -644,7 +662,10 @@ impl ReconcileWalker {
                     }
                     if vapor_providers::filesystem::is_internal_file_name(&name) {
                         if let Some(original) = crate::conflict::set_aside_original_name(&name) {
-                            self.recover_set_aside_file(state_db, &entry.path(), original, now)?;
+                            self.set_aside_found.push(SetAsideFile {
+                                aside: entry.path(),
+                                original_name: original.map(str::to_owned),
+                            });
                             continue;
                         }
                         // Reap orphaned download-staging temps from unclean
@@ -1370,6 +1391,62 @@ mod tests {
         assert!(
             queued.contains(&(copy.clone(), PendingIntentKind::Upload)),
             "the copy uploads: {queued:?}"
+        );
+    }
+
+    #[test]
+    fn the_walk_compares_a_set_aside_file_off_the_calling_thread() {
+        let mut fixture = Fixture::new();
+        let replaced = fixture.local_root.join("same.md");
+        std::fs::write(&replaced, b"identical").expect("seed");
+        let identical_aside = crate::conflict::aside_path(&replaced, "dev-1-2");
+        std::fs::write(&identical_aside, b"identical").expect("seed");
+        let edited = fixture.local_root.join("plan.md");
+        std::fs::write(&edited, b"what the download put here").expect("seed");
+        let edit_aside = crate::conflict::aside_path(&edited, "dev-1-3");
+        std::fs::write(&edit_aside, b"an edit that exists nowhere").expect("seed");
+
+        let reads_before = crate::local_hash::content_reads_on_this_thread();
+        let mode = ProviderCallMode::Threaded { waker: None };
+        let mut walker = ReconcileWalker::new(&fixture.local_root, &fixture.local_root, None);
+        // Bounded by iteration count: the loop ends as soon as the
+        // threads deliver.
+        let mut done = false;
+        for _ in 0..1_000_000 {
+            done = walker
+                .process(
+                    fixture.provider.clone(),
+                    &mode,
+                    SyncMode::TwoWay,
+                    &mut fixture.state_db,
+                    8,
+                    ts(0),
+                    &|| true,
+                )
+                .expect("walk step");
+            if done {
+                break;
+            }
+            std::thread::yield_now();
+        }
+
+        assert!(done);
+        assert!(!identical_aside.exists(), "identical bytes are dropped");
+        assert!(!edit_aside.exists(), "the edit left the temp name");
+        assert!(
+            std::fs::read_dir(&fixture.local_root)
+                .expect("list")
+                .flatten()
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("plan~conflict-")),
+            "the edit came back under a conflict name"
+        );
+        assert_eq!(
+            crate::local_hash::content_reads_on_this_thread(),
+            reads_before,
+            "the walk's thread read no file"
         );
     }
 

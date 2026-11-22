@@ -87,7 +87,7 @@ pub fn scenarios() -> Vec<Scenario> {
         Scenario {
             id: "S63",
             name: "profiles-command-sets-an-install-up",
-            proves: "vapor profiles add sets a fresh install up with one command and no restart, and refuses when no terminal can ask and a folder is left out; it refuses a cloud folder inside the local folder; remove refuses while the daemon runs, then forgets the sync state and leaves the files on both sides",
+            proves: "vapor profiles add sets a fresh install up with one command and no restart, and refuses when no terminal can ask and a folder is left out; it refuses a cloud folder inside the local folder, and a local folder inside the one of another profile; remove refuses while the daemon runs, then forgets the sync state and leaves the files on both sides",
             needs: &[Need::NativeWatcher, Need::Filesystem],
             expect: Expect::Pass,
             run: profiles_command_sets_an_install_up,
@@ -429,6 +429,39 @@ fn profiles_command_sets_an_install_up(ctx: &mut Ctx) -> Result<(), Failure> {
     ensure!(
         fs::read_to_string(home.config_path())? == before,
         "a refused profile must not change vapor.json"
+    );
+
+    // So is a local folder inside the folder of another profile: the
+    // outer profile would sync the files of the inner one a second time.
+    let nested_local = home.local.join("inner");
+    let nested_cloud = home.dir.join("nested-cloud");
+    let nested = cli.run(&[
+        "profiles",
+        "add",
+        "--id",
+        "nested",
+        "--provider",
+        "filesystem",
+        "--local",
+        &nested_local.to_string_lossy(),
+        "--cloud",
+        &nested_cloud.to_string_lossy(),
+    ])?;
+    ensure!(
+        !nested.success()
+            && nested
+                .stderr
+                .contains("overlaps the one of profile `default`"),
+        "a local folder inside the one of another profile must be refused with the reason: {}",
+        nested.combined()
+    );
+    ensure!(
+        fs::read_to_string(home.config_path())? == before,
+        "a refused profile must not change vapor.json"
+    );
+    ensure!(
+        !nested_local.exists() && !nested_cloud.exists(),
+        "a refused profile must create no folder"
     );
 
     // The daemon holds the profile's state: remove waits for a stop.

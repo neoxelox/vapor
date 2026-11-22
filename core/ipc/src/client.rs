@@ -166,16 +166,18 @@ impl Client {
         }
     }
 
-    pub fn pause(&mut self) -> Result<AckResponse, ClientError> {
-        self.call_for_ack(Method::Pause)
+    /// The three controls take the profile they are for; `None` is
+    /// every profile.
+    pub fn pause(&mut self, profile: Option<&str>) -> Result<AckResponse, ClientError> {
+        self.call_for_ack(Method::Pause, profile)
     }
 
-    pub fn resume(&mut self) -> Result<AckResponse, ClientError> {
-        self.call_for_ack(Method::Resume)
+    pub fn resume(&mut self, profile: Option<&str>) -> Result<AckResponse, ClientError> {
+        self.call_for_ack(Method::Resume, profile)
     }
 
-    pub fn reconcile(&mut self) -> Result<AckResponse, ClientError> {
-        self.call_for_ack(Method::Reconcile)
+    pub fn reconcile(&mut self, profile: Option<&str>) -> Result<AckResponse, ClientError> {
+        self.call_for_ack(Method::Reconcile, profile)
     }
 
     pub fn diagnostics(&mut self) -> Result<DiagnosticsResponse, ClientError> {
@@ -192,16 +194,31 @@ impl Client {
         }
     }
 
-    fn call_for_ack(&mut self, method: Method) -> Result<AckResponse, ClientError> {
-        match self.call(method)? {
+    fn call_for_ack(
+        &mut self,
+        method: Method,
+        profile: Option<&str>,
+    ) -> Result<AckResponse, ClientError> {
+        match self.call_for(method, profile)? {
             ResponseBody::Ack(value) => Ok(value),
             other => Err(ClientError::UnexpectedResponse(format!("{other:?}"))),
         }
     }
 
     fn call(&mut self, method: Method) -> Result<ResponseBody, ClientError> {
-        let payload = serde_json::to_vec(&Request::Call { method })
-            .map_err(|error| ClientError::Parse(error.to_string()))?;
+        self.call_for(method, None)
+    }
+
+    fn call_for(
+        &mut self,
+        method: Method,
+        profile: Option<&str>,
+    ) -> Result<ResponseBody, ClientError> {
+        let payload = serde_json::to_vec(&Request::Call {
+            method,
+            profile: profile.map(str::to_owned),
+        })
+        .map_err(|error| ClientError::Parse(error.to_string()))?;
         // One absolute deadline for the whole request/response so a large
         // (up to MAX_PAYLOAD_BYTES) reply from a byte-trickling daemon
         // cannot keep the call alive past the budget.

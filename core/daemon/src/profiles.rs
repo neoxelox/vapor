@@ -164,7 +164,57 @@ pub fn resolve_profile_set_from(config: &VaporConfig) -> ProfileSet {
             enabled: profile.enabled.unwrap_or(true),
         });
     }
+    refuse_nested_local_roots(&mut set.profiles);
     set
+}
+
+/// Why `local_root` cannot be the local folder of one more profile next
+/// to `profiles`: it lies inside the local folder of one that runs, or
+/// around it. What one of the two downloads the other would upload,
+/// and a mirror in one could delete through the other. The same folder
+/// is another thing: two profiles may share it, and each sends it to
+/// its own cloud.
+pub fn nested_local_root_problem(
+    profiles: &[ResolvedProfile],
+    local_root: &std::path::Path,
+) -> Option<String> {
+    profiles
+        .iter()
+        .filter(|profile| profile.enabled && profile.invalid.is_none())
+        .find_map(|profile| {
+            let other = profile.scope.local_root.as_deref()?;
+            let reason = sync_directories::local_roots_nest(other, local_root)?;
+            Some(format!(
+                "its local folder overlaps the one of profile `{}`: {reason}. Give the two \
+                 profiles folders that are apart, or the same folder",
+                profile.id
+            ))
+        })
+}
+
+/// The later profile of a pair whose local folders nest is the one
+/// that does not run.
+fn refuse_nested_local_roots(profiles: &mut [ResolvedProfile]) {
+    for index in 0..profiles.len() {
+        let (earlier, rest) = profiles.split_at_mut(index);
+        let profile = &mut rest[0];
+        if !profile.enabled || profile.invalid.is_some() {
+            continue;
+        }
+        let Some(local_root) = profile.scope.local_root.clone() else {
+            continue;
+        };
+        if let Some(problem) = nested_local_root_problem(earlier, &local_root) {
+            logging::error(
+                "A profile cannot run next to another one",
+                &[
+                    ("profile_id", profile.id.clone()),
+                    ("problem", problem.clone()),
+                ],
+            );
+            profile.invalid = Some(problem);
+        }
+    }
 }
 
 /// What stops `config`'s scope from being a profile, if anything: a
@@ -428,6 +478,61 @@ mod tests {
         );
         assert_eq!(set.problems.len(), 1);
         assert!(!set.is_unconfigured());
+    }
+
+    #[test]
+    fn a_profile_whose_local_folder_nests_with_an_earlier_one_does_not_run() {
+        let profile = |id: &str, local: &str, enabled: bool| ProfileConfig {
+            id: id.to_string(),
+            local_root: Some(rooted(local)),
+            cloud_root: Some(rooted(&format!("/tmp/vapor-nest-cloud/{id}"))),
+            enabled: Some(enabled),
+            ..ProfileConfig::default()
+        };
+        let config = VaporConfig {
+            profiles: vec![
+                profile("docs", "/tmp/vapor-nest/docs", true),
+                profile("inside", "/tmp/vapor-nest/docs/work", true),
+                profile("around", "/tmp/vapor-nest", true),
+                profile("same", "/tmp/vapor-nest/docs", true),
+                profile("apart", "/tmp/vapor-nest-other", true),
+                profile("alike", "/tmp/vapor-nest/docs-old", true),
+            ],
+            ..VaporConfig::default()
+        };
+        let profiles = resolve_profiles(&config);
+        let problem = |id: &str| {
+            profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .expect("the profile is listed")
+                .invalid
+                .clone()
+        };
+
+        assert_eq!(problem("docs"), None, "the earlier profile of a pair runs");
+        for later in ["inside", "around"] {
+            let reason = problem(later).expect("a nested folder is refused");
+            assert!(reason.contains("profile `docs`"), "{reason}");
+            assert!(reason.contains("is inside"), "{reason}");
+        }
+        assert_eq!(problem("same"), None, "two profiles may share one folder");
+        assert_eq!(problem("apart"), None);
+        assert_eq!(
+            problem("alike"),
+            None,
+            "a name that starts the same way is another folder, and a refused profile holds none"
+        );
+
+        // A profile that is turned off holds no folder.
+        let config = VaporConfig {
+            profiles: vec![
+                profile("off", "/tmp/vapor-nest/docs", false),
+                profile("inside", "/tmp/vapor-nest/docs/work", true),
+            ],
+            ..VaporConfig::default()
+        };
+        assert_eq!(resolve_profiles(&config)[1].invalid, None);
     }
 
     #[test]

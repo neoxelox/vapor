@@ -83,6 +83,13 @@ pub struct RemotePoller {
     /// The provider's message from the last poll it refused for the
     /// sign-in, until the runtime takes it.
     refused_sign_in: Option<String>,
+    /// The feed has no cursor that a poll confirmed: the first poll
+    /// since the start has not answered, or the cursor expired (or was
+    /// discarded) and its baseline has not answered. A reconcile walk
+    /// that started now could list a folder before the cursor is
+    /// taken, and a change between the two would be in neither. The
+    /// wait ends with the answer of that poll, whatever it is.
+    awaiting_cursor: bool,
 }
 
 impl RemotePoller {
@@ -101,6 +108,7 @@ impl RemotePoller {
             reported_collisions: std::collections::BTreeSet::new(),
             discard_history: false,
             refused_sign_in: None,
+            awaiting_cursor: true,
         }
     }
 
@@ -114,6 +122,13 @@ impl RemotePoller {
         self.cursor = None;
         self.cursor_loaded = true;
         self.last_poll_inst = None;
+        self.awaiting_cursor = true;
+    }
+
+    /// Whether a reconcile walk has to wait for a poll before it
+    /// starts, so that each of its listings is newer than the cursor.
+    pub fn awaits_cursor(&self) -> bool {
+        self.awaiting_cursor
     }
 
     /// Collisions found since the last call, for the timeline.
@@ -187,7 +202,6 @@ impl RemotePoller {
             if let Some(poll) = self.unwrap_poll(result, &mut report) {
                 self.apply_poll(
                     poll,
-                    app,
                     state_db,
                     remote_echoes,
                     local_root,
@@ -251,7 +265,6 @@ impl RemotePoller {
         if let Some(poll) = self.unwrap_poll(result, &mut report) {
             self.apply_poll(
                 poll,
-                app,
                 state_db,
                 remote_echoes,
                 local_root,
@@ -280,6 +293,8 @@ impl RemotePoller {
                 None
             }
             Ok(Err(error)) => {
+                // A poll that fails must not hold the reconcile.
+                self.awaiting_cursor = false;
                 logging::warning(
                     "Remote changes poll failed; will retry on the next cadence",
                     &[
@@ -290,6 +305,7 @@ impl RemotePoller {
                 None
             }
             Err(panic) => {
+                self.awaiting_cursor = false;
                 logging::error(
                     "Remote changes poll panicked; will retry on the next cadence",
                     &[("panic", panic)],
@@ -303,7 +319,6 @@ impl RemotePoller {
     fn apply_poll(
         &mut self,
         poll: ChangesPoll,
-        app: &mut DaemonApp,
         state_db: &mut DurableStateDb,
         remote_echoes: &mut SelfWriteCache,
         local_root: &Path,
@@ -315,6 +330,16 @@ impl RemotePoller {
         let first_poll = !self.first_poll_done;
         self.first_poll_done = true;
         match poll {
+            ChangesPoll::CursorExpired if self.cursor.is_none() => {
+                // A poll with no cursor asks for a baseline, which
+                // cannot expire: a provider bug. The next cadence asks
+                // again.
+                self.awaiting_cursor = false;
+                logging::error(
+                    "Provider reported CursorExpired for a baseline poll; deferring re-baseline",
+                    &[],
+                );
+            }
             ChangesPoll::CursorExpired => {
                 report.cursor_expired = true;
                 if first_poll {
@@ -342,9 +367,16 @@ impl RemotePoller {
                     )],
                     crate::safeguards::IntentSource::Fresh,
                 )?;
-                self.rebaseline(app, state_db, now)?;
+                // The next poll has no cursor, so it is the baseline. It
+                // runs on the poll thread like every poll, at the next
+                // tick, and no walk starts before it answers.
+                state_db.delete_state(&self.cursor_state_key)?;
+                self.cursor = None;
+                self.awaiting_cursor = true;
+                self.last_poll_inst = None;
             }
             ChangesPoll::Page(page) => {
+                self.awaiting_cursor = false;
                 report.observed_changes = page.changes.len();
                 // A full page means more changes are pending right now.
                 // Keep draining on the next tick (one page per tick stays
@@ -558,42 +590,6 @@ impl RemotePoller {
 
         Ok(())
     }
-
-    fn rebaseline(
-        &mut self,
-        app: &mut DaemonApp,
-        state_db: &mut DurableStateDb,
-        now: SystemTime,
-    ) -> Result<(), StateDbError> {
-        match app
-            .provider()
-            .poll_changes(None, constants::engine::REMOTE_CHANGES_PAGE_MAX)
-        {
-            Ok(ChangesPoll::Page(baseline)) => {
-                state_db.set_state(&self.cursor_state_key, &baseline.next_cursor, now)?;
-                self.cursor = Some(baseline.next_cursor);
-            }
-            Ok(ChangesPoll::CursorExpired) => {
-                // A baseline poll must never expire; treat as a provider
-                // bug and drop the cursor so the next poll re-baselines.
-                logging::error(
-                    "Provider reported CursorExpired for a baseline poll; deferring re-baseline",
-                    &[],
-                );
-                state_db.delete_state(&self.cursor_state_key)?;
-                self.cursor = None;
-            }
-            Err(error) => {
-                logging::warning(
-                    "Re-baseline poll failed; will retry on the next cadence",
-                    &[("error", error.message)],
-                );
-                state_db.delete_state(&self.cursor_state_key)?;
-                self.cursor = None;
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Whether a regular file exists at `path` (symlinks and directories
@@ -765,6 +761,12 @@ mod tests {
         fn poll(&mut self, now: SystemTime) -> RemotePollReport {
             // Advance past every cadence so the poll is always due.
             self.clock.advance(Duration::from_secs(61));
+            self.poll_at_once(now)
+        }
+
+        /// A poll at the same instant as the one before: it runs only
+        /// when the poller asked for a poll without waiting.
+        fn poll_at_once(&mut self, now: SystemTime) -> RemotePollReport {
             let clock: SharedClock = self.clock.clone();
             self.poller
                 .poll_if_due(
@@ -957,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_expiry_schedules_whole_scope_reconcile_and_rebaselines() {
+    fn cursor_expiry_schedules_the_reconcile_and_rebaselines_with_the_next_poll() {
         let mut fixture = Fixture::new();
         fixture.poll(ts(0)); // baseline
 
@@ -968,9 +970,31 @@ mod tests {
             .expect("poison cursor");
         fixture.poller = RemotePoller::new("default");
 
-        let report = fixture.poll(ts(20));
-        assert!(report.cursor_expired);
-        assert_eq!(report.enqueued_intents, 1, "reconcile intent enqueued");
+        // The poll that learns of the expiry asks the provider nothing
+        // more: the baseline is a poll of its own, off the tick thread
+        // in the daemon.
+        let expired = fixture.poll(ts(20));
+        assert!(expired.cursor_expired);
+        assert_eq!(expired.enqueued_intents, 1, "reconcile intent enqueued");
+        assert!(
+            fixture
+                .state_db
+                .state("provider.changes_cursor.default")
+                .expect("state read")
+                .is_none(),
+            "the expired cursor is dropped"
+        );
+        assert!(
+            fixture.poller.awaits_cursor(),
+            "no walk starts before the baseline answers"
+        );
+
+        // The baseline does not wait for the cadence.
+        let baseline = fixture.poll_at_once(ts(21));
+        assert!(baseline.polled);
+        assert!(!baseline.cursor_expired);
+        assert_eq!(baseline.enqueued_intents, 0);
+        assert!(!fixture.poller.awaits_cursor());
 
         let intent = fixture
             .state_db

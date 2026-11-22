@@ -16,57 +16,23 @@ are never reused.
 
 ## Sync engine
 
-- [ ] E-1 Build the first set of ignore rules on a worker. A rule
-      change already rebuilds on a worker, but the first build, which
-      walks the tree for ignore files, runs while a profile is
-      composed. Move it to a worker and hold the release of intents
-      until the rules are in.
-- [ ] E-2 Close the cloud-side window of a swapped root. The local root
-      is read again before any lease and before each cloud deletion.
-      The cloud root is checked each 15 seconds only, so a cloud root
-      that is swapped can make local files look deleted for that long.
-      Those files go to the trash, so nothing is lost, but the check
-      belongs before each local removal too.
-- [ ] E-3 Decide what two profiles with overlapping local roots mean,
-      and refuse the pair if the answer is "nothing safe". One profile
-      whose cloud folder sits inside its local folder is refused today;
-      two profiles whose local folders overlap are not. This waits for
-      the owner (`docs/specs/2026-11-14-full-review.md`, open points).
-- [ ] E-4 Remove a local folder that a cloud-side rename or removal
-      emptied. On a volume that keeps spellings apart, or for any
-      rename of a folder in the cloud that the reconcile walk finds,
-      the files move and the old local folder stays behind, empty.
-- [ ] E-5 `Pause`, `Resume`, and `Reconcile` for one profile: a profile
-      argument on the three IPC controls and `--profile` on the three
-      commands. Today each one acts on every profile.
-- [ ] E-6 Take the last two pieces of provider and hash work off the
-      tick thread (`AGENTS.md` §3 names them as the exceptions): the
-      planner and the reconcile walk hash a file of up to 8 MiB in line,
-      and the re-baseline of an expired changes cursor polls in line.
 - [ ] E-7 Ask when a case-sensitive local root holds `a.txt` and
       `A.txt` and the cloud folder folds case. Today the second upload
       waits for the name to go and is tried again without end; it needs a
-      decision, like the name collision in the other direction.
-- [ ] E-8 Check a profile's provider and roots before its local root is
-      created and adopted. A profile with an unknown provider or with
-      overlapping roots is suspended, and its local folder is made first.
+      decision, like the name collision in the other direction. It takes
+      a local volume that keeps the two spellings apart and a cloud
+      folder that folds them: the filesystem provider on such a volume.
+      A local root on the default macOS volume cannot hold the two
+      names, and Google Drive keeps them apart.
+      The owner put this off (2026-11-22), because no shipping setup
+      reaches it; when it is built, the question is the one a name that
+      cannot be synced gets today.
 - [ ] E-9 Follow a sync root whose own spelling changes while the
       daemon runs (`vapor` renamed to `Vapor` on a volume that folds
       case). Names below the root compare right; not checked is whether
       the watcher still delivers events under the path the daemon holds.
       The filesystem provider refuses every path under a cloud root that
       was respelled, until a restart.
-- [ ] E-10 Hold the watcher events of a folder while the rules of an
-      ignore file that just appeared in it load. A folder that moves in
-      whole waits for its rules, and so does a folder that the reconcile
-      walk meets. Files written one by one next to a new `.gitignore`
-      can still be queued under the old rules in the seconds before the
-      reload lands. A rule reload that fails also leaves the folders
-      that wait for it unreported until the next reload.
-- [ ] C8-71 Per-path detail on timeline `conflict` events (today the
-      event carries only the per-tick count), so app notifications can
-      name the conflicted file without an immediate list scan. Needed
-      by `macos.md` M3-8.
 
 ## Providers
 
@@ -93,10 +59,6 @@ are never reused.
       verification, or a narrower scope with what it costs. It gates
       general availability of the Drive provider and waits for the
       owner.
-- [ ] P-6 Charge the bandwidth bucket for what a Drive resumable chunk
-      really sends. A chunk is 256 KiB at least, so a grant below that
-      sends more than it was given, and the excess is not taken from the
-      bucket.
 
 ## Platform layer
 
@@ -270,6 +232,40 @@ runners. What remains before Linux ships a surface:
       Drive-side scenarios land before or with it. Until then the leg
       is empty (every scenario declares the filesystem provider) and
       the gate refuses without credentials.
+- [~] TR-13 Run the soak and the perf cell at full length on the engine
+      as it is now. The record held no such run since the changes of
+      the 2026-11-14 review to deletions, spelling, and the throttle:
+      that change ran three soak cells of five minutes each, the last
+      soak runs on GitHub (2026-09-15) were red, and `perf.yml` has no
+      run there. Done on 2026-11-22 on a contributor Mac: the five
+      cells of the release gate at 45 minutes each with no violation,
+      and `./scripts/perf.sh` with every SLO check passed. The
+      all-faults cell found three defects in the driver and its model
+      and none in the product; they are fixed. Open: one run of
+      `soak.yml` on GitHub.
+- [ ] TR-14 Put the filler of the soak's disk-full fault outside the
+      cloud root, on the same volume. It sits inside the root today, so
+      the daemon downloads it (some hundred MiB) and then moves its
+      local copy to the trash when the fault ends. That costs the phase
+      its time and tests nothing: a full cloud volume is other people's
+      data, which Vapor does not sync.
+- [ ] TR-15 Make the vanished-root fault of the soak fire in the cell
+      that has the cloud root on a disk image. The driver parks the
+      root with a rename into the sandbox, which is another volume
+      there, so the rename fails and the fault is skipped with no
+      note: it fired in none of the 9 phases of a run, against a 35%
+      chance in each. Park the root next to itself, on its own volume.
+- [ ] TR-16 Make the large-file cell of the soak fire its faults. In
+      45 minutes it made 54 operations and fired no fault: the chance
+      of a fault is per operation, and files of tens of megabytes
+      leave few operations. Fire `crash-mid-transfer` for each phase
+      of this load, or raise the chance with the size of the files.
+- [ ] TR-17 Make the soak ask for a sync after some of its disk-full
+      phases. The driver waits for the automatic try each time (15
+      minutes, and one more for the run state), so three such faults
+      take most of a 45-minute cell, and the try that `vapor
+      reconcile` brings forward runs in no soak. Ask in about half of
+      the phases, so that both tries are covered.
 - [ ] PT-1 Tune the soak cell `scripts/perf.sh` gates on (duration,
       seed, load) using release baseline history once per-OS baselines
       exist; gate SLO-1 on the `quiet` phases. Give the thresholds that
@@ -280,15 +276,6 @@ runners. What remains before Linux ships a surface:
       `scripts/perf.sh` release-gate suite; Tier-1 guard-rails (storm
       bounds, burst admission) already cover the regression-catching
       role on every PR.
-
-## Operations
-
-- [ ] R-1 Write the incident runbooks `AGENTS.md §12` mandates under
-      `docs/operations/`: daemon crash loops, auth/token refresh
-      failures, provider rate-limit storms, a state database that was
-      set aside, reconcile backlog non-convergence. Only the release
-      incident playbook exists today. Each runbook needs detection,
-      mitigation, user-visible state, and recovery verification.
 
 ## Documents
 
