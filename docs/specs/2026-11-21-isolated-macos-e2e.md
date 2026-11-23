@@ -298,7 +298,16 @@ The host:
 
 | # | Decision |
 |---|---|
-| D21 | A manual guest opens a window on the contributor's Mac when a person asks to use it by hand: `./scripts/vm.sh --guest --window`. Only the manual guest, and only with the option. A run of the suite never opens a window. The clipboard stays unshared and the guest still has no route to the Internet. The owner asked for it: "so that i can test that feature/vapor myself in that vm ... to see how it looks inside the simulator" (2026-11-21). The guest has no time limit: it stays up "until i close the window or i say to you that im over the QA" (owner, 2026-11-21). |
+| D21 | A manual guest opens a window on the contributor's Mac when a person asks to use it by hand: `./scripts/vm.sh --guest --window`. Only the manual guest, and only with the option. A run of the suite never opens a window. The clipboard stays unshared and the guest still has no route to the Internet. The owner asked for it: "so that i can test that feature/vapor myself in that vm ... to see how it looks inside the simulator" (2026-11-21). The guest has no time limit: it stays up "until i close the window or i say to you that im over the QA" (owner, 2026-11-21). The network part is replaced by D23. |
+
+### Round 7, 2026-11-22: a long session and a real provider
+
+Both decisions were built on the day they were made.
+
+| # | Decision |
+|---|---|
+| D22 | A manual guest can take the place of the fresh guests: `./scripts/vm.sh --guest --second`. The default stays the place of the shared guest. The name of the guest says the place (`manual-` or `manual2-`), because a run of another checkout reads the place from the name. The owner asked for a load session in one guest while another agent works on the app ("just use one mac VM ... i will be asking another coding agent to advance in the mac app frontend", 2026-11-22). The agent chose the option and its name. |
+| D23 | D23 replaces the network part of D21, of the safety contract, and of "No network in a test" below: a manual guest has a route to the Internet when it is started with `./scripts/vm.sh --guest --internet`. It is then on Tart's shared network, and it can also reach the local network of the host. Without the option every guest stays on the host-only network, and a run of the suite never has the Internet. The owner: "they should have internet access, maybe by default no, but with some flag we can enable internet in the VMs! because Vapor is a cloud sync backup app" (2026-11-22). A test with a real provider uses the dedicated test account (`AGENTS.md` §9.8). Scenarios of the suite against a real provider are open work (`docs/tasks/macos.md`). |
 
 ## Design
 

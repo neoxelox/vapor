@@ -62,7 +62,9 @@ that catalog too, never from a sentence in the scenario.
    (`--guest --window`).
 4. **A guest has no route to the Internet.** Its network reaches the
    host only. One limit stays: a service that the host itself offers
-   on that network is reachable from the guest.
+   on that network is reachable from the guest. The one exception is
+   a manual guest that was started to test a real cloud provider
+   (`--guest --internet`). A run of the suite never has the Internet.
 5. **A run never downloads.** With no image in Tart's store it stops
    and names `./scripts/vm.sh --setup`, the one command that uses the
    network.
@@ -211,6 +213,8 @@ For a look at a change while it is built:
 ```sh
 ./scripts/vm.sh --guest            # a guest with the build installed, app started
 ./scripts/vm.sh --guest --window   # the same, with its screen in a window on this Mac
+./scripts/vm.sh --guest --second   # the same, in the place of the fresh guests
+./scripts/vm.sh --guest --internet # the same, with a route to the Internet
 ./scripts/vm.sh --guest-stop       # stop and delete every guest of this checkout
 ```
 
@@ -220,12 +224,27 @@ screenshot, which lands in `.vapor/vm/manual-<id>/`. The guest takes
 the place of the shared guest until it is stopped, and a run of the
 suite waits for that place.
 
+With `--second`, the guest takes the place of the fresh guests
+instead. Use it for a long session: the scenarios of the installed
+app, and a manual guest of another checkout, still have their place.
+A scenario of the install waits 10 minutes for the place and then
+fails, as a scenario of the app does behind a default manual guest.
+A full run of another checkout is slow next to it for the same
+reason: stop the guest before that run.
+
+With `--internet`, the guest is on Tart's shared network and reaches
+the Internet through the host. It is for a test with a real cloud
+provider, such as a Google Drive sign-in with the dedicated test
+account. The guest can then also reach the local network of the host.
+Without the option the guest stays on the host-only network.
+
 With `--window`, Tart shows the screen of the guest in a window, and a
 person uses the app in it with the pointer and the keyboard, as in a
 simulator. It is for the project owner, or for a contributor who wants
 to try a change by hand: an agent starts it only when it is asked to.
-The guest still shares no clipboard and has no route to the Internet,
-and `tart exec` and the driver work on it as before. The user of the
+The guest still shares no clipboard, and it has no route to the
+Internet unless it also got `--internet`. `tart exec` and the driver
+work on it as before. The user of the
 guest is `admin`.
 
 A manual guest has no time limit, with a window or without one. It
@@ -234,6 +253,14 @@ stays up until the person closes the window, or until
 started it, so the end of that command, or of the session of an agent,
 does not close it. A manual guest that no longer runs is deleted at
 the next run or the next `--guest`.
+
+### Workloads for a manual guest
+
+`tools/vm/workloads/` holds scripts that use the installed product
+hard inside a manual guest: edge cases, conflicts, lifecycle faults, a
+coding workload with git, real `npm` installs, and a workload that
+moves folders. A person or an agent starts them by hand; no run of the
+suite uses them. Its `README.md` says how.
 
 ## Scenario catalog
 
@@ -282,7 +309,8 @@ that waits for a state on the screen waits up to one read.
 - **The look.** A scenario proves that a control exists and what it
   says. Whether the screen looks right is the owner's judgement, from
   the screenshots.
-- **The Google sign-in.** The guest has no network.
+- **The Google sign-in in a scenario.** A guest of a run has no
+  network. A manual guest with `--internet` can sign in.
 - **Gatekeeper and notarization.** The image has Gatekeeper and System
   Integrity Protection off, and a local build is signed ad hoc.
 - **An upgrade** from an older release, and what a removal leaves.

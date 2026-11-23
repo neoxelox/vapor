@@ -175,39 +175,26 @@ pub fn configure(name: &str) -> Result<(), Failure> {
     .map(drop)
 }
 
-/// Starts a VM with no sound, no shared clipboard, and a network that
-/// reaches the host only. It has no window either, unless `window`
+/// Starts a VM with no sound and no shared clipboard. Its network
+/// reaches the host only, unless `internet` asks for Tart's shared
+/// network: that is for a manual guest that tests a real cloud
+/// provider, never for a run. It has no window either, unless `window`
 /// asks for Tart's own: that is for a person who wants to use a manual
-/// guest, never for a run. A `detached` VM outlives the harness. The
-/// child lives as long as the VM runs; its output goes to `log`.
+/// guest. A `detached` VM outlives the harness. The child lives as
+/// long as the VM runs; its output goes to `log`.
 pub fn start(
     name: &str,
     shares: &[Share<'_>],
     log: &Path,
     window: bool,
+    internet: bool,
     detached: bool,
 ) -> Result<Child, Failure> {
     ours(name)?;
     let out = File::create(log)?;
     let err = out.try_clone()?;
     let mut command = tart();
-    command.args(["run", name]);
-    if !window {
-        command.arg("--no-graphics");
-    }
-    command.args([
-        "--no-audio",
-        "--no-clipboard",
-        "--net-host",
-        "--suspendable",
-    ]);
-    for share in shares {
-        let mut spec = format!("{}:{}", share.name, share.path.display());
-        if share.read_only {
-            spec.push_str(":ro");
-        }
-        command.arg("--dir").arg(spec);
-    }
+    command.args(run_arguments(name, shares, window, internet));
     // A guest for a person must stay up for as long as that person
     // wants it. In a process group of its own it does not end when the
     // process that started the harness is stopped or times out.
@@ -224,6 +211,29 @@ pub fn start(
         .stderr(err)
         .spawn()
         .map_err(|error| Failure::new(format!("could not start tart to run `{name}`: {error}")))
+}
+
+/// The arguments of `tart run` for a guest. A guest has no window and
+/// a host-only network unless the caller asks for the one or the
+/// other, and it never has sound or a shared clipboard.
+fn run_arguments(name: &str, shares: &[Share<'_>], window: bool, internet: bool) -> Vec<String> {
+    let mut arguments = vec!["run".to_string(), name.to_string()];
+    if !window {
+        arguments.push("--no-graphics".to_string());
+    }
+    arguments.extend(["--no-audio", "--no-clipboard", "--suspendable"].map(String::from));
+    if !internet {
+        arguments.push("--net-host".to_string());
+    }
+    for share in shares {
+        let mut spec = format!("{}:{}", share.name, share.path.display());
+        if share.read_only {
+            spec.push_str(":ro");
+        }
+        arguments.push("--dir".to_string());
+        arguments.push(spec);
+    }
+    arguments
 }
 
 /// Runs a command in a running guest, as the logged-in user. A command
@@ -356,6 +366,30 @@ mod tests {
         assert!(list[0].is_ours() && list[0].is_running());
         assert!(!list[1].is_ours() && !list[1].is_running());
         assert!(!list[2].is_ours());
+    }
+
+    #[test]
+    fn a_guest_is_offline_and_has_no_window_unless_asked() {
+        let stage = Path::new("/stage");
+        let shares = [Share {
+            name: "stage",
+            path: stage,
+            read_only: true,
+        }];
+        let has = |arguments: &[String], flag: &str| arguments.iter().any(|a| a == flag);
+
+        // What a run of the suite starts.
+        let run = run_arguments("vapor-vm-x-run-1-shared", &shares, false, false);
+        assert!(has(&run, "--net-host") && has(&run, "--no-graphics"));
+        assert!(has(&run, "--no-audio") && has(&run, "--no-clipboard"));
+        assert!(has(&run, "stage:/stage:ro"));
+
+        // Each option lifts its own limit and no other.
+        let window = run_arguments("vapor-vm-x-manual-1", &shares, true, false);
+        assert!(has(&window, "--net-host") && !has(&window, "--no-graphics"));
+        let internet = run_arguments("vapor-vm-x-manual-1", &shares, false, true);
+        assert!(!has(&internet, "--net-host") && has(&internet, "--no-graphics"));
+        assert!(has(&internet, "--no-audio") && has(&internet, "--no-clipboard"));
     }
 
     #[test]

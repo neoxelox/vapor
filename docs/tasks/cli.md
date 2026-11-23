@@ -30,6 +30,23 @@ stable and are never reused.
       folders, shared drives, and two folders with one name, which
       Google Drive allows. The app onboarding gets the same menu
       (`macos.md` O-1), from the same listing.
+- [ ] L1-9 `vapor init` ends with "daemon: unconfigured (no sync
+      profile yet; set Vapor up with `vapor init`)" right after it set
+      the profile up. The daemon composes the profile a moment later.
+      Wait for the daemon to report the profile before that line.
+- [ ] L1-10 Times a person can read. `vapor logs` and `vapor timeline`
+      print the time as milliseconds since 1970 (`[1795363810332]`),
+      and `vapor diagnostics` prints "next attempt at SystemTime {
+      tv_sec: 1795364849, tv_nsec: 500000000 }". Print the local time,
+      and "in 4 min" for a retry; `--json` keeps the numbers.
+- [ ] L1-11 `vapor auth login` waits 5 minutes for the consent and
+      then gives up, while the Google page in the browser stays open
+      and looks alive. A person who signs in on it later lands on a
+      browser error, because nothing listens on the redirect port any
+      more. Wait longer, and answer a late redirect with a page that
+      says "run `vapor auth login` again". For a profile that never
+      signed in, `vapor status` says "Vapor needs to sign in to gdrive
+      again"; drop "again" there.
 - [ ] L5-1 `--user-activity=always|never|auto` global flag that sets the
       interpretation for hosts without HID signal (default `auto`:
       always-idle on headless, event-driven on desktop).
@@ -43,6 +60,12 @@ stable and are never reused.
       does not give a plain job.
 - [ ] L2-7 The same round-trip automated on Windows CI (Task Scheduler)
       once `docs/tasks/core.md` C6-2 lands.
+- [ ] L2-8 `vapor service start` says "service: daemon started" and
+      exits 0 when a daemon that no longer answers still holds the
+      launchd job, and `vapor service status` says "Running" for it
+      (`core.md` PL-5). Both must ask the daemon on its socket, and a
+      `restart` that could not stop the old daemon must say that sync
+      is down and what to do.
 
 ## Headless and server use
 

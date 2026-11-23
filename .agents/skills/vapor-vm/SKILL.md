@@ -97,6 +97,8 @@ hang.
 ```
 ./scripts/vm.sh --guest [--skip-build]
 ./scripts/vm.sh --guest --window     # only when a person asks to try it by hand
+./scripts/vm.sh --guest --second     # in the place of the fresh guests, for a long session
+./scripts/vm.sh --guest --internet   # with a route to the Internet, for a real cloud provider
 ```
 
 With `--window` the screen of the guest shows in a window on the
@@ -125,6 +127,22 @@ After a change to the app, stop the guest and start a new one: the
 guest has the build that was staged when it started. The manual guest
 takes the place of the shared guest, so a suite run waits until it is
 gone. Finish with `./scripts/vm.sh --guest-stop`.
+
+With `--second` the guest takes the place of the fresh guests. Use it
+when the session is long or when another checkout works on the app:
+the scenarios of the installed app and another manual guest still
+run. A scenario of the install waits 10 minutes for the place and
+then fails, so stop the guest before another checkout runs the whole
+suite.
+
+With `--internet` the guest has a route to the Internet. Use it only
+to test a real cloud provider, and only with the dedicated test
+account, never with the owner's own. Start one only when the owner
+asks. The first sign-in of an account needs a person: start the guest
+with `--window` too, say that the window is up, and let the owner sign
+in. When the owner has stored the token of the test account, pipe it
+to `vapor auth login --token -` instead. Without the option a guest is
+offline, and a run of the suite is always offline.
 
 ## Reporting a UI change
 
@@ -183,7 +201,7 @@ shared scenario must not depend on the one before it.
 - The daemon in a guest works at the pace of `Throttled` while a
   scenario acts: the pointer events of the driver count as a user at
   the device.
-- The guest has no network: no Google sign-in.
+- A guest of a run has no network: no Google sign-in in a scenario.
 - Gatekeeper and System Integrity Protection are off in the image, and
   a local build is signed ad hoc, so the trust chain is not tested.
 - One macOS: the newest that Tart has an image for.

@@ -76,6 +76,29 @@ list of choices that wait for the owner.
 
 None of them blocks the Mac app work.
 
+### Before the next wave: findings of the heavy-user session, 2026-11-22
+
+Status: open. The installed product was used hard in a Mac guest for
+one session, and what it did wrong is in the task files. The owner
+decides the order; this is the order by what a user loses.
+
+- An edit that is lost, wrong content under a name, or a deleted
+  file that comes back, stays deleted, or goes missing: `core.md`
+  P-10, E-35, E-17, E-18, E-42, E-37.
+- Sync that waits or stops, or a status that hides it: `core.md`
+  E-19, E-36, P-11, PL-7, E-20, E-21, E-23, E-24, E-25, P-8, PL-5,
+  and `cli.md` L2-8. E-20 needs a design with the owner.
+- Waste of memory, CPU, disk, and cloud space: `core.md` E-39, E-22,
+  E-26, E-28.
+- Speed: `core.md` E-38, E-40, E-41, E-31, P-9, PL-6, after E-19 and
+  P-11 above.
+  `core.md` PT-3 measures each of them in the perf gate, so a
+  slower build fails it.
+- The rest: `core.md` E-27, E-29, E-30, E-32, E-33, E-34, `cli.md`
+  L1-9 … L1-11, `macos.md` O-5, MT-7.
+- A run that repeats the session: `core.md` TR-13. Real providers in a
+  guest: `macos.md` MT-6.
+
 ### Wave 9: macOS app UX
 
 Status: pending and unblocked.

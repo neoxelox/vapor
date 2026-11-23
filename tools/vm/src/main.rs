@@ -50,6 +50,15 @@ enum Cmd {
         /// app in it by hand. Only when a person asked to look.
         #[arg(long)]
         window: bool,
+        /// Take the place of the fresh guests, not the one of the
+        /// shared guest: the scenarios of the installed app, and a
+        /// manual guest of another checkout, still run next to it.
+        #[arg(long)]
+        second: bool,
+        /// Give the guest a route to the Internet, to test a real
+        /// cloud provider. A guest has none without this option.
+        #[arg(long)]
+        internet: bool,
     },
     /// Stop and delete every guest of this checkout: a manual guest,
     /// a guest that `--keep` left, a guest of a run that was killed.
@@ -100,7 +109,11 @@ fn main() -> ExitCode {
             Ok(true)
         }
         Cmd::Setup => runner::setup(&repo_root).map(|()| true),
-        Cmd::Guest { window } => runner::manual_guest(&repo_root, window).map(|()| true),
+        Cmd::Guest {
+            window,
+            second,
+            internet,
+        } => runner::manual_guest(&repo_root, window, second, internet).map(|()| true),
         Cmd::GuestStop => runner::stop_guests(&repo_root).map(|count| {
             println!("[vm] deleted {count} guest(s) of this checkout");
             true

@@ -241,6 +241,12 @@ for tests; the app never assumes it.
       as the owner defines them at the pass. Follows Apple HIG for
       onboarding: a single window, native controls, one decision per
       step, a Back path, no custom chrome.
+- [ ] O-5 The app's first start writes every setting it knows into
+      `vapor.json` with its default, the 74 `preIgnoreRules` among
+      them (`VaporConfiguration.swift`, `encode(to:)`). A later build
+      with a better default does not reach that install, because a
+      value in the file wins. Write a key only when the user changes
+      it. Found in the Mac guest, 2026-11-22.
 - [ ] O-2 The gate. When the runtime reports an unconfigured install,
       the app opens the onboarding window on its own instead of
       the menubar-only surface; this is the one window that may appear
@@ -310,3 +316,24 @@ Policy: `AGENTS.md §9`. Full taxonomy:
       "Throttled" where an idle Mac shows "Syncing". Find a way to
       show the idle pace too, for example a wait until the daemon
       counts the user as away before the scenario looks.
+- [ ] MT-7 A start that waits for a place holds the lock of Tart's
+      store for the whole wait, up to 10 minutes (`start_guest` in
+      `tools/vm/src/runner.rs`). While a run waits for the place of a
+      manual guest, every other run and every `--guest` on the machine
+      waits behind it, also for the place that is free. And a manual
+      guest that starts between two scenarios of a run takes the place
+      that the run's next guest needs. Take the lock only to look and
+      to clone, and let a run keep its place between its scenarios.
+- [ ] MT-6 Tier VM scenarios against a real cloud provider. A manual
+      guest can have the Internet (`./scripts/vm.sh --guest
+      --internet`), and a run of the suite cannot. A Google Drive leg
+      needs the dedicated test account and a folder of its own for
+      each run. The sign-in no longer needs a person each time: the
+      token of the account is in the gitignored `.env` as
+      `VAPOR_E2E_GDRIVE_TOKEN` (`core.md` TR-8), and `vapor auth login
+      --token -` takes it inside a guest. On a local build the daemon
+      then cannot read it from the keychain (`core.md` PL-7); until
+      that is fixed a scenario has to widen the item's partition list
+      itself, as `tools/vm/workloads/README.md` says. Decide with the
+      owner whether it is a leg of `./scripts/release.sh` next to the
+      Drive leg of Tier E2E (`core.md` TR-8).
