@@ -380,6 +380,9 @@ pub struct DaemonRuntime {
     /// not. Every start queues a whole-scope scan, so this starts at
     /// the start.
     last_whole_scope_scan_at: Option<SystemTime>,
+    /// The names that cannot be synced which the whole-scope walk
+    /// under way has met so far, over all of its slices.
+    unsyncable_seen_by_walk: Vec<crate::unsyncable::UnsyncableName>,
     /// Why the local root cannot be read, while a walk found it so (a
     /// privacy permission the user refused, an I/O error). The run
     /// state carries it until a whole-scope walk reads the root again.
@@ -519,7 +522,7 @@ pub struct DaemonRuntime {
     mass_delete_settings: crate::safeguards::MassDeleteGuardSettings,
     /// Where a file Vapor removes on this device goes. `None` until
     /// the profile runtime attaches one; the bare fixtures unlink.
-    trash: Option<crate::trash::LocalTrash>,
+    trash: Option<Arc<crate::trash::LocalTrash>>,
     last_trash_purge_inst: Option<Instant>,
     /// The trash purge in flight, if any.
     trash_purge: Option<crate::provider_jobs::ProviderCall<usize>>,
@@ -674,7 +677,9 @@ impl DaemonRuntime {
             .as_ref()
             .map(|recorder| {
                 recorder.with_state(|maps| {
-                    maps.pending_event_count() > 0 || maps.pending_intent_count() > 0
+                    maps.pending_event_count() > 0
+                        || maps.pending_intent_count() > 0
+                        || maps.deferred_reconcile_count() > 0
                 })
             })
             .unwrap_or(false)
@@ -784,6 +789,10 @@ impl DaemonRuntime {
             )?;
             report.mirror_reverts += report.remote_poll.mirror_reverts;
             report.mirror_deletes += report.remote_poll.mirror_deletes;
+            if report.remote_poll.observed_changes > 0 {
+                // The cloud is busy: the next change is likely near.
+                self.remote_poller.note_activity(self.clock.now());
+            }
             if report.remote_poll.sign_in_refused
                 && let Some(message) = self.remote_poller.take_refused_sign_in()
             {
@@ -807,12 +816,19 @@ impl DaemonRuntime {
 
         // One view of the renames in flight for the whole tick.
         let mut move_hints = crate::executor::MoveHints::default();
+        let local_changes_pending = self.scheduler.pending_count() > 0
+            || self
+                .recorder
+                .as_ref()
+                .is_some_and(|recorder| recorder.with_state(|maps| maps.pending_event_count() > 0));
+        let remote_changes_pending = self.remote_poller.more_changes_expected();
         let staged_report = {
             let mut env = ExecutionEnv {
                 local_root: self.sync_scope.local_root.as_deref(),
                 cloud_root: Some(self.sync_scope.cloud_root.as_str()),
                 sync_mode: self.sync_scope.sync_mode,
                 device_id: &self.device_id,
+                profile_id: &self.profile_id,
                 hash_algorithm: self.app.provider().content_hash_algorithm(),
                 bandwidth: &self.bandwidth,
                 move_hints: &mut move_hints,
@@ -824,11 +840,17 @@ impl DaemonRuntime {
                     .enabled
                     .then_some(&mut self.mass_change_guard),
                 trash: self.trash.as_ref(),
+                local_changes_pending,
+                remote_changes_pending,
             };
             self.staged_executor
                 .advance(&mut self.app, &mut self.state_db, &mut env, now)?
         };
         self.announce_decisions(&staged_report.decisions_opened, now);
+        if staged_report.completed > 0 {
+            // This device is syncing: another device may answer soon.
+            self.remote_poller.note_activity(self.clock.now());
+        }
         report.completed_intents += staged_report.completed;
         report.requeued_intents += staged_report.retried;
         report.failed_intents += staged_report.failed;
@@ -844,6 +866,10 @@ impl DaemonRuntime {
         }
         if staged_report.local_root_suspect || staged_report.cloud_root_suspect {
             self.last_root_check_inst = None;
+        }
+        if staged_report.cloud_root_suspect {
+            // The cloud side is checked at once too, not at its cadence.
+            self.last_cloud_root_attempt_inst = None;
         }
         if let Some(message) = &staged_report.cloud_storage_full {
             self.mark_cloud_full(message, now);
@@ -930,10 +956,20 @@ impl DaemonRuntime {
                             self.local_root_unreadable = Some(reason);
                             self.local_root_unreadable_this_walk = true;
                         }
+                        // A folder that is gone from this device is not
+                        // one that cannot be read: there is nothing to
+                        // wait for. Its walk runs now and ends at once
+                        // when the cloud has none either, in place of a
+                        // marker that sits in the queue for minutes.
                         let unreadable: Vec<_> = unreadable_dirs
                             .into_iter()
                             .map(|(directory, _)| {
-                                (directory, PendingIntentKind::ReconcileSubtree, retry_at)
+                                let at = if std::fs::symlink_metadata(&directory).is_err() {
+                                    now
+                                } else {
+                                    retry_at
+                                };
+                                (directory, PendingIntentKind::ReconcileSubtree, at)
                             })
                             .collect();
                         if !unreadable.is_empty() {
@@ -955,7 +991,15 @@ impl DaemonRuntime {
                         for path in mismatches {
                             self.open_type_mismatch_decision(&path, now)?;
                         }
-                        self.reconcile_unsyncable_names(&unsyncable, whole_scope, now)?;
+                        // Each slice of a walk asks about the names it
+                        // met. Which questions to withdraw is known only
+                        // when the whole scope was walked: a slice saw a
+                        // part of the tree, and a name it did not see
+                        // is not a name that is gone.
+                        self.reconcile_unsyncable_names(&unsyncable, false, now)?;
+                        if whole_scope {
+                            self.unsyncable_seen_by_walk.extend(unsyncable);
+                        }
                         if let Some(timeline) = &self.timeline {
                             for (wanted, existing) in collisions {
                                 timeline.push(
@@ -982,7 +1026,9 @@ impl DaemonRuntime {
                             self.reconcile_walker = None;
                             self.state_db.complete_leased(reconcile_intent_id)?;
                             self.running_reconcile_intent_id = None;
+                            let seen = std::mem::take(&mut self.unsyncable_seen_by_walk);
                             if self.sync_scope.local_root.as_ref() == Some(&completed_root) {
+                                self.reconcile_unsyncable_names(&seen, true, now)?;
                                 self.last_whole_scope_scan_at = Some(now);
                                 self.ignored_paths = ignored;
                                 // A whole-scope walk that ended without
@@ -1059,6 +1105,7 @@ impl DaemonRuntime {
                     cloud_root: Some(self.sync_scope.cloud_root.as_str()),
                     sync_mode: self.sync_scope.sync_mode,
                     device_id: &self.device_id,
+                    profile_id: &self.profile_id,
                     hash_algorithm: self.app.provider().content_hash_algorithm(),
                     bandwidth: &self.bandwidth,
                     move_hints: &mut move_hints,
@@ -1070,6 +1117,8 @@ impl DaemonRuntime {
                         .enabled
                         .then_some(&mut self.mass_change_guard),
                     trash: self.trash.as_ref(),
+                    local_changes_pending,
+                    remote_changes_pending,
                 };
                 let mut admission_report = crate::executor::StagedExecutorReport::default();
                 self.staged_executor.advance_intents(
@@ -1113,6 +1162,9 @@ impl DaemonRuntime {
                 }
                 if admission_report.local_root_suspect || admission_report.cloud_root_suspect {
                     self.last_root_check_inst = None;
+                }
+                if admission_report.cloud_root_suspect {
+                    self.last_cloud_root_attempt_inst = None;
                 }
                 if let Some(message) = &admission_report.cloud_storage_full {
                     self.mark_cloud_full(message, now);
@@ -1318,6 +1370,19 @@ impl DaemonRuntime {
             let Ok(Some(conflict)) = crate::conflict::Conflict::find(original) else {
                 continue;
             };
+            // With no file under the original name, only a copy that
+            // this device made is a conflict to ask about. A file that
+            // came with such a name from elsewhere (an export, another
+            // tool, a device whose original is long gone) is a file.
+            if conflict.versions.iter().all(|version| {
+                version
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(crate::conflict::parse_conflict_copy_name)
+                    .is_some_and(|copy| copy.device_id != self.device_id)
+            }) {
+                continue;
+            }
             let asking = crate::conflict::question(&conflict, &self.device_id, trash_enabled);
             opened.push(self.state_db.create_decision(
                 constants::decision::KIND_CONFLICT,
@@ -1732,6 +1797,7 @@ impl DaemonRuntime {
             last_throttle_sample_inst: None,
             last_stale_lease_sweep_inst: None,
             last_whole_scope_scan_at: None,
+            unsyncable_seen_by_walk: Vec::new(),
             local_root_unreadable: None,
             local_root_unreadable_this_walk: false,
             running_reconcile_intent_id: None,
@@ -1857,18 +1923,20 @@ impl DaemonRuntime {
     /// Attaches the profile's trash. Every local removal the engine
     /// performs from then on goes through it.
     pub fn attach_trash(&mut self, trash: crate::trash::LocalTrash) {
-        self.trash = Some(trash);
+        self.trash = Some(Arc::new(trash));
     }
 
     /// Applies the `trash` config group to the attached trash.
     pub fn configure_trash(&mut self, settings: crate::trash::TrashSettings) {
-        if let Some(trash) = &mut self.trash {
-            trash.configure(settings);
+        // A worker may hold the trash for a copy that runs: the new
+        // settings go into a new one.
+        if let Some(trash) = self.trash.take() {
+            self.trash = Some(Arc::new(trash.with_settings(settings)));
         }
     }
 
     pub fn trash(&self) -> Option<&crate::trash::LocalTrash> {
-        self.trash.as_ref()
+        self.trash.as_deref()
     }
 
     /// Passes the explicit transfer-concurrency ceiling to the app (see
@@ -2044,8 +2112,11 @@ impl DaemonRuntime {
                 "waiting for the startup reconstruction reconcile".to_string()
             } else if retrying {
                 format!(
-                    "retry backoff active (attempt {}), next attempt at {:?}",
-                    intent.attempt_count, intent.available_at
+                    "retry backoff active (attempt {}); next try in {}",
+                    intent.attempt_count,
+                    vapor_shared::duration_text(
+                        intent.available_at.duration_since(now).unwrap_or_default()
+                    )
                 )
             } else {
                 format!(
@@ -2206,7 +2277,7 @@ impl DaemonRuntime {
     fn sign_in_reason(&self) -> Option<String> {
         self.sign_in_hold.then(|| {
             format!(
-                "Vapor needs to sign in to {} again: sync is on hold until then \
+                "Vapor needs to sign in to {}: sync is on hold until then \
                  (vapor auth login --profile {})",
                 self.app.provider_name(),
                 self.profile_id
@@ -2301,12 +2372,42 @@ impl DaemonRuntime {
                 constants::timeline::KIND_SIGN_IN,
                 self.profile_id.clone(),
                 format!(
-                    "Vapor needs to sign in to {} again; sync is on hold until then",
+                    "Vapor needs to sign in to {}; sync is on hold until then",
                     self.app.provider_name()
                 ),
                 now,
             );
         }
+    }
+
+    /// Ends the sign-in hold when a call failed for another reason than
+    /// the sign-in: the cloud is not reachable, and the root stays not
+    /// ready, so nothing is released to run. A sign-in that the cloud
+    /// refuses once it is reachable puts the hold back. Returns whether
+    /// a hold was ended.
+    fn note_stored_sign_in(&mut self, now: SystemTime) -> bool {
+        if !std::mem::take(&mut self.sign_in_hold) {
+            return false;
+        }
+        logging::info(
+            "A sign-in is stored; the cloud is not reachable yet",
+            &[
+                ("profile_id", self.profile_id.clone()),
+                ("provider", self.app.provider_name().to_string()),
+            ],
+        );
+        if let Some(timeline) = &self.timeline {
+            timeline.push(
+                constants::timeline::KIND_SIGN_IN,
+                self.profile_id.clone(),
+                format!(
+                    "signed in to {}; the cloud is not reachable yet",
+                    self.app.provider_name()
+                ),
+                now,
+            );
+        }
+        true
     }
 
     /// Ends the sign-in hold after a provider call got through. Returns
@@ -2371,7 +2472,46 @@ impl DaemonRuntime {
                 reason: IGNORE_RULES_NOT_READ.to_string(),
             };
         }
+        // A folder that took a burst waits for one scan of the folder.
+        // Its changes are in no queue until then, and a status that
+        // said "nothing to do" for them would be wrong.
+        if let Some(reason) = self.deferred_scan_reason() {
+            return ReconcileStatus::Waiting { reason };
+        }
         ReconcileStatus::Idle
+    }
+
+    /// What `vapor status` says while the changes of a burst wait for
+    /// the scan of their folder: how many, where, and when the scan
+    /// starts.
+    fn deferred_scan_reason(&self) -> Option<String> {
+        let recorder = self.recorder.as_ref()?;
+        let deferred = recorder.with_state(|maps| maps.deferred_reconcile_summaries());
+        let (folder, _, _) = deferred.first()?;
+        let changes: usize = deferred.iter().map(|(_, held, _)| held).sum();
+        let shown = self
+            .sync_scope
+            .local_root
+            .as_deref()
+            .and_then(|root| folder.strip_prefix(root).ok())
+            .filter(|below| !below.as_os_str().is_empty())
+            .map_or_else(
+                || "the sync folder".to_string(),
+                |below| below.display().to_string(),
+            );
+        let place = match deferred.len() {
+            1 => shown,
+            more => format!("{shown} and {} more", more - 1),
+        };
+        let wait = if self.app.snapshot().throttle_state == vapor_shared::ThrottleState::Idle {
+            constants::engine::DEFERRED_RECONCILE_IDLE_QUIET_RELEASE_MILLIS
+        } else {
+            constants::engine::DEFERRED_RECONCILE_DELAY_MILLIS
+        };
+        Some(format!(
+            "{changes} change(s) in {place} wait for one scan, which starts {} s after the burst there ends",
+            wait.div_ceil(1_000)
+        ))
     }
 
     /// Cumulative count of strict-mirror reverts / deletions performed
@@ -2507,7 +2647,13 @@ impl DaemonRuntime {
                     "Cloud root probe failed; retrying at the ensure cadence",
                     &[("error", message)],
                 );
-                if first_probe {
+                // A provider that cannot read its sign-in says so before
+                // it sends anything. This failure came later: a sign-in
+                // is stored, and the way to the cloud is what is
+                // missing. The status must not go on asking for a
+                // sign-in that the user has just given.
+                let sign_in_is_stored = self.note_stored_sign_in(now);
+                if first_probe || sign_in_is_stored {
                     self.restore_run_state_after_root_recovery("cloud root checked");
                 }
             }
@@ -3050,11 +3196,16 @@ impl DaemonRuntime {
             .last_root_check_inst
             .map(|last| now_inst.saturating_duration_since(last) >= interval)
             .unwrap_or(true);
-        if !due {
+        // A cloud check that is in flight is harvested when it answers,
+        // not at the next cadence: a root in doubt holds work until
+        // then.
+        if !due && self.cloud_root_call.is_none() {
             return Ok(());
         }
-        self.last_root_check_inst = Some(now_inst);
-        if let Some(local_root) = self.sync_scope.local_root.clone() {
+        if due {
+            self.last_root_check_inst = Some(now_inst);
+        }
+        if due && let Some(local_root) = self.sync_scope.local_root.clone() {
             use crate::root_identity::{RootSide, RootStatus};
             match crate::root_identity::check_local_root(
                 &mut self.state_db,
@@ -3192,6 +3343,15 @@ impl DaemonRuntime {
         if reconcile_request {
             self.enqueue_startup_reconstruction_reconcile(now)?;
             self.try_uploads_that_wait_for_room(now)?;
+            // What waits in a retry backoff is tried now: the user may
+            // have fixed its cause, and asked for a sync to see.
+            let woken = self.state_db.wake_all_retries(now)?;
+            if woken > 0 {
+                logging::info(
+                    "Trying the waiting retries at once on the user's request",
+                    &[("retries", woken.to_string())],
+                );
+            }
         }
         Ok(())
     }
@@ -3459,7 +3619,7 @@ impl DaemonRuntime {
         if self.reconcile_boost_active() {
             let scheduler = &mut self.scheduler;
             return recorder.with_mut_state(|maps| {
-                let released = maps.take_all_deferred_reconcile_intents();
+                let released = maps.take_all_deferred_reconcile_intents(now);
                 for intent in &released {
                     scheduler.upsert_pending_intent_record(intent.clone());
                 }
@@ -3538,7 +3698,10 @@ impl DaemonRuntime {
                 continue;
             }
             if !crate::fs_events::resolve_event_path_within_watch_root(watch_root, &event.path) {
-                logging::warning(
+                // A link that points out of the root, or a path through
+                // one. Links are outside the sync contract, so this is
+                // routine and nobody has to act on it.
+                logging::debug(
                     "Dropped stabilized event that resolves outside watch root",
                     &[
                         ("watch_root", watch_root.display().to_string()),
@@ -3606,6 +3769,19 @@ impl DaemonRuntime {
                 // storm compaction, filters and guards as a `cp -r`. A
                 // subtree too large to enumerate here becomes a deferred
                 // reconcile marker, exactly as a storm would.
+                if matches!(self.state_db.sync_index(&event.path), Ok(Some(_)))
+                    && let Some(folder) = event.path.parent()
+                {
+                    // A folder where a synced file was. The file left
+                    // this device, and the cloud still has it: the walk
+                    // of the folder removes it there, so the files of
+                    // the new folder have a place to go.
+                    self.scheduler.upsert_intent(
+                        folder.to_path_buf(),
+                        PendingIntentKind::ReconcileSubtree,
+                        event.last_observed_at,
+                    );
+                }
                 let synthesized =
                     self.synthesize_subtree_events(&event.path, event.last_observed_at);
                 logging::info(
@@ -4157,13 +4333,48 @@ impl DaemonRuntime {
             OPTION_PREFER_CLOUD => {
                 let trash = self
                     .trash
-                    .as_ref()
+                    .clone()
                     .ok_or_else(|| "no trash attached".to_string())?;
-                trash
-                    .discard(&path, constants::trash::REASON_CLOUD_DELETE, now)
-                    .map_err(|error| {
-                        format!("cannot move {} to the trash: {error}", path.display())
-                    })?;
+                match trash.discard_without_copy(&path, constants::trash::REASON_CLOUD_DELETE, now)
+                {
+                    Ok(_) => {}
+                    // A try before this one moved it (the copy below).
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
+                        // Only a copy moves it to the trash, and this
+                        // thread reads no file: a thread of its own
+                        // makes the copy, and the answer is applied at
+                        // the next try, which finds the path free.
+                        let copied = path.clone();
+                        let _ = std::thread::Builder::new()
+                            .name("vapor-trash-copy".to_string())
+                            .spawn(move || {
+                                if let Err(error) = trash.discard(
+                                    &copied,
+                                    constants::trash::REASON_CLOUD_DELETE,
+                                    now,
+                                ) {
+                                    logging::warning(
+                                        "Could not copy the local side of a decision to the trash",
+                                        &[
+                                            ("path", copied.display().to_string()),
+                                            ("error", error.to_string()),
+                                        ],
+                                    );
+                                }
+                            });
+                        return Err(format!(
+                            "{} is being copied to the trash on another volume",
+                            path.display()
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "cannot move {} to the trash: {error}",
+                            path.display()
+                        ));
+                    }
+                }
                 self.local_echoes
                     .record_delete(crate::executor::path_key(&path), now);
                 "preferred the cloud side: the local side is in the trash; the cloud side comes down"
@@ -4189,7 +4400,12 @@ impl DaemonRuntime {
             }
             other => return Err(format!("no applier for choice {other:?}")),
         };
-        // The reconcile that follows materializes the winning side.
+        // The reconcile that follows materializes the winning side, and
+        // the work that failed at the clash is tried now, not at the
+        // end of its backoff.
+        self.state_db
+            .wake_retries_under(&path, now)
+            .map_err(|error| error.to_string())?;
         self.enqueue_startup_reconstruction_reconcile(now)
             .map_err(|error| format!("{error:?}"))?;
         Ok(summary)
@@ -4596,6 +4812,8 @@ impl DaemonRuntime {
                     &[("root", scope_root.display().to_string())],
                 );
             }
+            // A new walk starts its own list of the names it meets.
+            self.unsyncable_seen_by_walk.clear();
             self.reconcile_walker = Some(
                 crate::reconcile_walk::ReconcileWalker::new(
                     &scope_root,
@@ -5402,6 +5620,7 @@ mod tests {
                         signed_out: flag,
                         downloads_fail: Arc::default(),
                         cloud_full: Arc::default(),
+                        offline: Arc::default(),
                     })
                 });
             (fixture, handle)
@@ -5422,6 +5641,7 @@ mod tests {
                         signed_out: Arc::default(),
                         downloads_fail: Arc::default(),
                         cloud_full: flag,
+                        offline: Arc::default(),
                     })
                 });
             (fixture, handle)
@@ -5437,6 +5657,7 @@ mod tests {
                         signed_out: Arc::default(),
                         downloads_fail: flag,
                         cloud_full: Arc::default(),
+                        offline: Arc::default(),
                     })
                 });
             (fixture, handle)
@@ -5547,6 +5768,9 @@ mod tests {
         downloads_fail: Arc<std::sync::atomic::AtomicBool>,
         /// While set, each upload is refused the way a full cloud does.
         cloud_full: Arc<std::sync::atomic::AtomicBool>,
+        /// While set, a call that got past the sign-in fails the way a
+        /// cloud with no route to it does.
+        offline: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl SwitchedProvider {
@@ -5554,6 +5778,10 @@ mod tests {
             if self.signed_out.load(std::sync::atomic::Ordering::SeqCst) {
                 Err(vapor_providers::ProviderError::authentication(
                     "authorization is no longer valid (invalid_grant)",
+                ))
+            } else if self.offline.load(std::sync::atomic::Ordering::SeqCst) {
+                Err(vapor_providers::ProviderError::transient(
+                    "the cloud is unreachable",
                 ))
             } else {
                 Ok(())
@@ -5727,6 +5955,56 @@ mod tests {
             fixture.runtime.state_db().failed_depth().expect("failed"),
             0
         );
+    }
+
+    #[test]
+    fn a_sign_in_given_while_the_cloud_is_away_stops_the_ask_for_one() {
+        let offline = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signed_out = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (offline_switch, signed_out_switch) = (offline.clone(), signed_out.clone());
+        let mut fixture = BidirectionalFixture::new_with_provider(
+            vapor_shared::SyncMode::TwoWay,
+            move |provider| {
+                Box::new(SwitchedProvider {
+                    inner: provider,
+                    signed_out: signed_out_switch,
+                    downloads_fail: Arc::default(),
+                    cloud_full: Arc::default(),
+                    offline: offline_switch,
+                })
+            },
+        );
+        assert!(fixture.runtime.sign_in_required());
+
+        // The user signs in on a device with no route to the cloud.
+        offline.store(true, std::sync::atomic::Ordering::SeqCst);
+        signed_out.store(false, std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..6 {
+            fixture.tick(6_000);
+        }
+        assert!(
+            !fixture.runtime.sign_in_required(),
+            "the sign-in is stored: nothing asks for it any more"
+        );
+        let snapshot = fixture.runtime.app().snapshot();
+        assert_eq!(snapshot.run_state, RunState::Error);
+        assert!(
+            snapshot.reason.contains("is unavailable") && !snapshot.reason.contains("sign in"),
+            "the reason is the cloud now: {}",
+            snapshot.reason
+        );
+
+        // The cloud is back: sync runs.
+        offline.store(false, std::sync::atomic::Ordering::SeqCst);
+        let local = fixture.watch_root.join("draft.txt");
+        std::fs::write(&local, b"written after the sign-in").expect("seed");
+        fixture.record_local_event(&local, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(24);
+        assert_eq!(
+            fixture.runtime.app().snapshot().run_state,
+            RunState::Running
+        );
+        assert!(fixture.cloud_root.join("draft.txt").is_file());
     }
 
     #[test]
@@ -7154,6 +7432,82 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_only_looks_like_a_conflict_copy_is_not_asked_about() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        // No `report.txt`, and no conflict that this device resolved:
+        // the name came from somewhere else.
+        let lookalike = fixture
+            .watch_root
+            .join("report~conflict-otherdevice-1700000000000.txt");
+        std::fs::write(&lookalike, b"an export of something").expect("seed");
+        fixture.record_local_event(&lookalike, FsEventKind::Created, fixture.now_ms);
+        fixture.converge(12);
+        for _ in 0..6 {
+            fixture.tick(6_000);
+        }
+
+        assert!(
+            fixture
+                .cloud_root
+                .join("report~conflict-otherdevice-1700000000000.txt")
+                .is_file(),
+            "the file syncs like any file"
+        );
+        assert!(
+            conflict_questions(&fixture).is_empty(),
+            "{:?}",
+            conflict_questions(&fixture)
+        );
+    }
+
+    #[test]
+    fn a_burst_shows_as_waiting_work_and_is_scanned_a_moment_after_it_ends() {
+        let mut fixture = BidirectionalFixture::new();
+        fixture.tick(6_000);
+        let project = fixture.watch_root.join("project");
+        std::fs::create_dir_all(&project).expect("dir");
+        // One burst: more paths in two seconds than a folder takes
+        // one by one.
+        let files = constants::engine::STORM_DIRECTORY_UNIQUE_PATHS_THRESHOLD + 50;
+        for index in 0..files {
+            let path = project.join(format!("f{index}.txt"));
+            std::fs::write(&path, format!("payload {index}")).expect("seed");
+            fixture.record_local_event(&path, FsEventKind::Created, fixture.now_ms);
+        }
+        fixture.tick(250);
+
+        // The changes are in no queue yet, and the status says so.
+        match fixture.runtime.reconcile_status() {
+            ReconcileStatus::Waiting { reason } => {
+                assert!(
+                    reason.contains("change(s) in project wait for one scan"),
+                    "{reason}"
+                );
+            }
+            other => panic!("a folder that waits for its scan must show: {other:?}"),
+        }
+        assert!(
+            fixture
+                .runtime
+                .has_pending_work(&RuntimeTickReport::default())
+        );
+
+        // The device is idle: two seconds after the burst the scan is
+        // released, long before the delay of a device in use.
+        fixture.tick(2_000);
+        fixture.tick(250);
+        assert!(
+            fixture.runtime.state_db().queue_depth().expect("depth") > 0
+                || fixture.runtime.reconcile_status() != ReconcileStatus::Idle,
+            "the scan of the folder started"
+        );
+        fixture.converge(60);
+        assert_eq!(names_in(&fixture.cloud_root.join("project")).len(), files);
+        assert_eq!(fixture.runtime.reconcile_status(), ReconcileStatus::Idle);
+    }
+
+    #[test]
     fn a_conflicted_file_is_one_decision_until_no_copy_is_left() {
         let mut fixture = BidirectionalFixture::new();
         fixture.tick(6_000); // baseline
@@ -8045,6 +8399,173 @@ mod tests {
             .expect("a type-mismatch decision is open")
     }
 
+    /// A profile with `name` synced as a file, or as a folder with two
+    /// files, through one offline run.
+    fn offline_fixture_with_synced_entry(name: &str, as_folder: bool) -> OfflineFixture {
+        let fixture = OfflineFixture::new();
+        let entry = fixture.watch_root.join(name);
+        if as_folder {
+            std::fs::create_dir_all(&entry).expect("dir");
+            std::fs::write(entry.join("one.txt"), b"one").expect("seed");
+            std::fs::write(entry.join("two.txt"), b"two").expect("seed");
+        } else {
+            std::fs::write(&entry, b"a synced file").expect("seed");
+        }
+        drop(fixture.run(&[]));
+        assert_eq!(names_in(&fixture.cloud_root), vec![name.to_string()]);
+        fixture
+    }
+
+    fn assert_no_question_and_nothing_failed(runtime: &DaemonRuntime) {
+        assert!(
+            runtime
+                .state_db()
+                .decisions(false)
+                .expect("decisions")
+                .is_empty(),
+            "one side made the swap: nothing to ask"
+        );
+        assert_eq!(runtime.state_db().failed_depth().expect("failed"), 0);
+    }
+
+    #[test]
+    fn a_file_replaced_by_a_folder_on_this_device_reaches_the_cloud_with_no_question() {
+        let fixture = offline_fixture_with_synced_entry("thing", false);
+        let local = fixture.watch_root.join("thing");
+        std::fs::remove_file(&local).expect("remove file");
+        std::fs::create_dir(&local).expect("folder");
+        std::fs::write(local.join("inner.txt"), b"inside").expect("inner");
+
+        let runtime = fixture.run(&[]);
+
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("thing/inner.txt")).expect("cloud"),
+            b"inside"
+        );
+        assert_no_question_and_nothing_failed(&runtime);
+    }
+
+    #[test]
+    fn a_folder_replaced_by_a_file_on_this_device_reaches_the_cloud_with_no_question() {
+        let fixture = offline_fixture_with_synced_entry("thing", true);
+        let local = fixture.watch_root.join("thing");
+        std::fs::remove_dir_all(&local).expect("remove folder");
+        std::fs::write(&local, b"now a file").expect("file");
+
+        let runtime = fixture.run(&[]);
+
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("thing")).expect("cloud"),
+            b"now a file"
+        );
+        assert_no_question_and_nothing_failed(&runtime);
+    }
+
+    #[test]
+    fn a_folder_replaced_by_a_file_in_the_cloud_reaches_this_device_with_no_question() {
+        let fixture = offline_fixture_with_synced_entry("thing", true);
+        let cloud = fixture.cloud_root.join("thing");
+        std::fs::remove_dir_all(&cloud).expect("remove folder");
+        std::fs::write(&cloud, b"now a file").expect("file");
+
+        let runtime = fixture.run(&[]);
+
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("thing")).expect("local"),
+            b"now a file"
+        );
+        // The two files of the folder are in the trash, not lost.
+        assert_eq!(runtime.trash().expect("trash").list().len(), 2);
+        assert_no_question_and_nothing_failed(&runtime);
+    }
+
+    #[test]
+    fn a_file_replaced_by_a_folder_in_the_cloud_reaches_this_device_with_no_question() {
+        let fixture = offline_fixture_with_synced_entry("thing", false);
+        let cloud = fixture.cloud_root.join("thing");
+        std::fs::remove_file(&cloud).expect("remove file");
+        std::fs::create_dir(&cloud).expect("folder");
+        std::fs::write(cloud.join("inner.txt"), b"inside").expect("inner");
+
+        let runtime = fixture.run(&[]);
+
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("thing/inner.txt")).expect("local"),
+            b"inside"
+        );
+        assert_eq!(runtime.trash().expect("trash").list().len(), 1);
+        assert_no_question_and_nothing_failed(&runtime);
+    }
+
+    #[test]
+    fn a_swap_on_one_side_with_an_edit_on_the_other_is_a_question() {
+        let fixture = offline_fixture_with_synced_entry("thing", false);
+        // This device swaps the file for a folder, and the cloud file
+        // changes: both sides moved.
+        let local = fixture.watch_root.join("thing");
+        std::fs::remove_file(&local).expect("remove file");
+        std::fs::create_dir(&local).expect("folder");
+        std::fs::write(local.join("inner.txt"), b"inside").expect("inner");
+        std::fs::write(
+            fixture.cloud_root.join("thing"),
+            b"edited in the cloud, longer",
+        )
+        .expect("cloud edit");
+
+        let runtime = fixture.run(&[]);
+
+        let decision = open_mismatch(&runtime);
+        assert_eq!(decision.path.as_deref(), Some(local.as_path()));
+        assert!(local.join("inner.txt").is_file(), "nothing is touched");
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("thing")).expect("cloud"),
+            b"edited in the cloud, longer"
+        );
+    }
+
+    #[test]
+    fn a_folder_tree_removed_while_away_leaves_no_empty_folders_in_the_cloud() {
+        let fixture = OfflineFixture::new();
+        for name in [
+            "proj/a/b/deep.txt",
+            "proj/a/mid.txt",
+            "proj/top.txt",
+            "keep.txt",
+        ] {
+            let path = fixture.watch_root.join(name);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+            std::fs::write(&path, name).expect("seed");
+        }
+        drop(fixture.run(&[]));
+        assert!(fixture.cloud_root.join("proj/a/b/deep.txt").is_file());
+        // Another device added a file to the tree; this one never saw it.
+        std::fs::write(
+            fixture.cloud_root.join("proj/a/theirs.txt"),
+            b"not mine to delete",
+        )
+        .expect("cloud-only file");
+
+        std::fs::remove_dir_all(fixture.watch_root.join("proj")).expect("rm -rf");
+        let runtime = fixture.run(&[]);
+
+        // The files this device synced are gone, with the folders they
+        // left empty. The file it never compared is kept, on both
+        // sides, and so is the folder chain that holds it.
+        assert!(!fixture.cloud_root.join("proj/a/b").exists());
+        assert!(!fixture.cloud_root.join("proj/top.txt").exists());
+        assert_eq!(names_in(&fixture.cloud_root.join("proj")), vec!["a"]);
+        assert_eq!(
+            names_in(&fixture.cloud_root.join("proj/a")),
+            vec!["theirs.txt"]
+        );
+        assert_eq!(
+            std::fs::read(fixture.watch_root.join("proj/a/theirs.txt")).expect("kept here too"),
+            b"not mine to delete"
+        );
+        assert!(fixture.cloud_root.join("keep.txt").is_file());
+        assert_eq!(runtime.state_db().failed_depth().expect("failed"), 0);
+    }
+
     #[test]
     fn a_type_mismatch_asks_once_and_touches_nothing() {
         let fixture = OfflineFixture::new();
@@ -8147,6 +8668,7 @@ mod tests {
                 signed_out: signed_out.clone(),
                 downloads_fail: Arc::default(),
                 cloud_full: Arc::default(),
+                offline: Arc::default(),
             }),
             clock.clone(),
         );
@@ -8368,6 +8890,39 @@ mod tests {
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].choice.as_deref(), Some("withdrawn"));
         assert!(fixture.cloud_root.join("cafe.txt").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_with_a_backslash_is_asked_about_one_time_over_a_walk_of_many_slices() {
+        let fixture = OfflineFixture::new();
+        // A tree that one slice of the walk does not cover, with the
+        // name in the first folder the walk reads.
+        std::fs::write(fixture.watch_root.join("back\\slash.txt"), b"kept here").expect("seed");
+        for index in 0..150 {
+            let folder = fixture.watch_root.join(format!("d{index:03}"));
+            std::fs::create_dir_all(&folder).expect("dir");
+            std::fs::write(folder.join("f.txt"), b"x").expect("seed");
+        }
+        let questions = |runtime: &DaemonRuntime, closed_too: bool| {
+            runtime
+                .state_db()
+                .decisions(closed_too)
+                .expect("decisions")
+                .into_iter()
+                .filter(|decision| decision.kind == crate::unsyncable::DECISION_KIND)
+                .count()
+        };
+
+        let runtime = fixture.run(&[]);
+        assert_eq!(questions(&runtime, false), 1, "the question stays open");
+        assert_eq!(questions(&runtime, true), 1, "and it was asked one time");
+        drop(runtime);
+
+        // The next walk finds the same name: the same question.
+        let runtime = fixture.run(&[]);
+        assert_eq!(questions(&runtime, false), 1);
+        assert_eq!(questions(&runtime, true), 1);
     }
 
     #[cfg(unix)]
@@ -9606,6 +10161,177 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_spelling_changed_while_the_cloud_folder_cannot_be_read_is_carried_when_it_can() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut fixture = BidirectionalFixture::new().watching_the_local_tree();
+        fixture.tick(6_000); // baseline
+        let root = fixture.watch_root.clone();
+        std::fs::write(root.join("report.txt"), "quarterly").expect("seed");
+        fixture.converge(12);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["report.txt"]);
+
+        // The cloud folder cannot be read for a while (a share that
+        // lost its permissions), and the name changes spelling on this
+        // device in that time. "Not there" is not what the cloud says:
+        // nothing can be asked.
+        let readable = std::fs::metadata(&fixture.cloud_root)
+            .expect("stat")
+            .permissions();
+        std::fs::set_permissions(&fixture.cloud_root, std::fs::Permissions::from_mode(0o000))
+            .expect("lock the cloud folder");
+        std::fs::rename(root.join("report.txt"), root.join("Report.txt")).expect("rename");
+        for _ in 0..12 {
+            fixture.tick(1_000);
+        }
+        std::fs::set_permissions(&fixture.cloud_root, readable).expect("unlock");
+
+        // The rename is still this device's change: it goes to the
+        // cloud, and it is not undone here.
+        for _ in 0..60 {
+            fixture.tick(1_000);
+        }
+        fixture.converge(24);
+        assert_eq!(names_in(&root), vec!["Report.txt"]);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["Report.txt"]);
+        assert_eq!(
+            std::fs::read(fixture.cloud_root.join("Report.txt")).expect("cloud"),
+            b"quarterly"
+        );
+    }
+
+    #[test]
+    fn work_inside_a_folder_just_renamed_by_case_is_synced_as_what_it_is() {
+        let mut fixture = BidirectionalFixture::new().watching_the_local_tree();
+        fixture.tick(6_000); // baseline
+        let root = fixture.watch_root.clone();
+        std::fs::create_dir_all(root.join("Folder/inner")).expect("dirs");
+        for (name, body) in [
+            ("Folder/edit.txt", "the synced bytes"),
+            ("Folder/gone.txt", "to be deleted"),
+            ("Folder/keep.txt", "untouched"),
+            ("Folder/inner/1.txt", "one"),
+            ("Folder/inner/2.txt", "two"),
+        ] {
+            std::fs::write(root.join(name), body).expect("seed");
+        }
+        fixture.converge(12);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["Folder"]);
+
+        // The rename, and a second and a half later an edit, a
+        // deletion, and a rename of a folder inside it: before the
+        // rename itself is through its quiet window.
+        std::fs::rename(root.join("Folder"), root.join("FOLDER")).expect("rename");
+        fixture.tick(1_500);
+        std::fs::write(root.join("FOLDER/edit.txt"), "edited after the rename").expect("edit");
+        std::fs::remove_file(root.join("FOLDER/gone.txt")).expect("delete");
+        std::fs::rename(root.join("FOLDER/inner"), root.join("FOLDER/moved")).expect("rename");
+        for _ in 0..60 {
+            fixture.tick(1_000);
+        }
+        fixture.converge(24);
+
+        for side in [&fixture.watch_root, &fixture.cloud_root] {
+            assert_eq!(names_in(side), vec!["FOLDER"], "{}", side.display());
+            assert_eq!(
+                names_in(&side.join("FOLDER")),
+                vec!["edit.txt", "keep.txt", "moved"],
+                "{}",
+                side.display()
+            );
+            assert_eq!(
+                names_in(&side.join("FOLDER/moved")),
+                vec!["1.txt", "2.txt"],
+                "{}",
+                side.display()
+            );
+            assert_eq!(
+                std::fs::read(side.join("FOLDER/edit.txt")).expect("edit"),
+                b"edited after the rename",
+                "{}",
+                side.display()
+            );
+        }
+        assert_eq!(fixture.runtime.conflict_count(), 0);
+        assert_eq!(
+            fixture.runtime.state_db().queue_depth().expect("depth"),
+            0,
+            "{:?}",
+            fixture.runtime.state_db().queued_summaries()
+        );
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0,
+            "{:?}",
+            fixture.runtime.state_db().failed_summaries()
+        );
+
+        // What the cloud says about the move of the folder is not a
+        // change: nothing comes down, and nothing leaves this device.
+        let at = timestamp_ms(fixture.now_ms);
+        fixture
+            .feed
+            .emit_removed(fixture.cloud_root.join("Folder"), at);
+        fixture
+            .feed
+            .emit_removed(fixture.cloud_root.join("Folder/keep.txt"), at);
+        for name in ["FOLDER/keep.txt", "FOLDER/edit.txt", "FOLDER/moved/1.txt"] {
+            fixture.feed.emit_created(fixture.cloud_root.join(name), at);
+        }
+        fixture.converge(12);
+        assert_eq!(
+            names_in(&fixture.watch_root.join("FOLDER")),
+            vec!["edit.txt", "keep.txt", "moved"]
+        );
+        assert_eq!(fixture.runtime.conflict_count(), 0);
+    }
+
+    #[test]
+    fn a_folder_renamed_in_the_cloud_by_capitals_only_is_renamed_here() {
+        let mut fixture = BidirectionalFixture::new().watching_the_local_tree();
+        fixture.tick(6_000); // baseline
+        std::fs::create_dir(fixture.watch_root.join("CaseDir")).expect("dir");
+        std::fs::write(fixture.watch_root.join("CaseDir/a.txt"), b"first").expect("seed");
+        std::fs::write(fixture.watch_root.join("CaseDir/b.txt"), b"second").expect("seed");
+        fixture.converge(12);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["CaseDir"]);
+
+        // The rename in the cloud, as its watcher reports it: the files
+        // under the new spelling appear, the ones under the old one go.
+        std::fs::rename(
+            fixture.cloud_root.join("CaseDir"),
+            fixture.cloud_root.join("casedir"),
+        )
+        .expect("rename in the cloud");
+        let at = timestamp_ms(fixture.now_ms);
+        for name in ["a.txt", "b.txt"] {
+            fixture
+                .feed
+                .emit_removed(fixture.cloud_root.join("CaseDir").join(name), at);
+            fixture
+                .feed
+                .emit_created(fixture.cloud_root.join("casedir").join(name), at);
+        }
+        for _ in 0..20 {
+            fixture.tick(1_000);
+        }
+        fixture.converge(24);
+
+        assert_eq!(names_in(&fixture.watch_root), vec!["casedir"]);
+        assert_eq!(names_in(&fixture.cloud_root), vec!["casedir"]);
+        assert_eq!(
+            names_in(&fixture.watch_root.join("casedir")),
+            vec!["a.txt", "b.txt"]
+        );
+        assert_eq!(fixture.runtime.conflict_count(), 0);
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+        assert_eq!(
+            fixture.runtime.state_db().failed_depth().expect("failed"),
+            0
+        );
+    }
+
     /// Syncs `name` through one offline run and returns the fixture.
     fn offline_fixture_with_synced(name: &str, body: &[u8]) -> OfflineFixture {
         let fixture = OfflineFixture::new();
@@ -9613,6 +10339,45 @@ mod tests {
         drop(fixture.run(&[]));
         assert_eq!(names_in(&fixture.cloud_root), vec![name.to_string()]);
         fixture
+    }
+
+    #[test]
+    fn an_edit_made_while_an_ignore_rule_hid_the_file_uploads_when_the_rule_goes() {
+        let fixture = offline_fixture_with_synced("a.secret", b"synced");
+        let (local, cloud) = (
+            fixture.watch_root.join("a.secret"),
+            fixture.cloud_root.join("a.secret"),
+        );
+        // The rule hides the file, the file changes here, and a walk
+        // passes while it is hidden.
+        std::fs::write(fixture.watch_root.join(".vaporignore"), "*.secret\n").expect("rule");
+        std::fs::write(&local, b"edited while hidden").expect("edit");
+        drop(fixture.run(&[]));
+        assert_eq!(std::fs::read(&cloud).expect("cloud"), b"synced");
+
+        // The rule goes. The cloud copy never changed: the edit is the
+        // one change, and it goes up under the name.
+        std::fs::remove_file(fixture.watch_root.join(".vaporignore")).expect("rule gone");
+        let runtime = fixture.run(&[]);
+        assert_eq!(
+            std::fs::read(&cloud).expect("cloud"),
+            b"edited while hidden"
+        );
+        assert_eq!(
+            std::fs::read(&local).expect("local"),
+            b"edited while hidden"
+        );
+        for side in [&fixture.watch_root, &fixture.cloud_root] {
+            assert!(
+                names_in(side)
+                    .iter()
+                    .all(|name| !name.contains("~conflict-")),
+                "{:?}",
+                names_in(side)
+            );
+        }
+        assert_eq!(runtime.conflict_count(), 0);
+        assert_eq!(runtime.state_db().failed_depth().expect("failed"), 0);
     }
 
     #[test]
@@ -10161,6 +10926,105 @@ mod tests {
                 .expect("held"),
             0
         );
+    }
+
+    fn fixture_with_ratio_guard() -> BidirectionalFixture {
+        let mut fixture = BidirectionalFixture::new();
+        fixture
+            .runtime
+            .configure_mass_delete_guard(crate::safeguards::MassDeleteGuardSettings {
+                enabled: true,
+                threshold: 1_000,
+                window: Duration::from_secs(60),
+                ratio_percent: 25,
+            });
+        fixture.tick(6_000);
+        fixture
+    }
+
+    #[test]
+    fn a_deletion_that_arrives_while_the_question_is_open_is_covered_by_the_answer() {
+        let mut fixture = fixture_with_ratio_guard();
+        let paths = seed_synced_files(&mut fixture, 40);
+        let cloud_of = |fixture: &BidirectionalFixture, path: &Path| {
+            fixture
+                .cloud_root
+                .join(path.strip_prefix(&fixture.watch_root).unwrap())
+        };
+        for path in &paths[..12] {
+            let cloud = cloud_of(&fixture, path);
+            std::fs::remove_file(&cloud).expect("cloud unlink");
+            fixture
+                .feed
+                .emit_removed(cloud, timestamp_ms(fixture.now_ms));
+        }
+        fixture.converge(30);
+        let decision = fixture
+            .runtime
+            .state_db()
+            .open_decision("mass-delete", None)
+            .expect("query")
+            .expect("the burst must open a mass-delete decision");
+        assert_eq!(decision.held_intents, 12);
+
+        // One more deletion of the burst arrives late. Its first
+        // planning would wait a move-settle window, and the user
+        // answers within that window.
+        let late = cloud_of(&fixture, &paths[12]);
+        std::fs::remove_file(&late).expect("cloud unlink");
+        fixture
+            .feed
+            .emit_removed(late.clone(), timestamp_ms(fixture.now_ms));
+        fixture.tick(6_000);
+        fixture.tick(250);
+        fixture
+            .runtime
+            .state_db_mut()
+            .resolve_decision(decision.id, "discard", timestamp_ms(fixture.now_ms))
+            .expect("resolve");
+        fixture.converge(30);
+
+        for path in &paths[..13] {
+            assert!(path.exists(), "{} must stay here", path.display());
+            let cloud = cloud_of(&fixture, path);
+            assert!(
+                cloud.exists(),
+                "{} must be restored after discard",
+                cloud.display()
+            );
+        }
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
+    }
+
+    #[test]
+    fn a_scan_holds_no_deletion_a_second_time_while_the_question_is_open() {
+        let mut fixture = fixture_with_ratio_guard();
+        let paths = seed_synced_files(&mut fixture, 40);
+        for path in &paths[..12] {
+            std::fs::remove_file(path).expect("unlink");
+            fixture.record_local_event(path, FsEventKind::Removed, fixture.now_ms);
+        }
+        fixture.converge(30);
+        let held = |fixture: &BidirectionalFixture| {
+            fixture
+                .runtime
+                .state_db()
+                .held_intent_count()
+                .expect("held")
+        };
+        assert_eq!(held(&fixture), 12);
+
+        // Nobody answers. Each scan finds the same twelve files gone,
+        // and the held deletions already stand for them.
+        for _ in 0..3 {
+            fixture
+                .runtime
+                .schedule_startup_reconcile(timestamp_ms(fixture.now_ms))
+                .expect("schedule a scan");
+            fixture.converge(30);
+        }
+        assert_eq!(held(&fixture), 12, "one held deletion for each file");
+        assert_eq!(fixture.runtime.state_db().queue_depth().expect("depth"), 0);
     }
 
     #[test]
@@ -11195,11 +12059,13 @@ mod tests {
 
         let first = fixture.tick(6_000); // baseline poll
         assert!(first.remote_poll.polled);
-        let quiet = fixture.tick(1_000); // 1s later: cadence not due
+        // A quarter of a second later: the watched feed is read each
+        // second, so it is not due.
+        let quiet = fixture.tick(250);
         assert!(!quiet.remote_poll.polled);
 
         control.request_reconcile();
-        let boosted = fixture.tick(1_000);
+        let boosted = fixture.tick(250);
         assert!(
             boosted.remote_poll.polled,
             "the reconcile boost must clear the remote poll cadence"

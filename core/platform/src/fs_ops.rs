@@ -20,6 +20,249 @@ pub fn atomic_noclobber_rename(from: &Path, to: &Path) -> io::Result<()> {
     atomic_noclobber_rename_impl(from, to)
 }
 
+/// Atomically exchanges the files at `a` and `b`: after the call each
+/// name holds what the other held, and no moment exists at which
+/// either name is empty. A writer that replaces a file this way has
+/// the file it replaced in its hands, so nothing another writer put
+/// there in the meantime is lost.
+///
+/// Fails with [`io::ErrorKind::Unsupported`] where the host or the
+/// volume has no such exchange; the caller then decides what a plain
+/// rename costs.
+pub fn atomic_swap(a: &Path, b: &Path) -> io::Result<()> {
+    atomic_swap_impl(a, b)
+}
+
+/// `renamex_np(RENAME_SWAP)`, native on APFS and HFS+.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn atomic_swap_impl(a: &Path, b: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let a_c = CString::new(a.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    let b_c = CString::new(b.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    // SAFETY: both pointers reference NUL-terminated buffers that live
+    // for the duration of the call; `renamex_np` reads them and has no
+    // other memory effects.
+    let rc = unsafe { libc::renamex_np(a_c.as_ptr(), b_c.as_ptr(), libc::RENAME_SWAP) };
+    if rc == 0 {
+        return Ok(());
+    }
+    Err(swap_error(io::Error::last_os_error()))
+}
+
+/// `renameat2(RENAME_EXCHANGE)`.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn atomic_swap_impl(a: &Path, b: &Path) -> io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let a_c = CString::new(a.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    let b_c = CString::new(b.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    // SAFETY: both pointers reference NUL-terminated buffers that live
+    // for the duration of the call; `renameat2` reads them and has no
+    // other memory effects.
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            a_c.as_ptr(),
+            libc::AT_FDCWD,
+            b_c.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if rc == 0 {
+        return Ok(());
+    }
+    Err(swap_error(io::Error::last_os_error()))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn atomic_swap_impl(_a: &Path, _b: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this host has no atomic exchange of two files",
+    ))
+}
+
+/// A volume or a kernel with no exchange says so in more than one
+/// way; all of them are "not here".
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn swap_error(error: io::Error) -> io::Error {
+    match error.raw_os_error() {
+        Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::ENOSYS) => {
+            io::Error::new(io::ErrorKind::Unsupported, error)
+        }
+        _ => error,
+    }
+}
+
+/// Makes the content of `file` durable: after the call it survives a
+/// loss of power. Returns when it is, like [`std::fs::File::sync_all`].
+///
+/// On macOS that takes two steps, and the second is the costly one:
+/// `fsync` moves the file to the drive, and `F_FULLFSYNC` makes the
+/// drive write what it holds. The second step is for the whole drive,
+/// not for one file. So callers that arrive together share it: each
+/// moves its own file to the drive, and one flush of the drive that
+/// starts after that covers them all. A burst of small files then pays
+/// one flush for a group of files and not one flush for each file,
+/// with the same guarantee for every one of them.
+pub fn make_durable(file: &std::fs::File) -> io::Result<()> {
+    make_durable_impl(file)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn make_durable_impl(file: &std::fs::File) -> io::Result<()> {
+    file.sync_all()
+}
+
+#[cfg(target_os = "macos")]
+fn make_durable_impl(file: &std::fs::File) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    sync_to_drive(file)?;
+    let device = file.metadata()?.dev();
+    drive_flushes(device).flushed_after_now(|| file.sync_all())
+}
+
+/// `fsync(2)`: the file's data and attributes go to the drive. The
+/// drive may still hold them in its cache.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn sync_to_drive(file: &std::fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the descriptor is open for the life of `file`, and
+    // `fsync` has no memory effects.
+    let rc = unsafe { libc::fsync(file.as_raw_fd()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// The flush group of one drive, by the device number of its volume.
+#[cfg(target_os = "macos")]
+fn drive_flushes(device: u64) -> std::sync::Arc<FlushGroup> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static GROUPS: OnceLock<Mutex<HashMap<u64, Arc<FlushGroup>>>> = OnceLock::new();
+    GROUPS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(device)
+        .or_default()
+        .clone()
+}
+
+/// Callers that each need one flush that starts after they asked, and
+/// that share the flushes: one caller at a time runs a flush, and every
+/// caller that asked before it started is done when it ends.
+#[derive(Default)]
+struct FlushGroup {
+    state: std::sync::Mutex<FlushState>,
+    ended: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct FlushState {
+    /// How many flushes have started.
+    started: u64,
+    /// The number of the last flush that ended well.
+    done: u64,
+    running: bool,
+    /// Callers that wait for a flush another caller runs.
+    waiting: usize,
+}
+
+impl FlushGroup {
+    /// Returns when a flush that started after this call has ended
+    /// well. `flush` runs it when no other caller does; a flush that
+    /// fails is this caller's error, and the callers that waited on it
+    /// run their own.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    fn flushed_after_now(&self, flush: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // A flush that runs now started before this call: the next one
+        // is the first that counts.
+        let needed = state.started + 1;
+        loop {
+            if state.done >= needed {
+                return Ok(());
+            }
+            if !state.running {
+                state.running = true;
+                state.started += 1;
+                let number = state.started;
+                drop(state);
+                let result = flush();
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state.running = false;
+                if result.is_ok() {
+                    state.done = number;
+                }
+                drop(state);
+                self.ended.notify_all();
+                return result;
+            }
+            state.waiting += 1;
+            state = self
+                .ended
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.waiting -= 1;
+        }
+    }
+}
+
+/// Runs `action` while the owner may write `path`, and puts the mode
+/// back as it was. A file that is read-only for its owner refuses an
+/// extended attribute; the caller that has to tag such a file does it
+/// in here. A path that is not a regular file, a file the owner can
+/// write already, and a host with no POSIX modes run `action` as is.
+pub fn with_owner_write<T>(path: &Path, action: impl FnOnce() -> T) -> T {
+    with_owner_write_impl(path, action)
+}
+
+#[cfg(unix)]
+fn with_owner_write_impl<T>(path: &Path, action: impl FnOnce() -> T) -> T {
+    use std::os::unix::fs::PermissionsExt;
+
+    const OWNER_WRITE: u32 = 0o200;
+    let mode = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => metadata.permissions().mode(),
+        _ => return action(),
+    };
+    if mode & OWNER_WRITE != 0
+        || std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | OWNER_WRITE))
+            .is_err()
+    {
+        return action();
+    }
+    let result = action();
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    result
+}
+
+#[cfg(not(unix))]
+fn with_owner_write_impl<T>(_path: &Path, action: impl FnOnce() -> T) -> T {
+    action()
+}
+
 /// `renamex_np(RENAME_EXCL)`: atomic no-clobber rename, native since
 /// macOS 10.12 on APFS/HFS+.
 #[cfg(target_os = "macos")]
@@ -111,6 +354,113 @@ mod tests {
 
         assert_eq!(std::fs::read(&to).expect("target"), b"payload");
         assert!(!from.exists(), "the staged name must be consumed");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_swap_gives_each_name_the_file_of_the_other() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let staged = dir.path().join("staged");
+        let target = dir.path().join("final");
+        std::fs::write(&staged, b"new").expect("stage");
+        std::fs::write(&target, b"old").expect("target");
+
+        atomic_swap(&staged, &target).expect("swap");
+
+        assert_eq!(std::fs::read(&target).expect("target"), b"new");
+        assert_eq!(std::fs::read(&staged).expect("staged"), b"old");
+
+        // Both names must exist: there is nothing to exchange with.
+        std::fs::remove_file(&staged).expect("remove");
+        let error = atomic_swap(&staged, &target).expect_err("one name is gone");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read(&target).expect("target intact"), b"new");
+    }
+
+    #[test]
+    fn callers_that_arrive_during_a_flush_share_the_next_one() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier, mpsc};
+
+        let group = Arc::new(FlushGroup::default());
+        let flushes = Arc::new(AtomicUsize::new(0));
+        let (first_started_tx, first_started_rx) = mpsc::channel();
+        let (release_first_tx, release_first_rx) = mpsc::channel::<()>();
+
+        // The first caller runs a flush and stays in it.
+        let first = {
+            let group = group.clone();
+            let flushes = flushes.clone();
+            std::thread::spawn(move || {
+                group.flushed_after_now(|| {
+                    flushes.fetch_add(1, Ordering::SeqCst);
+                    first_started_tx.send(()).expect("signal");
+                    release_first_rx.recv().expect("release");
+                    Ok(())
+                })
+            })
+        };
+        first_started_rx.recv().expect("the first flush runs");
+
+        // Eight more arrive while it runs. It started before they
+        // asked, so it does not count for them: they need the next.
+        const LATER: usize = 8;
+        let ready = Arc::new(Barrier::new(LATER + 1));
+        let later: Vec<_> = (0..LATER)
+            .map(|_| {
+                let group = group.clone();
+                let flushes = flushes.clone();
+                let ready = ready.clone();
+                std::thread::spawn(move || {
+                    ready.wait();
+                    group.flushed_after_now(|| {
+                        flushes.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                })
+            })
+            .collect();
+        ready.wait();
+        while group.state.lock().expect("state").waiting < LATER {
+            std::thread::yield_now();
+        }
+        release_first_tx.send(()).expect("release the first");
+        first.join().expect("first").expect("first flush");
+        for caller in later {
+            caller.join().expect("caller").expect("flushed");
+        }
+
+        assert_eq!(
+            flushes.load(Ordering::SeqCst),
+            2,
+            "the flush that ran when they asked does not count for them, and one more covers all eight"
+        );
+    }
+
+    #[test]
+    fn a_flush_that_fails_is_the_error_of_its_caller_only() {
+        let group = FlushGroup::default();
+        let failed = group.flushed_after_now(|| Err(io::Error::other("the drive said no")));
+        assert!(failed.is_err());
+        // The failure counts for nobody: the next caller runs its own.
+        let mut ran = false;
+        group
+            .flushed_after_now(|| {
+                ran = true;
+                Ok(())
+            })
+            .expect("flush");
+        assert!(ran);
+    }
+
+    #[test]
+    fn a_file_made_durable_holds_what_was_written() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("payload");
+        let mut file = std::fs::File::create(&path).expect("create");
+        std::io::Write::write_all(&mut file, b"payload").expect("write");
+        make_durable(&file).expect("durable");
+        assert_eq!(std::fs::read(&path).expect("read"), b"payload");
     }
 
     #[test]

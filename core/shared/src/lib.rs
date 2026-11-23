@@ -3,11 +3,22 @@
 use std::time::Duration;
 
 pub mod config;
+pub mod conflict;
 pub mod constants;
 pub mod device_id;
 pub mod logging;
 pub mod paths;
 pub mod runtime_paths;
+
+/// A wait in the unit a person would use: `30 s`, `4 min`, `2 h`.
+pub fn duration_text(duration: Duration) -> String {
+    let seconds = duration.as_millis().div_ceil(1_000);
+    match seconds {
+        0..=89 => format!("{seconds} s"),
+        90..=5_399 => format!("{} min", (seconds + 30) / 60),
+        _ => format!("{} h", (seconds + 1_800) / 3_600),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThrottleState {

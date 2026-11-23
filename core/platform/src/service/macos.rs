@@ -208,6 +208,20 @@ impl NativeServiceInstaller {
     }
 }
 
+impl NativeServiceInstaller {
+    /// Whether the daemon's process is gone within `wait`.
+    fn wait_until_stopped(&self, wait: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + wait;
+        while std::time::Instant::now() < deadline {
+            if !matches!(self.status(), Ok(ServiceStatus::Running)) {
+                return true;
+            }
+            std::thread::sleep(STOP_POLL);
+        }
+        false
+    }
+}
+
 impl ServiceInstaller for NativeServiceInstaller {
     fn install_and_enable(&self) -> Result<(), ServiceInstallError> {
         self.validate_executable()?;
@@ -272,34 +286,60 @@ impl ServiceInstaller for NativeServiceInstaller {
         // The signal is sent; the daemon is stopped when its process is
         // gone. A start that follows at once (a restart) must not find
         // the old instance still there and take it for the new one.
-        let deadline = std::time::Instant::now() + STOP_WAIT;
-        while std::time::Instant::now() < deadline {
-            if !matches!(self.status(), Ok(ServiceStatus::Running)) {
-                return Ok(());
-            }
-            std::thread::sleep(STOP_POLL);
+        if self.wait_until_stopped(STOP_WAIT) {
+            return Ok(());
+        }
+        // The daemon did not go: a worker of it sits in a call that
+        // does not return. A process left like that holds the job,
+        // answers nobody, and syncs nothing, and every later start
+        // would take it for a daemon that runs. Its state is durable,
+        // so it is ended here.
+        self.kill_daemon()?;
+        if self.wait_until_stopped(KILL_WAIT) {
+            return Ok(());
         }
         Err(ServiceInstallError::Backend(Box::new(
             std::io::Error::other(format!(
-                "the daemon did not stop within {} s of SIGTERM",
-                STOP_WAIT.as_secs()
+                "the daemon did not stop within {} s of SIGTERM, and not within {} s of SIGKILL;                  sync is down until its process is gone (`launchctl print {}` shows it)",
+                STOP_WAIT.as_secs(),
+                KILL_WAIT.as_secs(),
+                self.service_target()
             )),
         )))
+    }
+
+    fn kill_daemon(&self) -> Result<(), ServiceInstallError> {
+        self.run_launchctl(&["kill", "KILL", &self.service_target()])
     }
 
     fn status(&self) -> Result<ServiceStatus, ServiceInstallError> {
         if !self.plist_path.exists() {
             return Ok(ServiceStatus::NotInstalled);
         }
-        let output = Command::new("/bin/launchctl")
-            .args(["print", &self.service_target()])
-            .output()
-            .map_err(|error| ServiceInstallError::Backend(Box::new(error)))?;
-        if !output.status.success() {
+        // Loaded: the exit status of `launchctl print`. Running: a
+        // process of launchd with the job's executable. The text that
+        // `launchctl print` writes is for people, and Apple changes it
+        // between releases, so nothing here reads it.
+        if !self.is_loaded() {
             return Ok(ServiceStatus::Stopped);
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if stdout.contains("state = running") || stdout.contains("pid = ") {
+        let processes = Command::new("/bin/ps")
+            .args(["-axww", "-o", "ppid=,comm="])
+            .output()
+            .map_err(|error| ServiceInstallError::Backend(Box::new(error)))?;
+        // The executable of the definition that is on disk: it is the
+        // one launchd started, also when this binary now lives at
+        // another path (an app that was moved or updated).
+        let executable = fs::read_to_string(&self.plist_path)
+            .ok()
+            .and_then(|definition| registered_executable(&definition))
+            .unwrap_or_else(|| {
+                self.descriptor
+                    .executable_path
+                    .to_string_lossy()
+                    .into_owned()
+            });
+        if job_process_runs(&String::from_utf8_lossy(&processes.stdout), &executable) {
             Ok(ServiceStatus::Running)
         } else {
             Ok(ServiceStatus::Stopped)
@@ -307,9 +347,42 @@ impl ServiceInstaller for NativeServiceInstaller {
     }
 }
 
+/// The executable of a service definition that this installer wrote:
+/// the first string of its `ProgramArguments`.
+fn registered_executable(definition: &str) -> Option<String> {
+    let arguments = definition.split_once("<key>ProgramArguments</key>")?.1;
+    let first = arguments.split_once("<string>")?.1;
+    let escaped = first.split_once("</string>")?.0;
+    Some(
+        escaped
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&"),
+    )
+}
+
+/// Whether `listing` (one `ppid command` line for each process) holds
+/// a process that launchd started from `executable`. launchd is the
+/// parent of every job it runs, and it starts a job by the path in the
+/// job's definition, so the two together name the job's process. A
+/// copy of the binary that a person started from a shell has the shell
+/// as its parent.
+fn job_process_runs(listing: &str, executable: &str) -> bool {
+    listing.lines().any(|line| {
+        let line = line.trim_start();
+        let (parent, command) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        parent == "1" && command.trim_start() == executable
+    })
+}
+
 /// How long a stop waits for the daemon's process to go, and how often
-/// it looks. The daemon's own shutdown takes well under a second.
+/// it looks. The daemon's own shutdown takes well under a second, and
+/// it ends itself when a worker holds it longer than its own limit.
 const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long a kill waits for the process to go.
+const KILL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 
 fn current_uid() -> u32 {
@@ -361,6 +434,33 @@ fn push_string_array_item(buf: &mut String, value: &str) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn the_job_runs_when_launchd_has_a_process_of_its_executable() {
+        let executable = "/Applications/Vapor.app/Contents/MacOS/vapord";
+        let listing =
+            "    1 /usr/sbin/cfprefsd\n  812 /Applications/Vapor.app/Contents/MacOS/vapord\n";
+        assert!(
+            !job_process_runs(listing, executable),
+            "a copy that a shell started is not the job"
+        );
+        let listing = format!("{listing}    1 {executable}\n");
+        assert!(job_process_runs(&listing, executable));
+        // The definition on disk names the executable that runs.
+        let definition = "<key>ProgramArguments</key>\n  <array>\n    \
+                          <string>/Apps/R&amp;D/vapord</string>\n    <string>run</string>";
+        assert_eq!(
+            registered_executable(definition).as_deref(),
+            Some("/Apps/R&D/vapord")
+        );
+        // A path with a space in it is one command.
+        let spaced = "/Users/sam/My Apps/Vapor.app/Contents/MacOS/vapord";
+        assert!(job_process_runs(&format!("    1 {spaced}\n"), spaced));
+        assert!(!job_process_runs(
+            &format!("    1 {spaced} extra\n"),
+            spaced
+        ));
+    }
     use super::*;
     use tempfile::TempDir;
 

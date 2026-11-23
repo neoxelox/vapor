@@ -37,8 +37,11 @@ Full checklist with acceptance criteria:
   size (`step_bytes`) and what is left when it knows (`remaining_bytes`).
   A step that moves zero bytes on a non-empty range must fail as
   transient, not report progress. Uploads honour `RemotePrecondition`
-  (keep-both safety). A completed upload reports the hash of the bytes
-  the backend stored, checked against the hash of what was sent.
+  (keep-both safety). A backend whose `HashEquals` is a check followed
+  by a write keeps any version the write replaced unseen as a
+  `~conflict-replaced-<ms>` copy (`provider-onboarding.md`). A completed
+  upload reports the hash of the bytes the backend stored, checked
+  against the hash of what was sent.
 - **Root identity and moves.** `root_identity` reports a stable
   identity for the cloud root (a marker file the provider writes at
   `adopt_root`, or the backend's folder id) and never creates the root;

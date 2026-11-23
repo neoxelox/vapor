@@ -110,9 +110,10 @@ profile without it.
 - `service status`: reports `running` / `stopped` / `not-installed` /
   `crash-loop-paused` (the crash-loop pause is overlaid from durable
   lifecycle state) plus `label`, `autoLaunch`, `supervisorInstalled`,
-  a `crashLoop` object, and `health` with `--json`. `health` is what a
-  `check` would find, read with nothing changed; it is what an app
-  shows.
+  a `crashLoop` object, `health`, and `answers` with `--json`. `health`
+  is what a `check` would find, read with nothing changed; it is what
+  an app shows. `answers` is `false` when the daemon's process runs and
+  its socket gives no answer, and absent when no process runs.
 - `service start` / `restart`: act on the registered service
   definition only. With none registered (auto-launch off, or a host
   that never ran `service install`) both answer `not-installed` with

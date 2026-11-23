@@ -125,8 +125,10 @@ protection. `launchd` is intentionally passive (`KeepAlive = false`):
    Detection belongs to the supervisor job (next section): every 30
    seconds it runs `vapor service check`, one supervision tick that
    detects an unexpected daemon exit, registers the crash, and restarts
-   or defers per the schedule above. It is the one caller of that
-   check, so one exit is counted once. The macOS app restarts nothing:
+   or defers per the schedule above. Between two ticks it asks the
+   daemon's socket twice a second, so it runs the tick within a second
+   of an exit and at the end of a backoff, not up to 30 seconds later.
+   It is the one caller of that check, so one exit is counted once. The macOS app restarts nothing:
    its 30-second timer (`DaemonHealthMonitor`,
    `VaporConstants.Daemon.healthTickIntervalSeconds`) runs `vapor
    service status`, which reports the `health` a check would find and
@@ -159,15 +161,28 @@ Every install registers a second LaunchAgent next to the daemon's,
 bootstrap` (what the app runs at its start), and `vapor init` all do
 it. Its program is the `vapor` binary itself running `service check
 --loop`: one supervision tick every 30 seconds (`--interval` to change
-it), printing an outcome only when it changes. A crashed daemon so
-comes back with the app open, with the app closed, and on a device
-that never opens the app.
+it), and one as soon as the daemon stops answering its socket,
+printing an outcome only when it changes. A crashed daemon so comes
+back within about a second, with the app open, with the app closed,
+and on a device that never opens the app.
+
+A daemon whose process runs and whose socket gives no answer for 30
+seconds hangs. The supervisor ends that process (`SIGKILL`), which the
+next tick counts as a crash and restarts under the same budget. A
+daemon that starts or stops answers inside that time, so neither is
+ended. `vapor service stop` and `restart` have the same last step: a
+daemon that does not exit 10 seconds after `SIGTERM` is ended, so no
+second daemon ever starts beside a first one that still holds the
+runtime directory.
 
 This job is the one job launchd keeps alive (`KeepAlive = true`): it is
 the supervisor, not the daemon, so the crash-loop guard still owns
 every daemon restart and its budget. Its output lands in
 `<vapor_dir>/logs/vapor-supervisor.log`. `vapor service status` reports
 `supervisorInstalled`, and `vapor service uninstall` removes both jobs.
+The same command reads the state of the job from launchd and from the
+process table, not from the daemon, and says in words when the process
+runs and gives no answer (`answers: false` with `--json`).
 A daemon that the user stopped (`vapor service stop`, Quit Vapor) reads
 as stopped on purpose, and the supervisor leaves it stopped.
 

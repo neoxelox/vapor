@@ -478,18 +478,22 @@ impl ReconcileWalker {
     /// go to the trash. With no row, the file is new and is kept.
     ///
     /// A row written after the cloud listing was asked for stays: the
-    /// listing is older than the transfer that wrote it.
+    /// listing is older than the transfer that wrote it. So does the
+    /// row of a name that an ignore rule hides (`hidden`): the walk did
+    /// not look at that name, on either side, and the row is what says
+    /// which side changed when the rule goes.
     fn forget_names_that_left_both_sides(
         &mut self,
         state_db: &mut DurableStateDb,
         directory: &Path,
         listed: &std::collections::BTreeSet<String>,
+        hidden: &std::collections::BTreeSet<String>,
         pairs: &BTreeMap<String, EntryPair>,
         listed_at: SystemTime,
     ) -> Result<(), WalkError> {
         let mut removed = 0usize;
         for name in state_db.sync_index_names_in(directory)? {
-            if listed.contains(&name) || pairs.contains_key(&name) {
+            if listed.contains(&name) || hidden.contains(&name) || pairs.contains_key(&name) {
                 continue;
             }
             removed += state_db
@@ -639,6 +643,8 @@ impl ReconcileWalker {
         now: SystemTime,
     ) -> Result<(), WalkError> {
         let mut pairs: BTreeMap<String, EntryPair> = BTreeMap::new();
+        // Names that an ignore rule kept out of this comparison.
+        let mut hidden: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
         match fs::read_dir(directory) {
             Ok(entries) => {
@@ -707,16 +713,21 @@ impl ReconcileWalker {
                         }) {
                             self.stats.ignored_local_entries += 1;
                         }
+                        hidden.insert(name);
                         continue;
                     }
                     let metadata = match entry.path().symlink_metadata() {
                         Ok(metadata) => metadata,
-                        // The entry was just listed, so it exists: a stat
-                        // failure is transient (permission, EIO). Never let
-                        // it read as "locally absent": that would drive a
-                        // strict-mirror remote delete of content that is
-                        // still present. Abandon this directory; it is
-                        // walked again later.
+                        // Gone between the listing and the stat (an
+                        // `rm -rf` that runs under the walk): the entry
+                        // is absent now, as its own event will say.
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        // The entry was just listed, so it exists: any
+                        // other stat failure is transient (permission,
+                        // EIO). Never let it read as "locally absent":
+                        // that would drive a strict-mirror remote delete
+                        // of content that is still present. Abandon this
+                        // directory; it is walked again later.
                         Err(error) => {
                             crate::logging::warning(
                                 "Reconcile walk cannot stat a local entry; deferring the directory",
@@ -779,6 +790,7 @@ impl ReconcileWalker {
             // converge onto, so one rule set governs both directions.
             let is_folder = entry.kind == vapor_providers::RemoteEntryKind::Directory;
             if self.ignores(&directory.join(&name), is_folder) {
+                hidden.insert(name);
                 continue;
             }
             pairs.entry(name).or_default().remote = Some(entry);
@@ -787,7 +799,9 @@ impl ReconcileWalker {
         let mut batch: Vec<(PathBuf, PendingIntentKind, SystemTime)> = Vec::new();
         let listed: std::collections::BTreeSet<String> = pairs.keys().cloned().collect();
         self.settle_spellings(sync_mode, state_db, directory, &mut pairs, &mut batch, now)?;
-        self.forget_names_that_left_both_sides(state_db, directory, &listed, &pairs, listed_at)?;
+        self.forget_names_that_left_both_sides(
+            state_db, directory, &listed, &hidden, &pairs, listed_at,
+        )?;
 
         // Remote-only names that differ only by case cannot all
         // materialize on a case-insensitive local filesystem. The
@@ -908,11 +922,66 @@ impl ReconcileWalker {
                             }
                         }
                         SyncMode::TwoWay => {
-                            crate::logging::warning(
-                                "Reconcile found a file/directory type mismatch in two-way mode; leaving both sides untouched",
-                                &[("path", local_path.display().to_string())],
-                            );
-                            self.type_mismatches.push(local_path.clone());
+                            let swap = if self.merge_without_deletions {
+                                None
+                            } else {
+                                swap_made_by_one_side(state_db, &local_path, &local, &remote)?
+                            };
+                            match swap {
+                                // The index vouches for the side that
+                                // did not change, so the change of the
+                                // other side applies like any deletion
+                                // and any new file. Each deletion still
+                                // passes the executor's own check.
+                                Some(OneSidedSwap::FolderHereOverSyncedFile) => {
+                                    batch.push((
+                                        local_path.clone(),
+                                        PendingIntentKind::Delete,
+                                        now,
+                                    ));
+                                    self.pending_dirs.push_back(local.path);
+                                }
+                                Some(OneSidedSwap::FileHereOverSyncedFolder) => {
+                                    // The upload follows the delete: the
+                                    // cloud name has to be free first.
+                                    batch.push((
+                                        local_path.clone(),
+                                        PendingIntentKind::Delete,
+                                        now,
+                                    ));
+                                }
+                                Some(OneSidedSwap::FileInCloudOverSyncedFolder(children)) => {
+                                    for child in children {
+                                        batch.push((
+                                            child,
+                                            PendingIntentKind::ApplyRemoteDelete,
+                                            now,
+                                        ));
+                                    }
+                                    batch.push((
+                                        local_path.clone(),
+                                        PendingIntentKind::Download,
+                                        now,
+                                    ));
+                                }
+                                Some(OneSidedSwap::FolderInCloudOverSyncedFile) => {
+                                    // The folder is compared when the
+                                    // file has left: the removal asks
+                                    // for that walk itself.
+                                    batch.push((
+                                        local_path.clone(),
+                                        PendingIntentKind::ApplyRemoteDelete,
+                                        now,
+                                    ));
+                                }
+                                None => {
+                                    crate::logging::warning(
+                                        "Reconcile found a file/directory type mismatch in two-way mode; leaving both sides untouched",
+                                        &[("path", local_path.display().to_string())],
+                                    );
+                                    self.type_mismatches.push(local_path.clone());
+                                }
+                            }
                         }
                     },
                 },
@@ -966,6 +1035,22 @@ impl ReconcileWalker {
                             &remote,
                             now,
                         )?;
+                        continue;
+                    }
+                    if sync_mode == SyncMode::TwoWay
+                        && !self.merge_without_deletions
+                        && remote.kind == RemoteEntryKind::Directory
+                        && state_db.sync_index_has_rows_under(&local_path)?
+                    {
+                        // A folder this device synced and no longer has:
+                        // it was removed here. One deletion of the
+                        // folder covers the tree: the executor lists
+                        // the cloud folder, deletes each file that is
+                        // still what was synced, keeps and brings back
+                        // what is not, and removes each folder that is
+                        // left empty. A walk into the folder would
+                        // delete the files and leave every folder.
+                        batch.push((local_path, PendingIntentKind::Delete, now));
                         continue;
                     }
                     match sync_mode {
@@ -1074,6 +1159,99 @@ fn remote_touched_since_last_sync(
                 && !index.matches_remote(remote.size_bytes, remote.modified_at)
         }
     })
+}
+
+/// A name that is a file on one side and a folder on the other, where
+/// the sync index shows that one side made the swap and the other side
+/// still holds what was last synced. Such a pair needs no question.
+enum OneSidedSwap {
+    /// This device put a folder where a synced file was; the cloud
+    /// file is as it was synced.
+    FolderHereOverSyncedFile,
+    /// This device put a file where a synced folder was.
+    FileHereOverSyncedFolder,
+    /// The cloud put a file where a synced folder was, and every local
+    /// file under the folder is as it was synced. Holds their paths.
+    FileInCloudOverSyncedFolder(Vec<PathBuf>),
+    /// The cloud put a folder where a synced file was; the local file
+    /// is as it was synced.
+    FolderInCloudOverSyncedFile,
+}
+
+/// Reads from the index which side swapped a file for a folder, or a
+/// folder for a file. `None` when both sides changed, or when the name
+/// never synced: only the user can say which one stays then.
+fn swap_made_by_one_side(
+    state_db: &DurableStateDb,
+    local_path: &Path,
+    local: &LocalEntry,
+    remote: &RemoteEntry,
+) -> Result<Option<OneSidedSwap>, WalkError> {
+    let file_row = state_db.sync_index(local_path)?;
+    let folder_was_synced = state_db.sync_index_has_rows_under(local_path)?;
+    Ok(match (local.is_dir, file_row, folder_was_synced) {
+        // A folder here, a file in the cloud.
+        (true, Some(row), false) if row.matches_remote(remote.size_bytes, remote.modified_at) => {
+            Some(OneSidedSwap::FolderHereOverSyncedFile)
+        }
+        (true, None, true) => local_folder_as_synced(state_db, local_path)?
+            .map(OneSidedSwap::FileInCloudOverSyncedFolder),
+        // A file here, a folder in the cloud.
+        (false, Some(row), false) if row.matches_local(local.size_bytes, local.modified_at) => {
+            Some(OneSidedSwap::FolderInCloudOverSyncedFile)
+        }
+        (false, None, true) => Some(OneSidedSwap::FileHereOverSyncedFolder),
+        _ => None,
+    })
+}
+
+/// The files under `folder`, when each one is exactly what the index
+/// recorded and the folder holds no other file. `None` when any file
+/// changed, is new, or cannot be read: the folder then holds something
+/// that a removal would lose.
+fn local_folder_as_synced(
+    state_db: &DurableStateDb,
+    folder: &Path,
+) -> Result<Option<Vec<PathBuf>>, WalkError> {
+    let rows = state_db.sync_index_rows_under(folder)?;
+    for row in &rows {
+        let unchanged = fs::symlink_metadata(&row.path).is_ok_and(|metadata| {
+            metadata.is_file() && row.matches_local(metadata.len(), metadata.modified().ok())
+        });
+        if !unchanged {
+            return Ok(None);
+        }
+    }
+    // Every row has its file; a file with no row makes the count differ.
+    let mut files = 0usize;
+    let mut pending = vec![folder.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            return Ok(None);
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name
+                .to_str()
+                .is_some_and(vapor_providers::filesystem::is_internal_file_name)
+            {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => pending.push(entry.path()),
+                Ok(kind) if kind.is_file() => {
+                    files += 1;
+                    if files > rows.len() {
+                        return Ok(None);
+                    }
+                }
+                // A link or a special file is not synced content, and a
+                // removal of the folder would lose it.
+                _ => return Ok(None),
+            }
+        }
+    }
+    Ok((files == rows.len()).then(|| rows.into_iter().map(|row| row.path).collect()))
 }
 
 /// A synced file the cloud no longer has, while the local copy is

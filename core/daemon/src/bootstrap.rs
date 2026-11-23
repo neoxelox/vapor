@@ -261,9 +261,32 @@ pub fn run_daemon() -> Result<(), BootstrapError> {
 
     let result = runtime.run_forever();
 
+    // The loop flushed what the watcher reported, and the queue is
+    // durable. What is left is the end of the worker threads, and a
+    // worker inside a call that never returns would hold the process
+    // for good: it would keep its job, answer nobody, and sync nothing.
+    // So the wait has a limit, and the process ends without the worker.
+    let (workers_done, limit) = std::sync::mpsc::channel::<()>();
+    let _ = std::thread::Builder::new()
+        .name("vapor-shutdown-limit".to_string())
+        .spawn(move || {
+            let wait = std::time::Duration::from_secs(
+                vapor_shared::constants::service::SHUTDOWN_JOIN_LIMIT_SECONDS,
+            );
+            if limit.recv_timeout(wait) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+                logging::warning(
+                    "A worker did not end within the shutdown limit; exiting without it",
+                    &[("limit_seconds", wait.as_secs().to_string())],
+                );
+                std::process::exit(0);
+            }
+        });
+
     // Drop the IPC handle explicitly so the socket file is removed on
     // clean shutdown even if drop order is later modified.
     drop(ipc_handle);
+    drop(runtime);
+    drop(workers_done);
 
     result.map_err(BootstrapError::from)
 }

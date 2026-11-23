@@ -130,10 +130,12 @@ true); one behavior per scenario; own your setup.
 
 Things the product does on purpose that a scenario must account for:
 
-- A deletion of a synced file waits one settle window (3 s) before it
-  lands, so a rename can be recognised as a move; budget for it in
-  waits, and expect a delete burst to join a `mass-delete` hold over
-  a few ticks rather than at once.
+- A deletion of a synced file waits one settle window (3 s) only
+  while the create half of a rename may still come: other local
+  events are inside their quiet window, or a transfer that could be
+  the new name is queued. Budget for it in waits, and expect a delete
+  burst to join a `mass-delete` hold over a few ticks rather than at
+  once.
 - A decision (`vapor decisions list --json`) holds only its scope and
   never pauses the daemon: assert `run.state` stays `running` and
   `decisions` counts it; answer with `vapor decisions resolve`.
@@ -147,9 +149,9 @@ Things the product does on purpose that a scenario must account for:
   provider is removed outright.
 - Both roots carry a hidden `.vapor-root` marker; the tree oracle
   ignores it, a listing you assert on must too.
-- The changes feed polls once a minute under the harness's static
-  throttle after the first idle window; a cloud-side change can take
-  that long to be noticed.
+- The filesystem provider's feed is a watcher on the cloud root, and
+  the daemon reads it each second: a cloud-side change is seen within
+  a second or two.
 
 ## Known limits (today)
 

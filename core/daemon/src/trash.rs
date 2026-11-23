@@ -101,6 +101,10 @@ pub struct LocalTrash {
     /// Tests stand in a second location without a second volume.
     #[cfg(test)]
     pinned_volume: Option<PathBuf>,
+    /// Tests stand in a trash on another volume: the rename of an item
+    /// into an entry answers `CrossesDevices`, as the OS does there.
+    #[cfg(test)]
+    pub(crate) rename_crosses_devices: bool,
     settings: TrashSettings,
     system: Arc<dyn TrashBin>,
     sequence: AtomicU64,
@@ -136,6 +140,8 @@ impl LocalTrash {
             sync_root: None,
             #[cfg(test)]
             pinned_volume: None,
+            #[cfg(test)]
+            rename_crosses_devices: false,
             settings,
             system,
             sequence: AtomicU64::new(0),
@@ -236,11 +242,53 @@ impl LocalTrash {
         self.settings = settings;
     }
 
+    /// This trash with other settings. The daemon shares one trash with
+    /// its workers, so a change of the settings makes a new one.
+    pub fn with_settings(&self, settings: TrashSettings) -> Self {
+        Self {
+            profile_id: self.profile_id.clone(),
+            root: self.root.clone(),
+            sync_root: self.sync_root.clone(),
+            #[cfg(test)]
+            pinned_volume: self.pinned_volume.clone(),
+            #[cfg(test)]
+            rename_crosses_devices: self.rename_crosses_devices,
+            settings,
+            system: self.system.clone(),
+            sequence: AtomicU64::new(self.sequence.load(std::sync::atomic::Ordering::Relaxed)),
+        }
+    }
+
     /// Discards `path` (a file or a directory) for `reason`: into the
     /// user's trash when configured and possible, else into the
     /// managed trash, else (trash disabled) by unlinking. The path is
     /// gone from its original place when this returns `Ok`.
     pub fn discard(&self, path: &Path, reason: &str, now: SystemTime) -> io::Result<Disposition> {
+        self.discard_as(path, reason, now, true)
+    }
+
+    /// [`Self::discard`] for the tick thread, which reads no file
+    /// content: when only a copy can move the item (the volume of the
+    /// item refuses a trash folder, so the item has to go to the
+    /// runtime directory on another volume), nothing is moved and the
+    /// error is `CrossesDevices`. The caller then runs
+    /// [`Self::discard`] on a worker.
+    pub fn discard_without_copy(
+        &self,
+        path: &Path,
+        reason: &str,
+        now: SystemTime,
+    ) -> io::Result<Disposition> {
+        self.discard_as(path, reason, now, false)
+    }
+
+    fn discard_as(
+        &self,
+        path: &Path,
+        reason: &str,
+        now: SystemTime,
+        may_copy: bool,
+    ) -> io::Result<Disposition> {
         if !self.settings.enabled {
             remove_any(path)?;
             return Ok(Disposition::Removed);
@@ -295,8 +343,8 @@ impl LocalTrash {
             .map_err(MoveError::NothingMoved)
             .and_then(|()| {
                 let destination = payload_path(&entry_dir, &file_name);
-                match fs::rename(path, &destination) {
-                    Err(error) if error.kind() == io::ErrorKind::CrossesDevices => {
+                match self.rename_into_entry(path, &destination) {
+                    Err(error) if error.kind() == io::ErrorKind::CrossesDevices && may_copy => {
                         copy_then_remove(path, &destination)
                     }
                     result => result.map_err(MoveError::NothingMoved),
@@ -327,6 +375,17 @@ impl LocalTrash {
                 Err(error)
             }
         }
+    }
+
+    fn rename_into_entry(&self, path: &Path, destination: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        if self.rename_crosses_devices {
+            return Err(io::Error::new(
+                io::ErrorKind::CrossesDevices,
+                "the trash is on another volume",
+            ));
+        }
+        fs::rename(path, destination)
     }
 
     /// Makes the directory of a new entry in `location` and returns its
@@ -646,6 +705,33 @@ mod tests {
             },
             Arc::new(vapor_platform::InMemoryTrashBin::unsupported()),
         )
+    }
+
+    #[test]
+    fn a_discard_that_needs_a_copy_moves_nothing_unless_a_copy_is_allowed() {
+        let temp = TempDir::new().expect("temp");
+        let mut trash = managed(&temp);
+        trash.rename_crosses_devices = true;
+        let file = temp.path().join("on-another-volume.txt");
+        fs::write(&file, b"payload").expect("seed");
+
+        // The tick thread asks: no copy, no entry, the file stays.
+        let refused = trash
+            .discard_without_copy(&file, "cloud-delete", at(100))
+            .expect_err("only a copy can move it");
+        assert_eq!(refused.kind(), io::ErrorKind::CrossesDevices);
+        assert_eq!(fs::read(&file).expect("the file stays"), b"payload");
+        assert!(
+            trash.list().is_empty(),
+            "no entry for an item that did not move"
+        );
+
+        // A worker asks: the copy is made and the original goes.
+        trash
+            .discard(&file, "cloud-delete", at(100))
+            .expect("the copy moves it");
+        assert!(!file.exists());
+        assert_eq!(trash.list().len(), 1);
     }
 
     #[test]

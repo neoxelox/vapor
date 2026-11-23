@@ -304,6 +304,14 @@ fn init_sets_an_install_up(ctx: &mut Ctx) -> Result<(), Failure> {
         first["profiles"][0]["id"] == "default",
         "the first profile is the default one: {first}"
     );
+    // The daemon was up before the profile existed. The run waits for
+    // it to read the configuration again, so its last line is not "no
+    // sync profile yet" about the profile it has just made.
+    ensure!(
+        first["daemon"]["state"].is_string()
+            && first["daemon"]["state"] != vapor_shared::constants::run_state::UNCONFIGURED,
+        "init ends with a daemon that does not know the profile: {first}"
+    );
 
     // The running daemon picks the profile up and syncs.
     cli.wait_run_state("running", CONVERGE_TIMEOUT)?;

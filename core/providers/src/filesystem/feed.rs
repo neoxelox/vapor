@@ -322,6 +322,10 @@ fn report_directory_files(
             report_directory_files(root, tags, &path, observed_at, sink);
             continue;
         }
+        if !metadata.is_file() {
+            // A pipe, a socket, a device: not an object.
+            continue;
+        }
         let Some(remote_path) = RemotePath::from_local(root, &path) else {
             continue;
         };
@@ -386,7 +390,9 @@ fn normalize_watch_event(
 
     match fs::symlink_metadata(&event.path) {
         Ok(metadata) => {
-            if metadata.file_type().is_symlink() || metadata.is_dir() {
+            // Regular files only: a link, a folder, a pipe, a socket,
+            // and a device are not objects of the cloud folder.
+            if !metadata.file_type().is_file() {
                 return None;
             }
             let op_id = tags.read_op_id(&event.path);

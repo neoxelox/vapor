@@ -22,9 +22,115 @@ pub struct DeferredReconcileRecord {
     pub root: PathBuf,
     pub reason: StormReason,
     pub first_detected_at: SystemTime,
+    /// The last moment the folder was in a storm: when it was detected,
+    /// and after that each time the events it takes in reach storm
+    /// level again. A few events a second do not move it.
     pub last_observed_at: SystemTime,
+    /// When the reconcile starts in a throttle state other than `Idle`.
     pub available_at: SystemTime,
     pub reschedule_count: usize,
+    /// The window in which the events the folder takes in are counted,
+    /// and the count so far.
+    pub busy_window_started_at: SystemTime,
+    pub busy_window_events: usize,
+}
+
+/// The start of a deferred reconcile on an idle device: `quiet` after
+/// the end of the storm, and never later than `max_delay` after the
+/// storm was first seen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IdleRelease {
+    pub quiet: Duration,
+    pub max_delay: Duration,
+}
+
+impl Default for IdleRelease {
+    fn default() -> Self {
+        Self {
+            quiet: Duration::from_millis(
+                constants::engine::DEFERRED_RECONCILE_IDLE_QUIET_RELEASE_MILLIS,
+            ),
+            max_delay: Duration::from_millis(
+                constants::engine::DEFERRED_RECONCILE_IDLE_MAX_DELAY_MILLIS,
+            ),
+        }
+    }
+}
+
+impl DeferredReconcileRecord {
+    /// A storm first seen at `observed_at`; `delay` is the wait after
+    /// its end in a throttle state other than `Idle`.
+    pub fn new(
+        root: PathBuf,
+        reason: StormReason,
+        observed_at: SystemTime,
+        delay: Duration,
+    ) -> Self {
+        Self {
+            root,
+            reason,
+            first_detected_at: observed_at,
+            last_observed_at: observed_at,
+            available_at: observed_at + delay,
+            reschedule_count: 0,
+            busy_window_started_at: observed_at,
+            busy_window_events: 0,
+        }
+    }
+
+    /// The storm was seen again at `observed_at` (a new trigger).
+    pub fn note_storm(&mut self, reason: StormReason, observed_at: SystemTime, delay: Duration) {
+        self.reason = reason;
+        self.extend_to(observed_at, delay);
+    }
+
+    /// The compacted folder took in one more event. It moves the end of
+    /// the storm only when the events of one window reach `busy_events`.
+    pub fn note_absorbed(
+        &mut self,
+        observed_at: SystemTime,
+        delay: Duration,
+        window: Duration,
+        busy_events: usize,
+    ) {
+        let in_window = observed_at
+            .duration_since(self.busy_window_started_at)
+            .is_ok_and(|age| age <= window);
+        if !in_window {
+            self.busy_window_started_at = observed_at;
+            self.busy_window_events = 0;
+        }
+        self.busy_window_events += 1;
+        if self.busy_window_events >= busy_events.max(1) {
+            self.extend_to(observed_at, delay);
+        }
+    }
+
+    fn extend_to(&mut self, observed_at: SystemTime, delay: Duration) {
+        if observed_at > self.last_observed_at {
+            self.last_observed_at = observed_at;
+        }
+        // "Defer until quiet", but bounded: a folder that never goes
+        // quiet must not push its own reconcile out forever.
+        let latest = self.first_detected_at
+            + Duration::from_millis(constants::engine::DEFERRED_RECONCILE_MAX_DELAY_MILLIS);
+        self.available_at = self
+            .available_at
+            .max(self.last_observed_at + delay)
+            .min(latest);
+        self.reschedule_count += 1;
+    }
+
+    /// Whether the reconcile starts at `now`. On an idle device it
+    /// starts a moment after the storm ends; elsewhere it waits out the
+    /// longer delay.
+    pub fn is_ready(&self, now: SystemTime, idle: Option<IdleRelease>) -> bool {
+        self.available_at <= now
+            || idle.is_some_and(|idle| {
+                (self.last_observed_at + idle.quiet).min(self.first_detected_at + idle.max_delay)
+                    <= now
+            })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +140,9 @@ pub struct StormThresholds {
     pub directory_event_count_threshold: usize,
     pub global_pending_event_count_threshold: usize,
     pub deferred_reconcile_delay: Duration,
+    /// Events a compacted folder takes in inside one window while it
+    /// still counts as in a storm.
+    pub absorbed_busy_event_threshold: usize,
 }
 
 impl Default for StormThresholds {
@@ -49,6 +158,7 @@ impl Default for StormThresholds {
             deferred_reconcile_delay: Duration::from_millis(
                 constants::engine::DEFERRED_RECONCILE_DELAY_MILLIS,
             ),
+            absorbed_busy_event_threshold: constants::engine::STORM_ABSORBED_BUSY_EVENTS,
         }
     }
 }
@@ -85,6 +195,15 @@ impl StormDetector {
 
     pub fn deferred_available_at(&self, observed_at: SystemTime) -> SystemTime {
         observed_at + self.thresholds.deferred_reconcile_delay
+    }
+
+    /// The window and the event count that say a compacted folder is
+    /// still in a storm.
+    pub fn busy_measure(&self) -> (Duration, usize) {
+        (
+            self.thresholds.window,
+            self.thresholds.absorbed_busy_event_threshold,
+        )
     }
 
     pub fn observe_event(
@@ -174,14 +293,23 @@ impl StormDetector {
         reason: StormReason,
         observed_at: SystemTime,
     ) -> DeferredReconcileRecord {
-        DeferredReconcileRecord {
+        DeferredReconcileRecord::new(
             root,
             reason,
-            first_detected_at: observed_at,
-            last_observed_at: observed_at,
-            available_at: self.deferred_available_at(observed_at),
-            reschedule_count: 0,
-        }
+            observed_at,
+            self.thresholds.deferred_reconcile_delay,
+        )
+    }
+
+    /// Forgets what the windows hold of the storm under `root`. The
+    /// folder is compacted now and its events no longer come here, but
+    /// the windows of the folders above it still count the burst for a
+    /// whole window: one event next to the compacted folder would then
+    /// trip the parent, and the parent would be compacted for a burst
+    /// that was already taken care of.
+    pub fn forget_storm_under(&mut self, root: &Path) {
+        self.directory_windows
+            .retain(|directory, _| !directory.starts_with(root) && !root.starts_with(directory));
     }
 
     /// Global window pruning runs at most once per storm window instead
@@ -302,6 +430,7 @@ mod tests {
                 directory_event_count_threshold: 99,
                 global_pending_event_count_threshold: 99,
                 deferred_reconcile_delay: Duration::from_secs(30),
+                absorbed_busy_event_threshold: 1,
                 ..StormThresholds::default()
             },
         );
@@ -330,6 +459,7 @@ mod tests {
                 directory_event_count_threshold: 3,
                 global_pending_event_count_threshold: 99,
                 deferred_reconcile_delay: Duration::from_secs(30),
+                absorbed_busy_event_threshold: 1,
                 ..StormThresholds::default()
             },
         );
@@ -355,6 +485,7 @@ mod tests {
                 directory_event_count_threshold: 99,
                 global_pending_event_count_threshold: 2,
                 deferred_reconcile_delay: Duration::from_secs(15),
+                absorbed_busy_event_threshold: 1,
                 ..StormThresholds::default()
             },
         );

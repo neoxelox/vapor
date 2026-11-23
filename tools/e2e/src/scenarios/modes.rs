@@ -104,6 +104,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: two_profiles_isolated,
         },
         Scenario {
+            id: "S80",
+            name: "two-profiles-edit-one-file",
+            proves: "two profiles on one cloud folder that both change one file before either upload lands keep both edits: each local folder and the cloud folder end with the file and one conflict copy, whichever upload reached the cloud first",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: two_profiles_edit_one_file,
+        },
+        Scenario {
             id: "S74",
             name: "nested-profile-does-not-run",
             proves: "a profile in vapor.json whose local folder is inside the one of an earlier profile does not run: vapor status lists it as suspended with the reason, neither of its folders is created, and the earlier profile syncs",
@@ -615,6 +623,95 @@ fn two_profiles_isolated(ctx: &mut Ctx) -> Result<(), Failure> {
         let report = oracle.compare(local, cloud)?;
         ensure!(report.is_clean(), "profile {label}: {}", report.summary(10));
     }
+    ctx.set_oracle(OracleMode::Skip(
+        "profiles use their own roots; compared explicitly above".to_string(),
+    ));
+    Ok(())
+}
+
+fn two_profiles_edit_one_file(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    let alpha_local = ctx.sandbox.root.join("alpha-local");
+    let beta_local = ctx.sandbox.root.join("beta-local");
+    let shared_cloud = ctx.sandbox.root.join("cloud").join("Shared");
+    let profiles = serde_json::json!([
+        {
+            "id": "alpha",
+            "name": "Alpha",
+            "enabled": true,
+            "localRoot": alpha_local.to_string_lossy(),
+            "cloudRoot": shared_cloud.to_string_lossy(),
+        },
+        {
+            "id": "beta",
+            "name": "Beta",
+            "enabled": true,
+            "localRoot": beta_local.to_string_lossy(),
+            "cloudRoot": shared_cloud.to_string_lossy(),
+        }
+    ]);
+    ctx.cli().config_set("profiles", &profiles.to_string())?;
+    ctx.start_daemon()?;
+    let alpha_db = crate::db::StateDb::at(&home.profile_state_db("alpha"));
+    let beta_db = crate::db::StateDb::at(&home.profile_state_db("beta"));
+    let oracle = crate::oracle::TreeOracle::new(&crate::oracle::OracleOptions {
+        extra_ignore_rules: Vec::new(),
+        compare_mode: cfg!(unix),
+    })?;
+    let converged = |ctx: &Ctx, what: &str| {
+        ctx.wait_until(Duration::from_secs(90), what, || {
+            alpha_db.queue_drained()
+                && beta_db.queue_drained()
+                && [&alpha_local, &beta_local].iter().all(|local| {
+                    oracle
+                        .compare(local, &shared_cloud)
+                        .is_ok_and(|report| report.is_clean())
+                })
+        })
+    };
+
+    write_file(
+        &alpha_local.join("doc.txt"),
+        "the version both start from\n",
+    )?;
+    ctx.wait_exists(&beta_local.join("doc.txt"), CONVERGE_TIMEOUT)?;
+    converged(ctx, "the first version on both devices")?;
+
+    // Both devices save while nothing is released, so both uploads
+    // start in the same tick.
+    ctx.cli().pause()?;
+    write_file(&alpha_local.join("doc.txt"), "the edit made on alpha\n")?;
+    write_file(&beta_local.join("doc.txt"), "the edit made on beta\n")?;
+    std::thread::sleep(Duration::from_secs(3));
+    ctx.cli().resume()?;
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "a conflict copy in the cloud folder",
+        || conflict_copy_exists(&shared_cloud, "doc"),
+    )?;
+    converged(ctx, "both devices to hold what the cloud holds")?;
+
+    for (label, tree) in [
+        ("alpha", &alpha_local),
+        ("beta", &beta_local),
+        ("the cloud folder", &shared_cloud),
+    ] {
+        for edit in ["the edit made on alpha\n", "the edit made on beta\n"] {
+            ensure!(
+                tree_contains_content(tree, edit.as_bytes()),
+                "{label} lost {edit:?}"
+            );
+        }
+        let copies = crate::scenario::conflict_copies(tree, "doc").count();
+        ensure!(
+            copies == 1,
+            "{label} holds {copies} conflict copies of doc.txt, not one"
+        );
+    }
+    // Which of the two the daemon logs depends on which upload reached
+    // the cloud first, and on whether the other one saw it in time.
+    ctx.allow_warning("Resolved concurrent divergence by keeping both versions");
+    ctx.allow_warning("An upload replaced a version another writer had just put in the cloud");
     ctx.set_oracle(OracleMode::Skip(
         "profiles use their own roots; compared explicitly above".to_string(),
     ));

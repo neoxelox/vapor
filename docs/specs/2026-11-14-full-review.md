@@ -480,6 +480,4 @@ Not built, with the task that tracks each one:
 | Proxy settings and system root certificates in the HTTP transport | A network that inspects TLS cannot sync | `docs/tasks/core.md` P-3 |
 | A live check of the Drive changes | Built from the API documents | `docs/tasks/core.md` P-4 |
 | The Google verification decision | The client can serve 100 users | `docs/tasks/core.md` P-5 |
-| The macOS system trash through `NSFileManager` | A rename into `~/.Trash`, with no Put Back | `docs/tasks/core.md` PL-1 |
-| A launchd job state that does not come from `launchctl print` text | The installer matches that text | `docs/tasks/core.md` PL-2 |
 | The first-run flow of the Mac app, its sync mode control, and its ignored-paths view | The runtime and the CLI side are in | `docs/tasks/macos.md` O-1 to O-4, M4-2, M4-5, M3-14 |

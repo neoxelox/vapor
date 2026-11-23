@@ -20,6 +20,13 @@ report~conflict-macbook-air-1731500000000.md   macbook-air's edit
 report~conflict-mac-studio-1731500004000.md    mac-studio's edit
 ```
 
+One case has no device that lost the race. Two uploads of one file can
+land in the same moment, each having checked the cloud before the other
+wrote. The later one then replaced a version that its device never saw.
+The provider keeps that version as `report~conflict-replaced-<ms>.md`:
+`replaced` stands where the device id goes (`data-flow.md` §Conflict
+handling). It is a version of the file like any other copy.
+
 The copies sync like any file, so every device ends up with the same
 three files under the same names. Which version holds the name does not
 depend on the device you look from.
@@ -90,13 +97,13 @@ enabled profile. A conflict reads `kind: "conflict"`, `scope: "path"`,
 | Field | Meaning |
 |---|---|
 | `file` | the version's file name; also its option key |
-| `device` | the `deviceId` whose edit a copy holds; `null` for the file under the name |
+| `device` | the `deviceId` whose edit a copy holds, or `replaced` for a version that an upload replaced unseen; `null` for the file under the name |
 | `sizeBytes` | its size |
 | `modifiedAtMs` | its modification time |
 
 Option labels say whose edit each version is: "Keep the version already
 under the name", "Keep this device's edit", "Keep the edit made on
-mac-studio". The list reads the profile state databases directly, so it
+mac-studio", "Keep the version that another upload replaced". The list reads the profile state databases directly, so it
 works with the daemon stopped; a conflict with no copy left is left out
 until the daemon withdraws it. The `--json` shape is locked in
 `core/cli/src/commands/decisions.rs`.

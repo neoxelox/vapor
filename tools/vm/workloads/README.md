@@ -70,15 +70,8 @@ The guest image has Python 3, git, node, npm, and sqlite3.
   that prints the token> | vapor auth login --profile <id> --token -`.
   `drive_tests.py` and `drive_conflict.py` expect two profiles, one
   on `~/VaporDrive` and one on `~/VaporDrive2`, on one Drive folder.
-  On a local build the daemon cannot read that sign-in from the
-  keychain (open work in `docs/tasks/core.md`). In a guest, sign in
-  through the real path of the CLI
-  (`/Applications/Vapor.app/Contents/Helpers/vapor`), then let the
-  daemon's binary into the item, and restart the service:
-  `security set-generic-password-partition-list -S
-  "cdhash:<vapord>,cdhash:<vapor>,apple-tool:,apple:" -s sh.arn.vapor
-  -a auth.<profile>.gdrive.token -k admin`, with the two hashes from
-  `codesign -dvvv`. `admin` is the password of the guest image.
+  The daemon's binary writes the sign-in to the keychain, so the
+  daemon reads it with no further step.
 
 ## Limits
 

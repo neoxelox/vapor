@@ -28,11 +28,15 @@ pub struct DebounceWindows {
     document: Duration,
     lockfile: Duration,
     other: Duration,
+    /// The window of an `Other` file whose writes came within
+    /// `growth_span`: it was written in one go and is complete.
+    other_settled: Duration,
+    growth_span: Duration,
 }
 
 impl Default for DebounceWindows {
     fn default() -> Self {
-        Self::from_millis(
+        let mut windows = Self::from_millis(
             constants::engine::MIN_DEBOUNCE_WINDOW_MILLIS,
             constants::engine::MAX_DEBOUNCE_WINDOW_MILLIS,
             constants::engine::KEY_CONFIG_DEBOUNCE_WINDOW_MILLIS,
@@ -40,7 +44,14 @@ impl Default for DebounceWindows {
             constants::engine::DOCUMENT_DEBOUNCE_WINDOW_MILLIS,
             constants::engine::LOCKFILE_DEBOUNCE_WINDOW_MILLIS,
             constants::engine::DEFAULT_DEBOUNCE_WINDOW_MILLIS,
-        )
+        );
+        windows.other_settled = clamp_duration(
+            Duration::from_millis(constants::engine::SETTLED_FILE_DEBOUNCE_WINDOW_MILLIS),
+            windows.minimum,
+            windows.other,
+        );
+        windows.growth_span = Duration::from_millis(constants::engine::GROWING_FILE_SPAN_MILLIS);
+        windows
     }
 }
 
@@ -71,7 +82,27 @@ impl DebounceWindows {
             document: clamp_duration(Duration::from_millis(document_millis), minimum, maximum),
             lockfile: clamp_duration(Duration::from_millis(lockfile_millis), minimum, maximum),
             other: clamp_duration(Duration::from_millis(other_millis), minimum, maximum),
+            // No shorter window unless the caller sets one: every
+            // `Other` file waits `other`.
+            other_settled: clamp_duration(Duration::from_millis(other_millis), minimum, maximum),
+            growth_span: Duration::ZERO,
         }
+    }
+
+    /// The window for one pending record: the class window, and for a
+    /// file with no class of its own the shorter one when its writes
+    /// came in one go. A file type says little about when a file is
+    /// complete; how it was written says more.
+    fn window_for(&self, record: &PendingEventRecord) -> (DebounceClass, Duration) {
+        let (class, window) = self.classify_path(record.path.as_path());
+        let written_in_one_go = record
+            .last_observed_at
+            .duration_since(record.first_observed_at)
+            .is_ok_and(|span| span <= self.growth_span);
+        if class == DebounceClass::Other && written_in_one_go {
+            return (class, self.other_settled);
+        }
+        (class, window)
     }
 
     pub fn classify_path(&self, path: &Path) -> (DebounceClass, Duration) {
@@ -241,7 +272,7 @@ impl DebounceLoop {
         record: &PendingEventRecord,
         now: SystemTime,
     ) -> Option<(DebounceClass, Duration)> {
-        let classification @ (_, quiet_window) = self.windows.classify_path(record.path.as_path());
+        let classification @ (_, quiet_window) = self.windows.window_for(record);
         // The `Err(_)` branch here is the conservative fallback: a wall-
         // clock rewind keeps an event pending instead of stabilizing it
         // prematurely. This complements the Instant-based tick_is_due: even
@@ -525,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn other_paths_wait_for_longer_default_window() {
+    fn a_file_with_no_class_that_was_written_in_one_go_waits_the_short_window() {
         let watch_root = PathBuf::from("/tmp/vapor-root");
         let path = watch_root.join("capture.mov");
         let mut maps = bounded_maps(&watch_root);
@@ -533,16 +564,41 @@ mod tests {
         let mut loop_state =
             DebounceLoop::with_windows_and_clock(DebounceWindows::default(), clock.clone());
 
+        // A copy: created and written within the same moment.
         maps.record_event(fs_event(path.clone(), FsEventKind::Created, 0));
+        maps.record_event(fs_event(path.clone(), FsEventKind::Modified, 80));
 
-        assert!(loop_state.run_tick(&mut maps, timestamp(3_750)).is_empty());
-        // Cross the tick interval so the next call is due, then assert
-        // the event hasn't aged past the larger 4s "Other" quiet window.
+        assert!(loop_state.run_tick(&mut maps, timestamp(900)).is_empty());
         clock.advance(Duration::from_millis(250));
-        let stabilized = loop_state.run_tick(&mut maps, timestamp(4_000));
+        let stabilized = loop_state.run_tick(&mut maps, timestamp(1_080));
         assert_eq!(stabilized.len(), 1);
         assert_eq!(stabilized[0].path, path);
         assert_eq!(stabilized[0].debounce_class, DebounceClass::Other);
+        assert_eq!(stabilized[0].quiet_window, Duration::from_millis(1_000));
+    }
+
+    #[test]
+    fn a_file_with_no_class_that_still_grows_waits_the_long_window() {
+        let watch_root = PathBuf::from("/tmp/vapor-root");
+        let path = watch_root.join("capture.mov");
+        let mut maps = bounded_maps(&watch_root);
+        let clock = Arc::new(ManualClock::at_now());
+        let mut loop_state =
+            DebounceLoop::with_windows_and_clock(DebounceWindows::default(), clock.clone());
+
+        // A recording: writes for three seconds, then a pause.
+        for at in [0, 800, 1_600, 2_400, 3_000] {
+            maps.record_event(fs_event(path.clone(), FsEventKind::Modified, at));
+        }
+
+        // One second after the last write is not enough for this one:
+        // its next write may be a moment away.
+        assert!(loop_state.run_tick(&mut maps, timestamp(4_200)).is_empty());
+        clock.advance(Duration::from_millis(250));
+        assert!(loop_state.run_tick(&mut maps, timestamp(6_750)).is_empty());
+        clock.advance(Duration::from_millis(250));
+        let stabilized = loop_state.run_tick(&mut maps, timestamp(7_000));
+        assert_eq!(stabilized.len(), 1);
         assert_eq!(stabilized[0].quiet_window, Duration::from_millis(4_000));
     }
 

@@ -1093,6 +1093,9 @@ mod tests {
         fn stop_daemon(&self) -> Result<(), vapor_platform::ServiceInstallError> {
             self.inner.stop_daemon()
         }
+        fn kill_daemon(&self) -> Result<(), vapor_platform::ServiceInstallError> {
+            self.inner.stop_daemon()
+        }
         fn status(&self) -> Result<ServiceStatus, vapor_platform::ServiceInstallError> {
             self.inner.status()
         }

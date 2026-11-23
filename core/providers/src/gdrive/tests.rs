@@ -1167,3 +1167,295 @@ fn google_native_types_are_excluded_but_folders_and_files_are_not() {
     assert!(!is_google_native_non_folder("application/pdf"));
     assert!(!is_google_native_non_folder("text/plain"));
 }
+
+fn revision(id: &str, md5: &str, modified: &str) -> GdRevision {
+    GdRevision {
+        id: id.to_string(),
+        md5_checksum: Some(md5.to_string()),
+        modified_time: Some(modified.to_string()),
+        size: Some("10".to_string()),
+    }
+}
+
+#[test]
+fn a_version_between_the_base_and_the_upload_was_replaced_unseen() {
+    let base = revision("r0", "base", "2026-11-23T10:00:00.000Z");
+    let theirs = revision("r1", "theirs", "2026-11-23T10:00:05.100Z");
+    let ours = revision("r2", "ours", "2026-11-23T10:00:05.300Z");
+
+    // Nobody came in between.
+    assert!(revisions_replaced_unseen(&[base.clone(), ours.clone()], "base", "ours").is_empty());
+    // Another device's upload landed between the check and the commit.
+    assert_eq!(
+        revisions_replaced_unseen(
+            &[base.clone(), theirs.clone(), ours.clone()],
+            "base",
+            "ours"
+        ),
+        vec![theirs.clone()]
+    );
+    // The order of the answer does not decide.
+    assert_eq!(
+        revisions_replaced_unseen(
+            &[ours.clone(), theirs.clone(), base.clone()],
+            "base",
+            "ours"
+        ),
+        vec![theirs.clone()]
+    );
+    // A version after the upload is the next change, which the feed
+    // reports; it was not replaced by this upload.
+    let later = revision("r3", "later", "2026-11-23T10:00:09.000Z");
+    assert!(
+        revisions_replaced_unseen(&[base.clone(), ours.clone(), later], "base", "ours").is_empty()
+    );
+    // An older version that the base itself replaced is history.
+    let older = revision("r-1", "older", "2026-11-22T09:00:00.000Z");
+    assert!(
+        revisions_replaced_unseen(&[older.clone(), base.clone(), ours.clone()], "base", "ours")
+            .is_empty()
+    );
+    // With no version of the base in the list, nothing can be said.
+    assert!(revisions_replaced_unseen(&[theirs.clone(), ours.clone()], "base", "ours").is_empty());
+    // Two devices came in between, one of them twice with one content.
+    let third = revision("r1b", "third", "2026-11-23T10:00:05.200Z");
+    let theirs_again = revision("r1c", "theirs", "2026-11-23T10:00:05.250Z");
+    assert_eq!(
+        revisions_replaced_unseen(
+            &[base, theirs, third.clone(), theirs_again.clone(), ours],
+            "base",
+            "ours"
+        ),
+        vec![third, theirs_again]
+    );
+}
+
+/// A guarded overwrite of `doc.txt` (file `doc-id` in the root) that
+/// lands, with the base `base-md5`.
+fn landed_overwrite(provider: &GoogleDriveProvider, transport: &ScriptedHttpTransport) -> String {
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"base-md5","size":"4","parents":["root-folder"]}]}"#,
+    );
+    // The re-verification before the commit still sees the base.
+    transport.push_response(
+        200,
+        r#"{"id":"doc-id","name":"doc.txt","mimeType":"text/plain","md5Checksum":"base-md5","size":"4","parents":["root-folder"]}"#,
+    );
+    let ours = md5_hex_of_bytes(b"our edit");
+    transport.push_response(200, format!(r#"{{"id":"doc-id","md5Checksum":"{ours}"}}"#));
+
+    let scratch = tempfile::TempDir::new().expect("scratch");
+    let source = scratch.path().join("doc.txt");
+    std::fs::write(&source, b"our edit").expect("seed");
+    let mut session = provider
+        .begin_upload(UploadRequest {
+            local_source: source,
+            remote_path: RemotePath::new("doc.txt").expect("path"),
+            op_id: "dev-op-doc".to_string(),
+            precondition: RemotePrecondition::HashEquals("base-md5".to_string()),
+        })
+        .expect("session");
+    assert!(matches!(
+        session.step(u64::MAX).expect("the upload lands"),
+        TransferStep::Completed(_)
+    ));
+    ours
+}
+
+#[test]
+fn a_version_that_an_upload_replaced_unseen_is_kept_as_a_copy_at_the_next_poll() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let uploads_before = transport.recorded_requests().len();
+
+    // The versions of the file: another device wrote between the
+    // re-verification and the commit.
+    let theirs = md5_hex_of_bytes(b"their edit");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"10"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"files":[]}"#); // no copy of that name yet
+    transport.push_response(200, "their edit"); // the content of r1
+    transport.push_response(200, r#"{"id":"copy-id"}"#); // the copy is created
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    let work = &requests[uploads_before..];
+    assert_eq!(
+        work.len(),
+        5,
+        "{:?}",
+        work.iter().map(|r| &r.url).collect::<Vec<_>>()
+    );
+    assert!(work[0].url.contains("/files/doc-id/revisions?"));
+    assert!(work[2].url.contains("/files/doc-id/revisions/r1?alt=media"));
+    assert_eq!(work[3].method, "POST");
+    let created = String::from_utf8_lossy(&work[3].body);
+    // 2026-11-23T10:00:05.100Z in epoch milliseconds.
+    assert!(
+        created.contains(r#""name":"doc~conflict-replaced-1795428005100.txt""#),
+        "{created}"
+    );
+    assert!(
+        created.contains(r#""parents":["root-folder"]"#),
+        "{created}"
+    );
+    assert!(created.contains("their edit"));
+    assert!(work[4].url.contains("/changes?"));
+
+    // The work is done: the next poll reads the feed and nothing else.
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("second poll");
+    assert_eq!(transport.recorded_requests().len(), requests.len() + 1);
+}
+
+#[test]
+fn an_upload_that_replaced_only_its_base_makes_no_copy() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let uploads_before = transport.recorded_requests().len();
+
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    assert_eq!(
+        requests.len() - uploads_before,
+        2,
+        "one check, one read of the feed"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.contains("alt=media"))
+    );
+}
+
+#[test]
+fn a_check_that_fails_is_tried_again_and_a_copy_that_is_there_is_not_made_twice() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+
+    // The first poll cannot read the versions.
+    transport.push_response(503, "");
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider
+        .poll_changes(Some("t1"), 100)
+        .expect("the feed is read all the same");
+
+    // The second can, and another device kept the version already.
+    let theirs = md5_hex_of_bytes(b"their edit");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"10"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(
+        200,
+        r#"{"files":[{"id":"copy-id","name":"doc~conflict-replaced-1795428005100.txt","mimeType":"text/plain"}]}"#,
+    );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    let before = transport.recorded_requests().len();
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+
+    let requests = transport.recorded_requests();
+    assert_eq!(
+        requests.len() - before,
+        3,
+        "the versions, the name, the feed"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.url.contains("alt=media"))
+    );
+    assert!(
+        !requests[before..]
+            .iter()
+            .any(|request| request.method == "POST")
+    );
+}
+
+#[test]
+fn a_large_replaced_version_is_copied_one_chunk_for_each_poll() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+    let size = CHUNK_START + 1000;
+
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"big-md5","modifiedTime":"2026-11-23T10:00:05.100Z","size":"{size}"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response_with_headers(
+        200,
+        "",
+        vec![(
+            "Location".to_string(),
+            "https://upload.example/copy-session".to_string(),
+        )],
+    );
+    transport.push_response(206, vec![1_u8; CHUNK_START as usize]); // the first range
+    transport.push_response(308, ""); // accepted, not the end
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("first poll");
+
+    transport.push_response(206, vec![1_u8; 1000]); // the rest
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("second poll");
+
+    let requests = transport.recorded_requests();
+    let ranges: Vec<&str> = requests
+        .iter()
+        .flat_map(|request| request.headers.iter())
+        .filter(|(name, _)| name == "Content-Range")
+        .map(|(_, value)| value.as_str())
+        .collect();
+    assert_eq!(
+        ranges,
+        vec![
+            format!("bytes 0-{}/{size}", CHUNK_START - 1).as_str(),
+            format!("bytes {CHUNK_START}-{}/{size}", size - 1).as_str(),
+        ]
+    );
+    // Nothing is left to do.
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t4"}"#);
+    let before = transport.recorded_requests().len();
+    provider.poll_changes(Some("t3"), 100).expect("third poll");
+    assert_eq!(transport.recorded_requests().len(), before + 1);
+}

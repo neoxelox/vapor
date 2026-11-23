@@ -54,6 +54,14 @@ pub fn scenarios() -> Vec<Scenario> {
             run: conflict_tooling,
         },
         Scenario {
+            id: "S79",
+            name: "replaced-version-is-a-question",
+            proves: "a version that an upload replaced without having seen it, which the provider leaves next to the file as a copy named ~conflict-replaced, comes to this device and is one conflict decision whose option says what the copy is; the answer keeps it under the name on both sides",
+            needs: &[Need::NativeWatcher, Need::Filesystem],
+            expect: Expect::Pass,
+            run: replaced_version_is_a_question,
+        },
+        Scenario {
             id: "S51",
             name: "sync-under-lasting-conditions",
             proves: "with a user at the keyboard, on battery, and Low Power Mode on, the startup scan runs with no request and an offline divergence resolves as a keep-both copy; under critical thermal pressure a new file waits and status says why; it uploads when the pressure clears",
@@ -448,6 +456,83 @@ fn conflict_tooling(ctx: &mut Ctx) -> Result<(), Failure> {
         "status to count no open decision after resolution",
         || cli.status().is_some_and(|status| status.decisions == 0),
     )?;
+    Ok(())
+}
+
+fn replaced_version_is_a_question(ctx: &mut Ctx) -> Result<(), Failure> {
+    let home = ctx.primary.clone();
+    start_primary(ctx)?;
+    let mark = ctx.mark();
+    write_file(&home.local.join("doc.txt"), "the edit that kept the name\n")?;
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_exists(&home.cloud.join("doc.txt"), CONVERGE_TIMEOUT)?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
+
+    // Two uploads of one file landed in the same moment, and the
+    // second replaced the first without having compared it. The
+    // provider keeps the first next to the file under this name.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|age| age.as_millis())
+        .unwrap_or_default();
+    let copy = format!("doc~conflict-replaced-{now_ms}.txt");
+    write_file(&home.cloud.join(&copy), "the edit that was replaced\n")?;
+    ctx.wait_exists(&home.local.join(&copy), CONVERGE_TIMEOUT)?;
+
+    let cli = ctx.cli();
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "one conflict decision with the two versions",
+        || {
+            open_conflicts(&cli).is_some_and(|open| {
+                open.len() == 1 && open[0]["options"].as_array().is_some_and(|o| o.len() == 2)
+            })
+        },
+    )?;
+    let decision = open_conflicts(&cli)
+        .unwrap_or_default()
+        .into_iter()
+        .next()
+        .ok_or_else(|| Failure::new("no conflict decision to answer"))?;
+    ensure!(
+        decision["path"].as_str() == home.local.join("doc.txt").to_str(),
+        "the decision is not about doc.txt: {decision}"
+    );
+    let option = decision["options"]
+        .as_array()
+        .and_then(|options| options.iter().find(|option| option["key"] == copy.as_str()))
+        .cloned()
+        .ok_or_else(|| Failure::new(format!("the replaced version is not offered: {decision}")))?;
+    ensure!(
+        option["label"] == "Keep the version that another upload replaced",
+        "the option does not say what the copy is: {option}"
+    );
+
+    let mark = ctx.mark();
+    cli.json(&[
+        "decisions",
+        "resolve",
+        &decision["id"].to_string(),
+        "--choose",
+        &copy,
+        "--json",
+    ])?;
+    ensure!(
+        read_string(&home.local.join("doc.txt"))? == "the edit that was replaced\n",
+        "the chosen version did not take the name"
+    );
+    ctx.converge_from(&mark, 1, CONVERGE_TIMEOUT)?;
+    ctx.wait_until(
+        CONVERGE_TIMEOUT,
+        "the copy to leave the cloud folder",
+        || !conflict_copy_exists(&home.cloud, "doc"),
+    )?;
+    ctx.wait_same_content(
+        &home.local.join("doc.txt"),
+        &home.cloud.join("doc.txt"),
+        CONVERGE_TIMEOUT,
+    )?;
+    ctx.settle(CONVERGE_TIMEOUT)?;
     Ok(())
 }
 

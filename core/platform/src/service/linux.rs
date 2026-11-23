@@ -255,7 +255,13 @@ impl ServiceInstaller for NativeServiceInstaller {
     }
 
     fn stop_daemon(&self) -> Result<(), ServiceInstallError> {
+        // systemd waits `TimeoutStopSec` for the process and then kills
+        // it, so the stop ends with the process gone.
         self.systemctl_ok(&["stop", &self.unit_name()])
+    }
+
+    fn kill_daemon(&self) -> Result<(), ServiceInstallError> {
+        self.systemctl_ok(&["kill", "--signal=SIGKILL", &self.unit_name()])
     }
 
     fn status(&self) -> Result<ServiceStatus, ServiceInstallError> {

@@ -117,17 +117,25 @@ pub struct ProviderCapabilities {
     /// re-upload ([`Provider::move_object`]); the engine turns a
     /// detected local rename into one call when this is set.
     pub supports_server_side_move: bool,
+    /// The changes feed is fed by a watcher on this device and a poll
+    /// of it costs no request to a cloud: the engine reads it each
+    /// second in every throttle state but `Suspended`, so a change is
+    /// seen when it happens. A feed that is a network call is polled at
+    /// the cadence of the throttle state.
+    pub changes_feed_is_watched: bool,
 }
 
 impl ProviderCapabilities {
     pub const FILESYSTEM: Self = Self {
         supports_remote_changes_feed: true,
         supports_server_side_move: true,
+        changes_feed_is_watched: true,
     };
 
     pub const GDRIVE_MVP: Self = Self {
         supports_remote_changes_feed: true,
         supports_server_side_move: true,
+        changes_feed_is_watched: false,
     };
 }
 
@@ -472,6 +480,7 @@ impl Provider for SuspendedProvider {
         ProviderCapabilities {
             supports_remote_changes_feed: false,
             supports_server_side_move: false,
+            changes_feed_is_watched: false,
         }
     }
 
@@ -543,6 +552,7 @@ impl Provider for FilesystemStubProvider {
         ProviderCapabilities {
             supports_remote_changes_feed: false,
             supports_server_side_move: false,
+            changes_feed_is_watched: false,
         }
     }
 

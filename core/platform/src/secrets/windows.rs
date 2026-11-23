@@ -17,6 +17,18 @@ impl NativeSecretStore {
     pub fn without_prompts(self) -> Self {
         self
     }
+
+    /// Every process writes its own secrets here: no backend on this
+    /// OS ties an item to the binary that created it.
+    pub fn writing_through_the_daemon(self) -> Self {
+        self
+    }
+
+    /// The store a helper request names by its namespace: the one
+    /// store there is.
+    pub fn helper_store(_namespace: &str) -> Result<Self, SecretStoreError> {
+        Self::for_current_user()
+    }
 }
 
 impl SecretStore for NativeSecretStore {

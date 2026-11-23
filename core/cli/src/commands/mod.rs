@@ -20,6 +20,7 @@ pub mod run;
 pub mod service;
 pub mod trash;
 pub mod version;
+pub mod when;
 
 pub use auth::{AuthError, AuthStatusEntry, AuthStatusReport};
 pub use config::{ConfigCommand, ConfigError};

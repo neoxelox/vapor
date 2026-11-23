@@ -47,6 +47,16 @@ use crate::{
 
 /// Hex-encoded SHA-256 of a byte slice. Shared by the provider, the
 /// engine's hash stage tests, and the stub provider.
+/// Whether `path` is there and is neither a regular file nor a folder
+/// nor a link: a pipe, a socket, or a device. Such an entry is not an
+/// object of the cloud folder, and it is never opened.
+pub(crate) fn is_special_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| {
+        let kind = metadata.file_type();
+        !kind.is_file() && !kind.is_dir() && !kind.is_symlink()
+    })
+}
+
 pub fn hash_hex_of_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -243,7 +253,17 @@ impl FilesystemProvider {
         }
         let metadata = match fs::symlink_metadata(resolved) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            // `NotADirectory`: a folder on the way to the path is a
+            // file now, so the object is gone as surely as with
+            // `NotFound`.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
             Err(error) => {
                 return Err(ProviderError::transient(format!(
                     "cannot stat remote path {remote}: {error}"
@@ -253,6 +273,11 @@ impl FilesystemProvider {
         if metadata.file_type().is_symlink() {
             // Symlinks are outside the provider's contract: following
             // them risks scope escape, so they are invisible.
+            return Ok(None);
+        }
+        if !metadata.is_dir() && !metadata.is_file() {
+            // A pipe, a socket, a device: no content to transfer, and
+            // opening a pipe waits for a writer that may never come.
             return Ok(None);
         }
         let kind = if metadata.is_dir() {
@@ -359,6 +384,7 @@ impl Provider for FilesystemProvider {
             && !vapor_platform::fs_watch::native_watcher_available()
         {
             capabilities.supports_remote_changes_feed = false;
+            capabilities.changes_feed_is_watched = false;
         }
         capabilities
     }
@@ -383,14 +409,20 @@ impl Provider for FilesystemProvider {
                 expanded.display()
             ))
         })?;
-        crate::logging::info(
-            "Filesystem provider ensured cloud root",
-            &[("path", canonical.display().to_string())],
-        );
-        *self
+        // The root is ensured again at every check of the root; only
+        // a root that is new to this provider is news.
+        let mut root = self
             .root
             .lock()
-            .expect("filesystem provider root mutex poisoned") = Some(canonical);
+            .expect("filesystem provider root mutex poisoned");
+        if root.as_ref() != Some(&canonical) {
+            crate::logging::info(
+                "Filesystem provider ensured cloud root",
+                &[("path", canonical.display().to_string())],
+            );
+        }
+        *root = Some(canonical);
+        drop(root);
         Ok(())
     }
 
@@ -402,10 +434,22 @@ impl Provider for FilesystemProvider {
     ) -> Result<(), ProviderError> {
         let resolved_from = self.resolve_in_scope(from)?;
         let resolved_to = self.resolve_in_scope(to)?;
-        if !resolved_from.exists() || stored_under_another_spelling(&resolved_from).is_some() {
-            return Err(ProviderError::not_found(format!(
-                "move source {from} does not exist"
-            )));
+        // Only an answer of the volume says that the source is gone. A
+        // folder that cannot be read (a lost permission, a share that
+        // went away) answers nothing, and the caller that took that for
+        // "gone" would act on a deletion nobody made.
+        match resolved_from.try_exists() {
+            Ok(true) if stored_under_another_spelling(&resolved_from).is_none() => {}
+            Ok(_) => {
+                return Err(ProviderError::not_found(format!(
+                    "move source {from} does not exist"
+                )));
+            }
+            Err(error) => {
+                return Err(ProviderError::transient(format!(
+                    "cannot read the move source {from}: {error}"
+                )));
+            }
         }
         // On a volume that folds names, a destination that is another
         // spelling of the source's own name resolves to the source:
@@ -537,6 +581,20 @@ impl Provider for FilesystemProvider {
                 continue;
             }
             let Ok(child) = directory.join(name) else {
+                // A name the path model refuses (a backslash, which is
+                // a separator on Windows). It stays in the cloud folder
+                // only, and the log says so one time.
+                let first_report = self
+                    .reported_names
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(dir_entry.path());
+                if first_report {
+                    crate::logging::warning(
+                        "A file in the cloud folder has a name that cannot be synced. Rename it",
+                        &[("path", dir_entry.path().to_string_lossy().into_owned())],
+                    );
+                }
                 continue;
             };
             if let Some(entry) = self.remote_entry_for(&child, &dir_entry.path())? {
@@ -554,7 +612,7 @@ impl Provider for FilesystemProvider {
 
     fn content_hash(&self, path: &RemotePath) -> Result<String, ProviderError> {
         let resolved = self.resolve_in_scope(path)?;
-        if stored_under_another_spelling(&resolved).is_some() {
+        if stored_under_another_spelling(&resolved).is_some() || is_special_file(&resolved) {
             return Err(ProviderError::not_found(format!(
                 "remote file {path} does not exist"
             )));
@@ -655,6 +713,10 @@ impl Provider for FilesystemProvider {
                     Some(HashGuard {
                         expected,
                         verified_size_mtime: None,
+                        verified_node: target_file
+                            .metadata()
+                            .ok()
+                            .and_then(|metadata| file_node(&metadata)),
                     }),
                     UploadPhase::VerifyingHash {
                         target: target_file,
@@ -689,7 +751,7 @@ impl Provider for FilesystemProvider {
         request: DownloadRequest,
     ) -> Result<Box<dyn TransferSession>, ProviderError> {
         let resolved = self.resolve_in_scope(&request.remote_path)?;
-        if stored_under_another_spelling(&resolved).is_some() {
+        if stored_under_another_spelling(&resolved).is_some() || is_special_file(&resolved) {
             return Err(ProviderError::not_found(format!(
                 "remote file {} does not exist",
                 request.remote_path
@@ -1012,6 +1074,31 @@ fn enforce_same_device(
 struct HashGuard {
     expected: String,
     verified_size_mtime: Option<(u64, SystemTime)>,
+    /// Which file the verification read. A writer that replaces the
+    /// target puts another file under the name, with a size and a time
+    /// that may be the same.
+    verified_node: Option<FileNode>,
+}
+
+/// The identity of a file on its volume, where the host has one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileNode {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+fn file_node(metadata: &fs::Metadata) -> Option<FileNode> {
+    use std::os::unix::fs::MetadataExt;
+    Some(FileNode {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn file_node(_metadata: &fs::Metadata) -> Option<FileNode> {
+    None
 }
 
 /// Upload proceeds in two phases so a `HashEquals` precondition never
@@ -1062,7 +1149,7 @@ fn upload_write_error(remote_path: &RemotePath, action: &str, error: &io::Error)
 impl FilesystemUploadSession {
     fn finalize(&mut self) -> Result<TransferOutcome, ProviderError> {
         let temp = self.temp.take().expect("finalize called with live temp");
-        temp.sync_all()
+        vapor_platform::fs_ops::make_durable(&temp)
             .map_err(|error| upload_write_error(&self.remote_path, "sync", &error))?;
         drop(temp);
 
@@ -1078,14 +1165,20 @@ impl FilesystemUploadSession {
             )
             .is_err();
 
-        // Narrow the TOCTOU window: re-check the HashEquals guard against
-        // the target's current (size, mtime) immediately before committing.
-        // A full re-hash here would re-introduce the unbounded read this
-        // session exists to avoid, so a residual sub-stat race remains a
-        // documented limitation of the reference provider.
+        // Re-check the HashEquals guard immediately before committing:
+        // the name must still hold the file that was verified, with the
+        // size and the time it had. A full re-hash here would bring back
+        // the unbounded read this session exists to avoid. A writer that
+        // lands after this check is caught by the commit itself, which
+        // exchanges the two files.
         if let Some(guard) = &self.hash_guard {
-            let current = current_size_mtime(&self.target);
-            if current != guard.verified_size_mtime {
+            let current = fs::metadata(&self.target).ok();
+            let same_file = current.as_ref().is_some_and(|metadata| {
+                guard.verified_node.is_none() || file_node(metadata) == guard.verified_node
+            });
+            let current =
+                current.and_then(|metadata| Some((metadata.len(), metadata.modified().ok()?)));
+            if !same_file || current != guard.verified_size_mtime {
                 let _ = fs::remove_file(&self.temp_path);
                 self.finished = true;
                 return Err(ProviderError::precondition_failed(format!(
@@ -1132,8 +1225,11 @@ impl FilesystemUploadSession {
 
     /// Move the staged temp into place. `Absent` uses an atomic
     /// no-clobber *rename* so a concurrent writer that lands the target
-    /// between the check and here is not silently overwritten; the
-    /// overwrite modes (`None`/`HashEquals`) rename unconditionally.
+    /// between the check and here is not silently overwritten.
+    /// `HashEquals` exchanges the temp with the target, so the file it
+    /// replaces is in its hands: when that is not the file the guard
+    /// verified, another writer came in between, and its version stays
+    /// as a copy. `None` renames unconditionally.
     /// The no-clobber commit must be a rename, never a hard-link +
     /// unlink pair: FSEvents tracks file events by node, and a link-
     /// created target stays bound to the deleted temp name: every
@@ -1156,13 +1252,55 @@ impl FilesystemUploadSession {
                     self.remote_path
                 ))),
             }
+        } else if let Some(guard) = &self.hash_guard
+            && guard.verified_node.is_some()
+        {
+            self.commit_over_verified(guard)
         } else {
-            fs::rename(&self.temp_path, &self.target).map_err(|error| {
-                ProviderError::transient(format!(
-                    "cannot move upload into place at {}: {error}",
+            self.rename_into_place()
+        }
+    }
+
+    fn rename_into_place(&self) -> Result<(), ProviderError> {
+        fs::rename(&self.temp_path, &self.target).map_err(|error| {
+            ProviderError::transient(format!(
+                "cannot move upload into place at {}: {error}",
+                self.remote_path
+            ))
+        })
+    }
+
+    fn commit_over_verified(&self, guard: &HashGuard) -> Result<(), ProviderError> {
+        match exchange_into_place(&self.temp_path, &self.target, guard, self.caps.as_ref()) {
+            Ok(None) => Ok(()),
+            Ok(Some(copy)) => {
+                crate::logging::warning(
+                    "An upload replaced a version another writer had just put in the cloud; kept that version as a copy",
+                    &[
+                        ("path", self.remote_path.to_string()),
+                        ("copy", copy.display().to_string()),
+                    ],
+                );
+                Ok(())
+            }
+            Err(ExchangeError::NoExchange) => self.rename_into_place(),
+            Err(ExchangeError::TargetGone) => {
+                let _ = fs::remove_file(&self.temp_path);
+                Err(ProviderError::precondition_failed(format!(
+                    "upload target {} was deleted during the transfer; keeping both",
                     self.remote_path
-                ))
-            })
+                )))
+            }
+            Err(ExchangeError::Commit(error)) => Err(ProviderError::transient(format!(
+                "cannot move upload into place at {}: {error}",
+                self.remote_path
+            ))),
+            Err(ExchangeError::Copy(error)) => Err(ProviderError::transient(format!(
+                "the version that the upload of {} replaced could not be kept as a copy \
+                 and is at {}: {error}",
+                self.remote_path,
+                self.temp_path.display()
+            ))),
         }
     }
 
@@ -1195,7 +1333,12 @@ impl FilesystemUploadSession {
                         self.remote_path
                     )));
                 }
-                guard.verified_size_mtime = current_size_mtime(&self.target);
+                // The size and the time of the file that was read, not
+                // of whatever is under the name by now.
+                guard.verified_size_mtime = target
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| Some((metadata.len(), metadata.modified().ok()?)));
                 return Ok((consumed, true));
             }
             hasher.update(&buffer[..read]);
@@ -1203,6 +1346,97 @@ impl FilesystemUploadSession {
             remaining -= read as u64;
         }
         Ok((consumed, false))
+    }
+}
+
+/// Why a guarded overwrite did not land as an exchange.
+enum ExchangeError {
+    /// The host or the volume has no exchange of two files.
+    NoExchange,
+    /// Nothing is under the target's name any more.
+    TargetGone,
+    /// The exchange itself failed; the target is untouched.
+    Commit(io::Error),
+    /// The upload is in place, and the file it replaced is still under
+    /// the temp name because it could not be renamed.
+    Copy(io::Error),
+}
+
+/// The commit of a guarded overwrite. The check of the guard and a
+/// rename are two steps, and another writer can land between them. The
+/// exchange closes that: whatever was under the name at the moment of
+/// the commit is under the temp name afterwards, and it is removed only
+/// when it is the file the guard verified. Any other file is a version
+/// nobody compared: it stays next to the target as a conflict copy,
+/// whose path is the answer.
+fn exchange_into_place(
+    temp_path: &Path,
+    target: &Path,
+    guard: &HashGuard,
+    caps: &dyn FilesystemCapabilities,
+) -> Result<Option<PathBuf>, ExchangeError> {
+    match vapor_platform::fs_ops::atomic_swap(temp_path, target) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+            return Err(ExchangeError::NoExchange);
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(ExchangeError::TargetGone);
+        }
+        Err(error) => return Err(ExchangeError::Commit(error)),
+    }
+    let replaced = temp_path;
+    let is_the_verified_file = fs::symlink_metadata(replaced).ok().is_some_and(|metadata| {
+        file_node(&metadata) == guard.verified_node
+            && metadata
+                .modified()
+                .ok()
+                .map(|modified| (metadata.len(), modified))
+                == guard.verified_size_mtime
+    });
+    if is_the_verified_file {
+        let _ = fs::remove_file(replaced);
+        return Ok(None);
+    }
+    keep_replaced_version(replaced, target, caps)
+        .map(Some)
+        .map_err(ExchangeError::Copy)
+}
+
+/// Gives the file at `replaced` the name of a conflict copy of
+/// `target`, next to it. The copy is nobody's upload: it carries no
+/// op-id.
+fn keep_replaced_version(
+    replaced: &Path,
+    target: &Path,
+    caps: &dyn FilesystemCapabilities,
+) -> io::Result<PathBuf> {
+    let _ = caps.remove_tag(replaced, constants::provider::OP_ID_XATTR_NAME);
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let replaced_at_ms = fs::symlink_metadata(replaced)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|age| age.as_millis() as u64)
+        .unwrap_or(0);
+    let mut sequence = None;
+    loop {
+        let copy = target.with_file_name(vapor_shared::conflict::copy_name(
+            &name,
+            constants::conflict::REPLACED_VERSION,
+            replaced_at_ms,
+            sequence,
+        ));
+        match vapor_platform::fs_ops::atomic_noclobber_rename(replaced, &copy) {
+            Ok(()) => return Ok(copy),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                sequence = Some(sequence.map_or(2, |sequence| sequence + 1));
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -1323,7 +1557,7 @@ impl TransferSession for FilesystemDownloadSession {
                     .destination
                     .take()
                     .expect("destination lives until completion");
-                destination.sync_all().map_err(|error| {
+                vapor_platform::fs_ops::make_durable(&destination).map_err(|error| {
                     ProviderError::transient(format!(
                         "cannot sync downloaded payload for {}: {error}",
                         self.remote_path
@@ -1818,6 +2052,192 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_version_that_lands_at_the_moment_of_the_commit_stays_as_a_copy() {
+        // The guard verified one file. Another writer puts its own file
+        // under the name after the last check and before the commit.
+        // The commit must not be the end of that file.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cloud = dir.path().join("cloud");
+        let provider = provider_at(&cloud);
+        let target = cloud.join("doc.txt");
+        fs::write(&target, b"base").expect("seed target");
+        let verified = fs::metadata(&target).expect("stat");
+        let guard = HashGuard {
+            expected: hash_hex_of_bytes(b"base"),
+            verified_size_mtime: Some((verified.len(), verified.modified().expect("mtime"))),
+            verified_node: file_node(&verified),
+        };
+
+        let theirs = cloud.join("their-upload.tmp");
+        fs::write(&theirs, b"their edit").expect("stage theirs");
+        fs::rename(&theirs, &target).expect("their commit");
+        let ours = cloud.join("our-upload.tmp");
+        fs::write(&ours, b"our edit").expect("stage ours");
+
+        let copy = exchange_into_place(&ours, &target, &guard, provider.caps.as_ref())
+            .ok()
+            .expect("the commit lands")
+            .expect("the replaced version is kept");
+
+        assert_eq!(fs::read(&target).expect("target"), b"our edit");
+        assert_eq!(fs::read(&copy).expect("copy"), b"their edit");
+        let name = copy
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("name");
+        assert!(
+            name.starts_with("doc~conflict-replaced-") && name.ends_with(".txt"),
+            "{name} is not the name of a copy of doc.txt"
+        );
+        assert!(!ours.exists(), "nothing stays under the temp name");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn the_file_the_guard_verified_is_replaced_with_no_copy() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cloud = dir.path().join("cloud");
+        let provider = provider_at(&cloud);
+        let target = cloud.join("doc.txt");
+        fs::write(&target, b"base").expect("seed target");
+        let verified = fs::metadata(&target).expect("stat");
+        let guard = HashGuard {
+            expected: hash_hex_of_bytes(b"base"),
+            verified_size_mtime: Some((verified.len(), verified.modified().expect("mtime"))),
+            verified_node: file_node(&verified),
+        };
+        let ours = cloud.join("our-upload.tmp");
+        fs::write(&ours, b"our edit").expect("stage ours");
+
+        let copy = exchange_into_place(&ours, &target, &guard, provider.caps.as_ref())
+            .ok()
+            .expect("the commit lands");
+
+        assert_eq!(copy, None);
+        assert_eq!(fs::read(&target).expect("target"), b"our edit");
+        assert_eq!(
+            fs::read_dir(&cloud).expect("list").count(),
+            1,
+            "only the target is left"
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn uploads_of_one_file_at_the_same_moment_lose_no_version() {
+        // Every writer planned against the same base. Whatever the
+        // order of their commits, each version ends under the name, as
+        // a copy next to it, or with its writer, who was refused and
+        // still has the file.
+        const WRITERS: usize = 8;
+        for _round in 0..20 {
+            let dir = tempfile::TempDir::new().expect("temp dir");
+            let cloud = dir.path().join("cloud");
+            let provider = Arc::new(provider_at(&cloud));
+            fs::write(cloud.join("doc.txt"), b"base").expect("seed target");
+            let barrier = Arc::new(std::sync::Barrier::new(WRITERS));
+
+            let writers: Vec<_> = (0..WRITERS)
+                .map(|writer| {
+                    let provider = provider.clone();
+                    let barrier = barrier.clone();
+                    let source = dir.path().join(format!("source-{writer}.txt"));
+                    fs::write(&source, format!("edit of writer {writer}")).expect("seed source");
+                    std::thread::spawn(move || {
+                        let mut session = provider
+                            .begin_upload(UploadRequest {
+                                local_source: source,
+                                remote_path: RemotePath::new("doc.txt").expect("remote path"),
+                                op_id: format!("op-{writer}"),
+                                precondition: RemotePrecondition::HashEquals(hash_hex_of_bytes(
+                                    b"base",
+                                )),
+                            })
+                            .ok()?;
+                        // The first step verifies the base; the commit
+                        // is in the last one.
+                        session.step(64 * 1024).ok()?;
+                        barrier.wait();
+                        loop {
+                            match session.step(64 * 1024) {
+                                Ok(TransferStep::Progressed { .. }) => continue,
+                                Ok(TransferStep::Completed(_)) => return Some(writer),
+                                Err(error) => {
+                                    assert_eq!(
+                                        error.kind,
+                                        vapor_shared::ProviderErrorKind::PreconditionFailed,
+                                        "{}",
+                                        error.message
+                                    );
+                                    return None;
+                                }
+                            }
+                        }
+                    })
+                })
+                .collect();
+            let committed: Vec<usize> = writers
+                .into_iter()
+                .filter_map(|writer| writer.join().expect("writer thread"))
+                .collect();
+            assert!(!committed.is_empty(), "one writer at least commits");
+
+            let in_the_cloud: std::collections::BTreeSet<String> = fs::read_dir(&cloud)
+                .expect("list")
+                .flatten()
+                .map(|entry| fs::read_to_string(entry.path()).expect("read"))
+                .collect();
+            for writer in committed {
+                assert!(
+                    in_the_cloud.contains(&format!("edit of writer {writer}")),
+                    "the upload of writer {writer} was reported as done and is gone: {in_the_cloud:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_move_whose_source_cannot_be_read_is_not_a_source_that_is_gone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cloud = dir.path().join("cloud");
+        let provider = provider_at(&cloud);
+        fs::create_dir_all(cloud.join("docs")).expect("folder");
+        fs::write(cloud.join("docs/report.txt"), b"quarterly").expect("seed");
+        let (from, to) = (
+            RemotePath::new("docs/report.txt").expect("path"),
+            RemotePath::new("docs/Report.txt").expect("path"),
+        );
+
+        let readable = fs::metadata(cloud.join("docs"))
+            .expect("stat")
+            .permissions();
+        fs::set_permissions(cloud.join("docs"), fs::Permissions::from_mode(0o000))
+            .expect("lock the folder");
+        let refused = provider.move_object(&from, &to, "op-move");
+        fs::set_permissions(cloud.join("docs"), readable).expect("unlock");
+
+        let error = refused.expect_err("the folder cannot be read");
+        assert_eq!(
+            error.kind,
+            vapor_shared::ProviderErrorKind::Transient,
+            "{}",
+            error.message
+        );
+        // A source that is gone is still said to be gone.
+        let gone = provider
+            .move_object(
+                &RemotePath::new("docs/none.txt").expect("path"),
+                &to,
+                "op-move",
+            )
+            .expect_err("no such file");
+        assert_eq!(gone.kind, vapor_shared::ProviderErrorKind::NotFound);
+    }
+
     #[test]
     fn stale_staging_temp_files_are_reaped_but_in_flight_ones_survive() {
         let dir = tempfile::TempDir::new().expect("temp dir");
@@ -1964,6 +2384,40 @@ mod tests {
         assert_eq!(names, vec!["a.txt", "sub"]);
         assert_eq!(entries[0].kind, RemoteEntryKind::File);
         assert_eq!(entries[1].kind, RemoteEntryKind::Directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pipe_in_the_cloud_folder_is_not_an_object() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cloud = dir.path().join("cloud");
+        let provider = provider_at(&cloud);
+        fs::write(cloud.join("a.txt"), b"a").expect("seed");
+        let status = std::process::Command::new("mkfifo")
+            .arg(cloud.join("pipe"))
+            .status()
+            .expect("mkfifo");
+        assert!(status.success(), "mkfifo must succeed");
+        let pipe = RemotePath::new("pipe").expect("path");
+
+        let entries = provider.enumerate(&RemotePath::root()).expect("enumerate");
+        let names: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+        assert_eq!(names, vec!["a.txt"], "the listing skips the pipe");
+        assert_eq!(provider.stat(&pipe).expect("stat"), None);
+        // Neither call opens the pipe: an open would wait for a writer
+        // and never return.
+        let download = provider.begin_download(DownloadRequest {
+            remote_path: pipe.clone(),
+            destination: dir.path().join("staging"),
+        });
+        assert_eq!(
+            download.err().map(|error| error.kind),
+            Some(vapor_shared::ProviderErrorKind::NotFound)
+        );
+        assert_eq!(
+            provider.content_hash(&pipe).err().map(|error| error.kind),
+            Some(vapor_shared::ProviderErrorKind::NotFound)
+        );
     }
 
     // Symlink scope tests are Unix-only: creating symlinks on Windows

@@ -137,6 +137,10 @@ pub struct ServiceStatusReport {
     pub health: DaemonHealthCheckOutcome,
     /// Whether the supervisor job is registered.
     pub supervisor_installed: bool,
+    /// Whether the daemon answers on its socket; `None` while its job
+    /// does not run. A job that runs with a daemon that gives no
+    /// answer syncs nothing.
+    pub answers: Option<bool>,
 }
 
 /// What a service subcommand produced. Rendered by [`render_text`] /
@@ -250,6 +254,7 @@ pub fn dispatch(
                 crash_loop: manager.crash_loop_state(now),
                 health: manager.observe_daemon_health_for(probed, now)?,
                 supervisor_installed: false,
+                answers: None,
             }))
         }
         ServiceCommand::Check => Ok(ServiceCommandOutcome::Health(
@@ -319,6 +324,7 @@ pub fn render_json(outcome: &ServiceCommandOutcome) -> serde_json::Value {
                     "awaitingRestart": report.crash_loop.awaiting_restart,
                 },
                 "supervisorInstalled": report.supervisor_installed,
+                "answers": report.answers,
             });
             // `health` and, for a deferred restart, `remainingSeconds`:
             // the keys of a `check` answer, so a surface reads both the
@@ -422,6 +428,12 @@ pub fn render_text(outcome: &ServiceCommandOutcome) -> String {
                     "\ncrash-loop: {} recent crash(es) in window",
                     report.crash_loop.consecutive_crashes
                 ));
+            }
+            if report.answers == Some(false) {
+                line.push_str(
+                    "\ndaemon: its job runs, but it gives no answer on its socket, so nothing syncs; \
+                     `vapor service restart` ends it and starts a new one",
+                );
             }
             line.push_str(if report.supervisor_installed {
                 "\nsupervisor: installed (it restarts a daemon that exited on its own)"
@@ -638,6 +650,30 @@ impl BinaryStamp {
     }
 }
 
+/// The clock of the supervisor loop.
+#[derive(Clone, Copy, Debug)]
+pub struct SupervisorWatch {
+    /// The time between two supervision ticks.
+    pub interval: Duration,
+    /// How often the loop asks, between two ticks, whether the daemon
+    /// still answers.
+    pub look: Duration,
+    /// How long a daemon whose job runs may give no answer before it is
+    /// ended.
+    pub silence_limit: Duration,
+}
+
+impl SupervisorWatch {
+    /// The clock of an install, with `interval` between two ticks.
+    pub fn every(interval: Duration) -> Self {
+        Self {
+            interval,
+            look: Duration::from_millis(constants::service::SUPERVISOR_WATCH_MILLIS),
+            silence_limit: Duration::from_secs(constants::service::UNRESPONSIVE_KILL_SECONDS),
+        }
+    }
+}
+
 /// Runs supervision ticks every `interval` until a shutdown signal
 /// arrives, printing an outcome only when it differs from the previous
 /// tick so the log stays quiet while the daemon is healthy. Returns
@@ -646,16 +682,31 @@ impl BinaryStamp {
 /// `updated` says whether an update replaced this binary. The loop
 /// then ends: the service manager keeps the job alive, so it starts
 /// the new binary, and that one replaces a daemon of the old build.
+///
+/// `answers` says whether the daemon answers on its socket. Between
+/// two ticks the loop asks it twice a second, and an answer that stops
+/// runs the next tick at once: the socket closes the moment the daemon
+/// exits, so a crash is seen within a second and not at the next tick.
+/// A daemon whose job runs and which gives no answer for
+/// `UNRESPONSIVE_KILL_SECONDS` is ended; the tick after that counts
+/// the exit and starts a new one under the crash-loop guard.
 pub fn check_loop(
     manager: &DaemonLifecycleManager,
     installer: &dyn ServiceInstaller,
-    interval: Duration,
+    watch: SupervisorWatch,
     json: bool,
     stop: &std::sync::atomic::AtomicBool,
     updated: &dyn Fn() -> bool,
+    answers: &dyn Fn() -> bool,
 ) -> Result<Option<DaemonHealthCheckOutcome>, ServiceCommandError> {
     use std::sync::atomic::Ordering;
+    let SupervisorWatch {
+        interval,
+        look: watch,
+        silence_limit,
+    } = watch;
     let mut last: Option<DaemonHealthCheckOutcome> = None;
+    let mut silent_since: Option<Instant> = None;
     while !stop.load(Ordering::SeqCst) {
         if updated() {
             break;
@@ -678,9 +729,51 @@ pub fn check_loop(
             // line forever.
             break;
         }
-        let deadline = Instant::now() + interval;
+        let answering = outcome == DaemonHealthCheckOutcome::Running && answers();
+        if outcome != DaemonHealthCheckOutcome::Running || answering {
+            silent_since = None;
+        } else {
+            // The job runs and nobody answers: a daemon that starts, a
+            // daemon that stops, or one that hangs.
+            let since = *silent_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= silence_limit {
+                eprintln!(
+                    "vapor: the daemon gave no answer for {} s; ending its process",
+                    silence_limit.as_secs()
+                );
+                if let Err(error) = installer.kill_daemon() {
+                    eprintln!("vapor: warning: could not end the daemon: {error}");
+                }
+                silent_since = None;
+                last = None;
+                continue;
+            }
+        }
+        // The next tick: at the interval, at the end of a restart
+        // backoff when that is sooner, and soon while a daemon that
+        // should answer does not.
+        let wait = match &outcome {
+            DaemonHealthCheckOutcome::RestartDeferred(remaining) => {
+                interval.min(*remaining + watch)
+            }
+            _ if silent_since.is_some() => interval.min(watch * 4),
+            _ => interval,
+        };
+        let deadline = Instant::now() + wait;
+        let mut next_look = Instant::now() + watch;
         while Instant::now() < deadline && !stop.load(Ordering::SeqCst) {
-            std::thread::sleep(Duration::from_millis(250).min(deadline - Instant::now()));
+            std::thread::sleep(
+                Duration::from_millis(250)
+                    .min(watch)
+                    .min(deadline.saturating_duration_since(Instant::now())),
+            );
+            if answering && Instant::now() >= next_look {
+                next_look = Instant::now() + watch;
+                if !answers() {
+                    // The daemon went away: look now.
+                    break;
+                }
+            }
         }
     }
     Ok(last)
@@ -909,10 +1002,11 @@ mod tests {
         let last = check_loop(
             &manager,
             installer.as_ref(),
-            Duration::from_millis(20),
+            SupervisorWatch::every(Duration::from_millis(20)),
             false,
             &stop,
             &|| false,
+            &|| true,
         )
         .expect("loop");
         stopper.join().expect("stopper");
@@ -931,6 +1025,103 @@ mod tests {
         );
     }
 
+    /// Runs the loop on its own thread until `done` says so (or ten
+    /// seconds pass, which only ends a run that never gets there).
+    fn run_loop_until(
+        installer: &Arc<InMemoryServiceInstaller>,
+        watch: SupervisorWatch,
+        answers: impl Fn() -> bool + Sync,
+        done: impl Fn(&InMemoryServiceInstaller) -> bool + Send + 'static,
+    ) {
+        let settings = Arc::new(InMemoryAutoLaunchSettingStore::seeded(Some(true)));
+        let manager = DaemonLifecycleManager::new(installer.clone(), settings);
+        manager
+            .start_daemon_if_allowed(Instant::now())
+            .expect("the daemon is meant to run");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (flag, watched) = (stop.clone(), installer.clone());
+        let stopper = std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(10);
+            while !done(&watched) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        check_loop(
+            &manager,
+            installer.as_ref(),
+            watch,
+            false,
+            &stop,
+            &|| false,
+            &answers,
+        )
+        .expect("loop");
+        stopper.join().expect("stopper");
+    }
+
+    #[test]
+    fn the_check_loop_sees_an_exit_between_two_ticks_and_starts_the_daemon_again() {
+        let installer = fake_installer();
+        installer.install_and_enable().expect("install");
+        // A minute between two ticks: only the watch of the socket can
+        // see the exit in the time this test runs.
+        let watch = SupervisorWatch {
+            interval: Duration::from_secs(60),
+            look: Duration::from_millis(5),
+            silence_limit: Duration::from_secs(60),
+        };
+        let crashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (crash, daemon) = (crashed.clone(), installer.clone());
+        let crasher = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            daemon.set_status_for_testing(ServiceStatus::Stopped);
+            crash.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let started = |installer: &InMemoryServiceInstaller| {
+            installer
+                .operations()
+                .iter()
+                .filter(|op| **op == "start")
+                .count()
+                >= 2
+        };
+        run_loop_until(
+            &installer,
+            watch,
+            || !crashed.load(std::sync::atomic::Ordering::SeqCst),
+            started,
+        );
+        crasher.join().expect("crasher");
+        assert!(
+            started(&installer),
+            "the daemon is started again within the tick it crashed in: {:?}",
+            installer.operations()
+        );
+    }
+
+    #[test]
+    fn the_check_loop_ends_a_daemon_that_holds_its_job_and_gives_no_answer() {
+        let installer = fake_installer();
+        installer.install_and_enable().expect("install");
+        let watch = SupervisorWatch {
+            interval: Duration::from_millis(20),
+            look: Duration::from_millis(5),
+            silence_limit: Duration::from_millis(60),
+        };
+        let replaced = |installer: &InMemoryServiceInstaller| {
+            let operations = installer.operations();
+            let killed = operations.iter().position(|op| *op == "kill");
+            killed.is_some_and(|at| operations[at..].contains(&"start"))
+        };
+        run_loop_until(&installer, watch, || false, replaced);
+        assert!(
+            replaced(&installer),
+            "a daemon that never answers is ended and a new one started: {:?}",
+            installer.operations()
+        );
+    }
+
     #[test]
     fn the_check_loop_ends_when_nothing_is_installed() {
         let installer = fake_installer();
@@ -940,10 +1131,11 @@ mod tests {
         let last = check_loop(
             &manager,
             installer.as_ref(),
-            Duration::from_secs(60),
+            SupervisorWatch::every(Duration::from_secs(60)),
             false,
             &stop,
             &|| false,
+            &|| true,
         )
         .expect("loop");
         assert_eq!(last, Some(DaemonHealthCheckOutcome::NotInstalled));
@@ -961,10 +1153,11 @@ mod tests {
         let last = check_loop(
             &manager,
             installer.as_ref(),
-            Duration::from_millis(1),
+            SupervisorWatch::every(Duration::from_millis(1)),
             false,
             &stop,
             &|| looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1,
+            &|| true,
         )
         .expect("loop");
         assert_eq!(last, Some(DaemonHealthCheckOutcome::Running));
@@ -1427,11 +1620,13 @@ mod tests {
             },
             health: DaemonHealthCheckOutcome::CrashLoopPaused,
             supervisor_installed: true,
+            // The job does not run: there is no daemon to ask.
+            answers: None,
         };
         assert_eq!(
             json_string(&ServiceCommandOutcome::Status(report)),
             concat!(
-                r#"{"autoLaunch":true,"crashLoop":{"awaitingRestart":true,"#,
+                r#"{"answers":null,"autoLaunch":true,"crashLoop":{"awaitingRestart":true,"#,
                 r#""consecutiveCrashes":5,"lastCrashAtMs":1750000000000,"paused":true},"#,
                 r#""health":"crash-loop-paused","label":"sh.arn.vapor.daemon","#,
                 r#""status":"crash-loop-paused","supervisorInstalled":true}"#

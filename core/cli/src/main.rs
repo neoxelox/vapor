@@ -800,23 +800,34 @@ fn dispatch_init(
             .map(|step| step.state)
     };
     use vapor_shared::constants::init as names;
-    // A daemon that this run started needs a moment before it answers.
-    let attempts = if step_state(names::STEP_SERVICE) == Some(names::STATE_DONE) {
-        15
+    // A daemon that this run started needs a moment before it answers,
+    // and a daemon that was up before the profile existed needs one to
+    // read the configuration again. Until then it says that there is
+    // no profile, which is not what this run leaves behind.
+    let has_profile = !report.profiles.is_empty();
+    let wait = if has_profile {
+        Duration::from_secs(5)
+    } else if step_state(names::STEP_SERVICE) == Some(names::STATE_DONE) {
+        Duration::from_secs(3)
     } else {
-        1
+        Duration::ZERO
     };
-    for attempt in 0..attempts {
-        if let Ok(status) = ipc_cmd::status() {
+    let deadline = Instant::now() + wait;
+    loop {
+        let status = ipc_cmd::status().ok();
+        let out_of_date = status.as_ref().is_none_or(|status| {
+            has_profile && status.run.state == vapor_shared::constants::run_state::UNCONFIGURED
+        });
+        if let Some(status) = status {
             report.daemon = Some(init_cmd::DaemonLine {
                 state: status.run.state,
                 reason: status.run.reason,
             });
+        }
+        if !out_of_date || Instant::now() >= deadline {
             break;
         }
-        if attempt + 1 < attempts {
-            std::thread::sleep(Duration::from_millis(200));
-        }
+        std::thread::sleep(Duration::from_millis(200));
     }
 
     if json {
@@ -1212,7 +1223,12 @@ fn dispatch_timeline(json: bool) -> Result<ExitCode, String> {
             println!("(older events are left out: the timeline is too long for one answer)");
         }
         for entry in &timeline.entries {
-            println!("[{}] {}: {}", entry.timestamp_ms, entry.kind, entry.message);
+            println!(
+                "[{}] {}: {}",
+                vapor_cli::commands::when::clock(entry.timestamp_ms),
+                entry.kind,
+                entry.message
+            );
         }
     }
     Ok(ExitCode::SUCCESS)
@@ -1458,10 +1474,11 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
             service_cmd::check_loop(
                 &manager,
                 installer.as_ref(),
-                interval,
+                service_cmd::SupervisorWatch::every(interval),
                 json,
                 &stop,
                 &updated,
+                &|| ipc_cmd::daemon_answers(),
             )
             .map_err(|e| e.to_string())?;
             return Ok(ExitCode::SUCCESS);
@@ -1486,6 +1503,28 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
                 report.supervisor_installed = vapor_platform::ServiceInstaller::status(&supervisor)
                     .map(|status| status != vapor_platform::ServiceStatus::NotInstalled)
                     .unwrap_or(false);
+                if report.status == vapor_platform::ServiceStatus::Running {
+                    report.answers = Some(ipc_cmd::daemon_answers());
+                }
+            }
+            // A start is done when a daemon answers, not when the
+            // service manager took the request: a daemon that hangs
+            // keeps its job, and a start against it changes nothing.
+            service_cmd::ServiceCommandOutcome::Action(result)
+                if matches!(command, ServiceCommand::Start | ServiceCommand::Restart)
+                    && matches!(
+                        result,
+                        vapor_lifecycle::DaemonLifecycleActionResult::Started
+                            | vapor_lifecycle::DaemonLifecycleActionResult::Unchanged
+                    )
+                    && !daemon_answers_within(Duration::from_secs(10)) =>
+            {
+                return Err(
+                    "the daemon's job runs, but the daemon gives no answer on its socket, so \
+                     nothing syncs. `vapor service restart` ends it and starts a new one; \
+                     `vapor logs` shows what it did last"
+                        .to_string(),
+                );
             }
             service_cmd::ServiceCommandOutcome::Action(_)
                 if matches!(command, ServiceCommand::Uninstall { .. })
@@ -1522,6 +1561,22 @@ fn dispatch_service(action: ServiceAction) -> Result<ExitCode, String> {
             "`vapor service` needs a native service manager; Windows lands with that surface"
                 .to_string(),
         )
+    }
+}
+
+/// Whether a daemon answers on the socket within `wait`: a daemon that
+/// was just started needs a moment to open it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn daemon_answers_within(wait: Duration) -> bool {
+    let deadline = Instant::now() + wait;
+    loop {
+        if ipc_cmd::daemon_answers() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 

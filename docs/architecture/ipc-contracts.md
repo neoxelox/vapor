@@ -134,6 +134,11 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
   "reconcile": { "state": "idle", "detail": "" },
   "queued": 0,
   "failed": 0,
+  "blocked": 1,
+  "blockedFiles": [
+    { "profileId": "default", "path": "/Users/sam/Vapor/locked.txt", "action": "upload",
+      "reason": "cannot stat local file: Permission denied", "attempts": 7, "nextAttemptMs": 1795364849500 }
+  ],
   "decisions": 1,
   "mirror": { "reverts": 0, "deletes": 0 },
   "restartRequired": null,
@@ -148,7 +153,7 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
       "id": "default", "name": "default", "provider": "gdrive", "syncMode": "two-way",
       "run": { "state": "running", "reason": "watching ~/Vapor" },
       "reconcile": { "state": "idle", "detail": "" },
-      "queued": 0, "failed": 0, "decisions": 1,
+      "queued": 0, "failed": 0, "blocked": 1, "decisions": 1,
       "mirror": { "reverts": 0, "deletes": 0 },
       "suspended": false, "signInRequired": false, "ignoredPaths": 214
     }
@@ -169,13 +174,24 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
   overwrites it.
 - `decisions` counts open decisions, conflicts included
   (`conflict-resolution.md`).
+- `blocked` counts the files that cannot be synced for now: a queued
+  item that failed `BLOCKED_AFTER_ATTEMPTS` (5) times in a row, with the
+  tries minutes apart (a file that cannot be read, a target that is
+  locked, a cloud that does not answer). They are not part of `queued`,
+  so a surface does not show "syncing" for them. `blockedFiles` names
+  the first ten with the reason of the last try and the time of the
+  next one; `vapor diagnostics` lists all. A new event for the path, a
+  `vapor reconcile`, and an answer about the path make the next try due
+  at once.
 - `suspended: true` means the profile is not syncing: it was stopped by
   its configuration or by repeated failures, or its local root is
   missing and Vapor waits for it (`run.reason` says which). A profile
   that could not be composed at all is listed the same way.
   `signInRequired` means the provider refused its sign-in.
-- `reconcile.state` is `idle`, `waiting` (a scan is queued; `detail`
-  says what it waits for), or `running` (`detail` names the root).
+- `reconcile.state` is `idle`, `waiting` (a scan is queued and `detail`
+  says what it waits for, or a folder that took a burst waits for its
+  scan and `detail` says how many changes it holds and when the scan
+  starts), or `running` (`detail` names the root).
 - `resources.bandwidth.usedKbps` is the measured rate of the last
   seconds. The two capacities are what the daemon measured for each
   direction of the link, and are absent before the first measure.
@@ -196,7 +212,9 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
 
 - Not served over IPC. `vapor service status --json` reads the
   auto-launch setting, the service state, and the crash-loop state
-  from `core/lifecycle`, with the daemon running or not.
+  from `core/lifecycle`, with the daemon running or not. Its `answers`
+  key is the one thing it asks the socket: whether a daemon whose
+  process runs answers a handshake.
 
 ### Controls
 
@@ -241,8 +259,8 @@ The daemon as a whole, then one row per profile (`StatusResponse` and
   `profileId`, `path`, `action`, `stage`, `elapsedMs` (time in the
   stage), `attempts`, `error` (the last one), and a human-readable
   `reason` it is not moving (for example "hash workers 2/2 and read
-  tokens 1/1 in use", "retry backoff active (attempt 3)", "waiting for
-  decision #4"). This is the data source for the "why is this stuck"
+  tokens 1/1 in use", "retry backoff active (attempt 3); next try in
+  4 min", "waiting for decision #4"). This is the data source for the "why is this stuck"
   surface.
 - `action` says what the item does (`constants::intent::ACTION_*`):
   - `upload` / `download`: content moving to or from the cloud.

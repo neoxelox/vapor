@@ -348,6 +348,119 @@ struct GdChangeList {
 const FILE_FIELDS: &str =
     "id,name,mimeType,size,md5Checksum,appProperties,parents,trashed,modifiedTime";
 
+/// One stored version of a file's content.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+struct GdRevision {
+    #[serde(default)]
+    id: String,
+    #[serde(default, rename = "md5Checksum")]
+    md5_checksum: Option<String>,
+    #[serde(default, rename = "modifiedTime")]
+    modified_time: Option<String>,
+    #[serde(default)]
+    size: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GdRevisionList {
+    #[serde(default)]
+    revisions: Vec<GdRevision>,
+    #[serde(default, rename = "nextPageToken")]
+    next_page_token: Option<String>,
+}
+
+const REVISION_FIELDS: &str = "nextPageToken,revisions(id,md5Checksum,modifiedTime,size)";
+/// The most pages of a file's versions one check reads. Drive keeps
+/// 100 versions of a file, 200 with the ones kept for good.
+const REVISION_PAGES_MAX: usize = 5;
+
+/// Work that keeps a version an upload replaced without having seen
+/// it. Drive has no conditional write of content: the guard of an
+/// upload is a read followed by a write, and a second device can write
+/// between the two. Both writes then land, and the first is a version
+/// of the file that no device holds under the name any more. Drive
+/// still has it, as a stored version, and this work gives it a name of
+/// its own.
+#[derive(Clone, Debug)]
+enum ReplacedWork {
+    /// Read the versions of a file after a guarded upload of it landed:
+    /// `base_md5` is what the upload meant to replace, `own_md5` what
+    /// it wrote.
+    Check {
+        file_id: String,
+        parent_id: String,
+        file_name: String,
+        base_md5: String,
+        own_md5: String,
+    },
+    /// Copy one version into a file next to the one it belongs to.
+    Copy(RevisionCopy),
+}
+
+#[derive(Clone, Debug)]
+struct RevisionCopy {
+    file_id: String,
+    revision: GdRevision,
+    parent_id: String,
+    /// The name of the file the version belongs to.
+    file_name: String,
+    /// The resumable session of the copy and how far it is, for a
+    /// version too large for one request.
+    upload: Option<(String, u64)>,
+}
+
+/// How many times one piece of that work is tried before it is given
+/// up with a warning that says where the version is.
+const REPLACED_WORK_ATTEMPTS: u32 = 20;
+/// The most pieces of that work one poll does: the poll is the feed,
+/// and it must stay quick. A check is one request.
+const REPLACED_WORK_PER_POLL: usize = 8;
+
+/// The versions between the one an upload meant to replace and the one
+/// it wrote: each is a write of another device that the upload never
+/// compared. Versions with the content of either end are not listed:
+/// nothing of them is missing.
+fn revisions_replaced_unseen(
+    revisions: &[GdRevision],
+    base_md5: &str,
+    own_md5: &str,
+) -> Vec<GdRevision> {
+    let mut ordered: Vec<&GdRevision> = revisions.iter().collect();
+    // Oldest first. Drive lists them so; the sort makes it certain,
+    // and it is stable for two versions of one millisecond.
+    ordered.sort_by_key(|revision| {
+        revision
+            .modified_time
+            .as_deref()
+            .and_then(parse_rfc3339_millis)
+    });
+    let md5 = |revision: &GdRevision| revision.md5_checksum.clone().unwrap_or_default();
+    let Some(own) = ordered
+        .iter()
+        .rposition(|revision| md5(revision) == own_md5)
+    else {
+        return Vec::new();
+    };
+    // With no version of the base in the list (Drive dropped it), the
+    // list cannot say what came between.
+    let Some(base) = ordered[..own]
+        .iter()
+        .rposition(|revision| md5(revision) == base_md5)
+    else {
+        return Vec::new();
+    };
+    let mut replaced: Vec<GdRevision> = Vec::new();
+    for revision in &ordered[base + 1..own] {
+        let content = md5(revision);
+        if content.is_empty() || content == base_md5 || content == own_md5 {
+            continue;
+        }
+        replaced.retain(|earlier| md5(earlier) != content);
+        replaced.push((*revision).clone());
+    }
+    replaced
+}
+
 // ---------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------
@@ -395,6 +508,10 @@ pub struct GoogleDriveProvider {
     /// allows two folders with one name, so two uploads into one new
     /// folder must not both find it missing and both create it.
     folder_creation: Mutex<()>,
+    /// What is left to do for versions that uploads replaced, with the
+    /// tries each piece has had. An upload adds to it when it lands;
+    /// the changes poll works it off.
+    replaced_work: Arc<Mutex<std::collections::VecDeque<(ReplacedWork, u32)>>>,
 }
 
 impl GoogleDriveProvider {
@@ -420,6 +537,7 @@ impl GoogleDriveProvider {
             folder_creation: Mutex::new(()),
             out_of_scope: Mutex::new(BTreeMap::new()),
             chunk_hint: Arc::new(Mutex::new(CHUNK_START)),
+            replaced_work: Arc::new(Mutex::new(std::collections::VecDeque::new())),
         }
     }
 
@@ -491,6 +609,291 @@ impl GoogleDriveProvider {
         serde_json::from_slice(&response.body).map_err(|error| {
             ProviderError::transient(format!("unparsable Drive API response: {error}"))
         })
+    }
+
+    // -- Versions that uploads replaced --------------------------------
+
+    /// Works off a part of [`Self::replaced_work`]. A piece that fails
+    /// goes to the end of the line and is tried at a later poll.
+    fn keep_replaced_versions(&self) {
+        for _ in 0..REPLACED_WORK_PER_POLL {
+            let next = self
+                .replaced_work
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pop_front();
+            let Some((work, attempts)) = next else {
+                return;
+            };
+            let large_step = matches!(&work, ReplacedWork::Copy(copy) if copy.upload.is_some());
+            let mut queue_back: Vec<(ReplacedWork, u32)> = Vec::new();
+            let mut failed = false;
+            match self.advance_replaced_work(work.clone()) {
+                Ok(follow_up) => queue_back.extend(follow_up.into_iter().map(|work| (work, 0))),
+                Err(error) if attempts + 1 < REPLACED_WORK_ATTEMPTS => {
+                    crate::logging::debug(
+                        "Could not keep a version that an upload replaced yet; trying again",
+                        &[("error", error.message)],
+                    );
+                    // A copy starts again from its first byte: nothing
+                    // of a resumable session is a file until its end.
+                    let work = match work {
+                        ReplacedWork::Copy(mut copy) => {
+                            copy.upload = None;
+                            ReplacedWork::Copy(copy)
+                        }
+                        check => check,
+                    };
+                    queue_back.push((work, attempts + 1));
+                    failed = true;
+                }
+                Err(error) => {
+                    match &work {
+                        // Nothing says that a version was replaced.
+                        ReplacedWork::Check { file_name, .. } => crate::logging::debug(
+                            "Gave up the check for a version that an upload replaced",
+                            &[("file", file_name.clone()), ("error", error.message)],
+                        ),
+                        ReplacedWork::Copy(copy) => crate::logging::warning(
+                            "An upload replaced a version another device had just put in Google Drive, and that version could not be kept as a copy; it is in the version history of the file in Google Drive",
+                            &[("file", copy.file_name.clone()), ("error", error.message)],
+                        ),
+                    }
+                }
+            }
+            let mut queue = self
+                .replaced_work
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if failed {
+                queue.extend(queue_back);
+            } else {
+                for work in queue_back.into_iter().rev() {
+                    queue.push_front(work);
+                }
+            }
+            drop(queue);
+            // One chunk of a large copy, or one failure, is enough for
+            // one poll.
+            if failed || large_step {
+                return;
+            }
+        }
+    }
+
+    /// Does one piece of the work and answers with what follows it.
+    fn advance_replaced_work(
+        &self,
+        work: ReplacedWork,
+    ) -> Result<Vec<ReplacedWork>, ProviderError> {
+        match work {
+            ReplacedWork::Check {
+                file_id,
+                parent_id,
+                file_name,
+                base_md5,
+                own_md5,
+            } => {
+                let revisions = match self.list_revisions(&file_id) {
+                    Ok(revisions) => revisions,
+                    // The file is gone, and its versions with it.
+                    Err(error) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
+                        return Ok(Vec::new());
+                    }
+                    Err(error) => return Err(error),
+                };
+                Ok(revisions_replaced_unseen(&revisions, &base_md5, &own_md5)
+                    .into_iter()
+                    .map(|revision| {
+                        ReplacedWork::Copy(RevisionCopy {
+                            file_id: file_id.clone(),
+                            revision,
+                            parent_id: parent_id.clone(),
+                            file_name: file_name.clone(),
+                            upload: None,
+                        })
+                    })
+                    .collect())
+            }
+            ReplacedWork::Copy(copy) => self.advance_revision_copy(copy),
+        }
+    }
+
+    fn list_revisions(&self, file_id: &str) -> Result<Vec<GdRevision>, ProviderError> {
+        let mut revisions = Vec::new();
+        let mut page_token: Option<String> = None;
+        for _ in 0..REVISION_PAGES_MAX {
+            let mut url = format!(
+                "{API_BASE}/files/{file_id}/revisions?pageSize=1000&fields={REVISION_FIELDS}"
+            );
+            if let Some(token) = &page_token {
+                url.push_str(&format!("&pageToken={}", oauth::url_encode(token)));
+            }
+            let page: GdRevisionList = self.api_json("GET", url, None)?;
+            revisions.extend(page.revisions);
+            page_token = page.next_page_token;
+            if page_token.is_none() {
+                break;
+            }
+        }
+        Ok(revisions)
+    }
+
+    /// Copies one stored version into a file of its own, named as a
+    /// conflict copy of the file it belongs to. A small version goes
+    /// in one request; a large one moves one chunk per call through a
+    /// resumable session.
+    fn advance_revision_copy(
+        &self,
+        mut copy: RevisionCopy,
+    ) -> Result<Vec<ReplacedWork>, ProviderError> {
+        let replaced_at_ms = copy
+            .revision
+            .modified_time
+            .as_deref()
+            .and_then(parse_rfc3339_millis)
+            .and_then(|at| at.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|age| age.as_millis() as u64)
+            .unwrap_or(0);
+        let name = vapor_shared::conflict::copy_name(
+            &copy.file_name,
+            vapor_shared::constants::conflict::REPLACED_VERSION,
+            replaced_at_ms,
+            None,
+        );
+        let size: u64 = copy
+            .revision
+            .size
+            .as_deref()
+            .and_then(|size| size.parse().ok())
+            .unwrap_or(0);
+        let media = format!(
+            "{API_BASE}/files/{}/revisions/{}?alt=media",
+            copy.file_id, copy.revision.id
+        );
+        let metadata = serde_json::json!({ "name": name, "parents": [copy.parent_id] });
+
+        if copy.upload.is_none() {
+            // A copy of this version that is there already (another
+            // device kept it, or a try of this one got that far) is
+            // enough.
+            if self.find_child(&copy.parent_id, &name)?.is_some() {
+                return Ok(Vec::new());
+            }
+            if size <= SIMPLE_UPLOAD_MAX_BYTES {
+                let response = self.execute_authed("GET", media, Vec::new(), Vec::new())?;
+                if response.status >= 300 {
+                    return Err(classify_api_failure(&response));
+                }
+                let content = response.body;
+                if let Some(expected) = copy.revision.md5_checksum.as_deref()
+                    && md5_hex_of_bytes(&content) != expected
+                {
+                    return Err(ProviderError::transient(
+                        "a stored version came down with other bytes than Drive described",
+                    ));
+                }
+                let boundary = multipart_boundary_absent_in(&content);
+                let mut body = Vec::new();
+                body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+                body.extend_from_slice(b"Content-Type: application/json; charset=UTF-8\r\n\r\n");
+                body.extend_from_slice(metadata.to_string().as_bytes());
+                body.extend_from_slice(format!("\r\n--{boundary}\r\n").as_bytes());
+                body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+                body.extend_from_slice(&content);
+                body.extend_from_slice(format!("\r\n--{boundary}--").as_bytes());
+                let response = self.execute_authed(
+                    "POST",
+                    format!("{UPLOAD_BASE}/files?uploadType=multipart&fields=id"),
+                    vec![(
+                        "Content-Type".to_string(),
+                        format!("multipart/related; boundary={boundary}"),
+                    )],
+                    body,
+                )?;
+                if response.status >= 300 {
+                    return Err(classify_api_failure(&response));
+                }
+                self.report_kept_copy(&copy, &name);
+                return Ok(Vec::new());
+            }
+            let response = self.execute_authed(
+                "POST",
+                format!("{UPLOAD_BASE}/files?uploadType=resumable&fields=id"),
+                vec![
+                    ("Content-Type".to_string(), "application/json".to_string()),
+                    ("X-Upload-Content-Length".to_string(), size.to_string()),
+                ],
+                metadata.to_string().into_bytes(),
+            )?;
+            if response.status >= 300 {
+                return Err(classify_api_failure(&response));
+            }
+            let session_url = response
+                .header("Location")
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| {
+                    ProviderError::transient("resumable initiation returned no session URI")
+                })?;
+            copy.upload = Some((session_url, 0));
+            return Ok(vec![ReplacedWork::Copy(copy)]);
+        }
+
+        let (session_url, sent) = copy.upload.clone().expect("checked above");
+        if sent >= size {
+            return Err(ProviderError::transient(
+                "the copy of a stored version sent every byte and did not finish",
+            ));
+        }
+        let chunk = CHUNK_START.min(size - sent);
+        let last = sent + chunk - 1;
+        let response = self.execute_authed(
+            "GET",
+            media,
+            vec![("Range".to_string(), format!("bytes={sent}-{last}"))],
+            Vec::new(),
+        )?;
+        if response.status >= 300 {
+            return Err(classify_api_failure(&response));
+        }
+        if response.body.len() as u64 != chunk {
+            return Err(ProviderError::transient(format!(
+                "a stored version answered {} bytes for a range of {chunk}",
+                response.body.len()
+            )));
+        }
+        let response = self.execute_authed(
+            "PUT",
+            session_url.clone(),
+            vec![(
+                "Content-Range".to_string(),
+                format!("bytes {sent}-{last}/{size}"),
+            )],
+            response.body,
+        )?;
+        match response.status {
+            308 => {
+                let acked = response
+                    .header("Range")
+                    .and_then(parse_resumable_range_end)
+                    .map(|end| end + 1)
+                    .unwrap_or(last + 1);
+                copy.upload = Some((session_url, acked.min(size)));
+                Ok(vec![ReplacedWork::Copy(copy)])
+            }
+            200 | 201 => {
+                self.report_kept_copy(&copy, &name);
+                Ok(Vec::new())
+            }
+            _ => Err(classify_api_failure(&response)),
+        }
+    }
+
+    fn report_kept_copy(&self, copy: &RevisionCopy, name: &str) {
+        crate::logging::warning(
+            "An upload replaced a version another device had just put in Google Drive; kept that version as a copy",
+            &[("file", copy.file_name.clone()), ("copy", name.to_string())],
+        );
     }
 
     // -- Path/id resolution --------------------------------------------
@@ -1257,9 +1660,13 @@ impl Provider for GoogleDriveProvider {
             .map(|metadata| metadata.len())
             .unwrap_or(0);
 
+        let overwritten = existing
+            .as_ref()
+            .and_then(|file| Some((file.parents.first()?.clone(), file.name.clone())));
         Ok(Box::new(GdriveUploadSession {
             state: UploadState::NotStarted,
             tokens: self.tokens.clone(),
+            overwritten,
             file_id: existing.map(|file| file.id),
             metadata,
             source,
@@ -1269,6 +1676,7 @@ impl Provider for GoogleDriveProvider {
             precondition: request.precondition.clone(),
             hasher: Md5::new(),
             hashed_bytes: 0,
+            replaced_work: self.replaced_work.clone(),
         }))
     }
 
@@ -1329,6 +1737,9 @@ impl Provider for GoogleDriveProvider {
         cursor: Option<&str>,
         max_changes: usize,
     ) -> Result<ChangesPoll, ProviderError> {
+        // Before the read of the feed, so that a copy made here is in
+        // the answer of this poll or of the next.
+        self.keep_replaced_versions();
         let Some(cursor) = cursor else {
             let start: GdStartPageToken =
                 self.api_json("GET", format!("{API_BASE}/changes/startPageToken"), None)?;
@@ -1574,6 +1985,12 @@ struct GdriveUploadSession {
     /// acknowledged only in part is sent again from the acknowledged
     /// offset, and those bytes must not be hashed twice.
     hashed_bytes: u64,
+    /// Where a guarded overwrite that landed leaves the check for a
+    /// version it replaced ([`ReplacedWork`]).
+    replaced_work: Arc<Mutex<std::collections::VecDeque<(ReplacedWork, u32)>>>,
+    /// The folder and the name of the file that is overwritten, which
+    /// a copy of a replaced version is placed and named by.
+    overwritten: Option<(String, String)>,
 }
 
 impl GdriveUploadSession {
@@ -1618,6 +2035,35 @@ impl GdriveUploadSession {
             ));
         }
         Ok(())
+    }
+
+    /// The re-verification before the commit and the commit are two
+    /// requests, and another device can write between them. After a
+    /// guarded overwrite landed, the versions of the file say whether
+    /// one did; the changes poll reads them, so the upload does not
+    /// wait for the answer.
+    fn check_for_a_replaced_version(&self, own_md5: &str) {
+        let (RemotePrecondition::HashEquals(base_md5), Some(file_id), Some((parent_id, file_name))) =
+            (&self.precondition, &self.file_id, &self.overwritten)
+        else {
+            return;
+        };
+        if own_md5.is_empty() || own_md5 == base_md5 {
+            return;
+        }
+        self.replaced_work
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push_back((
+                ReplacedWork::Check {
+                    file_id: file_id.clone(),
+                    parent_id: parent_id.clone(),
+                    file_name: file_name.clone(),
+                    base_md5: base_md5.clone(),
+                    own_md5: own_md5.to_string(),
+                },
+                0,
+            ));
     }
 
     fn simple_multipart(&mut self) -> Result<TransferOutcome, ProviderError> {
@@ -1670,13 +2116,15 @@ impl GdriveUploadSession {
             ProviderError::transient(format!("unparsable upload response: {error}"))
         })?;
         self.state = UploadState::Done;
+        let content_hash = file
+            .md5_checksum
+            .filter(|md5| !md5.is_empty())
+            .unwrap_or(content_md5);
+        self.check_for_a_replaced_version(&content_hash);
         Ok(TransferOutcome {
             bytes_total: self.total_bytes,
             remote_modified_at: file.modified_time.as_deref().and_then(parse_rfc3339_millis),
-            content_hash: file
-                .md5_checksum
-                .filter(|md5| !md5.is_empty())
-                .unwrap_or(content_md5),
+            content_hash,
         })
     }
 
@@ -1850,6 +2298,7 @@ impl TransferSession for GdriveUploadSession {
                             ));
                         }
                         let content_hash = stored_hash.or(sent_hash).unwrap_or_default();
+                        self.check_for_a_replaced_version(&content_hash);
                         Ok(TransferStep::Completed(TransferOutcome {
                             bytes_total: self.total_bytes,
                             content_hash,
@@ -1979,7 +2428,7 @@ impl TransferSession for GdriveDownloadSession {
 impl GdriveDownloadSession {
     fn finish(&mut self) -> Result<TransferStep, ProviderError> {
         if let Some(destination) = self.destination.take() {
-            destination.sync_all().map_err(|error| {
+            vapor_platform::fs_ops::make_durable(&destination).map_err(|error| {
                 ProviderError::transient(format!("cannot sync downloaded payload: {error}"))
             })?;
         }

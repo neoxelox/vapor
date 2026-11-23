@@ -142,7 +142,7 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 
 - The fs-watch callback (FSEvents on macOS, ReadDirectoryChangesW on Windows, inotify on Linux) may only normalize/filter/record event metadata.
 - No DB/hash/network work in callback.
-- No provider I/O and no file hashing on the tick thread: transfers, probes, deletes, hashes, the changes poll and its re-baseline, reconcile directory listings, and the cloud-root checks all run on worker threads and are harvested by a later tick. The tick thread reads no file content: a worker reads the file, and the tick thread uses the answer only while the file has the size and the modification time the worker saw. One exception is open work (`docs/tasks/core.md`): a discard whose volume refuses a trash folder copies the file to the trash of the runtime directory on the tick thread.
+- No provider I/O and no file hashing on the tick thread: transfers, probes, deletes, hashes, the changes poll and its re-baseline, reconcile directory listings, and the cloud-root checks all run on worker threads and are harvested by a later tick. The tick thread reads no file content: a worker reads the file, and the tick thread uses the answer only while the file has the size and the modification time the worker saw. A discard whose volume refuses a trash folder is copied to the trash of the runtime directory by a worker too.
 - All expensive work must be throttle-state gated.
 - Throttle states: `Idle`, `Light`, `Throttled`, `Suspended`.
 - A throttle state makes sync slower. Only `Suspended` stops it, and a condition that can last never gives `Suspended`: a device on battery, a user at the device, and Low Power Mode slow sync down and never stop it. Critical thermal pressure is what suspends (owner, 2026-11-14).
@@ -188,7 +188,7 @@ Do not move heavy compute into an app process or the fs-watch callback path.
 
 ## 6) Security and privacy
 
-- Secrets/tokens only via `core/platform/secrets::SecretStore`: the login keychain on macOS (one generic-password item per secret under the `sh.arn.vapor` service, with an access list covering `vapor` and `vapord`), Credential Manager on Windows, Secret Service on desktop Linux, the external command named by `VAPOR_SECRETS_COMMAND` on headless Linux, never a plaintext file. Tests use the in-memory fake; the fake and the native store run the same contract test.
+- Secrets/tokens only via `core/platform/secrets::SecretStore`: the login keychain on macOS (one generic-password item per secret under the `sh.arn.vapor` service, created by `vapord`, so the daemon reads it with no dialog), Credential Manager on Windows, Secret Service on desktop Linux, the external command named by `VAPOR_SECRETS_COMMAND` on headless Linux, never a plaintext file. Tests use the in-memory fake; the fake and the native store run the same contract test.
 - A runtime directory other than the default one has its own scope in the store, so a dev checkout or a test sandbox never reads or removes the secrets of the real install. The daemon reads secrets without a prompt and holds for a sign-in when it cannot. A token never goes on a command line.
 - Logs must redact secrets, tokens, auth headers, and sensitive identifiers.
 - Telemetry is local-only unless explicitly designed otherwise.

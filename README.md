@@ -86,6 +86,8 @@ In flight and coming next:
 - 🗂️ **Cloud folder picker.** Setup lists the folders of your cloud, so you pick one or make a new one.
 - 🧾 **Signed releases.** Signed and notarized, and verified on a clean machine every cycle.
 
+Vapor syncs the content of files. What does not travel (symbolic links, empty folders, file attributes) and what that means for a project: [`docs/product/what-syncs.md`](docs/product/what-syncs.md).
+
 ## Providers
 
 Available now:
@@ -104,7 +106,7 @@ In flight and coming next:
 | Command | Flags | What it does |
 | --- | --- | --- |
 | `vapor init` | `--provider <provider>`, `--local <path>`, `--cloud <path>`, `--mode <mode>`, `--token -`, `--auto-launch <on\|off>`, `--linger <on\|off>` (Linux), `--json` | Sets Vapor up: the cloud, the sign-in, the two folders, and the background service. A terminal asks for each answer; a script gives them as flags and has to give `--local` and `--cloud`. A later run does only what is left. Exits with 1 while a step waits for you. |
-| `vapor status` | `--json` | Shows what sync is doing and why: run state, throttle, queue, open questions. |
+| `vapor status` | `--json` | Shows what sync is doing and why: run state, throttle, queue, open questions, and the files that cannot sync. |
 | `vapor pause` | `--profile <id>`, `--json` | Pauses sync, for every profile or for one. Changes are still recorded and sync on resume. |
 | `vapor resume` | `--profile <id>`, `--json` | Resumes sync, for every profile or for one. |
 | `vapor reconcile` | `--profile <id>`, `--json` | Compares both folders now and syncs the differences, for every profile or for one. |
@@ -126,7 +128,7 @@ In flight and coming next:
 | `vapor service install` | `--linger <on\|off>` (Linux), `--json` | Starts Vapor at login and starts it now, with the supervisor that restarts a crashed daemon. On a Linux host with no desktop it turns lingering on, so Vapor keeps running after you log out; `--linger off` leaves that alone. |
 | `vapor service uninstall` | `--keep-running`, `--json` | Stops starting Vapor at login, and stops it unless `--keep-running`. |
 | `vapor service start`, `stop`, `restart` | `--json` | Starts, stops, or restarts the daemon. A restart applies the settings that need one. |
-| `vapor service status` | `--json` | Says whether the service is installed and running, or paused after repeated crashes. Changes nothing. |
+| `vapor service status` | `--json` | Says whether the service is installed and running, whether the daemon answers, or that it is paused after repeated crashes. Changes nothing. |
 | `vapor service bootstrap` | `--json` | Installs and starts the service when `autoLaunch` is on. The app runs it at startup. |
 | `vapor service check` | `--loop`, `--interval <seconds>`, `--json` | Restarts the daemon if it exited unexpectedly, within the crash-loop limits. The supervisor runs it for you. |
 | `vapor service acknowledge` | `--json` | Clears a crash-loop pause so the daemon may start again. |

@@ -17,7 +17,7 @@
     `ServiceInstaller` (launchd + SMAppService), `SecretStore` (Keychain),
     `PlatformMetricsSampler` (IOKit / NSProcessInfo), `IdleNotifier`
     (CGEventSource), `FilesystemCapabilities` (xattr), `ProcessSupervisor`
-    (SIGTERM/SIGINT), `TrashBin` (`~/.Trash`).
+    (SIGTERM/SIGINT), `TrashBin` (`NSFileManager`).
 - Provider modules (`core/providers`)
   - The filesystem provider (a local directory playing the cloud side)
     is the default and the reference implementation every

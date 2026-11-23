@@ -96,7 +96,8 @@ Behavior invariants:
   `launchctl kill TERM` exits the tick loop at the next tick boundary.
 - Crash-loop protection is owned by `core/lifecycle` (not `launchd` and
   not Swift): the supervisor job that every install registers runs
-  `vapor service check` every 30 seconds, the app's
+  `vapor service check` every 30 seconds and within a second of a
+  daemon exit, ends a daemon that gives no answer for 30 seconds, the app's
   `DaemonHealthMonitor` reads the result with `vapor service status`
   and restarts nothing, and crash counters/backoff/pause persist in
   `<vapor_dir>/state/lifecycle.json`. After 5 consecutive unclean exits
