@@ -166,11 +166,14 @@ printing an outcome only when it changes. A crashed daemon so comes
 back within about a second, with the app open, with the app closed,
 and on a device that never opens the app.
 
-A daemon whose process runs and whose socket gives no answer for 30
+A daemon that answered and then gives no answer on its socket for 30
 seconds hangs. The supervisor ends that process (`SIGKILL`), which the
 next tick counts as a crash and restarts under the same budget. A
-daemon that starts or stops answers inside that time, so neither is
-ended. `vapor service stop` and `restart` have the same last step: a
+daemon that has not answered since it started gets 5 minutes: a start
+can be slow (a large state database to check, a volume that wakes up),
+and a slow start is not a hang. When the daemon that takes its place
+does not answer either, the supervisor leaves it alone until it does:
+a daemon whose socket cannot open still syncs. `vapor service stop` and `restart` have the same last step: a
 daemon that does not exit 10 seconds after `SIGTERM` is ended, so no
 second daemon ever starts beside a first one that still holds the
 runtime directory.

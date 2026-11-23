@@ -445,6 +445,12 @@ impl Provider for FilesystemProvider {
                     "move source {from} does not exist"
                 )));
             }
+            // A folder on the way that is a file now holds no source.
+            Err(error) if error.kind() == io::ErrorKind::NotADirectory => {
+                return Err(ProviderError::not_found(format!(
+                    "move source {from} does not exist"
+                )));
+            }
             Err(error) => {
                 return Err(ProviderError::transient(format!(
                     "cannot read the move source {from}: {error}"
@@ -1236,7 +1242,7 @@ impl FilesystemUploadSession {
     /// later external edit or deletion of the uploaded file would then
     /// be invisible to the changes feed (observed live as a cloud-side
     /// `rm` that never propagated).
-    fn commit(&self) -> Result<(), ProviderError> {
+    fn commit(&mut self) -> Result<(), ProviderError> {
         if self.require_absent {
             match vapor_platform::fs_ops::atomic_noclobber_rename(&self.temp_path, &self.target) {
                 Ok(()) => Ok(()),
@@ -1252,10 +1258,12 @@ impl FilesystemUploadSession {
                     self.remote_path
                 ))),
             }
-        } else if let Some(guard) = &self.hash_guard
-            && guard.verified_node.is_some()
+        } else if self
+            .hash_guard
+            .as_ref()
+            .is_some_and(|guard| guard.verified_node.is_some())
         {
-            self.commit_over_verified(guard)
+            self.commit_over_verified()
         } else {
             self.rename_into_place()
         }
@@ -1270,7 +1278,11 @@ impl FilesystemUploadSession {
         })
     }
 
-    fn commit_over_verified(&self, guard: &HashGuard) -> Result<(), ProviderError> {
+    fn commit_over_verified(&mut self) -> Result<(), ProviderError> {
+        let guard = self
+            .hash_guard
+            .as_ref()
+            .expect("the caller checked the guard");
         match exchange_into_place(&self.temp_path, &self.target, guard, self.caps.as_ref()) {
             Ok(None) => Ok(()),
             Ok(Some(copy)) => {
@@ -1295,12 +1307,31 @@ impl FilesystemUploadSession {
                 "cannot move upload into place at {}: {error}",
                 self.remote_path
             ))),
-            Err(ExchangeError::Copy(error)) => Err(ProviderError::transient(format!(
-                "the version that the upload of {} replaced could not be kept as a copy \
-                 and is at {}: {error}",
-                self.remote_path,
-                self.temp_path.display()
-            ))),
+            Err(ExchangeError::LostTheRace) => {
+                // The two files are back as they were: the other
+                // writer's version under the name, this upload under
+                // the temp name.
+                let _ = fs::remove_file(&self.temp_path);
+                Err(ProviderError::precondition_failed(format!(
+                    "upload target {} changed at the moment of the commit; keeping both",
+                    self.remote_path
+                )))
+            }
+            Err(ExchangeError::Kept { error, left_at }) => {
+                // The upload is in place, and the version it replaced
+                // is a file that nothing may remove: the temp name is
+                // not this session's to clean up any more.
+                self.finished = true;
+                crate::logging::error(
+                    "An upload replaced a version another writer had just put in the cloud, and that version could not be given the name of a copy",
+                    &[
+                        ("path", self.remote_path.to_string()),
+                        ("left_at", left_at.display().to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
+                Ok(())
+            }
         }
     }
 
@@ -1357,9 +1388,14 @@ enum ExchangeError {
     TargetGone,
     /// The exchange itself failed; the target is untouched.
     Commit(io::Error),
-    /// The upload is in place, and the file it replaced is still under
-    /// the temp name because it could not be renamed.
-    Copy(io::Error),
+    /// The file under the name was not the verified one and could not
+    /// be kept as a copy, so the exchange was undone: the name holds
+    /// that file again, and the temp name holds the upload.
+    LostTheRace,
+    /// The upload is in place. The file it replaced could not be given
+    /// the name of a copy, and the exchange could not be undone: that
+    /// file is at `left_at`, under a name that no cleanup removes.
+    Kept { error: io::Error, left_at: PathBuf },
 }
 
 /// The commit of a guarded overwrite. The check of the guard and a
@@ -1375,6 +1411,9 @@ fn exchange_into_place(
     guard: &HashGuard,
     caps: &dyn FilesystemCapabilities,
 ) -> Result<Option<PathBuf>, ExchangeError> {
+    let upload = fs::symlink_metadata(temp_path)
+        .ok()
+        .and_then(|metadata| file_node(&metadata));
     match vapor_platform::fs_ops::atomic_swap(temp_path, target) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::Unsupported => {
@@ -1398,9 +1437,44 @@ fn exchange_into_place(
         let _ = fs::remove_file(replaced);
         return Ok(None);
     }
-    keep_replaced_version(replaced, target, caps)
-        .map(Some)
-        .map_err(ExchangeError::Copy)
+    let error = match keep_replaced_version(replaced, target, caps) {
+        Ok(copy) => return Ok(Some(copy)),
+        Err(error) => error,
+    };
+    // The version must not stay under a temp name: the session removes
+    // that name when it ends, and the sweep of stale temp files removes
+    // it later. Undo the exchange, so that the version is under the
+    // name again and the upload loses the race in the usual way.
+    if vapor_platform::fs_ops::atomic_swap(temp_path, target).is_ok() {
+        let holds_the_upload = fs::symlink_metadata(temp_path)
+            .ok()
+            .is_some_and(|metadata| upload.is_some() && file_node(&metadata) == upload);
+        if holds_the_upload {
+            return Err(ExchangeError::LostTheRace);
+        }
+        // A third writer landed between the two exchanges, and its
+        // file is under the temp name now. It is kept like the first.
+        if let Ok(copy) = keep_replaced_version(temp_path, target, caps) {
+            return Ok(Some(copy));
+        }
+    }
+    // Last resort: a name outside the temp prefix, so that no cleanup
+    // takes the file and the next scan syncs it as a file.
+    let left_at = target.with_file_name(format!(
+        "replaced-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|age| age.as_nanos())
+            .unwrap_or(0)
+    ));
+    match fs::rename(temp_path, &left_at) {
+        Ok(()) => Err(ExchangeError::Kept { error, left_at }),
+        Err(_) => Err(ExchangeError::Kept {
+            error,
+            left_at: temp_path.to_path_buf(),
+        }),
+    }
 }
 
 /// Gives the file at `replaced` the name of a conflict copy of
@@ -1424,12 +1498,7 @@ fn keep_replaced_version(
         .unwrap_or(0);
     let mut sequence = None;
     loop {
-        let copy = target.with_file_name(vapor_shared::conflict::copy_name(
-            &name,
-            constants::conflict::REPLACED_VERSION,
-            replaced_at_ms,
-            sequence,
-        ));
+        let copy = target.with_file_name(copy_name_that_fits(&name, replaced_at_ms, sequence));
         match vapor_platform::fs_ops::atomic_noclobber_rename(replaced, &copy) {
             Ok(()) => return Ok(copy),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -1438,6 +1507,40 @@ fn keep_replaced_version(
             Err(error) => return Err(error),
         }
     }
+}
+
+/// The name of the copy of a replaced version of `name`. A copy name is
+/// longer than the name it comes from, and a file name has a limit:
+/// the stem is cut, at a character, by what the copy name has too
+/// much. The copy of such a name no longer says which file it belongs
+/// to, and it is still a file that syncs.
+fn copy_name_that_fits(name: &str, replaced_at_ms: u64, sequence: Option<u64>) -> String {
+    const MAX_FILE_NAME_BYTES: usize = 255;
+    let build = |name: &str| {
+        vapor_shared::conflict::copy_name(
+            name,
+            constants::conflict::REPLACED_VERSION,
+            replaced_at_ms,
+            sequence,
+        )
+    };
+    let full = build(name);
+    let Some(excess) = full
+        .len()
+        .checked_sub(MAX_FILE_NAME_BYTES)
+        .filter(|n| *n > 0)
+    else {
+        return full;
+    };
+    let (stem, extension) = match name.rfind('.') {
+        Some(0) | None => (name, ""),
+        Some(index) => name.split_at(index),
+    };
+    let mut keep = stem.len().saturating_sub(excess);
+    while keep > 0 && !stem.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    build(&format!("{}{extension}", &stem[..keep]))
 }
 
 /// The target's (size, mtime) if it can be stat'd, for the pre-commit
@@ -2092,6 +2195,45 @@ mod tests {
             "{name} is not the name of a copy of doc.txt"
         );
         assert!(!ours.exists(), "nothing stays under the temp name");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_replaced_version_of_a_file_with_a_long_name_is_kept_too() {
+        // A copy name is longer than the name: for a name near the
+        // limit of the volume the copy would have none. The version
+        // must stay a file all the same.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cloud = dir.path().join("cloud");
+        let provider = provider_at(&cloud);
+        let name = format!("{}.txt", "n".repeat(245));
+        let target = cloud.join(&name);
+        fs::write(&target, b"base").expect("seed target");
+        let verified = fs::metadata(&target).expect("stat");
+        let guard = HashGuard {
+            expected: hash_hex_of_bytes(b"base"),
+            verified_size_mtime: Some((verified.len(), verified.modified().expect("mtime"))),
+            verified_node: file_node(&verified),
+        };
+        let theirs = cloud.join("their-upload.tmp");
+        fs::write(&theirs, b"their edit").expect("stage theirs");
+        fs::rename(&theirs, &target).expect("their commit");
+        let ours = cloud.join("our-upload.tmp");
+        fs::write(&ours, b"our edit").expect("stage ours");
+
+        let copy = exchange_into_place(&ours, &target, &guard, provider.caps.as_ref())
+            .ok()
+            .expect("the commit lands")
+            .expect("the replaced version is kept");
+
+        assert_eq!(fs::read(&target).expect("target"), b"our edit");
+        assert_eq!(fs::read(&copy).expect("copy"), b"their edit");
+        let copy_name = copy.file_name().and_then(|n| n.to_str()).expect("name");
+        assert!(
+            copy_name.len() <= 255 && copy_name.ends_with(".txt"),
+            "{copy_name}"
+        );
+        assert!(copy_name.contains("~conflict-replaced-"), "{copy_name}");
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

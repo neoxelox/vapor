@@ -743,6 +743,11 @@ pub mod service {
     /// nothing. Long enough for a daemon that starts, and for one that
     /// stops.
     pub const UNRESPONSIVE_KILL_SECONDS: u64 = 30;
+    /// The same for a daemon that has not answered since it started:
+    /// a start may take long (a large state database, a volume that
+    /// wakes up), and it is not a hang. After one such daemon was
+    /// ended, the next is left alone until it answers.
+    pub const UNRESPONSIVE_START_SECONDS: u64 = 300;
     /// How long a daemon that was told to stop waits for its worker
     /// threads. A worker inside a call that does not return (a read of
     /// a mount that hangs) must not keep the process alive: the state
@@ -1250,6 +1255,20 @@ pub mod engine {
     /// tick waker, so a fully idle daemon polls at 1 Hz instead of 4 Hz.
     pub const IDLE_TICK_MILLIS: u64 = 1_000;
     pub const RECONCILE_SLICE_MILLIS: u64 = 500;
+    /// How long a removal that needs a copy to the trash of another
+    /// volume waits before it looks again, while the throttle is
+    /// `Suspended`.
+    pub const SUSPENDED_COPY_WAIT_SECONDS: u64 = 30;
+    /// How long the removal of a cloud folder waits, at least, while
+    /// removals of its entries are still in the queue.
+    pub const FOLDER_DELETE_WAIT_SECONDS: u64 = 2;
+    /// How long a download waits when a synced folder that the cloud
+    /// replaced with a file still holds files here: their removals are
+    /// queued and run in this time.
+    pub const TYPE_CLASH_WAIT_SECONDS: u64 = 3;
+    /// The same wait while a mass-delete question holds those removals:
+    /// nothing moves until the user answers, so the look is rare.
+    pub const TYPE_CLASH_WAIT_HELD_SECONDS: u64 = 60;
     /// Minimum dwell time before the throttle controller may down-shift to
     /// or out of `Light`. Pairs with `MIN_DWELL_THROTTLED_SECONDS` to keep
     /// state stable under oscillating CPU / network samples.

@@ -673,16 +673,33 @@ impl DaemonRuntime {
             return true;
         }
 
+        // A deferred scan is work to come back for only while it can be
+        // released. Held, it would keep the loop at the working cadence
+        // for as long as the hold lasts.
+        let scans_can_be_released = self.deferred_scans_can_be_released();
         self.recorder
             .as_ref()
             .map(|recorder| {
                 recorder.with_state(|maps| {
                     maps.pending_event_count() > 0
                         || maps.pending_intent_count() > 0
-                        || maps.deferred_reconcile_count() > 0
+                        || (scans_can_be_released && maps.deferred_reconcile_count() > 0)
                 })
             })
             .unwrap_or(false)
+    }
+
+    /// Whether a scan that was put off can start when its time comes:
+    /// not during a pause, a hold of the profile, or a `Suspended`
+    /// throttle.
+    fn deferred_scans_can_be_released(&self) -> bool {
+        let snapshot = self.app.snapshot();
+        snapshot.run_state != RunState::Paused
+            && snapshot.throttle_state != vapor_shared::ThrottleState::Suspended
+            && self.cloud_root_ready
+            && self.root_hold.is_none()
+            && self.one_way_hold.is_none()
+            && !self.sign_in_hold
     }
 
     pub fn tick(&mut self, now: SystemTime) -> Result<RuntimeTickReport, DaemonRuntimeError> {
@@ -964,11 +981,15 @@ impl DaemonRuntime {
                         let unreadable: Vec<_> = unreadable_dirs
                             .into_iter()
                             .map(|(directory, _)| {
-                                let at = if std::fs::symlink_metadata(&directory).is_err() {
-                                    now
-                                } else {
-                                    retry_at
-                                };
+                                // Only "no such folder" means gone. A
+                                // folder that cannot be looked at (no
+                                // permission on the way to it) is the
+                                // other case, and its walk waits.
+                                let gone =
+                                    std::fs::symlink_metadata(&directory).is_err_and(|error| {
+                                        error.kind() == std::io::ErrorKind::NotFound
+                                    });
+                                let at = if gone { now } else { retry_at };
                                 (directory, PendingIntentKind::ReconcileSubtree, at)
                             })
                             .collect();
@@ -2401,7 +2422,7 @@ impl DaemonRuntime {
                 constants::timeline::KIND_SIGN_IN,
                 self.profile_id.clone(),
                 format!(
-                    "signed in to {}; the cloud is not reachable yet",
+                    "a sign-in to {} is stored; the cloud is not reachable yet",
                     self.app.provider_name()
                 ),
                 now,
@@ -2503,6 +2524,11 @@ impl DaemonRuntime {
             1 => shown,
             more => format!("{shown} and {} more", more - 1),
         };
+        if !self.deferred_scans_can_be_released() {
+            return Some(format!(
+                "{changes} change(s) in {place} wait for one scan, which starts when sync runs again"
+            ));
+        }
         let wait = if self.app.snapshot().throttle_state == vapor_shared::ThrottleState::Idle {
             constants::engine::DEFERRED_RECONCILE_IDLE_QUIET_RELEASE_MILLIS
         } else {
@@ -8480,6 +8506,45 @@ mod tests {
     }
 
     #[test]
+    fn a_download_that_waits_for_a_replaced_folder_to_empty_stays_one_queue_row() {
+        // The folder is the whole tree, so the removal of its files is
+        // a mass deletion and waits for the user. The download of the
+        // file that took the folder's place waits with them. It must
+        // wait as the same queue row: completed and queued again by a
+        // walk that it asked for itself, it is a loop with no pause.
+        let fixture = OfflineFixture::new();
+        let folder = fixture.watch_root.join("thing");
+        std::fs::create_dir_all(&folder).expect("dir");
+        for index in 0..12 {
+            std::fs::write(folder.join(format!("{index}.txt")), b"synced").expect("seed");
+        }
+        drop(fixture.run(&[]));
+        let cloud = fixture.cloud_root.join("thing");
+        std::fs::remove_dir_all(&cloud).expect("remove folder");
+        std::fs::write(&cloud, b"now a file").expect("file");
+
+        let waiting_download = |runtime: &DaemonRuntime| {
+            runtime
+                .state_db()
+                .list_queue_intents(100)
+                .expect("queue")
+                .into_iter()
+                .find(|intent| intent.kind == PendingIntentKind::Download && intent.path == folder)
+                .map(|intent| intent.id)
+        };
+        let first = fixture.run(&[]);
+        assert_eq!(names_in(&folder).len(), 12, "the files wait for the answer");
+        let row = waiting_download(&first).expect("the download waits");
+        drop(first);
+        let second = fixture.run(&[]);
+        assert_eq!(
+            waiting_download(&second),
+            Some(row),
+            "the same row waits; it was not completed and queued again"
+        );
+    }
+
+    #[test]
     fn a_file_replaced_by_a_folder_in_the_cloud_reaches_this_device_with_no_question() {
         let fixture = offline_fixture_with_synced_entry("thing", false);
         let cloud = fixture.cloud_root.join("thing");
@@ -10378,6 +10443,36 @@ mod tests {
         }
         assert_eq!(runtime.conflict_count(), 0);
         assert_eq!(runtime.state_db().failed_depth().expect("failed"), 0);
+    }
+
+    #[test]
+    fn a_file_removed_while_an_ignore_rule_hid_it_is_not_removed_from_the_cloud() {
+        let fixture = offline_fixture_with_synced("a.secret", b"synced");
+        let (local, cloud) = (
+            fixture.watch_root.join("a.secret"),
+            fixture.cloud_root.join("a.secret"),
+        );
+        // The rule hides the file and a walk passes. Then the file is
+        // removed here: under the rule that frees space on this device,
+        // it does not say "delete it everywhere".
+        std::fs::write(fixture.watch_root.join(".vaporignore"), "*.secret\n").expect("rule");
+        drop(fixture.run(&[]));
+        std::fs::remove_file(&local).expect("remove under the rule");
+        drop(fixture.run(&[]));
+        assert_eq!(std::fs::read(&cloud).expect("cloud"), b"synced");
+
+        // The rule goes. The cloud copy stays, and the file comes back.
+        std::fs::remove_file(fixture.watch_root.join(".vaporignore")).expect("rule gone");
+        let runtime = fixture.run(&[]);
+        assert_eq!(std::fs::read(&cloud).expect("cloud"), b"synced");
+        assert_eq!(std::fs::read(&local).expect("local"), b"synced");
+        assert_eq!(runtime.state_db().failed_depth().expect("failed"), 0);
+
+        // From here on the file is watched again: removed now, it is a
+        // deletion like any other.
+        std::fs::remove_file(&local).expect("remove in scope");
+        drop(fixture.run(&[]));
+        assert!(!cloud.exists(), "a removal in scope reaches the cloud");
     }
 
     #[test]

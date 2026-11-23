@@ -464,9 +464,12 @@ enum ActiveStage {
     },
     /// A worker copies a discarded item to the trash on another
     /// volume. `mirror_delete` says whether the removal counts as one
-    /// of a strict mirror.
+    /// of a strict mirror, and `cloud_folder_waits` that the cloud
+    /// holds a folder under the name, to be compared once the item is
+    /// gone.
     DiscardRunning {
         mirror_delete: bool,
+        cloud_folder_waits: bool,
     },
     WaitingForDownload {
         plan: TransferPlan,
@@ -555,8 +558,10 @@ enum PlanOutcome {
     /// The local removal that a cloud deletion asked for needs a copy:
     /// the volume of the item has no trash folder, so the item goes to
     /// the trash of the runtime directory on another volume. A copy
-    /// reads the file, so a worker makes it.
-    DiscardOnWorker,
+    /// reads the file, so a worker makes it. `cloud_folder_waits` says
+    /// that the cloud holds a folder under the name: its files come
+    /// down when the name is free here.
+    DiscardOnWorker { cloud_folder_waits: bool },
     /// A cloud deletion is about to remove a local file, and the cloud
     /// root is not known to be the folder the profile adopted. The
     /// intent goes back to the queue, and the runtime checks the root
@@ -1072,8 +1077,11 @@ impl StagedExecutor {
                 report.retried += 1;
                 Ok(None)
             }
-            PlanOutcome::DiscardOnWorker => {
-                Ok(self.dispatch_discard(app, env, intent, false, now_inst))
+            PlanOutcome::DiscardOnWorker { cloud_folder_waits } => {
+                if self.discard_copy_must_wait(app, state_db, &intent, now, report)? {
+                    return Ok(None);
+                }
+                Ok(self.dispatch_discard(app, env, intent, false, cloud_folder_waits, now_inst))
             }
             PlanOutcome::CloudRootSuspect => {
                 self.hold_for_cloud_root(state_db, &intent, now, report)?;
@@ -1523,13 +1531,26 @@ impl StagedExecutor {
                 Ok(None)
             }
 
-            ActiveStage::DiscardRunning { mirror_delete } => match outcome {
+            ActiveStage::DiscardRunning {
+                mirror_delete,
+                cloud_folder_waits,
+            } => match outcome {
                 ProviderJobOutcome::LocalWork(Ok(())) => {
                     // What an inline discard does after the move.
                     let _ = env.tags.remove(&intent.path);
                     env.local_echoes.record_delete(path_key(&intent.path), now);
                     forget_deleted_path(state_db, &intent.path);
                     ask_about_emptied_folder(env, state_db, &intent.path, now);
+                    if cloud_folder_waits {
+                        state_db.enqueue_intents_coalesced(
+                            &[(
+                                intent.path.clone(),
+                                PendingIntentKind::ReconcileSubtree,
+                                now,
+                            )],
+                            crate::safeguards::IntentSource::Fresh,
+                        )?;
+                    }
                     if mirror_delete {
                         report.mirror_deletes += 1;
                     }
@@ -1899,9 +1920,19 @@ impl StagedExecutor {
         match apply_remote_delete_locally(env, state_db, &intent.path, &LocalHashes::default(), now)
         {
             PlanOutcome::AppliedLocally => report.mirror_deletes += 1,
-            PlanOutcome::DiscardOnWorker => {
+            PlanOutcome::DiscardOnWorker { cloud_folder_waits } => {
+                if self.discard_copy_must_wait(app, state_db, intent, now, report)? {
+                    return Ok(None);
+                }
                 let now_inst = self.clock.now();
-                return Ok(self.dispatch_discard(app, env, intent.clone(), true, now_inst));
+                return Ok(self.dispatch_discard(
+                    app,
+                    env,
+                    intent.clone(),
+                    true,
+                    cloud_folder_waits,
+                    now_inst,
+                ));
             }
             PlanOutcome::Noop(_) => {}
             PlanOutcome::Fail { failure, message } => {
@@ -2324,6 +2355,29 @@ impl StagedExecutor {
         self.dispatch_upload(app, env, intent, permit, plan, now_inst)
     }
 
+    /// A copy to the trash reads and writes the whole item. Under
+    /// `Suspended` nothing that costs runs, so the intent waits; `true`
+    /// says that it was put back.
+    fn discard_copy_must_wait(
+        &mut self,
+        app: &DaemonApp,
+        state_db: &mut DurableStateDb,
+        intent: &DurableIntentRecord,
+        now: SystemTime,
+        report: &mut StagedExecutorReport,
+    ) -> Result<bool, StateDbError> {
+        if app.snapshot().throttle_state != vapor_shared::ThrottleState::Suspended {
+            return Ok(false);
+        }
+        state_db.defer_leased(
+            intent.id,
+            now + Duration::from_secs(constants::engine::SUSPENDED_COPY_WAIT_SECONDS),
+            "the copy to the trash waits while sync is suspended",
+        )?;
+        report.retried += 1;
+        Ok(true)
+    }
+
     /// Hands the discard of the intent's path to a worker, which may
     /// copy it to the trash of another volume. With no trash to copy
     /// to, the intent is tried again: the settings changed under it.
@@ -2333,10 +2387,15 @@ impl StagedExecutor {
         env: &ExecutionEnv<'_>,
         intent: DurableIntentRecord,
         mirror_delete: bool,
+        cloud_folder_waits: bool,
         now_inst: Instant,
     ) -> Option<ActiveExecution> {
         let trash = env.trash.cloned();
         let path = intent.path.clone();
+        // The planner judged the file as it is now. The worker may get
+        // to it later, and a save in between is a file nobody judged:
+        // the worker looks again and leaves such a file alone.
+        let judged = file_size_and_time(&path);
         let reason = if env.sync_mode == vapor_shared::SyncMode::TwoWay {
             constants::trash::REASON_CLOUD_DELETE
         } else {
@@ -2347,6 +2406,10 @@ impl StagedExecutor {
             intent.id,
             job_context(app, env, &self.clock, &self.root_identity),
             ProviderJobKind::LocalWork(Box::new(move || match trash {
+                Some(_) if judged.is_some() && file_size_and_time(&path) != judged => Err(format!(
+                    "{} changed while its removal waited for a worker",
+                    path.display()
+                )),
                 Some(trash) => match trash.discard(&path, reason, at) {
                     Ok(_) => Ok(()),
                     // Gone in the meantime: nothing is left to discard.
@@ -2361,7 +2424,10 @@ impl StagedExecutor {
         );
         Some(ActiveExecution {
             intent,
-            stage: ActiveStage::DiscardRunning { mirror_delete },
+            stage: ActiveStage::DiscardRunning {
+                mirror_delete,
+                cloud_folder_waits,
+            },
             stage_started_inst: now_inst,
         })
     }
@@ -2697,7 +2763,14 @@ fn respelling_of(state_db: &DurableStateDb, path: &Path) -> Option<Respelling> {
             break;
         }
     }
-    (differ && !crate::name_collision::exactly_present(&old)).then_some(Respelling { old, new })
+    // A spelling is a rename only where the volume folds names. Where
+    // it does not, `Notes` and `notes` are two folders: one that is
+    // gone and one that is new, and each is synced as what it is.
+    let folds = new
+        .parent()
+        .is_some_and(crate::name_collision::folds_case_at);
+    (differ && folds && !crate::name_collision::exactly_present(&old))
+        .then_some(Respelling { old, new })
 }
 
 /// A rename that changed only the spelling of a name on this device,
@@ -2763,6 +2836,12 @@ fn finish_respelling(
         .local_root
         .and_then(|root| RemotePath::from_local(root, &respelling.old))
     {
+        state_db.rekey_name_aliases_under(
+            &respelling.old,
+            &respelling.new,
+            from.as_str(),
+            to.as_str(),
+        )?;
         env.remote_echoes.record_delete(from.as_str(), now);
     }
     if let Some(row) = state_db.sync_index(&respelling.new)? {
@@ -3420,14 +3499,19 @@ fn continue_plan_directory_delete(
     };
     if queued_below > 0 {
         // Children are still being deleted (or preserved through a
-        // download); come back once they have settled.
-        return PlanOutcome::Fail {
-            failure: RetryFailureKind::Transient,
-            message: format!(
-                "remote directory still holds {} entr{} with {queued_below} queued intent(s) underneath; waiting",
-                subtree.len(),
-                if subtree.len() == 1 { "y" } else { "ies" }
-            ),
+        // download); come back once they have settled. This is a wait
+        // and not a failure: counted as tries, a large folder would
+        // read as a file that cannot sync while its removal is under
+        // way. Each look lists the folder in the cloud, so the wait
+        // grows with what is left.
+        let delay = match queued_below {
+            0..=99 => constants::engine::FOLDER_DELETE_WAIT_SECONDS,
+            100..=1_999 => 5 * constants::engine::FOLDER_DELETE_WAIT_SECONDS,
+            _ => 15 * constants::engine::FOLDER_DELETE_WAIT_SECONDS,
+        };
+        return PlanOutcome::Defer {
+            delay: Duration::from_secs(delay),
+            reason: "waiting for the entries under a deleted folder to leave",
         };
     }
     // Only entries that are gone locally are deletions. An entry whose
@@ -3966,7 +4050,27 @@ fn continue_plan_download(
         && !is_empty_folder(&plan.local_path)
     {
         // A file in the cloud, a folder with content here: the payload
-        // has no place to land, and a retry would not find one.
+        // has no place to land. When the folder was synced, the walk
+        // already read the swap and queued the removal of its files,
+        // and this download waits for them to leave. Asking for the
+        // walk again would make it queue this download again, a loop
+        // with no pause for as long as one file stays (a removal that
+        // waits for the answer to a mass-delete question does).
+        if state_db
+            .sync_index_has_rows_under(&plan.local_path)
+            .unwrap_or(false)
+        {
+            let delay = if mass_delete_question_is_open(state_db) {
+                constants::engine::TYPE_CLASH_WAIT_HELD_SECONDS
+            } else {
+                constants::engine::TYPE_CLASH_WAIT_SECONDS
+            };
+            return PlanOutcome::Defer {
+                delay: Duration::from_secs(delay),
+                reason: "waiting for the files of the folder that the cloud replaced to leave",
+            };
+        }
+        // A folder that never synced: only the walk can say what it is.
         return compare_folder_of_a_type_clash(
             state_db,
             &plan.local_path,
@@ -4369,12 +4473,18 @@ fn continue_apply_remote_delete(
             }
         }
     }
+    let cloud_holds_a_folder = matches!(probe.stat.as_ref(), Some(Ok(Some(_))));
     let outcome =
-        apply_remote_delete_locally(env, state_db, &intent.path, &probe.local_hashes, now);
+        match apply_remote_delete_locally(env, state_db, &intent.path, &probe.local_hashes, now) {
+            PlanOutcome::DiscardOnWorker { .. } => PlanOutcome::DiscardOnWorker {
+                cloud_folder_waits: cloud_holds_a_folder,
+            },
+            other => other,
+        };
     if matches!(outcome, PlanOutcome::AppliedLocally) {
         forget_deleted_path(state_db, &intent.path);
         ask_about_emptied_folder(env, state_db, &intent.path, now);
-        if matches!(probe.stat.as_ref(), Some(Ok(Some(_)))) {
+        if cloud_holds_a_folder {
             // The cloud holds a folder under the name the file had: its
             // files come down now that the name is free here.
             if let Err(error) = state_db.enqueue_intents_coalesced(
@@ -4940,6 +5050,15 @@ fn forget_deleted_path(state_db: &mut DurableStateDb, local_path: &Path) {
     }
 }
 
+/// The size and the modification time of the file at `path`; `None`
+/// for a folder and for a path with nothing at it.
+fn file_size_and_time(path: &Path) -> Option<(u64, Option<SystemTime>)> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    metadata
+        .is_file()
+        .then(|| (metadata.len(), metadata.modified().ok()))
+}
+
 fn local_size(path: &Path) -> u64 {
     fs::symlink_metadata(path)
         .map(|metadata| metadata.len())
@@ -5068,7 +5187,9 @@ fn apply_remote_delete_locally(
                         PlanOutcome::Noop("local file already gone")
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-                        PlanOutcome::DiscardOnWorker
+                        PlanOutcome::DiscardOnWorker {
+                            cloud_folder_waits: false,
+                        }
                     }
                     Err(error) => PlanOutcome::Fail {
                         failure: RetryFailureKind::Transient,
@@ -5088,7 +5209,9 @@ fn apply_remote_delete_locally(
                     PlanOutcome::Noop("local file already gone")
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {
-                    PlanOutcome::DiscardOnWorker
+                    PlanOutcome::DiscardOnWorker {
+                        cloud_folder_waits: false,
+                    }
                 }
                 Err(error) => PlanOutcome::Fail {
                     failure: RetryFailureKind::Transient,

@@ -658,9 +658,13 @@ pub struct SupervisorWatch {
     /// How often the loop asks, between two ticks, whether the daemon
     /// still answers.
     pub look: Duration,
-    /// How long a daemon whose job runs may give no answer before it is
-    /// ended.
+    /// How long a daemon that answered before may give no answer
+    /// before it is ended: it hangs.
     pub silence_limit: Duration,
+    /// How long a daemon that has not answered yet may take. A start
+    /// can be slow (a large state database to check, a volume that
+    /// wakes up), and a slow start is not a hang.
+    pub start_limit: Duration,
 }
 
 impl SupervisorWatch {
@@ -670,6 +674,7 @@ impl SupervisorWatch {
             interval,
             look: Duration::from_millis(constants::service::SUPERVISOR_WATCH_MILLIS),
             silence_limit: Duration::from_secs(constants::service::UNRESPONSIVE_KILL_SECONDS),
+            start_limit: Duration::from_secs(constants::service::UNRESPONSIVE_START_SECONDS),
         }
     }
 }
@@ -704,9 +709,14 @@ pub fn check_loop(
         interval,
         look: watch,
         silence_limit,
+        start_limit,
     } = watch;
     let mut last: Option<DaemonHealthCheckOutcome> = None;
     let mut silent_since: Option<Instant> = None;
+    // Whether the daemon that runs now has answered, and how many
+    // daemons in a row were ended before they ever did.
+    let mut answered = false;
+    let mut ended_before_an_answer = 0u32;
     while !stop.load(Ordering::SeqCst) {
         if updated() {
             break;
@@ -730,21 +740,35 @@ pub fn check_loop(
             break;
         }
         let answering = outcome == DaemonHealthCheckOutcome::Running && answers();
-        if outcome != DaemonHealthCheckOutcome::Running || answering {
+        if outcome != DaemonHealthCheckOutcome::Running {
             silent_since = None;
+            answered = false;
+        } else if answering {
+            silent_since = None;
+            answered = true;
+            ended_before_an_answer = 0;
         } else {
-            // The job runs and nobody answers: a daemon that starts, a
-            // daemon that stops, or one that hangs.
+            // The job runs and nobody answers. A daemon that answered
+            // before hangs, or it stops. One that has not answered yet
+            // may still start, so it gets the longer limit; and when
+            // the daemon started in its place does not answer either,
+            // it is left alone: a daemon whose socket cannot open still
+            // syncs, and ending it again and again would stop that too.
             let since = *silent_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= silence_limit {
+            let limit = if answered { silence_limit } else { start_limit };
+            if since.elapsed() >= limit && (answered || ended_before_an_answer == 0) {
                 eprintln!(
                     "vapor: the daemon gave no answer for {} s; ending its process",
-                    silence_limit.as_secs()
+                    limit.as_secs()
                 );
                 if let Err(error) = installer.kill_daemon() {
                     eprintln!("vapor: warning: could not end the daemon: {error}");
                 }
+                if !answered {
+                    ended_before_an_answer += 1;
+                }
                 silent_since = None;
+                answered = false;
                 last = None;
                 continue;
             }
@@ -1070,6 +1094,7 @@ mod tests {
             interval: Duration::from_secs(60),
             look: Duration::from_millis(5),
             silence_limit: Duration::from_secs(60),
+            start_limit: Duration::from_secs(60),
         };
         let crashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (crash, daemon) = (crashed.clone(), installer.clone());
@@ -1101,23 +1126,77 @@ mod tests {
     }
 
     #[test]
-    fn the_check_loop_ends_a_daemon_that_holds_its_job_and_gives_no_answer() {
+    fn the_check_loop_ends_a_daemon_that_answered_and_then_stops_answering() {
         let installer = fake_installer();
         installer.install_and_enable().expect("install");
+        // A long limit for a start: only the limit for a daemon that
+        // answered before can end this one in the time of the test.
         let watch = SupervisorWatch {
             interval: Duration::from_millis(20),
             look: Duration::from_millis(5),
             silence_limit: Duration::from_millis(60),
+            start_limit: Duration::from_secs(600),
         };
         let replaced = |installer: &InMemoryServiceInstaller| {
             let operations = installer.operations();
             let killed = operations.iter().position(|op| *op == "kill");
             killed.is_some_and(|at| operations[at..].contains(&"start"))
         };
-        run_loop_until(&installer, watch, || false, replaced);
+        let looks = std::sync::atomic::AtomicUsize::new(0);
+        let answers_at_first = move || looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 3;
+        run_loop_until(&installer, watch, answers_at_first, replaced);
         assert!(
             replaced(&installer),
-            "a daemon that never answers is ended and a new one started: {:?}",
+            "a daemon that hangs is ended and a new one started: {:?}",
+            installer.operations()
+        );
+    }
+
+    #[test]
+    fn a_daemon_that_never_answers_is_ended_one_time_and_then_left_alone() {
+        let installer = fake_installer();
+        installer.install_and_enable().expect("install");
+        let watch = SupervisorWatch {
+            interval: Duration::from_millis(10),
+            look: Duration::from_millis(2),
+            silence_limit: Duration::from_millis(20),
+            start_limit: Duration::from_millis(40),
+        };
+        // The loop runs for many start limits after the first kill:
+        // long enough to end the second daemon too, if it did that.
+        let looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = looks.clone();
+        let never = move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            false
+        };
+        let (seen, at_the_kill) = (
+            looks.clone(),
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        );
+        let long_after_the_kill = move |installer: &InMemoryServiceInstaller| {
+            if !installer.operations().contains(&"kill") {
+                return false;
+            }
+            let now = seen.load(std::sync::atomic::Ordering::SeqCst);
+            let _ = at_the_kill.compare_exchange(
+                0,
+                now.max(1),
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            now >= at_the_kill.load(std::sync::atomic::Ordering::SeqCst) + 60
+        };
+        run_loop_until(&installer, watch, never, long_after_the_kill);
+        let kills = installer
+            .operations()
+            .iter()
+            .filter(|operation| **operation == "kill")
+            .count();
+        assert_eq!(
+            kills,
+            1,
+            "a slow start gets one new try, not a kill at every limit: {:?}",
             installer.operations()
         );
     }
@@ -1631,6 +1710,34 @@ mod tests {
                 r#""health":"crash-loop-paused","label":"sh.arn.vapor.daemon","#,
                 r#""status":"crash-loop-paused","supervisorInstalled":true}"#
             )
+        );
+    }
+
+    #[test]
+    fn status_says_when_the_job_runs_and_the_daemon_gives_no_answer() {
+        let report = ServiceStatusReport {
+            status: ServiceStatus::Running,
+            label: constants::service::DAEMON_LABEL.to_string(),
+            auto_launch: true,
+            crash_loop: CrashLoopStateSnapshot {
+                paused: false,
+                consecutive_crashes: 0,
+                last_crash_at_ms: None,
+                awaiting_restart: false,
+            },
+            health: DaemonHealthCheckOutcome::Running,
+            supervisor_installed: true,
+            answers: Some(false),
+        };
+        let outcome = ServiceCommandOutcome::Status(report);
+        let json: serde_json::Value = serde_json::from_str(&json_string(&outcome)).expect("json");
+        assert_eq!(json["answers"], serde_json::json!(false));
+        assert_eq!(json["status"], "running");
+        let text = render_text(&outcome);
+        assert!(
+            text.contains("gives no answer on its socket")
+                && text.contains("vapor service restart"),
+            "{text}"
         );
     }
 }

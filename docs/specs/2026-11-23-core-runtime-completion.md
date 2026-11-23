@@ -161,16 +161,28 @@ option of each is what is built.
     works at once on such a build. After an update of such a build the
     user signs in one more time, because the item names the old
     binary. A release signed with a Developer ID keeps its access.
-12. **The supervisor ends a daemon that gives no answer for 30
-    seconds**, and the shutdown of the daemon gives its workers 5
-    seconds. A daemon whose tick takes longer than 30 seconds for an
-    honest reason would be ended and counted as one crash.
+12. **When the supervisor ends a daemon.** Built: a daemon that
+    answered and then gives no answer for 30 seconds is ended; one that
+    has not answered since its start gets 5 minutes, and the daemon
+    that takes its place is left alone until it answers. The shutdown
+    of the daemon gives its workers 5 seconds.
 13. **The state of the launchd job** comes from the exit status of
     `launchctl print` and from the process table, because the text of
     `launchctl print` is not stable.
 14. **The sign-in message** no longer says "again": the daemon cannot
     tell a profile that never signed in from one whose sign-in
     expired.
+15. **A file removed while an ignore rule hid it.** Built: the cloud
+    copy stays, and the file comes back when the rule goes; an edit
+    made under the rule uploads. The other reading is that the removal
+    is a deletion like one made while Vapor did not run. A rule is
+    also how a user frees space on one device, so the removal is not
+    carried.
+16. **A sign-in on a build with no Developer ID is readable by the
+    binary that wrote it.** Built: `vapord` writes it, so the daemon of
+    an install reads it. `vapor` itself then cannot: the look for the
+    cloud folder in `vapor init` and a daemon started as `vapor run`
+    hold for a sign-in on such a build (`docs/tasks/core.md` PL-8).
 
 ## Not done
 

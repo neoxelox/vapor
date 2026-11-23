@@ -481,7 +481,10 @@ impl ReconcileWalker {
     /// listing is older than the transfer that wrote it. So does the
     /// row of a name that an ignore rule hides (`hidden`): the walk did
     /// not look at that name, on either side, and the row is what says
-    /// which side changed when the rule goes.
+    /// that an edit made under the rule is this device's change when
+    /// the rule goes. Such a row is marked, because it is no evidence
+    /// for a deletion: a file removed under the rule was not removed
+    /// from sync, and the cloud copy comes back.
     fn forget_names_that_left_both_sides(
         &mut self,
         state_db: &mut DurableStateDb,
@@ -491,9 +494,21 @@ impl ReconcileWalker {
         pairs: &BTreeMap<String, EntryPair>,
         listed_at: SystemTime,
     ) -> Result<(), WalkError> {
+        // A file that is here with no rule on it is watched again: its
+        // row says what this device did to it from now on.
+        for name in state_db.sync_index_hidden_files_in(directory)? {
+            if !hidden.contains(&name) && pairs.get(&name).is_some_and(|pair| pair.local.is_some())
+            {
+                state_db.clear_sync_index_hidden(&directory.join(&name))?;
+            }
+        }
         let mut removed = 0usize;
         for name in state_db.sync_index_names_in(directory)? {
-            if listed.contains(&name) || hidden.contains(&name) || pairs.contains_key(&name) {
+            if hidden.contains(&name) {
+                state_db.mark_sync_index_hidden(&directory.join(&name), listed_at)?;
+                continue;
+            }
+            if listed.contains(&name) || pairs.contains_key(&name) {
                 continue;
             }
             removed += state_db
@@ -1281,6 +1296,9 @@ fn deleted_here_while_away(
     remote: &RemoteEntry,
 ) -> Result<bool, WalkError> {
     Ok(match state_db.sync_index(local_path)? {
+        // A row from before an ignore rule hid the file says nothing
+        // about a removal made under the rule.
+        Some(_) if state_db.sync_index_was_hidden(local_path)? => false,
         Some(index) => {
             index.matches_remote(remote.size_bytes, remote.modified_at)
                 || remote

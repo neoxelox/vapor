@@ -133,8 +133,7 @@ impl NativeSecretStore {
         use std::io::Write;
         use std::process::{Command, Stdio};
         let mut child = Command::new(writer)
-            .args([super::HELPER_COMMAND, action, name])
-            .env(super::HELPER_NAMESPACE_VARIABLE, &self.namespace)
+            .args([super::HELPER_COMMAND, action, name, &self.namespace])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

@@ -803,28 +803,32 @@ fn dispatch_init(
     // A daemon that this run started needs a moment before it answers,
     // and a daemon that was up before the profile existed needs one to
     // read the configuration again. Until then it says that there is
-    // no profile, which is not what this run leaves behind.
+    // no profile, which is not what this run leaves behind. With no
+    // daemon to wait for (the service is off, or it did not start),
+    // one look is enough.
     let has_profile = !report.profiles.is_empty();
-    let wait = if has_profile {
-        Duration::from_secs(5)
-    } else if step_state(names::STEP_SERVICE) == Some(names::STATE_DONE) {
-        Duration::from_secs(3)
-    } else {
-        Duration::ZERO
-    };
-    let deadline = Instant::now() + wait;
+    let started_here = step_state(names::STEP_SERVICE) == Some(names::STATE_DONE);
+    let started = std::time::Instant::now();
     loop {
         let status = ipc_cmd::status().ok();
-        let out_of_date = status.as_ref().is_none_or(|status| {
-            has_profile && status.run.state == vapor_shared::constants::run_state::UNCONFIGURED
-        });
+        let wait = match &status {
+            None if started_here => Duration::from_secs(3),
+            None => Duration::ZERO,
+            Some(status)
+                if has_profile
+                    && status.run.state == vapor_shared::constants::run_state::UNCONFIGURED =>
+            {
+                Duration::from_secs(5)
+            }
+            Some(_) => Duration::ZERO,
+        };
         if let Some(status) = status {
             report.daemon = Some(init_cmd::DaemonLine {
                 state: status.run.state,
                 reason: status.run.reason,
             });
         }
-        if !out_of_date || Instant::now() >= deadline {
+        if started.elapsed() >= wait {
             break;
         }
         std::thread::sleep(Duration::from_millis(200));

@@ -83,6 +83,11 @@ Policy: `AGENTS.md §9`. Full taxonomy:
       snapshot or a direct exit-code assertion test per command.
 - [ ] LT-3 Binary size stays reasonable (single-digit MB stripped).
       CI guard-rail, not a soft target.
+- [ ] LT-6 `vapor service start` and `restart` end with an error and a
+      non-zero exit when the daemon's job runs and the daemon gives no
+      answer within 10 seconds. No test covers that path: it needs a
+      daemon that holds its job and does not open its socket (the fake
+      daemon of LT-5).
 - [ ] LT-5 IPC client correctness tested against a fake daemon that
       speaks the IPC protocol from `docs/architecture/ipc-contracts.md`.
       Covers every IPC-backed command; tests the "no daemon running"

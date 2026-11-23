@@ -404,16 +404,22 @@ struct RevisionCopy {
     parent_id: String,
     /// The name of the file the version belongs to.
     file_name: String,
+    /// The name of the copy, from the moment it is chosen.
+    copy_name: String,
     /// The resumable session of the copy and how far it is, for a
     /// version too large for one request.
     upload: Option<(String, u64)>,
 }
 
-/// How many times one piece of that work is tried before it is given
-/// up with a warning that says where the version is.
+/// How many times one piece of that work is tried after a failure that
+/// time alone does not mend, before it is given up with a warning that
+/// says where the version is. A cloud that cannot be reached, a rate
+/// limit, and a sign-in that is needed spend none: the work waits for
+/// as long as they last.
 const REPLACED_WORK_ATTEMPTS: u32 = 20;
-/// The most pieces of that work one poll does: the poll is the feed,
-/// and it must stay quick. A check is one request.
+/// The most checks one poll reads: the poll is the feed, and it must
+/// stay quick. A check is one request. A copy moves bytes, so a poll
+/// makes one step of one copy and no more.
 const REPLACED_WORK_PER_POLL: usize = 8;
 
 /// The versions between the one an upload meant to replace and the one
@@ -425,15 +431,11 @@ fn revisions_replaced_unseen(
     base_md5: &str,
     own_md5: &str,
 ) -> Vec<GdRevision> {
-    let mut ordered: Vec<&GdRevision> = revisions.iter().collect();
-    // Oldest first. Drive lists them so; the sort makes it certain,
-    // and it is stable for two versions of one millisecond.
-    ordered.sort_by_key(|revision| {
-        revision
-            .modified_time
-            .as_deref()
-            .and_then(parse_rfc3339_millis)
-    });
+    // Oldest first, as Drive lists them. The time of a version is not
+    // an order: a client may set it (Drive for desktop writes the time
+    // the file has on its disk), so a version that was stored later can
+    // carry an older time.
+    let ordered: Vec<&GdRevision> = revisions.iter().collect();
     let md5 = |revision: &GdRevision| revision.md5_checksum.clone().unwrap_or_default();
     let Some(own) = ordered
         .iter()
@@ -625,39 +627,65 @@ impl GoogleDriveProvider {
             let Some((work, attempts)) = next else {
                 return;
             };
-            let large_step = matches!(&work, ReplacedWork::Copy(copy) if copy.upload.is_some());
-            let mut queue_back: Vec<(ReplacedWork, u32)> = Vec::new();
+            let moved_bytes = matches!(&work, ReplacedWork::Copy(_));
+            let mut requeue: Vec<(ReplacedWork, u32)> = Vec::new();
             let mut failed = false;
             match self.advance_replaced_work(work.clone()) {
-                Ok(follow_up) => queue_back.extend(follow_up.into_iter().map(|work| (work, 0))),
-                Err(error) if attempts + 1 < REPLACED_WORK_ATTEMPTS => {
+                // What follows keeps the tries of the piece it follows:
+                // a copy that opens a session each time and never ends
+                // must run out of them too.
+                Ok(follow_up) => requeue.extend(follow_up.into_iter().map(|work| (work, attempts))),
+                // The file or the version is gone: nothing is left to
+                // keep, and no try will find it.
+                Err(error) if error.kind == vapor_shared::ProviderErrorKind::NotFound => {
                     crate::logging::debug(
-                        "Could not keep a version that an upload replaced yet; trying again",
+                        "A version that an upload replaced is gone from Google Drive",
                         &[("error", error.message)],
                     );
-                    // A copy starts again from its first byte: nothing
-                    // of a resumable session is a file until its end.
-                    let work = match work {
-                        ReplacedWork::Copy(mut copy) => {
-                            copy.upload = None;
-                            ReplacedWork::Copy(copy)
-                        }
-                        check => check,
-                    };
-                    queue_back.push((work, attempts + 1));
-                    failed = true;
                 }
                 Err(error) => {
-                    match &work {
-                        // Nothing says that a version was replaced.
-                        ReplacedWork::Check { file_name, .. } => crate::logging::debug(
-                            "Gave up the check for a version that an upload replaced",
-                            &[("file", file_name.clone()), ("error", error.message)],
-                        ),
-                        ReplacedWork::Copy(copy) => crate::logging::warning(
-                            "An upload replaced a version another device had just put in Google Drive, and that version could not be kept as a copy; it is in the version history of the file in Google Drive",
-                            &[("file", copy.file_name.clone()), ("error", error.message)],
-                        ),
+                    failed = true;
+                    let waits_for_the_cloud = matches!(
+                        error.kind,
+                        vapor_shared::ProviderErrorKind::Transient
+                            | vapor_shared::ProviderErrorKind::RateLimited { .. }
+                            | vapor_shared::ProviderErrorKind::Authentication
+                            | vapor_shared::ProviderErrorKind::CloudRootUnavailable
+                            | vapor_shared::ProviderErrorKind::StorageFull
+                    );
+                    let attempts = if waits_for_the_cloud {
+                        attempts
+                    } else {
+                        attempts + 1
+                    };
+                    if attempts < REPLACED_WORK_ATTEMPTS {
+                        crate::logging::debug(
+                            "Could not keep a version that an upload replaced yet; trying again",
+                            &[("error", error.message)],
+                        );
+                        // A copy starts again from its first byte:
+                        // nothing of a resumable session is a file
+                        // until its end.
+                        let work = match work {
+                            ReplacedWork::Copy(mut copy) => {
+                                copy.upload = None;
+                                ReplacedWork::Copy(copy)
+                            }
+                            check => check,
+                        };
+                        requeue.push((work, attempts));
+                    } else {
+                        match &work {
+                            // Nothing says that a version was replaced.
+                            ReplacedWork::Check { file_name, .. } => crate::logging::debug(
+                                "Gave up the check for a version that an upload replaced",
+                                &[("file", file_name.clone()), ("error", error.message)],
+                            ),
+                            ReplacedWork::Copy(copy) => crate::logging::warning(
+                                "An upload replaced a version another device had just put in Google Drive, and that version could not be kept as a copy; it is in the version history of the file in Google Drive",
+                                &[("file", copy.file_name.clone()), ("error", error.message)],
+                            ),
+                        }
                     }
                 }
             }
@@ -666,16 +694,17 @@ impl GoogleDriveProvider {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if failed {
-                queue.extend(queue_back);
+                queue.extend(requeue);
             } else {
-                for work in queue_back.into_iter().rev() {
+                for work in requeue.into_iter().rev() {
                     queue.push_front(work);
                 }
             }
             drop(queue);
-            // One chunk of a large copy, or one failure, is enough for
-            // one poll.
-            if failed || large_step {
+            // One failure is enough for one poll, and so is one step of
+            // a copy: the bytes it moves are outside the transfer
+            // budgets of the engine.
+            if failed || moved_bytes {
                 return;
             }
         }
@@ -710,6 +739,7 @@ impl GoogleDriveProvider {
                             revision,
                             parent_id: parent_id.clone(),
                             file_name: file_name.clone(),
+                            copy_name: String::new(),
                             upload: None,
                         })
                     })
@@ -755,12 +785,37 @@ impl GoogleDriveProvider {
             .and_then(|at| at.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|age| age.as_millis() as u64)
             .unwrap_or(0);
-        let name = vapor_shared::conflict::copy_name(
-            &copy.file_name,
-            vapor_shared::constants::conflict::REPLACED_VERSION,
-            replaced_at_ms,
-            None,
-        );
+        // Two versions of one millisecond, or two with no time, would
+        // have one name. A name that other content holds already is
+        // not this version's copy: the next number is tried.
+        let mut name = copy.copy_name.clone();
+        if copy.upload.is_none() {
+            let mut sequence = None;
+            loop {
+                name = vapor_shared::conflict::copy_name(
+                    &copy.file_name,
+                    vapor_shared::constants::conflict::REPLACED_VERSION,
+                    replaced_at_ms,
+                    sequence,
+                );
+                match self.find_child(&copy.parent_id, &name)? {
+                    None => break,
+                    // A copy of this version that is there already
+                    // (another device kept it, or a try of this one
+                    // got that far) is enough.
+                    Some(existing) if existing.md5_checksum == copy.revision.md5_checksum => {
+                        return Ok(Vec::new());
+                    }
+                    Some(_) if sequence.unwrap_or(1) >= 8 => {
+                        return Err(ProviderError::permanent(
+                            "every name for the copy of a replaced version is taken",
+                        ));
+                    }
+                    Some(_) => sequence = Some(sequence.map_or(2, |number| number + 1)),
+                }
+            }
+            copy.copy_name = name.clone();
+        }
         let size: u64 = copy
             .revision
             .size
@@ -774,12 +829,6 @@ impl GoogleDriveProvider {
         let metadata = serde_json::json!({ "name": name, "parents": [copy.parent_id] });
 
         if copy.upload.is_none() {
-            // A copy of this version that is there already (another
-            // device kept it, or a try of this one got that far) is
-            // enough.
-            if self.find_child(&copy.parent_id, &name)?.is_some() {
-                return Ok(Vec::new());
-            }
             if size <= SIMPLE_UPLOAD_MAX_BYTES {
                 let response = self.execute_authed("GET", media, Vec::new(), Vec::new())?;
                 if response.status >= 300 {

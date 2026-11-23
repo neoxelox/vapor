@@ -84,16 +84,16 @@ pub trait SecretStore: Send + Sync {
 }
 
 /// The first argument of the daemon binary when another Vapor process
-/// runs it to write or remove one secret (`vapord secret set <name>`,
-/// value on standard input; `vapord secret delete <name>`). On macOS
+/// runs it to write or remove one secret (`vapord secret set <name>
+/// [<namespace>]`, value on standard input; `vapord secret delete
+/// <name> [<namespace>]`). The namespace is the one of the store that
+/// asks, so a test with a namespace of its own never writes into
+/// Vapor's; without one the helper uses the store of this user. On macOS
 /// the process that reads an item has to be the one that created it on
 /// a build that is signed ad hoc, so the daemon binary does the write.
 pub const HELPER_COMMAND: &str = "secret";
 pub const HELPER_SET: &str = "set";
 pub const HELPER_DELETE: &str = "delete";
-/// Carries the store's namespace to the helper, so a test that uses a
-/// namespace of its own never writes into Vapor's.
-pub const HELPER_NAMESPACE_VARIABLE: &str = "VAPOR_SECRETS_NAMESPACE";
 
 /// Runs one helper request in this process: `arguments` are what
 /// follows [`HELPER_COMMAND`], and `input` is where the value of a
@@ -105,11 +105,17 @@ pub fn run_helper(
 ) -> Result<(), SecretStoreError> {
     // A person runs the command that asked: the keychain may ask them
     // (to replace an item that another build created, for one).
-    let store = match std::env::var(HELPER_NAMESPACE_VARIABLE) {
-        Ok(namespace) if !namespace.is_empty() => NativeSecretStore::helper_store(&namespace)?,
-        _ => NativeSecretStore::for_current_user()?,
+    let (request, namespace) = match arguments {
+        [action, name, namespace] if !namespace.is_empty() => {
+            (vec![action.clone(), name.clone()], Some(namespace.as_str()))
+        }
+        other => (other.to_vec(), None),
     };
-    serve_helper_request(&store, arguments, input)
+    let store = match namespace {
+        Some(namespace) => NativeSecretStore::helper_store(namespace)?,
+        None => NativeSecretStore::for_current_user()?,
+    };
+    serve_helper_request(&store, &request, input)
 }
 
 fn serve_helper_request(
@@ -127,7 +133,7 @@ fn serve_helper_request(
         }
         [action, name] if action == HELPER_DELETE => store.delete(name),
         _ => Err(SecretStoreError::Unsupported(
-            "usage: secret set <name> (value on standard input) | secret delete <name>",
+            "usage: secret set <name> [<namespace>] (value on standard input) | secret delete <name> [<namespace>]",
         )),
     }
 }

@@ -1194,14 +1194,16 @@ fn a_version_between_the_base_and_the_upload_was_replaced_unseen() {
         ),
         vec![theirs.clone()]
     );
-    // The order of the answer does not decide.
+    // The order is the one Drive lists, not the one of the times: a
+    // client may give its version the time the file has on its disk.
+    let old_clock = revision("r1", "theirs", "2026-11-01T08:00:00.000Z");
     assert_eq!(
         revisions_replaced_unseen(
-            &[ours.clone(), theirs.clone(), base.clone()],
+            &[base.clone(), old_clock.clone(), ours.clone()],
             "base",
             "ours"
         ),
-        vec![theirs.clone()]
+        vec![old_clock]
     );
     // A version after the upload is the next change, which the feed
     // reports; it was not replaced by this upload.
@@ -1379,7 +1381,9 @@ fn a_check_that_fails_is_tried_again_and_a_copy_that_is_there_is_not_made_twice(
     );
     transport.push_response(
         200,
-        r#"{"files":[{"id":"copy-id","name":"doc~conflict-replaced-1795428005100.txt","mimeType":"text/plain"}]}"#,
+        format!(
+            r#"{{"files":[{{"id":"copy-id","name":"doc~conflict-replaced-1795428005100.txt","mimeType":"text/plain","md5Checksum":"{theirs}"}}]}}"#
+        ),
     );
     transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
     let before = transport.recorded_requests().len();
@@ -1400,6 +1404,49 @@ fn a_check_that_fails_is_tried_again_and_a_copy_that_is_there_is_not_made_twice(
         !requests[before..]
             .iter()
             .any(|request| request.method == "POST")
+    );
+}
+
+#[test]
+fn a_check_waits_through_an_outage_of_any_length() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let ours = landed_overwrite(&provider, &transport);
+
+    // The cloud cannot be reached for far more polls than the check
+    // has tries: an outage spends none of them.
+    for _ in 0..(REPLACED_WORK_ATTEMPTS * 3) {
+        transport.push_response(503, "");
+        transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+        provider
+            .poll_changes(Some("t1"), 100)
+            .expect("the feed is read");
+    }
+
+    let theirs = md5_hex_of_bytes(b"their edit");
+    transport.push_response(
+        200,
+        format!(
+            r#"{{"revisions":[
+                {{"id":"r0","md5Checksum":"base-md5","modifiedTime":"2026-11-23T10:00:00.000Z","size":"4"}},
+                {{"id":"r1","md5Checksum":"{theirs}","modifiedTime":"2026-11-23T10:00:05.100Z","size":"10"}},
+                {{"id":"r2","md5Checksum":"{ours}","modifiedTime":"2026-11-23T10:00:05.300Z","size":"8"}}
+            ]}}"#
+        ),
+    );
+    transport.push_response(200, r#"{"files":[]}"#);
+    transport.push_response(200, "their edit");
+    transport.push_response(200, r#"{"id":"copy-id"}"#);
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
+    provider.poll_changes(Some("t2"), 100).expect("poll");
+
+    assert!(
+        transport.recorded_requests().iter().any(|request| {
+            request.method == "POST"
+                && request.url.contains("uploadType=multipart")
+                && String::from_utf8_lossy(&request.body).contains("their edit")
+        }),
+        "the replaced version is kept when the cloud is back"
     );
 }
 
@@ -1429,15 +1476,20 @@ fn a_large_replaced_version_is_copied_one_chunk_for_each_poll() {
             "https://upload.example/copy-session".to_string(),
         )],
     );
+    transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
+    provider.poll_changes(Some("t1"), 100).expect("first poll");
+
+    // One step of the copy for each poll: the bytes are outside the
+    // budgets of the engine, and the feed must not wait for them.
     transport.push_response(206, vec![1_u8; CHUNK_START as usize]); // the first range
     transport.push_response(308, ""); // accepted, not the end
     transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t2"}"#);
-    provider.poll_changes(Some("t1"), 100).expect("first poll");
+    provider.poll_changes(Some("t2"), 100).expect("second poll");
 
     transport.push_response(206, vec![1_u8; 1000]); // the rest
     transport.push_response(200, r#"{"id":"copy-id"}"#);
     transport.push_response(200, r#"{"changes":[],"newStartPageToken":"t3"}"#);
-    provider.poll_changes(Some("t2"), 100).expect("second poll");
+    provider.poll_changes(Some("t2"), 100).expect("third poll");
 
     let requests = transport.recorded_requests();
     let ranges: Vec<&str> = requests

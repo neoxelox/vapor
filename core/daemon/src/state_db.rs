@@ -1356,7 +1356,8 @@ impl DurableStateDb {
                  local_modified_at_ms = excluded.local_modified_at_ms,
                  remote_modified_at_ms = excluded.remote_modified_at_ms,
                  last_op_id = excluded.last_op_id,
-                 updated_at_ms = excluded.updated_at_ms",
+                 updated_at_ms = excluded.updated_at_ms,
+                 hidden_since_ms = NULL",
             params![
                 path_text,
                 vapor_shared::paths::fold_name(&path_text),
@@ -1592,6 +1593,80 @@ impl DurableStateDb {
             })
             .optional()?;
         Ok(below.map(path_from_text))
+    }
+
+    /// Marks the row of `path`, and every row under it, as hidden by an
+    /// ignore rule since `at`. While a rule hides a path nothing watches
+    /// it, so the row no longer says what this device did to the file:
+    /// a file that is gone when the rule goes was removed in that time,
+    /// and that is not a deletion to carry to the cloud. The mark goes
+    /// when a transfer writes the row again, or when a walk finds the
+    /// file here with no rule on it.
+    pub fn mark_sync_index_hidden(
+        &mut self,
+        path: &Path,
+        at: SystemTime,
+    ) -> Result<usize, StateDbError> {
+        let (lower, upper) = rows_under_bounds(path)?;
+        Ok(self.connection.execute(
+            "UPDATE sync_index SET hidden_since_ms = ?1
+             WHERE hidden_since_ms IS NULL
+               AND (path_text = ?2 OR (path_text >= ?3 AND path_text < ?4))",
+            params![
+                system_time_to_millis(at)?,
+                path_to_text(path)?,
+                lower,
+                upper
+            ],
+        )?)
+    }
+
+    /// Whether the row of `path` carries the mark of
+    /// [`Self::mark_sync_index_hidden`].
+    pub fn sync_index_was_hidden(&self, path: &Path) -> Result<bool, StateDbError> {
+        Ok(self
+            .connection
+            .prepare_cached(
+                "SELECT 1 FROM sync_index WHERE path_text = ? AND hidden_since_ms IS NOT NULL",
+            )?
+            .query_row(params![path_to_text(path)?], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    /// The files directly in `directory` whose rows carry that mark.
+    pub fn sync_index_hidden_files_in(
+        &self,
+        directory: &Path,
+    ) -> Result<Vec<String>, StateDbError> {
+        let (lower, upper) = rows_under_bounds(directory)?;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT substr(path_text, ?3) FROM sync_index
+             WHERE hidden_since_ms IS NOT NULL
+               AND path_text >= ?1 AND path_text < ?2
+               AND instr(substr(path_text, ?3), ?4) = 0",
+        )?;
+        let names = statement
+            .query_map(
+                params![
+                    lower,
+                    upper,
+                    i64::try_from(lower.chars().count() + 1).unwrap_or(i64::MAX),
+                    std::path::MAIN_SEPARATOR.to_string()
+                ],
+                |row| row.get::<_, String>(0),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(names)
+    }
+
+    /// Takes that mark off the row of `path`.
+    pub fn clear_sync_index_hidden(&mut self, path: &Path) -> Result<usize, StateDbError> {
+        Ok(self.connection.execute(
+            "UPDATE sync_index SET hidden_since_ms = NULL
+             WHERE path_text = ? AND hidden_since_ms IS NOT NULL",
+            params![path_to_text(path)?],
+        )?)
     }
 
     /// Removes the row of `path` and every row under it.
@@ -2570,6 +2645,41 @@ impl DurableStateDb {
         Ok(found)
     }
 
+    /// Moves the aliases of the files under the folder `from` to the
+    /// folder `to`, on both sides: the local folder changed its
+    /// spelling, and its cloud folder moved from `remote_from` to
+    /// `remote_to` with it. An alias that kept the old spelling would
+    /// not be found for its file any more, and the file would be
+    /// compared with a cloud name that holds nothing.
+    pub fn rekey_name_aliases_under(
+        &mut self,
+        from: &Path,
+        to: &Path,
+        remote_from: &str,
+        remote_to: &str,
+    ) -> Result<usize, StateDbError> {
+        let (lower, upper) = rows_under_bounds(from)?;
+        let to_prefix = format!("{}{}", path_to_text(to)?, std::path::MAIN_SEPARATOR);
+        let (remote_from, remote_to) = (format!("{remote_from}/"), format!("{remote_to}/"));
+        Ok(self.connection.execute(
+            "UPDATE name_aliases
+             SET local_path_text = ?1 || substr(local_path_text, ?2),
+                 remote_path_text = ?3 || substr(remote_path_text, ?4)
+             WHERE local_path_text >= ?5 AND local_path_text < ?6
+               AND substr(remote_path_text, 1, ?7) = ?8",
+            params![
+                to_prefix,
+                lower.chars().count() as i64 + 1,
+                remote_to,
+                remote_from.chars().count() as i64 + 1,
+                lower,
+                upper,
+                remote_from.chars().count() as i64,
+                remote_from,
+            ],
+        )?)
+    }
+
     pub fn remove_name_alias_for_local(&mut self, local_path: &Path) -> Result<(), StateDbError> {
         self.connection.execute(
             "DELETE FROM name_aliases WHERE local_path_text = ?",
@@ -2723,14 +2833,19 @@ fn ensure_schema(connection: &mut Connection) -> Result<(), StateDbError> {
              local_modified_at_ms INTEGER,
              remote_modified_at_ms INTEGER,
              last_op_id TEXT NOT NULL,
-             updated_at_ms INTEGER NOT NULL
+             updated_at_ms INTEGER NOT NULL,
+             -- Set while an ignore rule hides the path: what happened
+             -- to the file in that time was not watched.
+             hidden_since_ms INTEGER
          );
+         CREATE INDEX IF NOT EXISTS idx_sync_index_hidden
+             ON sync_index(path_text) WHERE hidden_since_ms IS NOT NULL;
          CREATE INDEX IF NOT EXISTS idx_sync_index_content
              ON sync_index(content_hash, size_bytes);
          -- The path with every name folded: one seek finds the rows a
          -- path has under another spelling of its name.
          CREATE INDEX IF NOT EXISTS idx_sync_index_fold
-             ON sync_index(fold_key);
+             ON sync_index(fold_key, path_text);
          CREATE INDEX IF NOT EXISTS idx_sync_index_remote_state
              ON sync_index(size_bytes, remote_modified_at_ms);
          -- Partial indexes holding only the rows whose name carries the
@@ -4256,6 +4371,33 @@ mod tests {
         assert_eq!(leased.remote_path.as_deref(), Some("readme.md"));
         db.remove_name_alias("readme.md").expect("remove");
         assert_eq!(db.name_alias("readme.md").expect("alias"), None);
+
+        // A folder that changes its spelling takes the aliases of its
+        // files with it, on both sides.
+        let inside = PathBuf::from("/tmp/vapor-root/Folder/readme~conflict-x.md");
+        db.record_name_alias("Folder/Readme.md", &inside, "hash-2", timestamp_ms(3))
+            .expect("alias");
+        let other = PathBuf::from("/tmp/vapor-root/Folders/a~conflict-x.md");
+        db.record_name_alias("Folders/A.md", &other, "hash-3", timestamp_ms(3))
+            .expect("alias");
+        let moved = db
+            .rekey_name_aliases_under(
+                Path::new("/tmp/vapor-root/Folder"),
+                Path::new("/tmp/vapor-root/FOLDER"),
+                "Folder",
+                "FOLDER",
+            )
+            .expect("rekey");
+        assert_eq!(moved, 1, "only the aliases under the folder move");
+        assert_eq!(
+            db.alias_remote_for_local(Path::new("/tmp/vapor-root/FOLDER/readme~conflict-x.md"))
+                .expect("alias"),
+            Some("FOLDER/Readme.md".to_string())
+        );
+        assert_eq!(
+            db.alias_remote_for_local(&other).expect("alias"),
+            Some("Folders/A.md".to_string())
+        );
     }
 
     #[test]

@@ -87,7 +87,7 @@ decides the order; this is the order by what a user loses.
 - Speed: `core.md` E-31, P-9.
   `core.md` PT-3 measures each of them in the perf gate, so a
   slower build fails it.
-- The rest: `core.md` E-43, P-12, `cli.md` L1-11, `macos.md`
+- The rest: `core.md` E-43, E-44, P-12, PL-8, `cli.md` L1-11, `macos.md`
   O-5, MT-7, M3-20.
 - A run that repeats the session: `core.md` TR-13. Real providers in a
   guest: `macos.md` MT-6.

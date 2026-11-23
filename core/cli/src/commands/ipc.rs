@@ -680,6 +680,29 @@ mod tests {
     }
 
     #[test]
+    fn the_json_shape_of_a_blocked_file_is_stable() {
+        let file = vapor_ipc::BlockedFile {
+            profile_id: "default".to_string(),
+            path: "/Users/sam/Sync/locked.txt".to_string(),
+            action: "upload".to_string(),
+            reason: "cannot stat local file: Permission denied".to_string(),
+            attempts: 7,
+            next_attempt_ms: 1_750_000_000_000,
+        };
+        assert_eq!(
+            serde_json::to_value(&file).expect("json"),
+            serde_json::json!({
+                "profileId": "default",
+                "path": "/Users/sam/Sync/locked.txt",
+                "action": "upload",
+                "reason": "cannot stat local file: Permission denied",
+                "attempts": 7,
+                "nextAttemptMs": 1_750_000_000_000_u64,
+            })
+        );
+    }
+
+    #[test]
     fn status_names_the_files_that_cannot_sync_with_their_reason() {
         let status = StatusResponse {
             schema_version: 5,

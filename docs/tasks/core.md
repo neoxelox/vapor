@@ -111,6 +111,15 @@ a task costs a user.
       whole tick. The removal of a folder of 6 000 files is one
       deletion in the cloud and takes 3 s after the answer to the
       mass-delete question.
+- [ ] E-44 The look for another spelling of a folder reads every
+      index row under the folder when all of them are spelled as the
+      folder is (`sync_index_row_spelled_otherwise`). It runs on the
+      tick thread each time the removal of a folder is planned, so a
+      folder of 100 000 files costs a scan of 100 000 index entries for
+      each look. The index now holds the path next to the folded key,
+      so the scan reads no table row; a seek that needs no scan is
+      still to find. Found by the review of the pull request,
+      2026-11-23.
 - [ ] E-43 Ask about a name in the cloud folder that cannot be synced,
       as a local one is asked about. A file with a backslash in its
       name in the cloud folder of the filesystem provider stays there
@@ -143,7 +152,10 @@ a task costs a user.
       `~conflict-replaced` copy that holds the other edit. The code
       reads `revisions.list` and the content of one revision
       (`revisions.get` with `alt=media`); only the scripted transport
-      has answered it so far. See also whether the `version` field of
+      has answered it so far. The check takes the order of
+      `revisions.list` as the order in which the versions were stored;
+      confirm that, with one version written by a client that sets an
+      old modification time. See also whether the `version` field of
       a file tells a second writer without the list, which costs one
       request for each overwrite.
 - [ ] P-12 Make the Drive check for a replaced version survive a stop
@@ -153,7 +165,11 @@ a task costs a user.
       history of the file in Google Drive. Both uploads must land in
       the same second for a version to be replaced at all, so the
       window is small; a durable record of the check (the file, the
-      hash it replaced, the hash it wrote) closes it.
+      hash it replaced, the hash it wrote) closes it. The copy of a
+      replaced version also moves its bytes inside the changes poll,
+      one step for each poll, outside the transfer caps and the
+      bandwidth ceiling: a durable record would let it run as a
+      transfer.
 - [ ] P-5 Decide the Google verification path. The `drive` scope is
       restricted: Google requires app verification and a yearly
       security assessment before more than 100 users can sign in, and a
@@ -207,6 +223,18 @@ a task costs a user.
         on the Linux CI job, as the macOS test does, and
         `docs/architecture/platform-abstractions.md` no longer says
         "with no interface speed".
+- [ ] PL-8 On a build with no Developer ID, `vapor` cannot read the
+      sign-in that `vapord` wrote to the keychain. The keychain lets a
+      process read an item with no dialog only when the item names the
+      code of that process, and an item holds the code of the one
+      binary that made it. The daemon binary makes it, so the daemon
+      of an install reads it. Two things then hold for a sign-in: the
+      look for the cloud folder in `vapor init`, right after the
+      sign-in, and a daemon started as `vapor run` with Google Drive.
+      A release signed with a Developer ID has one team for both and
+      is not affected. A second item made by `vapor` itself, or the
+      token handed to the look in memory, would close it. Found by the
+      review of the pull request, 2026-11-23; not seen in a guest.
 - [ ] PL-1 Check in Finder that a file which Vapor moved to the macOS
       trash offers Put Back. The move goes through
       `NSFileManager.trashItem` now, and a contract test proves the

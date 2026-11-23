@@ -323,8 +323,17 @@ impl ServiceInstaller for NativeServiceInstaller {
         if !self.is_loaded() {
             return Ok(ServiceStatus::Stopped);
         }
+        // The processes of this user only: launchd is the parent of the
+        // jobs of every user, and another user of this Mac may run the
+        // same app from the same path.
         let processes = Command::new("/bin/ps")
-            .args(["-axww", "-o", "ppid=,comm="])
+            .args([
+                "-xww",
+                "-U",
+                &current_uid().to_string(),
+                "-o",
+                "ppid=,comm=",
+            ])
             .output()
             .map_err(|error| ServiceInstallError::Backend(Box::new(error)))?;
         // The executable of the definition that is on disk: it is the
