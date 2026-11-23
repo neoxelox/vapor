@@ -84,7 +84,7 @@ in its pull request and in the documents under `docs/`.
 - The release pipeline packages each platform under its own protected environment. Actions are pinned and allowlisted, and `main` is protected by a ruleset.
 - The pre-commit hook runs lint and Tier 1.
 - Tier VM (`./scripts/vm.sh`) installs the packaged app in a macOS virtual machine and acts on it as a user does, with screenshots of each scenario. The controls in the windows of the Mac app have accessibility identifiers, which the tier finds them by.
-- A manual Tier VM guest can run next to the app scenarios (`--guest --second`) and can have the Internet to test a real cloud provider (`--guest --internet`). `tools/vm/workloads/` holds the workloads of a heavy-user session, and `url` is updated for RUSTSEC-2026-0592.
+- A manual Tier VM guest can run next to the app scenarios (`--guest --second`) and can have the Internet to test a real cloud provider (`--guest --internet`). `tools/vm/workloads/` holds the workloads of a heavy-user session.
 
 ## [0.2.0-alpha.3] - 2026-03-10
 

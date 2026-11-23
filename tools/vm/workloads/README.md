@@ -45,6 +45,7 @@ The guest image has Python 3, git, node, npm, and sqlite3.
 | `wl_coding.py` | A person or an agent that writes code: a real git repository, saves the way editors save (in place, a temporary file and a rename, the JetBrains and Vim sequences), bursts over many files, commits, branch switches. It keeps a model of what it wrote and checks each file before it touches it again, so a sync that puts an older version back is caught in the act. `check` compares the model, the tree, and git on both sides. |
 | `wl_mover.py` | A person who reorganizes a library: moves, folder renames, bulk renames, duplicates, deletes, out of the root and back, renames by capitals. `check` compares names without case and counts payloads. |
 | `wl_npm.sh` | Real `npm ci`, `npm install`, `npm uninstall`, and `rm -rf node_modules` from an offline cache, with the time Vapor needs after each. |
+| `latency.py` | Times one change at a time in both directions: a new file, an edit, a media file, a 5 MB file, a deletion, a rename. Between the two roots of the filesystem provider, or between two local folders that sync through one cloud. |
 | `probe.py` | Saves one file every few seconds in each folder it is given and times its arrival on the other side. Run it next to a workload to see what a single save costs meanwhile. |
 | `answer_loop.py`, `resolve_all.py` | A user who answers `mass-delete` questions with `apply` a few seconds after they show; and one pass that answers every open question. |
 | `drive_tests.py`, `drive_conflict.py` | Two profiles on one Google Drive folder, as two devices: first files, the time of one save from device to device, names, operations both ways, a git repository, a burst and its removal, and a conflict in five variants. They need a guest with the Internet and the dedicated test account. |
@@ -65,8 +66,17 @@ The guest image has Python 3, git, node, npm, and sqlite3.
 - **Google Drive.** A guest with `--internet` and a build that carries
   the OAuth client (`.env`). The test account signs in with `<command
   that prints the token> | vapor auth login --profile <id> --token -`.
-  `drive_tests.py` expects the profiles `default` (`~/VaporDrive`) and
-  `second` (`~/VaporDrive2`) on one Drive folder.
+  `drive_tests.py` and `drive_conflict.py` expect two profiles, one
+  on `~/VaporDrive` and one on `~/VaporDrive2`, on one Drive folder.
+  On a local build the daemon cannot read that sign-in from the
+  keychain (open work in `docs/tasks/core.md`). In a guest, sign in
+  through the real path of the CLI
+  (`/Applications/Vapor.app/Contents/Helpers/vapor`), then let the
+  daemon's binary into the item, and restart the service:
+  `security set-generic-password-partition-list -S
+  "cdhash:<vapord>,cdhash:<vapor>,apple-tool:,apple:" -s sh.arn.vapor
+  -a auth.<profile>.gdrive.token -k admin`, with the two hashes from
+  `codesign -dvvv`. `admin` is the password of the guest image.
 
 ## Limits
 
@@ -77,6 +87,9 @@ The guest image has Python 3, git, node, npm, and sqlite3.
   lost edit.
 - `vt.py wait` reads one profile: the implicit one, or the one named
   by `VT_PROFILE`.
+- A change from the cloud side takes seconds to arrive, and a minute
+  with `presence` running. A check that runs right after `wait` can
+  come before it.
 - `wl_coding.py` takes the tree as its model after each branch switch.
   A version that sync put back just before a switch is committed with
   the rest and is not reported.

@@ -209,7 +209,7 @@ def d_burst(ctx):
     ctx.info(f"after `rm -rf` of the 400 files: open questions {[(d.get('kind'), d.get('question', '')[:90]) for d in ds]}")
     for d in ds:
         if d.get("kind") == "mass-delete":
-            vt.vapor("decisions", "resolve", str(d["id"]), "--choose", "apply", "--profile", str(d.get("profile", "default")))
+            vt.vapor("decisions", "resolve", str(d["id"]), "--choose", "apply", "--profile", str(d.get("profileId", "default")))
     t0 = time.time()
     while time.time() - t0 < 900 and os.path.exists(os.path.join(B, sub)) and tree(B, sub):
         time.sleep(2)

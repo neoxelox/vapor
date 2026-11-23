@@ -75,11 +75,14 @@ directions, conflict and race cases, lifecycle faults, a coding
 workload with a real git repository, real `npm ci` and
 `rm -rf node_modules` cycles, and a workload that moves folders. What
 passed is in the description of the pull request that added these
-tasks. Each task below was seen in the installed product, and E-32 in
-a CI run of that pull request. `docs/tasks/README.md` has the order by
-what a task costs a user.
+tasks. Each task below was seen in the installed product, and E-37 in
+a CI run of that pull request. A second run on 2026-11-23 used the
+build of `80c842a`, after the engine change of that day; where a task
+says nothing else, the second run showed the same. E-24, E-29, and
+E-37 were not run again. `docs/tasks/README.md` has the order by what
+a task costs a user.
 
-- [ ] E-30 Work inside a folder in the seconds after the folder was
+- [ ] E-35 Work inside a folder in the seconds after the folder was
       renamed by capitals only goes wrong in three ways, with one
       device and no change in the cloud. `Folder` to `FOLDER`, then
       1.5 s later: an edit of a file in it became a conflict with the
@@ -88,21 +91,23 @@ what a task costs a user.
       one; a deleted file came back. Each happened on the first try,
       and none happened when the daemon was quiet between the steps.
       The moving workload hit all three 40 s apart (75 files that came
-      back and one conflict copy in 150 s), because E-13 keeps the
+      back and one conflict copy in 150 s), because E-19 keeps the
       window open for minutes. While the moves of the rename wait, an
       intent for a path under the new spelling finds no index row and
       takes the "keep the data" path: a conflict, or a download of the
       object under the old spelling. Look the row up by the spelling
       the index holds, or hold the intents of a folder until its
       rename has landed.
-- [ ] E-11 An event in the cloud that changes no bytes turns a waiting
+- [ ] E-17 An event in the cloud that changes no bytes turns a waiting
       local edit into a conflict, and the old bytes get the name. A
       file that another tool put in the cloud folder, a local edit not
       uploaded yet (a pause, a backlog, a failed upload), and a
       `chmod`, a `chflags`, or a rewrite with the same bytes of the
       cloud copy: Vapor moves the edit to a `~conflict-` copy and
       downloads the old content under the name, on both sides.
-      Reproduced 6 times in 6 on the filesystem provider. The feed
+      Reproduced 6 times in 6 on the filesystem provider. On `80c842a`
+      a `touch` of the cloud copy does it too (2 of 2 runs); on
+      `d18a288` it did not. The feed
       drops an event as "no change" when its hash equals the index, or
       when its op-id equals the op-id the index recorded and the size
       and mtime agree (`remote_sync.rs`, `is_durable_self_write_echo`).
@@ -116,7 +121,7 @@ what a task costs a user.
       state is an upload, not a conflict. The Google Drive feed sends
       a hash, which should drop the same event there; that was not
       run.
-- [ ] E-12 A file edited while an ignore rule hid it becomes a conflict
+- [ ] E-18 A file edited while an ignore rule hid it becomes a conflict
       when the rule goes, and the old bytes get the name. `a.secret`
       synced, `*.secret` was added to `postIgnoreRules`, the file
       changed here, the rule was removed: the cloud's old content took
@@ -124,7 +129,7 @@ what a task costs a user.
       The cloud copy never changed. The pair seems to lose its index
       row while the rule hides it, so nothing says which side moved.
       Keep the row of a hidden path.
-- [ ] E-13 After one burst, a whole top-level folder stops syncing
+- [ ] E-19 After one burst, a whole top-level folder stops syncing
       until it is quiet, for up to 10 minutes. A storm (200 paths in
       2 s: a branch switch, a formatter, an install) is compacted into
       one deferred reconcile, and each new event in the compacted
@@ -139,11 +144,12 @@ what a task costs a user.
       Measured with one busy project in `code/demo`: a save in another
       project, `code/other-project`, took 1.4 s before the burst and
       54 s to 307 s after it, until the busy project stopped; a save
-      outside `code/` took 1.5 s all the time. Keep a compaction from
+      outside `code/` took 1.5 s all the time. The second run gave the
+      same numbers. Keep a compaction from
       growing to a parent because of the burst it already took, keep
       single saves flowing next to a compacted folder, and bound the
       wait by seconds while the device is idle.
-- [ ] E-32 A deletion that waits in its move-settle delay when the
+- [ ] E-37 A deletion that waits in its move-settle delay when the
       mass-delete guard trips is not held with the burst, and
       `discard` then restores the others and not that one. Seen in CI
       on `ubuntu-latest`, e2e scenario S40: 12 cloud deletions, one of
@@ -156,16 +162,17 @@ what a task costs a user.
       fails when the timing falls that way, so it is a flaky test
       under `AGENTS.md` §9.6 until this is fixed. Hold a deferred
       deletion of the same direction with the burst.
-- [ ] E-31 While a compacted folder waits for its deferred reconcile,
-      `vapor status` says that nothing is left to do: "Queue: 0
-      queued" and `reconcile.state: idle`. 1 500 new files showed no
-      queued work for 30 s and then 1 384 intents at once; in the
+- [ ] E-36 While a compacted folder waits for its deferred reconcile,
+      `vapor status` says that almost nothing is left to do: "Queue: 0
+      queued" on `d18a288` and "Queue: 1 queued" on `80c842a`, with
+      `reconcile.state: idle`, for a burst of 1 500 new files. The
+      files show as queued work only when the wait is over; in the
       coding runs the status was empty for 4 minutes while hundreds of
-      changes waited (E-13). The app then shows a synced state that is
+      changes waited (E-19). The app then shows a synced state that is
       not true, and a person cannot tell a wait from a stop. Report a
-      folder that waits for its scan as waiting work, with the time of
-      the scan.
-- [ ] E-33 A burst waits 30 seconds before its first file moves, on a
+      folder that waits for its scan as waiting work, with the number
+      of changes it holds and the time of the scan.
+- [ ] E-38 A burst waits 30 seconds before its first file moves, on a
       device that is idle and plugged in. 1 500 new files: no queued
       work for 30 s, then 1 384 intents, and the files were in the
       cloud about 45 s after they were written. A project of 603
@@ -173,20 +180,56 @@ what a task costs a user.
       took 34 s, while 1 GiB in one file takes 11 s. The wait is
       `DEFERRED_RECONCILE_DELAY_MILLIS` (30 000), with a release after
       5 s of quiet that these runs did not get. The delay protects a
-      device under load; on an idle one it only costs time. Start the
+      device under load; on an idle one it only costs time. The second
+      run: the first file after 33 s, all 1 500 after 39 s. Start the
       scan when the burst has been quiet for a second or two in
       `Idle`, and keep the long delay for the throttled states.
-- [ ] E-14 The mass-delete guard asks during ordinary developer work,
+- [ ] E-39 While a mass-delete question is open, the same deletions
+      are held again and again, and the daemon grows and works with
+      nothing to do. `rm -rf node_modules` on `80c842a`, no answer for
+      25 minutes: 43 879 held rows for 10 513 files, resident memory
+      from 41 MB to 360 MB, the state database from 8 MB to 22 MB, and
+      25% to 45% of one core the whole time. Each scan finds the
+      deleted files again, plans their deletions again, and the guard
+      holds them next to the ones it has. `apply` then removed the
+      cloud files in 41 s and the memory fell to 47 MB. A question
+      that waits overnight costs the device a core. A deletion that is
+      held for a path must stand for every later one of that path, and
+      a scan must not plan work that a held intent already covers.
+- [ ] E-40 A deletion takes 5 s to 7 s to reach the other side, a
+      rename 1.5 s to 3 s. One change at a time on an idle device,
+      `80c842a`: a deletion made here was gone from the cloud folder
+      after 5.3 s, and one made in the cloud folder was gone here
+      after 6.7 s; with a user at the device 4.8 s and 24 s (61 s at
+      most, the poll of P-11). Through Google Drive a deletion took
+      16 s from device to device. The first planning of a deletion waits
+      3 s to see whether a create of the same file follows, so a move
+      is one move. Shorten that wait when nothing of the same size is
+      queued or arriving, and measure what each cloud deletion pays
+      for the check of the cloud root (E-16).
+- [ ] E-41 A file whose type has no class of its own waits 4 s before
+      it moves (`DEFAULT_DEBOUNCE_WINDOW_MILLIS`). One 5 MB `.bin`
+      file took 4.3 s to reach the cloud folder, where a `.ts` file
+      took 1.5 s and a 200 KB `.jpg` 1.6 s; 1 GiB then moves at
+      96 MiB/s, so the wait is most of the time of a small file. A
+      fixed window by file name guesses when a file is complete. Use
+      what the file does: start when its size and time stood still for
+      a short moment, and keep a longer window only for a file that
+      still grows.
+- [ ] E-20 The mass-delete guard asks during ordinary developer work,
       and then holds every later deletion. Git's own maintenance
       removed about 1 000 loose objects: "895 of the 3231 files it
       syncs (27%) would be removed on the cloud", 1 038 deletions held,
       the deletes and renames of source files after it among them. A
-      second question came 5 minutes later, because E-13 delivers the
+      second question came 5 minutes later, because E-19 delivers the
       deletions of minutes as one burst. `rm -rf node_modules` asks
       each time. A small tree asks at once: on Google Drive, with 70
       files synced, the rename of a folder of 10 files opened the
       question ("19 of the 70 files it syncs (27%)"), because a folder
-      rename counts as deletions. And each device asks: one `rm -rf`
+      rename counts as deletions. In the second run the count of the
+      question was right in one run and old in another, and the
+      daemon needed 80 s to 148 s to hold the 10 493 deletions (E-31).
+      And each device asks: one `rm -rf`
       of 400 files asked on the device that ran it and again on the
       second device, which kept 251 of the files until its own
       question was answered. The text of the question keeps the count of the
@@ -197,7 +240,7 @@ what a task costs a user.
       routine (content-addressed stores such as `.git/objects`,
       dependency folders, build output), and a count in the question
       that follows the burst.
-- [ ] E-15 A file replaced by a folder of the same name, or a folder by
+- [ ] E-21 A file replaced by a folder of the same name, or a folder by
       a file, on one side never syncs on its own. The intents retry
       with "Not a directory", "Is a directory", and "File exists", and
       a `type-mismatch` question opens only when a reconcile walk
@@ -206,7 +249,7 @@ what a task costs a user.
       change on one side can apply with no question. The same holds
       when both sides make the name at once: the question must open
       when the intent fails, not at the next walk.
-- [ ] E-16 A download that cannot be applied leaves one staging file
+- [ ] E-22 A download that cannot be applied leaves one staging file
       for each attempt in the user's folder. The staging name carries
       the op-id, and the op-id carries the attempt
       (`.vapor-tmp-dl-<device>-op527-a0…a9-t<ms>`). A target that is
@@ -215,7 +258,7 @@ what a task costs a user.
       restart, and the sweep takes them after 24 hours. Each is a full
       copy: a 1 GB file fills the disk one attempt at a time. Use one
       staging name for an intent and remove it when an attempt fails.
-- [ ] E-17 A file that cannot be read or replaced is retried without
+- [ ] E-23 A file that cannot be read or replaced is retried without
       end, and the user is not told. A local file with mode 000, a
       cloud file with mode 000, a target with the Finder lock: the
       intent backs off to about 15 minutes and stays in the queue, so
@@ -223,31 +266,33 @@ what a task costs a user.
       diagnostics` has the reason. Count such files apart from queued
       work, name them with their reason in `vapor status` and in the
       app, and stop calling the profile busy for them.
-- [ ] E-18 A retry does not wake when its cause is gone. A file made
+- [ ] E-24 A retry does not wake when its cause is gone. A file made
       readable again, a lock removed, a `type-mismatch` answered, and
       `vapor reconcile` all left the intent in its backoff (attempt 11:
       about 15 minutes). After `prefer-local` the cloud folder was
       empty for that time, with the files only on this device. A new
       event for the path, an answer that releases it, and a reconcile
       on request must make the intent due at once.
-- [ ] E-19 A reconcile marker of a folder that is gone keeps the queue
+- [ ] E-25 A reconcile marker of a folder that is gone keeps the queue
       at 2 for 13 minutes. `rm -rf node_modules` while the walk was
       inside it: "Reconcile walk cannot stat a local entry; deferring
       the directory", and the marker waits out the full deferral.
       `vapor status` said "Queue: 2 queued" for 13 minutes at 0% CPU.
-      Drop the marker of a folder that neither side holds.
-- [ ] E-20 Empty folders pile up in the cloud. After a local rename or
+      Not seen again in one run on `80c842a`. Drop the marker of a
+      folder that neither side holds.
+- [ ] E-26 Empty folders pile up in the cloud. After a local rename or
       removal of a folder the cloud keeps the old folder, empty: 268
       after ten minutes of coding (`.git/objects/xx` among them), and
       770 after `rm -rf node_modules`, which leaves `node_modules/` in
-      the cloud as a tree of empty folders. E-4 is the same on this
-      device after a change in the cloud. Remove a folder that a
-      deletion or a move emptied.
-- [ ] E-21 A folder renamed in the cloud by capitals only keeps its old
+      the cloud as a tree of empty folders (768 in the second run).
+      The same on this device was fixed on 2026-11-22, and E-14 has
+      what is left of it. Remove a cloud folder that a deletion or a
+      move emptied.
+- [ ] E-27 A folder renamed in the cloud by capitals only keeps its old
       spelling here (`CaseDir` to `casedir`). A file renamed that way
       follows in both directions, and a folder follows from this
       device to the cloud.
-- [ ] E-22 A read-only file that comes from the cloud gets a
+- [ ] E-28 A read-only file that comes from the cloud gets a
       `<name>.vapor-meta.json` next to it in the local folder. The
       download sets the mode before the op-id tag, the tag then fails
       with a permission error, and the fallback writes the side file
@@ -256,36 +301,36 @@ what a task costs a user.
       commits made on the cloud side left 17 side files in the local
       `.git`, `git count-objects -v` says "garbage: 17", and `git
       fsck` prints "bad sha1 file" for each.
-- [ ] E-23 The `unsyncable-name` question is withdrawn and asked again
+- [ ] E-29 The `unsyncable-name` question is withdrawn and asked again
       at every walk, and `skip` does not stick: 33 decisions for one
       file with a backslash in two hours, each with the warning
       "asking once". The same name in the cloud folder is dropped with
       no question, no warning, and no line in `vapor ignored`.
-- [ ] E-24 A `touch` in the cloud downloads the file again and rewrites
+- [ ] E-30 A `touch` in the cloud downloads the file again and rewrites
       the local copy, and a `chmod` in the cloud reaches this device
       while a `chmod` here never reaches the cloud. `data-flow.md`
       says that a change of mode alone does not sync; the cloud side
       does it by accident, through that download. Compare the content
       before a download, and make both directions do what the document
       says.
-- [ ] E-25 Small files move at about 160 a second with nothing near a
+- [ ] E-31 Small files move at about 160 a second with nothing near a
       ceiling. `npm ci` wrote 10 493 files (126 MB) in 2.8 s; the
       upload took 65 s at 23% of one core in `Idle`. Holding 10 493
       deletions took 100 s, and applying them 60 s with stops of 8 to
       20 s at 0% CPU while thousands waited. Find what a file costs
       (one transaction, one `fsync`, one tick each) and batch it.
-- [ ] E-26 A file whose name looks like a conflict copy, with no
+- [ ] E-32 A file whose name looks like a conflict copy, with no
       conflict behind it (`report~conflict-otherdevice-1700000000000.txt`),
       opens a `conflict` question: "report.txt is gone, but its
       conflict copy is still here". Ask only for a copy that this
       profile made or that has a file under the original name.
-- [ ] E-28 Log noise in a healthy run. "Updated throttle state ...
+- [ ] E-33 Log noise in a healthy run. "Updated throttle state ...
       reason=system CPU load is 69%" comes once a second while the
       percentage moves; "Filesystem provider ensured cloud root" comes
       at INFO every 30 s; a symlink that points outside the root logs
       the WARNING "Dropped stabilized event that resolves outside
       watch root" for each event, though the contract skips symlinks.
-- [ ] E-29 Say in the product documents what a synced project loses on
+- [ ] E-34 Say in the product documents what a synced project loses on
       the other side, with the reason for each: symlinks (so
       `node_modules/.bin` is missing and `npm run` fails there until
       an install), empty folders (so a repository made with `git init`
@@ -327,34 +372,45 @@ what a task costs a user.
       than the last sync, and the engine drops the removal until the
       next whole-scope scan. The feed needs the clock of the daemon
       for this, which the provider does not get today.
-- [ ] P-8 Small files move through Google Drive at about 2 a second.
+- [ ] P-9 Small files move through Google Drive at about 2 a second.
       400 files of 1 KB took 214 s from one device to the other (the
       upload, the changes poll, and the download together), and 31
-      files with one of 20 MiB took 110 s. One save takes 5 s to 11 s
-      from device to device, which is the poll. Measure the upload and
+      files with one of 20 MiB took 110 s. On `80c842a` the 400 files
+      took 301 s (1.3 a second), their removal 286 s after the answer
+      to the mass-delete question, and the 31 files 64 s. One save
+      takes 9 s to 12 s from device to device (P-11). Measure the
+      upload and
       the download apart, then raise what runs in parallel within the
       rate limits of the API. Found with the dedicated test account in
       a Mac guest, 2026-11-22.
-- [ ] P-10 A change from another device waits for the next poll of
-      the cloud: each 5 s in `Idle`, each 15 s in `Light`, and each
-      60 s in `Throttled` (`REMOTE_POLL_*_SECONDS`). Measured on
-      Google Drive in `Idle`: one save took 5 s to 11 s from device to
-      device. Not measured: a person at the receiving device puts it
-      in `Throttled`, so by the constants a change then takes up to a
-      minute to arrive, on the device that is in use. One poll is one
-      small request. Poll sooner when something says a change is
-      near (this device just uploaded, the app is open, a poll just
-      brought changes), and measure what the poll costs before the
-      60 s stays. Check the filesystem provider too: its watcher sees
-      a change at once, and the daemon reads it at the same cadence.
-- [ ] P-9 Two uploads of one Google Drive file that commit at the same
+- [ ] P-11 A change from the cloud side reaches a device that is in
+      use a minute late. The daemon reads the cloud side each 5 s in
+      `Idle`, each 15 s in `Light`, and each 60 s in `Throttled`
+      (`REMOTE_POLL_*_SECONDS`), and a person at the device puts it in
+      `Throttled`. Measured between two local folders on `80c842a`,
+      one change at a time: a new or an edited file went from this
+      device to the cloud folder in 1.4 s to 1.5 s, idle or in use.
+      From the cloud folder to this device it took 3.6 s on an idle
+      device (9.1 s at most) and 58 s with a user at it (34 s at
+      least). The watcher of the `filesystem` provider sees the change
+      at once and costs no request; the daemon reads its events at the
+      poll cadence all the same. On Google Drive, from one device to
+      another, a new file took 9 s to 12 s on idle devices and 58 s
+      with a user at them. Read the events of a watcher when they
+      come, in every state but `Suspended`. For a
+      real cloud, poll sooner when something says a change is near
+      (this device just uploaded, the app is open, a poll just brought
+      changes), and measure what a poll costs before the 60 s stays.
+- [ ] P-10 Two uploads of one Google Drive file that commit at the same
       moment both pass, and one edit is lost with no conflict copy.
       Two profiles of one daemon on one Drive folder each changed
       `doc.txt`: the folder ended with one version, the other device
       then downloaded it over its own edit ("Remote changed while the
       local copy stayed at the last sync; downloading instead of
       uploading"), and nothing went to the trash. 6 of 6 runs, with
-      the base version quiet for 25 s or fresh, paused or not.
+      the base version quiet for 25 s or fresh, paused or not, and 5 of
+      5 again on `80c842a`, where either edit can be the one that is
+      lost.
       `data-flow.md` promises keep-both for exactly this pair of
       profiles. The guard reads the hash and then writes
       (`reverify_precondition_before_commit`), and Drive v3 has no
@@ -367,11 +423,11 @@ what a task costs a user.
       same second. Run the same pair of profiles on the filesystem
       provider too. Found with the dedicated test account in a Mac
       guest, 2026-11-22.
-- [ ] P-7 The filesystem provider reads a pipe, a socket, or a device
+- [ ] P-8 The filesystem provider reads a pipe, a socket, or a device
       in the cloud folder as a file. A named pipe there blocks a
       download worker in `open` for good ("stage downloading (1240540
       ms)"), a later change of that path waits behind it, and the
-      daemon cannot stop (PL-4). A socket fails with "Operation not
+      daemon cannot stop (PL-5). A socket fails with "Operation not
       supported on socket" and is retried without end.
       `remote_entry_for` and the feed (`report_directory_files`, the
       event mapping) call everything that is not a symlink and not a
@@ -418,18 +474,43 @@ what a task costs a user.
       nothing uses it, and a newer cargo warns about an unused
       dependency in the lint job there. The warning does not fail the
       job today.
-- [ ] PL-5 A crashed daemon is down for up to 30 seconds. After
-      `kill -9` a new daemon ran 24 s later: the supervisor looks each
+- [ ] PL-7 After a sign-in from a terminal, the daemon cannot read the
+      sign-in from the keychain, and sync does not start. Two causes,
+      both seen in a Mac guest on 2026-11-23 with `vapor auth login
+      --token -` for Google Drive. First, the access list of the
+      keychain item names the daemon only when `vapor` was started by
+      its real path. `companion_binaries` (`secrets/macos.rs`) looks
+      next to `current_exe()`, and through the link that the installer
+      puts on the `PATH` that is `/usr/local/bin`, where no `vapord`
+      is: the item then trusts the CLI alone (`security dump-keychain
+      -a` shows one application; two when the CLI is started as
+      `Vapor.app/Contents/Helpers/vapor`). macOS then asks "vapord
+      wants to use your confidential information" with a password
+      field, the worker of the daemon waits in that call, and the
+      profile says "starting: checking the cloud folder" for as long
+      as nobody answers. Second, on a build that is signed ad hoc,
+      which every prerelease is, the partition list of the item holds
+      the code hash of the CLI only: with the access list right, the
+      daemon is refused with no prompt, and the profile says "Vapor
+      needs to sign in to gdrive again" right after a sign-in. A build
+      signed with one team was not tested. Resolve the link before the
+      companions are looked up; read the item with no user interface,
+      so a refusal is the sign-in hold and never a blocked worker
+      (`AGENTS.md` §6); and decide how a prerelease build lets the
+      daemon read what the CLI stored.
+- [ ] PL-6 A crashed daemon is down for up to 30 seconds. After
+      `kill -9` a new daemon ran 24 s later (21 s in the second run):
+      the supervisor looks each
       30 s (`HEALTH_TICK_INTERVAL_SECONDS`), and the first restart is
       "at once" only from that look on. Notice the exit when it
       happens (wait on the process, or let the service manager start
       the daemon and keep the crash-loop guard at its start), with the
       crash-loop limits as they are. Found in the Mac guest,
       2026-11-22.
-- [ ] PL-4 A daemon with one blocked worker cannot be stopped, and no
+- [ ] PL-5 A daemon with one blocked worker cannot be stopped, and no
       part of Vapor notices that it is dead. The shutdown joins every
       worker with no limit, so a worker in a system call that never
-      returns (the pipe of P-7; a network mount that hangs would do
+      returns (the pipe of P-8; a network mount that hangs would do
       the same) keeps the process alive after it closed its socket.
       `vapor service stop` and `restart` then fail with "the daemon
       did not stop within 10 s of SIGTERM" and leave it there
@@ -596,21 +677,26 @@ runners. What remains before Linux ships a surface:
       first; the soak model does not produce any of them today.
 - [ ] PT-3 Measure in the perf gate what a user waits for, so a slower
       build fails the gate. `scripts/perf.sh` checks CPU and memory of
-      a soak cell today and no latency. The cases, with what the
-      session of 2026-11-22 measured in a Mac guest (4 CPUs) between
-      two local folders: one save on an idle device, each direction
-      (1.3 s to 1.75 s); one save with a user at the device (1.4 s,
-      2.0 s at most); one save next to a busy project (54 s to 307 s,
-      E-13); the time until the first file of a burst moves and until
-      the burst is done (30 s and 45 s for 1 500 files, E-33); small
-      files a second up, and deletions a second (160, and 115 to hold
-      and 175 to apply, E-25); one large file (94 MiB/s up, 158 down);
-      the restart after a kill (24 s, PL-5). Add a save of a file type
-      that gets the default 4 s debounce window, which the session did
-      not time. Budgets come from the CI runner, not from the guest.
-      The same cases for Google Drive join with its leg (TR-8): one
-      save from device to device (5 s to 11 s) and small files a
-      second (2, P-8).
+      a soak cell today and no latency. `tools/vm/workloads/latency.py`
+      times one change at a time in both directions; the gate needs
+      the same on the CI runner, with budgets set there and not from a
+      guest. The cases, with what a Mac guest of 4 CPUs measured on
+      `80c842a` between two local folders (this device to the cloud
+      folder, then the other way): a new file 1.5 s and 3.6 s, an
+      edit 1.4 s and 3.6 s, a 5 MB file 4.3 s and 3.3 s (E-41), a
+      rename 1.5 s and 2.8 s, a deletion 5.3 s and 6.7 s (E-40); with
+      a user at the device a new file 1.4 s and 58 s (P-11); one save
+      next to a busy project 54 s to 248 s (E-19); the first file of a
+      burst of 1 500 after 33 s and the last after 39 s (E-38); small
+      files a second up, 160 (E-31); one large file 96 MiB/s up and
+      124 down; the catch-up after a pause 33 s and after a stop 22 s
+      (17 s and 16 s on `d18a288`, one run each); the restart after a
+      kill 21 s (PL-6); and the memory and CPU of a daemon with an
+      open question (E-39). The same cases for Google Drive join with
+      its leg (TR-8); measured on `80c842a` from device to device: a
+      new file 9 s to 12 s, an edit 9 s, a 5 MB file 23 s to 27 s, a
+      rename 11 s, a deletion 16 s, and 31 files with one of 20 MiB
+      64 s.
 - [ ] PT-1 Tune the soak cell `scripts/perf.sh` gates on (duration,
       seed, load) using release baseline history once per-OS baselines
       exist; gate SLO-1 on the `quiet` phases. Give the thresholds that

@@ -331,6 +331,9 @@ Policy: `AGENTS.md §9`. Full taxonomy:
       each run. The sign-in no longer needs a person each time: the
       token of the account is in the gitignored `.env` as
       `VAPOR_E2E_GDRIVE_TOKEN` (`core.md` TR-8), and `vapor auth login
-      --token -` takes it inside a guest. Decide with the
+      --token -` takes it inside a guest. On a local build the daemon
+      then cannot read it from the keychain (`core.md` PL-7); until
+      that is fixed a scenario has to widen the item's partition list
+      itself, as `tools/vm/workloads/README.md` says. Decide with the
       owner whether it is a leg of `./scripts/release.sh` next to the
       Drive leg of Tier E2E (`core.md` TR-8).

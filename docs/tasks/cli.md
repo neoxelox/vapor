@@ -63,7 +63,7 @@ stable and are never reused.
 - [ ] L2-8 `vapor service start` says "service: daemon started" and
       exits 0 when a daemon that no longer answers still holds the
       launchd job, and `vapor service status` says "Running" for it
-      (`core.md` PL-4). Both must ask the daemon on its socket, and a
+      (`core.md` PL-5). Both must ask the daemon on its socket, and a
       `restart` that could not stop the old daemon must say that sync
       is down and what to do.
 

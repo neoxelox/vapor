@@ -10,7 +10,8 @@ while time.time() < end:
     for d in (vt.vapor_json("decisions", "list") or {}).get("decisions", []):
         if d.get("kind") == "mass-delete":
             time.sleep(3)
-            code, out, err = vt.vapor("decisions", "resolve", str(d["id"]), "--choose", "apply")
+            extra = ["--profile", str(d["profileId"])] if d.get("profileId") else []
+            code, out, err = vt.vapor("decisions", "resolve", str(d["id"]), "--choose", "apply", *extra)
             n += 1
             print(f"{time.time():.0f} answered #{d['id']} apply ({n}): {d.get('question', '')[:150]}", flush=True)
         else:
