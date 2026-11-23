@@ -129,6 +129,27 @@ a task costs a user.
       The cloud copy never changed. The pair seems to lose its index
       row while the rule hides it, so nothing says which side moved.
       Keep the row of a hidden path.
+- [ ] E-42 A copy that keeps the modification time takes the original
+      away on this device, and the device never holds both. `cp -p
+      original.bin copy.bin` in the cloud folder of the filesystem
+      provider (a Finder duplicate keeps the time too): 1.3 s later
+      this device had `copy.bin` and no `original.bin`, while the
+      cloud held both. It stayed so for 17 minutes. Each `vapor
+      reconcile` then swapped the pair: `original.bin` and no
+      `copy.bin`, then the reverse, three times in three. A tree of
+      1 440 files in which three files share each content, written in
+      the cloud in one burst, did not arrive in full in 600 s, with
+      125 such renames in the log. Found in the second run
+      (`80c842a`). The download of a new cloud object looks for a
+      synced local file with the same size, cloud time, and content,
+      and renames it to the new name as a moved object (`executor.rs`,
+      `local_move_candidate`). It does not check that the cloud object
+      under the old name is gone, and the download that would bring
+      the missing file back finds its twin the same way. A copy with
+      a new time, `cp -p` on this device, and `cp -p` from device to
+      device through Google Drive (2 of 2) sync right. A copy made
+      inside Google Drive was not run. Rename only when the old name
+      is gone from the cloud; otherwise download.
 - [ ] E-19 After one burst, a whole top-level folder stops syncing
       until it is quiet, for up to 10 minutes. A storm (200 paths in
       2 s: a branch switch, a formatter, an install) is compacted into
@@ -226,7 +247,15 @@ a task costs a user.
       each time. A small tree asks at once: on Google Drive, with 70
       files synced, the rename of a folder of 10 files opened the
       question ("19 of the 70 files it syncs (27%)"), because a folder
-      rename counts as deletions. In the second run the count of the
+      rename counts as deletions. Eight renames and removals of a
+      folder of 10 files, on a Drive tree of 37 to 50 files, asked 8
+      times. The count of the question holds the folders and its total
+      does not: `rm -rf` of 1 440 files in 360 folders asked about
+      "1800 of the 1501 files it syncs (100%)". One removal can ask
+      many times: 360 files removed one at a time in 32 s asked 8
+      questions in 67 s ("95 of the 374", "78 of the 309", down to
+      "23 of the 85"), because each `apply` leaves a smaller tree and
+      the next deletions are a quarter of it again. In the second run the count of the
       question was right in one run and old in another, and the
       daemon needed 80 s to 148 s to hold the 10 493 deletions (E-31).
       And each device asks: one `rm -rf`
@@ -280,14 +309,25 @@ a task costs a user.
       `vapor status` said "Queue: 2 queued" for 13 minutes at 0% CPU.
       Not seen again in one run on `80c842a`. Drop the marker of a
       folder that neither side holds.
-- [ ] E-26 Empty folders pile up in the cloud. After a local rename or
-      removal of a folder the cloud keeps the old folder, empty: 268
-      after ten minutes of coding (`.git/objects/xx` among them), and
-      770 after `rm -rf node_modules`, which leaves `node_modules/` in
-      the cloud as a tree of empty folders (768 in the second run).
-      The same on this device was fixed on 2026-11-22, and E-14 has
-      what is left of it. Remove a cloud folder that a deletion or a
-      move emptied.
+- [ ] E-26 A fast removal of a folder tree on this device leaves the
+      tree in the cloud, empty of files. `rm -rf` of 360 files in 181
+      folders: the files left the cloud in 40 s and all 181 folders
+      stayed. The same tree removed one file at a time, 0.06 s apart,
+      left nothing after 107 s. 1 440 files in 361 folders: all 361
+      folders stayed, 12 minutes later too. `rm -rf node_modules`
+      leaves `node_modules/` in the cloud as 768 empty folders, and
+      ten minutes of coding left 268 (`.git/objects/xx` among them).
+      Likely cause, not proven: the fast removal is the one that the
+      daemon compacts into a walk of the removed folder ("Compacted
+      pending paths into a subtree reconcile intent"), and that walk
+      removes the files and leaves the folders. The same removal made
+      in the cloud removes the whole tree here. A small folder leaves
+      nothing on either side, with the filesystem provider and from
+      device to device through Google Drive: a rename, a removal, or
+      its files moved out (10 files; the old folder is gone 3 s to
+      26 s later, 17 s to 33 s through Drive). E-14 has the folder
+      that still holds an ignored file. Remove a cloud folder that a
+      deletion or a move emptied, on the path of the walk too.
 - [ ] E-27 A folder renamed in the cloud by capitals only keeps its old
       spelling here (`CaseDir` to `casedir`). A file renamed that way
       follows in both directions, and a folder follows from this

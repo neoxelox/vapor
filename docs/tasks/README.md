@@ -83,8 +83,8 @@ one session, and what it did wrong is in the task files. The owner
 decides the order; this is the order by what a user loses.
 
 - An edit that is lost, wrong content under a name, or a deleted
-  file that comes back or stays deleted: `core.md` P-10, E-35, E-17,
-  E-18, E-37.
+  file that comes back, stays deleted, or goes missing: `core.md`
+  P-10, E-35, E-17, E-18, E-42, E-37.
 - Sync that waits or stops, or a status that hides it: `core.md`
   E-19, E-36, P-11, PL-7, E-20, E-21, E-23, E-24, E-25, P-8, PL-5,
   and `cli.md` L2-8. E-20 needs a design with the owner.
