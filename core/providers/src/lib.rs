@@ -259,7 +259,9 @@ pub enum RemoteChangeKind {
     /// with one entry for the folder and none for the files in it
     /// (Google Drive). `path` is a path of the folder: the one it has
     /// now, or the one it had. The engine walks the folder that holds
-    /// that path, and the walk finds what the change did. A feed that
+    /// that path, and the walk finds what the change did. With the root
+    /// as its path it says that the place of something that changed
+    /// could not be read, and the engine walks everything. A feed that
     /// reports each file under such a folder never sends this.
     FolderMoved,
 }

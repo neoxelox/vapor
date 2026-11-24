@@ -591,9 +591,18 @@ impl RemotePoller {
                             // this path finds what the change did: a
                             // name with another spelling, files under a
                             // new path, files that left.
-                            if let Some(parent) = local_target.parent() {
+                            //
+                            // The root as the path: the provider could
+                            // not read where a change is, and the walk
+                            // of everything finds it.
+                            let holder = if change.path.is_root() {
+                                Some(local_target.clone())
+                            } else {
+                                local_target.parent().map(Path::to_path_buf)
+                            };
+                            if let Some(holder) = holder {
                                 batch.push((
-                                    parent.to_path_buf(),
+                                    holder,
                                     PendingIntentKind::ReconcileSubtree,
                                     event_time,
                                 ));
@@ -1128,11 +1137,17 @@ mod tests {
             size_bytes: None,
             modified_at: None,
         };
-        // The folder got another spelling, then moved to the top.
+        // The folder got another spelling, then moved to the top. Then
+        // the provider could not read where a change is.
+        let place_unknown = vapor_providers::RemoteChange {
+            path: vapor_providers::RemotePath::root(),
+            ..moved("x")
+        };
         let provider = ScriptedFeed {
             pages: std::sync::Mutex::new(vec![
                 vec![moved("work/Reports"), moved("work/reports")],
                 vec![moved("work/reports"), moved("reports")],
+                vec![place_unknown],
             ]),
         };
         let clock = Arc::new(ManualClock::at_now());
@@ -1183,6 +1198,16 @@ mod tests {
         }
         walks.sort();
         assert_eq!(walks, vec![local_root.clone(), local_root.join("work")]);
+
+        // The root as the path asks for the walk of everything, and not
+        // of the folder that holds the root.
+        poll(&mut state_db, ts(60));
+        let intent = state_db
+            .lease_next_ready(ts(70))
+            .expect("lease")
+            .expect("a walk");
+        assert_eq!(intent.kind, PendingIntentKind::ReconcileSubtree);
+        assert_eq!(intent.path, local_root);
     }
 
     #[test]

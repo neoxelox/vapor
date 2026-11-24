@@ -11,6 +11,7 @@ for each fact: what the provider takes for true, and what Drive did.
   <command that prints the sign-in> | drive_probe.py cloud rename <path> <name>
   <command that prints the sign-in> | drive_probe.py cloud move <path> <folder>
   <command that prints the sign-in> | drive_probe.py cloud overwrite <path> <text> [<time>]
+  <command that prints the sign-in> | drive_probe.py cloud overwrite-after <path> <text>
   <command that prints the sign-in> | drive_probe.py cloud versions <path>
   <command that prints the sign-in> | drive_probe.py cloud list <folder>
   <command that prints the sign-in> | drive_probe.py cloud trash <path>
@@ -23,7 +24,8 @@ the entries the changes feed has for a folder, and whether the older
 API version has a conditional write of content. `cloud` changes one
 file of a synced folder as another program does, to see what Vapor
 makes of it: a new time with no new bytes, a new name, another folder,
-new bytes with a time of the writer's choice. `cloud trash` puts the
+new bytes with a time of the writer's choice, new bytes at the moment
+an upload of the file lands. `cloud trash` puts the
 folder of a session in the trash of the account when the session is
 over. `<path>` starts at the top of the Drive.
 
@@ -537,6 +539,19 @@ def cloud(args):
         metadata = {"modifiedTime": args[3]} if len(args) > 3 else {}
         done = overwrite(target["id"], args[2].encode() + bytes([10]), metadata)
         print(f"overwrote {done['name']}: the version carries the time {done['modifiedTime']}")
+    elif action == "overwrite-after":
+        # A program that writes without a look at what it replaces, at
+        # the moment another upload of the file lands.
+        before = target.get("md5Checksum")
+        deadline = time.time() + float(args[3]) if len(args) > 3 else time.time() + 120
+        while time.time() < deadline:
+            now = js("GET", f"{API}/files/{target['id']}?fields=md5Checksum").get("md5Checksum")
+            if now != before:
+                done = overwrite(target["id"], args[2].encode() + bytes([10]), {})
+                print(f"the file changed, and {done['name']} was overwritten at once: the version carries the time {done['modifiedTime']}")
+                return
+            time.sleep(0.1)
+        sys.exit("drive_probe: the file did not change in time")
     elif action == "versions":
         head = js("GET", f"{API}/files/{target['id']}?fields=md5Checksum,headRevisionId")
         for r in revisions(target["id"]):

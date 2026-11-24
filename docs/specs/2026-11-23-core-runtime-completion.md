@@ -103,6 +103,25 @@ it:
     a refresh never writes tokens back after a sign-out
     (`operations/provider-auth-operations.md`).
 
+Found by a review of that commit, which the owner agreed to (owner,
+2026-11-24), and built after it:
+
+17. **An editor that saves by itself gets no copies.** The check took
+    the next saves of this device for writes of another one. The
+    provider now remembers what it wrote.
+18. **A program that is not Vapor and writes at the same moment no
+    longer costs the edit of this device.** When such a write holds
+    the name, the device keeps its own version as the copy.
+19. **A commit whose answer was lost still gets its check**, and a
+    change whose place the cloud did not answer for starts a walk of
+    everything where it was dropped before.
+20. **The sign-in follows the store with no false alarm.** A refresh
+    never writes over another sign-in, and a store with no tokens is a
+    sign-out only at two looks, 2 seconds apart.
+21. **The provider forgets what is under a folder that moved**, so a
+    later removal of a file in it is not dropped, and an entry for a
+    folder that did not move costs no request.
+
 ## Verification
 
 - Tier 1: `./scripts/test.sh`, green on the contributor Mac.
@@ -150,9 +169,15 @@ it:
     device leaves no empty folder on the other. The devices rename
     their files; nothing is sent again.
   - A sign-out: the profile of a daemon that runs holds for a sign-in
-    6 s after `vapor auth logout`, a file written meanwhile stays on
-    its device, and it reaches the other device 12 s after the next
+    20 s after `vapor auth logout`, a file written meanwhile stays on
+    its device, and it reaches the other device 8 s after the next
     sign-in. Before, the profile went on to sync.
+  - After the review fixes: a file saved 20 times, 2 seconds apart,
+    ends with no copy on either device. A program that writes at the
+    moment an upload lands leaves its content under the name and the
+    edit of the device as a `~conflict-replaced` copy on both devices.
+    The folder cases pass again, and 8 more same-moment races lose no
+    edit.
 - Tier VM: `./scripts/vm.sh`, 14 scenarios pass on the final tree,
   with the launchd round trip of the service in a fresh guest. In a manual guest with no
   route to the Internet, a made-up token given to `vapor auth login
@@ -253,10 +278,12 @@ option of each is what is built.
     hold for a sign-in on such a build (`docs/tasks/core.md` PL-8).
 17. **What "the same moment" is on Google Drive.** Built: a version
     is a write of the moment of an upload when its time is no more
-    than the time the commit took plus 5 seconds after the time of the
+    than the time the commit took plus 1 second after the time of the
     upload's own version, and no more than twice that time plus 30
-    seconds before it. Of those, each one that does not hold the name
-    is kept as a copy. The run with the test account gave the facts:
+    seconds before it. A version that this device wrote itself never
+    counts. Of the rest, each one that does not hold the name is kept
+    as a copy, and the upload's own version too when a program that is
+    not Vapor holds the name. The run with the test account gave the facts:
     Drive lists the versions of a file by their times, a writer can
     set the time, Drive gives a version its time when its bytes are
     in, and of two writes of one moment the one that holds the name

@@ -7,7 +7,7 @@
 //! the same marker; Drive-style backends use their folder id instead.
 //! Design: `docs/architecture/data-flow.md` §Root identity.
 
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -59,7 +59,12 @@ fn stage_marker(root: &Path, marker: &RootMarker) -> io::Result<PathBuf> {
         constants::provider::TEMP_FILE_PREFIX,
         marker.root_id
     ));
-    std::fs::write(&staging, bytes)?;
+    // On disk before it gets its name: the profile records the id, and
+    // a marker that a power loss left empty would read as another
+    // folder at the next start.
+    let mut file = std::fs::File::create(&staging)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
     Ok(staging)
 }
 
@@ -86,36 +91,31 @@ pub fn adopt(root: &Path, created_by: &str, now: SystemTime) -> io::Result<RootM
     }
     let marker = fresh_marker(created_by, now);
     let staging = stage_marker(root, &marker)?;
+    let target = marker_path(root);
     // A hard link fails when the name is taken, and what it publishes
     // is the whole file.
-    match std::fs::hard_link(&staging, marker_path(root)) {
-        Ok(()) => {
+    if std::fs::hard_link(&staging, &target).is_ok() {
+        let _ = std::fs::remove_file(&staging);
+        return Ok(marker);
+    }
+    // The name is taken, or the volume has no hard links. A marker that
+    // another adopter published in the meantime is the identity of the
+    // root.
+    match read_marker(root) {
+        Ok(Some(first)) => {
             let _ = std::fs::remove_file(&staging);
+            Ok(first)
+        }
+        // A file under the name that is no marker, or a volume with no
+        // hard links: the rename takes the name. Of two adopters that
+        // reach this step at the same moment the last one wins.
+        Ok(None) => {
+            std::fs::rename(&staging, &target)?;
             Ok(marker)
         }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            match read_marker(root) {
-                Ok(Some(first)) => {
-                    let _ = std::fs::remove_file(&staging);
-                    Ok(first)
-                }
-                // A foreign file of that name is not an identity: the
-                // marker takes its place.
-                Ok(None) => {
-                    std::fs::rename(&staging, marker_path(root))?;
-                    Ok(marker)
-                }
-                Err(error) => {
-                    let _ = std::fs::remove_file(&staging);
-                    Err(error)
-                }
-            }
-        }
-        // A volume with no hard links: the rename, where the last of
-        // two adopters wins.
-        Err(_) => {
-            std::fs::rename(&staging, marker_path(root))?;
-            Ok(marker)
+        Err(error) => {
+            let _ = std::fs::remove_file(&staging);
+            Err(error)
         }
     }
 }

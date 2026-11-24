@@ -9,16 +9,21 @@ pipe into the guest. Runs on the host.
 It reads the gitignored `.env` of the checkout: `VAPOR_E2E_GDRIVE_TOKEN`
 (the JSON document that Vapor stores for a sign-in) and, for `probe`,
 `VAPOR_GDRIVE_CLIENT_ID` and `VAPOR_GDRIVE_CLIENT_SECRET`. The output is
-a secret: the script refuses a terminal, and nothing but a pipe to the
-guest takes it. Only for the dedicated test account.
+a secret: the script writes it to a pipe only, never to a terminal or
+to a file, and the pipe goes to the guest. A program that reads that
+pipe for its own log gets the secret, so run the script in no other
+way than the one below. Only for the dedicated test account.
 
   tools/vm/workloads/sign_in.py | STDIN=1 tools/vm/workloads/in-guest.sh 'vapor auth login --token -'
 """
 import json
 import os
+import stat
 import sys
 
-if sys.stdout.isatty():
+# A pipe and nothing else: not a terminal, and not a file that would
+# keep the secret on disk.
+if not stat.S_ISFIFO(os.fstat(sys.stdout.fileno()).st_mode):
     sys.exit("sign_in: the output is a secret; pipe it to the guest")
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
 env = {}

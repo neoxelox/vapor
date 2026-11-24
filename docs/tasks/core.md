@@ -167,6 +167,12 @@ a task costs a user.
       time near that moment. A write that lands inside the one round
       trip of an upload's commit with a time its writer set to another
       day is not found; it stays in the version history of the file.
+      A version that the upload replaces and that its writer dated
+      later than the upload's own (a clock that is ahead) is listed
+      after it, and the check then finds no base and ends. The check
+      also ends when the list does not hold the upload's own version
+      yet; the runs with the account never saw the list lag a write,
+      and nothing else says that it cannot.
       Also seen with the account: `files.version` grows by 2 or 3 for
       one overwrite of content and by 5 to 7 for two, so it does not
       tell a second writer.
@@ -178,17 +184,33 @@ a task costs a user.
       because the same entry stands for each new folder, whose files
       come with entries of their own. A walk for each unknown folder
       would close it, at the cost of one walk for each new folder of a
-      burst. Found with the test account, 2026-11-24.
+      burst. The same holds for a folder that comes back from the
+      trash of Drive, or that moves out of the synced folder and back:
+      the entry of its removal makes the provider forget it, and the
+      entry of its return then reads as a new folder (not measured
+      with the account). Found with the test account, 2026-11-24.
 - [ ] P-15 A folder that moves in Google Drive can cost one device a
       new transfer. After the folder signal, of two devices that
       followed the move of a folder with 2 files into another folder,
       one renamed its files and the other put them in the trash and
       downloaded them again under the new path. Both ended right, and
-      the trash kept the files. Why the two differ is not known: the
-      removal of the old path may reach a device before the walk sees
-      the new one. For a large folder that is a transfer of every
-      file, and the removals can open the mass-delete question (E-20).
-      Seen with the test account, 2026-11-24.
+      the trash kept the files. The review of the change read the
+      cause from the code: the removal of the old path waits for the
+      download of the new one only when that download is queued before
+      the removal is first planned, and only for 9 seconds. For a
+      large folder that is a transfer of every file, and the removals
+      can open the mass-delete question (E-20). Seen with the test
+      account, 2026-11-24.
+- [ ] P-16 A folder at the top of the synced folder that gets another
+      name in Google Drive costs each device a scan of everything. The
+      folder signal asks for a walk of the folder that holds the
+      path, and a walk enters every folder under it: one request for
+      each folder of the tree. A move between two folders asks for two
+      walks, also when one of them holds the other. A walk that pairs
+      one level of names, and then enters only the folder that moved,
+      would cost a few requests. The walk of everything that such a
+      rename starts counts as the scan of the day. Found by the review
+      of the change, 2026-11-24.
 - [ ] P-12 Make the Drive check for a replaced version survive a stop
       of the daemon. An upload that lands leaves the check in memory
       for the next changes poll. A daemon that stops in between makes
@@ -277,6 +299,19 @@ a task costs a user.
       profile step of `init` says that the cloud folder "was not looked
       up" with the raw keychain error ("The user name or passphrase you
       entered is not correct"), which reads as a failed sign-in.
+- [ ] PL-9 A secret store that does not answer must not read as "no
+      secret". The Linux store runs `secret-tool lookup` and takes exit
+      code 1 with no output for a secret that is not there; a D-Bus
+      failure or a locked collection may answer the same way (not
+      checked on a Linux desktop). The Drive provider looks at the
+      store each 30 seconds, so such an answer at two looks holds the
+      profile for a sign-in until the store answers again; before, a
+      daemon that ran did not look. Give the store an answer for "could
+      not ask" that is not `NotFound`. One more case of the same kind,
+      on every OS: a request that Drive refuses with 401 drops the
+      tokens in memory before it reads the store, so with a locked
+      keychain the profile says "sign in again" until the keychain
+      opens. Found by the review of the change, 2026-11-24.
 - [ ] PL-1 Check in Finder that a file which Vapor moved to the macOS
       trash offers Put Back. The move goes through
       `NSFileManager.trashItem` now, and a contract test proves the
