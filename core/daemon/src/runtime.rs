@@ -99,6 +99,12 @@ pub enum DaemonRuntimeError {
     /// The local root the profile adopted is not there. Waited for by
     /// the caller; never re-created.
     LocalRootMissing(PathBuf),
+    /// The state database did not take the writes of a tick (a full
+    /// drive, an I/O error at the commit). What the runtime holds in
+    /// memory is ahead of the database from here on, so the caller
+    /// composes the profile again from the database, as after a kill
+    /// inside a tick.
+    TickNotSaved(StateDbError),
 }
 
 impl From<FsEventsWatcherError> for DaemonRuntimeError {
@@ -740,6 +746,11 @@ impl DaemonRuntime {
         // done, as it did when each statement was a transaction of its
         // own, and the batch never outlives the tick: a profile that is
         // suspended after a panic is composed again on this database.
+        //
+        // A commit that fails takes every write of the tick with it,
+        // while the memory of the runtime moved on (the cursor of the
+        // changes feed, the changes the scheduler handed over). That
+        // error has a name of its own, and the caller ends this runtime.
         self.state_db.begin_batch()?;
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.tick_in_batch(now, throttle_inputs)
@@ -747,7 +758,7 @@ impl DaemonRuntime {
         let committed = self.state_db.commit_batch();
         match outcome {
             Ok(report) => {
-                committed?;
+                committed.map_err(DaemonRuntimeError::TickNotSaved)?;
                 report
             }
             Err(panic) => std::panic::resume_unwind(panic),
@@ -1134,11 +1145,21 @@ impl DaemonRuntime {
                         // wakes goes on with the walk. With a wait for
                         // the timer of the loop after each slice, a
                         // walk of a cloud API took a second a folder.
+                        //
+                        // A scan holds a planner slot and a read token.
+                        // It takes them back in this tick only when
+                        // that leaves one of each for other work: in a
+                        // throttle state with one read token, a walk
+                        // that never let go would keep every hash, and
+                        // so every upload, waiting until it ends.
                         let waits_for_a_listing = self
                             .reconcile_walker
                             .as_ref()
                             .is_some_and(|walker| walker.waits_for_a_listing());
-                        let due = if waits_for_a_listing {
+                        let gate = self.app.workgate_snapshot();
+                        let leaves_room = gate.available_planner_workers() > 1
+                            && gate.available_read_tokens() > 1;
+                        let due = if waits_for_a_listing && leaves_room {
                             now
                         } else {
                             now + self.tick_interval
@@ -1943,6 +1964,15 @@ impl DaemonRuntime {
             runtime.last_cloud_root_attempt_inst = Some(runtime.clock.now());
         }
         Ok(runtime)
+    }
+
+    /// Whether the profile waits for a local root that is not there.
+    /// No watcher can start on such a folder, and the runtime says
+    /// when it is back ([`Self::take_local_root_changed`]).
+    pub(crate) fn waits_for_its_local_root(&self) -> bool {
+        self.root_hold
+            .as_ref()
+            .is_some_and(|hold| hold.missing && hold.side == crate::root_identity::RootSide::Local)
     }
 
     /// Whether the folder at the local root changed since the last
@@ -4926,7 +4956,17 @@ impl DaemonRuntime {
         let deadline =
             clock.now() + Duration::from_millis(constants::engine::RECONCILE_SLICE_MILLIS);
         let should_continue = move || clock.now() < deadline;
-        let listings = listings_in_flight(self.app.snapshot().throttle_state);
+        // A provider that asked for fewer requests gets one listing at
+        // a time, as it gets one transfer at a time.
+        let slowed = self
+            .app
+            .retry_slowdown_until()
+            .is_some_and(|until| until > now);
+        let listings = if slowed {
+            1
+        } else {
+            listings_in_flight(self.app.snapshot().throttle_state)
+        };
         let walker = self
             .reconcile_walker
             .as_mut()
@@ -5050,9 +5090,6 @@ fn name_collision_message(wanted: &Path, existing: &Path) -> String {
     )
 }
 
-/// Requeue delay applied when a leased intent cannot start because no
-/// permit / slot is available. Coarser than the tick interval so blocked
-/// intents don't churn a lease+requeue write pair on every tick.
 /// Cloud listings a reconcile walk asks for at one time under `state`.
 /// A throttle state makes the scan slower and never stops it.
 fn listings_in_flight(state: vapor_shared::ThrottleState) -> usize {
@@ -5064,6 +5101,9 @@ fn listings_in_flight(state: vapor_shared::ThrottleState) -> usize {
     }
 }
 
+/// Requeue delay applied when a leased intent cannot start because no
+/// permit / slot is available. Coarser than the tick interval so blocked
+/// intents don't churn a lease+requeue write pair on every tick.
 fn blocked_intent_requeue_delay() -> Duration {
     Duration::from_millis(constants::engine::BLOCKED_INTENT_REQUEUE_DELAY_MILLIS)
 }
@@ -7695,6 +7735,43 @@ mod tests {
             );
         }
         assert!(yields > 0, "the slice ended while the listing was out");
+
+        // On battery the gate has one read token, and a scan holds one.
+        // A walk that took it back in the same tick would keep every
+        // hash waiting until the walk ends. So there it lets go for a
+        // tick, as a walk that used its slice does.
+        let on_battery = |fixture: &mut BidirectionalFixture| {
+            fixture.clock.advance(Duration::from_millis(250));
+            fixture.now_ms += 250;
+            fixture
+                .runtime
+                .tick_with_inputs(
+                    timestamp_ms(fixture.now_ms),
+                    ThrottleInputs {
+                        on_battery: true,
+                        ..ThrottleInputs::default()
+                    },
+                )
+                .expect("runtime tick");
+        };
+        for _ in 0..40 {
+            if fixture.runtime.app.snapshot().throttle_state == vapor_shared::ThrottleState::Light {
+                break;
+            }
+            on_battery(&mut fixture);
+        }
+        assert_eq!(
+            fixture.runtime.app.snapshot().throttle_state,
+            vapor_shared::ThrottleState::Light
+        );
+        // Four slices pass: the first can still end on the caps of
+        // the state before, and each later one ends on those of now.
+        let mut let_go = false;
+        for _ in 0..8 {
+            on_battery(&mut fixture);
+            let_go |= fixture.runtime.running_reconcile_intent_id.is_none();
+        }
+        assert!(let_go, "the permit is free for a tick between two slices");
 
         hold.set(false);
         for _ in 0..100_000 {

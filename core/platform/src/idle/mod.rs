@@ -97,17 +97,16 @@ mod tests {
     use super::*;
 
     /// What every implementation holds to: a reading comes back with
-    /// no wait, it is never longer than the reading of a host with no
-    /// input devices, and the derived view follows it at both ends.
+    /// no wait, and the derived view follows it at both ends. The
+    /// reading itself is whatever the host says: a device that nobody
+    /// touched for a weekend reads two days, and the contract holds
+    /// there too.
     fn exercise_contract(notifier: &dyn IdleNotifier) {
         for _ in 0..2 {
-            assert!(notifier.idle_for() <= AlwaysIdleNotifier::IDLE_FOR);
+            let _ = notifier.idle_for();
         }
         assert_eq!(notifier.user_activity(Duration::ZERO), UserActivity::Idle);
-        assert_eq!(
-            notifier.user_activity(AlwaysIdleNotifier::IDLE_FOR + Duration::from_secs(1)),
-            UserActivity::Active
-        );
+        assert_eq!(notifier.user_activity(Duration::MAX), UserActivity::Active);
     }
 
     #[test]

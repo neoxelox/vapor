@@ -1226,16 +1226,16 @@ pub mod engine {
     /// `vapor status` reports the bandwidth the daemon used over this
     /// many seconds.
     pub const BANDWIDTH_USAGE_WINDOW_SECONDS: u64 = 5;
-    /// Fallback cadence for re-publishing the IPC status snapshot while
-    /// idle. Busy ticks, control requests, and per-profile state flips
-    /// publish immediately; this heartbeat only bounds the staleness of
-    /// anything those triggers miss, so a fully idle daemon runs the
-    /// snapshot's per-profile SQL at this cadence instead of every tick.
     /// The least time between two status snapshots while work is in
     /// flight. A snapshot runs SQL for each profile, and under a burst
     /// the tick loop turns over a thousand times a second. A state that
     /// changes (a pause, an error, a question) is published at once.
     pub const STATUS_BUSY_REPUBLISH_MILLIS: u64 = 250;
+    /// Fallback cadence for re-publishing the IPC status snapshot while
+    /// idle. Control requests and per-profile state flips publish
+    /// immediately; this heartbeat only bounds the staleness of
+    /// anything those triggers miss, so a fully idle daemon runs the
+    /// snapshot's per-profile SQL at this cadence instead of every tick.
     pub const STATUS_REPUBLISH_HEARTBEAT_SECONDS: u64 = 10;
     /// After `vapor reconcile` the runtime releases deferred work
     /// eagerly for this long, so what the scan finds moves at once.

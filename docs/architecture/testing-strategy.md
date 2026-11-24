@@ -481,8 +481,9 @@ second copy of the Rust policy.
 **Logic + shape + binary tests.** Every command with `--json` output
 has an explicit shape test in its module. `core/cli/tests/binary.rs`
 spawns the built `vapor` on every CI OS with a throwaway `VAPOR_DIR`
-and locks the shell contract: the exit code of each command (the
-table in `core/cli/README.md`), stdout for results and
+and locks the shell contract: the exit codes (the table in
+`core/cli/README.md`) on the commands that need no service of the
+host, stdout for results and
 stderr for errors (never half a document on stdout), the typed
 `config set`, the empty-state shapes of `decisions` and `trash`, the
 `doctor --json` shape, and death on a closed pipe.

@@ -242,9 +242,9 @@ public final class VaporCLIServiceController: LaunchAgentControlling {
     )
   }
 
-  /// Runs the browser sign-in. The CLI gives the consent
-  /// `browserSignInTimeoutSeconds`; the extra margin lets it report its
-  /// own timeout instead of being killed first.
+  /// Runs the browser sign-in, and ends it after
+  /// `browserSignInTimeoutSeconds` and a margin when the consent has
+  /// not come: the CLI itself would wait much longer.
   public func signIn(profile: String) throws {
     let arguments = ["auth", "login", "--profile", profile, "--browser"]
     _ = try runExpectingSuccess(

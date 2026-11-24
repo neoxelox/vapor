@@ -398,6 +398,9 @@ Discipline rules:
 - **Observe through product surfaces.** CLI exit codes and `--json`
   output, the daemon log, the trees, and read-only state-DB queries.
   Never add a test-only hook to the daemon for the harness's benefit.
+  A scenario may prepare a state database while no daemon runs, as
+  the one for a database of another build does; what it asserts, it
+  reads.
 - **Bounded waits, never bare sleeps.** Every wait has a deadline on
   the clock and a named condition. To prove something stays true, use
   `hold_for`, which polls the condition for the window.
@@ -443,7 +446,7 @@ Discipline rules:
 |---|---|---|---|
 | Tier 1 | `./scripts/test.sh` | every PR | module + composed correctness, in-process |
 | Tier E2E | `./scripts/e2e.sh` | every PR (all three OS jobs; `--full` on macOS) + locally for runtime-affecting changes | the shipped binaries work black-box, end to end |
-| Tier 2 | `./scripts/perf.sh` | release pipeline | one soak cell with the SLO checks asserted on its report |
+| Tier 2 | `./scripts/perf.sh` | release pipeline | the property tests at 4 000 cases each, and one soak cell with the SLO checks asserted on its report |
 | Tier S | `./scripts/soak.sh` | release pipeline + on demand | five cells of churn with faults; nothing lost, both trees converged (`soak-testing.md`) |
 
 Tier E2E complements Tier 1; it never replaces the Tier 1 tests that

@@ -220,6 +220,9 @@ pub struct MultiProfileRuntime {
     /// The ids of the profiles in the order of the configuration, which
     /// is the order status lists them in.
     profile_order: Vec<String>,
+    /// The profiles that the configuration names and has disabled. With
+    /// no profile left to run, status says how to start one.
+    disabled_profiles: Vec<String>,
 }
 
 /// The cheap observable state of one profile: enough to detect that a
@@ -401,6 +404,11 @@ impl MultiProfileRuntime {
         };
         let mut slots = Vec::new();
         let mut profile_order = Vec::new();
+        let disabled_profiles: Vec<String> = profiles
+            .iter()
+            .filter(|profile| !profile.enabled)
+            .map(|profile| profile.id.clone())
+            .collect();
         for profile in profiles.into_iter().filter(|profile| profile.enabled) {
             profile_order.push(profile.id.clone());
             slots.push(compose_slot(&mut composer, profile, now));
@@ -442,6 +450,7 @@ impl MultiProfileRuntime {
             retiring: Vec::new(),
             awaiting_retirement: Vec::new(),
             profile_order,
+            disabled_profiles,
         })
     }
 
@@ -656,8 +665,21 @@ impl MultiProfileRuntime {
     /// composed. A profile that runs and whose definition changed keeps
     /// running as it was composed: that change waits for a restart, and
     /// the answer says so.
+    ///
+    /// While one profile runs on a definition that the file no longer
+    /// has, no profile starts. The file says which profiles may run
+    /// next to each other (a one-way profile and another profile on
+    /// one folder may not), and it says so for the set it names, which
+    /// is not the set that runs. A profile that the file now allows
+    /// could start next to the old folders of the one that waits.
     fn reshape_profiles(&mut self, set: crate::profiles::ProfileSet, now: SystemTime) -> Reshape {
         self.config_problems = set.problems;
+        self.disabled_profiles = set
+            .profiles
+            .iter()
+            .filter(|profile| !profile.enabled)
+            .map(|profile| profile.id.clone())
+            .collect();
         let wanted: Vec<ResolvedProfile> = set
             .profiles
             .into_iter()
@@ -668,6 +690,12 @@ impl MultiProfileRuntime {
         // decided again from the set of now.
         self.awaiting_retirement.clear();
 
+        let waits_for_restart = self.slots.iter().any(|slot| {
+            !slot.failed_at_composition
+                && wanted.iter().any(|profile| {
+                    profile.id == slot.profile.id && !same_definition(&slot.profile, profile)
+                })
+        });
         let mut outcome = Reshape::Applied;
         let mut changed = false;
         let mut kept: Vec<ProfileSlot> = Vec::new();
@@ -691,7 +719,7 @@ impl MultiProfileRuntime {
                 // A stand-in for a profile that was never composed
                 // holds no state and no work: the profile is composed
                 // from what the file says now.
-                Some(_) if slot.failed_at_composition => {
+                Some(_) if slot.failed_at_composition && !waits_for_restart => {
                     drop(slot);
                     changed = true;
                 }
@@ -709,6 +737,13 @@ impl MultiProfileRuntime {
         let mut composed = false;
         for profile in wanted {
             if self.slots.iter().any(|slot| slot.profile.id == profile.id) {
+                continue;
+            }
+            if waits_for_restart {
+                logging::info(
+                    "A profile of the new configuration starts with the restart that another profile's change needs",
+                    &[("profile_id", profile.id.clone())],
+                );
                 continue;
             }
             if self.retiring.iter().any(|(id, _)| *id == profile.id) {
@@ -1130,14 +1165,27 @@ impl MultiProfileRuntime {
                             ),
                         ],
                     );
-                    if slot.consecutive_tick_errors >= MAX_CONSECUTIVE_PROFILE_TICK_ERRORS {
+                    // A tick whose writes the database did not take
+                    // left the runtime ahead of the database. One such
+                    // tick ends the runtime: the profile is composed
+                    // again from the database, and its first scan finds
+                    // what the lost tick had queued.
+                    let not_saved = matches!(error, DaemonRuntimeError::TickNotSaved(_));
+                    if not_saved
+                        || slot.consecutive_tick_errors >= MAX_CONSECUTIVE_PROFILE_TICK_ERRORS
+                    {
+                        let cause = if not_saved {
+                            "a tick the state database did not save"
+                        } else {
+                            "repeated tick failures"
+                        };
                         self.timeline.push(
                             constants::timeline::KIND_PROFILE,
                             slot.profile.id.clone(),
-                            "profile suspended after repeated tick failures",
+                            format!("profile suspended after {cause}"),
                             now,
                         );
-                        suspend_profile(slot, format!("repeated tick failures: {error:?}"), now);
+                        suspend_profile(slot, format!("{cause}: {error:?}"), now);
                         slot.runtime_retry = Some(RuntimeRetry {
                             attempts,
                             at: now_inst + suspended_profile_retry_delay(attempts),
@@ -1409,13 +1457,23 @@ impl MultiProfileRuntime {
         let Some(worst) = worst else {
             // No profile: the daemon is up and syncs nothing. Either
             // nothing is set up yet, or the file has something to fix.
-            let (run_state, run_reason) = if self.config_problems.is_empty() {
+            let (run_state, run_reason) = if !self.config_problems.is_empty() {
+                (RunState::Error, self.config_problems.join("; "))
+            } else if let Some(first) = self.disabled_profiles.first() {
+                // Set up, and switched off: `vapor init` has nothing
+                // to do here, and the way on is another command.
+                (
+                    RunState::Unconfigured,
+                    format!(
+                        "every profile is disabled ({}); start one with `vapor profiles enable {first}`",
+                        self.disabled_profiles.join(", ")
+                    ),
+                )
+            } else {
                 (
                     RunState::Unconfigured,
                     "no sync profile yet; set Vapor up with `vapor init`".to_string(),
                 )
-            } else {
-                (RunState::Error, self.config_problems.join("; "))
             };
             return DaemonStatusSnapshot {
                 run_state: run_state.wire_name().to_string(),
@@ -2068,6 +2126,12 @@ fn start_deduplicated_watchers(
         let Some(path_filter) = slot.runtime.shared_path_filter() else {
             continue;
         };
+        // A profile that waits for its folder has nothing to watch. It
+        // keeps its runtime and its wait, and it asks for the watchers
+        // again when the folder is back.
+        if slot.runtime.waits_for_its_local_root() {
+            continue;
+        }
         let canonical = match normalize_watch_root(root) {
             Ok(canonical) => canonical,
             Err(error) => {
@@ -3169,6 +3233,149 @@ mod tests {
     }
 
     #[test]
+    fn no_profile_starts_while_a_running_profile_waits_for_a_restart() {
+        use crate::clock::Clock as _;
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        let config_path = temp.path().join("vapor.json");
+        let root = |name: &str| temp.path().join(name);
+        let profile = |id: &str, local: &str, mode: &str, enabled: bool| {
+            serde_json::json!({
+                "id": id,
+                "localRoot": root(local),
+                "cloudRoot": root(&format!("{id}-cloud")),
+                "syncMode": mode,
+                "enabled": enabled,
+            })
+        };
+        let write = |profiles: Vec<serde_json::Value>, seconds_later: u64| {
+            rewrite_config(
+                &config_path,
+                &serde_json::json!({ "profiles": profiles }).to_string(),
+                seconds_later,
+            );
+        };
+        let composed = |multi: &MultiProfileRuntime, id: &str| {
+            multi
+                .slots
+                .iter()
+                .any(|slot| slot.profile.id == id && !slot.failed_at_composition)
+        };
+
+        // A mirror and a two-way profile on one folder: the file allows
+        // the first one only, and the second one is a stand-in.
+        std::fs::write(
+            &config_path,
+            serde_json::json!({ "profiles": [
+                profile("mirror", "shared", "pull-only", true),
+                profile("work", "shared", "two-way", true),
+            ] })
+            .to_string(),
+        )
+        .expect("seed config");
+        let mut multi = daemon_from_config(&temp, &config_path, clock.clone());
+        multi.tick_all(clock.now_system());
+        assert!(composed(&multi, "mirror"));
+        assert!(!composed(&multi, "work"), "two profiles on one folder");
+
+        // The mirror gets another folder in the file. It runs on the
+        // old one until a restart, so the file's "these two may run"
+        // is about a set that does not run: the second profile stays a
+        // stand-in next to the folder that the mirror still holds.
+        write(
+            vec![
+                profile("mirror", "elsewhere", "pull-only", true),
+                profile("work", "shared", "two-way", true),
+            ],
+            5,
+        );
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        assert!(!multi.restart_required().is_empty());
+        assert!(composed(&multi, "mirror"));
+        assert!(
+            !composed(&multi, "work"),
+            "a profile that the file now allows does not start next to what still runs"
+        );
+
+        // The other way round: a two-way profile runs alone, and a
+        // mirror on its folder is enabled before it in the file. The
+        // file refuses the profile that runs; that waits for a restart,
+        // and the mirror does not start next to it.
+        let temp = TempDir::new().expect("temp dir");
+        let config_path = temp.path().join("vapor.json");
+        let root = |name: &str| temp.path().join(name);
+        let profile = |id: &str, local: &str, mode: &str, enabled: bool| {
+            serde_json::json!({
+                "id": id,
+                "localRoot": root(local),
+                "cloudRoot": root(&format!("{id}-cloud")),
+                "syncMode": mode,
+                "enabled": enabled,
+            })
+        };
+        std::fs::write(
+            &config_path,
+            serde_json::json!({ "profiles": [
+                profile("mirror", "shared", "pull-only", false),
+                profile("work", "shared", "two-way", true),
+            ] })
+            .to_string(),
+        )
+        .expect("seed config");
+        let mut multi = daemon_from_config(&temp, &config_path, clock.clone());
+        multi.tick_all(clock.now_system());
+        assert!(composed(&multi, "work"));
+        rewrite_config(
+            &config_path,
+            &serde_json::json!({ "profiles": [
+                profile("mirror", "shared", "pull-only", true),
+                profile("work", "shared", "two-way", true),
+            ] })
+            .to_string(),
+            5,
+        );
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        assert!(!multi.restart_required().is_empty());
+        assert!(composed(&multi, "work"), "what runs keeps running");
+        assert!(
+            multi.slots.iter().all(|slot| slot.profile.id != "mirror"),
+            "the mirror waits for the restart"
+        );
+    }
+
+    #[test]
+    fn an_install_whose_profiles_are_all_disabled_says_how_to_start_one() {
+        use crate::clock::Clock as _;
+        let temp = TempDir::new().expect("temp dir");
+        let clock = Arc::new(ManualClock::at_now());
+        let config_path = temp.path().join("vapor.json");
+        let profile = |enabled: bool| {
+            serde_json::json!({ "profiles": [{
+                "id": "home",
+                "localRoot": temp.path().join("home-local"),
+                "cloudRoot": temp.path().join("home-cloud"),
+                "enabled": enabled,
+            }] })
+            .to_string()
+        };
+        std::fs::write(&config_path, profile(true)).expect("seed config");
+        let mut multi = daemon_from_config(&temp, &config_path, clock.clone());
+        multi.tick_all(clock.now_system());
+
+        rewrite_config(&config_path, &profile(false), 5);
+        clock.advance(Duration::from_secs(2));
+        multi.tick_all(clock.now_system());
+        let status = multi.aggregate_status(clock.now_system());
+        assert_eq!(status.run_state, RunState::Unconfigured.wire_name());
+        assert_eq!(
+            status.run_reason,
+            "every profile is disabled (home); start one with `vapor profiles enable home`"
+        );
+    }
+
+    #[test]
     fn a_change_of_the_profile_set_applies_to_a_daemon_that_runs() {
         use crate::clock::Clock as _;
         let temp = TempDir::new().expect("temp dir");
@@ -3629,6 +3836,76 @@ mod tests {
                 .join("after-the-failure.txt")
                 .exists(),
             "the profile syncs again"
+        );
+    }
+
+    #[test]
+    fn a_tick_that_the_database_did_not_save_ends_the_runtime_and_nothing_is_lost() {
+        let mut fixture = MultiFixture::new(&[("only", SyncMode::TwoWay, false)]);
+        fixture.tick(6_000);
+        let local = fixture.local_roots["only"].clone();
+
+        // A file is made, and the tick that queues its upload is the
+        // one whose commit fails: the queue of the database never held
+        // the upload, and the runtime handed the change over already.
+        std::fs::write(local.join("in-the-lost-tick.txt"), b"kept").expect("seed");
+        fixture.record_local_event(
+            "only",
+            &local.join("in-the-lost-tick.txt"),
+            WatchEventKind::Created,
+        );
+        let database = fixture
+            .multi
+            .runtime_for("only")
+            .expect("runtime")
+            .state_db_mut();
+        database.begin_batch().expect("begin");
+        database.fail_the_commit_of_the_open_batch();
+        fixture.tick(6_000);
+        assert_eq!(
+            fixture.multi.failed_profile_count(),
+            1,
+            "one such tick ends the runtime"
+        );
+
+        // The profile is composed again from the database after its
+        // wait, and its first scan finds the file.
+        fixture.tick(61_000);
+        assert_eq!(fixture.multi.failed_profile_count(), 0);
+        fixture.converge(16);
+        assert_eq!(
+            std::fs::read(fixture.cloud_roots["only"].join("in-the-lost-tick.txt"))
+                .expect("uploaded"),
+            b"kept"
+        );
+    }
+
+    #[test]
+    fn watchers_that_start_again_leave_a_profile_that_waits_for_its_folder_alone() {
+        let mut fixture = MultiFixture::new(&[("only", SyncMode::TwoWay, false)]);
+        fixture.tick(6_000);
+        let local = fixture.local_roots["only"].clone();
+        std::fs::remove_dir_all(&local).expect("the drive is unplugged");
+        fixture.tick(16_000);
+        fixture.tick(16_000);
+        assert!(
+            fixture
+                .multi
+                .runtime_for("only")
+                .expect("runtime")
+                .waits_for_its_local_root()
+        );
+
+        // Another profile gets a new name, a profile is added: each
+        // change of the set starts the watchers again. The profile
+        // that waits is not one whose watcher failed.
+        let waker = fixture.multi.tick_waker.clone();
+        let watchers = start_deduplicated_watchers(&mut fixture.multi.slots, &waker);
+        assert!(watchers.is_empty(), "there is no folder to watch");
+        assert_eq!(
+            fixture.multi.failed_profile_count(),
+            0,
+            "the profile keeps its runtime and its wait"
         );
     }
 

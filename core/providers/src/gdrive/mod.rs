@@ -1757,7 +1757,7 @@ impl GoogleDriveProvider {
     fn path_for_changed_file(&self, file: &GdFile) -> ChangedPath {
         // Zero-request reject for a file already resolved to be outside the
         // sync root, until its TTL lapses (in case it moved into scope).
-        if self.is_known_out_of_scope(file) {
+        if self.is_known_out_of_scope(file) && !self.parent_is_known_inside(file) {
             return ChangedPath::OutOfScope;
         }
         // Any previously-cached path for this id is the OLD path: it must
@@ -1815,8 +1815,17 @@ impl GoogleDriveProvider {
                 }
                 // The cloud did not answer. No verdict is remembered,
                 // and the caller must not take the file for one that
-                // is outside the root.
-                Err(_) => return ChangedPath::Unknown,
+                // is outside the root. A folder may be inside now, with
+                // every file under it, so no verdict stands either.
+                Err(_) => {
+                    if file.mime_type == FOLDER_MIME {
+                        self.out_of_scope
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .clear();
+                    }
+                    return ChangedPath::Unknown;
+                }
             };
             segments.push(parent.name.clone());
             let Some(next) = parent.parents.first().cloned() else {
@@ -1883,6 +1892,43 @@ impl GoogleDriveProvider {
                     .map(|age| age < OUT_OF_SCOPE_TTL)
                     .unwrap_or(false)
         })
+    }
+
+    /// Whether the folder that holds `file` is the sync root or a folder
+    /// this provider knows inside it. A listing learns a folder that no
+    /// feed entry reported, and a verdict on a file under it is then
+    /// out of date.
+    fn parent_is_known_inside(&self, file: &GdFile) -> bool {
+        let Some(parent) = file.parents.first() else {
+            return false;
+        };
+        let is_the_root = self
+            .root_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_deref()
+            == Some(parent.as_str());
+        is_the_root
+            || self
+                .path_by_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(parent)
+    }
+
+    /// Whether the feed showed the folder `id`, or a file in it, outside
+    /// the sync root a moment ago. Such a folder is not a new one, also
+    /// when it was made a minute ago: it was moved in, and the feed has
+    /// no entry for what it holds.
+    fn was_seen_outside(&self, id: &str) -> bool {
+        let cache = self
+            .out_of_scope
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.contains_key(id)
+            || cache
+                .values()
+                .any(|verdict| verdict.parent.as_deref() == Some(id))
     }
 
     /// Records `file` as outside the sync root, pruning expired entries
@@ -2386,7 +2432,7 @@ impl Provider for GoogleDriveProvider {
                             now.duration_since(created)
                                 .map_or(true, |age| age <= NEW_FOLDER_AGE)
                         });
-                    if made_just_now {
+                    if made_just_now && !self.was_seen_outside(&file.id) {
                         continue;
                     }
                     match self.path_for_changed_file(file) {
@@ -2454,8 +2500,36 @@ impl Provider for GoogleDriveProvider {
             }
             let resolved = match self.path_for_changed_file(file) {
                 ChangedPath::InScope(resolved) => resolved,
-                // Not ours.
-                ChangedPath::OutOfScope => continue,
+                ChangedPath::OutOfScope => {
+                    // Not ours, or not ours any more: a file that was
+                    // moved out of the sync root left its path, as one
+                    // that went to the trash did.
+                    let had_path = self
+                        .path_by_id
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .get(&file.id)
+                        .cloned();
+                    if let Some(path) = had_path {
+                        if self.path_is_bound_to(&path, &file.id) {
+                            self.evict_path(&path);
+                            if let Ok(path) = RemotePath::new(path) {
+                                changes.push(RemoteChange {
+                                    path,
+                                    kind: RemoteChangeKind::Removed,
+                                    observed_at: now,
+                                    op_id: None,
+                                    content_hash: None,
+                                    size_bytes: None,
+                                    modified_at: None,
+                                });
+                            }
+                        } else {
+                            self.forget_file(&file.id);
+                        }
+                    }
+                    continue;
+                }
                 ChangedPath::Unknown => {
                     place_unknown = true;
                     continue;

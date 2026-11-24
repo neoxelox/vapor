@@ -831,9 +831,16 @@ impl ChangeOutcome {
         let profile = &self.profile;
         let id = &profile.id;
         match (&self.change, self.changed) {
-            (Change::Enable, true) => {
-                format!("Enabled profile {id}. A running daemon starts it within a few seconds.\n")
-            }
+            // The text says what the JSON carries: a profile that
+            // cannot run as it is written does not start.
+            (Change::Enable, true) => match &profile.problem {
+                Some(problem) => {
+                    format!("Enabled profile {id}. It cannot run as it is written: {problem}\n")
+                }
+                None => format!(
+                    "Enabled profile {id}. A running daemon starts it within a few seconds.\n"
+                ),
+            },
             (Change::Enable, false) => format!("Profile {id} is enabled already.\n"),
             (Change::Disable, true) => format!(
                 "Disabled profile {id}. Vapor stops syncing {} with {}. Its sync state, its \
@@ -1937,6 +1944,19 @@ mod tests {
 
         let enabled = change(&path, "work", &Change::Enable).expect("enable");
         assert!(enabled.changed && enabled.profile.enabled);
+        assert!(
+            enabled
+                .render_text()
+                .contains("starts it within a few seconds"),
+            "{}",
+            enabled.render_text()
+        );
+        let mut cannot_run = enabled.clone();
+        cannot_run.profile.problem = Some("`cloudRoot` is not set".to_string());
+        assert_eq!(
+            cannot_run.render_text(),
+            "Enabled profile work. It cannot run as it is written: `cloudRoot` is not set\n"
+        );
         let entry = document(&path)["profiles"][1].clone();
         assert!(
             entry.get("enabled").is_none(),

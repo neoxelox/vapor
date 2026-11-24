@@ -1081,11 +1081,21 @@ impl ReconcileWalker {
                         }
                     }
                     SyncMode::PullOnly => {
-                        // Strict mirror: local-only content does not
-                        // exist at the source of truth: remove it,
-                        // recursively for directories.
-                        batch.push((local_path, PendingIntentKind::ApplyRemoteDelete, now));
-                        self.stats.mirror_deletes += 1;
+                        // A file whose index row was written after the
+                        // listing was asked for came down after it:
+                        // the listing is older than the file, and says
+                        // nothing about it. The next walk judges it.
+                        let newer_than_the_listing = !local.is_dir
+                            && state_db
+                                .sync_index(&local_path)?
+                                .is_some_and(|row| row.updated_at >= listed_at);
+                        if !newer_than_the_listing {
+                            // Strict mirror: local-only content does not
+                            // exist at the source of truth: remove it,
+                            // recursively for directories.
+                            batch.push((local_path, PendingIntentKind::ApplyRemoteDelete, now));
+                            self.stats.mirror_deletes += 1;
+                        }
                     }
                 },
                 (None, Some(remote)) => {
@@ -1571,6 +1581,36 @@ mod tests {
         );
         assert_eq!(stats.mirror_deletes, 2);
         assert_eq!(stats.mirror_reverts, 1);
+    }
+
+    #[test]
+    fn a_pull_only_walk_keeps_a_file_that_came_down_after_its_listing() {
+        // The walk asks for listings ahead, so a listing can be older
+        // than a download that landed before its folder is compared.
+        let mut fixture = Fixture::new();
+        let landed = fixture.local_root.join("landed-after.txt");
+        let synced_before = fixture.local_root.join("synced-before.txt");
+        for path in [&landed, &synced_before] {
+            std::fs::write(path, b"12345").expect("seed");
+        }
+        let earlier = ts(0) - std::time::Duration::from_secs(60);
+        fixture
+            .state_db
+            .set_sync_index(&landed, "hash", 5, None, None, "op-1", ts(5))
+            .expect("row written after the listing");
+        fixture
+            .state_db
+            .set_sync_index(&synced_before, "hash", 5, None, None, "op-2", earlier)
+            .expect("row written before the listing");
+
+        // The listing was asked for at `ts(0)` and holds neither file.
+        let stats = fixture.run_walk(SyncMode::PullOnly);
+        assert_eq!(
+            fixture.queued_kinds(),
+            vec![(synced_before, PendingIntentKind::ApplyRemoteDelete)],
+            "the listing is evidence for the file it could have seen, and for no other"
+        );
+        assert_eq!(stats.mirror_deletes, 1);
     }
 
     #[test]

@@ -377,13 +377,39 @@ impl DurableStateDb {
         Ok(())
     }
 
-    /// Ends the batch that is open, when there is one.
+    /// Ends the batch that is open, when there is one. A commit that
+    /// fails leaves no transaction behind: what it held is rolled back,
+    /// and the error says that the writes of the batch are gone.
     pub fn commit_batch(&mut self) -> Result<(), StateDbError> {
         if self.batch_open {
             self.batch_open = false;
-            self.connection.execute_batch("COMMIT")?;
+            if let Err(error) = self.connection.execute_batch("COMMIT") {
+                if !self.connection.is_autocommit() {
+                    let _ = self.connection.execute_batch("ROLLBACK");
+                }
+                // The memo holds answers that the lost writes gave.
+                self.one_spelling.get_mut().clear();
+                return Err(error.into());
+            }
         }
         Ok(())
+    }
+
+    /// Makes the commit of the batch that is open fail, as a full drive
+    /// does: a row that breaks a rule which is checked at the commit.
+    #[cfg(test)]
+    pub(crate) fn fail_the_commit_of_the_open_batch(&mut self) {
+        assert!(self.batch_open, "a batch is open");
+        self.connection
+            .execute_batch(
+                "CREATE TEMP TABLE commit_fault_parent (id INTEGER PRIMARY KEY);
+                 CREATE TEMP TABLE commit_fault_child (
+                     parent INTEGER REFERENCES commit_fault_parent(id)
+                         DEFERRABLE INITIALLY DEFERRED
+                 );
+                 INSERT INTO commit_fault_child (parent) VALUES (1);",
+            )
+            .expect("a row that fails the commit");
     }
 
     pub fn path(&self) -> &Path {
@@ -3612,6 +3638,40 @@ mod tests {
                 .is_none(),
             "a row that waits for another reason keeps its wait"
         );
+    }
+
+    #[test]
+    fn a_commit_that_fails_loses_the_batch_and_leaves_the_database_usable() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let database_path = temp_dir.path().join("state/vapor.sqlite");
+        let mut database = DurableStateDb::open(&database_path).expect("open durable state db");
+        let kept = PathBuf::from("/tmp/vapor-root/kept.txt");
+        let lost = PathBuf::from("/tmp/vapor-root/lost.txt");
+        database
+            .enqueue_intent(&kept, PendingIntentKind::Upload, timestamp_ms(100))
+            .expect("enqueue before the batch");
+
+        database.begin_batch().expect("begin");
+        database
+            .enqueue_intent(&lost, PendingIntentKind::Upload, timestamp_ms(100))
+            .expect("enqueue in the batch");
+        database.fail_the_commit_of_the_open_batch();
+        database
+            .commit_batch()
+            .expect_err("the commit of the batch fails");
+        assert_eq!(
+            database.queue_depth().expect("depth"),
+            1,
+            "the write of the batch is gone, and what came before it stays"
+        );
+
+        // No transaction is left open: the next batch begins and ends.
+        database.begin_batch().expect("begin again");
+        database
+            .enqueue_intent(&lost, PendingIntentKind::Upload, timestamp_ms(200))
+            .expect("enqueue again");
+        database.commit_batch().expect("commit");
+        assert_eq!(database.queue_depth().expect("depth"), 2);
     }
 
     #[test]

@@ -123,12 +123,22 @@ impl NativeHttpTransport {
 }
 
 /// The proxy that requests go through, and the hosts that go around it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProxyRoute {
     /// `http://host:port`, with a user and a password when the setting
     /// has them. Never logged as it is.
     url: String,
     bypass: Vec<String>,
+}
+
+/// The address can hold a password, so the debug form has none.
+impl std::fmt::Debug for ProxyRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyRoute")
+            .field("url", &self.shown())
+            .field("bypass", &self.bypass)
+            .finish()
+    }
 }
 
 impl ProxyRoute {
@@ -149,12 +159,7 @@ impl ProxyRoute {
             .or_else(|| variable(["ALL_PROXY", "all_proxy"]))
         {
             let bypass = variable(["NO_PROXY", "no_proxy"])
-                .map(|list| {
-                    list.split(',')
-                        .map(|rule| rule.trim().to_string())
-                        .filter(|rule| !rule.is_empty())
-                        .collect()
-                })
+                .map(|list| Self::rules_of_no_proxy(&list))
                 .unwrap_or_default();
             return Some(Self::new(&proxy, bypass));
         }
@@ -175,8 +180,32 @@ impl ProxyRoute {
         Self { url, bypass }
     }
 
+    /// The rules of a `NO_PROXY` list. A name in that variable also
+    /// stands for every host under it (`example.com` covers
+    /// `api.example.com`), as curl and the other tools read it.
+    fn rules_of_no_proxy(list: &str) -> Vec<String> {
+        list.split(',')
+            .map(str::trim)
+            .filter(|rule| !rule.is_empty())
+            .map(|rule| {
+                if rule == "*" || rule.starts_with('.') || rule.starts_with("*.") {
+                    rule.to_string()
+                } else {
+                    format!(".{rule}")
+                }
+            })
+            .collect()
+    }
+
     fn applies_to(&self, host: &str) -> bool {
         !vapor_platform::proxy::bypasses(&self.bypass, host)
+    }
+
+    /// Whether the transport can use the route: a proxy that opens a
+    /// tunnel on a plain HTTP request. A SOCKS proxy and a proxy that
+    /// is itself reached over TLS are other protocols.
+    fn opens_a_tunnel(&self) -> bool {
+        self.url.starts_with("http://")
     }
 
     /// The address with no user and no password, for a log line.
@@ -222,6 +251,14 @@ impl Agents {
     /// [`constants::provider::HTTP_PROXY_RECHECK_SECONDS`], so a device
     /// that joins or leaves a network with a proxy follows it.
     fn agent_for(&self, host: &str) -> ureq::Agent {
+        self.proxied_agent_for(host)
+            .unwrap_or_else(|| self.direct.clone())
+    }
+
+    /// The agent that sends a request to `host` through the proxy, or
+    /// `None` when the request goes directly: no route, a route that
+    /// cannot be used, or a host that a bypass rule names.
+    fn proxied_agent_for(&self, host: &str) -> Option<ureq::Agent> {
         let mut proxied = self
             .proxied
             .lock()
@@ -232,25 +269,35 @@ impl Agents {
                 now + Duration::from_secs(constants::provider::HTTP_PROXY_RECHECK_SECONDS);
             let route = (self.route)();
             if route != proxied.route {
-                proxied.agent =
-                    route
-                        .as_ref()
-                        .and_then(|route| match ureq::Proxy::new(&route.url) {
-                            Ok(proxy) => {
-                                logging::info(
-                                    "Requests go through a proxy",
-                                    &[("proxy", route.shown())],
-                                );
-                                Some(agent_builder().proxy(proxy).build())
-                            }
-                            Err(error) => {
-                                logging::warning(
-                                    "The proxy setting cannot be used; requests go directly",
-                                    &[("proxy", route.shown()), ("error", error.to_string())],
-                                );
-                                None
-                            }
-                        });
+                proxied.agent = route.as_ref().and_then(|route| {
+                    if !route.opens_a_tunnel() {
+                        // Before Vapor read the setting at all, such a
+                        // host connected directly. An agent for a kind
+                        // of proxy it cannot speak to would fail every
+                        // request.
+                        logging::warning(
+                            "This kind of proxy is not supported; requests go directly",
+                            &[("proxy", route.shown())],
+                        );
+                        return None;
+                    }
+                    match ureq::Proxy::new(&route.url) {
+                        Ok(proxy) => {
+                            logging::info(
+                                "Requests go through a proxy",
+                                &[("proxy", route.shown())],
+                            );
+                            Some(agent_builder().proxy(proxy).build())
+                        }
+                        Err(error) => {
+                            logging::warning(
+                                "The proxy setting cannot be used; requests go directly",
+                                &[("proxy", route.shown()), ("error", error.to_string())],
+                            );
+                            None
+                        }
+                    }
+                });
                 if route.is_none() && proxied.route.is_some() {
                     logging::info("Requests no longer go through a proxy", &[]);
                 }
@@ -258,8 +305,8 @@ impl Agents {
             }
         }
         match (&proxied.agent, &proxied.route) {
-            (Some(agent), Some(route)) if route.applies_to(host) => agent.clone(),
-            _ => self.direct.clone(),
+            (Some(agent), Some(route)) if route.applies_to(host) => Some(agent.clone()),
+            _ => None,
         }
     }
 }
@@ -416,32 +463,54 @@ mod tests {
     #[test]
     fn a_request_goes_through_the_proxy_that_the_route_names() {
         use std::io::{BufRead, BufReader, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
         // A stand-in for a proxy: it reads the first line of what
-        // reaches it and refuses the tunnel.
+        // reaches it and refuses the tunnel. It stops when the request
+        // is over, so a request that went around it cannot hang the
+        // test.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        listener.set_nonblocking(true).expect("nonblocking");
         let address = listener.local_addr().expect("address");
+        let over = Arc::new(AtomicBool::new(false));
+        let request_is_over = over.clone();
         let proxy = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut first_line = String::new();
-            BufReader::new(&stream)
-                .read_line(&mut first_line)
-                .expect("request line");
-            let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
-            first_line
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).expect("blocking");
+                        let mut first_line = String::new();
+                        BufReader::new(&stream)
+                            .read_line(&mut first_line)
+                            .expect("request line");
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+                        return Some(first_line);
+                    }
+                    Err(_) if request_is_over.load(Ordering::SeqCst) => return None,
+                    Err(_) => std::thread::yield_now(),
+                }
+            }
         });
         let transport = NativeHttpTransport::with_route(move || {
             Some(route(&address.to_string(), &["*.local"]))
         });
+        // The target is a closed port of this device: a request that
+        // went around the proxy reaches nothing, and no network.
         let refused = transport.execute(HttpRequest {
             method: "GET",
-            url: "https://www.googleapis.com/drive/v3/about".to_string(),
+            url: "https://127.0.0.1:9/drive/v3/about".to_string(),
             headers: Vec::new(),
             body: Arc::new(Vec::new()),
         });
+        over.store(true, Ordering::SeqCst);
         assert!(refused.is_err(), "the stand-in refuses the tunnel");
         assert_eq!(
-            proxy.join().expect("proxy thread").trim(),
-            "CONNECT www.googleapis.com:443 HTTP/1.1",
+            proxy
+                .join()
+                .expect("proxy thread")
+                .as_deref()
+                .map(str::trim),
+            Some("CONNECT 127.0.0.1:9 HTTP/1.1"),
             "the request asked the proxy for a tunnel to the host"
         );
     }
@@ -451,18 +520,52 @@ mod tests {
         let agents = Agents::new(Box::new(|| {
             Some(route("proxy.example:3128", &["*.local", "direct.example"]))
         }));
-        // Same agent as the direct one means no proxy on the way.
-        let goes_direct = |host: &str| {
-            let proxied = agents.proxied.lock().expect("proxied");
-            proxied
-                .route
-                .as_ref()
-                .is_none_or(|route| !route.applies_to(host))
-        };
-        let _ = agents.agent_for("www.googleapis.com");
-        assert!(!goes_direct("www.googleapis.com"));
-        assert!(goes_direct("nas.local"));
-        assert!(goes_direct("direct.example"));
+        assert!(agents.proxied_agent_for("www.googleapis.com").is_some());
+        assert!(agents.proxied_agent_for("nas.local").is_none());
+        assert!(agents.proxied_agent_for("direct.example").is_none());
+    }
+
+    #[test]
+    fn a_proxy_of_a_kind_the_transport_cannot_speak_to_is_not_used() {
+        // `ALL_PROXY=socks5://...` is a common setting of a shell. An
+        // agent for it would fail every request; the host connected
+        // directly before Vapor read the variable.
+        for address in [
+            "socks5://127.0.0.1:1080",
+            "socks5h://127.0.0.1:1080",
+            "https://proxy.example:443",
+        ] {
+            let agents = Agents::new(Box::new(move || Some(route(address, &[]))));
+            assert!(
+                agents.proxied_agent_for("www.googleapis.com").is_none(),
+                "{address}"
+            );
+        }
+        let agents = Agents::new(Box::new(|| Some(route("http://proxy.example:3128", &[]))));
+        assert!(agents.proxied_agent_for("www.googleapis.com").is_some());
+    }
+
+    #[test]
+    fn a_name_in_no_proxy_covers_the_hosts_under_it() {
+        let rules =
+            ProxyRoute::rules_of_no_proxy("googleapis.com, .corp.example ,*.local,,10.0.0.1");
+        let route = ProxyRoute::new("proxy.example:3128", rules);
+        for host in [
+            "googleapis.com",
+            "www.googleapis.com",
+            "api.corp.example",
+            "nas.local",
+            "10.0.0.1",
+        ] {
+            assert!(!route.applies_to(host), "{host} goes around the proxy");
+        }
+        for host in ["notgoogleapis.com", "example.org"] {
+            assert!(route.applies_to(host), "{host} goes through the proxy");
+        }
+        assert!(
+            !ProxyRoute::new("proxy.example:3128", ProxyRoute::rules_of_no_proxy("*"))
+                .applies_to("any.example")
+        );
     }
 
     #[test]
@@ -474,6 +577,10 @@ mod tests {
         assert_eq!(
             route("proxy.example:3128", &[]).shown(),
             "http://proxy.example:3128"
+        );
+        assert!(
+            !format!("{:?}", route("http://sam:s3cret@proxy.example:3128", &[])).contains("s3cret"),
+            "the debug form holds no password"
         );
     }
 

@@ -18,7 +18,8 @@ are provider-neutral unless a section says otherwise.
   auth expired`, hidden): a sign-in that comes late gets a page that
   says to sign in again, where the browser showed a refused connection
   before. The process holds no secret and answers every request with
-  that one page. It runs the browser flow
+  that one page. The Mac app ends the command after 5 minutes, because
+  its Sign In button is off while the command runs. It runs the browser flow
   only from a terminal; `--browser` runs it without one (the app's
   Sign In button). A token made elsewhere goes in on stdin (`<command
   that prints the token> | vapor auth login --token -`); a token given

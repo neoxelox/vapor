@@ -921,10 +921,14 @@ fn profile_changes_need_no_restart(ctx: &mut Ctx) -> Result<(), Failure> {
     };
     let runs = |id: &str| profile(id).is_some_and(|profile| profile.run.state == "running");
     let no_restart = |after: &str| -> Result<(), Failure> {
-        let asked = cli.status().and_then(|status| status.restart_required);
+        // A status that did not come is no answer.
+        let Some(status) = cli.status() else {
+            return Err(Failure::new(format!("no status after {after}")));
+        };
         ensure!(
-            asked.is_none(),
-            "status asks for a restart after {after}: {asked:?}"
+            status.restart_required.is_none(),
+            "status asks for a restart after {after}: {:?}",
+            status.restart_required
         );
         Ok(())
     };
@@ -1234,26 +1238,32 @@ fn unsyncable_cloud_name_decision(ctx: &mut Ctx) -> Result<(), Failure> {
     ctx.start_daemon()?;
     ctx.wait_exists(&home.local.join("fine.txt"), CONVERGE_TIMEOUT)?;
     let cli = ctx.cli();
-    let open_questions = || -> Vec<serde_json::Value> {
-        cli.json(&["decisions", "list", "--json"])
-            .ok()
-            .and_then(|report| report["decisions"].as_array().cloned())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|decision| {
-                decision["kind"] == "unsyncable-name" && decision["choice"].is_null()
-            })
-            .collect()
+    // `None` when the command failed: a list that did not come is not
+    // an empty list.
+    let open_questions = || -> Option<Vec<serde_json::Value>> {
+        let report = cli.json(&["decisions", "list", "--json"]).ok()?;
+        Some(
+            report["decisions"]
+                .as_array()?
+                .iter()
+                .filter(|decision| {
+                    decision["kind"] == "unsyncable-name" && decision["choice"].is_null()
+                })
+                .cloned()
+                .collect(),
+        )
     };
     wait::wait_until(
         Duration::from_secs(60),
         "an unsyncable-name decision for the cloud file",
-        || open_questions().len() == 1,
+        || open_questions().is_some_and(|open| open.len() == 1),
     )?;
-    let question = open_questions()[0]["question"]
-        .as_str()
-        .unwrap_or_default()
-        .to_string();
+    let question = open_questions()
+        .and_then(|open| {
+            open.first()
+                .and_then(|decision| decision["question"].as_str().map(str::to_string))
+        })
+        .unwrap_or_default();
     ensure!(
         question.starts_with("back\\slash.txt in the cloud folder cannot be synced")
             && question.contains("backslash"),
@@ -1274,7 +1284,7 @@ fn unsyncable_cloud_name_decision(ctx: &mut Ctx) -> Result<(), Failure> {
     wait::wait_until(
         Duration::from_secs(60),
         "no open unsyncable-name decision",
-        || open_questions().is_empty(),
+        || open_questions().is_some_and(|open| open.is_empty()),
     )?;
     ctx.settle(CONVERGE_TIMEOUT)?;
     Ok(())

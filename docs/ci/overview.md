@@ -19,7 +19,8 @@ GitHub Actions workflows are defined in `.github/workflows/`:
   (`apps/macos/scripts/verify-package.sh --install`), so a break in the
   packaging shows at the pull request and not at a release.
 - `perf.yml`: Tier 2, a release gate and on demand, never a PR gate:
-  one soak cell against the release profile with the SLO checks
+  the property tests at 4 000 cases each, then one soak cell against
+  the release profile with the SLO checks
   asserted on its report (`scripts/perf.sh`), on a runner matrix that
   holds `macos-latest` today. `release.yml` calls it through
   `workflow_call`; `workflow_dispatch` takes a duration and a seed for

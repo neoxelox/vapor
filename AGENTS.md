@@ -694,10 +694,10 @@ If a test's failure mode is "I typo'd a default value", skip it.
   (`docs/ci/required-checks.md`). Budget: under 5 minutes per OS on CI.
 - **Tier 2**: `scripts/perf.sh` via `perf.yml`, a release gate and on
   demand.
-  One bounded soak cell against the release profile with the SLO
-  checks asserted on its report; long-running property cases, fuzz
-  corpora, and `loom`-backed concurrency tests as they land. Not a PR
-  gate.
+  The property tests at 4 000 cases each, then one bounded soak cell
+  against the release profile with the SLO checks asserted on its
+  report; fuzz corpora and `loom`-backed concurrency tests as they
+  land. Not a PR gate.
 - **Tier S**: `./scripts/soak.sh` (the `tools/soak` driver), a
   release gate in `soak.yml` and on demand. Hours of seeded file churn on
   both sides of a real daemon, fault injection, and a model-checked

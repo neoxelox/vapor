@@ -411,7 +411,6 @@ fn wait_for_redirect(
     state: &str,
     deadline: std::time::Instant,
 ) -> Result<String, RedirectError> {
-    use std::io::{BufRead, BufReader};
     listener
         .set_nonblocking(true)
         .map_err(|error| RedirectError::Listener(error.to_string()))?;
@@ -429,12 +428,10 @@ fn wait_for_redirect(
         };
         // An accepted connection can inherit the listener's mode.
         let _ = stream.set_nonblocking(false);
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-        let mut reader = BufReader::new(&stream);
-        let mut request_line = String::new();
         // A connection that sends nothing (or times out) is a stray probe;
         // discard it and keep waiting for the real redirect.
-        if reader.read_line(&mut request_line).is_err() || request_line.trim().is_empty() {
+        let request_line = read_request_line(&stream);
+        if request_line.trim().is_empty() {
             continue;
         }
         // GET /?code=...&state=... HTTP/1.1
@@ -507,7 +504,6 @@ fn answer_with_expired_page(
     listener: &std::net::TcpListener,
     until: std::time::Instant,
 ) -> std::io::Result<()> {
-    use std::io::{BufRead, BufReader};
     listener.set_nonblocking(true)?;
     while std::time::Instant::now() < until {
         let stream = match listener.accept() {
@@ -519,14 +515,37 @@ fn answer_with_expired_page(
             Err(error) => return Err(error),
         };
         let _ = stream.set_nonblocking(false);
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
         // The request is read before the answer goes out: a browser
         // shows an answer that comes before its request as an error.
-        let mut request_line = String::new();
-        let _ = BufReader::new(&stream).read_line(&mut request_line);
+        let _ = read_request_line(&stream);
         let _ = write_redirect_response(&mut &stream, EXPIRED_SIGN_IN_PAGE);
     }
     Ok(())
+}
+
+/// The first line of a request on the redirect address: 8 KiB of it
+/// at most, and ten seconds for it at most. One connection at a time
+/// is served, so a client that sends a byte now and then, or a line
+/// with no end, must not hold the listener or grow the line.
+fn read_request_line(stream: &std::net::TcpStream) -> String {
+    use std::io::Read;
+    const MOST_BYTES: usize = 8 * 1024;
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    let mut line: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 512];
+    let mut reader = stream;
+    while line.len() < MOST_BYTES && !line.contains(&b'\n') && std::time::Instant::now() < end {
+        match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => line.extend_from_slice(&chunk[..read]),
+        }
+    }
+    let line = match line.iter().position(|byte| *byte == b'\n') {
+        Some(end_of_line) => &line[..end_of_line],
+        None => &line[..],
+    };
+    String::from_utf8_lossy(line).into_owned()
 }
 
 /// Returns the percent-decoded value of `key` from a URL query string.
@@ -599,6 +618,30 @@ mod tests {
         let mut answer = String::new();
         let _ = stream.read_to_string(&mut answer);
         answer
+    }
+
+    #[test]
+    fn a_request_line_on_the_redirect_address_is_read_up_to_a_bound() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        let line_of = |sent: Vec<u8>| {
+            let mut client = std::net::TcpStream::connect(address).expect("connect");
+            client.write_all(&sent).expect("send");
+            let (server, _) = listener.accept().expect("accept");
+            // The client stays open: the read ends by itself.
+            let line = read_request_line(&server);
+            drop(client);
+            line
+        };
+        assert_eq!(
+            line_of(b"GET /?code=abc&state=s HTTP/1.1\r\nHost: x\r\n\r\n".to_vec()).trim(),
+            "GET /?code=abc&state=s HTTP/1.1"
+        );
+        // A line with no end stops at the bound, with the client still
+        // connected and silent.
+        let endless = line_of(vec![b'a'; 64 * 1024]);
+        assert!(endless.len() <= 8 * 1024 + 512, "{}", endless.len());
     }
 
     #[test]

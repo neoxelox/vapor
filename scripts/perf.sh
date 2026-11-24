@@ -17,7 +17,9 @@ SEED="${VAPOR_PERF_SOAK_SEED:-11}"
 # time in thousands needs thousands of cases.
 PROPERTY_CASES="${VAPOR_PERF_PROPERTY_CASES:-4000}"
 echo "[perf] property tests: $PROPERTY_CASES cases for each property"
-PROPTEST_CASES="$PROPERTY_CASES" cargo test --manifest-path "$ROOT_DIR/Cargo.toml" \
+# The tests get the runtime directory of every repository script.
+VAPOR_DIR="${VAPOR_DIR:-$ROOT_DIR/.vapor}" PROPTEST_CASES="$PROPERTY_CASES" \
+  cargo test --manifest-path "$ROOT_DIR/Cargo.toml" \
   -p vapor-daemon --test properties --release
 
 echo "[perf] soak cell: two-way, mixed load, crash faults, release profile, $DURATION, seed $SEED"

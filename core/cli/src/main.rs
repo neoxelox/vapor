@@ -552,7 +552,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode, String> {
                 }
                 ConfigAction::Set { key, value } => {
                     config_cmd::set(&path, &key, &value).map_err(|e| e.to_string())?;
-                    println!("{}", config_cmd::apply_hint(&key, &value));
+                    println!("{}", config_cmd::set_hint(&path, &key, &value));
                     Ok(ExitCode::SUCCESS)
                 }
             }

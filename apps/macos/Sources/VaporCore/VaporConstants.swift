@@ -150,10 +150,13 @@ public enum VaporConstants {
     public static let all = [filesystem, gdrive]
     public static let defaultKind = filesystem
 
-    /// Mirrors `core/shared/src/constants.rs::provider::BROWSER_SIGN_IN_TIMEOUT_SECONDS`
-    /// per AGENTS.md §8.6: how long `vapor auth login` waits for the
-    /// browser consent.
-    public static let browserSignInTimeoutSeconds = 30 * 60
+    /// How long the app waits for a sign-in that it started. The app
+    /// ends the command then, and the user can press Sign In again.
+    /// `vapor auth login` on its own waits longer
+    /// (`core/shared/src/constants.rs::provider::BROWSER_SIGN_IN_TIMEOUT_SECONDS`):
+    /// the Sign In button is off while the command runs, so the wait
+    /// of the app is the time a user cannot start again.
+    public static let browserSignInTimeoutSeconds = 300
 
     /// User-facing display name for a `provider` config value. Unknown
     /// values render verbatim so a misconfiguration stays visible.

@@ -73,7 +73,7 @@ Available now:
 - 📈 **Explains itself.** Status with a reason, a live timeline, and a support report with your file names hidden.
 - ⌨️ **Full command line.** Everything the app does, `vapor` does too, for scripts and for servers with no app.
 - 🔐 **Private by design.** Tokens stay in the system keychain, logs hold no secrets, and only your files leave the device.
-- 🏢 **Works on managed networks.** Vapor follows the system's proxy and trusts the certificates your device trusts, so an office network that inspects traffic does not stop sync.
+- 🏢 **Built for managed networks.** Vapor follows an HTTP proxy from the system's settings or the environment and trusts the certificates your device trusts, so an office network that inspects traffic can carry sync. A proxy set by a script (PAC) or a SOCKS proxy is not followed yet.
 - 🔑 **Sign-in hold.** An expired cloud sign-in puts sync on hold, and signing in again resumes it where it stopped.
 - 🔕 **Menu bar app.** No window unless you ask, and the mark turns orange only when Vapor needs you.
 
@@ -185,7 +185,7 @@ The Applies column says when a change takes effect: **live** within a few second
 | `trash.retentionDays` | `7` | live | Days an item stays in the trash. |
 | `trash.useSystem` | `false` | live | Try the system trash (the Finder's Trash) first. |
 
-Each `profiles` entry has an `id` and optionally `name`, `enabled`, `provider`, `localRoot`, `cloudRoot`, `syncMode`, `resourceLimits`, and `idleBoost`; unset fields inherit the top-level value, and a profile's limits can only be stricter than the top-level ones. `vapor profiles add` writes an entry for you; on a terminal it suggests `~/Vapor` and `/Vapor` for the two folders. The first profile starts without a restart.
+Each `profiles` entry has an `id` and optionally `name`, `enabled`, `provider`, `localRoot`, `cloudRoot`, `syncMode`, `resourceLimits`, and `idleBoost`; unset fields inherit the top-level value, and a profile's limits can only be stricter than the top-level ones. `vapor profiles add` writes an entry for you; on a terminal it suggests `~/Vapor` and `/Vapor` for the two folders. A profile that is added starts without a restart.
 
 ### Environment variables
 
@@ -198,7 +198,7 @@ Each `profiles` entry has an `id` and optionally `name`, `enabled`, `provider`, 
 | `VAPOR_GDRIVE_CLIENT_SECRET` | the secret built in | The matching client secret, read the same two ways. |
 | `VAPOR_SECRETS_COMMAND` | unset | Linux only: a program that stores Vapor's secrets (`pass`, a vault CLI), used instead of the desktop Secret Service. |
 | `VAPOR_THROTTLE_INPUTS` | `host` | Test harnesses only: `static` or `file:<path>` replace the device's real load readings. Never set it on a real install. |
-| `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` | unset | The standard proxy variables, for a server or a container. With none set, Vapor uses the proxy of the system's network settings (macOS). |
+| `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` | unset | The standard proxy variables, for a server or a container, for a proxy reached as `http://host:port`. With none set, Vapor uses the proxy of the system's network settings (macOS). |
 
 The build, release, and test variables are in `.env.example`.
 

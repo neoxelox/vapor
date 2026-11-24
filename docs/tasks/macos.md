@@ -104,6 +104,17 @@ decision waits; the sign-in notice has a Sign In button.
       whether the setting is on, and it names the setting in another
       way than the Dashboard and Settings ("Start Vapor at login").
       Show it as one item with a checkmark and the same wording.
+- [ ] M3-21 Sign In while a sign-in waits. The button is off while
+      `vapor auth login --browser` runs, so a user who closed the
+      consent tab waits until the app ends the command, 5 minutes
+      later. The CLI waits 30 minutes for a slow consent since
+      2026-11-24, and answers a late one with a page that says to
+      start again; the app does not take that wait, because 30 minutes
+      with the button off is worse than a consent that came too late.
+      Let the button start the sign-in again (and end the command that
+      waits), then give the app the wait of the CLI. With several
+      profiles on hold the waits add up today, one after the other.
+      Found by the review of the pull request, 2026-11-24.
 - [ ] M3-19 "Start Vapor at login" set to off stops sync at once. On
       macOS the removal of a launchd job ends its process, so the
       toggle stops the daemon while the app stays open, and

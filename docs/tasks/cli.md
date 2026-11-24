@@ -27,6 +27,17 @@ stable and are never reused.
       folders, shared drives, and two folders with one name, which
       Google Drive allows. The app onboarding gets the same menu
       (`macos.md` O-1), from the same listing.
+- [ ] L1-9 Change one profile from the command line. The folders, the
+      provider, and the mode of a profile are in its entry of the
+      `profiles` list once the install has a list (a second profile,
+      or a `disable` or a `rename` of the first one). `vapor config
+      set syncMode` then sets the value for a profile that has none of
+      its own, and says which profiles it did not change, but no
+      command changes the entry: the user edits `vapor.json` or sets
+      the whole list (`vapor config set profiles '<json>'`). A command
+      such as `vapor profiles set <id> <key> <value>` closes that, and
+      `vapor config get localRoot` on such an install prints an empty
+      line today. Found by the review of the pull request, 2026-11-24.
 - [ ] L5-1 `--user-activity=always|never|auto` global flag that sets the
       interpretation for hosts without HID signal (default `auto`:
       always-idle on headless, event-driven on desktop).

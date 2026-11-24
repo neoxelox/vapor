@@ -1144,6 +1144,119 @@ fn a_file_judged_outside_is_judged_again_when_a_folder_comes_into_the_root() {
 }
 
 #[test]
+fn a_young_folder_that_was_seen_outside_is_a_folder_that_moved_in() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = provider_that_knows_two_folders(&transport);
+    let moved = RemoteChangeKind::FolderMoved;
+    let now = SystemTime::now();
+    let outside =
+        r#"{"id":"top","name":"Elsewhere","mimeType":"application/vnd.google-apps.folder"}"#;
+
+    // A folder is made outside the sync root and a file is put in it.
+    // The folder is new and not ours; the file is judged outside, in
+    // that folder.
+    let young = folder_entry_made("d7", "Fresh", "top", now);
+    let file = r#"{"fileId":"f7","file":{"id":"f7","name":"a.txt","mimeType":"text/plain","size":"3","md5Checksum":"h","parents":["d7"]}}"#;
+    let in_top = r#"{"id":"d7","name":"Fresh","mimeType":"application/vnd.google-apps.folder","parents":["top"]}"#;
+    assert!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &format!("{young},{file}"),
+            &[(200, in_top), (200, outside)]
+        )
+        .is_empty()
+    );
+
+    // A minute later the folder is moved into the sync root. It is
+    // still young, and the feed has this one entry for it and none for
+    // the file. The provider saw a file of it outside, so it is no new
+    // folder: it gets its walk.
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry_made("d7", "Fresh", "root-folder", now),
+            &[]
+        ),
+        vec![("Fresh".to_string(), moved)]
+    );
+
+    // A young folder of the sync root leaves it and comes back: the
+    // provider judged the folder itself outside in between.
+    let known = folder_entry_made("d1", "Reports", "top", now);
+    assert_eq!(
+        poll_the_feed(&provider, &transport, &known, &[(200, outside)]),
+        vec![("Reports".to_string(), moved)]
+    );
+    assert_eq!(
+        poll_the_feed(
+            &provider,
+            &transport,
+            &folder_entry_made("d1", "Reports", "root-folder", now),
+            &[]
+        ),
+        vec![("Reports".to_string(), moved)]
+    );
+}
+
+#[test]
+fn a_file_judged_outside_is_ours_when_a_listing_finds_its_folder_inside() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let file = r#"{"fileId":"f1","file":{"id":"f1","name":"a.txt","mimeType":"text/plain","size":"3","md5Checksum":"h","parents":["d5"]}}"#;
+    let elsewhere =
+        r#"{"id":"d5","name":"Elsewhere","mimeType":"application/vnd.google-apps.folder"}"#;
+    assert!(poll_the_feed(&provider, &transport, file, &[(200, elsewhere)]).is_empty());
+
+    // The folder comes into the sync root, and no feed entry that the
+    // provider acts on says so: a walk of the root lists it.
+    transport.push_response(
+        200,
+        r#"{"files":[
+            {"id":"d5","name":"Elsewhere","mimeType":"application/vnd.google-apps.folder","parents":["root-folder"]}
+        ]}"#,
+    );
+    provider.enumerate(&RemotePath::root()).expect("enumerate");
+
+    // The entry of the file names the folder it was judged in. That
+    // folder is known inside now, so the verdict is out of date.
+    assert_eq!(
+        poll_the_feed(&provider, &transport, file, &[]),
+        vec![(
+            "Elsewhere/a.txt".to_string(),
+            RemoteChangeKind::CreatedOrModified
+        )]
+    );
+}
+
+#[test]
+fn a_file_that_is_moved_out_of_the_sync_root_left_its_path() {
+    let transport = Arc::new(ScriptedHttpTransport::new());
+    let provider = ensured_provider(transport.clone());
+    let entry = |parent: &str| {
+        format!(
+            r#"{{"fileId":"f1","file":{{"id":"f1","name":"a.txt","mimeType":"text/plain","size":"3","md5Checksum":"h","parents":["{parent}"]}}}}"#
+        )
+    };
+    assert_eq!(
+        poll_the_feed(&provider, &transport, &entry("root-folder"), &[]),
+        vec![("a.txt".to_string(), RemoteChangeKind::CreatedOrModified)]
+    );
+
+    // The file goes to a folder outside the sync root. The feed names
+    // the file and where it is now; the path it had holds nothing.
+    let elsewhere =
+        r#"{"id":"top","name":"Elsewhere","mimeType":"application/vnd.google-apps.folder"}"#;
+    assert_eq!(
+        poll_the_feed(&provider, &transport, &entry("top"), &[(200, elsewhere)]),
+        vec![("a.txt".to_string(), RemoteChangeKind::Removed)]
+    );
+    // The next entry for the file outside says nothing more.
+    assert!(poll_the_feed(&provider, &transport, &entry("top"), &[]).is_empty());
+}
+
+#[test]
 fn a_folder_whose_new_place_cannot_be_read_asks_for_a_walk_of_everything() {
     let transport = Arc::new(ScriptedHttpTransport::new());
     let provider = provider_that_knows_two_folders(&transport);

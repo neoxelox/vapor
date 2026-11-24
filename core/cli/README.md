@@ -27,13 +27,15 @@ code first and the output second.
 | Code | Meaning | Output |
 |---|---|---|
 | `0` | The command did what it was asked. "Nothing to do" counts: an empty list, a profile that is enabled already. | The result on stdout. |
-| `1` | The command could not do it, or the answer is no. | For an error, one line on stderr that starts with `vapor: `, and nothing on stdout, also with `--json`. For an answer that is a no, the answer on stdout as for code 0: a request that the daemon refused (`pause`, `resume`, `reconcile`), an install that still waits for a person or has a failed step (`init`), a failed check (`doctor`). |
+| `1` | The command could not do it, or the answer is no. | For an error, one line on stderr that starts with `vapor: `, and nothing on stdout, also with `--json`. For an answer that is a no, with `--json` the answer is on stdout as for code 0. In text form, a request that the daemon refused (`pause`, `resume`, `reconcile`) is one line on stderr, `<command>: not accepted; <why>`, and an install that still waits for a person or has a failed step (`init`) and a failed check (`doctor`) print their report on stdout. |
 | `2` | The command line is wrong: an unknown command, an unknown option, a missing value. | The usage message on stderr. |
 
 A command that needs the daemon exits with `1` within seconds when no
 daemon answers; it never waits for one. `core/cli/tests/binary.rs`
-asserts the code of each command, and `core/cli/tests/fake_daemon.rs`
-asserts the commands that talk to the daemon against a stand-in for it.
+asserts the codes on the commands that need no service of the host
+(`service`, `report`, and `run` are not among them), and
+`core/cli/tests/fake_daemon.rs` asserts the commands that talk to the
+daemon against a stand-in for it.
 
 ## Install from source
 

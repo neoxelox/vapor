@@ -431,6 +431,20 @@ fn existing_profiles_step(
             Some(problems.join("; ")),
         );
     }
+    // Set up, and switched off: nothing here is left to do, and the
+    // run must not read as "Vapor syncs now".
+    if !rows.is_empty() && rows.iter().all(|row| !row.enabled) {
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        return InitStep::new(
+            names::STEP_PROFILE,
+            names::STATE_WAITS,
+            Some(format!(
+                "every profile is disabled ({}); start one with: vapor profiles enable {}",
+                ids.join(", "),
+                ids[0]
+            )),
+        );
+    }
     // A one-way profile syncs nothing until its question has an
     // answer, however many runs ago the profile was written.
     let config = vapor_shared::config::load_from(config_path).config;
@@ -851,6 +865,32 @@ mod tests {
             written
         );
         assert!(report.render_text().starts_with("Vapor is initialized.\n"));
+    }
+
+    #[test]
+    fn a_run_on_an_install_whose_profiles_are_all_disabled_says_how_to_start_one() {
+        let install = Install::fresh();
+        let mut host = Scripted::default();
+        install
+            .run(&install.flags(), None, &mut host)
+            .expect("first run");
+        profiles::change(&install.config(), "default", &profiles::Change::Disable)
+            .expect("disable");
+
+        let report = install
+            .run(&InitRequest::default(), None, &mut host)
+            .expect("second run");
+        assert!(
+            !report.initialized,
+            "an install that syncs nothing is not reported as set up: {report:?}"
+        );
+        assert!(
+            report
+                .render_text()
+                .contains("vapor profiles enable default"),
+            "{}",
+            report.render_text()
+        );
     }
 
     #[test]

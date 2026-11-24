@@ -62,7 +62,9 @@ setting changed in one place survives a save in another.
   at the top level or in its `profiles` entry), and `deviceId`. `vapor
   status` reports `restartRequired`, naming the keys, until the daemon
   restarts or the file names what runs again. `vapor service restart`
-  applies them.
+  applies them. While a profile waits for that restart, no other
+  profile starts: a profile that is added or enabled in that time
+  starts with the restart too.
 - **Elsewhere**: `autoLaunch` is acted on by `vapor service install`
   and `uninstall` (which also set it) and by the app at startup through
   `vapor service bootstrap`. `language` is read by the app only.
@@ -167,7 +169,12 @@ the first `add` for a fresh install, with the sign-in and the
 background service. `disable` stops a profile and keeps its sync
 state, its sign-in, and its trash; `enable` starts it again where it
 stopped. `rename` sets the name the surfaces show, and the `id` never
-changes: it names the profile's state and sign-in. `remove`
+changes: it names the profile's state and sign-in. With every profile
+disabled, `vapor status` names the command that starts one. `disable`
+and `rename` of the implicit profile write it as an entry of the list,
+with its folders, its provider, and its mode: `vapor config set` of
+one of those keys then sets the value for a profile that has none of
+its own, and says which profiles it did not change. `remove`
 needs the daemon stopped, forgets the profile's sync state and
 sign-in, keeps its trash, and leaves the files on both sides. Each
 entry runs as an isolated pipeline with its own state database, trash,
@@ -277,5 +284,10 @@ A proxy needs no setting in `vapor.json`. Vapor reads `HTTPS_PROXY`,
 then `ALL_PROXY`, with `NO_PROXY` for the hosts that go around the
 proxy: that is how a server or a container names one. With none of
 them set, it uses the HTTPS proxy of the system's network settings on
-macOS, and follows a change of network within 30 seconds. A proxy that
-a script names (automatic proxy configuration) is not followed.
+macOS, and follows a change of network within 30 seconds. A name in
+`NO_PROXY` also stands for the hosts under it. The proxy is one that is
+reached as `http://host:port` and opens a tunnel. A SOCKS proxy, a
+proxy that is itself reached over TLS, and a proxy that a script names
+(automatic proxy configuration) are not followed: Vapor logs one
+warning and connects directly, as it did before it read these
+settings.

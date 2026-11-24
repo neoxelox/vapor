@@ -17,7 +17,12 @@ MANIFEST="$ROOT_DIR/Cargo.toml"
 # after it.
 toolchain_notice=""
 if command -v rustup >/dev/null 2>&1; then
-  if rustup check 2>/dev/null | grep -q '^stable.*Update available'; then
+  # The answer is read whole before it is searched: a search that
+  # stops at its first match ends the pipe, and `pipefail` then reads
+  # the stopped `rustup` as "no update". Some versions of rustup also
+  # exit non-zero when an update exists.
+  toolchain_state="$(rustup check 2>/dev/null || true)"
+  if grep -q '^stable.*Update available' <<<"$toolchain_state"; then
     toolchain_notice="[rust-lint] A newer stable Rust is out, and CI lints with it. Run: rustup update stable"
     echo "$toolchain_notice"
   fi
